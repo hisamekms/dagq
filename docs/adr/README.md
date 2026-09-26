@@ -69,6 +69,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md) | taskの全文検索（search）と、task番号の言及と検索の一致の強さを含む決まった規則の関連（related）と、重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する（ADR-0046を統合） | 2026-09-27 |
 | [ADR-0068](0068-recheck-waiting-runs-after-each-landing.md) | 着地のたびに着地待ちのrunをmerge-treeと軽い検査で先回りして確かめ、着地しなくなったrunは人の回答や着地の順番を待たずにresumeする | 2026-09-26 |
 | [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | 衝突の多いファイルで進行中のrunと重なるtaskはそのpassでclaimせずに次の候補へ進み、控えた理由と時間をstatusとstatsに出す | 2026-09-26 |
+| [ADR-0070](0070-forecast-snapshots-and-scoring.md) | open なtaskとgoalの完了見込み（forecast）をsimulationで出し、supervisorが決まったきっかけでsnapshotをeventに記録し、完了の時点で答え合わせをしてobserverが誤差を読む | 2026-09-27 |
 | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 人の答えを待つrunを、最初のsessionと/exitに加えて差し戻しと解消依頼の段でもslotから外し、待ちのあいだ段の計時を止め、leaseを持ったまま軽く見張り、戻り待ちも含めて待ちの数に上限を付け、待ちが終わったrunを新しいclaimより先にslotへ戻す（ADR-0062を統合） | 2026-09-26 |
 | [ADR-0073](0073-kind-additions-are-compatible.md) | 固定バイナリをbuild識別子で見分け、queueを開いただけではmigrateせず、互換の範囲のschemaを受け入れ、askとeventのkindの追加を互換として扱い、supervisorを待たずに引き継ぎで入れ替え、up --auto-updateで着地のたびに自動で更新する（ADR-0045を統合） | 2026-09-26 |
 | [ADR-0076](0076-run-the-coverage-gate-tests-with-nextest.md) | integrateのcoverageの関門のtestをcargo-nextestでbinaryをまたいで並列に流し（cargo llvm-cov nextest）、cargo-nextestは人がhostに入れる | 2026-09-26 |

@@ -24,6 +24,7 @@ related:
   - adr-t610-1
   - adr-0079
   - design-supervisor-lifecycle-plan-review
+  - adr-0070
 ---
 
 # `stats`
@@ -193,6 +194,23 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 - **`inflow_per_outflow`**: `registered` ÷ （`adopted` + `canceled`）（小数2桁。出ていったものが0ならnull）。1を超えればdraftは決着より速く増えている
 
 ADR-0051のKPIの一覧（決定1）にdraftの流入と流出は無いので、KPIの集計（[`kpi`](kpi.md)）はこの値を読まない。足すときは`landings`と同じ名前で、この規則をKPIの規則として決める。
+
+## 完了見込み（予定）
+
+[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。まだ実装していない。goal 40の後続taskが持つ。
+
+- **見込み**: `src/domain`の純粋関数が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とgoalの完了のp50 / p90を、依存のグラフ（goal依存はgoalが閉じるまで待つ）・効く優先度によるclaimの順・生きているsupervisorの`parallel`の合計・taskの種類ごとの`work` / `validate` / `wait_to_land`（この文書の区間。`startup`は`work`に含まれるので走っているrunの条件付けにだけ使う）とresume・延期の確率・`ask_wait`（待ちのrunはslotを空ける）・goalを閉じるまでの遅れからsimulationで出す。流入（新しいtask、follow_up）は含めない。`dagq forecast [--task ID] [--goal ID]`は読むだけで記録しない。
+- **snapshot**: supervisorが、plan reviewのpass、変更の印（[変更の印](marks.md)の記録する印（`parallel`の変化はsupervisorの起動・引き継ぎの印で拾う）、`task_priority_changed`、依存の変更）、着地（前のsnapshotからp50が動いたtask / goalがあるとき）、日次（[レポート](report.md)と同じtimer）で、open なtaskとgoalすべての見込みと前提を1件のevent（名前は実装taskが決める。例: `forecast_recorded`）に記録する。KPIの記帳のevent（[Observer](observer.md)の`BOOKKEEPING_KINDS`）に足す。
+- **答え合わせ**: taskの`completed`とgoalの`achieved`の時点で、その対象のsnapshotすべてに実績を当てる。p50の誤差（秒と、見込みの残り時間に対する比）の中央値と偏りの向き、p90の的中率、残り時間の帯ごと・taskの種類ごと・`method`ごとの誤差、snapshotから完了までの変更の印の数（0の標本だけの誤差も）をeventから導き、[`kpi`](kpi.md)のKPIとして完了の時刻で期間に入れる。
+
+初めの値（ADR-0070。調整はADRを置き換えずにここを直す）:
+
+| 値 | 初めの値 |
+| --- | --- |
+| simulationの試行の回数 | 1,000 |
+| 種類の分布を全体に代える標本数 | `[kpi]`の`min_samples`（既定5） |
+| 着地で記録する閾値 | 前のsnapshotの残り時間の20%以上、かつ30分以上p50が動いた |
+| 答え合わせのKPIの目標の案（runtimeに埋め込まず、plannerが`dagq.toml`の`[kpi.targets]`に書く） | p50の誤差の比の中央値が±25%以内、p90の的中率が75%以上 |
 
 ## KPIからの読み口
 

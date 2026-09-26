@@ -11,6 +11,7 @@ related:
   - design-supervisor-lifecycle
   - adr-0044
   - design-domain-model
+  - adr-0070
 ---
 
 # Observer
@@ -28,3 +29,7 @@ related:
 - **権限**: observerのenvからのCLIは許可一覧で判定する（`main.rs`の`observer_access`、一覧は[domain-model](../domain-model.md#current-operations)）。読み取り（`findings`と`notes`、変更の印の`marks`、KPIの`kpi`を含む）、`finding record` / `finding resolve`、`ask --kind blocked`だけが通り、`note`、`mark`、`goal add`（`--draft`を含む）、`add`、`finding dismiss`、`ready` / `integrate` / `recover` / `goal ready` / `answer` / `observe`（`--history`は読み取りとして通る） / `supervise`などは`{"error":"observer may not change queue state"}`で拒否される。
 - **timer**: `supervise --observe-interval SECS`（既定3600、`--once`のときは既定0。0でobserverを起動しない。dailyも含む）と`--observe-daily BOOL`（既定true）。ループの各passで、走っているobserverが無ければ、dailyが有効で最後のdailyの`observe_started` / `observe_finished`から24時間経っていればdailyを、そうでなく最後のhourlyから`--observe-interval`秒経っていればhourlyを、`<runner> --db <db> observe --claude <claude> [--daily]`の子プロセスで起動する（cwdはcheckout、`DAGQ_ROLE`は外す）。一度も記録の無いmodeは期日が来ている。期日はqueueのrun_eventsで判定するので、別のsupervisorや手の`observe`も数える。加えて同じプロセスが同じmodeを起動してから間隔が経つまでは再起動しない（記録を書く前に落ちたobserverを毎passで起動しないため）。同時に走るobserverは1つで、run slotを使わない。子プロセスの終了はlogに1行残し、記録は`observe_finished`が持つ。launchd modeでもin-cmux modeでも`supervise`の既定値で同じに動く（`up`はこのflagを渡さない）。
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss ID --reason`にする。proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。`blocked`のaskは`status --role inbox`に`ask_opened`として出る。導入前にobserverが書いたnoteとdraft goalは記録として残り、draft goalは人が開いたplannerで扱う。
+
+## 完了見込みの誤差（予定）
+
+[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定5（task 473）。まだ実装していない。observerは`kpi`が出す完了見込みの答え合わせのKPI（[stats](stats.md)の「完了見込み」）の目標の判定を入力に読み、目標割れ（`breach`）なら種類`kpi`ではなく種類`forecast`・対象`queue`・`subject`に指標と層（例: `p50_bias/kind=runtime`）のfindingを記録するか更新する。数字は作らず判定を引く。計算の改善が要ればproposalを求める印を付け、runtimeが立てるplannerが計算の改善をproposalにする（改善のproposalの上限と優先度はADR-0051の決定25・26のまま）。`blocked`のaskにはせず、人には上げない。見込みのsnapshotのeventは記帳のeventとしてobserverを起こさない。`dagq forecast`は読み取りのコマンドとして許す。日次レポートには見込みの誤差の欄を足す。
