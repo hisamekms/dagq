@@ -8,6 +8,8 @@ updated: 2026-09-26
 accepted_on: 2026-09-26
 supersedes:
   - adr-0045
+amended_by:
+  - adr-t614-1
 owners:
   - hisamekms
 tags:

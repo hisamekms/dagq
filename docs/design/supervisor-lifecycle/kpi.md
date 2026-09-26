@@ -91,3 +91,5 @@ related:
 - `--compare <event id>`はその印（`dagq mark`の`--at`の印は効いた時刻。導く印はそれを読んだclaimの`run_claimed`のevent ID（`marks`の`detail.claim_event`）で指す）、`--compare <時刻のcursor>`はその時刻を境に、前後に`--window`日（既定7）の窓を作る。`--compare A..B,C..D`は2つの窓を明示する（前の窓が後の窓より前で、どちらも始まりが終わりより前）。
 - 印の並び（取り消された印と取り消しの印を除く、記録する印と導く印）を時刻の順にたどり、前の印からその印までに終わったrunが`min_samples`に満たなければ同じ「重なった変更」にまとめる（3つ以上も1つに。`domain::kpi::compare::overlapping_groups`）。境の印がまとまった変更に入っていれば、その最初の印の前と最後の印の後で比べ、`split.separable: false`で「含まれる印を分けられない」ことを示す。
 - 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`）、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`parallel=`・`load=`・`build=`。後の窓が今を越えていれば`partial`で判定しない）、`summary`（`--kind`の種類、既定`runtime`の`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`）。区間は自動では縮めない。
+
+`toolchain=`の層（hostの`rustc`）は、queueのrepositoryがdagqのソースのときだけ出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。

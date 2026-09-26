@@ -197,3 +197,5 @@ ADR-0051のKPIの一覧（決定1）にdraftの流入と流出は無いので、
 ## KPIからの読み口
 
 [`kpi`](kpi.md)（ADR-0051）は期間ごとの窓でこの`stats`を`full`に呼び、同じ区間・`land_phases`・`retries`・sessionを使う。KPIのために、同じ走査を共有する読み口を2つ足した: `stats::asks::human_waits`（`asks`と同じ`ask_opened` / `ask_answered` / 適用のeventの対応から、人が答えたaskの答えまでと適用までの秒を並べる。`runtime_closed`で閉じたaskは除く）と`stats::measures::verification_durations`（`verification_commands`と同じeventの選び方で、`integrate`の検証コマンドごとの秒を並べる）。`stats`の出力は変わらない。
+
+cargoとdagqの検証の形に依る計測（worktimeの`e2e`・`llvm_cov`・`test`の分類と`full_tests`・`llvm_cov_runs`・`verification_repeats`、`work_breakdown`の`test_with_llvm_cov`、claimの`rustc_release`・`rustc_host`と`versions.rustc`）は、queueのrepositoryがdagqのソースのときだけ記録して出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。

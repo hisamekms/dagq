@@ -4,8 +4,8 @@ type: design
 title: "`install`"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -26,3 +26,5 @@ related:
 6. **drain**（`--allow-breaking`、決定14）: liveな登録があれば`down --wait`で止め、元の`migrate`（非互換なので`backups/`に複製してから適用）、置き換え、`<to> --db <db> up --parallel <止めた登録のparallel> [--in-cmux（止めた登録がin_cmuxなら）] --cmux … [--claude …] [--plugin-dir …]`で起動し直す。結果は`{"outcome":"installed",…,"migrated","drained","up"}`。
 
 `install`自身は引き継ぎの完了を待ち、失敗すればfileを戻してerrorを返す。新しいbinaryが起動直後に死んだときは、supervisorは止まったままなので、inboxの`supervisor_stopped`と`install`のerrorを見て、人が戻ったbinaryで`up`する（leaseはstaleになり、adoptで引き継がれる）。決定13の見張り（引き継ぎの後のheartbeatの確認、`.previous`への戻し、止まったsupervisorの起動し直し、inboxへの`update_failed`）は、`up --auto-update`の自動更新のjobがこの`install`を呼んだ後に行う（[Auto-update](auto-update.md#auto-update)）。自動更新が非互換のmigrationのビルドで開く`approve_update`のaskは、`install --from <queue dir>/update/staged/dagq --allow-breaking`を人が打つ入口になる。
+
+`--from`なしのbuild（上の1の省略時）は、queueのrepositoryがdagqのソースのときだけ動く（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)。判定とソースでないrepositoryでのerrorは[Source repository](source-repository.md)）。`--from`付きと`--rollback`は判定に関係なく動く。判定はまだ実装していない。

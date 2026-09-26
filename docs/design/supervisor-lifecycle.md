@@ -165,6 +165,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 - [Auto-update](supervisor-lifecycle/auto-update.md)
 
+### Source repository
+
+- [Source repository](supervisor-lifecycle/source-repository.md)（dagqのソースのrepositoryでだけ動く機能と判定）
+
 ### 人への通知（`cmux notify`）
 
 - [人への通知（`cmux notify`）](supervisor-lifecycle/cmux-notify.md)

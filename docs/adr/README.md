@@ -77,6 +77,8 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md) | ADRのIDを書くtaskのIDにし、1 ADR 1決定・記載の粒度・今の姿はdesign・大きなADRはamendsで直すと決める（ADR-0042を置き換え） | 2026-09-26 |
 | [ADR-t609-1](2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md) | 生きているrunのalertで復旧jobが失敗したら、recover by handのattentionではなく、そのalertのaskを開く（ADR-0047決定40をamends） | 2026-09-27 |
 | [ADR-t610-1](2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md) | statusのslots.usedとstatsのidle_slotsを、supervisorがclaimと戻りの判定に使うslotと同じ集合で数え、着地中のrunも埋まったslotに数える（ADR-0071決定12・13をamends） | 2026-09-27 |
+| [ADR-t614-1](2026-09-27-t614-1-dagq-source-only-features-by-one-check.md) | dagqの開発でだけ要る機能を、queueのrepositoryがdagqのソースかの判定1つで有効にし、ソースでないrepositoryではmigrationの振り直し・--fromなしのinstall・source buildの自動更新・cargo専用の計測を動かさない（ADR-0067決定3・ADR-0073決定14・17をamends） | 2026-09-27 |
+| [ADR-t614-2](2026-09-27-t614-2-released-migrations-are-immutable.md) | リリース済み（最新のv*のtagに含まれる）のmigrationは中身も名前も変えず消さず、それを検査のscriptとCIとreleaseで止める | 2026-09-27 |
 
 ## 置き換え・廃止されたADR
 
