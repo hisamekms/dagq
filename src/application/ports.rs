@@ -1799,14 +1799,16 @@ pub trait Repository {
     fn paths_containing(&self, commit: &str, needle: &str, paths: &[String])
     -> Result<Vec<String>>;
     /// Move `from` to `to` in the clean `worktree` and commit the rename on
-    /// its branch, `paragraphs` its message; the new head.
+    /// its branch, `paragraphs` its message; the new head. `Ok(Err(output))`
+    /// is a commit Git refused, with the rename undone and the worktree clean
+    /// at the head it had; `Err` when the move or the undoing failed.
     fn rename_and_commit(
         &self,
         worktree: &Path,
         from: &str,
         to: &str,
         paragraphs: &[String],
-    ) -> Result<CommitSha>;
+    ) -> Result<std::result::Result<CommitSha, String>>;
     fn tree_of(&self, commit: &str) -> Result<String>;
     /// One commit with `tree` on top of `parent`, `paragraphs` its message.
     fn commit_tree(&self, tree: &str, parent: &str, paragraphs: &[String]) -> Result<CommitSha>;

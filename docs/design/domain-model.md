@@ -314,7 +314,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `rebase_conflict` | runがmainと衝突した（着地のrebase、passの後の`git merge-tree`の事前判定、着地の後のlanding recheck） | （`conflicts`は既存） |
 | `rebase_empty` | rebaseの後にmainの上にcommitが残らない | |
 | `rebase_in_progress` | worktreeに途中のrebaseが残っていたので中止した | |
-| `migration_number_taken` | runが足したmigrationの番号がmainで埋まっていて、機械的に振り直せない（runが足したmigrationが2つ以上か、番号をrunの他の変更が含む。[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3） | `migrations`、`taken`、`next_number`、（番号を含むファイルがあれば）`referring` |
+| `migration_number_taken` | runが足したmigrationの番号がmainで埋まっていて、機械的に振り直せない（runが足したmigrationが2つ以上か、番号をrunの他の変更が含むか、振り直しのcommitをGitが拒んだ。[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3） | `migrations`、`taken`、`next_number`、（番号を含むファイルがあれば）`referring`、（振り直しのcommitをGitが拒んだら）`commit_error` |
 | `verification_failed` | rebaseの後の検証コマンドが非0で終わった（landing recheckの`[recheck] command`がmainに載せた木で非0で終わったときも） | `index`（1始まり）、（`command` / `exit_code`は既存） |
 | `backend_timeout` | cmuxの呼び出しがtimeoutした（adapterの`did not finish within`、cmuxの`Command timed out`） | `op`（`backend_call_failed`は既存の`op`） |
 | `backend_failed` | cmuxの呼び出しが失敗した | `op` |

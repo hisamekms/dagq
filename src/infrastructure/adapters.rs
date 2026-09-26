@@ -1043,14 +1043,17 @@ impl GitRepository {
     }
 
     /// `git mv` `from` to `to` in the clean `worktree` and commit that on its
-    /// branch with `paragraphs` as the message; the new head.
+    /// branch with `paragraphs` as the message; the new head. When Git
+    /// refuses the commit (a signing or identity failure, or a failing
+    /// `prepare-commit-msg` hook, which `--no-verify` does not skip), the
+    /// rename is undone and `Ok(Err(output))` carries what Git said.
     pub fn rename_and_commit(
         &self,
         worktree: &Path,
         from: &str,
         to: &str,
         paragraphs: &[String],
-    ) -> Result<CommitSha> {
+    ) -> Result<std::result::Result<CommitSha, String>> {
         output(
             Command::new(&self.git)
                 .arg("-C")
@@ -1067,8 +1070,30 @@ impl GitRepository {
         for paragraph in paragraphs {
             commit.arg("-m").arg(paragraph);
         }
-        output(&mut commit)?;
-        self.head(worktree)
+        // A commit that did not finish (a signing program waiting for a
+        // passphrase until the timeout) is refused like one Git turned down.
+        let refused = match capture(&mut commit, OUTPUT_TIMEOUT) {
+            Ok((status, _, _)) if status.success() => return Ok(Ok(self.head(worktree)?)),
+            Ok((status, stdout, stderr)) => format!("{status}: {stdout}{stderr}"),
+            Err(error) => format!("{error:#}"),
+        }
+        .trim()
+        .to_owned();
+        // The worktree was clean at HEAD before the move, and the refused
+        // commit left HEAD where it was, so resetting to it undoes the move
+        // alone.
+        output(
+            Command::new(&self.git)
+                .arg("-C")
+                .arg(worktree)
+                .args(["reset", "-q", "--hard", "HEAD"]),
+        )
+        .with_context(|| {
+            format!(
+                "git commit of the rename {from} -> {to} failed ({refused}); undoing the rename also failed"
+            )
+        })?;
+        Ok(Err(refused))
     }
 
     pub fn tree_of(&self, commit: &str) -> Result<String> {
@@ -1406,7 +1431,7 @@ impl Repository for GitRepository {
         from: &str,
         to: &str,
         paragraphs: &[String],
-    ) -> Result<CommitSha> {
+    ) -> Result<std::result::Result<CommitSha, String>> {
         GitRepository::rename_and_commit(self, worktree, from, to, paragraphs)
     }
     fn merged_tree(

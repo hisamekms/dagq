@@ -1189,7 +1189,7 @@ fn renumber_migration(
         );
     }
     let new = path(&migration_numbers::renumbered(name, next));
-    let head = repository.rename_and_commit(
+    let head = match repository.rename_and_commit(
         worktree,
         &old,
         &new,
@@ -1199,7 +1199,18 @@ fn renumber_migration(
                 "main {main} took number {old_digits} while the run was open, so dagq integrate moved {old} to {new} (ADR-0067)."
             ),
         ],
-    )?;
+    )? {
+        Ok(head) => head,
+        // The rename is undone and the worktree is back at the rebased head,
+        // so the session can move the migration itself.
+        Err(refused) => {
+            let gist = commit_error_gist(&refused);
+            return blocked(
+                format!("git refused the commit moving {old} to {new} ({gist})"),
+                json!({"commit_error": gist}),
+            );
+        }
+    };
     queue.record_runtime_event(
         run.id(),
         "migration_renumbered",
@@ -1220,6 +1231,24 @@ fn renumber_migration(
         run.id()
     );
     Ok(Renumbering::Renumbered(head))
+}
+
+/// The lines of what Git said when it refused a commit, joined and cut to
+/// 500 characters: enough for the session to see why.
+fn commit_error_gist(refused: &str) -> String {
+    let joined = refused
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if joined.is_empty() {
+        return "git commit failed without output".to_owned();
+    }
+    match joined.char_indices().nth(500) {
+        Some((cut, _)) => format!("{}…", &joined[..cut]),
+        None => joined,
+    }
 }
 
 /// How often [`sampled`] reads the load average while a verification
@@ -1471,7 +1500,13 @@ mod tests {
         fn paths_containing(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<String>> {
             unimplemented!()
         }
-        fn rename_and_commit(&self, _: &Path, _: &str, _: &str, _: &[String]) -> Result<CommitSha> {
+        fn rename_and_commit(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<std::result::Result<CommitSha, String>> {
             unimplemented!()
         }
         fn tree_of(&self, _: &str) -> Result<String> {
@@ -1692,5 +1727,18 @@ mod tests {
         // A multi-byte character is not split.
         assert_eq!(tail("aé", 2), "é");
         assert_eq!(tail("aé", 1), "");
+    }
+
+    #[test]
+    fn commit_error_gist_joins_the_lines_and_cuts_long_output() {
+        assert_eq!(
+            commit_error_gist(
+                "error: gpg failed to sign the data\n\nfatal: failed to write commit object\n"
+            ),
+            "error: gpg failed to sign the data; fatal: failed to write commit object"
+        );
+        assert_eq!(commit_error_gist(" \n"), "git commit failed without output");
+        let long = "é".repeat(600);
+        assert_eq!(commit_error_gist(&long), format!("{}…", "é".repeat(500)));
     }
 }

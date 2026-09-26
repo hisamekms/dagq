@@ -2124,6 +2124,85 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     assert_landed(&repo, &landed, "add asks", &main);
 }
 
+/// Git refuses the commit that would renumber the run's migration (here a
+/// signing program that does not exist; the hooks are skipped). The rename
+/// is undone, the worktree is clean at the rebased head, and the run waits
+/// for a session as `migration_number_taken` with the next free number and
+/// what Git said, instead of the integrate failing.
+#[test]
+fn a_refused_renumbering_commit_is_undone_and_needs_a_session() {
+    let (dir, repo, db) = migration_fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let first = add_script_task(
+        &mut queue,
+        &backend,
+        "add goals",
+        "printf -- '-- goals\\n' > migrations/0002_goals.sql",
+        &[NO_SHARED_NUMBER],
+    );
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(
+        integrate(&db, first.as_i64(), &repo).unwrap()["outcome"],
+        "integrated"
+    );
+    // Claimed on the new main, so the rebase has nothing to rewrite and
+    // only the renumbering commits.
+    let second = add_script_task(
+        &mut queue,
+        &backend,
+        "add asks",
+        "printf -- '-- asks\\n' > migrations/0002_asks.sql",
+        &[NO_SHARED_NUMBER],
+    );
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    let run = queue.show(second).unwrap().runs[0].clone();
+    let worktree = PathBuf::from(run.worktree_path().unwrap());
+    let head = git_out(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD^"]), main);
+    git(&repo, &["config", "commit.gpgsign", "true"]);
+    let missing = dir.path().join("no-such-gpg");
+    git(&repo, &["config", "gpg.program", missing.to_str().unwrap()]);
+
+    let outcome = integrate(&db, second.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    let reason = outcome["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(
+            "git refused the commit moving migrations/0002_asks.sql to migrations/0003_asks.sql"
+        ) && reason.contains("the next free number is 0003"),
+        "{reason}"
+    );
+    let detail = queue.show(second).unwrap();
+    assert!(!event_kinds(&detail).contains(&"migration_renumbered"));
+    let deferred = detail
+        .events
+        .iter()
+        .rfind(|e| e.kind == "integration_deferred")
+        .unwrap();
+    assert_eq!(deferred.payload["code"], "migration_number_taken");
+    assert_eq!(deferred.payload["next_number"], "0003");
+    let commit_error = deferred.payload["commit_error"].as_str().unwrap();
+    assert!(commit_error.contains("gpg"), "{commit_error}");
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    // Nothing of the rename is left: no staged move, no stray file, and
+    // HEAD is the rebased head.
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        git_out(
+            &worktree,
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
+        ""
+    );
+    assert!(worktree.join("migrations/0002_asks.sql").exists());
+    assert!(!worktree.join("migrations/0003_asks.sql").exists());
+    assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
+}
+
 /// A migration integrate cannot move by itself: its number is mentioned by
 /// another file the run changes, or the run adds more than one migration.
 /// The run waits for a session with the next free number and the reason
