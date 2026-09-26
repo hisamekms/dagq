@@ -27,6 +27,10 @@ const VERSION: &str = dagq::VERSION;
 /// Longer than the supervisor's own 120 s exit-request timeout so its error
 /// surfaces first.
 const SUPERVISE_TIMEOUT: Duration = Duration::from_secs(180);
+/// Passed to every `supervise` the tests start: the load of the host (other
+/// e2e tests running in parallel, other runs) must not hold back the claims
+/// a test waits for.
+const NO_LOAD_HOLD: [&str; 2] = ["--max-load", "0"];
 
 /// Stand-in for Claude Code. It accepts the argv the Claude adapter builds and
 /// follows the prompt: work in the cwd worktree, commit, publish the receipt by
@@ -220,15 +224,49 @@ fn cmux_executable() -> PathBuf {
         .unwrap_or_else(|| "cmux".into())
 }
 
+/// How many times [`cmux_retrying`] runs a cmux query, and how long it waits
+/// between tries. cmux can answer `ping`, `workspace list` or
+/// `workspace-group list` with a failure for a moment while other e2e tests
+/// running in parallel open and close workspaces; a few short retries ride that out, where running the e2e
+/// tests one at a time would lengthen the whole run.
+const CMUX_RETRY_ATTEMPTS: u32 = 5;
+const CMUX_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Run `cmux args` until `accept` holds of its output, up to
+/// [`CMUX_RETRY_ATTEMPTS`] times [`CMUX_RETRY_INTERVAL`] apart, and return
+/// the last output. A cmux that cannot be started at all is returned at once:
+/// that is not a transient failure.
+fn cmux_retrying(
+    cmux: &Path,
+    args: &[&str],
+    accept: impl Fn(&std::process::Output) -> bool,
+) -> std::io::Result<std::process::Output> {
+    let mut attempt = 1;
+    loop {
+        let output = Command::new(cmux).args(args).output()?;
+        if accept(&output) || attempt >= CMUX_RETRY_ATTEMPTS {
+            return Ok(output);
+        }
+        eprintln!(
+            "cmux {args:?} failed ({}), retrying ({attempt}/{CMUX_RETRY_ATTEMPTS}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        attempt += 1;
+        thread::sleep(CMUX_RETRY_INTERVAL);
+    }
+}
+
 /// Fail loudly, never skip, when cmux is missing: the test would prove nothing.
 fn preflight(cmux: &Path) -> String {
     let hint = "the e2e test needs a running cmux; put cmux on PATH or set DAGQ_E2E_CMUX";
-    let ping = Command::new(cmux)
-        .arg("ping")
-        .output()
+    let pong = |output: &std::process::Output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "PONG"
+    };
+    let ping = cmux_retrying(cmux, &["ping"], pong)
         .unwrap_or_else(|error| panic!("cannot run {}: {error}; {hint}", cmux.display()));
     assert!(
-        ping.status.success() && String::from_utf8_lossy(&ping.stdout).trim() == "PONG",
+        pong(&ping),
         "cmux ping failed ({}): {}{}; {hint}",
         ping.status,
         String::from_utf8_lossy(&ping.stdout),
@@ -312,11 +350,18 @@ fn dagq_with(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> Value {
 
 /// The workspace's entry in `cmux --json workspace list`, while it is listed.
 fn listed_workspace(cmux: &Path, id: &str) -> Option<Value> {
-    let output = Command::new(cmux)
-        .args(["--json", "--id-format", "uuids", "workspace", "list"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "cmux workspace list failed");
+    let output = cmux_retrying(
+        cmux,
+        &["--json", "--id-format", "uuids", "workspace", "list"],
+        |output| output.status.success() && serde_json::from_slice::<Value>(&output.stdout).is_ok(),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "cmux workspace list failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let list: Value = serde_json::from_slice(&output.stdout).unwrap();
     list["workspaces"]
         .as_array()
@@ -400,11 +445,18 @@ fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
 /// The queue's workspace group in `cmux --json workspace-group list`,
 /// found by its external ID (the queue hash).
 fn listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
-    let output = Command::new(cmux)
-        .args(["--json", "--id-format", "uuids", "workspace-group", "list"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "cmux workspace-group list failed");
+    let output = cmux_retrying(
+        cmux,
+        &["--json", "--id-format", "uuids", "workspace-group", "list"],
+        |output| output.status.success() && serde_json::from_slice::<Value>(&output.stdout).is_ok(),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "cmux workspace-group list failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let list: Value = serde_json::from_slice(&output.stdout).unwrap();
     list["groups"]
         .as_array()
@@ -438,7 +490,10 @@ struct GroupGuard {
 
 impl Drop for GroupGuard {
     fn drop(&mut self) {
-        let Some(group) = listed_group(&self.cmux, &self.external_id) else {
+        // Never panic here: a panic while the test is already unwinding
+        // aborts the whole test binary. A group left behind is swept by the
+        // next fixture.
+        let Some(group) = try_listed_group(&self.cmux, &self.external_id) else {
             return;
         };
         let id = group["id"].as_str().unwrap_or_default().to_owned();
@@ -718,10 +773,13 @@ fn close_workspaces_inside(cmux: &Path, inside: &dyn Fn(&str) -> bool) {
 }
 
 fn try_listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
-    let list = cmux_json(
+    let output = cmux_retrying(
         cmux,
         &["--json", "--id-format", "uuids", "workspace-group", "list"],
-    )?;
+        |output| output.status.success() && serde_json::from_slice::<Value>(&output.stdout).is_ok(),
+    )
+    .ok()?;
+    let list: Value = serde_json::from_slice(&output.stdout).ok()?;
     list["groups"]
         .as_array()?
         .iter()
@@ -900,6 +958,7 @@ fn supervise_once(
             .env("XDG_DATA_HOME", &fixture.env.data_home)
             .arg("supervise")
             .arg("--once")
+            .args(NO_LOAD_HOLD)
             .args(extra)
             .arg("--cmux")
             .arg(&fixture.cmux)
@@ -1593,6 +1652,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
             .args(["supervise", "--parallel", "1"])
+            .args(NO_LOAD_HOLD)
             .arg("--cmux")
             .arg(&fixture.cmux)
             .arg("--claude")
@@ -2548,6 +2608,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
+            .args(NO_LOAD_HOLD)
             .arg("--cmux")
             .arg(cmux)
             .arg("--claude")
@@ -2733,6 +2794,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
+            .args(NO_LOAD_HOLD)
             .arg("--cmux")
             .arg(cmux)
             .arg("--claude")
