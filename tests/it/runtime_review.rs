@@ -36,6 +36,24 @@ fn exit_attempts(detail: &dagq::domain::TaskDetail) -> Vec<(Value, Value, Value)
         .collect()
 }
 
+/// Waits for the state a `/exit` that never got there and cannot land
+/// reaches and keeps until the person answers: `exit_unsent` recorded and
+/// the `stuck_exit` ask open (recorded after it). The supervisor holds the
+/// run there, so nothing is caught in passing and the wait is bounded by
+/// [`common::STEP_LIMIT`] rather than by how fast a loaded host gets there
+/// (task 520).
+fn wait_for_stuck_exit(db: &Path) {
+    wait_until(db, common::STEP_LIMIT, |queue| {
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        !payloads(&detail, "exit_unsent").is_empty()
+            && queue
+                .asks(AskQuery::default())
+                .unwrap()
+                .iter()
+                .any(|ask| ask.kind == AskKind::StuckExit)
+    });
+}
+
 /// A `/exit` that cmux timed out before it reached the session (the screen
 /// shows the input box and no trace of it) is sent again after a backoff,
 /// and the run goes on without being given up (task 354).
@@ -140,16 +158,15 @@ fn an_exit_that_never_got_there_closes_a_sound_passed_run_and_lands_it() {
 #[test]
 fn an_exit_that_never_got_there_asks_for_a_run_that_cannot_land() {
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
+    backend.registration_timeout = common::STEP_LIMIT;
     let backend = Arc::new(backend);
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise(&db, &repo, &backend))
     };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
+    wait_for_stuck_exit(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
@@ -200,6 +217,7 @@ fn an_exit_that_never_got_there_asks_when_the_workspace_cannot_be_closed() {
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
     backend.close_times_out = true;
+    backend.registration_timeout = common::STEP_LIMIT;
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
         "pass",
@@ -222,9 +240,7 @@ fn an_exit_that_never_got_there_asks_when_the_workspace_cannot_be_closed() {
             )
         })
     };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
+    wait_for_stuck_exit(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
@@ -251,8 +267,9 @@ fn an_exit_that_never_got_there_asks_when_the_workspace_cannot_be_closed() {
 #[test]
 fn an_exit_that_never_got_there_asks_for_a_passed_run_whose_worktree_changed() {
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.exit_unsent.store(usize::MAX, Ordering::SeqCst);
+    backend.registration_timeout = common::STEP_LIMIT;
     let backend = Arc::new(backend);
     // The review runs in the worktree; this one leaves a file behind.
     let reviewer = Arc::new(TestReviewer::new(&[format!(
@@ -264,9 +281,7 @@ fn an_exit_that_never_got_there_asks_for_a_passed_run_whose_worktree_changed() {
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
         thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
     };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
+    wait_for_stuck_exit(&db);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
