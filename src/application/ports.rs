@@ -1316,6 +1316,19 @@ pub trait RunStore {
     /// Record the finished transcript turns of the Claude session spans
     /// still open (ADR-0048 decision 8); returns how many spans got turns.
     fn record_session_turns(&self) -> Result<usize>;
+    /// Record what the plugin's hook reported of an inbox or planner
+    /// session (ADR-0048 decision 6): its span opened, gone on with or
+    /// closed. Only the spans are written.
+    fn record_session_hook(
+        &self,
+        hook: &crate::domain::sessions::SessionHook,
+    ) -> Result<serde_json::Value>;
+    /// The open spans the hook recorded, each with its workspace.
+    fn hook_session_workspaces(&self) -> Result<Vec<(EventId, String)>>;
+    /// Close, as `inferred`, the spans among `gone` the hook recorded that
+    /// are still open: their workspace is gone (ADR-0048 decision 7).
+    /// Returns how many it closed.
+    fn close_gone_sessions(&self, gone: &[EventId]) -> Result<usize>;
     /// Close the run's review span still open, as `job_finished` now: its
     /// headless job ended (or could not start) without a verdict, and its
     /// `review_failed` waits for the session's `/exit` (task 541); returns

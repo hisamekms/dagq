@@ -3544,6 +3544,18 @@ impl RunStore for SqliteQueue {
     fn record_session_turns(&self) -> Result<usize> {
         super::sessions::record_open_turns(&self.conn)
     }
+    fn record_session_hook(
+        &self,
+        hook: &crate::domain::sessions::SessionHook,
+    ) -> Result<serde_json::Value> {
+        super::sessions::record_hook(&self.conn, hook)
+    }
+    fn hook_session_workspaces(&self) -> Result<Vec<(EventId, String)>> {
+        super::sessions::hook_workspaces(&self.conn)
+    }
+    fn close_gone_sessions(&self, gone: &[EventId]) -> Result<usize> {
+        super::sessions::close_gone_hook_spans(&self.conn, gone)
+    }
     fn close_review_session(&self, id: &RunId) -> Result<usize> {
         let _read = read_before(&self.conn, Closing::Run(id, &["review_failed"]))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;

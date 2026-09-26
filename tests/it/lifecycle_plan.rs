@@ -165,6 +165,7 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
                 env: vec![
                     ("DAGQ_ROLE".into(), "planner".into()),
                     ("DAGQ_QUEUE".into(), db.to_str().unwrap().into()),
+                    ("DAGQ_SESSION_KIND".into(), "planner".into()),
                     ("DAGQ_PLANNER_ORIGIN".into(), "person".into()),
                     ("DAGQ_PLANNER_ID".into(), id.to_string()),
                 ],
@@ -358,6 +359,19 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             .contains(&("DAGQ_PLANNER_ORIGIN".into(), "runtime".into())),
         "{:?}",
         tags[0]
+    );
+    // Its span is the runtime planner's, never the person's planner's.
+    assert!(
+        tags[0]
+            .env
+            .contains(&("DAGQ_SESSION_KIND".into(), "runtime_planner".into())),
+        "{:?}",
+        tags[0]
+    );
+    assert!(
+        !tags[0]
+            .env
+            .contains(&("DAGQ_SESSION_KIND".into(), "planner".into()))
     );
     let command = &cmux.workspaces.lock().unwrap()[0].3;
     assert!(!command.contains("--plugin-dir"), "{command}");

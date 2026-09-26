@@ -482,3 +482,69 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     .unwrap();
     assert!(candidate(&queue));
 }
+
+/// ADR-0048 decision 7: the supervisor closes, as inferred, the inbox and
+/// planner spans whose workspace cmux no longer lists (their `SessionEnd`
+/// never came); a span whose workspace is listed stays open, and nothing is
+/// closed while cmux cannot list its workspaces.
+#[test]
+fn the_supervisor_closes_the_session_spans_of_gone_inbox_and_planner_workspaces() {
+    use dagq::{
+        application::RunStore,
+        domain::sessions::{HookEvent, INBOX, PLANNER, SessionHook},
+    };
+    let (_dir, repo, db) = fixture();
+    let queue = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue
+            .transition(TaskId::new(1), TaskAction::Cancel)
+            .unwrap();
+        queue
+    };
+    for (kind, session, workspace) in [
+        (INBOX, "s-inbox", "W-LISTED"),
+        (PLANNER, "s-plan", "W-GONE"),
+    ] {
+        queue
+            .record_session_hook(&SessionHook {
+                event: HookEvent::Start {
+                    source: "startup".into(),
+                },
+                kind,
+                session_id: session.into(),
+                transcript_path: None,
+                cwd: None,
+                workspace_id: Some(workspace.into()),
+                planner_id: None,
+            })
+            .unwrap();
+    }
+    let open = || -> Vec<String> {
+        queue
+            .hook_session_workspaces()
+            .unwrap()
+            .into_iter()
+            .map(|(_, workspace)| workspace)
+            .collect()
+    };
+
+    let mut failing = TestWorkspace::new(&db, false, "exit 0");
+    failing.exists_fails = true;
+    supervise(&db, &repo, &failing).unwrap();
+    assert_eq!(open(), ["W-LISTED", "W-GONE"]);
+
+    let backend = TestWorkspace::new(&db, false, "exit 0");
+    backend.listed.lock().unwrap().push("w-listed".into());
+    supervise(&db, &repo, &backend).unwrap();
+    assert_eq!(open(), ["W-LISTED"]);
+    let closed: Vec<Value> = queue
+        .latest_events_of("session_closed", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0]["kind"], "planner");
+    assert_eq!(closed[0]["session_id"], "s-plan");
+    assert_eq!(closed[0]["reason"], "inferred");
+}

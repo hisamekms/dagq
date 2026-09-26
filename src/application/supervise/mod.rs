@@ -1272,11 +1272,50 @@ impl Supervisor<'_> {
             return;
         }
         self.last_turns = Some(Instant::now());
+        self.close_gone_sessions();
         match self.queue.record_session_turns() {
             Ok(0) => {}
             Ok(spans) => info!("recorded the transcript turns of {spans} open session span(s)"),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "transcript turns could not be recorded: {error:#}")
+            }
+        }
+    }
+    /// Close, as `inferred`, the inbox and planner spans whose workspace cmux
+    /// no longer lists: their `SessionEnd` never came (ADR-0048 decision 7).
+    /// The spans are read before the listing, so a span opened after it is
+    /// not taken for gone. A failure is logged only (decision 10).
+    fn close_gone_sessions(&mut self) {
+        let spans = match self.queue.hook_session_workspaces() {
+            Ok(spans) if spans.is_empty() => return,
+            Ok(spans) => spans,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the open inbox and planner session spans could not be read: {error:#}");
+                return;
+            }
+        };
+        let listed = match self.cmux.listed_workspace_ids() {
+            Ok(listed) => listed,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the workspaces of the open inbox and planner session spans could not be listed: {error:#}");
+                return;
+            }
+        };
+        let gone: Vec<EventId> = spans
+            .into_iter()
+            .filter(|(_, workspace)| !listed.iter().any(|id| id.eq_ignore_ascii_case(workspace)))
+            .map(|(span, _)| span)
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        match self.queue.close_gone_sessions(&gone) {
+            Ok(0) => {}
+            Ok(closed) => {
+                info!("closed {closed} inbox or planner session span(s) whose workspace is gone")
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the spans of gone inbox and planner sessions could not be closed: {error:#}")
             }
         }
     }

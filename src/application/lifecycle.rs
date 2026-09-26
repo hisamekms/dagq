@@ -70,6 +70,11 @@ pub const WORKER_ROLE: &str = SessionRole::Worker.as_str();
 /// submits them as a proposal. A person opens one with `dagq plan` in a
 /// workspace `[<repo>]planner#<id>`; `up` opens none (ADR-0041 decision 6).
 pub const PLANNER_ROLE: &str = SessionRole::Planner.as_str();
+/// The kind of the session span the plugin's hook records for the session
+/// of the workspace (ADR-0048 decision 6): `inbox`, `planner` or
+/// `runtime_planner`. A workspace without it (opened before it) is taken
+/// from its `DAGQ_ROLE`.
+pub const SESSION_KIND_ENV: &str = "DAGQ_SESSION_KIND";
 /// The ID of the planner session a planner workspace runs (`planners.id`).
 pub const PLANNER_ID_ENV: &str = "DAGQ_PLANNER_ID";
 /// Who opened a planner session (ADR-0041 decision 7): `person` (the
@@ -516,9 +521,19 @@ impl<'a> QueueWorkspaces<'a> {
     }
 
     /// The tags of a workspace of `role` that belongs to no run.
+    /// The inbox and a planner also carry the kind of their session span.
     pub fn tags(&self, role: SessionRole) -> Result<WorkspaceTags> {
+        let mut env = session_env(role, self.db)?;
+        let kind = match role {
+            SessionRole::Inbox => Some(crate::domain::sessions::INBOX),
+            SessionRole::Planner => Some(crate::domain::sessions::PLANNER),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            env.push((SESSION_KIND_ENV.to_owned(), kind.to_owned()));
+        }
         Ok(WorkspaceTags {
-            env: session_env(role, self.db)?,
+            env,
             description: Some(workspace_description(role, &self.hash, None, None)),
             group: self.group(),
         })

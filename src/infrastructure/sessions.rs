@@ -21,8 +21,9 @@ use crate::{
     domain::{
         EventId, RunId, TaskId,
         sessions::{
-            INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW, RUN_SESSION, SESSION_CLOSED,
-            SESSION_OPENED, SESSION_TURNS, Scope, SpanChange, SpanContext, changes, scope,
+            HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW, RUN_SESSION,
+            RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS, Scope, SessionHook,
+            SpanChange, SpanContext, changes, hook_changes, scope,
         },
         stats::rfc3339_millis,
         tokens,
@@ -53,6 +54,8 @@ pub(super) enum Closing<'a> {
     Queue(&'a str, &'a Value),
     /// The plan review's of this id, or of every plan review when `None`.
     PlanReviews(Option<i64>),
+    /// These spans.
+    Spans(&'a [OpenSpan]),
 }
 
 /// The transcripts [`read_before`] read, for the closes of the write that
@@ -130,6 +133,7 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
             "c.run_id IS NULL",
             params![PLAN_REVIEW, plan_review_id],
         )?,
+        Closing::Spans(spans) => spans.to_vec(),
     };
     let mut read_spans = Vec::new();
     for span in spans {
@@ -679,6 +683,137 @@ pub(super) fn close_review(conn: &Connection, run_id: &RunId) -> Result<usize> {
         close(conn, &now, task_id, Some(run_id), span, JOB_FINISHED)?;
     }
     Ok(open.len())
+}
+
+/// The open spans of [`HOOK_KINDS`], which the plugin's hook records on no
+/// run (ADR-0048 decision 6), oldest first.
+fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
+    let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
+    open_spans(
+        conn,
+        &format!("o.run_id IS NULL AND json_extract(o.payload,'$.kind') IN ({kinds})"),
+        "c.run_id IS NULL",
+        params![],
+    )
+}
+
+/// The task the `session_opened` of `span` is on.
+fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
+    Ok(conn.query_row(
+        "SELECT task_id FROM run_events WHERE id=?1",
+        [span.opened_event_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Record what the plugin's hook reported of an inbox or planner session
+/// (ADR-0048 decision 6): open its span, go on with the one open for its
+/// session id, close the one of the session a `/clear` replaced in its
+/// workspace (`next_span`), or close it at its end. A span closed already
+/// is not closed again. A runtime planner's span is on the first task of
+/// its proposal, with the proposal and its goals; the others are on no
+/// task. Only the spans are written: no run, proposal or planner changes.
+pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value> {
+    let closing: Vec<OpenSpan> = hook_changes(hook, &open_hook_spans(conn)?, &Value::Null)
+        .into_iter()
+        .filter_map(|change| match change {
+            SpanChange::Close { span, .. } => Some(span),
+            SpanChange::Open(_) => None,
+        })
+        .collect();
+    let _read = read_before(conn, Closing::Spans(&closing))?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let (task_id, context) = planner_context(&tx, hook)?;
+    let changes = hook_changes(hook, &open_hook_spans(&tx)?, &context);
+    let now = now(&tx)?;
+    let mut opened = None;
+    let mut closed = Vec::new();
+    for change in changes {
+        match change {
+            SpanChange::Close { span, reason } => {
+                let task = span_task(&tx, &span)?;
+                close(&tx, &now, task, None, &span, reason)?;
+                closed.push(span.opened_event_id);
+            }
+            SpanChange::Open(payload) => {
+                insert_at(&tx, task_id, None, SESSION_OPENED, &payload, &now)?;
+                opened = Some(EventId::new(tx.last_insert_rowid()));
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(json!({
+        "kind": hook.kind,
+        "session_id": hook.session_id,
+        "opened": opened,
+        "closed": closed,
+    }))
+}
+
+/// Where a span of `hook` is recorded, and what its payload adds: a
+/// runtime planner's goes on the first task of its planner's proposal,
+/// naming the proposal and its goals (as a plan review's does).
+fn planner_context(conn: &Connection, hook: &SessionHook) -> Result<(Option<TaskId>, Value)> {
+    let Some(planner) = hook.planner_id.filter(|_| hook.kind == RUNTIME_PLANNER) else {
+        return Ok((None, Value::Null));
+    };
+    let proposal: Option<i64> = conn
+        .query_row(
+            "SELECT proposal_id FROM planners WHERE id=?1",
+            [planner],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(proposal) = proposal else {
+        return Ok((None, Value::Null));
+    };
+    let task: Option<TaskId> = conn.query_row(
+        "SELECT min(id) FROM tasks WHERE proposal_id=?1",
+        [proposal],
+        |r| r.get(0),
+    )?;
+    Ok((
+        task,
+        json!({"proposal_id": proposal, "goal_ids": proposal_goals(conn, Some(proposal))?}),
+    ))
+}
+
+/// The open spans the hook recorded that name their workspace, with it.
+pub(super) fn hook_workspaces(conn: &Connection) -> Result<Vec<(EventId, String)>> {
+    Ok(open_hook_spans(conn)?
+        .into_iter()
+        .filter_map(|span| {
+            let workspace = span.payload["workspace_id"].as_str()?.to_owned();
+            Some((span.opened_event_id, workspace))
+        })
+        .collect())
+}
+
+/// Close the spans the hook recorded that are among `gone` and still open,
+/// as `inferred`: their workspace is gone, and their `SessionEnd` never
+/// came (ADR-0048 decision 7). Each ends at its transcript's last record
+/// (now when it cannot be read). Returns how many it closed.
+pub(super) fn close_gone_hook_spans(conn: &Connection, gone: &[EventId]) -> Result<usize> {
+    let spans: Vec<OpenSpan> = open_hook_spans(conn)?
+        .into_iter()
+        .filter(|span| gone.contains(&span.opened_event_id))
+        .collect();
+    if spans.is_empty() {
+        return Ok(0);
+    }
+    let _read = read_before(conn, Closing::Spans(&spans))?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let open = open_hook_spans(&tx)?;
+    let now = now(&tx)?;
+    let mut closed = 0;
+    for span in spans.iter().filter(|span| open.contains(span)) {
+        let task = span_task(&tx, span)?;
+        close(&tx, &now, task, None, span, INFERRED)?;
+        closed += 1;
+    }
+    tx.commit()?;
+    Ok(closed)
 }
 
 /// The `session_opened` events matching `opened` that no `session_closed`
@@ -1851,5 +1986,236 @@ mod tests {
         drop(read);
         tx.rollback().unwrap();
         assert_eq!(READS.get(), 4);
+    }
+
+    /// A `SessionStart` / `SessionEnd` the hook reported for `session` of
+    /// `kind` in `workspace`, with its transcript under `dir`.
+    fn hook(
+        dir: &std::path::Path,
+        start: Option<&str>,
+        kind: &'static str,
+        session: &str,
+        workspace: &str,
+    ) -> SessionHook {
+        use crate::domain::sessions::HookEvent;
+        SessionHook {
+            event: match start {
+                Some(source) => HookEvent::Start {
+                    source: source.into(),
+                },
+                None => HookEvent::End {
+                    reason: "prompt_input_exit".into(),
+                },
+            },
+            kind,
+            session_id: session.into(),
+            transcript_path: Some(dir.join(format!("{session}.jsonl")).display().to_string()),
+            cwd: Some("/repo".into()),
+            workspace_id: Some(workspace.into()),
+            planner_id: None,
+        }
+    }
+
+    /// Write the transcript of the hook's `session` under `dir`: `turns` as
+    /// (input, last output) offsets in seconds from `base`, then an input
+    /// not answered yet at `pending`.
+    fn hook_transcript(
+        dir: &std::path::Path,
+        session: &str,
+        base: i64,
+        turns: &[(i64, i64)],
+        pending: i64,
+    ) {
+        let line = |kind: &str, secs: i64| {
+            json!({"type": kind, "timestamp": millis_text(base + secs * 1000),
+                   "sessionId": session, "version": "2.1.283",
+                   "message": {"content": if kind == "user" { json!("go") } else { json!([{"type": "text"}]) }}})
+            .to_string()
+        };
+        let mut lines = Vec::new();
+        for &(input, output) in turns {
+            lines.push(line("user", input));
+            lines.push(line("assistant", output));
+        }
+        lines.push(line("user", pending));
+        std::fs::write(dir.join(format!("{session}.jsonl")), lines.join("\n")).unwrap();
+    }
+
+    /// The inbox's span opens at its start, records its finished turns
+    /// while open, goes on through a compaction, and is replaced at a
+    /// /clear (a new session id in its workspace) with its active time; its
+    /// late `SessionEnd` and a second one change nothing (ADR-0048
+    /// decision 6). `stats` counts the spans with their open and active
+    /// time in its window.
+    #[test]
+    fn the_hook_records_the_inbox_span_once_across_compaction_and_clear() {
+        use crate::domain::{
+            sessions::INBOX,
+            stats::sessions::{SessionWindow, by_kind, spans as stat_spans},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        let started =
+            record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1", "W")).unwrap();
+        assert_eq!(started["closed"], json!([]));
+        let opened = started["opened"].as_i64().unwrap();
+        let start = retime(conn, 0, 100);
+        hook_transcript(dir.path(), "s-1", start, &[(5, 25), (40, 50)], 60);
+        // Finished turns of the open span, recorded as they come.
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(of_kind(&queue, SESSION_TURNS)[0].payload["kind"], "inbox");
+        // A compaction keeps the session id: the span goes on.
+        let compacted =
+            record_hook(conn, &hook(dir.path(), Some("compact"), INBOX, "s-1", "W")).unwrap();
+        assert_eq!(compacted["opened"], Value::Null);
+        assert_eq!(compacted["closed"], json!([]));
+        // A /clear whose SessionStart comes first: the new session id
+        // closes the span of its workspace as the next span.
+        let cleared =
+            record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2", "W")).unwrap();
+        assert_eq!(cleared["closed"], json!([opened]));
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+        assert_eq!(closed.payload["reason"], crate::domain::sessions::NEXT_SPAN);
+        assert_eq!(closed.payload["active"], "recorded");
+        assert_eq!(closed.payload["active_secs"], 30);
+        assert_eq!(closed.task_id, None);
+        // Its SessionEnd, late, and a second one: closed once.
+        for _ in 0..2 {
+            let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1", "W")).unwrap();
+            assert_eq!(ended["closed"], json!([]));
+        }
+        assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
+        assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
+        // The new session's span is still open.
+        let events: Vec<RunEvent> = queue
+            .conn
+            .prepare("SELECT * FROM run_events ORDER BY id")
+            .unwrap()
+            .query_map([], event_row)
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let upto = events.last().unwrap().id;
+        let spans = stat_spans(&events);
+        let end = rfc3339_millis(&events.last().unwrap().created_at).unwrap();
+        let sessions = by_kind(
+            &spans,
+            &events,
+            SessionWindow {
+                after: EventId::new(0),
+                upto,
+            },
+            end,
+            |_| true,
+        );
+        let inbox = &sessions.by_kind[INBOX];
+        assert_eq!(inbox.count, 2);
+        assert_eq!(inbox.open_now, 1);
+        assert_eq!(inbox.active.summary.total, 30);
+        assert!(inbox.open.summary.total >= 100, "{inbox:?}");
+        assert_eq!(sessions.by_kind["planner"].count, 0);
+    }
+
+    /// A runtime planner's span is on the first task of its proposal, with
+    /// the proposal and its goals, as a plan review's; a person's planner
+    /// and one without a proposal are on no task.
+    #[test]
+    fn a_runtime_planner_span_is_on_its_proposal() {
+        use crate::domain::{
+            NewGoal,
+            sessions::{PLANNER, RUNTIME_PLANNER},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let goal = queue
+            .add_goal(NewGoal {
+                title: "g".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                draft: false,
+            })
+            .unwrap();
+        let first = task(&mut queue);
+        let second = task(&mut queue);
+        let conn = &queue.conn;
+        conn.execute_batch(
+            "INSERT INTO proposals(id,status,owner_origin,submitted_at,created_at,updated_at)
+               VALUES (5,'revising','runtime','t','t','t');
+             INSERT INTO planners(id,origin,proposal_id,created_at) VALUES (3,'runtime',5,0);
+             INSERT INTO planners(id,origin,created_at) VALUES (4,'runtime',0);",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tasks SET proposal_id=5, goal_id=?1 WHERE id IN (?2,?3)",
+            params![goal.id(), first, second],
+        )
+        .unwrap();
+        let planner = |kind, session: &str, planner| SessionHook {
+            planner_id: planner,
+            ..hook(dir.path(), Some("startup"), kind, session, session)
+        };
+        record_hook(conn, &planner(RUNTIME_PLANNER, "p-3", Some(3))).unwrap();
+        record_hook(conn, &planner(RUNTIME_PLANNER, "p-4", Some(4))).unwrap();
+        record_hook(conn, &planner(PLANNER, "p-5", Some(3))).unwrap();
+        let opened = of_kind(&queue, SESSION_OPENED);
+        assert_eq!(opened[0].task_id, Some(first));
+        assert_eq!(opened[0].payload["proposal_id"], 5);
+        assert_eq!(opened[0].payload["goal_ids"], json!([goal.id()]));
+        assert_eq!(opened[0].payload["planner_id"], 3);
+        for other in &opened[1..] {
+            assert_eq!(other.task_id, None);
+            assert_eq!(other.payload.get("proposal_id"), None);
+        }
+        // Its end closes it on the same task.
+        record_hook(conn, &hook(dir.path(), None, RUNTIME_PLANNER, "p-3", "p-3")).unwrap();
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+        assert_eq!(closed.task_id, Some(first));
+        assert_eq!(closed.payload["reason"], crate::domain::sessions::EXITED);
+    }
+
+    /// The spans of the workspaces the supervisor found gone close as
+    /// inferred, at their transcript's last record; the others stay open.
+    #[test]
+    fn spans_of_gone_workspaces_close_as_inferred() {
+        use crate::domain::sessions::{INBOX, PLANNER};
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        record_hook(
+            conn,
+            &hook(dir.path(), Some("startup"), INBOX, "s-1", "W-1"),
+        )
+        .unwrap();
+        record_hook(
+            conn,
+            &hook(dir.path(), Some("startup"), PLANNER, "s-2", "W-2"),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        hook_transcript(dir.path(), "s-2", start, &[(5, 25)], 30);
+        let workspaces = hook_workspaces(conn).unwrap();
+        assert_eq!(
+            workspaces
+                .iter()
+                .map(|(_, w)| w.as_str())
+                .collect::<Vec<_>>(),
+            ["W-1", "W-2"]
+        );
+        let gone = [workspaces[1].0];
+        assert_eq!(close_gone_hook_spans(conn, &gone).unwrap(), 1);
+        assert_eq!(close_gone_hook_spans(conn, &gone).unwrap(), 0);
+        assert_eq!(close_gone_hook_spans(conn, &[]).unwrap(), 0);
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+        assert_eq!(closed.payload["kind"], "planner");
+        assert_eq!(closed.payload["reason"], INFERRED);
+        assert_eq!(closed.payload["active_secs"], 20);
+        assert_eq!(closed.created_at, millis_text(start + 30_000));
+        assert_eq!(hook_workspaces(conn).unwrap().len(), 1);
     }
 }

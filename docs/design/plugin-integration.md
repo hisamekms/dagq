@@ -18,6 +18,7 @@ related:
   - adr-0026
   - adr-0028
   - adr-0030
+  - adr-0048
 ---
 
 # Claude Code and Codex plugin integration
@@ -82,14 +83,15 @@ packageは`Cargo.toml`の`include`で`src/`、`migrations/`（`include_str!`で�
 
 ## Claude Code plugin (`plugins/claude-dagq`)
 
-[plan](../plans/current.md)のステップ8で実装。Claude Code 2.1.278のplugin形式（`.claude-plugin/plugin.json`、`skills/<name>/SKILL.md`、`hooks/hooks.json`、`bin/`）に従う。hookは`SessionStart`の1本だけで（ADR-0016がそれまでの「hookを持たない」を改めた）、agent・MCPは持たない。
+[plan](../plans/current.md)のステップ8で実装。Claude Code 2.1.278のplugin形式（`.claude-plugin/plugin.json`、`skills/<name>/SKILL.md`、`hooks/hooks.json`、`bin/`）に従う。hookは`SessionStart`と`SessionEnd`だけで（ADR-0016がそれまでの「hookを持たない」を改め、ADR-0048の決定6がsessionの区間の記録を足した）、agent・MCPは持たない。
 
 ```text
 plugins/claude-dagq/
   .claude-plugin/plugin.json      name "claude-dagq"、version はクレートと同じ
   bin/dagq                        launcher（POSIX sh）
-  hooks/hooks.json                SessionStart（matcher compact|clear）で session-start.sh を呼ぶ
+  hooks/hooks.json                SessionStart（matcher compact|clear）で session-start.sh、SessionStart（全部）で session-event.sh open、SessionEnd で session-event.sh close を呼ぶ
   hooks/session-start.sh          DAGQ_ROLE が inbox / planner の時だけ、役割と skill の 1 行と dagq status --role <role> を stdout に出す
+  hooks/session-event.sh          DAGQ_ROLE が inbox / planner で DAGQ_QUEUE がある時だけ、hook の stdin を dagq session-event open|close に渡して session の区間を記録する（何も出力しない）
   skills/dagq/                    バイナリと DB の解決、goal の登録と task への分解、ready、参照コマンドの要点、結果の読み方
     reference/locate.md             install、version 警告、db_exists false と rebind
     reference/inspect.md            参照コマンドの表と各フィールド（findings・events --full と絞り込み・timeline・observe --history を含む）、list のページング、task / run の状態、graph、goal edit / set-goal
@@ -122,6 +124,16 @@ inbox（唯一の常駐session）とplanner（proposalごとのオンデマン�
 - バイナリが見つからない（`DAGQ_BIN`が実行可能でない、PATHに`dagq`が無い）時や`status`が失敗した時も1行だけ理由（`dagq status unavailable: …` / `dagq status failed: …`）を出してexit 0し、session開始を止めない。
 - inboxはhookの出力を起点に`dagq-inbox`の手順（openなaskを人に見せ、残りのattentionを知らせ、`watch --role inbox`を再開）へ、plannerは`dagq-planner`の手順へ戻る。`watch`の結果で`integrate`は呼ばない。
 
+### sessionの区間hook（ADR-0048）
+
+runtimeがheadlessで起動しないinbox・planner（人が`dagq plan`で開くものとruntimeが立てるもの）のClaude sessionの区間（kind・session_id・開始・終了）は、pluginのhookが記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定6、task 387）。区間の書き方と推定の終了は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)、集計は[stats](supervisor-lifecycle/stats.md#claude-session)。
+
+- `hooks/hooks.json`は`SessionStart`にmatcherの無い2つ目のグループ（`startup` / `resume` / `clear` / `compact`の全部）で`${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open`を、`SessionEnd`（matcherなし）で`session-event.sh close`を呼ぶ。起き直しの`session-start.sh`のグループと出力はそのまま。
+- `session-event.sh`は`DAGQ_ROLE`が`inbox` / `planner`で`DAGQ_QUEUE`があるときだけ、hookのstdin（`session_id`・`transcript_path`・`cwd`・`source` / `reason`）をそのまま`bin/dagq session-event open|close`（隠しコマンド）に渡す。`DAGQ_DB`が無ければ`DAGQ_QUEUE`を`DAGQ_DB`にする。それ以外のsession（workerを含む。workerの区間はruntimeが書く）では何もしない。
+- 区間のkindはworkspaceの`--env`の`DAGQ_SESSION_KIND`（`up`がinboxに`inbox`、`dagq plan`が`planner`、supervisorが立てるplannerに`runtime_planner`を置く）で、無い古いworkspaceは`DAGQ_ROLE`（plannerは`DAGQ_PLANNER_ORIGIN=runtime`なら`runtime_planner`）から決める。workspaceは`CMUX_WORKSPACE_ID`、plannerは`DAGQ_PLANNER_ID`から取る。
+- `/clear`とcompactionで二重に数えない: 同じsession_idの`SessionStart`（`resume`・`compact`）は開いている区間を続け、別のsession_idの`SessionStart`は同じworkspaceの開いている区間を`next_span`で閉じてから開き、閉じた区間への2回目の`SessionEnd`は何も書かない。
+- 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入るので）、`dagq`が無い・実行できない、queueが開けない、入力にsession_idが無い、記録に失敗した、のどれでもexit 0する。記録のCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。
+
 ### launcher
 
 skillはすべて`${CLAUDE_PLUGIN_ROOT}/bin/dagq`を呼ぶ。launcherはバイナリを解決してcwdのまま`dagq <args>`を`exec`するだけで、DBのpathを計算せず、DBも開かない（[ADR-0006](../adr/0006-queue-per-repository.md)）。
@@ -150,11 +162,11 @@ claude plugin marketplace add hisamekms/dagq
 claude plugin install claude-dagq@dagq
 ```
 
-`add`はGitHubのrepositoryをcloneし、`install`はそのcloneの`./plugins/claude-dagq`からuser scopeに入れる。更新は`claude plugin marketplace update dagq`と`claude plugin update claude-dagq@dagq`。pluginはskillと`SessionStart` hookだけでinstallに`-y`を要する宣言commandはなく、runtimeバイナリは同梱しない（Releaseから別に入れる。launcherのエラー文がその手順を持つ）。
+`add`はGitHubのrepositoryをcloneし、`install`はそのcloneの`./plugins/claude-dagq`からuser scopeに入れる。更新は`claude plugin marketplace update dagq`と`claude plugin update claude-dagq@dagq`。pluginはskillと`SessionStart` / `SessionEnd` hookだけでinstallに`-y`を要する宣言commandはなく、runtimeバイナリは同梱しない（Releaseから別に入れる。launcherのエラー文がその手順を持つ）。
 
 ### 読み込みと検証
 
 - 検証: `claude plugin validate plugins/claude-dagq`（hookとskillを含む。Claude Code 2.1.280で確認）と`claude plugin validate .claude-plugin/marketplace.json`（`--strict`も通る）、inventory: `claude --plugin-dir plugins/claude-dagq plugin details claude-dagq`。
 - 開発中の読み込み: `claude --plugin-dir /path/to/dagq/plugins/claude-dagq`（そのsessionのみ）。supervisorがworkerに渡すのもこの形（`up --plugin-dir`）。
 - marketplace経由のinstallは、使い捨ての`HOME` / `CLAUDE_CONFIG_DIR`でローカルpathを`marketplace add`して`install`し、`plugin list`と`plugin details`でskillが載ることを確認する（task 29、Claude Code 2.1.278で確認。task 65以降は`plugin details`でskill 5件とhook 1件、task 88以降はskill 7件、task 100以降はskill 4件）。
-- `tests/plugin.rs`がmanifest（name、versionの一致）、marketplace manifest（marketplace名、pluginのnameとrepository相対の`source`がpluginのdirectoryを指すこと）、launcherのversion比較（`--version`と`locate`だけ答えるfake binaryを`DAGQ_BIN`にして、major.minorが同じならstderrが空、1 minor違えばstderrに`{"warning": ...}`が出てexit 0）、skill一覧（`dagq` / `dagq-inbox` / `dagq-planner` / `dagq-recover`）、各`SKILL.md`が8 KB以下であること、`reference/`のファイルと本文からの参照が過不足なく対応すること（他skillの`skills/<name>/reference/`への参照はそのskillで解決する）、`reference/review-by-hand.md`が`review ID`・`integrate`・`approve_landing`のaskの3値・`git push origin main`を持つこと、inbox / recoverのskillが`goal add` / `add` / `goal close`を持たず、inboxがattentionの`next`ごとの行き先と「人の指示があるときだけ」の線引きを、recoverがsection 3〜7を、plannerが登録とgoal closeと`up`の参照を持つこと、frontmatter（先頭行`---`、`name`がdirectory名、`description`）、hook（`hooks.json`の形式、matcherが`compact` / `clear`だけ、scriptが実行可能、role無し・別role（worker、observer、supervisor）で出力が空、inbox / plannerで出力の先頭が役割とskillの1行でstdout全体はJSONとして読めないこと、inboxで`supervisor_stopped`と`ask_opened`のattentionとopenなaskを持つ`status`、plannerでattentionの無い`status`、`DAGQ_QUEUE`での解決、バイナリ無し・`status`失敗で1行とexit 0）、launcherの解決（`XDG_DATA_HOME`配下、worktreeからの共有、`DAGQ_DB`の優先、`binary_version`と`plugin_version`）・エラー（Release URL、tarball名、`SHA256SUMS`、`~/.local/bin`、`cargo build --locked`を含むこと）・`init`・登録・`show`を実バイナリで確認する。テストは`XDG_DATA_HOME`を一時dirに向け、開発者の実queueに触れない。skillに書いたコマンド列のうち自動テストにしないもの（goal系の`goal add` → `add --goal` → `ready` → `goal show` → `goal close`、runtime系の`up` → `status` → `down`）は、skillを変えたtaskのrun sessionが`cargo build --locked`したバイナリと使い捨てrepository・使い捨てqueue（`--db`）で実行し、その実行ログをreceiptのevidenceに残す（task 13、task 16）。
+- `tests/plugin.rs`がmanifest（name、versionの一致）、marketplace manifest（marketplace名、pluginのnameとrepository相対の`source`がpluginのdirectoryを指すこと）、launcherのversion比較（`--version`と`locate`だけ答えるfake binaryを`DAGQ_BIN`にして、major.minorが同じならstderrが空、1 minor違えばstderrに`{"warning": ...}`が出てexit 0）、skill一覧（`dagq` / `dagq-inbox` / `dagq-planner` / `dagq-recover`）、各`SKILL.md`が8 KB以下であること、`reference/`のファイルと本文からの参照が過不足なく対応すること（他skillの`skills/<name>/reference/`への参照はそのskillで解決する）、`reference/review-by-hand.md`が`review ID`・`integrate`・`approve_landing`のaskの3値・`git push origin main`を持つこと、inbox / recoverのskillが`goal add` / `add` / `goal close`を持たず、inboxがattentionの`next`ごとの行き先と「人の指示があるときだけ」の線引きを、recoverがsection 3〜7を、plannerが登録とgoal closeと`up`の参照を持つこと、frontmatter（先頭行`---`、`name`がdirectory名、`description`）、hook（`hooks.json`の形式、`session-start.sh`のmatcherが`compact` / `clear`だけ、`session-event.sh open`がmatcherなしの`SessionStart`・`session-event.sh close`がmatcherなしの`SessionEnd`、scriptが実行可能、`session-event.sh`がrole無し・worker・`DAGQ_QUEUE`無しで何も記録せず、inboxの開始・compaction・`/clear`（`SessionEnd`の`clear`→新しいsession_idの`SessionStart`）・終了と2回目の終了で区間を1回ずつ開き閉じ、`DAGQ_SESSION_KIND`の無い古いplannerのworkspaceの`/clear`で前の区間を`next_span`で閉じ、`stats`の`sessions.by_kind`に`inbox` / `planner`の件数が出ること、バイナリ無し・実行できない・queueが開けない・session_idの無い入力・未知のeventで出力が空でexit 0、role無し・別role（worker、observer、supervisor）で出力が空、inbox / plannerで出力の先頭が役割とskillの1行でstdout全体はJSONとして読めないこと、inboxで`supervisor_stopped`と`ask_opened`のattentionとopenなaskを持つ`status`、plannerでattentionの無い`status`、`DAGQ_QUEUE`での解決、バイナリ無し・`status`失敗で1行とexit 0）、launcherの解決（`XDG_DATA_HOME`配下、worktreeからの共有、`DAGQ_DB`の優先、`binary_version`と`plugin_version`）・エラー（Release URL、tarball名、`SHA256SUMS`、`~/.local/bin`、`cargo build --locked`を含むこと）・`init`・登録・`show`を実バイナリで確認する。テストは`XDG_DATA_HOME`を一時dirに向け、開発者の実queueに触れない。skillに書いたコマンド列のうち自動テストにしないもの（goal系の`goal add` → `add --goal` → `ready` → `goal show` → `goal close`、runtime系の`up` → `status` → `down`）は、skillを変えたtaskのrun sessionが`cargo build --locked`したバイナリと使い捨てrepository・使い捨てqueue（`--db`）で実行し、その実行ログをreceiptのevidenceに残す（task 13、task 16）。

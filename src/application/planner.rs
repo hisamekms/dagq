@@ -27,7 +27,8 @@ use super::{
     AgentProvider, AgentSignals, Clock, PlannerCommand, ProcessControl, Queue, RunFiles, Spawner,
     Streams, WorkspaceBackend,
     lifecycle::{
-        PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QueueWorkspaces, ROLE_STATUS_KEY, session_look,
+        PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QueueWorkspaces, ROLE_STATUS_KEY, SESSION_KIND_ENV,
+        session_look,
     },
     naming::{planner_workspace_name, shell_join},
     path_text, planner_idle_marker,
@@ -35,7 +36,7 @@ use super::{
 };
 use crate::domain::{
     IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState, ProposalId,
-    SessionRole, Task,
+    SessionRole, Task, sessions::RUNTIME_PLANNER,
 };
 
 /// The planner's first message, which its wrapper hands the agent.
@@ -222,6 +223,13 @@ fn create_workspace(
         argv.push(path_text(plugin_dir)?);
     }
     let mut tags = workspaces.tags(SessionRole::Planner)?;
+    if planner.origin == PlannerOrigin::Runtime {
+        for (key, value) in &mut tags.env {
+            if key == SESSION_KIND_ENV {
+                *value = RUNTIME_PLANNER.to_owned();
+            }
+        }
+    }
     tags.env.push((
         PLANNER_ORIGIN_ENV.to_owned(),
         planner.origin.as_str().to_owned(),

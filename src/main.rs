@@ -924,6 +924,14 @@ enum Command {
         #[arg(long)]
         resume: bool,
     },
+    /// Record a SessionStart (`open`) or SessionEnd (`close`) of an inbox or planner session:
+    /// the plugin's hook passes its stdin, and the session's environment names its kind
+    /// (ADR-0048 decision 6). Only the session spans are written.
+    #[command(hide = true)]
+    SessionEvent {
+        #[arg(value_parser = ["open", "close"])]
+        event: String,
+    },
     #[command(hide = true)]
     PlannerSession {
         #[arg(long)]
@@ -2217,6 +2225,19 @@ fn execute(cli: Cli) -> Result<Value> {
             claude,
             resume,
         } => dagq::compose::session(&db, &RunId::new(run)?, &lease, &claude, resume)?,
+        Command::SessionEvent { event } => {
+            use dagq::{application::RunStore, domain::sessions::SessionHook};
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+                .context("read the hook input")?;
+            let input: Value = serde_json::from_str(&input).context("parse the hook input")?;
+            match SessionHook::from_hook(&event, &input, |name| env::var(name).ok())
+                .map_err(anyhow::Error::msg)?
+            {
+                Some(hook) => queue.record_session_hook(&hook)?,
+                None => json!({"recorded": false, "reason": "not an inbox or planner session"}),
+            }
+        }
         Command::PlannerSession {
             planner,
             claude,

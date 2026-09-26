@@ -1,5 +1,5 @@
 //! The Claude Code plugin in `plugins/claude-dagq` is data plus one launcher
-//! script and one hook script. These tests catch a broken manifest, skill
+//! script and two hook scripts. These tests catch a broken manifest, skill
 //! frontmatter, hook, or launcher before `claude plugin validate` or a real
 //! session would.
 
@@ -299,27 +299,353 @@ fn hooks_manifest() -> Value {
 }
 
 #[test]
-fn hooks_json_runs_the_session_start_script_on_compact_and_clear_only() {
+fn hooks_json_runs_the_status_on_compact_and_clear_and_records_every_start_and_end() {
     let hooks = hooks_manifest();
     let events = hooks["hooks"].as_object().expect("hooks object");
-    assert_eq!(events.keys().collect::<Vec<_>>(), ["SessionStart"]);
+    let mut names: Vec<&String> = events.keys().collect();
+    names.sort();
+    assert_eq!(names, ["SessionEnd", "SessionStart"]);
+    let command = |group: &Value| -> String {
+        let commands = group["hooks"].as_array().unwrap();
+        assert_eq!(commands.len(), 1, "{group}");
+        assert_eq!(commands[0]["type"], "command");
+        commands[0]["command"].as_str().unwrap().to_owned()
+    };
     let groups = events["SessionStart"].as_array().unwrap();
-    assert_eq!(groups.len(), 1);
-    // startup is the session prompt's job; resume keeps its context.
+    assert_eq!(groups.len(), 2);
+    // The status: startup is the session prompt's job; resume keeps its context.
     let matcher = groups[0]["matcher"].as_str().unwrap();
     let mut sources: Vec<&str> = matcher.split('|').collect();
     sources.sort();
     assert_eq!(sources, ["clear", "compact"]);
-    let commands = groups[0]["hooks"].as_array().unwrap();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0]["type"], "command");
     assert_eq!(
-        commands[0]["command"],
+        command(&groups[0]),
         "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"
     );
-    let script = plugin_root().join("hooks/session-start.sh");
-    let mode = fs::metadata(&script).unwrap().permissions().mode();
-    assert_ne!(mode & 0o111, 0, "session-start.sh must be executable");
+    // The span: every source (no matcher), and every end.
+    assert!(groups[1].get("matcher").is_none(), "{}", groups[1]);
+    assert_eq!(
+        command(&groups[1]),
+        "${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open"
+    );
+    let ends = events["SessionEnd"].as_array().unwrap();
+    assert_eq!(ends.len(), 1);
+    assert!(ends[0].get("matcher").is_none(), "{}", ends[0]);
+    assert_eq!(
+        command(&ends[0]),
+        "${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh close"
+    );
+    for script in ["session-start.sh", "session-event.sh"] {
+        let mode = fs::metadata(plugin_root().join("hooks").join(script))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "{script} must be executable");
+    }
+}
+
+/// Runs the span hook for `event` with a clean environment plus `env`, the
+/// hook's JSON `input` on stdin.
+fn session_event(
+    event: &str,
+    input: &Value,
+    env: &[(&str, &str)],
+    data_home: &Path,
+    cwd: &Path,
+) -> Output {
+    use std::io::Write;
+    let mut command = Command::new(plugin_root().join("hooks/session-event.sh"));
+    command
+        .arg(event)
+        .env_clear()
+        .env("XDG_DATA_HOME", data_home)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let _waiting = common::within(common::STEP_LIMIT, "the session-event hook to exit");
+    let mut child = command.spawn().unwrap();
+    // A hook that exits without reading its input closes the pipe first.
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes());
+    child.wait_with_output().unwrap()
+}
+
+/// The span events of the queue at `db`, oldest first.
+fn span_events(binary: &str, db: &str, data_home: &Path, cwd: &Path) -> Vec<Value> {
+    let events = stdout_json(&launcher(
+        &[("DAGQ_BIN", binary), ("DAGQ_DB", db)],
+        data_home,
+        cwd,
+        &[
+            "events",
+            "--full",
+            "--kind",
+            "session_opened",
+            "--kind",
+            "session_closed",
+            "--limit",
+            "100",
+        ],
+    ));
+    events["events"].as_array().unwrap().clone()
+}
+
+#[test]
+fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_home = dir.path().join("xdg");
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .bounded_status()
+            .unwrap()
+            .success()
+    );
+    let binary = env!("CARGO_BIN_EXE_dagq");
+    stdout_json(&launcher(
+        &[("DAGQ_BIN", binary)],
+        &data_home,
+        &repo,
+        &["init"],
+    ));
+    let db = stdout_json(&launcher(
+        &[("DAGQ_BIN", binary)],
+        &data_home,
+        &repo,
+        &["locate"],
+    ))["db"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let start = |session: &str, source: &str| {
+        serde_json::json!({
+            "session_id": session,
+            "transcript_path": dir.path().join(format!("{session}.jsonl")),
+            "cwd": repo,
+            "hook_event_name": "SessionStart",
+            "source": source,
+        })
+    };
+    let end = |session: &str, reason: &str| serde_json::json!({"session_id": session, "hook_event_name": "SessionEnd", "reason": reason});
+    let silent = |output: Output| {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"", "{output:?}");
+        assert_eq!(output.stderr, b"", "{output:?}");
+    };
+
+    // Workers and sessions of no role or no queue record nothing.
+    for env in [
+        vec![("DAGQ_BIN", binary), ("DAGQ_QUEUE", db.as_str())],
+        vec![
+            ("DAGQ_BIN", binary),
+            ("DAGQ_ROLE", "worker"),
+            ("DAGQ_QUEUE", db.as_str()),
+        ],
+        vec![("DAGQ_BIN", binary), ("DAGQ_ROLE", "inbox")],
+    ] {
+        silent(session_event(
+            "open",
+            &start("s-0", "startup"),
+            &env,
+            &data_home,
+            dir.path(),
+        ));
+    }
+    assert_eq!(
+        span_events(binary, &db, &data_home, &repo),
+        Vec::<Value>::new()
+    );
+
+    // The inbox: opened at its start, gone on with at a compaction, closed
+    // and replaced at a /clear, and closed at its end, once.
+    let inbox = [
+        ("DAGQ_BIN", binary),
+        ("DAGQ_ROLE", "inbox"),
+        ("DAGQ_SESSION_KIND", "inbox"),
+        ("DAGQ_QUEUE", db.as_str()),
+        ("CMUX_WORKSPACE_ID", "W-INBOX"),
+    ];
+    silent(session_event(
+        "open",
+        &start("s-1", "startup"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "open",
+        &start("s-1", "compact"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "close",
+        &end("s-1", "clear"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "open",
+        &start("s-2", "clear"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "close",
+        &end("s-2", "prompt_input_exit"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "close",
+        &end("s-2", "other"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    // A planner of an old workspace (no DAGQ_SESSION_KIND) whose SessionEnd
+    // was lost: its /clear closes it as the next span.
+    let planner = [
+        ("DAGQ_BIN", binary),
+        ("DAGQ_ROLE", "planner"),
+        ("DAGQ_QUEUE", db.as_str()),
+        ("CMUX_WORKSPACE_ID", "W-PLANNER"),
+    ];
+    silent(session_event(
+        "open",
+        &start("p-1", "startup"),
+        &planner,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "open",
+        &start("p-2", "clear"),
+        &planner,
+        &data_home,
+        dir.path(),
+    ));
+
+    let spans: Vec<(String, String, String)> = span_events(binary, &db, &data_home, &repo)
+        .iter()
+        .map(|event| {
+            let payload = &event["payload"];
+            (
+                event["kind"].as_str().unwrap().to_owned(),
+                format!(
+                    "{} {}",
+                    payload["kind"].as_str().unwrap(),
+                    payload["session_id"].as_str().unwrap()
+                ),
+                payload["reason"]
+                    .as_str()
+                    .or(payload["source"].as_str())
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect();
+    let row =
+        |kind: &str, span: &str, why: &str| (kind.to_owned(), span.to_owned(), why.to_owned());
+    assert_eq!(
+        spans,
+        [
+            row("session_opened", "inbox s-1", "startup"),
+            row("session_closed", "inbox s-1", "clear"),
+            row("session_opened", "inbox s-2", "clear"),
+            row("session_closed", "inbox s-2", "exited"),
+            row("session_opened", "planner p-1", "startup"),
+            row("session_closed", "planner p-1", "next_span"),
+            row("session_opened", "planner p-2", "clear"),
+        ]
+    );
+    let events = span_events(binary, &db, &data_home, &repo);
+    assert_eq!(events[0]["payload"]["workspace_id"], "W-INBOX");
+    assert_eq!(events[0]["task_id"], Value::Null);
+    // No transcript: the spans closed without their active time.
+    assert_eq!(events[1]["payload"]["active"], "unavailable");
+    assert_eq!(
+        events[1]["payload"]["active_unavailable"],
+        "transcript_missing"
+    );
+
+    // stats counts them in its window, per kind.
+    let stats = stdout_json(&launcher(
+        &[("DAGQ_BIN", binary), ("DAGQ_DB", db.as_str())],
+        &data_home,
+        &repo,
+        &["stats", "--full"],
+    ));
+    let by_kind = &stats["sessions"]["by_kind"];
+    assert_eq!(by_kind["inbox"]["count"], 2, "{by_kind}");
+    assert_eq!(by_kind["inbox"]["open_now"], 0, "{by_kind}");
+    assert_eq!(by_kind["planner"]["count"], 2, "{by_kind}");
+    assert_eq!(by_kind["planner"]["open_now"], 1, "{by_kind}");
+
+    // A failure is silent and never fails the session: no dagq, a dagq
+    // that is not executable, a queue that cannot be opened, bad input.
+    silent(session_event(
+        "open",
+        &start("s-3", "startup"),
+        &[("DAGQ_ROLE", "inbox"), ("DAGQ_QUEUE", db.as_str())],
+        &data_home,
+        dir.path(),
+    ));
+    let bogus = dir.path().join("not-executable");
+    fs::write(&bogus, "").unwrap();
+    silent(session_event(
+        "open",
+        &start("s-3", "startup"),
+        &[
+            ("DAGQ_BIN", bogus.to_str().unwrap()),
+            ("DAGQ_ROLE", "inbox"),
+            ("DAGQ_QUEUE", db.as_str()),
+        ],
+        &data_home,
+        dir.path(),
+    ));
+    let missing = dir.path().join("missing").join("queue.db");
+    silent(session_event(
+        "open",
+        &start("s-3", "startup"),
+        &[
+            ("DAGQ_BIN", binary),
+            ("DAGQ_ROLE", "inbox"),
+            ("DAGQ_QUEUE", missing.to_str().unwrap()),
+        ],
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "open",
+        &serde_json::json!({"source": "startup"}),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    silent(session_event(
+        "bogus",
+        &start("s-3", "startup"),
+        &inbox,
+        &data_home,
+        dir.path(),
+    ));
+    assert_eq!(span_events(binary, &db, &data_home, &repo).len(), 7);
 }
 
 /// Runs the SessionStart hook with a clean environment plus `env`.

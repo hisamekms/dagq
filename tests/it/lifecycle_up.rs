@@ -232,6 +232,8 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
                 env: vec![
                     ("DAGQ_ROLE".into(), key.into()),
                     ("DAGQ_QUEUE".into(), db.to_str().unwrap().into()),
+                    // The kind of the span the plugin's hook records (ADR-0048).
+                    ("DAGQ_SESSION_KIND".into(), key.into()),
                 ],
                 description: Some(format!("dagq role={key} queue={hash}")),
                 group: Some(format!("group-{hash}")),
