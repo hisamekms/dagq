@@ -61,7 +61,7 @@ A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (
 
 ## 3. Inspect
 
-`goal list`, `goal show ID`, `list` (unfinished tasks, paged: `--before NEXT` while `next` is not null), `show ID`, `graph [--goal ID]` (what waits on what, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went), `observe --history`, `notes` / `note` and `stats` (time per run and goal, `alerts`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
+`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID]` (what waits on what, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went), `observe --history`, `notes` / `note` and `stats` (time per run, goal and session kind, `alerts`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
 
 ## 4. Report results
 

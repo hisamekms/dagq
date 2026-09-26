@@ -21,6 +21,10 @@ The supervisor detects stalled sessions by the `[stall]` settings (ADR-0043); th
 - In `running_alerts`, an `idle_without_receipt` alert with `nudged: false` and `asked: false` past its `threshold` suggests the supervisor missed the stall.
 - The observer records a revisit as `finding record --kind threshold --subject <setting name>` and adds `--propose` when it recurs; it never changes the threshold. Changing a value is the user's decision (`[stall]` in `dagq.toml`; defaults in `docs/design/supervisor-lifecycle/stall-thresholds.md`).
 
+## Session time: reading `sessions`
+
+The `stats` the observer reads carry the Claude session time per kind (`sessions.by_kind`, and `sessions` per run and goal; fields in `reference/inspect.md`, "Claude session time"). A kind whose `open` grows while its `active_ratio` falls spends its time waiting, not working; many `active_unavailable` spans mean the transcript could not be read (the active time is missing, not zero); many `inferred` spans mean sessions ended without a seen exit (recovered, triaged, or the workspace was gone). Read them with the user when deciding a `capacity` or `wait` finding.
+
 ## Where a finding goes
 
 1. **A proposal, without a person.** The observer marks a finding that needs a remedy (`finding record --propose '<why>'`: it recurs or costs much). The supervisor then opens a runtime planner for it, which checks `search` / `related` for work already queued or done and either submits tasks on an open goal or a new draft goal (`submit ... --finding ID`: the finding becomes `proposed`), dismisses it, or asks the person with a `planner_question`. Plan review checks the proposal like any other and asks the person only on a `concern`. When the proposal ends the runtime marks the finding `resolved` (a task completed) or `open` again without its mark (everything was canceled). After three runtime planners left it undecided, the inbox gets `decide the finding in a planner`.
