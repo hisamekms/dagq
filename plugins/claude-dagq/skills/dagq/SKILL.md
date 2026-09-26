@@ -19,7 +19,7 @@ Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dag
 
 It prints `binary`, `binary_version`, `plugin_version` and the queue (`db`, `db_exists`, `runs_dir`, `source`). Report `binary_version` and `db` to the user once per session. Then:
 
-- `{"error": ...}` (no binary): pass the message on (it names the install steps) and retry once installed.
+- `{"error": ...}` (no binary): pass the message on (the install steps) and retry once installed.
 - `{"warning": ...}` on stderr (plugin and binary differ in major.minor): report it and continue.
 - `db_exists: false`: run `"${CLAUDE_PLUGIN_ROOT}/bin/dagq" init` once, unless the repository was moved or renamed; then do not `init` and read `reference/locate.md`.
 
@@ -27,23 +27,23 @@ The queue is per repository, resolved from the current directory: run the launch
 
 ## 2. Register a goal and decompose it into tasks
 
-Hear the problem → `goal add` → decompose it into tasks, each registered with `add --goal` → `lint` and `submit` them for plan review, which makes them `ready`. Look for duplicates and done work with `search` before `add` and `related ID` before `submit`; cancel one with `--duplicate-of X` (`reference/inspect.md`). A task's prompt shows its goal, its dependencies' receipt summaries and commits, and siblings in progress, so siblings agree on names and boundaries.
+Hear the problem → `goal add` → decompose it into tasks, each registered with `add --goal` → `lint` and `submit` them for plan review, which makes them `ready`. Look for duplicates and done work with `search` before `add` and `related ID` before `submit`; cancel one with `--duplicate-of X` (`reference/inspect.md`). A task's prompt shows its goal, its dependencies' receipts and siblings in progress, so siblings agree on names.
 
-Skip the goal only for a one-shot task that finishes the problem by itself (a typo fix, a clippy warning). If a second task will exist, or a later task needs to know what this one decided, register a goal. When unsure, register it.
+Skip the goal only for a one-shot task that finishes the problem by itself. If a second task will exist, or a later task needs to know what this one decided, register a goal. When unsure, register it.
 
 ### Register the goal
 
-Collect from the user, asking only for what is missing: title (the problem, one line), description (what is wrong today and what the repository looks like when solved), acceptance (how the whole goal is judged after every task landed), constraints (naming, boundaries, what not to do, shared by every task), doc (a committed document, relative to the repository root).
+Collect, asking only for what is missing: title (the problem, one line), description (what is wrong today and what the repository looks like when solved), acceptance (how the whole goal is judged after every task landed), constraints (naming, boundaries, what not to do, shared by every task), doc (a committed document, relative to the repository root).
 
 ```sh
 "$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc docs/adr/NNNN-name.md
 ```
 
-A goal has no verification commands; a goal-level check is a final task depending on all the others. It is draft or open: the tasks of a `goal add --draft` goal are never claimed, even when `ready`. Adopt it by submitting it (`submit --goal ID`; a `pass` lifts the draft), or reject it with `goal close ID --verdict abandoned`. The observer's findings, and how they become proposals: `reference/observer.md`.
+A goal has no verification commands; a goal-level check is a final task depending on the others. It is draft or open: the tasks of a `goal add --draft` goal are never claimed, even when `ready`. Adopt it by submitting it (`submit --goal ID`; a `pass` lifts the draft), or reject it with `goal close ID --verdict abandoned`. The observer's findings, and how they become proposals: `reference/observer.md`.
 
 ### Register the tasks
 
-Split the goal into tasks one session finishes in one worktree. Collect per task: title (one line), description (what to change and where; for runtime, the files it mainly touches), acceptance (how a reviewer decides it is done), verification commands (run by `integrate` after its rebase; repeat `--verify`), dependencies (tasks that must be `completed` first; repeat `--depends-on`, may cross goals), `--context` (why it exists and what to read first, when the goal does not say it), and `--evidence` (receipt checks the run must report `passed` with evidence: `tests`, `e2e` or `subagent_review`; repeatable). A missing check parks the run (`needs_session`, `evidence_missing`) for a resume. `--paths GLOB` (repeatable) limits what a task may change: a run changing more parks (`scope_violation`). Pick `--verify`, `--paths`, `--evidence`, `--kind` (docs, plugin, runtime, ci) and the files named per `reference/scope.md`.
+Split the goal into tasks, each one session in one worktree. Collect per task: title (one line), description (what to change and where; for runtime, the files it mainly touches), acceptance (how a reviewer decides it is done), verification commands (run by `integrate` after its rebase; repeat `--verify`), dependencies (tasks that must be `completed` first; repeat `--depends-on`, may cross goals), `--context` (why it exists, what to read first), and `--evidence` (receipt checks to report `passed` with evidence: `tests`, `e2e`, `subagent_review`). A missing one parks the run (`evidence_missing`). `--paths GLOB` (repeatable) limits what a task may change: a run changing more parks (`scope_violation`). Pick `--verify`, `--paths`, `--evidence`, `--kind` (docs, plugin, runtime, ci) and the files named per `reference/scope.md`.
 
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \
@@ -55,9 +55,9 @@ Split the goal into tasks one session finishes in one worktree. Collect per task
 "$DAGQ" candidates
 ```
 
-A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (which refuses what `lint` rejects) makes the tasks `submitted`, one proposal owned by this session; nothing claims them. The supervisor's plan review job checks each proposal in turn: `pass` makes its tasks `ready`, `revise` returns them to `draft` with reasons for their planner to fix and `submit --proposal ID` again, `concern` asks the person through the inbox. `proposal list` / `proposal show ID` read proposals. Only plan review readies a task; `ready --bypass-review` skips it on a person's explicit word. `candidates` lists ready tasks whose dependencies are all `completed`; a ready task missing from it is blocked (see `show ID`). `edit` changes a draft or submitted task, `draft ID` takes a ready or submitted task back, `cancel ID` drops it, `dependency add|remove TASK PREDECESSOR` changes prerequisites. `set-goal`, `goal edit`, `edit`: `reference/inspect.md`; `set-paths`: `reference/scope.md`.
+A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (refusing what `lint` rejects) makes the tasks `submitted`, never claimed, in one proposal owned by this session. Plan review checks each proposal in turn: `pass` makes its tasks `ready`, `revise` returns them to `draft` with reasons for their planner to fix and `submit --proposal ID` again, `concern` asks the person through the inbox. `proposal list` / `proposal show ID` read proposals. Its planner withdraws one with `proposal withdraw ID` (a revising one whose drafts a bypass or cancel emptied, so `submit --proposal` fails with `EmptyProposal`, or a dropped plan): it ends `canceled`, its submitted tasks return to `draft`, free for another proposal, and an unanswered `approve_plan` ask closes (`reference/inspect.md`). Only plan review readies a task; `ready --bypass-review` skips it on a person's explicit word. `candidates` lists claimable ready tasks; a ready one missing from it is blocked (`show ID`). `edit` changes a draft or submitted task, `draft ID` takes a ready or submitted task back, `cancel ID` drops it, `dependency add|remove TASK PREDECESSOR` changes prerequisites. `set-goal`, `goal edit`, `edit`: `reference/inspect.md`; `set-paths`: `reference/scope.md`.
 
-`--priority LEVEL` (default `normal`; `set-priority TASK LEVEL` while `draft` or `ready`) orders claiming: `interrupt` (a rare cut-in, never routine), `urgent` (a defect stopping operation), `high` (a prerequisite of other work), `normal`, `low` (deferred). Claim order: effective priority (own, or higher from ready tasks waiting on it), `unblocks`, ID. Never mark urgency by drafting tasks or bending dependencies (`reference/inspect.md`).
+`--priority LEVEL` (default `normal`; `set-priority TASK LEVEL` while `draft` or `ready`) orders claiming: `interrupt` (a rare cut-in, never routine), `urgent` (a defect stopping operation), `high` (a prerequisite of other work), `normal`, `low` (deferred). Claim order, and urgency without drafting or bending dependencies: `reference/inspect.md`.
 
 ## 3. Inspect
 

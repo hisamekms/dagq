@@ -117,6 +117,19 @@ Fix a draft or submitted task in place instead of canceling it and registering i
 - The change is recorded as a `task_edited` event whose `from` and `to` hold only the fields that changed (under their task JSON names); `show ID` lists it with long texts cut to 300 characters, `show ID --full` has the whole values. Nothing changed, nothing recorded.
 - Priority, goal and dependencies have their own commands: `set-priority`, `set-goal`, `dependency add|remove`.
 
+## Withdraw a proposal (`proposal withdraw`)
+
+```sh
+"$DAGQ" proposal withdraw ID
+```
+
+Its planner (or a person) withdraws a `submitted` or `revising` proposal without plan review, in two cases:
+
+- **A revising proposal that cannot be resubmitted.** Its drafts were all readied with `ready --bypass-review` or canceled, so `submit --proposal ID` fails with `EmptyProposal` ("a proposal needs at least one draft task") and the proposal would stay `revising` for good.
+- **The plan is dropped or reshaped.** The person no longer wants it, or its tasks go into another proposal.
+
+What it does, in one transaction: the proposal becomes `canceled` and its pending plan review and undelivered revise are dropped; its `submitted` tasks go back to `draft` (tasks already `ready`, `canceled` or claimed stay as they are); each member task and goal gets a `proposal_withdrawn` event (`proposal_id`, `from`); an `approve_plan` ask on it still open is closed (answered `withdrawn`, `runtime_closed: true`, when unanswered; an answer not yet applied is dropped), so no answer lands on the tasks' next proposal. The drafts are free: submit them in another proposal (`submit ID...`), `cancel` them, or leave them as drafts; a draft with an origin (`follow_up`, `goal_gap`) goes back to the runtime's planners. An `accepted` or `canceled` proposal is refused; the observer and the review jobs cannot run it.
+
 ## A run that needs paths outside its task
 
 A task registered with `--paths` may change only what they match (`reference/scope.md`). Two signs say a run needed more:
