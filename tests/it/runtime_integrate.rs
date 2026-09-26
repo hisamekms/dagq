@@ -2013,9 +2013,21 @@ fn add_script_task(
 /// Fails when two migration files share a number, as the build would.
 const NO_SHARED_NUMBER: &str = "test -z \"$(ls migrations | cut -c1-4 | sort | uniq -d)\"";
 
-/// A repository whose main has `migrations/0001_first.sql`.
+/// dagq's source repository (ADR-t614-1) whose main has
+/// `migrations/0001_first.sql`.
 fn migration_fixture() -> (Fixture, PathBuf, PathBuf) {
+    migration_fixture_named("dagq")
+}
+
+/// A repository whose main has `migrations/0001_first.sql` and a
+/// `Cargo.toml` of the package `package`.
+fn migration_fixture_named(package: &str) -> (Fixture, PathBuf, PathBuf) {
     let (dir, repo, db) = fixture();
+    fs::write(
+        repo.join("Cargo.toml"),
+        format!("[package]\nname = \"{package}\"\n"),
+    )
+    .unwrap();
     fs::create_dir(repo.join("migrations")).unwrap();
     fs::write(repo.join("migrations/0001_first.sql"), "-- first\n").unwrap();
     git(&repo, &["add", "."]);
@@ -2122,6 +2134,55 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     assert!(renumbered_at < verified_at, "{kinds:?}");
     let landed = queue.show(second).unwrap().runs[0].clone();
     assert_landed(&repo, &landed, "add asks", &main);
+}
+
+/// Outside dagq's source repository (ADR-t614-1) integrate leaves the
+/// repository's own migrations alone: a run whose migration has a number
+/// main took meanwhile lands as it is, neither renumbered nor held as
+/// `migration_number_taken`.
+#[test]
+fn integrate_does_not_renumber_migrations_outside_dagqs_source() {
+    let (_dir, repo, db) = migration_fixture_named("myapp");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let first = add_script_task(
+        &mut queue,
+        &backend,
+        "add goals",
+        "printf -- '-- goals\\n' > migrations/0002_goals.sql",
+        &["true"],
+    );
+    let second = add_script_task(
+        &mut queue,
+        &backend,
+        "add asks",
+        "printf -- '-- asks\\n' > migrations/0002_asks.sql && printf 'migration 0002 adds asks\\n' > notes.md",
+        &["true"],
+    );
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    for task in [first, second] {
+        let outcome = integrate(&db, task.as_i64(), &repo).unwrap();
+        assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+        let detail = queue.show(task).unwrap();
+        assert!(!event_kinds(&detail).contains(&"migration_renumbered"));
+    }
+    assert!(
+        !queue
+            .show(second)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.payload["code"] == "migration_number_taken")
+    );
+    assert_eq!(
+        migrations_on(&repo, "main"),
+        [
+            "migrations/0001_first.sql",
+            "migrations/0002_asks.sql",
+            "migrations/0002_goals.sql"
+        ]
+    );
 }
 
 /// Git refuses the commit that would renumber the run's migration (here a

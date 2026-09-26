@@ -1069,7 +1069,9 @@ fn inspect_repository(repo: &Path) -> Result<RepositoryPaths> {
     let landing = repository
         .landing_branch()
         .map_err(|error| format!("{error:#}"));
+    let dagq_source = repository.is_dagq_source();
     Ok(RepositoryPaths {
+        dagq_source,
         root: repository.root,
         common_dir: repository.common_dir,
         landing,

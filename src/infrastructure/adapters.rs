@@ -544,6 +544,14 @@ fn object_id(text: &str, field: &'static str) -> Result<CommitSha> {
 
 pub use crate::application::DiffNumbers;
 
+/// Whether the checkout at `dir` is dagq's source (ADR-t614-1), from its
+/// `Cargo.toml` as it is now; a missing or unreadable file is not.
+pub fn is_dagq_source(dir: &Path) -> bool {
+    crate::domain::source_repository::is_source(
+        fs::read_to_string(dir.join("Cargo.toml")).ok().as_deref(),
+    )
+}
+
 #[derive(Clone)]
 pub struct GitRepository {
     pub root: PathBuf,
@@ -630,6 +638,12 @@ impl GitRepository {
                 _ => bail!("git show-ref failed ({status}): {stderr}"),
             }
         })
+    }
+
+    /// Whether the repository is dagq's source (ADR-t614-1), judged now
+    /// from the main checkout's `Cargo.toml`.
+    pub fn is_dagq_source(&self) -> bool {
+        is_dagq_source(&self.checkout)
     }
 
     /// `git -C <root>`.
@@ -1443,6 +1457,9 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
 impl Repository for GitRepository {
     fn landing_branch(&self) -> Result<LandingBranch> {
         GitRepository::landing_branch(self)
+    }
+    fn is_dagq_source(&self) -> bool {
+        GitRepository::is_dagq_source(self)
     }
     fn main_head(&self) -> Result<CommitSha> {
         GitRepository::main_head(self)

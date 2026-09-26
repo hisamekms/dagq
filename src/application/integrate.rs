@@ -943,7 +943,8 @@ fn land(
         );
     }
     // A migration the run adds under a number main took meanwhile would
-    // fail the build with two files of one number (ADR-0067 decision 3).
+    // fail the build with two files of one number (ADR-0067 decision 3);
+    // dagq's source repository only (ADR-t614-1).
     let rebased = match renumber_migration(queue, repository, run, worktree, main, &rebased)? {
         Renumbering::Unchanged => rebased,
         Renumbering::Renumbered(head) => head,
@@ -1098,6 +1099,10 @@ enum Renumbering {
 /// `migration_renumbered`. Only a run that adds exactly one migration, whose
 /// number none of the run's other changed files mentions, is moved; any
 /// other collision is left to a session with the next free number.
+///
+/// Only in dagq's source repository (ADR-t614-1): the numbers are those of
+/// dagq's own queue schema, and another repository's `migrations/` is its
+/// own, left as any other file.
 fn renumber_migration(
     queue: &mut dyn Queue,
     repository: &dyn Repository,
@@ -1106,6 +1111,9 @@ fn renumber_migration(
     main: &CommitSha,
     rebased: &CommitSha,
 ) -> Result<Renumbering> {
+    if !repository.is_dagq_source() {
+        return Ok(Renumbering::Unchanged);
+    }
     let in_directory = |path: &str| {
         path.strip_prefix(migration_numbers::DIRECTORY)
             .and_then(|rest| rest.strip_prefix('/'))
@@ -1457,6 +1465,9 @@ mod tests {
     }
 
     impl Repository for FakeRepository {
+        fn is_dagq_source(&self) -> bool {
+            true
+        }
         fn main_head(&self) -> Result<CommitSha> {
             Ok(sha(BASE))
         }

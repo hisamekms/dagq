@@ -1346,12 +1346,14 @@ fn execute(cli: Cli) -> Result<Value> {
                 let common_dir = location.git_common_dir.as_deref().context(
                     "not in a repository: pass --from with a checkout or a built binary",
                 )?;
-                Source::Checkout(match common_dir.parent() {
+                let checkout = match common_dir.parent() {
                     Some(parent) if common_dir.file_name() == Some(".git".as_ref()) => {
                         parent.to_path_buf()
                     }
                     _ => cwd.clone(),
-                })
+                };
+                let dagq_source = dagq::infrastructure::adapters::is_dagq_source(&checkout);
+                Source::default_checkout(checkout, dagq_source)?
             }
         };
         let cmux = executable(&cmux).unwrap_or(cmux);

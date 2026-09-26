@@ -22,7 +22,7 @@ related:
 
 dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース」かの判定1つで有効にする（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。設定・flag・環境変数で判定を上書きする手段は無い。
 
-**実装状況**: 判定と下の表の振る舞いはまだ実装していない（goal 52の後続のtask）。実装が入るまでは、表の機能はどのrepositoryのqueueでも動く。
+**実装状況**: 判定と表の上の3行（migrationの振り直し・`--from`なしの`install`・`up --auto-update`）は実装済み。cargo専用の計測（表の4行目）はまだで、それが入るまではどのrepositoryのqueueでも記録して出す。
 
 ## 判定
 
@@ -30,6 +30,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 - `[package]`の表があり、その`name`が文字列`"dagq"`ならソース。
 - ファイルが無い、読めない、TOMLとして読めない、`[package]`が無い（`[workspace]`だけ）、`name`が`"dagq"`でない、のどれかならソースではない。
 - 機能を使うたびにその時点のファイルで判定し、DBにもsupervisorの登録にも保存しない。
+- 実装: 判定は`domain::source_repository::is_source`（`Cargo.toml`の文字列を受け、`[package]`の表の`name = "dagq"`（basic・literalの文字列、行末のコメント可）だけを真にする）。TOMLを完全には解釈せず行単位で読むので、`[ package ]`のように空白を含む表の見出しや、dotted keyの`package.name`はソースでない側に倒れる。ファイルを読むのは`infrastructure::adapters::is_dagq_source(dir)`で、`GitRepository::is_dagq_source`（port`Repository::is_dagq_source`）はmain checkout（`dagq.toml`を読むのと同じ`checkout`）を渡す。`up`は`RepositoryPaths::dagq_source`で受け取る。
 
 ## 対象
 
@@ -49,6 +50,13 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 - worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。
 - `stats`の`work_breakdown`の`test_with_llvm_cov`（`src/domain/stats/work.rs`）。
 - claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）と、`stats`の`versions.rustc`、[`kpi`](kpi.md)の`toolchain=`の層。
+
+## テスト
+
+- `src/domain/source_repository.rs`の単体test: `name = "dagq"`の`[package]`だけがソースで、ファイル無し・別の名前・`[workspace]`だけ・別の表の`name`・引用の無い値はソースでない。
+- `tests/it/runtime_integrate.rs`の`integrate_does_not_renumber_migrations_outside_dagqs_source`: `Cargo.toml`が別のpackageのrepositoryでは、mainが取った番号のmigrationを足したrunがそのまま着地する（振り直しの既存のtestは`[package] name = "dagq"`のfixtureで動く）。
+- `tests/it/source_repository.rs`: `--from`なしの`install`が`Cargo.toml`の無いrepositoryと`migrations/`を持つ別のpackageのrepositoryでbuildの前にerrorになり、dagqのソースでは判定を通ってbuildに進むこと。`up --auto-update`がソースでないrepositoryでsupervisorを起動せず、ソースでは起動すること。
+- `tests/it/cli_version.rs`の`auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back`: `Cargo.toml`の名前を変えるとruntimeの着地でjobが起動せず、戻すとまたbuildして入れ替える。
 
 ## リリース済みのmigration
 

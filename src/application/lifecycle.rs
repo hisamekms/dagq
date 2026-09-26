@@ -161,6 +161,9 @@ pub struct RepositoryPaths {
     pub root: PathBuf,
     pub common_dir: PathBuf,
     pub landing: std::result::Result<crate::domain::landing_branch::LandingBranch, String>,
+    /// Whether the repository is dagq's source (ADR-t614-1), which
+    /// `--auto-update` needs.
+    pub dagq_source: bool,
 }
 
 /// What `up` and `down` reach the outside through. `queues` opens the queue at a database
@@ -276,6 +279,13 @@ pub fn up(
         Ok(landing) => landing.clone(),
         Err(error) => bail!("{error}; the supervisor was not started"),
     };
+    // The automatic update builds dagq from this repository (ADR-t614-1).
+    if options.auto_update && !repository.dagq_source {
+        bail!(
+            "{}; the supervisor was not started",
+            auto_update_refused(trust_root)
+        );
+    }
     let plugin_dir = options
         .plugin_dir
         .as_deref()
@@ -1186,6 +1196,18 @@ fn supervise_arguments(
         arguments.push("--auto-update".into());
     }
     Ok(arguments)
+}
+
+/// Why `--auto-update` is refused in `checkout`, a repository that is not
+/// dagq's source (ADR-t614-1), and how to update dagq there instead.
+pub fn auto_update_refused(checkout: &Path) -> String {
+    format!(
+        "--auto-update builds dagq from the repository's sources, and {} is not dagq's source \
+(its Cargo.toml has no [package] named {}); leave --auto-update off and update dagq with \
+`cargo install dagq`, or with `dagq install --from <binary or checkout>`",
+        checkout.display(),
+        crate::domain::source_repository::PACKAGE
+    )
 }
 
 /// Remove the registration of a supervisor that did not remove its own

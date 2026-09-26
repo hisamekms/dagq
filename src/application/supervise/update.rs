@@ -5,7 +5,8 @@
 //! when main moved past the commit it last updated to and the commits in
 //! between change the runtime. The job runs in a session of its own and
 //! outlives an exec of this process; one job runs at a time, and a landing
-//! during it is built once it ended (the latest head, once).
+//! during it is built once it ended (the latest head, once). Only in
+//! dagq's source repository (ADR-t614-1); elsewhere it builds nothing.
 
 use super::*;
 use crate::application::update::{
@@ -57,6 +58,9 @@ pub(super) struct UpdateWatch {
     /// Main when this process first looked: the base of a build that names
     /// no commit (a release, or `+unknown`) and has updated nothing yet.
     first_head: Option<String>,
+    /// The repository was found not to be dagq's source, and that was
+    /// logged; cleared once it is again.
+    not_source: bool,
 }
 
 impl Supervisor<'_> {
@@ -91,6 +95,18 @@ impl Supervisor<'_> {
         if !enabled {
             return Ok(());
         }
+        // Only dagq's source builds dagq (ADR-t614-1): elsewhere the
+        // registration's auto_update builds nothing.
+        if !self.repository.is_dagq_source() {
+            if !self.update.not_source {
+                warn!(
+                    "automatic update: the repository is not dagq's source (its Cargo.toml has no [package] named dagq), so nothing is built; update dagq with `cargo install dagq` or `dagq install --from`"
+                );
+            }
+            self.update.not_source = true;
+            return Ok(());
+        }
+        self.update.not_source = false;
         self.apply_update_answers()?;
         if self.update.job.is_some() {
             return Ok(());

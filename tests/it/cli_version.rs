@@ -442,6 +442,8 @@ fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
         git(&["rev-parse", "HEAD"])
     };
     git(&["init", "-q", "-b", "main"]);
+    // The automatic update builds only dagq's source (ADR-t614-1).
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
     let seed = commit("seed.txt");
     let stub = |name: &str, text: &str| {
         let path = dir.path().join(name);
@@ -551,6 +553,36 @@ exec '{bin}' \"$@\"\n"
     );
     assert_eq!(registered()[0].pid, supervisor.id());
 
+    // Once the repository is not dagq's source (ADR-t614-1), runtime
+    // landings build nothing; they do again once it is.
+    // Committed before the working file changes, so no look sees the new
+    // manifest with the old head.
+    let manifest = |name: &str| {
+        let staged = dir.path().join("Cargo.toml.staged");
+        std::fs::write(&staged, format!("[package]\nname = \"{name}\"\n")).unwrap();
+        let blob = git(&["hash-object", "-w", staged.to_str().unwrap()]);
+        git(&[
+            "update-index",
+            "--cacheinfo",
+            &format!("100644,{blob},Cargo.toml"),
+        ]);
+        git(&["commit", "-q", "-m", name]);
+        git(&["checkout", "--", "Cargo.toml"]);
+        git(&["rev-parse", "HEAD"])
+    };
+    let renamed = manifest("myapp");
+    let elsewhere = commit("src/elsewhere.rs");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(
+        !started(&renamed) && !started(&elsewhere),
+        "{:?}",
+        updates()
+    );
+    let restored = manifest("dagq");
+    wait("the update once dagq's source again", &mut || {
+        installed(&restored)
+    });
+
     // A build whose supervisor dies at its start: the binary it replaced
     // is put back and the inbox is asked.
     let broken_commit = commit("src/broken");
@@ -626,13 +658,13 @@ exec '{bin}' \"$@\"\n"
         .iter()
         .filter(|e| e["kind"] == "update_installed")
         .collect();
-    assert_eq!(installs.len(), 2, "{watched}");
+    assert_eq!(installs.len(), 3, "{watched}");
     assert_eq!(installs[0]["next"], "report the update", "{watched}");
     let stats = ok(&db, &["stats", "--full"]);
     let updates_stats = &stats["updates"];
-    assert_eq!(updates_stats["by_kind"]["update_installed"], 2, "{stats}");
+    assert_eq!(updates_stats["by_kind"]["update_installed"], 3, "{stats}");
     assert_eq!(updates_stats["failed_by_stage"]["install"], 1, "{stats}");
-    assert!(updates_stats["by_kind"]["update_started"].as_i64() >= Some(3));
+    assert!(updates_stats["by_kind"]["update_started"].as_i64() >= Some(4));
     let rows: i64 = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row("SELECT count(*) FROM binary_updates", [], |r| r.get(0))

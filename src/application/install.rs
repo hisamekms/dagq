@@ -92,6 +92,24 @@ pub enum Source {
     Rollback,
 }
 
+impl Source {
+    /// The source of `install` without `--from`: `checkout`, the main
+    /// checkout of the working directory's repository, built, when it is
+    /// dagq's source (ADR-t614-1). Elsewhere building it would not give
+    /// dagq, so it is an error that says how to update dagq instead.
+    pub fn default_checkout(checkout: PathBuf, dagq_source: bool) -> Result<Self> {
+        ensure!(
+            dagq_source,
+            "install without --from builds dagq from the repository's sources, and {} is not \
+dagq's source (its Cargo.toml has no [package] named {}); update dagq with `cargo install dagq`, \
+or pass --from with a built binary or a checkout of dagq",
+            checkout.display(),
+            crate::domain::source_repository::PACKAGE
+        );
+        Ok(Self::Checkout(checkout))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
     pub source: Source,
@@ -356,5 +374,28 @@ pub fn parse_version(output: &str) -> Result<String> {
     match output.split_whitespace().last() {
         Some(version) => Ok(version.to_owned()),
         None => bail!("no version in {output:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_from_only_dagqs_source_is_built() {
+        let checkout = PathBuf::from("/repo");
+        assert!(matches!(
+            Source::default_checkout(checkout.clone(), true).unwrap(),
+            Source::Checkout(path) if path == checkout
+        ));
+        let error = Source::default_checkout(checkout, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("/repo is not dagq's source")
+                && error.contains("cargo install dagq")
+                && error.contains("--from"),
+            "{error}"
+        );
     }
 }

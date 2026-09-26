@@ -2718,6 +2718,10 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
         cmux: cmux.clone(),
         ids: Vec::new(),
     };
+    // The automatic update builds only dagq's source (ADR-t614-1).
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
+    git(repo, &["add", "Cargo.toml"]);
+    git(repo, &["commit", "-q", "-m", "dagq's manifest"]);
     let fixed = fixture._dir.path().join("bin").join("dagq");
     fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     fs::copy(BIN, &fixed).unwrap();

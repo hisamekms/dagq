@@ -410,6 +410,10 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
         .unwrap()
         .transition(TaskId::new(1), TaskAction::Cancel)
         .unwrap();
+    // The automatic update builds only dagq's source (ADR-t614-1).
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
+    git(&repo, &["add", "Cargo.toml"]);
+    git(&repo, &["commit", "-m", "dagq's manifest"]);
     let options = SuperviseOptions {
         update: dagq::application::supervise::UpdateSettings {
             register: true,

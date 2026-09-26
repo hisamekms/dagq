@@ -1792,6 +1792,10 @@ pub trait Repository {
     fn landing_branch(&self) -> Result<crate::domain::landing_branch::LandingBranch> {
         Ok(crate::domain::landing_branch::LandingBranch::main())
     }
+    /// Whether the repository is dagq's source (ADR-t614-1), judged again
+    /// on every call; what only dagq's own development needs runs only
+    /// there.
+    fn is_dagq_source(&self) -> bool;
     /// The landing branch's current commit, read again on every call.
     fn main_head(&self) -> Result<CommitSha>;
     /// Main's first-parent history since `since` (unix seconds) and the
