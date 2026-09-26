@@ -23,7 +23,7 @@ related:
 
 着地先のbranch、着地後のpushのremote、pushするかは、repositoryの`dagq.toml`の`[repository]`で指定でき、指定が無ければruntimeが決める（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)。ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends）。
 
-**実装状況**: branchの解決は実装済み（task 619）。`src/domain/landing_branch.rs`の`resolve`が下の順で決め、`GitRepository::landing_branch`（`src/infrastructure/adapters.rs`）がmain checkoutの`dagq.toml`の`[repository] branch`（`run_env.rs`の`load_landing_branch`）・`origin`のHEAD・ローカルのbranchを読んで呼ぶ。`main_head`・`main_history`・`main_checkout`・`advance_main`・`push_main`は使うたびに解決したbranchを読み、`GitRepository::inspect`はbranchを読まない（`rebind`・`review`・`plan`は着地先が無くても動く）。`[repository]`で読むkeyはまだ`branch`だけで、`remote`と`push`（下の「pushの解決」）は後続のtaskが足す。それまでpushのremoteは`origin`の固定（`src/domain/mod.rs`の`PUSH_REMOTE`）で、推定の1.も`origin`のHEADを見る。`up`・`doctor`の`repository`の欄も今は`branch`と`branch_source`（解決できなければ`doctor`は`error`）だけを出す。
+**実装状況**: すべて実装済み（branchはtask 619、remoteとpushはtask 620）。`src/domain/landing_branch.rs`の`resolve`が下の順で決め、`GitRepository::landing_branch`（`src/infrastructure/adapters.rs`）がmain checkoutの`dagq.toml`の`[repository]`（`run_env.rs`の`load_repository_config`。`GitRepository::repository_config`が`branch`と`remote`をGitの名前として検査する）・pushのremoteのHEAD・ローカルのbranchを読んで呼ぶ。`main_head`・`main_history`・`main_checkout`・`advance_main`・`push_main`は使うたびに解決したbranchを読み、`GitRepository::inspect`はbranchを読まない（`rebind`・`review`・`plan`は着地先が無くても動く）。pushは`integrate`の`push_main`（`src/application/integrate.rs`）が`MainRemote::push_config`で`[repository]`を読んで下の表のとおりに決め、既定のremoteは`landing_branch::DEFAULT_REMOTE`（`origin`）。`up`のpreflightと`doctor`は`GitRepository::repository_settings`（branchの解決と`PushTarget`。明示した`remote`が無くpushするならerror）を出す。
 
 ## `[repository]`の欄
 
@@ -79,6 +79,7 @@ push = false
 | `push = false` | remoteを見ずにpushしない | `push_skipped`（`reason: "push = false in dagq.toml"`） |
 | `remote`を書かず、`origin`が無い | pushしない（今までどおり） | `push_skipped`（`reason: "the repository has no remote origin"`） |
 | `remote`を書き、そのremoteが無い | 設定の誤り。着地は取り消さない | `push_failed`（`error`にremoteが無いこと） |
+| 着地の後に`[repository]`が読めない | pushしない。着地は取り消さない | `push_failed`（`error`に読めない理由、`remote`は`origin`） |
 | remoteが在る | `git push <remote> refs/heads/<branch>:refs/heads/<branch>` | 成功は`push_finished`、失敗は`push_failed` |
 
 - payloadは今の`remote`・`commit`（・`reason` / `error`、`push_failed`は`code: push_failed`も）に`branch`を足す。`push_failed`のattention（`push main`）と、runが`integrated`のまま残る扱いは変えない。人の手のpushは`git push <remote> <branch>`になる。

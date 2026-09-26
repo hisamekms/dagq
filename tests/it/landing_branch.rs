@@ -51,6 +51,7 @@ fn a_master_repository_without_origin_lands_on_master() {
     let landed = integrate(&db, 1, &repo).unwrap();
     assert_eq!(landed["outcome"], "integrated", "{landed}");
     assert_eq!(landed["push"]["outcome"], "skipped", "{landed}");
+    assert_eq!(landed["push"]["branch"], "master", "{landed}");
     assert_eq!(
         landed["push"]["reason"],
         "the repository has no remote origin"
@@ -79,7 +80,10 @@ fn a_master_repository_without_origin_lands_on_master() {
     let doctor = runtime::doctor(&db, false).unwrap();
     assert_eq!(
         doctor["repository"],
-        json!({"branch": "master", "branch_source": "master"}),
+        json!({
+            "branch": "master", "branch_source": "master", "remote": "origin",
+            "remote_source": "default", "remote_exists": false, "push": true,
+        }),
         "{doctor}"
     );
 }
@@ -118,7 +122,10 @@ fn a_branch_named_in_dagq_toml_is_where_runs_land() {
     );
     assert_eq!(
         runtime::doctor(&db, true).unwrap()["repository"],
-        json!({"branch": "trunk", "branch_source": "config"})
+        json!({
+            "branch": "trunk", "branch_source": "config", "remote": "origin",
+            "remote_source": "default", "remote_exists": false, "push": true,
+        })
     );
 
     fs::write(
@@ -129,6 +136,19 @@ fn a_branch_named_in_dagq_toml_is_where_runs_land() {
     let doctor = runtime::doctor(&db, false).unwrap();
     let error = doctor["repository"]["error"].as_str().unwrap();
     assert!(error.contains("without refs/heads/"), "{doctor}");
+
+    // A configured push remote that is missing is an error too.
+    fs::write(
+        repo.join("dagq.toml"),
+        "[repository]\nbranch = 'trunk'\nremote = 'upstream'\n",
+    )
+    .unwrap();
+    let doctor = runtime::doctor(&db, false).unwrap();
+    let error = doctor["repository"]["error"].as_str().unwrap();
+    assert!(error.contains("the remote upstream"), "{doctor}");
+    assert_eq!(doctor["repository"]["branch"], "trunk", "{doctor}");
+    assert_eq!(doctor["repository"]["remote"], "upstream", "{doctor}");
+    assert_eq!(doctor["repository"]["remote_exists"], false, "{doctor}");
 }
 
 /// `up` reports the landing branch of a master repository and refuses,
@@ -146,7 +166,10 @@ fn up_checks_the_landing_branch_and_plan_opens_on_master() {
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(
         report["repository"],
-        json!({"branch": "master", "branch_source": "master"})
+        json!({
+            "branch": "master", "branch_source": "master", "remote": "origin",
+            "remote_source": "default", "remote_exists": false, "push": true,
+        })
     );
 
     let runner = fixture._dir.path().join("dagq-binary");
@@ -180,4 +203,75 @@ fn up_checks_the_landing_branch_and_plan_opens_on_master() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// `up` refuses, before starting a supervisor, a repository whose
+/// `[repository] remote` names a remote it does not have, unless `push =
+/// false`, or is not a remote name; it reports the configured remote once
+/// it exists, whose HEAD names the guessed landing branch.
+#[test]
+fn up_and_doctor_check_the_configured_push_remote() {
+    use common::lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, try_up, up};
+    let fixture = fixture();
+    let config = fixture.repo.join("dagq.toml");
+    fs::write(&config, "[repository]\nremote = \"upstream\"\n").unwrap();
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(
+        error.contains("the remote upstream")
+            && error.contains("[repository]")
+            && error.contains("the supervisor was not started"),
+        "{error}"
+    );
+    fs::write(
+        &config,
+        "[repository]\nremote = \"upstream\"\npush = false\n",
+    )
+    .unwrap();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    assert_eq!(
+        report["repository"],
+        json!({
+            "branch": "main", "branch_source": "main", "remote": "upstream",
+            "remote_source": "config", "remote_exists": false, "push": false,
+        })
+    );
+
+    // With the remote and its HEAD on `trunk`, the guess follows it.
+    fs::write(&config, "[repository]\nremote = \"upstream\"\n").unwrap();
+    git(&fixture.repo, &["branch", "trunk"]);
+    git(
+        &fixture.repo,
+        &["remote", "add", "upstream", "/nonexistent/upstream.git"],
+    );
+    git(
+        &fixture.repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/trunk",
+        ],
+    );
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(
+        report["repository"],
+        json!({
+            "branch": "trunk", "branch_source": "remote_head", "remote": "upstream",
+            "remote_source": "config", "remote_exists": true, "push": true,
+        }),
+        "{report}"
+    );
+
+    fs::write(&config, "[repository]\nremote = \"bad name\"\n").unwrap();
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(error.contains("not a valid remote name"), "{error}");
 }

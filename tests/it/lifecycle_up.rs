@@ -111,7 +111,10 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
     // What the preflight resolved (ADR-t615-1).
     assert_eq!(
         first["repository"],
-        json!({"branch": "main", "branch_source": "main"})
+        json!({
+            "branch": "main", "branch_source": "main", "remote": "origin",
+            "remote_source": "default", "remote_exists": false, "push": true,
+        })
     );
     assert_eq!(first["retired_sessions"], 0);
     assert_eq!(first["pruned_supervisors"], json!([]));

@@ -560,9 +560,14 @@ pub struct IdleHook {
     pub evidence: Vec<(&'static str, serde_json::Value)>,
 }
 
-/// The Git remote `integrate` pushes the landed `main` to (ADR-0019
-/// decision 3), replaceable in tests.
+/// The Git remote `integrate` pushes the landing branch to (ADR-0019
+/// decision 3, ADR-t615-1), replaceable in tests.
 pub trait MainRemote {
+    /// `[repository]` of `dagq.toml`: which remote to push to and whether
+    /// to push; the default is `origin`, pushed.
+    fn push_config(&self) -> Result<crate::domain::landing_branch::RepositoryConfig> {
+        Ok(Default::default())
+    }
     /// Whether the repository has a remote named `remote`.
     fn has_remote(&self, remote: &str) -> Result<bool>;
     /// Push the landing branch to the same branch of `remote`. An error is

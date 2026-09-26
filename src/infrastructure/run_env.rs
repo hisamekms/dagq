@@ -24,6 +24,7 @@ use crate::{
     domain::{
         disk::DiskConfig,
         kpi::KpiSettings,
+        landing_branch::RepositoryConfig,
         run_env::{RunEnvCheck, RunEnvProgram},
         stall::StallConfig,
         stats::ConflictConfig,
@@ -39,10 +40,12 @@ const STALL_TABLE: &str = "stall";
 const CONFLICTS_TABLE: &str = "conflicts";
 const RECHECK_TABLE: &str = "recheck";
 const DISK_TABLE: &str = "disk";
-/// `[repository]`: the landing branch (ADR-t615-1).
+/// `[repository]`: the landing branch and its push (ADR-t615-1).
 const REPOSITORY_TABLE: &str = "repository";
-/// The key of `[repository]` this binary reads.
+/// The keys of `[repository]`.
 const REPOSITORY_BRANCH: &str = "branch";
+const REPOSITORY_REMOTE: &str = "remote";
+const REPOSITORY_PUSH: &str = "push";
 /// `[kpi]` and its targets (ADR-0051), read by [`KpiTables`].
 const KPI_TABLE: &str = "kpi";
 const TABLES: [&str; 6] = [
@@ -96,9 +99,9 @@ pub struct Config {
     pub disk: DiskConfig,
     /// `[kpi]` and its `[kpi.targets."<kpi>"]`; `None` without any.
     pub kpi: Option<KpiSettings>,
-    /// `[repository] branch`: the landing branch; none guesses it
-    /// (ADR-t615-1).
-    pub branch: Option<String>,
+    /// `[repository]`: the landing branch, the push remote and whether
+    /// to push (ADR-t615-1).
+    pub repository: RepositoryConfig,
 }
 
 /// Parse the whole file.
@@ -185,25 +188,41 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.recheck_command = Some(command);
             }
             Some(REPOSITORY_TABLE) => {
+                let repository = &mut config.repository;
+                let defined = match key {
+                    REPOSITORY_BRANCH => repository.branch.is_some(),
+                    REPOSITORY_REMOTE => repository.remote.is_some(),
+                    REPOSITORY_PUSH => repository.push.is_some(),
+                    _ => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REPOSITORY_TABLE}]; the keys are {REPOSITORY_BRANCH}, {REPOSITORY_REMOTE} and {REPOSITORY_PUSH}"
+                    ),
+                };
                 ensure!(
-                    key == REPOSITORY_BRANCH,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REPOSITORY_TABLE}]; the key is {REPOSITORY_BRANCH}"
-                );
-                ensure!(
-                    config.branch.is_none(),
+                    !defined,
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
-                let branch = parse_string(rest.trim())
+                if key == REPOSITORY_PUSH {
+                    repository.push =
+                        Some(parse_bool(rest.trim()).with_context(|| {
+                            format!("{CONFIG_FILE_NAME}:{number}: value of {key}")
+                        })?);
+                    continue;
+                }
+                let value = parse_string(rest.trim())
                     .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
                 ensure!(
-                    !branch.trim().is_empty(),
+                    !value.trim().is_empty(),
                     "{CONFIG_FILE_NAME}:{number}: {key} is blank"
                 );
+                if key == REPOSITORY_REMOTE {
+                    repository.remote = Some(value);
+                    continue;
+                }
                 ensure!(
-                    !branch.starts_with("refs/"),
-                    "{CONFIG_FILE_NAME}:{number}: {key} is a branch name without refs/heads/, not {branch}"
+                    !value.starts_with("refs/"),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is a branch name without refs/heads/, not {value}"
                 );
-                config.branch = Some(branch);
+                repository.branch = Some(value);
             }
             Some(DISK_TABLE) => {
                 ensure!(
@@ -275,6 +294,16 @@ pub(super) fn parse_positive(text: &str, what: &str) -> Result<i64> {
         .with_context(|| format!("expected a whole {what}, not {digits}"))?;
     ensure!(value > 0, "must be a positive {what}, not {value}");
     Ok(value)
+}
+
+/// `true` or `false`, followed by nothing but an optional comment.
+fn parse_bool(text: &str) -> Result<bool> {
+    match strip_comment(text) {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        "" => bail!("missing value"),
+        other => bail!("expected true or false, not {other}"),
+    }
 }
 
 /// A positive number, whole or not (`1.5`), followed by nothing but an
@@ -361,16 +390,16 @@ pub fn load_recheck_command(root: &Path) -> Result<Option<String>> {
         .recheck_command)
 }
 
-/// `[repository] branch` of the `dagq.toml` in `root` (ADR-t615-1); no
-/// file, no table or no key is none.
-pub fn load_landing_branch(root: &Path) -> Result<Option<String>> {
+/// `[repository]` of the `dagq.toml` in `root` (ADR-t615-1); no file, no
+/// table or no key is the default.
+pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
-        return Ok(None);
+        return Ok(RepositoryConfig::default());
     };
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
-        .branch)
+        .repository)
 }
 
 fn read_config(path: &Path) -> Result<Option<String>> {
@@ -790,8 +819,20 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[recheck]\nargs = 'x'", "unknown key args in [recheck]"),
             (
-                "[repository]\nremote = 'x'",
-                "unknown key remote in [repository]",
+                "[repository]\nremotes = 'x'",
+                "unknown key remotes in [repository]",
+            ),
+            ("[repository]\nremote = ''", "remote is blank"),
+            ("[repository]\nremote = x", "expected a quoted string"),
+            (
+                "[repository]\nremote = 'a'\nremote = 'b'",
+                "remote is defined twice",
+            ),
+            ("[repository]\npush = 'false'", "expected true or false"),
+            ("[repository]\npush = ", "missing value"),
+            (
+                "[repository]\npush = true\npush = false",
+                "push is defined twice",
             ),
             ("[repository]\nbranch = ''", "branch is blank"),
             (
@@ -860,22 +901,33 @@ LITERAL = 'no \n escapes # here'
     }
 
     #[test]
-    fn reads_the_landing_branch() {
+    fn reads_the_repository_table() {
         let config = parse_config("[repository]\nbranch = \"master\" # trunk\n").unwrap();
-        assert_eq!(config.branch.as_deref(), Some("master"));
+        assert_eq!(config.repository.branch.as_deref(), Some("master"));
+        assert_eq!(config.repository.remote, None);
+        assert_eq!(config.repository.push, None);
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load_landing_branch(dir.path()).unwrap(), None);
+        assert_eq!(
+            load_repository_config(dir.path()).unwrap(),
+            RepositoryConfig::default()
+        );
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
-            "[run.env]\nA = 'x'\n[repository]\nbranch = 'trunk'\n",
+            "[run.env]\nA = 'x'\n[repository]\nbranch = 'trunk'\nremote = 'upstream'\npush = false # local only\n",
         )
         .unwrap();
         assert_eq!(
-            load_landing_branch(dir.path()).unwrap().as_deref(),
-            Some("trunk")
+            load_repository_config(dir.path()).unwrap(),
+            RepositoryConfig {
+                branch: Some("trunk".into()),
+                remote: Some("upstream".into()),
+                push: Some(false),
+            }
         );
+        let config = parse_config("[repository]\npush = true\n").unwrap();
+        assert_eq!(config.repository.push, Some(true));
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[repository]\nx = 1\n").unwrap();
-        assert!(load_landing_branch(dir.path()).is_err());
+        assert!(load_repository_config(dir.path()).is_err());
     }
 
     #[test]

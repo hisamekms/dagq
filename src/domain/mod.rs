@@ -950,9 +950,6 @@ pub struct NotePage {
     pub notes: Vec<RunEvent>,
     pub cursor: EventId,
 }
-/// The remote `integrate` pushes the landed `main` to (ADR-0019 decision 3).
-pub const PUSH_REMOTE: &str = "origin";
-
 string_enum!(PushResult {
     Pushed => "pushed",
     Skipped => "skipped",
@@ -960,12 +957,15 @@ string_enum!(PushResult {
 });
 
 /// What became of the push after a landing: `pushed` (`push_finished`),
-/// `skipped` with its `reason` (`--no-push` or no such remote,
-/// `push_skipped`) or `failed` with Git's `error` (`push_failed`).
+/// `skipped` with its `reason` (`--no-push`, `push = false` or no default
+/// remote, `push_skipped`) or `failed` with Git's `error` (`push_failed`),
+/// and the landing `branch` it concerns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushReport {
     pub outcome: PushResult,
     pub remote: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -975,7 +975,8 @@ impl Default for PushReport {
     fn default() -> Self {
         Self {
             outcome: PushResult::Skipped,
-            remote: PUSH_REMOTE.to_owned(),
+            remote: landing_branch::DEFAULT_REMOTE.to_owned(),
+            branch: None,
             error: None,
             reason: None,
         }

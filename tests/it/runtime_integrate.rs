@@ -4,16 +4,25 @@ use crate::runtime_support;
 
 use runtime_support::*;
 
-/// A Git remote double: `origin` exists unless `missing`, and a push fails
-/// with `failure` when set. Every push is counted.
+/// A Git remote double: `origin` exists unless `missing`, `[repository]`
+/// is the default unless reading it fails with `config_error`, and a push
+/// fails with `failure` when set. Every push is counted.
 #[derive(Default)]
 struct TestRemote {
     missing: bool,
+    config_error: Option<String>,
     failure: Option<String>,
     pushes: Mutex<Vec<String>>,
 }
 
 impl MainRemote for TestRemote {
+    fn push_config(&self) -> Result<dagq::domain::landing_branch::RepositoryConfig> {
+        match &self.config_error {
+            Some(error) => bail!("{error}"),
+            None => Ok(Default::default()),
+        }
+    }
+
     fn has_remote(&self, remote: &str) -> Result<bool> {
         Ok(!self.missing && remote == "origin")
     }
@@ -39,13 +48,13 @@ fn integrate_pushes_the_landed_main_to_origin() {
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(
         outcome["push"],
-        json!({"outcome": "pushed", "remote": "origin", "error": null})
+        json!({"outcome": "pushed", "remote": "origin", "branch": "main", "error": null})
     );
     assert_eq!(*remote.pushes.lock().unwrap(), ["origin"]);
     let landed = git_out(&repo, &["rev-parse", "main"]);
     assert_eq!(
         events_of(&db, run.id(), "push_finished"),
-        [json!({"remote": "origin", "commit": landed})]
+        [json!({"remote": "origin", "branch": "main", "commit": landed})]
     );
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
@@ -88,7 +97,7 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
     assert_eq!(
         events_of(&db, run.id(), "push_failed"),
         [
-            json!({"code": "push_failed", "remote": "origin", "commit": landed, "error": "rejected: fetch first"})
+            json!({"code": "push_failed", "remote": "origin", "branch": "main", "commit": landed, "error": "rejected: fetch first"})
         ]
     );
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -136,7 +145,7 @@ fn no_push_and_a_missing_origin_skip_the_push() {
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(
         outcome["push"],
-        json!({"outcome": "skipped", "remote": "origin", "error": null, "reason": "--no-push"})
+        json!({"outcome": "skipped", "remote": "origin", "branch": "main", "error": null, "reason": "--no-push"})
     );
     assert!(remote.pushes.lock().unwrap().is_empty());
     let skipped = events_of(&db, run.id(), "push_skipped");
@@ -192,6 +201,143 @@ fn git_adapter_pushes_main_to_a_bare_origin() {
     assert!(!adapter.has_remote("upstream").unwrap());
     let error = format!("{:#}", adapter.push_main("origin").unwrap_err());
     assert!(error.contains("git push origin main failed"), "{error}");
+}
+
+/// `[repository]` of dagq.toml steers the real adapter's push
+/// (ADR-t615-1): `remote` pushes to that remote, `push = false` skips the
+/// push without looking at the remote, and a `remote` the repository does
+/// not have fails the push (unlike a missing default origin, which skips
+/// it) while the landing stands.
+#[test]
+fn the_push_follows_the_repository_table_of_dagq_toml() {
+    let bare = |dir: &Path, name: &str| {
+        let path = dir.join(name);
+        let made = Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&path)
+            .bounded_output()
+            .unwrap();
+        assert!(made.status.success());
+        path
+    };
+
+    // remote = "upstream": pushed there, not to origin.
+    let (dir, repo, db, run) = awaiting_run();
+    let upstream = bare(dir.path(), "upstream.git");
+    let origin = bare(dir.path(), "origin.git");
+    git(
+        &repo,
+        &["remote", "add", "upstream", upstream.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fs::write(
+        repo.join("dagq.toml"),
+        "[repository]\nremote = \"upstream\"\n",
+    )
+    .unwrap();
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(
+        outcome["push"],
+        json!({"outcome": "pushed", "remote": "upstream", "branch": "main", "error": null}),
+        "{outcome}"
+    );
+    let landed = git_out(&repo, &["rev-parse", "main"]);
+    assert_eq!(git_out(&upstream, &["rev-parse", "main"]), landed);
+    assert!(
+        !git_ok(&origin, &["rev-parse", "--verify", "--quiet", "main"]),
+        "origin is not pushed"
+    );
+    assert_eq!(
+        events_of(&db, run.id(), "push_finished"),
+        [json!({"remote": "upstream", "branch": "main", "commit": landed})]
+    );
+
+    // push = false: skipped with its own reason, origin untouched.
+    let (dir, repo, db, run) = awaiting_run();
+    let origin = bare(dir.path(), "origin.git");
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    fs::write(repo.join("dagq.toml"), "[repository]\npush = false\n").unwrap();
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(
+        outcome["push"],
+        json!({"outcome": "skipped", "remote": "origin", "branch": "main", "error": null, "reason": "push = false in dagq.toml"}),
+        "{outcome}"
+    );
+    assert!(!git_ok(
+        &origin,
+        &["rev-parse", "--verify", "--quiet", "main"]
+    ));
+    let landed = git_out(&repo, &["rev-parse", "main"]);
+    assert_eq!(
+        events_of(&db, run.id(), "push_skipped"),
+        [
+            json!({"remote": "origin", "branch": "main", "commit": landed, "reason": "push = false in dagq.toml"})
+        ]
+    );
+
+    // A configured remote that is missing fails the push.
+    let (_dir, repo, db, run) = awaiting_run();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[repository]\nremote = \"upstream\"\n",
+    )
+    .unwrap();
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(outcome["task"]["status"], "completed");
+    assert_eq!(outcome["push"]["outcome"], "failed", "{outcome}");
+    assert_eq!(outcome["push"]["remote"], "upstream");
+    let error = outcome["push"]["error"].as_str().unwrap();
+    assert!(
+        error.contains("the remote upstream") && error.contains("[repository]"),
+        "{error}"
+    );
+    let failed = events_of(&db, run.id(), "push_failed");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["code"], "push_failed");
+    assert_eq!(failed[0]["branch"], "main");
+    let status = runtime::status(&db).unwrap();
+    assert_eq!(
+        run_attention_of(&status, run.id()).unwrap()["kind"],
+        "push_failed"
+    );
+}
+
+/// A `[repository]` that cannot be read when the push starts fails the
+/// push, to the default remote, after the landing.
+#[test]
+fn an_unreadable_repository_table_fails_the_push() {
+    let (_dir, repo, db, run) = awaiting_run();
+    let remote = TestRemote {
+        config_error: Some("dagq.toml:2: value of remote".into()),
+        ..TestRemote::default()
+    };
+    let outcome = integrate_with(&db, &repo, Some(&remote));
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(
+        outcome["push"],
+        json!({"outcome": "failed", "remote": "origin", "branch": "main", "error": "dagq.toml:2: value of remote"})
+    );
+    assert!(remote.pushes.lock().unwrap().is_empty());
+    assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
+}
+
+fn git_ok(repo: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .bounded_output()
+        .unwrap()
+        .status
+        .success()
 }
 
 /// A task whose fake agent commits `file` with `content`; verification

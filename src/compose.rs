@@ -1067,7 +1067,7 @@ fn queue_paths(location: &QueueLocation) -> QueuePaths {
 fn inspect_repository(repo: &Path) -> Result<RepositoryPaths> {
     let repository = GitRepository::inspect(repo)?;
     let landing = repository
-        .landing_branch()
+        .repository_settings()
         .map_err(|error| format!("{error:#}"));
     let dagq_source = repository.is_dagq_source();
     Ok(RepositoryPaths {
@@ -1145,17 +1145,24 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
     .run_env_programs(None)
 }
 
-/// The landing branch of the repository the queue is bound to, as `up`'s
-/// preflight resolves it (ADR-t615-1), or `error` with why it does not
-/// resolve; `None` for a queue bound to no checkout.
+/// The landing branch and push of the repository the queue is bound to,
+/// as `up`'s preflight resolves them (ADR-t615-1), or `error` with why
+/// they do not resolve; `None` for a queue bound to no checkout.
 fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
     let Some(checkout) = bound_checkout(queue)? else {
         return Ok(None);
     };
-    let resolved =
-        GitRepository::inspect(&checkout).and_then(|repository| repository.landing_branch());
+    let resolved = GitRepository::inspect(&checkout)
+        .and_then(|repository| repository.resolve_repository_settings());
     Ok(Some(match resolved {
-        Ok(branch) => serde_json::to_value(branch)?,
+        // A configured push remote that is missing keeps the fields.
+        Ok(settings) => {
+            let mut value = serde_json::to_value(&settings)?;
+            if let Err(error) = settings.push.check() {
+                value["error"] = format!("{error:#}").into();
+            }
+            value
+        }
         Err(error) => serde_json::json!({"error": format!("{error:#}")}),
     }))
 }

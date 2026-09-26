@@ -702,7 +702,7 @@ enum Command {
         /// Must be the repository the queue is bound to.
         #[arg(long)]
         repo: Option<PathBuf>,
-        /// Do not push the landed main to origin (recorded as push_skipped).
+        /// Do not push the landing branch to its remote (recorded as push_skipped).
         #[arg(long)]
         no_push: bool,
     },

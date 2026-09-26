@@ -2188,7 +2188,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         thread::sleep(Duration::from_millis(500));
     };
     // main is pushed after the task completes; wait for its record.
-    let pushed = format!("run {run_id}: push of main failed");
+    let pushed = format!("run {run_id}: push of the landing branch failed");
     let records = loop {
         let records = log_records(&supervisor_log);
         if records

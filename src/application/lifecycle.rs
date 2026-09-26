@@ -154,13 +154,13 @@ pub struct QueuePaths {
 }
 
 /// The repository `up` starts the supervisor for: the checkout it was
-/// inspected from, its Git common directory, and its landing branch
-/// (ADR-t615-1) or why that did not resolve.
+/// inspected from, its Git common directory, and its landing branch and
+/// push (ADR-t615-1) or why they did not resolve.
 #[derive(Debug, Clone)]
 pub struct RepositoryPaths {
     pub root: PathBuf,
     pub common_dir: PathBuf,
-    pub landing: std::result::Result<crate::domain::landing_branch::LandingBranch, String>,
+    pub landing: std::result::Result<crate::domain::landing_branch::RepositorySettings, String>,
     /// Whether the repository is dagq's source (ADR-t614-1), which
     /// `--auto-update` needs.
     pub dagq_source: bool,
@@ -274,7 +274,8 @@ pub fn up(
         bail!("{message}; the supervisor was not started");
     }
     // Every claim and landing reads the landing branch: one that does not
-    // resolve would hold them all (ADR-t615-1).
+    // resolve would hold them all, and a configured push remote that is
+    // missing would fail every push (ADR-t615-1).
     let landing = match &repository.landing {
         Ok(landing) => landing.clone(),
         Err(error) => bail!("{error}; the supervisor was not started"),

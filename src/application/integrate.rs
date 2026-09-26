@@ -21,9 +21,9 @@ use super::{
 };
 use crate::domain::{
     CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, MAX_RESUME_ATTEMPTS, NewTask,
-    PUSH_REMOTE, PushReport, PushResult, Reason, ReasonCode, Receipt, ReceiptResult,
-    RegisteredFollowUp, RunId, RunStatus, Task, TaskId, TaskRun, evidence_missing_reason,
-    heartbeat_stale,
+    PushReport, PushResult, Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunId,
+    RunStatus, Task, TaskId, TaskRun, evidence_missing_reason, heartbeat_stale,
+    landing_branch::{DEFAULT_REMOTE, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
     scope::{out_of_scope, scope_violation_reason},
     verify_failure,
@@ -414,7 +414,7 @@ pub fn land_integrating(
             );
             close_landing_asks(queue, &run);
             remove_landed_worktree(queue, repository, &run);
-            let push = push_main(queue, ctx.remote, run.id(), &landing.commit);
+            let push = push_main(queue, repository, ctx.remote, run.id(), &landing.commit);
             let follow_ups = register_follow_ups(queue, &task, run.id(), proposed.as_ref());
             IntegrationOutcome::Integrated {
                 task: Box::new(task),
@@ -458,65 +458,88 @@ pub fn land_integrating(
     })
 }
 
-/// Push the landed `main` to [`PUSH_REMOTE`] and record the outcome as
-/// `push_finished`, `push_skipped` or `push_failed` on the landed run. A
-/// failure to record is only reported: the landing stands either way.
+/// Push the landing branch to the remote `[repository]` of `dagq.toml`
+/// names (`origin` by default, ADR-t615-1) and record the outcome as
+/// `push_finished`, `push_skipped` or `push_failed` on the landed run.
+/// `push = false` and a missing default remote skip the push; a configured
+/// remote that is missing fails it. A failure to record is only reported:
+/// the landing stands either way.
 fn push_main(
     queue: &dyn Queue,
+    repository: &dyn Repository,
     remote: Option<&dyn MainRemote>,
     run_id: &RunId,
     commit: &CommitSha,
 ) -> PushReport {
-    let skipped = |reason: &str| PushReport {
-        outcome: PushResult::Skipped,
-        remote: PUSH_REMOTE.to_owned(),
-        error: None,
-        reason: Some(reason.to_owned()),
+    let branch = repository.landing_branch().ok().map(|branch| branch.name);
+    let report = |outcome, remote: &str, error: Option<String>, reason: Option<&str>| PushReport {
+        outcome,
+        remote: remote.to_owned(),
+        branch: branch.clone(),
+        error,
+        reason: reason.map(str::to_owned),
+    };
+    let failed = |remote: &str, error: &anyhow::Error| {
+        report(PushResult::Failed, remote, Some(format!("{error:#}")), None)
     };
     let report = match remote {
-        None => skipped("--no-push"),
-        Some(remote) => match remote.has_remote(PUSH_REMOTE) {
-            Ok(false) => skipped(&format!("the repository has no remote {PUSH_REMOTE}")),
-            Ok(true) => match remote.push_main(PUSH_REMOTE) {
-                Ok(()) => PushReport {
-                    outcome: PushResult::Pushed,
-                    remote: PUSH_REMOTE.to_owned(),
-                    error: None,
-                    reason: None,
-                },
-                Err(error) => failed_push(&error),
-            },
-            Err(error) => failed_push(&error),
+        None => report(PushResult::Skipped, DEFAULT_REMOTE, None, Some("--no-push")),
+        Some(main_remote) => match main_remote.push_config() {
+            Err(error) => failed(DEFAULT_REMOTE, &error),
+            Ok(config) if !config.push() => report(
+                PushResult::Skipped,
+                config.remote(),
+                None,
+                Some("push = false in dagq.toml"),
+            ),
+            Ok(config) => {
+                let name = config.remote();
+                match main_remote.has_remote(name) {
+                    Ok(false) if config.remote_source() == RemoteSource::Default => report(
+                        PushResult::Skipped,
+                        name,
+                        None,
+                        Some(&format!("the repository has no remote {name}")),
+                    ),
+                    Ok(false) => report(PushResult::Failed, name, Some(missing_remote(name)), None),
+                    Ok(true) => match main_remote.push_main(name) {
+                        Ok(()) => report(PushResult::Pushed, name, None, None),
+                        Err(error) => failed(name, &error),
+                    },
+                    Err(error) => failed(name, &error),
+                }
+            }
         },
     };
     let (kind, payload) = match report.outcome {
         PushResult::Pushed => (
             "push_finished",
-            json!({"remote": report.remote, "commit": commit}),
+            json!({"remote": report.remote, "branch": report.branch, "commit": commit}),
         ),
         PushResult::Skipped => (
             "push_skipped",
-            json!({"remote": report.remote, "commit": commit, "reason": report.reason}),
+            json!({"remote": report.remote, "branch": report.branch, "commit": commit, "reason": report.reason}),
         ),
         PushResult::Failed => (
             "push_failed",
-            json!({"code": ReasonCode::PushFailed, "remote": report.remote, "commit": commit, "error": report.error}),
+            json!({"code": ReasonCode::PushFailed, "remote": report.remote, "branch": report.branch, "commit": commit, "error": report.error}),
         ),
     };
+    let remote = report.remote.as_str();
     match &report.error {
         Some(error) => warn!(
             op = "push",
             run_id = %run_id,
-            remote = PUSH_REMOTE,
+            remote,
             error = %error,
-            "run {run_id}: push of main failed: {error}"
+            "run {run_id}: push of the landing branch failed: {error}"
         ),
         None => info!(
             op = "push",
             run_id = %run_id,
-            remote = PUSH_REMOTE,
+            remote,
             outcome = kind,
-            "run {run_id}: {kind} ({PUSH_REMOTE})"
+            "run {run_id}: {kind} ({remote})"
         ),
     }
     if let Err(error) = queue.record_runtime_event(run_id, kind, payload) {
@@ -528,15 +551,6 @@ fn push_main(
         );
     }
     report
-}
-
-fn failed_push(error: &anyhow::Error) -> PushReport {
-    PushReport {
-        outcome: PushResult::Failed,
-        remote: PUSH_REMOTE.to_owned(),
-        error: Some(format!("{error:#}")),
-        reason: None,
-    }
 }
 
 /// Register the landed receipt's `follow_ups` of `task`'s run `run_id` as

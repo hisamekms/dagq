@@ -5,8 +5,8 @@ use crate::{
         stats::WorkspaceListing,
     },
     domain::{
-        CommitSha, PUSH_REMOTE, Task, TaskId, TaskRun,
-        landing_branch::{self, LandingBranch},
+        CommitSha, Task, TaskId, TaskRun,
+        landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
         recovery::ProcessInfo,
         stall::IDLE_LOG,
@@ -41,7 +41,7 @@ pub use crate::application::{
     },
     path_text,
 };
-use crate::infrastructure::run_env::load_landing_branch;
+use crate::infrastructure::run_env::load_repository_config;
 
 pub fn executable(path: &Path) -> Result<PathBuf> {
     let candidate = if path.components().count() > 1 || path.is_absolute() {
@@ -588,17 +588,17 @@ impl GitRepository {
         })
     }
 
-    /// The branch runs land on (ADR-t615-1), resolved now from the main
-    /// checkout's `dagq.toml` and the repository's branches; an error says
-    /// what could not be resolved and points at `[repository]`.
-    pub fn landing_branch(&self) -> Result<LandingBranch> {
-        let configured = load_landing_branch(&self.checkout).with_context(|| {
+    /// `[repository]` of the main checkout's `dagq.toml` (ADR-t615-1),
+    /// with its `branch` and `remote` checked as Git names; an error points
+    /// at `[repository]`.
+    pub fn repository_config(&self) -> Result<RepositoryConfig> {
+        let config = load_repository_config(&self.checkout).with_context(|| {
             format!(
                 "cannot resolve the landing branch; {}",
                 landing_branch::HINT
             )
         })?;
-        if let Some(name) = &configured {
+        if let Some(name) = &config.branch {
             let (status, _, _) = capture(
                 Command::new(&self.git).args(["check-ref-format", "--branch", name]),
                 Duration::from_secs(30),
@@ -609,35 +609,83 @@ impl GitRepository {
                 landing_branch::HINT
             );
         }
+        if let Some(name) = &config.remote {
+            // Git's own test of a remote name.
+            let (status, _, _) = capture(
+                Command::new(&self.git)
+                    .args(["check-ref-format", &format!("refs/remotes/{name}/test")]),
+                Duration::from_secs(30),
+            )?;
+            ensure!(
+                status.success(),
+                "[repository] remote = {name:?} of dagq.toml is not a valid remote name; name the remote the landing is pushed to as remote = \"<name>\" under [repository] in the dagq.toml of the repository's main checkout"
+            );
+        }
+        Ok(config)
+    }
+
+    /// The branch runs land on (ADR-t615-1), resolved now from the main
+    /// checkout's `dagq.toml` and the repository's branches; an error says
+    /// what could not be resolved and points at `[repository]`.
+    pub fn landing_branch(&self) -> Result<LandingBranch> {
+        self.resolve_landing_branch(&self.repository_config()?)
+    }
+
+    fn resolve_landing_branch(&self, config: &RepositoryConfig) -> Result<LandingBranch> {
+        let remote = config.remote();
         let (status, stdout, _) = capture(
             self.git_root().args([
                 "symbolic-ref",
                 "--quiet",
-                &format!("refs/remotes/{PUSH_REMOTE}/HEAD"),
+                &format!("refs/remotes/{remote}/HEAD"),
             ]),
             Duration::from_secs(30),
         )?;
-        let prefix = format!("refs/remotes/{PUSH_REMOTE}/");
+        let prefix = format!("refs/remotes/{remote}/");
         let remote_head = status
             .success()
             .then(|| stdout.trim().strip_prefix(&prefix).map(str::to_owned))
             .flatten();
-        landing_branch::resolve(configured.as_deref(), remote_head.as_deref(), &mut |name| {
-            let (status, _, stderr) = capture(
-                self.git_root().args([
-                    "show-ref",
-                    "--verify",
-                    "--quiet",
-                    &format!("refs/heads/{name}"),
-                ]),
-                Duration::from_secs(30),
-            )?;
-            match status.code() {
-                Some(0) => Ok(true),
-                Some(1) => Ok(false),
-                _ => bail!("git show-ref failed ({status}): {stderr}"),
-            }
-        })
+        landing_branch::resolve(
+            config.branch.as_deref(),
+            remote,
+            remote_head.as_deref(),
+            &mut |name| {
+                let (status, _, stderr) = capture(
+                    self.git_root().args([
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{name}"),
+                    ]),
+                    Duration::from_secs(30),
+                )?;
+                match status.code() {
+                    Some(0) => Ok(true),
+                    Some(1) => Ok(false),
+                    _ => bail!("git show-ref failed ({status}): {stderr}"),
+                }
+            },
+        )
+    }
+
+    /// The landing branch and the push (ADR-t615-1), as `up`'s preflight
+    /// and `doctor` resolve them: an error when the branch does not
+    /// resolve or the landing would be pushed to a configured remote the
+    /// repository does not have.
+    pub fn repository_settings(&self) -> Result<RepositorySettings> {
+        let settings = self.resolve_repository_settings()?;
+        settings.push.check()?;
+        Ok(settings)
+    }
+
+    /// [`Self::repository_settings`] without the check of the push remote,
+    /// for `doctor` to show the fields next to that error.
+    pub fn resolve_repository_settings(&self) -> Result<RepositorySettings> {
+        let config = self.repository_config()?;
+        let branch = self.resolve_landing_branch(&config)?;
+        let push = PushTarget::new(&config, self.has_remote(config.remote())?);
+        Ok(RepositorySettings { branch, push })
     }
 
     /// Whether the repository is dagq's source (ADR-t614-1), judged now
@@ -1591,6 +1639,10 @@ impl Repository for GitRepository {
 /// working directory, may be a run worktree that the landing removed
 /// before the push.
 impl MainRemote for GitRepository {
+    fn push_config(&self) -> Result<RepositoryConfig> {
+        self.repository_config()
+    }
+
     fn has_remote(&self, remote: &str) -> Result<bool> {
         let remotes = output(
             Command::new(&self.git)
