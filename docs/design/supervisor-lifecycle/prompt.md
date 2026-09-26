@@ -12,6 +12,7 @@ related:
   - adr-0009
   - adr-0038
   - adr-0029
+  - design-supervisor-lifecycle-language
 ---
 
 # Prompt
@@ -36,3 +37,5 @@ taskに`required_evidence`があれば、verification commandsの直後（4節�
 4節の後に「担当はこのtaskだけ。兄弟taskの範囲を変えず、範囲外の仕事を見つけたら受け持たずにreceiptの`follow_ups`に書く」の一文を置き、receipt JSONの例に任意の`follow_ups`（`{title, description}`の配列。`Receipt::check`は配列であることだけを見る）を含める。
 
 schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt pathの行だけを読み、`follow_ups`のないreceiptを書くので、節の追加に影響されない。
+
+言語の設定（`[language]`）が解決できるときは、receiptの契約の前に言語の指示の段落を足す。resumeとreviseの依頼文も同じ（[Language](language.md#promptへの渡し方)、ADR-t616-2。未実装）。

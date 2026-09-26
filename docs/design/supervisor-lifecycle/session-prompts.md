@@ -4,13 +4,14 @@ type: design
 title: "Session prompts"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
   - adr-0022
   - design-plugin-integration
+  - design-supervisor-lifecycle-language
 ---
 
 # Session prompts
@@ -19,3 +20,5 @@ inboxとplannerの初期promptは`src/application/prompt.rs`の`inbox_prompt(db)
 
 - **inbox**: このqueue（db path）のinboxで、askとattentionを人に取り次ぎ自分では判断しないこと。`dagq status --role inbox`から始めてdagq pluginの`dagq-inbox` skillに従い、`dagq watch --role inbox --after <cursor>`をbackgroundで回して終了で起き、返ったcursorからwatchし直すこと。`ask_opened`が来たら`dagq asks --open --role inbox`でaskを読み、questionとoptionsを人に見せ（AskUserQuestionが使えるなら使う）、人の答えを`dagq answer ID --text '<answer>'`で書くこと。それ以外のattention（回答済みのask、止まったsupervisor、失敗したreview / triage）は人に知らせ、人の言うことだけをskillのとおり行うこと。queue DBを直接開かずCLIだけを使うこと。
 - **planner**: このqueueのplannerの1つで、人の課題を聞いてgoalとtaskにすること。dagq pluginの`dagq-planner` skillに従い、その`dagq` skillの手順で登録してplan reviewにsubmitすること（`ready`にするのはplan review。ADR-0044の決定8）、runの着地とaskへの回答はしないこと。goalの全taskが完了したらreceiptをgoalのacceptanceと照合して`dagq goal close ID --verdict achieved`で閉じること。queue DBを直接開かずCLIだけを使うこと。observerのnoteとdraft goal、follow_upsのdraft taskの扱いはpromptに書かず`dagq-planner` skillが持つ。
+
+言語の設定（`[language]`）が解決できるときは、どのroleの初期promptにも言語の指示の1行が足され（5行には数えない）、起き直しの`status --role`の出力にも同じ指示が載る（[Language](language.md#promptへの渡し方)、ADR-t616-2。未実装）。

@@ -81,6 +81,8 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t614-1](2026-09-27-t614-1-dagq-source-only-features-by-one-check.md) | dagqの開発でだけ要る機能を、queueのrepositoryがdagqのソースかの判定1つで有効にし、ソースでないrepositoryではmigrationの振り直し・--fromなしのinstall・source buildの自動更新・cargo専用の計測を動かさない（ADR-0067決定3・ADR-0073決定14・17をamends） | 2026-09-27 |
 | [ADR-t614-2](2026-09-27-t614-2-released-migrations-are-immutable.md) | リリース済み（最新のv*のtagに含まれる）のmigrationは中身も名前も変えず消さず、それを検査のscriptとCIとreleaseで止める | 2026-09-27 |
 | [ADR-t615-1](2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md) | 着地先のbranchとpushのremoteとpushするかをrepositoryごとにdagq.tomlで決められるようにし、指定が無ければdefault branchを推定し、解決できなければupで止める（ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends） | 2026-09-27 |
+| [ADR-t616-1](2026-09-27-t616-1-runtime-fixed-strings-are-english.md) | runtimeが出す固定の文字列（prompt・ask・error・event・contextの見出し・commitの定型部分・pushのメッセージ）は英語にする | 2026-09-27 |
+| [ADR-t616-2](2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md) | AIが人に向けて書く文の言語を、利用者ごとの設定を既定にrepositoryのdagq.tomlで上書きして指定でき、runtimeがすべてのsessionとjobのpromptに指示を足す | 2026-09-27 |
 
 ## 置き換え・廃止されたADR
 
