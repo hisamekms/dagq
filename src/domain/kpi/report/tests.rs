@@ -158,6 +158,7 @@ pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
             goals: &goals,
             kinds: &kinds,
             heartbeats: &HashMap::new(),
+            draft_origins: &HashMap::new(),
             now,
             utc_offset_secs: JST,
             cores: Some(4),

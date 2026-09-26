@@ -4,7 +4,7 @@
 use std::{path::Path, process::Command};
 
 use dagq::{
-    domain::{ClaimOutcome, CommitSha},
+    domain::{ClaimOutcome, CommitSha, DraftOrigin, TaskId},
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::{Value, json};
@@ -170,6 +170,53 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     let output = kpi(None, &db, &config, &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("host.toml:2"));
+}
+
+/// A job's draft next to a landing: `drafts_per_landing` and
+/// `draft_backlog` read the draft's origin from the queue, as `stats`'
+/// `draft_flow` does, and a `[kpi]` target judges them (task 611).
+#[test]
+fn kpi_counts_the_drafts_registered_per_landing() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::write(
+        dir.path().join("host.toml"),
+        "[kpi.targets.draft_backlog]\nmax = 0\n",
+    )
+    .unwrap();
+    ok(&db, &["add", "landed"]);
+    ok(&db, &["ready", "1", "--bypass-review"]);
+    let gap = ok(&db, &["add", "gap"])["id"].as_i64().unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_draft_origin(TaskId::new(gap), DraftOrigin::GoalGap, &json!({}))
+        .unwrap();
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+        panic!("nothing to claim");
+    };
+    queue
+        .record_runtime_event(run.id(), "run_integrated", json!({"status": "integrated"}))
+        .unwrap();
+
+    let report = kpi_ok(&db, &config, &["--last", "1"]);
+    let today = &report["periods"][0];
+    assert_eq!(
+        today["kpis"]["drafts_per_landing"],
+        json!({"all": {"n": 1, "value": 1.0}})
+    );
+    let backlog = &today["kpis"]["draft_backlog"]["all"];
+    assert_eq!(backlog["value"], 1.0);
+    assert!(backlog["max"].is_number());
+    let drafts = &today["details"]["drafts"];
+    assert_eq!(drafts["by_origin"]["goal_gap"]["drafts_per_landing"], 1.0);
+    assert!(drafts["by_origin"].get("follow_up").is_none());
+    let flow = &ok(&db, &["stats", "--full"])["draft_flow"];
+    assert_eq!(flow["drafts_per_landing"], 1.0);
+    assert_eq!(flow["backlog"].as_f64(), backlog["value"].as_f64());
+    let target = &report["targets"][0];
+    assert_eq!(target["kpi"], "draft_backlog");
+    assert_eq!(target["periods"][0]["reason"], "partial");
 }
 
 /// `dagq report` in UTC with the host-wide `host.toml` under `config`.

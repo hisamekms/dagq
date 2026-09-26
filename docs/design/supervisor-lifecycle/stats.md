@@ -193,7 +193,7 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 - **`drafts_per_landing`**: `registered` ÷ `landings`（小数2桁。着地が0ならnull）
 - **`inflow_per_outflow`**: `registered` ÷ （`adopted` + `canceled`）（小数2桁。出ていったものが0ならnull）。1を超えればdraftは決着より速く増えている
 
-ADR-0051のKPIの一覧（決定1）にdraftの流入と流出は無いので、KPIの集計（[`kpi`](kpi.md)）はこの値を読まない。足すときは`landings`と同じ名前で、この規則をKPIの規則として決める。
+KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`drafts_per_landing`（出どころごとの内訳は`OriginFlow::per_landing`の同じ規則）と`draft_backlog`（`backlog`と`oldest_backlog_secs`）として期間ごとの窓で読む（task 611。ADR-0051の決定1の、規則を変えずにKPIを足す実装）。規則はこの節のものだけで、`kpi`は同じ関数の結果を読む。
 
 ## 完了見込み
 

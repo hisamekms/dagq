@@ -61,9 +61,12 @@ related:
 | `candidates` | `candidates_sampled`（`candidates`・`free_slots`・`ready`）の時間で重み付けた平均（`value`）と最大、空きslotがあるのに`candidates`が0で`ready`が残った秒（`details.candidates.starved_secs`） | `all` |
 | `findings_open` / `finding_resolve_time` | 期間の終わりに`open` / `proposed`のfinding（`finding_recorded`と`finding_status_changed`から）、期間に`resolved`になったものの最初の記録からの秒。記録・解決の数は`details.findings` | `all` |
 | `improvement_proposals` | 記録が無い（ADR-0051の決定25の数え方の実装が無い）ので値はnull | `all` |
+| `drafts_per_landing` | 「改善」群（task 611）。runtimeやjobが登録したdraftの`task_created` ÷ `run_integrated`（`landings`）。登録と着地をそれぞれのeventの時刻で期間に入れ、着地が0ならnull。`n`は着地の数（`min_samples`で判定する率）。良い向きは小さい。出どころ（`follow_up` / `goal_gap`）ごとの内訳は`details.drafts.by_origin.<origin>.drafts_per_landing` | `all` |
+| `draft_backlog` | 「改善」群（task 611）。期間の終わりの時点で`draft`のままの、runtimeやjobが登録したdraftの数（`value`。数えるKPI）と、そのうち最も古いものの`task_created`からの経過秒（`max`。`candidates`と同じく`median` / `p90` / `min`はnull）。良い向きは小さい。期間の`registered` / `adopted` / `canceled` / `kept_draft`・`inflow_per_outflow`・最も古いdraftのtaskと、出どころごとの同じ数は`details.drafts` | `all` |
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` | 計画の品質（下の[計画の品質](#計画の品質)） | 計画の層 |
 
+- `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
 - `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（期間に重なる`candidates_sampled`が無い。supervisorはclaimのpassごとに標本を数え、値が変わったときと起動・引き継ぎの直後の最初のpassで記録する（[`supervise`](supervise.md)の5のcandidatesの標本）ので、supervisorの動いていた期間には標本がある。記録を始める前の期間と、supervisorが1度も動いていない期間に出る）、`improvement_proposals`の`not_recorded`。
 - `--goal`はそのgoalのtaskのrun・ask・findingだけを数える（`slot_usage`の分母はqueue全体のまま）。
 

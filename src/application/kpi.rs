@@ -24,6 +24,7 @@ pub fn kpi(
     let events = queue.all_events()?;
     let goals = queue.task_goals()?;
     let kinds = queue.task_kinds()?;
+    let draft_origins = queue.draft_origins()?;
     let heartbeats = queue
         .supervisors()?
         .into_iter()
@@ -35,6 +36,7 @@ pub fn kpi(
             goals: &goals,
             kinds: &kinds,
             heartbeats: &heartbeats,
+            draft_origins: &draft_origins,
             now,
             utc_offset_secs: host.utc_offset_secs,
             cores: host.cores,

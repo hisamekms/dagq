@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde::ser::SerializeMap;
 
 use super::{
-    GoalId, RunEvent, TaskId, TaskKind,
+    DraftOrigin, GoalId, RunEvent, TaskId, TaskKind,
     marks::{self, Mark},
     stats::{Cursor, landing::p90, median, median_f64, timestamp_millis},
 };
@@ -279,6 +279,9 @@ pub struct KpiInput<'a> {
     /// The registered supervisors' last heartbeats (unix seconds), by
     /// token: a stale one ends that supervisor's life (decision 10).
     pub heartbeats: &'a HashMap<String, i64>,
+    /// Where each draft the runtime or a job registered came from
+    /// (`draft_origins`), for the drafts' KPIs as `stats`' `draft_flow`.
+    pub draft_origins: &'a HashMap<TaskId, DraftOrigin>,
     /// Unix seconds.
     pub now: i64,
     /// The host's time zone, seconds east of UTC.

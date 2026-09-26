@@ -58,6 +58,8 @@ pub(super) struct Context<'a> {
     goals: &'a HashMap<TaskId, Option<GoalId>>,
     kinds: &'a HashMap<TaskId, Option<TaskKind>>,
     goal_id: Option<GoalId>,
+    /// What `stats` reads besides the events: only the drafts' origins.
+    live: LiveSnapshot,
     /// Unix seconds.
     now: i64,
     cores: Option<usize>,
@@ -250,6 +252,10 @@ impl<'a> Context<'a> {
             goals: input.goals,
             kinds: input.kinds,
             goal_id,
+            live: LiveSnapshot {
+                draft_origins: input.draft_origins.clone(),
+                ..LiveSnapshot::default()
+            },
             now: input.now,
             cores: input.cores,
             first_ready,
@@ -303,7 +309,7 @@ impl<'a> Context<'a> {
                 goal_id: self.goal_id,
                 full: true,
             },
-            &LiveSnapshot::default(),
+            &self.live,
         );
         stats::with_kinds(&mut stats, self.kinds);
         stats
@@ -501,6 +507,46 @@ impl<'a> Context<'a> {
         );
         put("improvement_proposals", ALL, Measure::total(None, 0));
         unavailable.insert("improvement_proposals", NOT_RECORDED);
+        // The drafts the runtime and the jobs register, as `stats`'
+        // `draft_flow` counts them (task 611): no run carries them, so
+        // `all` only, like `findings_open`.
+        let flow = &stats.draft_flow;
+        put(
+            "drafts_per_landing",
+            ALL,
+            Measure {
+                n: usize::try_from(flow.landings).unwrap_or(0),
+                value: flow.drafts_per_landing,
+                has_value: true,
+                ..Measure::default()
+            },
+        );
+        let mut backlog = Measure::count(usize::try_from(flow.all.backlog).unwrap_or(0));
+        backlog.max = flow.all.oldest_backlog_secs.map(float);
+        backlog.has_spread = true;
+        put("draft_backlog", ALL, backlog);
+        let by_origin: BTreeMap<&str, Value> = flow
+            .by_origin
+            .iter()
+            .map(|(origin, counts)| {
+                let mut value = json(counts);
+                value["drafts_per_landing"] = serde_json::json!(counts.per_landing(flow.landings));
+                (*origin, value)
+            })
+            .collect();
+        details.insert(
+            "drafts",
+            serde_json::json!({
+                "landings": flow.landings,
+                "registered": flow.all.registered,
+                "adopted": flow.all.adopted,
+                "canceled": flow.all.canceled,
+                "kept_draft": flow.all.kept_draft,
+                "oldest_backlog_task_id": flow.all.oldest_backlog_task_id,
+                "inflow_per_outflow": flow.inflow_per_outflow,
+                "by_origin": by_origin,
+            }),
+        );
 
         // Sessions of the kinds no run is measured by one of (decision 1):
         // their totals over the window.

@@ -53,6 +53,12 @@ pub struct OriginFlow {
 }
 
 impl OriginFlow {
+    /// `registered` ÷ `landings`, to two decimals; null without a landing.
+    /// The rule of `drafts_per_landing`, for every origin and each one.
+    pub fn per_landing(&self, landings: i64) -> Option<f64> {
+        ratio(self.registered, landings)
+    }
+
     fn waiting(&mut self, task_id: TaskId, age: i64) {
         self.backlog += 1;
         if self.oldest_backlog_secs.is_none_or(|oldest| age > oldest) {
@@ -174,7 +180,7 @@ pub fn draft_flow(
             add(task_id, &|f| f.waiting(task_id, age));
         }
     }
-    flow.drafts_per_landing = ratio(flow.all.registered, flow.landings);
+    flow.drafts_per_landing = flow.all.per_landing(flow.landings);
     flow.inflow_per_outflow = ratio(flow.all.registered, flow.all.adopted + flow.all.canceled);
     flow
 }

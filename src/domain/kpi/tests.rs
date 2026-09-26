@@ -20,6 +20,7 @@ struct Queue {
     goals: HashMap<TaskId, Option<GoalId>>,
     /// The registered supervisors' last heartbeats.
     heartbeats: HashMap<String, i64>,
+    draft_origins: HashMap<TaskId, DraftOrigin>,
 }
 
 /// How one run went.
@@ -180,6 +181,7 @@ impl Queue {
                 goals: &self.goals,
                 kinds: &self.kinds,
                 heartbeats: &self.heartbeats,
+                draft_origins: &self.draft_origins,
                 now,
                 utc_offset_secs: JST,
                 cores: Some(4),
@@ -815,6 +817,7 @@ fn compares_two_explicit_windows() {
             goals: &queue.goals,
             kinds: &queue.kinds,
             heartbeats: &queue.heartbeats,
+            draft_origins: &queue.draft_origins,
             now: MONDAY + 2 * DAY,
             utc_offset_secs: 0,
             cores: None,
@@ -854,6 +857,7 @@ fn one_window_of_any_length() {
             goals: &queue.goals,
             kinds: &queue.kinds,
             heartbeats: &queue.heartbeats,
+            draft_origins: &queue.draft_origins,
             now: MONDAY + DAY,
             utc_offset_secs: 0,
             cores: None,
@@ -1276,4 +1280,133 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
     );
     assert_eq!(direction("plan.task_rework_rate"), Some(Direction::Lower));
     assert_eq!(direction("plan.follow_up_adoption_rate"), None);
+}
+
+/// The drafts the runtime and the jobs register (task 611): per landing
+/// and still waiting at the period's end, the very values of `stats`'
+/// `draft_flow` over the same window, next to the previous day and judged
+/// against a target.
+#[test]
+fn the_drafts_per_landing_and_the_backlog_are_stats_draft_flow() {
+    let mut queue = Queue::default();
+    let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, 300));
+    for (task, secs) in [(10, landed + 10), (11, landed + 20), (20, landed + 30)] {
+        queue.push(Some(task), None, "task_created", json!({}), secs);
+    }
+    for task in [10, 11] {
+        queue.push(
+            Some(1),
+            None,
+            "follow_up_registered",
+            json!({"task_id": task}),
+            landed + 5 + task,
+        );
+    }
+    queue
+        .draft_origins
+        .insert(TaskId::new(20), DraftOrigin::GoalGap);
+    queue.run(&Run::new(2, None, MONDAY + DAY + HOUR, 300));
+    let next = MONDAY + DAY + 2 * HOUR;
+    let changed = |to: &str| json!({"from": "draft", "to": to});
+    queue.push(
+        Some(10),
+        None,
+        "task_status_changed",
+        changed("submitted"),
+        next,
+    );
+    queue.push(
+        Some(11),
+        None,
+        "task_status_changed",
+        changed("canceled"),
+        next + 1,
+    );
+    let config = KpiConfig::merge(
+        Some(&KpiSettings {
+            min_samples: Some(1),
+            targets: ["draft_backlog", "drafts_per_landing"]
+                .map(|kpi| Target {
+                    kpi: kpi.into(),
+                    kind: None,
+                    stat: None,
+                    min: None,
+                    max: Some(0.5),
+                })
+                .into(),
+            ..KpiSettings::default()
+        }),
+        None,
+    );
+    let now = MONDAY + 2 * DAY + HOUR;
+    let query = KpiQuery {
+        last: 3,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(now, &config, &query);
+    let [first, second, today] = &result.periods[..] else {
+        panic!("three days");
+    };
+    let per_landing = measure(first, "drafts_per_landing", ALL);
+    assert_eq!((per_landing.n, per_landing.value), (1, Some(3.0)));
+    let backlog = measure(first, "draft_backlog", ALL);
+    assert_eq!((backlog.value, backlog.max.is_some()), (Some(3.0), true));
+    let drafts = &first.window.details["drafts"];
+    assert_eq!(drafts["registered"], 3);
+    assert_eq!(drafts["by_origin"]["follow_up"]["drafts_per_landing"], 2.0);
+    assert_eq!(drafts["by_origin"]["goal_gap"]["drafts_per_landing"], 1.0);
+    assert_eq!(measure(second, "drafts_per_landing", ALL).value, Some(0.0));
+    assert_eq!(measure(second, "draft_backlog", ALL).value, Some(1.0));
+    assert_eq!(second.window.details["drafts"]["inflow_per_outflow"], 0.0);
+    // No landing: null, not 0.
+    assert_eq!(measure(today, "drafts_per_landing", ALL).value, None);
+    // Only `all`: no run carries a draft.
+    assert_eq!(first.window.kpis["draft_backlog"].len(), 1);
+
+    // The same window's `draft_flow`.
+    for period in [first, second, today] {
+        let flow = crate::domain::stats::stats(
+            &queue.events,
+            &queue.goals,
+            now,
+            crate::domain::stats::SlotSnapshot::default(),
+            &crate::domain::stats::StatsQuery {
+                since: Some(Cursor::Time(timestamp_millis(&period.start).unwrap())),
+                until: Some(Cursor::Time(period.end_ms())),
+                goal_id: None,
+                full: true,
+            },
+            &crate::domain::stats::LiveSnapshot {
+                draft_origins: queue.draft_origins.clone(),
+                ..crate::domain::stats::LiveSnapshot::default()
+            },
+        )
+        .draft_flow;
+        let per_landing = measure(period, "drafts_per_landing", ALL);
+        assert_eq!(
+            per_landing.value, flow.drafts_per_landing,
+            "{}",
+            period.label
+        );
+        assert_eq!(per_landing.n as i64, flow.landings);
+        let backlog = measure(period, "draft_backlog", ALL);
+        assert_eq!(backlog.value, Some(flow.all.backlog as f64));
+        assert_eq!(backlog.max, flow.all.oldest_backlog_secs.map(|s| s as f64));
+    }
+
+    // Better when smaller, against the day before.
+    let change = &second.comparison["drafts_per_landing"][ALL];
+    assert_eq!(
+        (change.previous, change.verdict),
+        (Some(3.0), Some("improved"))
+    );
+    assert_eq!(direction("draft_backlog"), Some(Direction::Lower));
+    // The backlog is off target two judged days in a row (short of a
+    // breach), the drafts per landing back on target the second day.
+    let state = |kpi: &str| {
+        let target = result.targets.iter().find(|t| t.kpi == kpi).unwrap();
+        (target.state, target.streak)
+    };
+    assert_eq!(state("draft_backlog"), ("missed", 2));
+    assert_eq!(state("drafts_per_landing"), ("ok", 0));
 }
