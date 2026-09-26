@@ -1,7 +1,9 @@
 //! What Claude Code shows and writes that the supervisor reads of a live
 //! session ([`AgentSignals`]): the dialogs of its TUI on the screen
 //! (ADR-0019 decision 6) and the input its `Stop` hook writes to the idle
-//! marker (ADR-0016, task 147), its input box (task 285) and the dialogs
+//! marker (ADR-0016, task 147), the input its `UserPromptSubmit` hook
+//! writes to the input marker (ADR-0043 decision 2, task 409), its input
+//! box (task 285) and the dialogs
 //! the supervisor answers by rule (ADR-0047 decision 29). The formats
 //! are Claude Code's own; the supervisor only learns the kind of a dialog,
 //! an excerpt of the screen, whether background work was left running,
@@ -12,7 +14,7 @@ use serde_json::Value;
 
 use super::adapters::ClaudeCode;
 use crate::{
-    application::{AgentSignals, DialogAnswer, IdleHook, KnownDialog},
+    application::{AgentSignals, DialogAnswer, IdleHook, InputSource, KnownDialog},
     domain::stall::BackgroundTask,
 };
 
@@ -359,6 +361,33 @@ pub fn idle_hook(content: &[u8]) -> IdleHook {
     }
 }
 
+/// The tags Claude Code wraps the input it puts in by itself in: the
+/// notice that a background task ended (seen with Claude Code 2.1.283:
+/// `<task-notification>` with the task's id, status and summary).
+const AGENT_INPUT_TAGS: [&str; 1] = ["<task-notification>"];
+
+/// The input marker is the input of Claude Code's `UserPromptSubmit` hook,
+/// as JSON (Claude Code 2.1.283: `session_id`, `transcript_path`, `cwd`,
+/// `prompt_id`, `permission_mode`, `hook_event_name` and `prompt`). The
+/// hook fires for typed text and also for the notice Claude Code puts in
+/// when background work ends, with no field naming the source: the notice
+/// is told by its tag at the start of `prompt`. A content without a
+/// `prompt` string does not say.
+pub fn input_source(content: &[u8]) -> InputSource {
+    let hook: Value = serde_json::from_slice(content).unwrap_or(Value::Null);
+    match hook.get("prompt").and_then(Value::as_str) {
+        Some(prompt)
+            if AGENT_INPUT_TAGS
+                .iter()
+                .any(|tag| prompt.trim_start().starts_with(tag)) =>
+        {
+            InputSource::Agent
+        }
+        Some(_) => InputSource::Typed,
+        None => InputSource::Unknown,
+    }
+}
+
 impl AgentSignals for ClaudeCode {
     fn detect_prompt(&self, screen: &str) -> Option<&'static str> {
         detect_prompt(screen).map(PromptKind::as_str)
@@ -374,6 +403,17 @@ impl AgentSignals for ClaudeCode {
 
     fn idle_hook(&self, content: &[u8]) -> IdleHook {
         idle_hook(content)
+    }
+
+    fn input_source(&self, content: &[u8]) -> InputSource {
+        input_source(content)
+    }
+
+    fn input_text(&self, content: &[u8]) -> Option<String> {
+        let hook: Value = serde_json::from_slice(content).ok()?;
+        hook.get("prompt")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     }
 
     fn input_ready(&self, screen: &str) -> bool {
@@ -901,6 +941,48 @@ worktree on  dagq/68a96a60 took 8h32m49s
             Some("confirm")
         );
         assert_eq!(claude.screen_excerpt("a\n\nb\n"), "a\nb");
+    }
+
+    #[test]
+    fn input_source_tells_a_typed_input_from_a_background_notice() {
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        // Hook inputs as Claude Code 2.1.283 wrote them.
+        let typed = json!({
+            "session_id": "s1",
+            "prompt_id": "p1",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Please rebase onto main",
+        });
+        assert_eq!(
+            claude.input_source(typed.to_string().as_bytes()),
+            InputSource::Typed
+        );
+        assert_eq!(
+            claude.input_text(typed.to_string().as_bytes()).as_deref(),
+            Some("Please rebase onto main")
+        );
+        assert_eq!(claude.input_text(b"not json"), None);
+        let notice = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "<task-notification>\n<task-id>b9g52xog2</task-id>\n<status>completed</status>\n<summary>Background command \"sleep 5\" completed (exit code 0)</summary>\n</task-notification>",
+        });
+        assert_eq!(
+            claude.input_source(notice.to_string().as_bytes()),
+            InputSource::Agent
+        );
+        for content in [
+            json!({"hook_event_name": "UserPromptSubmit"}).to_string(),
+            "not json".to_owned(),
+        ] {
+            assert_eq!(
+                claude.input_source(content.as_bytes()),
+                InputSource::Unknown,
+                "{content}"
+            );
+        }
     }
 
     #[test]

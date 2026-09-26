@@ -1253,7 +1253,7 @@ impl SessionWatch {
         match apply_live(sv, run, &live, job, verdict)? {
             Ok(applied) => {
                 if let Some((text, sent_at, submission)) = applied.sent {
-                    self.stall.input_sent(sent_at);
+                    self.stall.input_sent(sent_at, Some(&text));
                     self.answer_start = Some(StartCheck::new(
                         "recovery instruction",
                         &text,
@@ -1369,7 +1369,7 @@ impl SessionWatch {
             LiveStep::Pending | LiveStep::Failed => Ok(()),
             LiveStep::Repaired(applied) => {
                 if let Some((text, sent_at, submission)) = applied.sent {
-                    self.stall.input_sent(sent_at);
+                    self.stall.input_sent(sent_at, Some(&text));
                     self.answer_start = Some(StartCheck::new(
                         "recovery instruction",
                         &text,

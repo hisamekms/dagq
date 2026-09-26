@@ -1633,4 +1633,30 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         .as_secs();
     assert!(now.abs_diff(secs.parse().unwrap()) < 60, "{log}");
     assert_eq!(marker, payload);
+    // The UserPromptSubmit hook publishes each input it takes as the input
+    // marker next to the idle marker (ADR-0043 decision 2), printing
+    // nothing into the agent's context.
+    let hook = &parsed["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+    assert_eq!(hook["type"], "command");
+    let payload = r#"{"hook_event_name":"UserPromptSubmit","prompt":"it's \"quoted\""}"#;
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(hook["command"].as_str().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            let _waiting = common::within(common::STEP_LIMIT, "the UserPromptSubmit hook to exit");
+            child.stdin.take().unwrap().write_all(payload.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(run_dir.join("prompt-submit.json")).unwrap(),
+        payload
+    );
+    assert!(!run_dir.join("prompt-submit.json.tmp").exists());
 }

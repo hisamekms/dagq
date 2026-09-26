@@ -475,7 +475,6 @@ pub struct TestWorkspace {
     /// This many texts are typed but never reach the session, as one typed
     /// before Claude Code's input box is drawn.
     pub dropped_texts: AtomicUsize,
-    pub start_wait: Duration,
     pub exits_sent: AtomicUsize,
     pub sessions: Mutex<Vec<(String, TestSession)>>,
     pub closed: Mutex<Vec<String>>,
@@ -543,7 +542,6 @@ impl TestWorkspace {
             enters: AtomicUsize::new(0),
             swallowed_enters: AtomicUsize::new(0),
             dropped_texts: AtomicUsize::new(0),
-            start_wait: Duration::from_secs(60),
             exits_sent: AtomicUsize::new(0),
             sessions: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
@@ -811,9 +809,6 @@ impl WorkspaceBackend for TestWorkspace {
     }
     fn submit_check_interval(&self) -> Duration {
         Duration::from_millis(10)
-    }
-    fn start_wait(&self) -> Duration {
-        self.start_wait
     }
     fn resume_timeout(&self) -> Duration {
         self.resume_timeout

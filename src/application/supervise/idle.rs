@@ -95,6 +95,52 @@ impl IdleMarker {
     }
 }
 
+/// The input marker next to the idle marker `idle_marker`: the file the
+/// agent's hook replaces each time the session takes an input
+/// ([`PROMPT_SUBMIT_MARKER`](crate::application::stats::PROMPT_SUBMIT_MARKER)).
+pub(super) fn input_marker_path(idle_marker: &Path) -> PathBuf {
+    idle_marker.with_file_name(crate::application::stats::PROMPT_SUBMIT_MARKER)
+}
+
+/// An input the session took, as its input marker records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InputMarker {
+    /// When the agent took it.
+    pub(super) modified: SystemTime,
+    pub(super) source: InputSource,
+    /// The fingerprint of its text ([`text_fingerprint`]), when the
+    /// marker says it.
+    pub(super) text: Option<u64>,
+}
+
+/// A fingerprint of a text typed into a session, to match the input marker
+/// with a text the supervisor typed: its surrounding whitespace ignored.
+pub(super) fn text_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.trim().hash(&mut hasher);
+    hasher.finish()
+}
+
+impl InputMarker {
+    /// The input marker next to `idle_marker`; `None` when the agent's hook
+    /// never wrote one (a provider without it, or no input taken yet).
+    pub(super) fn read(
+        files: &dyn RunFiles,
+        signals: &dyn AgentSignals,
+        idle_marker: &Path,
+    ) -> Result<Option<Self>> {
+        let Some((modified, bytes)) = files.read_stamped(&input_marker_path(idle_marker))? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            modified,
+            source: signals.input_source(&bytes),
+            text: signals.input_text(&bytes).as_deref().map(text_fingerprint),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +189,24 @@ mod tests {
     #[test]
     fn the_transcript_is_the_whole_screen_by_default() {
         assert_eq!(Signals.transcript("work\n❯\n12:04"), "work\n❯\n12:04");
+    }
+
+    #[test]
+    fn the_input_marker_is_read_next_to_the_idle_marker() {
+        let files = MemoryFiles::default();
+        let idle = Path::new("/run/idle.json");
+        assert_eq!(InputMarker::read(&files, &Signals, idle).unwrap(), None);
+        let at = files.now();
+        files.put(Path::new("/run/prompt-submit.json"), at, "{}");
+        // An adapter that does not read it knows no source.
+        assert_eq!(
+            InputMarker::read(&files, &Signals, idle).unwrap(),
+            Some(InputMarker {
+                modified: at,
+                source: InputSource::Unknown,
+                text: None,
+            })
+        );
     }
 
     #[test]

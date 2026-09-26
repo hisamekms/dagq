@@ -22,9 +22,14 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     // default windows to register.
     let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
     backend.registration_timeout = common::STEP_LIMIT;
-    backend.start_wait = common::STEP_LIMIT;
     let backend = Arc::new(backend);
-    let options = supervise_options(4, false);
+    let options = SuperviseOptions {
+        stall: Some(dagq::domain::stall::StallConfig {
+            send_confirm_secs: i64::try_from(common::STEP_LIMIT.as_secs()).unwrap(),
+            ..Default::default()
+        }),
+        ..supervise_options(4, false)
+    };
     let finish = |run: &TaskRun| {
         fs::write(
             Path::new(run.run_dir().unwrap()).join("exit-requested.go"),

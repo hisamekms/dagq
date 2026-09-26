@@ -417,3 +417,110 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
             .all(|ask| ask.closed_at.is_some())
     );
 }
+
+/// Task 409 (ADR-0043 decisions 2 and 3): a person typed into the idle
+/// session before the threshold; the input marker the `UserPromptSubmit`
+/// hook writes counts as its last input, so the turn it started (at work
+/// on the screen) is not nudged however long it runs, and the input is recorded once as
+/// `stall_preempted`, which `stats` counts as preempted via input. A
+/// notice Claude Code put in by itself (background work that ended) holds
+/// the nudge off the same way and is not counted.
+#[test]
+fn an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted() {
+    for (prompt, preempted) in [
+        ("please also update the docs", 1),
+        (
+            "<task-notification>\\n<status>completed</status>\\n</task-notification>",
+            0,
+        ),
+    ] {
+        let (_dir, repo, db) = fixture();
+        let backend = TestWorkspace::new(
+            &db,
+            false,
+            &format!(
+                r#"
+commit work; idle
+sleep 0.3
+INPUT="$(dirname "$IDLE")/prompt-submit.json"
+printf '{{"hook_event_name":"UserPromptSubmit","prompt":"{prompt}"}}' > "$INPUT.tmp"
+mv "$INPUT.tmp" "$INPUT"
+sleep 5
+receipt "$(git rev-parse HEAD)"; idle; await_exit
+"#
+            ),
+        );
+        // The turn the input started shows at work on the screen.
+        *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
+        let options = SuperviseOptions {
+            stall: Some(dagq::domain::stall::StallConfig {
+                idle_without_receipt_secs: 3,
+                ..Default::default()
+            }),
+            ..supervise_options(4, true)
+        };
+        let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        // The turn the input started ran past the threshold un-nudged.
+        assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+        assert!(payloads(&detail, "stall_nudged").is_empty());
+        let found = payloads(&detail, "stall_preempted");
+        assert_eq!(found.len(), preempted, "{prompt}: {found:?}");
+        if preempted == 1 {
+            assert_eq!(found[0]["threshold"], "idle_without_receipt_secs");
+            assert_eq!(found[0]["threshold_secs"], 3);
+            assert!(found[0]["idle_secs"].as_i64().unwrap() < 3, "{found:?}");
+        }
+        let stats = runtime::stats(&db, &Default::default()).unwrap();
+        let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
+        assert_eq!(idle["preempted"]["count"], preempted, "{stats}");
+        if preempted == 1 {
+            assert_eq!(idle["preempted"]["by_via"]["input"], 1, "{stats}");
+        }
+    }
+}
+
+/// A turn a person interrupted (Esc) ends with no `Stop` hook, so no idle
+/// marker follows its input: past the threshold from the input, with the
+/// agent not at work on the screen, the session is nudged as idle.
+#[test]
+fn an_input_whose_turn_never_ended_is_nudged_past_the_threshold() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        r#"
+commit work; idle
+sleep 0.3
+INPUT="$(dirname "$IDLE")/prompt-submit.json"
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"wait"}' > "$INPUT.tmp"
+mv "$INPUT.tmp" "$INPUT"
+while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+receipt "$(git rev-parse HEAD)"; idle; await_exit
+"#,
+    );
+    let options = SuperviseOptions {
+        stall: Some(dagq::domain::stall::StallConfig {
+            idle_without_receipt_secs: 2,
+            ..Default::default()
+        }),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let nudged = payloads(&detail, "stall_nudged");
+    assert_eq!(nudged.len(), 1, "{:?}", event_kinds(&detail));
+    assert!(nudged[0]["idle_secs"].as_i64().unwrap() >= 2, "{nudged:?}");
+    // The input itself came short of the threshold.
+    assert_eq!(payloads(&detail, "stall_preempted").len(), 1);
+    let resolved = payloads(&detail, "stall_resolved");
+    assert_eq!(resolved[0]["outcome"], "resolved_by_nudge", "{resolved:?}");
+}

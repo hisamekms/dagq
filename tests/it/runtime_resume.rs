@@ -1527,15 +1527,18 @@ fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
 }
 
 /// Task 285: a request the session never got (typed into a box that lost
-/// it) shows no sign of work within `start_wait`; with the input box empty
-/// it is sent once more, and the run goes on without waiting out the
-/// resume timeout.
+/// it) shows no sign of work within `[stall].send_confirm_secs` (here set
+/// to one second in the main checkout's `dagq.toml`, task 409); with the
+/// input box empty it is sent once more, and the run goes on without
+/// waiting out the resume timeout.
 #[test]
 fn a_lost_request_is_sent_again_after_no_sign_of_work() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    fs::write(repo.join("dagq.toml"), "[stall]\nsend_confirm_secs = 1\n").unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "stall"]);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
-    backend.start_wait = Duration::from_secs(1);
     backend.dropped_texts.store(1, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
     backend.resume_script_for(
@@ -1566,13 +1569,19 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
     count_resumes_of_parked(&db);
-    backend.start_wait = Duration::from_secs(1);
     backend.resume_timeout = Duration::from_secs(4);
     backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
     // It never gets the request, and exits at the /exit of the resume timeout.
     backend.resume_script_for(2, "await_exit");
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let options = SuperviseOptions {
+        stall: Some(dagq::domain::stall::StallConfig {
+            send_confirm_secs: 1,
+            ..Default::default()
+        }),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();

@@ -462,9 +462,6 @@ impl WorkspaceBackend for RecordingBackend<'_> {
     fn submit_check_interval(&self) -> Duration {
         self.inner.submit_check_interval()
     }
-    fn start_wait(&self) -> Duration {
-        self.inner.start_wait()
-    }
 }
 
 #[cfg(test)]

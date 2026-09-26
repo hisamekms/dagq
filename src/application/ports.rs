@@ -467,6 +467,18 @@ pub trait AgentSignals {
     /// What the idle marker's content says. A content the adapter cannot
     /// read still marks a stop.
     fn idle_hook(&self, content: &[u8]) -> IdleHook;
+    /// Who gave the input the input marker's content records (the
+    /// `prompt-submit.json` the agent's hook writes each time the session
+    /// takes an input, ADR-0043 decision 2). A provider whose hook writes
+    /// no such marker never has one to read.
+    fn input_source(&self, _content: &[u8]) -> InputSource {
+        InputSource::Unknown
+    }
+    /// The text of the input the input marker's content records, when it
+    /// says: matched against the texts the supervisor typed.
+    fn input_text(&self, _content: &[u8]) -> Option<String> {
+        None
+    }
     /// Whether the agent's input box is drawn with no dialog over it: text
     /// typed now reaches the agent (a booting session drops it).
     fn input_ready(&self, screen: &str) -> bool;
@@ -519,6 +531,20 @@ impl KnownDialog {
 pub struct DialogAnswer {
     pub dialog: KnownDialog,
     pub keys: Vec<&'static str>,
+}
+
+/// Who gave an input the session took, as [`AgentSignals::input_source`]
+/// reads its input marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    /// Text typed into the session: a person's, or the supervisor's (told
+    /// apart by the time of the supervisor's sends).
+    Typed,
+    /// Text the agent put in by itself, such as the notice that its
+    /// background work ended.
+    Agent,
+    /// The marker does not say.
+    Unknown,
 }
 
 /// The content of an idle marker, as [`AgentSignals::idle_hook`] read it.
@@ -726,11 +752,6 @@ pub trait WorkspaceBackend {
     /// screen is read for the text left in the input box.
     fn submit_check_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(1)
-    }
-    /// How long a session sent a request or an answer may show no sign of
-    /// work before the supervisor sends it again or asks the inbox.
-    fn start_wait(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(60)
     }
 }
 

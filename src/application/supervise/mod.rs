@@ -43,9 +43,9 @@ use tracing::{error, info, warn};
 
 use super::{
     AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
-    LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository, ResumeCandidate,
-    RunFiles, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation, Verifier,
-    WorkspaceBackend, WorkspaceTags, ask, dependency_graph,
+    InputSource, LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository,
+    ResumeCandidate, RunFiles, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation,
+    Verifier, WorkspaceBackend, WorkspaceTags, ask, dependency_graph,
     health::{lease_health, run_health},
     integrate::{self as integration, Integration, check_receipt},
     naming::{

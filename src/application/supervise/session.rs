@@ -684,7 +684,7 @@ impl SessionWatch {
                 // lease, so it is only noted (the ask then shows unclosed).
                 Ok(submission) => {
                     typed = Some(sent_at);
-                    self.stall.input_sent(sent_at);
+                    self.stall.input_sent(sent_at, Some(&text));
                     self.answer_start = Some(StartCheck::new(&what, &text, sent_at, &submission));
                     match sv.queue.ask_delivered(ask.id, &self.workspace) {
                         Ok(_) => {

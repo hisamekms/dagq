@@ -299,12 +299,32 @@ pub(super) fn start_sign(
     }
 }
 
+/// How long a sent text may show no sign of being taken before the
+/// supervisor reads the screen for it: `[stall].send_confirm_secs`
+/// (ADR-0043 decision 2).
+pub(super) fn confirm_wait(stall: &StallConfig) -> Duration {
+    Duration::from_secs(u64::try_from(stall.send_confirm_secs).unwrap_or(0))
+}
+
+/// The files whose writing after a send shows the session took it: its
+/// idle marker and its receipt. The input marker (the agent's hook writes
+/// it as the input is taken; a provider without one never has it) is read
+/// apart: a notice the agent put in by itself is not the text taken.
+fn taken_marks(run: &TaskRun, idle_marker: &Path) -> Vec<PathBuf> {
+    let mut marks = vec![idle_marker.to_path_buf()];
+    if let Some(receipt) = run.receipt_path() {
+        marks.push(PathBuf::from(receipt));
+    }
+    marks
+}
+
 /// Watches a request or an answer sent to a live session until the session
-/// shows a sign of work: its idle marker written after it, the agent at
-/// work, or its transcript changed. With none after `start_wait`, a text the
-/// input box lost is sent once more (`submit_resent`); otherwise, or when
-/// that is lost too, the run records `submit_not_started` and the inbox is
-/// asked, instead of waiting out the resume timeout.
+/// shows a sign of work: its idle marker, input marker or receipt written
+/// after it, the agent at work, or its transcript changed. With none after
+/// [`confirm_wait`], a text the input box lost is sent once more
+/// (`submit_resent`); otherwise, or when that is lost too, the run records
+/// `submit_not_started` and the inbox is asked, instead of waiting out the
+/// resume timeout.
 #[derive(Debug, Clone)]
 pub(super) struct StartCheck {
     what: String,
@@ -338,6 +358,37 @@ impl StartCheck {
         }
     }
 
+    /// Whether the screen is to be read for a sign: the check is not done,
+    /// `wait` passed since the send, and none of `marks` nor the input
+    /// marker `input` (unless a notice of the agent's own) was written
+    /// after it. A mark written after it is the text taken: the check is
+    /// done, with no Enter sent again and no ask.
+    fn due(
+        &mut self,
+        files: &dyn RunFiles,
+        wait: Duration,
+        marks: &[PathBuf],
+        input: Option<InputMarker>,
+    ) -> bool {
+        if self.done || self.sent.elapsed() < wait {
+            return false;
+        }
+        let input_taken = input.is_some_and(|input| {
+            input.source != InputSource::Agent && input.modified > self.sent_at
+        });
+        if input_taken
+            || marks.iter().any(|mark| {
+                files
+                    .modified(mark)
+                    .is_ok_and(|modified| modified > self.sent_at)
+            })
+        {
+            self.done = true;
+            return false;
+        }
+        true
+    }
+
     /// One observation of the session in `workspace`.
     pub(super) fn poll(
         &mut self,
@@ -346,16 +397,12 @@ impl StartCheck {
         workspace: &str,
         idle_marker: &Path,
     ) -> Result<()> {
-        let wait = sv.cmux.start_wait();
+        let wait = confirm_wait(&sv.stall);
         if self.done || self.sent.elapsed() < wait {
             return Ok(());
         }
-        if sv
-            .files
-            .modified(idle_marker)
-            .is_ok_and(|modified| modified > self.sent_at)
-        {
-            self.done = true;
+        let input = InputMarker::read(&*sv.files, sv.signals, idle_marker)?;
+        if !self.due(&*sv.files, wait, &taken_marks(run, idle_marker), input) {
             return Ok(());
         }
         let screen = match sv.cmux.capture(workspace) {
@@ -715,6 +762,104 @@ mod tests {
         assert!(check.done);
         assert_eq!(check.submitted.as_deref(), Some("s"));
         assert_eq!(Input::Exit.name(), "exit");
+    }
+
+    /// ADR-0043 decision 2: the check waits `[stall].send_confirm_secs`
+    /// (the value of `dagq.toml` the supervisor loaded, or its default),
+    /// not a wait of the backend's.
+    #[test]
+    fn a_start_check_waits_send_confirm_secs() {
+        assert_eq!(
+            confirm_wait(&StallConfig::default()),
+            Duration::from_secs(60)
+        );
+        let mut stall = StallConfig::default();
+        stall.set("send_confirm_secs", 5).unwrap();
+        let wait = confirm_wait(&stall);
+        assert_eq!(wait, Duration::from_secs(5));
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let mut check = StartCheck::new("request", TEXT, files.now(), &Submission::Submitted(None));
+        // Within the wait the screen is not read.
+        assert!(!check.due(&files, wait, &[], None));
+        // Past it, with no mark written, it is.
+        check.sent = Instant::now().checked_sub(Duration::from_secs(6)).unwrap();
+        assert!(check.due(&files, wait, &[], None));
+        assert!(!check.done);
+    }
+
+    /// A send is taken once the session's input marker (its
+    /// `prompt-submit.json`), idle marker or receipt is written after it:
+    /// the check ends with no screen read, no Enter sent again and no ask,
+    /// even when only the input marker moved (the session works on it). A
+    /// notice the agent put in by itself (its background work ended) is
+    /// not the text taken.
+    #[test]
+    fn a_send_is_taken_by_any_mark_written_after_it() {
+        use crate::application::memory_files::MemoryFiles;
+        let idle = Path::new("/run/idle.json");
+        let receipt = Path::new("/run/receipt.json");
+        assert_eq!(
+            input_marker_path(idle),
+            Path::new("/run/prompt-submit.json")
+        );
+        let marks = [idle.to_path_buf(), receipt.to_path_buf()];
+        let input = |at: SystemTime, source: InputSource| {
+            Some(InputMarker {
+                modified: at,
+                source,
+                text: None,
+            })
+        };
+        for written in [None, Some(idle), Some(receipt)] {
+            let files = MemoryFiles::default();
+            let sent_at = files.now();
+            let before = sent_at - Duration::from_secs(30);
+            let after = sent_at + Duration::from_secs(1);
+            // Marks from before the send do not count.
+            for mark in &marks {
+                files.put(mark, before, "{}");
+            }
+            let mut check = StartCheck::new("request", TEXT, sent_at, &Submission::Submitted(None));
+            assert!(check.due(
+                &files,
+                Duration::ZERO,
+                &marks,
+                input(before, InputSource::Typed)
+            ));
+            // A notice of the agent's own after the send is no sign.
+            assert!(check.due(
+                &files,
+                Duration::ZERO,
+                &marks,
+                input(after, InputSource::Agent)
+            ));
+            assert!(!check.done);
+            let taken = match written {
+                // Only the input marker moved.
+                None => input(after, InputSource::Typed),
+                Some(mark) => {
+                    files.put(mark, after, "{}");
+                    None
+                }
+            };
+            assert!(
+                !check.due(&files, Duration::ZERO, &marks, taken),
+                "{written:?}"
+            );
+            assert!(check.done, "{written:?}");
+            // Nothing more is checked.
+            assert!(!check.due(&files, Duration::ZERO, &marks, taken));
+        }
+        // A provider without the input marker: an unknown source counts.
+        let files = MemoryFiles::default();
+        let sent_at = files.now();
+        let mut check = StartCheck::new("request", TEXT, sent_at, &Submission::Submitted(None));
+        assert!(!check.due(
+            &files,
+            Duration::ZERO,
+            &marks,
+            input(sent_at + Duration::from_secs(1), InputSource::Unknown)
+        ));
     }
 
     #[test]
