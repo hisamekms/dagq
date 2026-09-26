@@ -41,7 +41,7 @@ use crate::{
     VERSION,
     domain::{
         HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration,
-        run_env::RunEnvCheck,
+        marks::SUPERVISOR_STOPPED, run_env::RunEnvCheck,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -306,7 +306,7 @@ pub fn up(
     let mut existing = HashSet::new();
     for registration in queue.supervisors()? {
         if !processes.alive(registration.pid) {
-            queue.deregister_supervisor(&registration.token)?;
+            prune_supervisor(queue, &registration)?;
             pruned.push(json!({"token": registration.token, "pid": registration.pid}));
             continue;
         }
@@ -729,7 +729,7 @@ once `status` shows it gone",
         .collect();
     for registration in live {
         if surviving.contains(&registration.token) {
-            queue.deregister_supervisor(&registration.token)?;
+            prune_supervisor(queue, registration)?;
         }
     }
     // The drain is over, so every workspace of a replaced supervisor is
@@ -1179,6 +1179,33 @@ fn supervise_arguments(
     Ok(arguments)
 }
 
+/// Remove the registration of a supervisor that did not remove its own
+/// (dead, killed, or gone silent), and record its stop (ADR-0051 decision
+/// 10) with the row's last heartbeat, which `kpi` ends its life at: the
+/// process could not record its own, and the row that kept the heartbeat
+/// is gone after this. A row the process removed meanwhile (it recorded
+/// its own stop) is not recorded again. The heartbeat is read again, as
+/// `registration` may be from before a drain.
+fn prune_supervisor(queue: &dyn Queue, registration: &SupervisorRegistration) -> Result<()> {
+    let registration = queue
+        .supervisors()?
+        .into_iter()
+        .find(|current| current.token == registration.token)
+        .unwrap_or_else(|| registration.clone());
+    if queue.deregister_supervisor(&registration.token)? {
+        queue.record_queue_event(
+            SUPERVISOR_STOPPED,
+            json!({
+                "supervisor": registration.token,
+                "dagq_version": registration.binary_version,
+                "outcome": "pruned",
+                "last_heartbeat_at": registration.heartbeat_at,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 fn fresh(registration: &SupervisorRegistration, processes: &dyn ProcessControl, now: i64) -> bool {
     processes.alive(registration.pid) && now - registration.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
 }
@@ -1375,7 +1402,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         let mut pruned = Vec::new();
         if options.force {
             for registration in &dead {
-                queue.deregister_supervisor(&registration.token)?;
+                prune_supervisor(queue, registration)?;
                 pruned.push(json!({"token": registration.token, "pid": registration.pid}));
             }
         }
@@ -1409,13 +1436,13 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     if options.force {
         for registration in &live {
             processes.kill(registration.pid)?;
-            queue.deregister_supervisor(&registration.token)?;
+            prune_supervisor(queue, registration)?;
         }
         // The dead ones go too, so no row is left pointing at a workspace
         // this call has just closed.
         let mut pruned = Vec::new();
         for registration in &dead {
-            queue.deregister_supervisor(&registration.token)?;
+            prune_supervisor(queue, registration)?;
             pruned.push(json!({"token": registration.token, "pid": registration.pid}));
         }
         return Ok(json!({

@@ -225,6 +225,18 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
     );
     assert!(queue.supervisors().unwrap().is_empty());
     assert!(processes.killed.lock().unwrap().is_empty());
+    // The dead one could not record its stop, so the prune does, with the
+    // row's last heartbeat `kpi` ends its life at (ADR-0051 decision 10).
+    let stops: Vec<_> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "supervisor_stopped")
+        .collect();
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0].payload["supervisor"], "dead");
+    assert_eq!(stops[0].payload["outcome"], "pruned");
+    assert!(stops[0].payload["last_heartbeat_at"].is_i64(), "{stops:?}");
 }
 
 /// A queue can hold supervisors of both modes at once: the launchd one is

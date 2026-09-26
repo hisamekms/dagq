@@ -24,11 +24,17 @@ pub fn kpi(
     let events = queue.all_events()?;
     let goals = queue.task_goals()?;
     let kinds = queue.task_kinds()?;
+    let heartbeats = queue
+        .supervisors()?
+        .into_iter()
+        .map(|registration| (registration.token, registration.heartbeat_at))
+        .collect();
     derive(
         &KpiInput {
             events: &events,
             goals: &goals,
             kinds: &kinds,
+            heartbeats: &heartbeats,
             now,
             utc_offset_secs: host.utc_offset_secs,
             cores: host.cores,

@@ -46,7 +46,7 @@ related:
 | `first_pass_rate` | 期間に完了したtask（着地したrun）のうち、runが1つで、そのrunの`resume_started`・`revise_requested`・`integration_deferred`が0のもの | runの層 |
 | `revise_rate` | 着地したrunのうち`revise_requested`があったもの | runの層 |
 | `conflict_rate` | `integrate`を試みたrunのうち`rebase_conflict`で延期されたことがあるもの | runの層 |
-| `verification_failed_rate` | 終わったrunの`integration_rebased`（検証に進んだ試行）のうち、`verification_failed`で延期されたもの | runの層 |
+| `verification_failed_rate` | 終わったrunの`integrate`の試行のうち検証コマンドを実行したもの（`phase: integration`の`verification_command`を持つ`attempt`の数。rebaseが空だった・worktreeがcleanでなかったなど、検証の前に止まった試行は数えない）のうち、`verification_failed`で延期されたもの。延期は検証コマンドの失敗の後にだけ起きるので、分子の試行は分母に入る | runの層 |
 | `resumes_per_run` | 終わったrunの`resume_started`の平均。理由ごとは`details.resume_outcomes` | runの層 |
 | `failed_rate` | 終わったrunのうち`failed` / `interrupted` | runの層 |
 | `session_open.worker` / `session_active.worker` | 終わったrunのworker sessionの開いている時間・稼働時間（task 385・386）。記録の無いrunは標本にしない | runの層 |
@@ -57,7 +57,7 @@ related:
 | `max_load_avg` | 期間のclaim時のload averageと`backend_call_failed`の`load_avg`の最大（`value`）と、claim時の分布 | `all` |
 | `auto_repairs` | 期間の`auto_repaired`の数。`layer`ごとは`details.auto_repairs_by_layer` | `all` |
 | `verify_command.<コマンド>` | `integrate`の検証コマンドごとの秒 | `all` |
-| `slot_usage` | runがslotを占めた時間 ÷ （`parallel` × supervisorが生きていた時間）。runはclaimから終わり（`run_integrated`、`succeeded` / `failed` / `interrupted`）まで、`run_waiting_started`→`run_slot_regained`を除く。supervisorは`supervisor_started`から、同じsupervisorの`supervisor_stopped`か次の`supervisor_started`（どのsupervisorでも）か今まで。runの占有はsupervisorが生きていた区間に限る（印の記録より前と、終わりの記録が無いrunを数えない）。supervisorを複数同時に動かすと分母が小さく出る。staleになって停止の印も次の起動の印も無いsupervisorは今まで生きていたことになり、分母が大きく出る（heartbeatは記録に残らない）。`n`は占有のあったrun | `all` |
+| `slot_usage` | runがslotを占めた時間 ÷ （`parallel` × supervisorが生きていた時間）。runはclaimから終わり（`run_integrated`、`succeeded` / `failed` / `interrupted`）まで、`run_waiting_started`→`run_slot_regained`を除く。supervisorは`supervisor_started`から、次のうち最も早いものまで: 次の`supervisor_started`（どのsupervisorでも）、同じsupervisorの`supervisor_stopped`（`up` / `down`が登録を消したときの印は`last_heartbeat_at`の時刻）、`supervisors`表に残る登録のheartbeatがstale（`HEARTBEAT_TIMEOUT_SECS`より古い）ならその`heartbeat_at`、今。どれも無く登録も消えている（停止の印を残さずに行が消えた）supervisorは、そのsupervisorの名を`supervisor`に持つ最後のeventで閉じる。生きているsupervisor（heartbeatが新しい登録）は今まで開いたまま。runの占有はsupervisorが生きていた区間に限る（印の記録より前と、終わりの記録が無いrunを数えない）。supervisorを複数同時に動かすと分母が小さく出る。`n`は占有のあったrun | `all` |
 | `candidates` | `candidates_sampled`（`candidates`・`free_slots`・`ready`）の時間で重み付けた平均（`value`）と最大、空きslotがあるのに`candidates`が0で`ready`が残った秒（`details.candidates.starved_secs`） | `all` |
 | `findings_open` / `finding_resolve_time` | 期間の終わりに`open` / `proposed`のfinding（`finding_recorded`と`finding_status_changed`から）、期間に`resolved`になったものの最初の記録からの秒。記録・解決の数は`details.findings` | `all` |
 | `improvement_proposals` | 記録が無い（ADR-0051の決定25の数え方の実装が無い）ので値はnull | `all` |

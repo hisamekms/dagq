@@ -18,6 +18,8 @@ struct Queue {
     events: Vec<RunEvent>,
     kinds: HashMap<TaskId, Option<TaskKind>>,
     goals: HashMap<TaskId, Option<GoalId>>,
+    /// The registered supervisors' last heartbeats.
+    heartbeats: HashMap<String, i64>,
 }
 
 /// How one run went.
@@ -127,6 +129,13 @@ impl Queue {
         self.push(
             task,
             id,
+            "verification_command",
+            json!({"phase": "integration", "attempt": 1, "index": 1, "exit_code": 0}),
+            receipt + 60,
+        );
+        self.push(
+            task,
+            id,
             "run_integrated",
             json!({"status": "integrated"}),
             receipt + 100,
@@ -170,6 +179,7 @@ impl Queue {
                 events: &self.events,
                 goals: &self.goals,
                 kinds: &self.kinds,
+                heartbeats: &self.heartbeats,
                 now,
                 utc_offset_secs: JST,
                 cores: Some(4),
@@ -804,6 +814,7 @@ fn compares_two_explicit_windows() {
             events: &queue.events,
             goals: &queue.goals,
             kinds: &queue.kinds,
+            heartbeats: &queue.heartbeats,
             now: MONDAY + 2 * DAY,
             utc_offset_secs: 0,
             cores: None,
@@ -842,6 +853,7 @@ fn one_window_of_any_length() {
             events: &queue.events,
             goals: &queue.goals,
             kinds: &queue.kinds,
+            heartbeats: &queue.heartbeats,
             now: MONDAY + DAY,
             utc_offset_secs: 0,
             cores: None,
@@ -963,6 +975,125 @@ fn derives_the_queue_kpis_of_a_window() {
     assert_eq!(measure(before, "slot_usage", ALL).value, None);
     assert_eq!(before.window.unavailable["candidates"], "no_samples");
     assert_eq!(measure(before, "landings", ALL).value, Some(0.0));
+}
+
+/// The slot usage of Monday with one run holding a slot for two hours
+/// under a supervisor of two slots started at midnight, once `alive`
+/// wrote its end (or left it out).
+fn monday_slot_usage(alive: impl FnOnce(&mut Queue)) -> Option<f64> {
+    let mut queue = Queue::default();
+    start(&mut queue, 2, MONDAY);
+    queue.run(&Run::new(
+        1,
+        Some(TaskKind::Runtime),
+        MONDAY + HOUR,
+        2 * HOUR - 100,
+    ));
+    alive(&mut queue);
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+    measure(result.periods.last().unwrap(), "slot_usage", ALL).value
+}
+
+/// A supervisor that went stale with neither its stop nor a later start
+/// ends at its last heartbeat (ADR-0051 decision 10), not now; a live one
+/// is alive until now.
+#[test]
+fn a_stale_supervisor_ends_at_its_last_heartbeat() {
+    // Two hours of one run in four hours of two slots.
+    let stale = monday_slot_usage(|queue| {
+        queue.heartbeats.insert("s".to_owned(), MONDAY + 4 * HOUR);
+    });
+    assert_eq!(stale, Some(0.25));
+    // Alive (its heartbeat fresh at now): the whole day.
+    let live = monday_slot_usage(|queue| {
+        queue.heartbeats.insert("s".to_owned(), MONDAY + DAY - 1);
+    });
+    assert_eq!(live, Some(round3(2.0 / 48.0)));
+    // `up` or `down` pruned its row: the stop they recorded ends it at the
+    // row's last heartbeat, not at the prune.
+    let pruned = monday_slot_usage(|queue| {
+        queue.queue_event(
+            marks::SUPERVISOR_STOPPED,
+            json!({"supervisor": "s", "outcome": "pruned", "last_heartbeat_at": MONDAY + 4 * HOUR}),
+            MONDAY + 10 * HOUR,
+        );
+    });
+    assert_eq!(pruned, Some(0.25));
+    // Its row went without a stop: it ends at the last event it recorded.
+    let gone = monday_slot_usage(|queue| {
+        queue.queue_event(
+            window::CANDIDATES_SAMPLED,
+            json!({"supervisor": "s", "candidates": 0, "free_slots": 2, "ready": 0}),
+            MONDAY + 4 * HOUR,
+        );
+    });
+    assert_eq!(gone, Some(0.25));
+    // A later start still ends it first.
+    let restarted = monday_slot_usage(|queue| {
+        queue.heartbeats.insert("s".to_owned(), MONDAY + 6 * HOUR);
+        queue.queue_event(
+            marks::SUPERVISOR_STARTED,
+            json!({"supervisor": "t", "parallel": 2}),
+            MONDAY + 4 * HOUR,
+        );
+        queue.queue_event(
+            marks::SUPERVISOR_STOPPED,
+            json!({"supervisor": "t"}),
+            MONDAY + 4 * HOUR,
+        );
+    });
+    assert_eq!(restarted, Some(0.25));
+}
+
+/// Only the `integrate` attempts that ran a verification command count
+/// towards `verification_failed_rate`: one stopped before its commands
+/// (an empty rebase, a dirty worktree) does not.
+#[test]
+fn verification_failed_rate_counts_the_attempts_that_verified() {
+    let mut queue = Queue::default();
+    let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, HOUR));
+    let receipt = landed - 100;
+    let id = format!("{:08x}-0000-4000-8000-{:012x}", 1, MONDAY + HOUR);
+    let (task, id) = (Some(1), Some(id.as_str()));
+    let attempt = |queue: &mut Queue, at: i64, verified: Option<i64>, code: &str| {
+        queue.push(task, id, "integration_started", json!({}), at);
+        queue.push(task, id, "integration_rebased", json!({}), at + 1);
+        if let Some(number) = verified {
+            queue.push(
+                task,
+                id,
+                "verification_command",
+                json!({"phase": "integration", "attempt": number, "index": 1, "exit_code": 1}),
+                at + 2,
+            );
+        }
+        queue.push(
+            task,
+            id,
+            "integration_deferred",
+            json!({"code": code}),
+            at + 3,
+        );
+    };
+    attempt(&mut queue, receipt + 21, None, "rebase_empty");
+    attempt(&mut queue, receipt + 25, None, "dirty_worktree");
+    attempt(&mut queue, receipt + 30, Some(3), "verification_failed");
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+    let rate = measure(
+        result.periods.last().unwrap(),
+        "verification_failed_rate",
+        ALL,
+    );
+    // The failed attempt 3 and the landing's attempt 1 of the four rebased.
+    assert_eq!((rate.n, rate.value), (2, Some(0.5)));
 }
 
 /// With `--goal`, only that goal's runs count.

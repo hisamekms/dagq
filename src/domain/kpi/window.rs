@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float};
 use crate::domain::{
-    DraftOrigin, EventId, GoalId, RunEvent, RunId, TaskId, TaskKind, event_attention,
+    DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskId, TaskKind,
+    event_attention,
     marks::{self, Mark},
     plan_quality::plan_quality,
     stats::{
@@ -64,8 +65,9 @@ pub(super) struct Context<'a> {
     first_ready: HashMap<TaskId, i64>,
     runs_per_task: HashMap<TaskId, HashSet<RunId>>,
     revises: HashMap<RunId, usize>,
-    /// The `integrate` attempts that reached their verification.
-    verify_attempts: HashMap<RunId, usize>,
+    /// The `integrate` attempts that ran a verification command, by their
+    /// `attempt` (an attempt stopped before its commands is not one).
+    verify_attempts: HashMap<RunId, HashSet<Option<i64>>>,
     /// When each finished run (of the goal) finished, ascending.
     pub finishes: Vec<i64>,
     /// The supervisors' lives: start, end and `parallel`.
@@ -83,6 +85,84 @@ fn overlap((from, to): (i64, i64), start: i64, end: i64) -> i64 {
     (to.min(end) - from.max(start)).max(0)
 }
 
+/// The supervisors' lives (decision 10): start, end and `parallel`, in
+/// unix ms. A life ends at the first of the next start of any supervisor (a
+/// handoff, or a restart), its own stop (a stop `up` or `down` recorded for
+/// a row it pruned ends at the row's last heartbeat), the last heartbeat
+/// of its registration once that is stale, and now. A supervisor with none
+/// of those and no registration left (its row went without a stop) ends at
+/// the last event it recorded.
+fn supervisor_lives(
+    events: &[RunEvent],
+    heartbeats: &HashMap<String, i64>,
+    now: i64,
+) -> Vec<(i64, i64, i64)> {
+    let now_ms = now * 1000;
+    let supervisor = |event: &RunEvent| {
+        event
+            .payload
+            .get("supervisor")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let starts: Vec<(i64, i64, Option<String>)> = events
+        .iter()
+        .filter(|event| event.kind == marks::SUPERVISOR_STARTED)
+        .filter_map(|event| {
+            Some((
+                event_ms(event)?,
+                event.payload.get("parallel").and_then(Value::as_i64)?,
+                supervisor(event),
+            ))
+        })
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, (start, parallel, token))| {
+            let start = *start;
+            let own = |event: &&RunEvent| token.is_some() && supervisor(event) == *token;
+            let next = starts.get(index + 1).map(|next| next.0);
+            let stop = events
+                .iter()
+                .filter(|event| event.kind == marks::SUPERVISOR_STOPPED)
+                .filter(own)
+                .filter_map(|event| {
+                    let at = event_ms(event)?;
+                    let heartbeat = event
+                        .payload
+                        .get("last_heartbeat_at")
+                        .and_then(Value::as_i64)
+                        .map(|secs| (secs * 1000).max(start));
+                    Some((at, heartbeat.map_or(at, |heartbeat| heartbeat.min(at))))
+                })
+                .find(|&(at, _)| at >= start)
+                .map(|(_, end)| end);
+            let registration = token.as_ref().and_then(|token| heartbeats.get(token));
+            let stale = registration
+                .filter(|&&heartbeat| now - heartbeat > HEARTBEAT_TIMEOUT_SECS)
+                .map(|&heartbeat| heartbeat * 1000);
+            let end = [next, stop, stale]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or_else(|| {
+                    if registration.is_some() || token.is_none() {
+                        now_ms
+                    } else {
+                        events
+                            .iter()
+                            .filter(own)
+                            .filter_map(event_ms)
+                            .max()
+                            .unwrap_or(start)
+                    }
+                });
+            (start, end.min(now_ms).max(start), *parallel)
+        })
+        .collect()
+}
+
 impl<'a> Context<'a> {
     pub fn new(input: &KpiInput<'a>, goal_id: Option<GoalId>) -> Self {
         let events = input.events;
@@ -90,7 +170,7 @@ impl<'a> Context<'a> {
         let mut first_ready = HashMap::new();
         let mut runs_per_task: HashMap<TaskId, HashSet<RunId>> = HashMap::new();
         let mut revises: HashMap<RunId, usize> = HashMap::new();
-        let mut verify_attempts: HashMap<RunId, usize> = HashMap::new();
+        let mut verify_attempts: HashMap<RunId, HashSet<Option<i64>>> = HashMap::new();
         let mut claims: Vec<(RunId, TaskId, i64)> = Vec::new();
         let mut ends: HashMap<RunId, i64> = HashMap::new();
         let mut waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
@@ -117,8 +197,11 @@ impl<'a> Context<'a> {
                     }
                 }
                 "revise_requested" => *revises.entry(run_id.clone()).or_default() += 1,
-                "integration_rebased" => {
-                    *verify_attempts.entry(run_id.clone()).or_default() += 1;
+                "verification_command" if event.payload["phase"] == "integration" => {
+                    verify_attempts
+                        .entry(run_id.clone())
+                        .or_default()
+                        .insert(event.payload["attempt"].as_i64());
                 }
                 RUN_WAITING_STARTED => {
                     if let Some(at) = at {
@@ -161,38 +244,7 @@ impl<'a> Context<'a> {
                 Occupancy { task_id, spans }
             })
             .collect();
-        // A supervisor's life ends at its stop, or at the next start of any
-        // supervisor (a handoff, or a restart after it went stale without a
-        // stop), or now.
-        let starts: Vec<(i64, i64, Option<&str>)> = events
-            .iter()
-            .filter(|event| event.kind == marks::SUPERVISOR_STARTED)
-            .filter_map(|event| {
-                Some((
-                    event_ms(event)?,
-                    event.payload.get("parallel").and_then(Value::as_i64)?,
-                    event.payload.get("supervisor").and_then(Value::as_str),
-                ))
-            })
-            .collect();
-        let supervisors = starts
-            .iter()
-            .enumerate()
-            .map(|(index, &(start, parallel, supervisor))| {
-                let next = starts.get(index + 1).map_or(now_ms, |next| next.0);
-                let stop = events
-                    .iter()
-                    .filter(|event| {
-                        event.kind == marks::SUPERVISOR_STOPPED
-                            && supervisor.is_some()
-                            && event.payload.get("supervisor").and_then(Value::as_str) == supervisor
-                    })
-                    .filter_map(event_ms)
-                    .find(|&at| at >= start)
-                    .unwrap_or(now_ms);
-                (start, next.min(stop).min(now_ms).max(start), parallel)
-            })
-            .collect();
+        let supervisors = supervisor_lives(events, input.heartbeats, input.now);
         let mut context = Self {
             events,
             goals: input.goals,
@@ -657,7 +709,11 @@ impl<'a> Context<'a> {
         ));
         let verified: usize = runs
             .iter()
-            .map(|run| self.verify_attempts.get(&run.run_id).copied().unwrap_or(0))
+            .map(|run| {
+                self.verify_attempts
+                    .get(&run.run_id)
+                    .map_or(0, HashSet::len)
+            })
             .sum();
         let failed_verifications: usize = runs
             .iter()

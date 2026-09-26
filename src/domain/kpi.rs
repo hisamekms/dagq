@@ -268,6 +268,9 @@ pub struct KpiInput<'a> {
     pub events: &'a [RunEvent],
     pub goals: &'a HashMap<TaskId, Option<GoalId>>,
     pub kinds: &'a HashMap<TaskId, Option<TaskKind>>,
+    /// The registered supervisors' last heartbeats (unix seconds), by
+    /// token: a stale one ends that supervisor's life (decision 10).
+    pub heartbeats: &'a HashMap<String, i64>,
     /// Unix seconds.
     pub now: i64,
     /// The host's time zone, seconds east of UTC.

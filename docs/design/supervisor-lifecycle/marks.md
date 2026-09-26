@@ -4,8 +4,8 @@ type: design
 title: "変更の印（`mark` / `marks`）"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -27,7 +27,7 @@ related:
 | kind | 書くもの | payload |
 | --- | --- | --- |
 | `supervisor_started` | supervisorの起動と、handoffでexecした次のprocess（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10）。`stall_config_loaded`の直後に1件 | `supervisor`（token）、`dagq_version`（build識別子）、`parallel`、`mode`（`up`がsupervisorの引数に渡すhiddenの`--mode launchd` / `--mode in_cmux`。`up`は登録を見てから登録の`mode`を書くので、起動の時点の値は引数から取る。handoffのexecは`--mode`を落とす（引き継ぐbinaryが`--mode`を知らなくても起動できるように）ので、handoffでは`up`が書いた登録の`mode`。手で起動したsupervisorは`null`）、`auto_update`、`handoff`（bool）、`previous_version`（handoffのときexecの前のbuild識別子） |
-| `supervisor_stopped` | loopが終わって登録を消すsupervisor（`down`のdrain、`--once`の終わり、失敗）。handoffでexecするprocessは書かず、次のprocessの`supervisor_started`（`handoff: true`）が引き継ぎを表す。heartbeatに失敗したsupervisorとstaleになったsupervisorは書けない | `supervisor`、`dagq_version`、`outcome`（`stopped` / `failed`） |
+| `supervisor_stopped` | loopが終わって登録を消すsupervisor（`down`のdrain、`--once`の終わり、失敗）。handoffでexecするprocessは書かず、次のprocessの`supervisor_started`（`handoff: true`）が引き継ぎを表す。heartbeatに失敗したsupervisorとstaleになったsupervisorは書けないので、その登録を消す`up`（死んだ登録のprune）と`down`（`--force`、drainの後に残った行）が代わりに書く（`outcome: pruned`、登録の最後の`heartbeat_at`を`last_heartbeat_at`に。`kpi`はその時刻でsupervisorの区間を閉じる） | `supervisor`、`dagq_version`、`outcome`（`stopped` / `failed` / `pruned`）、`last_heartbeat_at`（`pruned`だけ。unix秒） |
 | `run_env_changed` | supervisorが起動時と周回のたびに（`[run.env]`のプログラムの検査と同じ場所で）、main checkoutの`dagq.toml`の`[run.env]`を書かれたまま（`${DAGQ_*}`を展開せずに）読み、正規化したhashがqueueの最新の`run_env_changed`の`hash`と違うときだけ1件 | `hash`（キーで並べた`KEY=VALUE\n`の並びを、queueの秘密のsaltで鍵付けしたSHA-256の先頭16桁）、`previous_hash`、`keys`（キーごとの`KEY=VALUE`の同じく鍵付きのhash。次の変化で変わったキーを名指すため）、`changed`（前のhashから変わった・足された・消えたキーの名前）、`supervisor` |
 | `mark_recorded` | `dagq mark <label>` | `label`、`note`、`at`（`--at`の時刻。無ければnull）、`by`（`DAGQ_ROLE`、無ければ`human`） |
 | `mark_retracted` | `dagq mark --retract <id>` | `mark`（取り消した印のevent ID）、`kind`、`label`、`by` |

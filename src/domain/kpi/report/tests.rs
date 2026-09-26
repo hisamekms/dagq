@@ -157,6 +157,7 @@ fn report(now: i64, at: i64, period: Period) -> Report {
             events: &events,
             goals: &goals,
             kinds: &kinds,
+            heartbeats: &HashMap::new(),
             now,
             utc_offset_secs: JST,
             cores: Some(4),
