@@ -12,7 +12,7 @@ Plain `doctor` is the compact form, one line's worth per supervisor and per run 
 
 ## Common cases
 
-- The supervisor gave the run up (`last_error` set, `lease` null, `runtime_error` event with `lease_released: true`, for example after the wrapper's heartbeat was lost and its process died; a wrapper whose process lives on is not given up but asked to `/exit`, and raised as a `stuck_exit` ask if it does not) while its session may still be running; the supervisor keeps serving other runs, and recovers the run itself once the session's processes are gone.
+- The supervisor gave the run up (`last_error` set, `lease` null, `runtime_error` event with `lease_released: true`, for example after the wrapper's heartbeat was lost and its process died; a wrapper whose process lives on is not given up but asked to `/exit`, and, when neither the runtime nor the recovery job gets it to exit, raised as a `stuck_exit` ask) while its session may still be running; the supervisor keeps serving other runs, and recovers the run itself once the session's processes are gone.
 - The supervisor was killed (lease stale, PID dead) while the sessions are still running.
 - The whole machine restarted (everything dead).
 - The supervisor is alive but its heartbeat stopped (the person stops it with `down --force`).
@@ -22,6 +22,6 @@ A `running` or `validating` run whose lease is stale while its wrapper is alive 
 
 ## recover
 
-`"$DAGQ" recover RUN_ID` prints `{"outcome": "recovered", "run": ...}` on success: the run is `interrupted` (an `integrating` run goes back to `awaiting_integration` instead, because its validated result is intact, and an `awaiting_integration` run that a dead supervisor still leases keeps its status and only loses the lease; land either as in `reference/review-by-hand.md`), a `run_recovered` event records what was checked, and that run's lease (if any) is deleted. Other runs, their leases and processes are untouched. The worktree, branch, cmux workspace, and run directory are kept, and the task stays `in_progress`. The next supervisor triages the `interrupted` run.
+`"$DAGQ" recover RUN_ID` prints `{"outcome": "recovered", "run": ...}` on success: the run is `interrupted` (an `integrating` run goes back to `awaiting_integration` instead, because its validated result is intact, and an `awaiting_integration` run that a dead supervisor still leases keeps its status and only loses the lease; land either as in `reference/review-by-hand.md`), a `run_recovered` event records what was checked, and that run's lease (if any) is deleted. Other runs, their leases and processes are untouched. The worktree, branch, cmux workspace, and run directory are kept, and the task stays `in_progress`. The next supervisor's recovery job takes the `interrupted` run.
 
 Recovery is refused while any process registered for that run is alive, its lease heartbeat is fresh, or its lease PID is alive. The person ends those first: `/exit` in the task's cmux workspace (`cmux workspace list` shows it by `workspace_id`), and stopping a hung supervisor process. Do not kill processes unless the person asks. Runs owned by a live supervisor are not orphans; leave them to it.
