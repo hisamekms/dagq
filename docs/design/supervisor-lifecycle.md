@@ -8,6 +8,7 @@ updated: 2026-09-27
 last_verified: 2026-09-27
 scope: runtime
 related:
+  - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
   - design-supervisor-lifecycle-disk-space
@@ -325,6 +326,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### `kpi`
 
 - [`kpi`](supervisor-lifecycle/kpi.md)（KPIを日・ISO週・taskの種類・claimの属性で集計し、前の期間と目標と比べ、変更の印の前後を比べる。[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)の決定1〜9・14〜19）
+
+### `report`
+
+- [KPIのレポート（`report`）](supervisor-lifecycle/report.md)（supervisorが日次でKPIのレポートをHTMLとJSONで`<queue dir>/reports/`に書き、`dagq report`で手でも書く。ADR-0051の決定20・21）
 
 ### `doctor`
 

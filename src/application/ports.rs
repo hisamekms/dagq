@@ -1057,6 +1057,15 @@ pub trait RunStore {
     fn task_titles(&self) -> Result<HashMap<TaskId, String>>;
     /// The kind of every task (none for a task without one), for `stats`.
     fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>>;
+    /// The findings `query` lists, larger impact first (`findings`), for
+    /// the KPI report's open findings.
+    fn findings(&self, query: &crate::domain::FindingQuery) -> Result<Vec<FindingView>>;
+    /// The reports recorded as written (`report_written`, ADR-0051
+    /// decision 20): each (period, label).
+    fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>>;
+    /// Record `report_written` with `payload` (its `period` and `label`)
+    /// unless the same report is recorded; `false` when it is.
+    fn record_report_written(&self, payload: serde_json::Value) -> Result<bool>;
     /// Where every draft the runtime or a job registered came from, for
     /// `stats`' `draft_flow`.
     fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>>;

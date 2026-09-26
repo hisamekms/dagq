@@ -9,6 +9,7 @@ last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
+  - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-stats
   - design-supervisor-lifecycle-marks
   - design-supervisor-lifecycle-run-environment
@@ -83,8 +84,8 @@ related:
 ## 目標（`targets`）
 
 - 設定は`[kpi]`（`min_samples` 既定5、`breach_periods` 既定3、`breach_weeks` 既定2、`max_improvement_proposals` 既定2）と`[kpi.targets."<KPI>"]`（`kind`（省略で`all`）、`stat`（`median` / `p90` / `value`。省略で値のKPIは`value`、分布のKPIは`median`）、`min` / `max`の少なくとも一方）。同じKPIの別の種類の目標は`[kpi.targets."<KPI>".<label>]`に書く。解析は`infrastructure::kpi_config`。
-- 置き場所はmain checkoutの`dagq.toml`（repositoryの方針。`load_kpi_settings`）と、host.toml（`<queue dir>/host.toml`と`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。queueのファイルがキーごと・目標ごとに優先。`load_host_kpi`。host.tomlの他の表（`[push]`・`[report]`）はここでは読み飛ばす）。host.tomlの値がdagq.tomlより優先し、`max_improvement_proposals`だけはdagq.tomlの値。どこから来たかは`config.sources`と各目標の`source`（`repository` / `host`）。既定の目標値は持たない。
-- 判定は`--last`の期間と、その前の日なら7日・週なら2週（`breach_periods` / `breach_weeks`の2倍の方が長ければその数）も含めて古い順に行う。完結した期間で、値があり`n`が`min_samples`以上（数えるKPIは`n`によらない）のものだけを判定し、目標を外れた判定が`breach_periods`（週は`breach_weeks`）回続けば`breach`、続きが足りなければ`missed`、最後の判定が目標内なら`ok`、1つも判定できなければ`not_judged`。判定できない期間は連続を切らず数えもしない。`streak`・`breach_since`と、並べた期間ごとの`value`・`n`・`judged`・`reason`（`partial` / `no_value` / `small_sample`）・`met`を出す。目標割れの始まりと解消のevent、push、observerのfindingは後続のtaskが持つ。
+- 置き場所はmain checkoutの`dagq.toml`（repositoryの方針。`load_kpi_settings`）と、host.toml（`<queue dir>/host.toml`と`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。queueのファイルがキーごと・目標ごとに優先。`load_host_kpi`。host.tomlの他の表（`[push]`・`[report]`）はここでは読み飛ばす。`[report]`は[レポート](report.md)が読む）。host.tomlの値がdagq.tomlより優先し、`max_improvement_proposals`だけはdagq.tomlの値。どこから来たかは`config.sources`と各目標の`source`（`repository` / `host`）。既定の目標値は持たない。
+- 判定は`--last`の期間と、その前の日なら7日・週なら2週（`breach_periods` / `breach_weeks`の2倍の方が長ければその数）も含めて古い順に行う。完結した期間で、値があり`n`が`min_samples`以上（数えるKPIは`n`によらない）のものだけを判定し、目標を外れた判定が`breach_periods`（週は`breach_weeks`）回続けば`breach`、続きが足りなければ`missed`、最後の判定が目標内なら`ok`、1つも判定できなければ`not_judged`。判定できない期間は連続を切らず数えもしない。`streak`・`breach_since`と、並べた期間ごとの`value`・`n`・`judged`・`reason`（`partial` / `no_value` / `small_sample`）・`met`を出す。目標割れの始まりと解消のevent、push、observerのfindingは後続のtaskが持つ。日次のHTMLとJSONのレポートは[レポート](report.md)（task 431）。
 
 ## 前後比較（`compare`）
 

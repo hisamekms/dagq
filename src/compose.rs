@@ -160,6 +160,10 @@ pub struct SuperviseOptions {
     pub disk: Option<crate::domain::disk::DiskConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// Write the KPI reports of each day and week under `<queue dir>/reports/`
+    /// (ADR-0051 decision 20): off unless asked for (`supervise
+    /// --report-daily`, on by default in the CLI).
+    pub report_daily: bool,
     /// The run files the supervisor works with; `None` is the local file
     /// system. Tests set it (a slow removal, task 405).
     pub files: Option<RunFilesPort>,
@@ -202,6 +206,7 @@ impl SuperviseOptions {
             load_average,
             disk: None,
             free_space: free_disk_bytes,
+            report_daily: false,
             files: None,
         }
     }
@@ -326,6 +331,13 @@ pub fn supervise_with_reviewer(
     };
     let review_db = db.clone();
     let review_material = move |task_id: TaskId| review(&review_db, task_id);
+    let reports = options.report_daily.then(|| {
+        let (db, checkout) = (db.clone(), main_checkout(&repository));
+        crate::application::supervise::ReportPort {
+            utc_offset: clock::local_utc_offset,
+            setup: Arc::new(move |now| report_setup(&db, Some(&checkout), None, now)),
+        }
+    });
     let ports = Ports {
         queues: Arc::new(SqliteOpener {
             db: db.clone(),
@@ -352,6 +364,7 @@ pub fn supervise_with_reviewer(
         load_average: options.load_average,
         free_space: options.free_space,
         host_versions,
+        reports,
         layout,
     };
     supervisor::supervise(&ports, &options.settings(stall, conflicts, disk))
@@ -607,24 +620,43 @@ impl OneShot {
         db: &Path,
         query: &crate::domain::kpi::KpiQuery,
     ) -> Result<Value> {
-        use crate::infrastructure::kpi_config::{host_wide_file, load_host_kpi};
         let now = self.generators.clock.now();
-        let repository = match bound_checkout(queue)? {
-            Some(checkout) => load_kpi_settings(&checkout)?,
-            None => None,
-        };
-        let queue_dir = db.parent().unwrap_or(Path::new("."));
-        let host = load_host_kpi(queue_dir, host_wide_file().as_deref())?;
-        let config = crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref());
+        let setup = report_setup(db, bound_checkout(queue)?.as_deref(), None, now)?;
         Ok(serde_json::to_value(crate::application::kpi::kpi(
             queue,
             now,
-            crate::application::kpi::Host {
-                utc_offset_secs: clock::local_utc_offset(now),
-                cores: clock::logical_cores(),
-            },
-            &config,
+            setup.host,
+            &setup.config,
             query,
+        )?)?)
+    }
+
+    /// `report` (ADR-0051 decision 21): the KPI report of the `period` that
+    /// holds `at` (now without; today's and this week's are partial),
+    /// made as the supervisor makes it and written under `out` (the
+    /// queue's `reports/` without), or with `print` only returned.
+    pub fn report_of(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        period: crate::domain::kpi::Period,
+        at: Option<crate::domain::stats::Cursor>,
+        out: Option<&Path>,
+        print: bool,
+    ) -> Result<Value> {
+        use crate::application::report;
+        let now = self.generators.clock.now();
+        let setup = report_setup(db, bound_checkout(queue)?.as_deref(), out, now)?;
+        let made = report::make(queue, &setup, now, period, at)?;
+        if print {
+            return Ok(serde_json::to_value(made)?);
+        }
+        Ok(serde_json::to_value(report::write(
+            &LocalRunFiles,
+            &setup,
+            &made,
+            period,
+            now,
         )?)?)
     }
 
@@ -1105,6 +1137,43 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
 /// directory, or the inspected root for a bare common directory.
 /// The main checkout of the repository the queue is bound to: the parent
 /// of its `.git`; `None` for a queue bound to none, or to a bare one.
+/// What the KPIs and their reports of the queue at `db` are made with at
+/// `now`: the `[kpi]` of `checkout`'s `dagq.toml` with the host's
+/// `host.toml` (the queue's, over the host-wide one) over it, the host's
+/// time zone and cores, the `[report]` retention of `host.toml`, and the
+/// reports' root (`out`, else `<queue dir>/reports/`).
+fn report_setup(
+    db: &Path,
+    checkout: Option<&Path>,
+    out: Option<&Path>,
+    now: i64,
+) -> Result<crate::application::report::ReportSetup> {
+    use crate::infrastructure::{
+        kpi_config::{host_wide_file, load_host_kpi},
+        report_config::load_host_report,
+    };
+    let repository = match checkout {
+        Some(checkout) => load_kpi_settings(checkout)?,
+        None => None,
+    };
+    let queue_dir = db.parent().unwrap_or(Path::new("."));
+    let host_wide = host_wide_file();
+    let host = load_host_kpi(queue_dir, host_wide.as_deref())?;
+    Ok(crate::application::report::ReportSetup {
+        root: out.map_or_else(|| queue_dir.join(REPORTS_DIR), Path::to_path_buf),
+        host: crate::application::kpi::Host {
+            utc_offset_secs: clock::local_utc_offset(now),
+            cores: clock::logical_cores(),
+        },
+        config: crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref()),
+        keep: load_host_report(queue_dir, host_wide.as_deref())?,
+        build: crate::VERSION.to_owned(),
+    })
+}
+
+/// The KPI reports' directory in the queue's (ADR-0051 decision 20).
+pub const REPORTS_DIR: &str = "reports";
+
 fn bound_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
     Ok(queue
         .repository_binding()?

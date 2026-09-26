@@ -171,3 +171,97 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("host.toml:2"));
 }
+
+/// `dagq report` in UTC with the host-wide `host.toml` under `config`.
+fn report(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
+        .env("TZ", "UTC")
+        .env("XDG_CONFIG_HOME", config)
+        .env_remove("DAGQ_ROLE");
+    if let Some(role) = role {
+        command.env("DAGQ_ROLE", role);
+    }
+    command
+        .arg("--db")
+        .arg(db)
+        .arg("report")
+        .args(args)
+        .bounded_output()
+        .unwrap()
+}
+
+/// `dagq report` writes the report of a day or week as the supervisor does,
+/// today's apart as partial, and returns the paths; it records nothing.
+#[test]
+fn report_writes_the_html_and_json_and_returns_their_paths() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    ok(&db, &["add", "first", "--kind", "runtime"]);
+    let run = |args: &[&str]| -> Value {
+        let output = report(None, &db, &config, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let today = run(&[]);
+    assert_eq!(today["period"], "day");
+    assert_eq!(today["partial"], true);
+    let label = today["label"].as_str().unwrap();
+    let html = Path::new(today["html"].as_str().unwrap());
+    let reports = db.parent().unwrap().join("reports");
+    assert_eq!(html, reports.join(format!("daily/{label}.partial.html")));
+    let page = std::fs::read_to_string(html).unwrap();
+    for external in [
+        "<script", "<link", "<img", "@import", "url(", "src=", "http://", "https://",
+    ] {
+        assert!(!page.contains(external), "{external}");
+    }
+    let json: Value =
+        serde_json::from_slice(&std::fs::read(today["json"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(json["report"]["label"], label);
+    assert!(Path::new(today["index"].as_str().unwrap()).exists());
+
+    // A finished week, into another directory.
+    let out = dir.path().join("out");
+    let week = run(&[
+        "--period",
+        "week",
+        "--at",
+        "2026-09-16T12:00:00Z",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(week["label"], "2026-W38");
+    assert_eq!(week["partial"], false);
+    assert!(out.join("weekly/2026-W38.html").exists());
+    assert!(out.join("index.html").exists());
+
+    let printed = run(&["--print", "json", "--at", "2026-09-23T12:00:00Z"]);
+    assert_eq!(printed["report"]["label"], "2026-09-23");
+    assert_eq!(printed["period"], "day");
+    assert!(!reports.join("daily/2026-09-23.json").exists());
+
+    // Nothing is recorded: the supervisor still writes its own.
+    let events = ok(&db, &["events", "--kind", "report_written"]);
+    assert_eq!(events["events"], json!([]), "{events}");
+    // The observer and the jobs do not write files.
+    for role in ["observer", "reviewer"] {
+        assert!(!report(Some(role), &db, &config, &[]).status.success());
+    }
+    assert!(
+        !report(None, &db, &config, &["--period", "month"])
+            .status
+            .success()
+    );
+    std::fs::write(
+        dir.path().join("host.toml"),
+        "[report]\nkeep_daily_days = 0\n",
+    )
+    .unwrap();
+    assert!(!report(None, &db, &config, &[]).status.success());
+}

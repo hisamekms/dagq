@@ -49,6 +49,7 @@ mod runtime_integrate;
 mod runtime_observer;
 mod runtime_recheck;
 mod runtime_repair;
+mod runtime_report;
 mod runtime_resume;
 mod runtime_review;
 mod runtime_run_env;

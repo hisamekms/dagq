@@ -510,6 +510,10 @@ enum Command {
         /// Also run the daily observation of the last 24 hours once a day.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         observe_daily: bool,
+        /// Write the KPI reports of each finished day and ISO week under the queue's reports/
+        /// on the first pass after local midnight (ADR-0051 decision 20).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        report_daily: bool,
         /// Maximum number of planners the runtime opens at once for proposals plan review sent
         /// back (apart from --parallel; planners a person opened do not count).
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
@@ -891,6 +895,26 @@ enum Command {
         /// Only the runs, asks and findings of tasks in this goal.
         #[arg(long = "goal")]
         goal_id: Option<i64>,
+    },
+    /// Write the KPI report of a day or ISO week (ADR-0051 decision 21) as the supervisor writes it
+    /// daily: `dagq kpi --period P --at <the period>` with the build, the time and the top open
+    /// findings, as JSON and as one self-contained HTML page (no script, CSS, font or image from
+    /// anywhere else), under the queue's reports/ (daily/YYYY-MM-DD, weekly/YYYY-Www; today's and
+    /// this week's are named .partial), then index.html and the [report] retention of host.toml.
+    /// Prints the paths written. Changes no queue state.
+    Report {
+        #[arg(long, default_value = "day", value_parser = ["day", "week"])]
+        period: String,
+        /// Event id, `@<unix seconds>` or an RFC 3339 time: the period that holds it (now
+        /// without).
+        #[arg(long)]
+        at: Option<dagq::domain::stats::Cursor>,
+        /// Write under this directory instead of the queue's reports/.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print the report as JSON instead of writing any file.
+        #[arg(long, value_parser = ["json"], conflicts_with = "out")]
+        print: Option<String>,
     },
     /// Report every unfinished run and supervisor, one line's worth each, without changing state.
     Doctor {
@@ -1367,7 +1391,8 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::Doctor { full } = cli.command {
         return one_shot.doctor(&db, full, common_dir.as_deref());
     }
-    let mut queue = if reads_only(&cli.command) {
+    // `report` writes files but no queue state.
+    let mut queue = if reads_only(&cli.command) || matches!(cli.command, Command::Report { .. }) {
         SqliteQueue::open_read_only(&db)?
     } else {
         SqliteQueue::open(&db)?
@@ -1909,6 +1934,7 @@ fn execute(cli: Cli) -> Result<Value> {
             log_dir: _,
             observe_interval,
             observe_daily,
+            report_daily,
             runtime_planners,
             planner_timeout,
             plugin_dir,
@@ -1930,6 +1956,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     3600
                 })),
                 observe_daily,
+                report_daily,
                 generators,
                 runtime_planners: usize::from(runtime_planners),
                 planner_timeout: Duration::from_secs(planner_timeout),
@@ -2156,6 +2183,19 @@ fn execute(cli: Cli) -> Result<Value> {
                 window_days: window,
                 goal_id: goal_id.map(GoalId::new),
             },
+        )?,
+        Command::Report {
+            period,
+            at,
+            out,
+            print,
+        } => one_shot.report_of(
+            &queue,
+            &db,
+            period.parse().map_err(anyhow::Error::msg)?,
+            at,
+            out.as_deref(),
+            print.is_some(),
         )?,
         Command::Stats {
             since,

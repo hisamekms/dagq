@@ -97,6 +97,7 @@ mod landing;
 mod plan_review;
 mod recheck;
 mod recovery;
+mod report;
 mod resume;
 mod revise;
 mod session;
@@ -108,6 +109,7 @@ mod update;
 mod waiting;
 
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
+pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
     deliver::*, dialog::*, exit::*, idle::*, jobs::*, recovery::*, resume::*, revise::*,
@@ -261,6 +263,9 @@ pub struct Ports<'a> {
     /// The versions of Claude Code (given `--claude`) and of the host's
     /// `rustc` (run in the given checkout) a claim records (task 197).
     pub host_versions: fn(&Path, &Path) -> HostVersions,
+    /// Writes the daily KPI reports (ADR-0051 decision 20); `None` writes
+    /// none.
+    pub reports: Option<ReportPort>,
     pub layout: Layout,
 }
 
@@ -477,6 +482,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         max_load: settings.max_load,
         load_average: ports.load_average,
         host_versions: ports.host_versions,
+        reports: ports.reports.clone(),
+        report: report::ReportWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
         disk_config: settings.disk,
@@ -585,6 +592,10 @@ struct Supervisor<'a> {
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, &Path) -> HostVersions,
+    /// Writes the daily KPI reports; `None` writes none.
+    reports: Option<ReportPort>,
+    /// The report job and the day the reports were last found written.
+    report: report::ReportWatch,
     /// The load samples of each held run's current interval (task 197).
     loads: HashMap<RunId, LoadWindow>,
     /// The claims deferred on conflict hotspots (ADR-0069).
@@ -795,6 +806,7 @@ impl Supervisor<'_> {
                     }
                     self.draining = true;
                     self.poll_observer();
+                    self.report_pass(false);
                     self.tick(true);
                     thread::sleep(options.tick);
                     continue;
@@ -808,6 +820,8 @@ impl Supervisor<'_> {
             let rechecked = self.recheck_pass();
             // A supervisor that stopped claiming is draining, not observing
             // nor starting plan reviews, nor updating itself.
+            // Reaped on every pass, started only by a supervisor at work.
+            self.report_pass(!stopping && self.claiming);
             if !stopping && self.claiming {
                 self.start_observer_when_due(options);
                 self.auto_update_pass(options);
@@ -816,7 +830,7 @@ impl Supervisor<'_> {
             // pass, which claims them.
             let progressed = self.plan_review_pass(options, !stopping && self.claiming);
             if self.slots.is_empty() {
-                // A running observer, plan review, landing recheck or
+                // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space or one a triage or resume waits
                 // for is waited for like a run: it is
                 // bounded by its own timeout, its command or its worktrees.
@@ -825,6 +839,7 @@ impl Supervisor<'_> {
                 // that claims if there is room now. Any other cleanup is
                 // joined once the loop ends.
                 let job = self.observer.is_some()
+                    || self.report.running()
                     || self.plan_review.is_some()
                     || self.rechecks.running()
                     || self.cleanup.for_disk()

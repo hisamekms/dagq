@@ -21,6 +21,7 @@ use super::{
 
 pub mod compare;
 pub mod config;
+pub mod report;
 mod window;
 
 pub use compare::{Comparison, Confounder, Side, Split, WindowSpan};
@@ -43,7 +44,7 @@ pub const UNKNOWN: &str = "unknown";
 const BASELINE_DAYS: usize = 7;
 
 /// The length of a period (decision 8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Period {
     /// The host's local day, from midnight.
     Day,

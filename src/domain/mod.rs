@@ -1408,6 +1408,8 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     "run_env_changed",
     "mark_recorded",
     "mark_retracted",
+    // The KPI report the supervisor wrote (ADR-0051 decision 20).
+    kpi::report::REPORT_WRITTEN,
     claim_hold::CLAIM_HELD,
     claim_hold::CLAIM_RESUMED,
     claim_hold::LANDING_HELD,

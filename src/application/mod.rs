@@ -20,6 +20,7 @@ mod ports;
 pub mod prompt;
 pub mod rebind;
 pub mod recording;
+pub mod report;
 pub mod review;
 pub mod session;
 pub mod stats;

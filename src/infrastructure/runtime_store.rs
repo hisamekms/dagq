@@ -22,6 +22,7 @@ use crate::domain::{
     PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunId, RunLease,
     RunPaths, RunProcess, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration, Task,
     TaskAction, TaskId, TaskKind, TaskRun,
+    kpi::report::REPORT_WRITTEN,
     related::RelatedPage,
     resume::{self, ResumeCount},
     run,
@@ -805,6 +806,55 @@ impl SqliteQueue {
         Ok(id)
     }
 
+    /// The reports recorded as written: (period, label) of every
+    /// `report_written` (ADR-0051 decision 20).
+    pub fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT json_extract(payload,'$.period'), json_extract(payload,'$.label')
+             FROM run_events WHERE kind=?1",
+        )?;
+        let rows = statement.query_map([REPORT_WRITTEN], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        let mut written = std::collections::HashSet::new();
+        for row in rows {
+            if let (Some(period), Some(label)) = row? {
+                written.insert((period, label));
+            }
+        }
+        Ok(written)
+    }
+
+    /// Record `report_written` unless a report of the same `period` and
+    /// `label` is recorded, in one write: of two supervisors that wrote
+    /// the same report, one records it. `false` when it was recorded.
+    pub fn record_report_written(&self, payload: serde_json::Value) -> Result<bool> {
+        let (Some(period), Some(label)) = (
+            payload.get("period").and_then(Value::as_str),
+            payload.get("label").and_then(Value::as_str),
+        ) else {
+            bail!("report_written needs a period and a label");
+        };
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let recorded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+               AND json_extract(payload,'$.period')=?2 AND json_extract(payload,'$.label')=?3)",
+            params![REPORT_WRITTEN, period, label],
+            |r| r.get(0),
+        )?;
+        if !recorded {
+            tx.execute(
+                "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+                params![REPORT_WRITTEN, serde_json::to_string(&payload)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(!recorded)
+    }
+
     /// The newest event of `kind`, on whatever task, goal or run.
     pub fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
         Ok(self
@@ -955,7 +1005,7 @@ impl SqliteQueue {
     pub fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
-               kind IN ('observe_started','observe_finished')
+               kind IN ('observe_started','observe_finished','report_written')
                OR (kind IN ('finding_recorded','finding_updated','finding_status_changed')
                    AND json_extract(payload,'$.by') IS ?1)
                OR (kind='ask_opened' AND json_extract(payload,'$.asked_by') IS ?1)
@@ -3172,6 +3222,18 @@ impl RunStore for SqliteQueue {
     }
     fn all_events(&self) -> Result<Vec<RunEvent>> {
         SqliteQueue::all_events(self)
+    }
+    fn findings(
+        &self,
+        query: &crate::domain::FindingQuery,
+    ) -> Result<Vec<crate::domain::FindingView>> {
+        SqliteQueue::findings(self, query)
+    }
+    fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        SqliteQueue::reports_written(self)
+    }
+    fn record_report_written(&self, payload: serde_json::Value) -> Result<bool> {
+        SqliteQueue::record_report_written(self, payload)
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         SqliteQueue::latest_task_events(self, kinds)
