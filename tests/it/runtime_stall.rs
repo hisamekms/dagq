@@ -173,7 +173,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     assert_eq!(first.run_id.as_ref(), Some(run.id()));
     assert_eq!(first.asked_by, "supervisor");
-    assert_eq!(first.options, ["wait", "intervene"]);
+    assert_eq!(first.options, ["wait", "intervene", "propose"]);
     for part in [
         "idle_without_receipt",
         "- cargo test (b1): cargo test",

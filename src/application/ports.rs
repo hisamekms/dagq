@@ -16,12 +16,13 @@ use std::{
 use super::{GraphInput, TaskPage, TaskQuery, timestamp, unix_seconds};
 use crate::domain::{
     Ask, AskId, AskKind, AskOutcome, ClaimOutcome, CommitSha, DraftOrigin, DraftTarget, EventId,
-    EvidenceCheck, Goal, GoalDetail, GoalEdit, GoalId, GoalPredecessor, GoalSummary, GoalVerdict,
-    LintInput, NewAsk, NewGoal, NewNote, NewTask, NotePage, NoteQuery, PlanReviewCandidate,
-    PlanReviewDecision, PlanReviewVerdict, PlannerId, PlannerOrigin, PlannerSession, Predecessor,
-    Priority, Proposal, ProposalId, Reason, ReasonCode, RunEvent, RunId, RunLease, RunPlan,
-    RunProcess, RunStatus, SessionRole, Submission, SupervisorMode, SupervisorRegistration, Task,
-    TaskAction, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRun, TaskStatus,
+    EvidenceCheck, Finding, FindingId, FindingStatus, FindingView, Goal, GoalDetail, GoalEdit,
+    GoalId, GoalPredecessor, GoalSummary, GoalVerdict, LintInput, NewAsk, NewGoal, NewNote,
+    NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
+    PlannerId, PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason,
+    ReasonCode, RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission,
+    SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId,
+    TaskKind, TaskRun, TaskStatus,
     related::RelatedPage,
     search::{SearchPage, SearchQuery},
 };
@@ -1422,6 +1423,25 @@ pub enum DraftPlannerStart {
     Skipped,
 }
 
+/// How [`DraftPlannerStore::open_finding_planner`] ended.
+#[derive(Debug, Clone)]
+pub enum FindingPlannerStart {
+    /// A planner of the runtime's is recorded for the finding, its
+    /// `attempt`-th since the finding was marked; the caller opens its
+    /// workspace.
+    Opened {
+        planner: PlannerSession,
+        finding: Box<Finding>,
+        attempt: usize,
+    },
+    /// [`crate::domain::MAX_FINDING_PLANNERS`] planners ended without
+    /// deciding the finding: `finding_planner_exhausted` is recorded and a
+    /// person decides.
+    Exhausted { attempts: usize },
+    /// Not now: the finding moved on, or another planner took it.
+    Skipped,
+}
+
 /// Where the answer of a `planner_question` goes (ADR-0041 decision 13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerAnswerRoute {
@@ -1496,6 +1516,41 @@ pub trait DraftPlannerStore {
     /// The `follow_up_depth` of a task (ADR-0037 decision 6).
     fn follow_up_depth(&self, task: TaskId) -> Result<i64>;
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()>;
+    /// The findings waiting for a planner of the runtime's (ADR-0044
+    /// decision 19): `open`, marked for a proposal, no planner open for
+    /// it, no `planner_question` about it nobody closed and its planners
+    /// since the mark not used up; the oldest mark first.
+    fn planner_findings(&self) -> Result<Vec<Finding>>;
+    /// Record a planner of the runtime's for `finding`
+    /// (`finding_planner_opened`) after re-checking it in the same write
+    /// transaction. With `answer`, the planner carries that answered
+    /// `planner_question` about the finding, whose planner is gone.
+    fn open_finding_planner(
+        &mut self,
+        finding: FindingId,
+        answer: Option<AskId>,
+    ) -> Result<FindingPlannerStart>;
+    /// One finding as `findings ID --full` shows it.
+    fn finding_view(&self, finding: FindingId) -> Result<FindingView>;
+    /// The asks about the finding, oldest first.
+    fn finding_asks(&self, finding: FindingId) -> Result<Vec<Ask>>;
+    /// End the `proposed` findings whose proposal ended: `resolved`, or
+    /// `open` again without the mark.
+    fn settle_findings(&mut self) -> Result<Vec<(FindingId, FindingStatus)>>;
+    /// Findings whose planners were used up (`finding_planner_exhausted`)
+    /// and that still wait, by ID.
+    fn exhausted_findings(&self) -> Result<Vec<Finding>>;
+    /// Record an event on the finding's target (on nothing for the queue).
+    fn record_finding_event(
+        &mut self,
+        finding: FindingId,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> Result<()>;
+    /// Whether the answer of `ask` was typed into `workspace`.
+    fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool>;
+    /// Whether typing the answer of `ask` ever failed.
+    fn ask_delivery_failed(&self, ask: AskId) -> Result<bool>;
 }
 
 /// A plan review job the queue recorded (ADR-0041 decision 11): the

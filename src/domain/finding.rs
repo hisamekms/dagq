@@ -320,6 +320,146 @@ impl FindingQuery {
     }
 }
 
+/// The option of an ask that asks for a proposal to remedy its finding
+/// (ADR-0044 decision 19): answered `propose` (or `propose: <why>`), the
+/// runtime marks the finding and a planner of its own makes the proposal.
+pub const PROPOSE_OPTION: &str = "propose";
+
+/// The option of an ask about a finding that nobody will remedy:
+/// answered `dismiss` (or `dismiss: <why>`), the finding is `dismissed`.
+pub const DISMISS_OPTION: &str = "dismiss";
+
+/// At most this many planners of the runtime's are opened for one finding;
+/// when they all end without deciding it, the inbox is told.
+pub const MAX_FINDING_PLANNERS: usize = super::MAX_DRAFT_PLANNERS;
+
+/// A person's answer the runtime applies to a finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindingAnswer {
+    /// Make a proposal to remedy it, with the person's reason if given.
+    Propose(Option<String>),
+    /// Nobody will remedy it, with the person's reason if given.
+    Dismiss(Option<String>),
+}
+
+impl FindingAnswer {
+    /// `propose`, `propose: <why>`, `dismiss` or `dismiss: <why>`, trimmed;
+    /// anything else is no answer the runtime applies.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let reason = |rest: &str| -> Option<Option<String>> {
+            if rest.is_empty() {
+                return Some(None);
+            }
+            let why = rest.strip_prefix(':')?.trim();
+            Some((!why.is_empty()).then(|| why.to_owned()))
+        };
+        if let Some(rest) = text.strip_prefix(PROPOSE_OPTION) {
+            return reason(rest).map(Self::Propose);
+        }
+        if let Some(rest) = text.strip_prefix(DISMISS_OPTION) {
+            return reason(rest).map(Self::Dismiss);
+        }
+        None
+    }
+}
+
+/// `options` with [`PROPOSE_OPTION`] and [`DISMISS_OPTION`] after the
+/// asker's own, each once: an ask about a finding always offers them.
+pub fn with_finding_options(options: &[String]) -> Vec<String> {
+    let mut all = with_propose_option(options);
+    if !all.iter().any(|o| o.trim() == DISMISS_OPTION) {
+        all.push(DISMISS_OPTION.to_owned());
+    }
+    all
+}
+
+/// `options` with [`PROPOSE_OPTION`] after the asker's own, once: an ask
+/// about a stall offers to make a proposal of its cause.
+pub fn with_propose_option(options: &[String]) -> Vec<String> {
+    let mut all = options.to_vec();
+    if !all.iter().any(|o| o.trim() == PROPOSE_OPTION) {
+        all.push(PROPOSE_OPTION.to_owned());
+    }
+    all
+}
+
+/// Mark `finding` for a proposal because a person answered so. A person
+/// overrides the observer's judgement: a `resolved` or `dismissed` finding
+/// is `open` again. `None` when nothing changes: it is already `proposed`,
+/// or `open` with a mark.
+pub fn mark_for_proposal(finding: &Finding, reason: &str, now: i64) -> Option<Finding> {
+    if finding.status == FindingStatus::Proposed
+        || (finding.status == FindingStatus::Open && finding.propose_reason.is_some())
+    {
+        return None;
+    }
+    let mut marked = finding.clone();
+    marked.status = FindingStatus::Open;
+    marked.status_reason = None;
+    marked.proposal_id = None;
+    marked.propose_reason = Some(reason.to_owned());
+    marked.propose_requested_at = Some(now);
+    marked.updated_at = now;
+    Some(marked)
+}
+
+/// Whether `finding` may be linked to `proposal` by the submission of that
+/// proposal: an `open` one becomes `proposed` (`Ok(true)`); one already
+/// `proposed` for the same proposal (a resubmission) stays (`Ok(false)`).
+pub fn check_link(finding: &Finding, proposal: ProposalId) -> Result<bool, DomainError> {
+    match finding.status {
+        FindingStatus::Open => Ok(true),
+        FindingStatus::Proposed if finding.proposal_id == Some(proposal) => Ok(false),
+        _ => Err(DomainError::FindingNotInStatus {
+            finding_id: finding.id,
+            status: finding.status,
+            to: FindingStatus::Proposed,
+        }),
+    }
+}
+
+/// What the end of a `proposed` finding's proposal makes of it (ADR-0044
+/// decision 18): `resolved` once every task of the proposal ended and one
+/// completed; `open` again when the proposal was canceled or every task
+/// was, with its mark taken off (a new proposal needs a new mark). `None`
+/// while a task is still to be done. `tasks` are the statuses of the
+/// proposal's tasks.
+pub fn settle(
+    proposal: ProposalStatus,
+    tasks: &[super::TaskStatus],
+) -> Option<(FindingStatus, String)> {
+    use super::TaskStatus;
+    if proposal == ProposalStatus::Canceled {
+        return Some((FindingStatus::Open, "its proposal was canceled".into()));
+    }
+    if tasks.is_empty()
+        || !tasks
+            .iter()
+            .all(|s| matches!(s, TaskStatus::Completed | TaskStatus::Canceled))
+    {
+        return None;
+    }
+    let completed = tasks
+        .iter()
+        .filter(|s| **s == TaskStatus::Completed)
+        .count();
+    Some(if completed == 0 {
+        (
+            FindingStatus::Open,
+            "every task of its proposal was canceled".into(),
+        )
+    } else {
+        (
+            FindingStatus::Resolved,
+            format!(
+                "its proposal ended: {completed} of {} tasks completed",
+                tasks.len()
+            ),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +751,78 @@ mod tests {
             ]
             .map(|t| t.name()),
             ["queue", "goal", "task", "run"]
+        );
+    }
+
+    #[test]
+    fn a_persons_answer_parses_to_propose_or_dismiss_with_its_reason() {
+        use FindingAnswer::*;
+        for (text, parsed) in [
+            ("propose", Some(Propose(None))),
+            (" propose ", Some(Propose(None))),
+            ("propose: split it", Some(Propose(Some("split it".into())))),
+            ("propose:", Some(Propose(None))),
+            ("dismiss", Some(Dismiss(None))),
+            (
+                "dismiss: task 7 does it",
+                Some(Dismiss(Some("task 7 does it".into()))),
+            ),
+            ("proposed", None),
+            ("dismissal", None),
+            ("wait", None),
+        ] {
+            assert_eq!(FindingAnswer::parse(text), parsed, "{text}");
+        }
+        let options = with_finding_options(&["look".into(), "dismiss".into()]);
+        assert_eq!(options, ["look", "dismiss", "propose"]);
+        assert_eq!(
+            with_propose_option(&["wait".into(), "intervene".into()]),
+            ["wait", "intervene", "propose"]
+        );
+        assert_eq!(with_propose_option(&["propose".into()]), ["propose"]);
+    }
+
+    #[test]
+    fn a_persons_mark_opens_a_settled_finding_and_leaves_a_marked_one() {
+        let dismissed = stored(FindingStatus::Dismissed);
+        let marked = mark_for_proposal(&dismissed, "a person asked", 50).unwrap();
+        assert_eq!(marked.status, FindingStatus::Open);
+        assert_eq!(marked.propose_reason.as_deref(), Some("a person asked"));
+        assert_eq!(marked.propose_requested_at, Some(50));
+        assert_eq!(marked.updated_at, 50);
+        assert!(mark_for_proposal(&marked, "again", 60).is_none());
+        assert!(mark_for_proposal(&stored(FindingStatus::Proposed), "x", 60).is_none());
+        let resolved = stored(FindingStatus::Resolved);
+        assert_eq!(
+            mark_for_proposal(&resolved, "x", 60).unwrap().status,
+            FindingStatus::Open
+        );
+    }
+
+    #[test]
+    fn a_finding_links_to_one_proposal_and_settles_with_its_tasks() {
+        use super::super::TaskStatus::*;
+        let proposal = ProposalId::new(4);
+        assert_eq!(check_link(&stored(FindingStatus::Open), proposal), Ok(true));
+        let mut proposed = stored(FindingStatus::Proposed);
+        proposed.proposal_id = Some(proposal);
+        assert_eq!(check_link(&proposed, proposal), Ok(false));
+        assert!(check_link(&proposed, ProposalId::new(5)).is_err());
+        assert!(check_link(&stored(FindingStatus::Dismissed), proposal).is_err());
+
+        assert_eq!(settle(ProposalStatus::Accepted, &[Completed, Ready]), None);
+        assert_eq!(settle(ProposalStatus::Submitted, &[]), None);
+        assert_eq!(
+            settle(ProposalStatus::Accepted, &[Completed, Canceled]).map(|s| s.0),
+            Some(FindingStatus::Resolved)
+        );
+        assert_eq!(
+            settle(ProposalStatus::Accepted, &[Canceled, Canceled]).map(|s| s.0),
+            Some(FindingStatus::Open)
+        );
+        assert_eq!(
+            settle(ProposalStatus::Canceled, &[Draft]),
+            Some((FindingStatus::Open, "its proposal was canceled".into()))
         );
     }
 }

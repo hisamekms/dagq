@@ -23,6 +23,19 @@ pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "intervene"];
 /// The answers the runtime writes into a `stalled` ask it closes.
 pub(super) const STALL_MOVED_CLOSED: &str = "the session moved on; closed by the runtime";
 
+/// Whether a `stalled` ask's answer leaves the session alone: `wait`, or
+/// `propose` (ADR-0044 decision 19), which hands the cause to a planner
+/// of the runtime's instead of a person stepping in.
+fn answered_wait(answer: Option<&str>) -> bool {
+    answer.is_some_and(|answer| {
+        answer.trim() == "wait"
+            || matches!(
+                crate::domain::FindingAnswer::parse(answer),
+                Some(crate::domain::FindingAnswer::Propose(_))
+            )
+    })
+}
+
 pub(super) const STALL_EXITED_CLOSED: &str = "the session exited; closed by the runtime";
 
 /// The phase whose idle the watch judges.
@@ -162,7 +175,7 @@ impl StallWatch {
             && let Some(closed) = ask.closed_at
             && !resolved("ask", Some(ask.id))
         {
-            if ask.answer.as_deref().map(str::trim) == Some("wait") {
+            if answered_wait(ask.answer.as_deref()) {
                 watch.wait_from = watch.wait_from.max(Some(at_unix(closed)));
             } else {
                 watch.held = watch.held.max(Some(at_unix(closed + 1)));
@@ -527,7 +540,7 @@ impl StallWatch {
             Err(error) => format!("(the screen could not be read: {error:#})"),
         };
         let question = format!(
-            "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), although the supervisor nudged it {nudged}s ago to write its receipt, ask a worker_question or say what it waits for. Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
+            "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), although the supervisor nudged it {nudged}s ago to write its receipt, ask a worker_question or say what it waits for. Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
             run_id = run.id(),
             task_id = run.task_id(),
             nudged = secs_between(nudge.at, now),
@@ -595,7 +608,7 @@ impl StallWatch {
             // else (or none) is a person who took the session over.
             self.asked = None;
             let wait = stalled_ask(&*sv.queue, run.id(), Some(asked.id))?
-                .is_some_and(|ask| ask.answer.as_deref().map(str::trim) == Some("wait"));
+                .is_some_and(|ask| answered_wait(ask.answer.as_deref()));
             if wait {
                 self.wait_from = Some(now);
             } else {
@@ -629,7 +642,7 @@ impl StallWatch {
                     self.close(sv, run, STALL_MOVED_CLOSED, "resolved_by_itself")?;
                 }
             }
-            Some("wait") => {
+            Some(answer) if answered_wait(Some(answer)) => {
                 // Closed first: a supervisor that stops in between leaves
                 // a closed `wait` its adopter reads as one.
                 sv.queue.close_ask(ask.id)?;

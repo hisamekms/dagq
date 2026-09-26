@@ -189,6 +189,11 @@ enum Command {
         /// Submit this proposal again after plan review sent it back, with the drafts it holds.
         #[arg(long, group = "members")]
         proposal: Option<i64>,
+        /// Open finding the proposal remedies; repeatable. It becomes proposed with the proposal
+        /// (ADR-0044 decision 19). A planner the runtime opened for a finding links that one
+        /// without it.
+        #[arg(long = "finding")]
+        findings: Vec<i64>,
     },
     /// Check the fixed rules of a plan (plan review's mechanical checks): dependency cycles,
     /// dependencies on completed, canceled or unsubmitted draft tasks and on abandoned goals, no
@@ -727,13 +732,17 @@ enum Command {
         /// A question that fits none of them is no ask: decide it yourself, or leave it as a note (`dagq note`).
         #[arg(long = "because", required = true, value_parser = ["scope", "discard", "recovery_failed", "authentication", "cost"])]
         because: Option<String>,
-        /// Task the ask is about. Only a blocked ask may name neither a task nor a run.
+        /// Task the ask is about. Only a blocked ask, or a planner_question about a finding, may
+        /// name neither a task nor a run.
         #[arg(long = "task", conflicts_with = "run")]
         task_id: Option<i64>,
         /// Run the ask is about (its task is implied).
         #[arg(long)]
         run: Option<String>,
         /// Finding a blocked ask raises; one ask per finding stays open (ADR-0044 decision 23).
+        /// A blocked ask about a finding also offers `propose` and `dismiss`, which the runtime
+        /// applies to the finding. A planner_question names the finding its planner was opened
+        /// for (decision 19).
         #[arg(long)]
         finding: Option<i64>,
         /// cmux executable, used to notify the inbox; a bare name is resolved on PATH.
@@ -1448,6 +1457,7 @@ fn execute(cli: Cli) -> Result<Value> {
             tasks,
             goals,
             proposal,
+            findings,
         } => {
             use dagq::application::lifecycle::{CMUX_WORKSPACE_ENV, PLANNER_ORIGIN_ENV};
             let origin = match env::var(PLANNER_ORIGIN_ENV) {
@@ -1455,17 +1465,20 @@ fn execute(cli: Cli) -> Result<Value> {
                 _ => PlannerOrigin::Person,
             };
             serde_json::to_value(
-                queue.submit(Submission {
-                    tasks: tasks.into_iter().map(TaskId::new).collect(),
-                    goals: goals.into_iter().map(GoalId::new).collect(),
-                    proposal: proposal.map(ProposalId::new),
-                    owner: PlannerOwner {
-                        origin,
-                        workspace_id: env::var(CMUX_WORKSPACE_ENV)
-                            .ok()
-                            .filter(|id| !id.trim().is_empty()),
+                queue.submit_linking(
+                    Submission {
+                        tasks: tasks.into_iter().map(TaskId::new).collect(),
+                        goals: goals.into_iter().map(GoalId::new).collect(),
+                        proposal: proposal.map(ProposalId::new),
+                        owner: PlannerOwner {
+                            origin,
+                            workspace_id: env::var(CMUX_WORKSPACE_ENV)
+                                .ok()
+                                .filter(|id| !id.trim().is_empty()),
+                        },
                     },
-                })?,
+                    &findings.into_iter().map(FindingId::new).collect::<Vec<_>>(),
+                )?,
             )?
         }
         Command::Lint { tasks, proposals } => {

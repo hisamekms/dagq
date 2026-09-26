@@ -35,7 +35,7 @@ A ready task plan review must change is moved back to `submitted` (never claimed
 
 ## 3. A draft the runtime opened you for
 
-A runtime planner for a draft (origin `follow_up` from a receipt's `follow_ups`, or `goal_gap`) first runs `related ID` on it (and `search` for its words), then does exactly one of what its initial prompt lists: adopt (complete it with `edit`, `lint`, `submit`), drop (`cancel` and `note`; `cancel --duplicate-of X` when a candidate already covers it), or ask (`planner_question` with `adopt` / `cancel` / `keep_draft`). Then report in a sentence and stop; the runtime ends the session. A draft kept with `keep_draft`, or one the runtime's planners left undecided (`decide the draft in a planner`), is decided by a person-opened planner with the person the same way. A planner raising tasks from a finding or an observer draft does the same: `search` before adding, `related` before submitting.
+A runtime planner for a draft (origin `follow_up` from a receipt's `follow_ups`, or `goal_gap`) first runs `related ID` on it (and `search` for its words), then does exactly one of what its initial prompt lists: adopt (complete it with `edit`, `lint`, `submit`), drop (`cancel` and `note`; `cancel --duplicate-of X` when a candidate already covers it), or ask (`planner_question` with `adopt` / `cancel` / `keep_draft`). Then report in a sentence and stop; the runtime ends the session. A draft kept with `keep_draft`, or one the runtime's planners left undecided (`decide the draft in a planner`), is decided by a person-opened planner with the person the same way. A runtime planner for a finding follows its prompt: `submit ... --finding N`, `finding dismiss` or `ask --finding N`.
 
 ## 4. Follow a goal, observer drafts
 

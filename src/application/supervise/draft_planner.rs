@@ -35,6 +35,10 @@ impl Supervisor<'_> {
         runtime_open: &mut usize,
     ) -> Result<()> {
         for ask in self.queue.planner_answers()? {
+            if let Some(finding) = ask.finding_id {
+                self.deliver_finding_answer(options, views, runtime_open, &ask, finding)?;
+                continue;
+            }
             let Some(task) = ask.task_id else {
                 continue;
             };

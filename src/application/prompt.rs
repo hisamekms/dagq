@@ -18,10 +18,10 @@ use super::{
     or_none, tail,
 };
 use crate::domain::{
-    Ask, CommitSha, DraftOrigin, DraftTarget, Goal, GoalId, GoalPredecessor, GoalTask,
-    LintViolation, MAX_DRAFT_PLANNERS, MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
-    Predecessor, Proposal, ProposalId, Receipt, RunEvent, RunId, RunStatus, TRIAGE_RETRY_FAILURES,
-    Task, TaskDetail, TaskId, TaskRun,
+    Ask, CommitSha, DraftOrigin, DraftTarget, FindingView, Goal, GoalId, GoalPredecessor, GoalTask,
+    LintViolation, MAX_DRAFT_PLANNERS, MAX_FINDING_PLANNERS, MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS,
+    MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId, Receipt, RunEvent, RunId, RunStatus,
+    TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId, TaskRun,
     recovery::{ProcessInfo, RecoveryAlert},
     related::RelatedTask,
     resume,
@@ -604,6 +604,131 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     if let Some(answer) = material.answer {
         out.push_str(&format!(
             "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 3 says.\n",
+            aid = answer.id,
+            question = answer.question,
+            text = answer.answer.as_deref().unwrap_or_default(),
+        ));
+    }
+    Ok(out)
+}
+
+/// What the initial prompt of a planner opened for a finding shows
+/// (ADR-0044 decision 19).
+pub struct FindingPlannerMaterial<'a> {
+    pub db: &'a Path,
+    /// The finding with its evidence events.
+    pub finding: &'a FindingView,
+    /// Which planner of the runtime's this is since the finding was marked
+    /// (1-based).
+    pub attempt: usize,
+    /// The asks about the finding: the observer's, a person's `propose`
+    /// answer, earlier planners' questions.
+    pub asks: &'a [Ask],
+    /// The goal of the finding's target, if it has one.
+    pub goal: Option<&'a Goal>,
+    pub goal_closed: bool,
+    /// That goal's tasks.
+    pub siblings: &'a [GoalTask],
+    /// The answered `planner_question` of a planner that is gone.
+    pub answer: Option<&'a Ask>,
+}
+
+/// The initial prompt of a planner the runtime opens for a finding marked
+/// for a proposal (ADR-0044 decisions 19, 20): the finding and its
+/// evidence, the asks about it, the goal of its target, and what it may do:
+/// a proposal of tasks for an open goal or of a new goal, a dismissal, or a
+/// `planner_question` for a person.
+pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<String> {
+    let view = material.finding;
+    let finding = &view.finding;
+    let id = finding.id;
+    let mut out = format!(
+        "You are a planner the dagq runtime opened for finding {id} of the queue at {db}; no person watches this session. The finding is marked for a proposal: make the plan that remedies it (planner {attempt} of at most {max} the runtime opens for it).\n",
+        db = super::path_text(material.db)?,
+        attempt = material.attempt,
+        max = MAX_FINDING_PLANNERS,
+    );
+    let target = match (&finding.run_id, finding.task_id, finding.goal_id) {
+        (Some(run), Some(task), _) => format!("run {run} (task {task})"),
+        (None, Some(task), _) => format!("task {task}"),
+        (_, _, Some(goal)) => format!("goal {goal}"),
+        _ => "the queue".to_owned(),
+    };
+    out.push_str(&format!(
+        "\n## Finding {id}: {summary}\n\n- kind: {kind}\n- on: {target}\n- subject: {subject}\n- impact: {impact}\n- occurrences: {occurrences}, first seen {first}, last seen {last} (Unix seconds)\n- recorded by: {by}\n- why a proposal: {why}\n\n### Detail\n\n{detail}\n",
+        summary = finding.summary,
+        kind = finding.kind,
+        subject = or_none(&finding.subject),
+        impact = finding.impact.as_str(),
+        occurrences = finding.occurrences,
+        first = finding.first_seen_at,
+        last = finding.last_seen_at,
+        by = finding.recorded_by,
+        why = finding.propose_reason.as_deref().unwrap_or("(none)"),
+        detail = or_none(&finding.detail),
+    ));
+    out.push_str("\n### Its evidence\n\n");
+    match &view.evidence_events {
+        Some(events) if !events.is_empty() => {
+            out.push_str(&fenced("json", &serde_json::to_string_pretty(events)?));
+        }
+        _ => out.push_str("(no event)\n"),
+    }
+    out.push_str(&format!(
+        "Read more with `dagq findings {id} --full`, `dagq events --all --full` (narrowed by `--run`, `--task`, `--kind`, `--since`), and `dagq timeline RUN` for a run.\n"
+    ));
+    if !material.asks.is_empty() {
+        out.push_str("\n### Asks about it\n\n");
+        for ask in material.asks {
+            out.push_str(&format!(
+                "- ask {aid} ({kind}): {question}\n  answer: {answer}\n",
+                aid = ask.id,
+                kind = ask.kind.as_str(),
+                question = ask.question.replace('\n', "\n  "),
+                answer = ask.answer.as_deref().unwrap_or("(none yet)"),
+            ));
+        }
+    }
+    match material.goal {
+        Some(goal) => {
+            out.push_str(&format!(
+                "\n## Goal {gid} of its target: {title}{closed}\n\n{description}\n\nAcceptance:\n{acceptance}\n\nConstraints:\n{constraints}\n\nIts tasks:\n{tasks}\n",
+                gid = goal.id(),
+                title = goal.title(),
+                closed = if material.goal_closed { " (closed)" } else { "" },
+                description = or_none(goal.description()),
+                acceptance = or_none(goal.acceptance()),
+                constraints = or_none(goal.constraints()),
+                tasks = if material.siblings.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    material
+                        .siblings
+                        .iter()
+                        .map(|t| format!("- task {} ({}): {}", t.id, t.status.as_str(), t.title))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+            ));
+        }
+        None => out.push_str(
+            "\n## Goal\n\nIts target belongs to no goal. `dagq goal list` shows the open goals.\n",
+        ),
+    }
+    out.push_str(&format!(
+        "\n## What to do\n\n\
+         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR IDs. Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related --task ID` or `--goal ID`, `dagq show ID`). Then do exactly one of these:\n\
+         1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `finding {id}（{kind}）から`), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
+         2. A new goal: when no open goal covers it, write a draft goal (`dagq goal add --draft ...`) and its draft tasks, lint them and submit with `dagq submit --goal GOAL --finding {id}`.\n\
+         Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal.\n\
+         3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`.\n\
+         4. Ask: only when a person must decide (the plan's intent or scope, an acceptance, a contradiction with a goal's constraints or an ADR's decision, a precedent a person answered otherwise, or a change that is large and hard to undo), run `dagq ask --finding {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option propose --option dismiss`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
+         When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n",
+        kind = finding.kind,
+    ));
+    if let Some(answer) = material.answer {
+        out.push_str(&format!(
+            "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 4 says.\n",
             aid = answer.id,
             question = answer.question,
             text = answer.answer.as_deref().unwrap_or_default(),

@@ -206,7 +206,7 @@ fn a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask() {
     assert!(pid_alive(outsider.id()));
     let _ = outsider.kill();
     let _ = outsider.wait();
-    assert_eq!(ask.options, ["wait", "intervene"]);
+    assert_eq!(ask.options, ["wait", "intervene", "propose"]);
     for part in [
         "alert: long_background",
         "Why a person: recovery_failed",
@@ -249,7 +249,7 @@ fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
         })),
     );
     let (ask, detail) = escalated_long_background(&db, &backend, supervisor);
-    assert_eq!(ask.options, ["wait", "intervene", "stop it"]);
+    assert_eq!(ask.options, ["wait", "intervene", "stop it", "propose"]);
     for part in [
         "confidence low",
         "Recommended: [{\"action\":\"stop_processes\"",

@@ -1031,12 +1031,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn submit(&mut self, submission: Submission) -> Result<Proposal> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal = proposals::submit(&tx, submission, &self.generators.clock.timestamp())?;
-        tx.commit()?;
-        Ok(proposal)
+        self.submit_linking(submission, &[])
     }
 
     fn approve_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {

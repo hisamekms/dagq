@@ -89,6 +89,7 @@ mod dialog;
 mod disk;
 mod draft_planner;
 mod exit;
+mod finding_planner;
 mod handoff;
 mod idle;
 mod jobs;

@@ -612,6 +612,11 @@ impl Supervisor<'_> {
         // decision 16), within the same limit.
         self.deliver_planner_answers(options, &views, &mut runtime_open)?;
         self.open_draft_planners(options, &mut runtime_open)?;
+        // Then the findings marked for a proposal (ADR-0044 decision 19),
+        // within the same limit, once those whose proposal ended are
+        // settled.
+        self.settle_findings()?;
+        self.open_finding_planners(options, &mut runtime_open)?;
         self.end_runtime_planners(&views)
     }
 
@@ -744,9 +749,12 @@ impl Supervisor<'_> {
     /// is at work on the answer). An ask closed without a typing holds
     /// nothing.
     fn waits_on_question(&mut self, view: &PlannerView) -> Result<bool> {
-        let Some(draft) = view.planner.draft_task_id else {
+        let (draft, finding) = (view.planner.draft_task_id, view.planner.finding_id);
+        if draft.is_none() && finding.is_none() {
             return Ok(false);
-        };
+        }
+        // A finding's planner asks about the finding, a draft's about the
+        // draft.
         let asks: Vec<_> = self
             .queue
             .asks(crate::application::AskQuery {
@@ -754,7 +762,13 @@ impl Supervisor<'_> {
                 ..Default::default()
             })?
             .into_iter()
-            .filter(|ask| ask.kind == AskKind::PlannerQuestion && ask.task_id == Some(draft))
+            .filter(|ask| {
+                ask.kind == AskKind::PlannerQuestion
+                    && match finding {
+                        Some(finding) => ask.finding_id == Some(finding),
+                        None => ask.finding_id.is_none() && ask.task_id == draft,
+                    }
+            })
             .collect();
         if asks.iter().any(|ask| ask.closed_at.is_none()) {
             return Ok(true);
@@ -762,20 +776,18 @@ impl Supervisor<'_> {
         let Some(workspace) = view.planner.workspace_id.as_deref() else {
             return Ok(false);
         };
-        let events = self.queue.show(draft)?.events;
-        Ok(asks.iter().any(|ask| {
-            let typed_here = events.iter().any(|event| {
-                event.kind == "ask_delivered"
-                    && event.payload.get("ask_id").and_then(Value::as_i64) == Some(ask.id.as_i64())
-                    && event.payload.get("workspace_id").and_then(Value::as_str) == Some(workspace)
-            });
+        for ask in &asks {
             // The typing happened when the ask closed; an agent idle since
             // before it has not taken the answer up yet.
-            typed_here
-                && ask
-                    .closed_at
-                    .is_some_and(|closed| view.idle_since.is_none_or(|since| since <= closed))
-        }))
+            if ask
+                .closed_at
+                .is_some_and(|closed| view.idle_since.is_none_or(|since| since <= closed))
+                && self.queue.ask_delivered_to(ask.id, workspace)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 

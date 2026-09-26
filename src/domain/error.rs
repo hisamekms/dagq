@@ -169,7 +169,8 @@ pub enum DomainError {
         status: FindingStatus,
         to: FindingStatus,
     },
-    /// Only a `blocked` ask may name a finding (ADR-0044 decision 23).
+    /// Only a `blocked` ask (ADR-0044 decision 23) or a `planner_question`
+    /// (decision 19) may name a finding.
     AskFindingNotBlocked {
         kind: AskKind,
     },
@@ -436,7 +437,7 @@ impl fmt::Display for DomainError {
             ),
             Self::AskFindingNotBlocked { kind } => write!(
                 f,
-                "only a blocked ask may name a finding, not {}",
+                "only a blocked ask or a planner_question may name a finding, not {}",
                 kind.as_str()
             ),
         }

@@ -4,6 +4,7 @@ pub mod binaries;
 pub mod claude;
 pub mod clock;
 pub mod draft_planners;
+mod finding_planners;
 mod findings;
 pub mod kpi_config;
 pub mod launchd;

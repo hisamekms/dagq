@@ -16,10 +16,13 @@ use super::{
     asks::{ask_row, read_ask},
     sqlite::{SqliteQueue, event, read_task},
 };
-use crate::application::{DraftPlannerStart, DraftPlannerStore, PlannerAnswerRoute};
+use crate::application::{
+    DraftPlannerStart, DraftPlannerStore, FindingPlannerStart, PlannerAnswerRoute,
+};
 use crate::domain::{
-    Ask, AskId, AskKind, DraftOrigin, DraftTarget, GoalId, MAX_DRAFT_PLANNERS, PlannerId,
-    PlannerOrigin, PlannerSession, Task, TaskId, TaskStatus,
+    Ask, AskId, AskKind, DraftOrigin, DraftTarget, Finding, FindingId, FindingQuery, FindingStatus,
+    FindingView, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession, Task,
+    TaskId, TaskStatus,
     follow_up::{FollowUpFacts, adopt_needs_person},
 };
 
@@ -214,30 +217,34 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ask = read_ask(&tx, id)?;
-        let Some(task) = ask.task_id else {
+        // A question about a finding may be about no task: its claim is on
+        // the finding's target (ADR-0044 decision 19).
+        if ask.task_id.is_none() && ask.finding_id.is_none() {
             return Ok(false);
-        };
+        }
         if !matches!(route_of(&tx, &ask)?, PlannerAnswerRoute::Planner(to) if to.id == planner) {
             return Ok(false);
         }
         let now = self.generators.clock.now();
         let claimed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1
-             AND kind='planner_answer_claimed' AND json_extract(payload,'$.ask_id')=?2
-             AND COALESCE(json_extract(payload,'$.claimed_at'), 0) > ?3)",
-            params![task, id, now - PLANNER_ANSWER_CLAIM_SECS],
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='planner_answer_claimed'
+             AND json_extract(payload,'$.ask_id')=?1
+             AND COALESCE(json_extract(payload,'$.claimed_at'), 0) > ?2)",
+            params![id, now - PLANNER_ANSWER_CLAIM_SECS],
             |r| r.get(0),
         )?;
         if claimed {
             return Ok(false);
         }
-        event(
-            &tx,
-            task,
-            None,
-            "planner_answer_claimed",
-            json!({"ask_id": id, "planner_id": planner, "workspace_id": workspace, "claimed_at": now}),
-        )?;
+        let payload = json!({"ask_id": id, "planner_id": planner, "workspace_id": workspace, "claimed_at": now});
+        match (ask.finding_id, ask.task_id) {
+            (Some(finding), _) => {
+                let finding = super::findings::read_finding(&tx, finding)?;
+                super::findings::finding_event(&tx, &finding, "planner_answer_claimed", payload)?;
+            }
+            (None, Some(task)) => event(&tx, task, None, "planner_answer_claimed", payload)?,
+            (None, None) => return Ok(false),
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -255,14 +262,12 @@ impl SqliteQueue {
             "UPDATE asks SET closed_at=?2 WHERE id=?1",
             params![id, self.generators.clock.now()],
         )?;
-        if let Some(task) = ask.task_id {
-            event(
-                &tx,
-                task,
-                None,
-                "planner_answer_closed",
-                json!({"ask_id": id, "reason": why}),
-            )?;
+        let payload = json!({"ask_id": id, "reason": why});
+        if let Some(finding) = ask.finding_id {
+            let finding = super::findings::read_finding(&tx, finding)?;
+            super::findings::finding_event(&tx, &finding, "planner_answer_closed", payload)?;
+        } else if let Some(task) = ask.task_id {
+            event(&tx, task, None, "planner_answer_closed", payload)?;
         }
         tx.commit()?;
         Ok(())
@@ -351,6 +356,52 @@ impl DraftPlannerStore for SqliteQueue {
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()> {
         SqliteQueue::set_follow_up_depth(self, task, depth)
     }
+    fn planner_findings(&self) -> Result<Vec<Finding>> {
+        SqliteQueue::planner_findings(self)
+    }
+    fn open_finding_planner(
+        &mut self,
+        finding: FindingId,
+        answer: Option<AskId>,
+    ) -> Result<FindingPlannerStart> {
+        SqliteQueue::open_finding_planner(self, finding, answer)
+    }
+    fn finding_view(&self, finding: FindingId) -> Result<FindingView> {
+        SqliteQueue::findings(
+            self,
+            &FindingQuery {
+                id: Some(finding),
+                full: true,
+                ..FindingQuery::default()
+            },
+        )?
+        .into_iter()
+        .next()
+        .with_context(|| format!("finding {finding} does not exist"))
+    }
+    fn finding_asks(&self, finding: FindingId) -> Result<Vec<Ask>> {
+        SqliteQueue::finding_asks(self, finding)
+    }
+    fn settle_findings(&mut self) -> Result<Vec<(FindingId, FindingStatus)>> {
+        SqliteQueue::settle_findings(self)
+    }
+    fn exhausted_findings(&self) -> Result<Vec<Finding>> {
+        SqliteQueue::exhausted_findings(self)
+    }
+    fn record_finding_event(
+        &mut self,
+        finding: FindingId,
+        kind: &str,
+        payload: Value,
+    ) -> Result<()> {
+        SqliteQueue::record_finding_event(self, finding, kind, payload)
+    }
+    fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool> {
+        SqliteQueue::ask_delivered_to(self, ask, workspace)
+    }
+    fn ask_delivery_failed(&self, ask: AskId) -> Result<bool> {
+        SqliteQueue::ask_delivery_failed(self, ask)
+    }
 }
 
 fn is_target(conn: &Connection, draft: TaskId) -> Result<bool> {
@@ -401,12 +452,17 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
 /// draft that moved on; else a new planner for a draft that still waits
 /// (unless its planners are used up); else a person's.
 pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRoute> {
-    let Some(task_id) = ask.task_id else {
-        return Ok(PlannerAnswerRoute::Person);
-    };
     if ask.kind != AskKind::PlannerQuestion || ask.answer.is_none() || ask.closed_at.is_some() {
         return Ok(PlannerAnswerRoute::Person);
     }
+    // A question about a finding goes the way of the finding's planners
+    // (ADR-0044 decision 19).
+    if let Some(finding) = ask.finding_id {
+        return super::finding_planners::route_of(conn, finding);
+    }
+    let Some(task_id) = ask.task_id else {
+        return Ok(PlannerAnswerRoute::Person);
+    };
     let planner: Option<i64> = conn
         .query_row(
             "SELECT p.id FROM planners p JOIN tasks t ON t.id=?1

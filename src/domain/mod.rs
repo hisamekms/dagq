@@ -594,8 +594,9 @@ pub mod worktime;
 pub use error::DomainError;
 use error::require;
 pub use finding::{
-    Finding, FindingOutcome, FindingQuery, FindingStatus, FindingTarget, FindingUpdate,
-    FindingView, Impact, NewFinding,
+    DISMISS_OPTION, Finding, FindingAnswer, FindingOutcome, FindingQuery, FindingStatus,
+    FindingTarget, FindingUpdate, FindingView, Impact, MAX_FINDING_PLANNERS, NewFinding,
+    PROPOSE_OPTION,
 };
 pub use follow_up::{DraftOrigin, DraftTarget, MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS};
 pub use goal::Goal;
@@ -705,7 +706,9 @@ pub struct NewAsk {
     /// or `recovery_failed`. Authentication and cost are [`NewHold`]s.
     pub reason_category: AskReason,
     /// The finding a `blocked` ask raises; the one-open-ask rule then holds
-    /// per finding (ADR-0044 decision 23).
+    /// per finding (ADR-0044 decision 23). A `planner_question` names the
+    /// finding its planner of the runtime's was opened for (ADR-0044
+    /// decision 19).
     pub finding_id: Option<FindingId>,
 }
 
@@ -730,13 +733,17 @@ impl NewAsk {
             },
         )?;
         require(
-            self.finding_id.is_none() || self.kind == AskKind::Blocked,
+            self.finding_id.is_none()
+                || matches!(self.kind, AskKind::Blocked | AskKind::PlannerQuestion),
             || DomainError::AskFindingNotBlocked {
                 kind: self.kind.clone(),
             },
         )?;
         require(
-            self.task_id.is_some() || self.run_id.is_some() || self.kind == AskKind::Blocked,
+            self.task_id.is_some()
+                || self.run_id.is_some()
+                || self.kind == AskKind::Blocked
+                || (self.kind == AskKind::PlannerQuestion && self.finding_id.is_some()),
             || DomainError::AskWithoutTarget {
                 kind: self.kind.clone(),
             },
@@ -765,7 +772,10 @@ pub fn check_ask_kind(
     }
     require(
         task_id.is_some()
-            || ((matches!(kind, AskKind::Blocked | AskKind::QueueHold) || kind.is_update())
+            || ((matches!(
+                kind,
+                AskKind::Blocked | AskKind::QueueHold | AskKind::PlannerQuestion
+            ) || kind.is_update())
                 && run_id.is_none()),
         || DomainError::AskWithoutTarget { kind: kind.clone() },
     )?;
@@ -1237,6 +1247,10 @@ pub enum AttentionNext {
     /// registered, and none decided it (`draft_planner_exhausted`,
     /// ADR-0041 decision 16): a person decides it in a planner of theirs.
     DecideDraft,
+    /// The runtime opened its planners for a finding marked for a proposal,
+    /// and none decided it (`finding_planner_exhausted`, ADR-0044 decision
+    /// 19): a person decides it in a planner of theirs.
+    DecideFinding,
     /// A program `[run.env]` names is not found on the supervisor's PATH
     /// (`run_env_program_missing`, ADR-0049 decision 9): a person installs
     /// it or has a task take it out of `dagq.toml`; the supervisor claims
@@ -1284,6 +1298,7 @@ impl fmt::Display for AttentionNext {
             Self::PlanReviewByHand => f.write_str("plan review by hand"),
             Self::CheckPlanner => f.write_str("check the planner"),
             Self::DecideDraft => f.write_str("decide the draft in a planner"),
+            Self::DecideFinding => f.write_str("decide the finding in a planner"),
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
         }
@@ -1375,6 +1390,14 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     "finding_recorded",
     "finding_updated",
     "finding_status_changed",
+    // A finding's planners and the answers to their questions, for a
+    // finding on the queue (ADR-0044 decision 19).
+    "finding_planner_opened",
+    "finding_planner_exhausted",
+    "ask_delivered",
+    "ask_delivery_failed",
+    "planner_answer_closed",
+    "planner_answer_claimed",
     "run_env_program_missing",
     "run_env_program_found",
     "session_opened",
@@ -1493,6 +1516,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         ("plan_review_failed", _) => Some(AttentionNext::PlanReviewByHand),
         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
+        ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
         ("push_failed", _) => Some(AttentionNext::PushMain),
         (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
         // The failure and the breaking build of the automatic update reach
@@ -1512,6 +1536,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         {
             None
         }
+        // A `propose` or `dismiss` answer the runtime applied to the ask's
+        // finding (ADR-0044 decision 19).
+        ("ask_answered", _) if payload.get("finding_applied").is_some() => None,
         // The supervisor types the answer of a `worker_question` into the
         // worker's terminal, and that of a `planner_question` into the
         // planner's workspace (ADR-0041 decision 13).

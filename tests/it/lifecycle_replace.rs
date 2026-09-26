@@ -792,6 +792,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
+             DROP INDEX planners_by_finding;
+             ALTER TABLE planners DROP COLUMN finding_id;
              PRAGMA user_version = 30;",
         )
         .unwrap();
@@ -854,6 +856,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
+             DROP INDEX planners_by_finding;
+             ALTER TABLE planners DROP COLUMN finding_id;
              PRAGMA user_version = {};",
             auto_update - 1
         ))

@@ -17,6 +17,7 @@ mod cli_roles;
 mod cli_stats;
 mod cli_tasks;
 mod cli_version;
+mod finding_planner;
 mod lifecycle_cmux;
 mod lifecycle_down;
 mod lifecycle_in_cmux;

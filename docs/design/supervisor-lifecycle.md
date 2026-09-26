@@ -253,6 +253,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 - [Draft planners (supervisor)](supervisor-lifecycle/draft-planners.md)
 
+## Finding planners (supervisor)
+
+- [Finding planners (supervisor)](supervisor-lifecycle/finding-planners.md)（proposalを求める印の付いたfindingとaskの`propose`のanswerからplannerを立てる）
+
 ## Plan review (supervisor)
 
 - [Plan review (supervisor)](supervisor-lifecycle/plan-review.md)

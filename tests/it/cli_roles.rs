@@ -880,7 +880,7 @@ fn findings_are_recorded_once_per_problem_and_listed_by_impact() {
                 &id
             ]
         ),
-        "only a blocked ask may name a finding, not decide"
+        "only a blocked ask or a planner_question may name a finding, not decide"
     );
     assert_eq!(
         error(

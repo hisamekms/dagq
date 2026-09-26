@@ -11,7 +11,8 @@ use crate::domain::Ask;
 use crate::domain::{
     ANSWERED_BY_PERSON, ANSWERED_BY_RUNTIME, AskId, AskKind, AskOutcome, AskReason,
     HOLD_AFFECTED_HEADING, HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId,
-    UPDATE_FAILED_OPTIONS, check_ask_kind, check_event_target, option_index, session_takes_answers,
+    UPDATE_FAILED_OPTIONS, check_ask_kind, check_event_target, finding, option_index,
+    session_takes_answers,
 };
 
 pub use crate::application::AskQuery;
@@ -182,16 +183,42 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ask = read_ask(&tx, id)?;
         ensure!(ask.is_open(), "ask {id} is not open");
+        let now = self.generators.clock.now();
         let mut payload =
             json!({"ask_id": id, "kind": ask.kind, "reason_category": ask.reason_category});
-        write_answer(
-            &tx,
-            &ask,
-            text,
-            answered_by,
-            self.generators.clock.now(),
-            &mut payload,
-        )?;
+        write_answer(&tx, &ask, text, answered_by, now, &mut payload)?;
+        // A `propose` or `dismiss` answer the ask offered is applied to its
+        // finding here (ADR-0044 decision 19): nobody has to carry it. The
+        // observer's `blocked` ask is done with it; a `stalled` ask stays
+        // for the supervisor that watches its run.
+        if let Some(applied) =
+            super::finding_planners::apply_answer(&tx, &ask, text, answered_by, now)?
+        {
+            payload["finding_id"] = json!(applied.finding);
+            payload["finding_applied"] = json!(applied.action);
+            payload["runtime_delivers"] = json!(true);
+            ask_event(
+                &tx,
+                ask.task_id,
+                ask.run_id.as_ref(),
+                "ask_answered",
+                payload,
+            )?;
+            if ask.kind == AskKind::Blocked {
+                tx.execute("UPDATE asks SET closed_at=?2 WHERE id=?1", params![id, now])?;
+                // Applied: `stats` reads `ask_closed` as the answer applied.
+                ask_event(
+                    &tx,
+                    ask.task_id,
+                    ask.run_id.as_ref(),
+                    "ask_closed",
+                    json!({"ask_id": id, "kind": ask.kind}),
+                )?;
+            }
+            let answered = read_ask(&tx, id)?;
+            tx.commit()?;
+            return Ok(answered);
+        }
         if ask.kind == AskKind::WorkerQuestion
             && let Some(run_id) = ask.run_id.as_ref()
         {
@@ -727,6 +754,14 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     if let Some(finding_id) = ask.finding_id {
         super::findings::read_finding(tx, finding_id)?;
     }
+    // An ask about a finding offers to make a proposal of it or dismiss
+    // it, a `stalled` one to make a proposal of its cause (ADR-0044
+    // decision 19); the runtime applies those answers.
+    let options = match (&ask.kind, ask.finding_id) {
+        (AskKind::Blocked, Some(_)) => finding::with_finding_options(&ask.options),
+        (AskKind::Stalled, _) => finding::with_propose_option(&ask.options),
+        _ => ask.options.clone(),
+    };
     if let Some(existing) = tx
             .query_row(
                 "SELECT * FROM asks WHERE ifnull(task_id,0)=ifnull(?1,0) AND ifnull(run_id,'')=ifnull(?2,'')
@@ -750,7 +785,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
             task_id,
             ask.run_id,
             ask.question,
-            serde_json::to_string(&ask.options)?,
+            serde_json::to_string(&options)?,
             ask.asked_by,
             ask.reason_category.as_str(),
             ask.finding_id

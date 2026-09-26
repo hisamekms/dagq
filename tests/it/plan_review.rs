@@ -51,10 +51,10 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     _dir: TempDir,
     repo: PathBuf,
-    db: PathBuf,
+    pub(crate) db: PathBuf,
     claude: PathBuf,
     /// Times the test while held (task 324).
     _test: common::Waiting,
@@ -62,7 +62,7 @@ struct Fixture {
 
 /// A repository with one commit on main, a queue next to it, and a draft
 /// task (1) every other task depends on, so none is ever claimed.
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -90,7 +90,12 @@ fn fixture() -> Fixture {
     }
 }
 
-fn add(queue: &mut SqliteQueue, title: &str, deps: &[TaskId], priority: Priority) -> TaskId {
+pub(crate) fn add(
+    queue: &mut SqliteQueue,
+    title: &str,
+    deps: &[TaskId],
+    priority: Priority,
+) -> TaskId {
     queue
         .add(NewTask {
             kind: None,
@@ -129,7 +134,7 @@ fn submit(queue: &mut SqliteQueue, tasks: &[TaskId], workspace: Option<&str>) ->
 
 /// The headless plan review: each job prints the next verdict (the last
 /// repeats) and its prompt is kept.
-struct StubReviewer {
+pub(crate) struct StubReviewer {
     verdicts: Mutex<Vec<String>>,
     prompts: Mutex<Vec<String>>,
     /// A task the first job's run edits through the queue at `.0`, as
@@ -138,7 +143,7 @@ struct StubReviewer {
 }
 
 impl StubReviewer {
-    fn new(verdicts: &[Value]) -> Self {
+    pub(crate) fn new(verdicts: &[Value]) -> Self {
         Self {
             verdicts: Mutex::new(verdicts.iter().map(Value::to_string).collect()),
             prompts: Mutex::new(Vec::new()),
@@ -158,7 +163,7 @@ impl StubReviewer {
             edit: Mutex::new(None),
         }
     }
-    fn prompts(&self) -> Vec<String> {
+    pub(crate) fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
     }
 }
@@ -213,11 +218,11 @@ impl AgentProvider for StubReviewer {
 /// `listed` and those it opened, until closed), texts typed, workspaces
 /// opened by name, exits sent and notifications.
 #[derive(Default)]
-struct PlanWorkspace {
+pub(crate) struct PlanWorkspace {
     listed: Mutex<Vec<String>>,
     opened: Mutex<Vec<(String, String)>>,
     texts: Mutex<Vec<(String, String)>>,
-    exits: Mutex<Vec<String>>,
+    pub(crate) exits: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     notifications: Mutex<Vec<(String, String)>>,
 }
@@ -228,10 +233,10 @@ impl PlanWorkspace {
         *backend.listed.lock().unwrap() = workspaces.iter().map(|w| (*w).to_owned()).collect();
         backend
     }
-    fn texts(&self) -> Vec<(String, String)> {
+    pub(crate) fn texts(&self) -> Vec<(String, String)> {
         self.texts.lock().unwrap().clone()
     }
-    fn opened(&self) -> Vec<(String, String)> {
+    pub(crate) fn opened(&self) -> Vec<(String, String)> {
         self.opened.lock().unwrap().clone()
     }
 }
@@ -313,7 +318,7 @@ impl WorkspaceBackend for PlanWorkspace {
     }
 }
 
-fn options(runtime_planners: usize, planner_timeout: Duration) -> SuperviseOptions {
+pub(crate) fn options(runtime_planners: usize, planner_timeout: Duration) -> SuperviseOptions {
     SuperviseOptions {
         tick: Duration::from_millis(20),
         idle_poll: Duration::from_millis(20),
@@ -324,7 +329,7 @@ fn options(runtime_planners: usize, planner_timeout: Duration) -> SuperviseOptio
     }
 }
 
-fn supervise(fx: &Fixture, backend: &PlanWorkspace, reviewer: &StubReviewer) -> Value {
+pub(crate) fn supervise(fx: &Fixture, backend: &PlanWorkspace, reviewer: &StubReviewer) -> Value {
     supervise_with(
         fx,
         backend,
@@ -333,7 +338,7 @@ fn supervise(fx: &Fixture, backend: &PlanWorkspace, reviewer: &StubReviewer) -> 
     )
 }
 
-fn supervise_with(
+pub(crate) fn supervise_with(
     fx: &Fixture,
     backend: &PlanWorkspace,
     reviewer: &StubReviewer,
@@ -351,12 +356,12 @@ fn supervise_with(
     .unwrap()
 }
 
-fn status(queue: &mut SqliteQueue, id: TaskId) -> TaskStatus {
+pub(crate) fn status(queue: &mut SqliteQueue, id: TaskId) -> TaskStatus {
     queue.show(id).unwrap().task.status()
 }
 
 /// The payloads of the task's events of `kind`.
-fn events(queue: &mut SqliteQueue, id: TaskId, kind: &str) -> Vec<Value> {
+pub(crate) fn events(queue: &mut SqliteQueue, id: TaskId, kind: &str) -> Vec<Value> {
     queue
         .show(id)
         .unwrap()
@@ -1145,7 +1150,7 @@ fn runtime_draft(
     id
 }
 
-fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
+pub(crate) fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
     queue
         .add_goal(NewGoal {
             title: "tidy the queue".into(),
@@ -1159,7 +1164,7 @@ fn open_goal(queue: &mut SqliteQueue) -> dagq::domain::GoalId {
         .id()
 }
 
-fn planner_prompt(db: &Path, planner: dagq::domain::PlannerId) -> String {
+pub(crate) fn planner_prompt(db: &Path, planner: dagq::domain::PlannerId) -> String {
     fs::read_to_string(
         planners_dir(db)
             .join(planner.to_string())
@@ -1169,7 +1174,7 @@ fn planner_prompt(db: &Path, planner: dagq::domain::PlannerId) -> String {
 }
 
 /// Make `planner` alive (its wrapper is this test process) and idle.
-fn idle(queue: &SqliteQueue, db: &Path, planner: dagq::domain::PlannerId) {
+pub(crate) fn idle(queue: &SqliteQueue, db: &Path, planner: dagq::domain::PlannerId) {
     queue
         .register_planner_wrapper(planner, std::process::id())
         .unwrap();

@@ -864,6 +864,26 @@ pub fn attention(
             next: AttentionNext::DecideDraft,
         });
     }
+    // A finding the runtime's planners left undecided waits for a
+    // person's planner (ADR-0044 decision 19); it is shown on its task,
+    // or on none for a finding on the queue or a goal.
+    for finding in queue.exhausted_findings()? {
+        attention.push(Attention {
+            run_id: finding.run_id.clone(),
+            task_id: finding.task_id,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: finding.status.as_str().into(),
+            kind: "finding_planner_exhausted".into(),
+            last_error: Some(truncate_reason(&format!(
+                "finding {}: {}",
+                finding.id, finding.summary
+            ))),
+            last_error_code: None,
+            next: AttentionNext::DecideFinding,
+        });
+    }
     for hold in queue.plan_review_holds()? {
         let (status, next) = match hold.kind {
             "plan_review_failed" => ("submitted", AttentionNext::PlanReviewByHand),

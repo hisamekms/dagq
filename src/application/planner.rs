@@ -149,6 +149,9 @@ fn launch_planner(
     if let Some(draft) = planner.draft_task_id {
         name.push_str(&format!(" - draft task {draft}"));
     }
+    if let Some(finding) = planner.finding_id {
+        name.push_str(&format!(" - finding {finding}"));
+    }
     let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, prompt);
     let workspace_id = match opened {
         Ok(id) => id,
