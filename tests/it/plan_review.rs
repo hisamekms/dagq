@@ -1365,6 +1365,15 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     );
     assert!(queue.asks(Default::default()).unwrap().is_empty());
     assert_eq!(events(&mut queue, first, "ask_delivered").len(), 1);
+    assert_eq!(
+        events(&mut queue, first, "planner_answer_claimed"),
+        [json!({
+            "ask_id": asked.id,
+            "planner_id": planner.id,
+            "workspace_id": "RT1",
+            "claimed_at": events(&mut queue, first, "planner_answer_claimed")[0]["claimed_at"],
+        })]
+    );
     // It is at work on the answer: not asked to exit yet.
     assert!(backend.exits.lock().unwrap().is_empty());
 
@@ -1438,6 +1447,92 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     assert_eq!(opened[0]["ask_id"], json!(asked.id.as_i64() - 1));
     assert_eq!(events(&mut queue, second, "planner_answer_closed").len(), 1);
     assert!(queue.asks(Default::default()).unwrap().is_empty());
+}
+
+#[test]
+fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "draft",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
+    );
+    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let planner = queue.planners(false).unwrap()[0].clone();
+    let asked = queue
+        .ask(NewAsk {
+            kind: AskKind::PlannerQuestion,
+            task_id: Some(draft),
+            run_id: None,
+            question: "is this in the goal?".into(),
+            options: vec!["adopt".into(), "cancel".into(), "keep_draft".into()],
+            asked_by: "planner".into(),
+            reason_category: dagq::domain::AskReason::Scope,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask;
+    // An open ask is nobody's to type yet.
+    assert!(
+        !queue
+            .claim_planner_answer(asked.id, planner.id, "RT1")
+            .unwrap()
+    );
+    idle(&queue, &fx.db, planner.id);
+    queue.answer(asked.id, "cancel").unwrap();
+    // Not to a planner the answer does not go to.
+    assert!(
+        !queue
+            .claim_planner_answer(asked.id, dagq::domain::PlannerId::new(99), "RT1")
+            .unwrap()
+    );
+    // The other supervisor of a handoff claims it first, on its own
+    // connection; a second claim is refused.
+    let mut other = SqliteQueue::open(&fx.db).unwrap();
+    assert!(
+        other
+            .claim_planner_answer(asked.id, planner.id, "RT1")
+            .unwrap()
+    );
+    assert!(
+        !queue
+            .claim_planner_answer(asked.id, planner.id, "RT1")
+            .unwrap()
+    );
+    // This supervisor then leaves the typing to the claimer.
+    supervise(&fx, &backend, &reviewer);
+    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+    assert_eq!(events(&mut queue, draft, "planner_answer_claimed").len(), 1);
+    assert!(events(&mut queue, draft, "ask_delivered").is_empty());
+
+    // The claimer ended before typing: once its claim is older than the
+    // lease, the next pass takes it over and types the answer once.
+    Connection::open(&fx.db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET payload=json_set(payload,'$.claimed_at',
+             json_extract(payload,'$.claimed_at') - ?1) WHERE kind='planner_answer_claimed'",
+            [dagq::infrastructure::draft_planners::PLANNER_ANSWER_CLAIM_SECS],
+        )
+        .unwrap();
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(
+        backend.texts(),
+        [(
+            "RT1".to_owned(),
+            format!("answer to ask {}: cancel", asked.id)
+        )]
+    );
+    assert_eq!(events(&mut queue, draft, "planner_answer_claimed").len(), 2);
+    assert_eq!(events(&mut queue, draft, "ask_delivered").len(), 1);
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(backend.texts().len(), 1);
 }
 
 #[test]

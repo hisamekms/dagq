@@ -1470,6 +1470,16 @@ pub trait DraftPlannerStore {
     fn planner_answers(&self) -> Result<Vec<Ask>>;
     /// Where the answer of an answered `planner_question` goes.
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute>;
+    /// Claim the typing of the answer of `ask` into `planner`'s
+    /// `workspace` (`planner_answer_claimed`), in one write transaction:
+    /// `false` when another process claimed it, the ask was closed, or its
+    /// answer no longer goes to that planner. Only the claimer types it.
+    fn claim_planner_answer(
+        &mut self,
+        ask: AskId,
+        planner: PlannerId,
+        workspace: &str,
+    ) -> Result<bool>;
     /// Close an answered `planner_question` nobody needs any more (its
     /// draft moved on), recording `planner_answer_closed` with `why`.
     fn close_planner_answer(&mut self, ask: AskId, why: &str) -> Result<()>;

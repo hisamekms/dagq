@@ -23,6 +23,11 @@ use crate::domain::{
     follow_up::{FollowUpFacts, adopt_needs_person},
 };
 
+/// How long a claim on typing the answer of a `planner_question` holds
+/// (seconds): the typing takes seconds, so a claim this old was left by a
+/// supervisor that ended before it typed, and another may take it over.
+pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
+
 /// The drafts waiting for a planner of the runtime's: `draft`, in no
 /// proposal (or in one withdrawn: a canceled proposal holds no draft), with an origin, no planner of the runtime's open for it, no
 /// `planner_question` about it nobody closed, not kept as a draft by an
@@ -192,6 +197,51 @@ impl SqliteQueue {
         route_of(&self.conn, ask)
     }
 
+    /// Claim the typing of the answer of `id` into `planner`'s `workspace`
+    /// in one write transaction (`planner_answer_claimed`): `false` when
+    /// the ask was closed, no longer goes to that planner, or another
+    /// process claimed it within [`PLANNER_ANSWER_CLAIM_SECS`] (two
+    /// supervisors across a handoff). An older claim is taken over: its
+    /// supervisor ended before typing (a typing that fails records
+    /// `ask_delivery_failed`, which holds the answer back first).
+    pub fn claim_planner_answer(
+        &mut self,
+        id: AskId,
+        planner: PlannerId,
+        workspace: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ask = read_ask(&tx, id)?;
+        let Some(task) = ask.task_id else {
+            return Ok(false);
+        };
+        if !matches!(route_of(&tx, &ask)?, PlannerAnswerRoute::Planner(to) if to.id == planner) {
+            return Ok(false);
+        }
+        let now = self.generators.clock.now();
+        let claimed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1
+             AND kind='planner_answer_claimed' AND json_extract(payload,'$.ask_id')=?2
+             AND COALESCE(json_extract(payload,'$.claimed_at'), 0) > ?3)",
+            params![task, id, now - PLANNER_ANSWER_CLAIM_SECS],
+            |r| r.get(0),
+        )?;
+        if claimed {
+            return Ok(false);
+        }
+        event(
+            &tx,
+            task,
+            None,
+            "planner_answer_claimed",
+            json!({"ask_id": id, "planner_id": planner, "workspace_id": workspace, "claimed_at": now}),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn close_planner_answer(&mut self, id: AskId, why: &str) -> Result<()> {
         let tx = self
             .conn
@@ -277,6 +327,14 @@ impl DraftPlannerStore for SqliteQueue {
     }
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute> {
         SqliteQueue::planner_answer_route(self, ask)
+    }
+    fn claim_planner_answer(
+        &mut self,
+        ask: AskId,
+        planner: PlannerId,
+        workspace: &str,
+    ) -> Result<bool> {
+        SqliteQueue::claim_planner_answer(self, ask, planner, workspace)
     }
     fn close_planner_answer(&mut self, ask: AskId, why: &str) -> Result<()> {
         SqliteQueue::close_planner_answer(self, ask, why)

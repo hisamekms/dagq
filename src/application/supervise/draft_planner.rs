@@ -25,8 +25,9 @@ impl Supervisor<'_> {
     /// planner that works on the ask's task once it stopped after asking,
     /// handed to a new planner when the draft's one is gone (within the
     /// limit, counted in `runtime_open`), or closed when the draft moved on.
-    /// A typing that fails records `ask_delivery_failed` and leaves the
-    /// answer to the inbox.
+    /// The typing is claimed first (`planner_answer_claimed`), so only one
+    /// supervisor types an answer. A typing that fails records
+    /// `ask_delivery_failed` and leaves the answer to the inbox.
     pub(super) fn deliver_planner_answers(
         &mut self,
         options: &LoopSettings,
@@ -55,7 +56,13 @@ impl Supervisor<'_> {
                     let Some(workspace) = view.planner.workspace_id.clone() else {
                         continue;
                     };
-                    if self.delivery_failed(task, ask.id)? {
+                    // One transaction takes the typing first, so two
+                    // supervisors (across a handoff) never both type it.
+                    if self.delivery_failed(task, ask.id)?
+                        || !self
+                            .queue
+                            .claim_planner_answer(ask.id, planner.id, &workspace)?
+                    {
                         continue;
                     }
                     let text = format!(

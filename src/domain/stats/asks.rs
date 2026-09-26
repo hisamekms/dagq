@@ -135,6 +135,7 @@ const NOT_APPLYING: &[&str] = &[
     "ask_answered",
     "ask_updated",
     "ask_delivery_failed",
+    "planner_answer_claimed",
     "run_waiting_started",
     "run_waiting_ask_added",
     "run_waiting_ended",
