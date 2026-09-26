@@ -406,6 +406,17 @@ pub fn observer_prompt(
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
          - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} notes`, `{dagq} show ID`, `{dagq} events --all`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
          \n\
+         Reading the stalled-session thresholds (ADR-0043 decision 6, ADR-0044 decision 21):\n\
+         - stats' `stall_thresholds` has one entry per `[stall]` setting (`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`), each with \
+           `threshold_secs` (the value now), `detections`, `by_detection` (nudge, ask, enter_retry, resend, with their outcomes), `outcomes`, `detected_after_secs` / `resolved_after_secs` (count, median, max), \
+           `preempted` (a person stepped in by input or recover before any detection), `by_threshold_secs` (the outcomes per value the detections were made with) and `running_alerts`.\n\
+         - Many `answered_wait` outcomes (the answer to the ask was to wait) suggest the threshold is too early; many `preempted` suggest it is too late. \
+           `resolved_by_nudge` / `resolved_by_enter` / `resolved_by_resend` show the detection works; `pending` has no outcome yet, so do not judge on it. \
+           Compare the outcomes before and after a change of the value with `by_threshold_secs`.\n\
+         - An `idle_without_receipt` entry of stats' `running_alerts` with `nudged: false` and `asked: false` past its `threshold` suggests the supervisor missed the stall.\n\
+         - When a threshold needs revisiting, record a finding with `--kind threshold --subject <the setting's name>` (a missed detection too, on the run), and add `--propose` when it recurs. \
+           You never change the threshold yourself.\n\
+         \n\
          Do not:\n\
          - Write notes, goals or tasks, resolve individual stalls, answer asks, dismiss findings, or change the state of runs, tasks or goals (ready, cancel, integrate, recover, goal ready/close); the queue refuses those from your environment.\n\
          - Edit files or run anything but the queue commands above.\n\
@@ -416,4 +427,32 @@ pub fn observer_prompt(
          ```json\n{}\n```\n",
         serde_json::to_string_pretty(input)?
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_explains_how_to_read_the_stall_thresholds() {
+        let prompt =
+            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        for text in [
+            "`stall_thresholds`",
+            "`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`",
+            "`detections`, `by_detection`",
+            "`detected_after_secs` / `resolved_after_secs`",
+            "`by_threshold_secs`",
+            "Many `answered_wait` outcomes (the answer to the ask was to wait) suggest the threshold is too early",
+            "many `preempted` suggest it is too late",
+            "`resolved_by_nudge` / `resolved_by_enter`",
+            "`pending` has no outcome yet",
+            "`idle_without_receipt` entry of stats' `running_alerts` with `nudged: false` and `asked: false`",
+            "`--kind threshold --subject <the setting's name>`",
+            "add `--propose` when it recurs",
+            "You never change the threshold yourself.",
+        ] {
+            assert!(prompt.contains(text), "the prompt lacks {text:?}");
+        }
+    }
 }
