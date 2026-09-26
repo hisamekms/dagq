@@ -654,6 +654,8 @@ mod stats {
         assert_eq!(
             all["backend_failures"],
             json!({"count": 4, "by_op": {"close": 1, "ensure_group": 1, "send_exit": 2},
+                   "retried": 0, "exhausted": 4, "retried_by_op": {},
+                   "exhausted_by_op": {"close": 1, "ensure_group": 1, "send_exit": 2},
                    "max_load_avg": 34.25, "max_slots": 4,
                    "by_load_band": [{"band": "0-4", "count": 1}, {"band": "16-32", "count": 1},
                                     {"band": "32-64", "count": 1}]})
@@ -689,7 +691,9 @@ mod stats {
         });
         assert_eq!(
             only_close["backend_failures"],
-            json!({"count": 0, "by_op": {}, "max_load_avg": null, "max_slots": null, "by_load_band": []})
+            json!({"count": 0, "by_op": {}, "retried": 0, "exhausted": 0, "retried_by_op": {},
+                   "exhausted_by_op": {}, "max_load_avg": null, "max_slots": null,
+                   "by_load_band": []})
         );
 
         // Nothing past the last event: an empty window.

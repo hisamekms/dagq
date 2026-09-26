@@ -311,6 +311,17 @@ pub struct BackendFailures {
     pub count: i64,
     /// Failures per `op`.
     pub by_op: BTreeMap<String, i64>,
+    /// Failed attempts the call was retried after (a non-null
+    /// `retry_after_ms`, task 326).
+    pub retried: i64,
+    /// Failures the call gave up on: a null or missing `retry_after_ms`,
+    /// which also counts events from before the retry as the last failure.
+    /// `retried + exhausted == count`.
+    pub exhausted: i64,
+    /// `retried` per `op`.
+    pub retried_by_op: BTreeMap<String, i64>,
+    /// `exhausted` per `op`.
+    pub exhausted_by_op: BTreeMap<String, i64>,
     /// The highest 1-minute load average recorded with a failure.
     pub max_load_avg: Option<f64>,
     /// The most slots held when one failed.
@@ -1384,11 +1395,23 @@ fn backend_failures(
             && counts(event.task_id)
     }) {
         failures.count += 1;
-        let op = event.payload.get("op").and_then(Value::as_str);
-        *failures
-            .by_op
-            .entry(op.unwrap_or("unknown").to_owned())
-            .or_default() += 1;
+        let op = event
+            .payload
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *failures.by_op.entry(op.to_owned()).or_default() += 1;
+        let retried = event
+            .payload
+            .get("retry_after_ms")
+            .is_some_and(|backoff| !backoff.is_null());
+        let (total, by_op) = if retried {
+            (&mut failures.retried, &mut failures.retried_by_op)
+        } else {
+            (&mut failures.exhausted, &mut failures.exhausted_by_op)
+        };
+        *total += 1;
+        *by_op.entry(op.to_owned()).or_default() += 1;
         if let Some(load) = event.payload.get("load_avg").and_then(Value::as_f64) {
             failures.max_load_avg = Some(failures.max_load_avg.map_or(load, |max| max.max(load)));
             measures::count_band(&mut failures.by_load_band, load);
@@ -1754,6 +1777,49 @@ mod tests {
             created_at: at(secs),
             ..event(id, 1, kind, payload)
         }
+    }
+
+    /// A failed attempt with a backoff is `retried`; one with a null
+    /// `retry_after_ms`, or an event from before the retry without it, is
+    /// `exhausted`, and the two add up to `count`.
+    #[test]
+    fn backend_failures_split_retried_attempts_from_exhausted_ones() {
+        let failed = |id, op: &str, retry: Option<Value>| {
+            let mut payload = json!({"op": op, "attempt": 1, "max_attempts": 3});
+            if let Some(retry) = retry {
+                payload["retry_after_ms"] = retry;
+            }
+            event(id, 1, "backend_call_failed", payload)
+        };
+        let events = vec![
+            failed(1, "capture", Some(json!(2000))),
+            failed(2, "capture", Some(json!(4000))),
+            failed(3, "capture", Some(Value::Null)),
+            failed(4, "send_text", Some(json!(2000))),
+            // Before task 326: no retry_after_ms at all.
+            failed(5, "close", None),
+        ];
+        let failures = backend_failures(&events, EventId::new(0), EventId::new(5), |_| true);
+        assert_eq!(failures.count, 5);
+        assert_eq!(failures.retried, 3);
+        assert_eq!(failures.exhausted, 2);
+        assert_eq!(failures.retried + failures.exhausted, failures.count);
+        assert_eq!(
+            failures.retried_by_op,
+            BTreeMap::from([("capture".to_owned(), 2), ("send_text".to_owned(), 1)])
+        );
+        assert_eq!(
+            failures.exhausted_by_op,
+            BTreeMap::from([("capture".to_owned(), 1), ("close".to_owned(), 1)])
+        );
+        assert_eq!(
+            failures.by_op,
+            BTreeMap::from([
+                ("capture".to_owned(), 3),
+                ("close".to_owned(), 1),
+                ("send_text".to_owned(), 1),
+            ])
+        );
     }
 
     #[test]
