@@ -1225,6 +1225,7 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
         format!("- task {gap} (draft): gap"),
         format!("dagq submit {follow_up}"),
         format!("dagq cancel {follow_up}"),
+        format!("dagq cancel {follow_up} --duplicate-of <that task>"),
         format!("dagq ask --task {follow_up} --kind planner_question --because scope"),
         "follow-up draft（task".to_owned(),
     ] {
@@ -1883,4 +1884,99 @@ fn plan_review_records_each_tasks_predicted_weight_and_goes_on_without_one() {
     assert_eq!(events(&mut queue, three, "task_weight_predicted").len(), 1);
     // No run was claimed, so nothing predicted at a claim either.
     assert!(queue.show(two).unwrap().runs.is_empty());
+}
+
+#[test]
+fn a_duplicate_plan_review_cancels_is_recorded_as_cancel_duplicate_of_does() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let original = TaskId::new(1);
+    let copy = add(&mut queue, "copy", &[original], Priority::Normal);
+    let kept = add(&mut queue, "kept", &[original], Priority::Normal);
+    submit(&mut queue, &[copy, kept], None);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "pass", "reasons": [], "summary": "copy duplicates task 1",
+        "actions": [{"action": "cancel_duplicate", "task_id": copy, "duplicate_of": original}]
+    })]);
+    let outcome = supervise(&fx, &PlanWorkspace::default(), &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(status(&mut queue, copy), TaskStatus::Canceled);
+    assert_eq!(status(&mut queue, kept), TaskStatus::Ready);
+    // The same record as `cancel --duplicate-of` (ADR-0046 decision 5),
+    // marked as the plan review's.
+    let changed = events(&mut queue, copy, "task_status_changed");
+    let canceled = changed.last().unwrap();
+    assert_eq!(canceled["to"], "canceled");
+    assert_eq!(canceled["duplicate_of"], json!(original));
+    assert_eq!(canceled["by"], "plan_review");
+    assert!(events(&mut queue, copy, "task_canceled_as_duplicate").is_empty());
+
+    let copy_id = copy.to_string();
+    let shown = common::cli::ok(&fx.db, &["show", &copy_id]);
+    assert_eq!(shown["duplicate_of"], json!(original));
+    let shown = common::cli::ok(&fx.db, &["show", "1"]);
+    assert_eq!(shown["duplicates"], json!([copy]));
+    let listed = common::cli::ok(&fx.db, &["list", "--all"]);
+    let row = listed["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == json!(copy))
+        .cloned()
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(row["duplicate_of"], json!(original));
+    let stats = common::cli::ok(&fx.db, &["stats", "--full"]);
+    assert_eq!(
+        stats["duplicate_cancels"],
+        json!({"count": 1, "tasks": [{"task_id": copy, "duplicate_of": original}]})
+    );
+}
+
+#[test]
+fn a_plan_review_duplicate_of_a_canceled_missing_or_the_same_task_fails() {
+    // (task, gone, chained): the task under review, a canceled task and
+    // one canceled as a duplicate of task 1.
+    type Ids = (TaskId, TaskId, TaskId);
+    type Case = (fn(Ids) -> TaskId, fn(Ids) -> String);
+    let cases: [Case; 4] = [
+        (
+            |(task, ..)| task,
+            |(task, ..)| format!("task {task} cannot be a duplicate of itself"),
+        ),
+        (
+            |_| TaskId::new(999),
+            |_| "task 999 does not exist".to_owned(),
+        ),
+        (
+            |(_, gone, _)| gone,
+            |(_, gone, _)| format!("task {gone} is canceled; a duplicate needs"),
+        ),
+        (
+            |(.., chained)| chained,
+            |(.., chained)| format!("task {chained} is canceled as a duplicate of task 1"),
+        ),
+    ];
+    for (target, error) in cases {
+        let fx = fixture();
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        let gone = add(&mut queue, "gone", &[], Priority::Normal);
+        queue.transition(gone, TaskAction::Cancel).unwrap();
+        let chained = add(&mut queue, "chained", &[], Priority::Normal);
+        queue.cancel_duplicate(chained, TaskId::new(1)).unwrap();
+        let task = add(&mut queue, "task", &[TaskId::new(1)], Priority::Normal);
+        submit(&mut queue, &[task], None);
+        let ids = (task, gone, chained);
+        let reviewer = StubReviewer::new(&[json!({
+            "verdict": "pass", "reasons": [], "summary": "duplicate",
+            "actions": [{"action": "cancel_duplicate", "task_id": task, "duplicate_of": target(ids)}]
+        })]);
+        supervise(&fx, &PlanWorkspace::default(), &reviewer);
+        assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
+        let failed = events(&mut queue, task, "plan_review_failed");
+        let expected = error(ids);
+        assert!(
+            failed[0]["error"].as_str().unwrap().contains(&expected),
+            "{expected}: {failed:?}"
+        );
+    }
 }

@@ -731,6 +731,7 @@ impl TaskStore for SqliteQueue {
             &tx,
             task_id,
             duplicate_of,
+            None,
             &self.generators.clock.timestamp(),
         )?;
         tx.commit()?;
@@ -1731,17 +1732,36 @@ pub(super) fn transition_task(
 /// Cancel `task_id` as a duplicate of `duplicate_of` inside the caller's
 /// transaction (ADR-0046 decision 5), recording `duplicate_of` in the
 /// payload of its `task_status_changed`: what `cancel --duplicate-of` does,
-/// and what plan review and the follow-up triage share to close a
-/// duplicate. The target must be another task that exists and is not
-/// canceled; a completed one means the task was already implemented there.
-/// A target canceled as a duplicate itself is refused with its own target,
-/// so the records never chain nor loop.
+/// and what plan review shares to close a duplicate (`by` names who closed
+/// it when it was not a person's CLI, as `plan_review`). The target is
+/// checked by [`check_duplicate`].
 pub(super) fn cancel_as_duplicate(
     conn: &Connection,
     task_id: TaskId,
     duplicate_of: TaskId,
+    by: Option<&str>,
     now: &str,
 ) -> Result<Task> {
+    check_duplicate(conn, task_id, duplicate_of)?;
+    apply_transition(
+        conn,
+        task_id,
+        TaskAction::Cancel,
+        now,
+        Some(Duplicate { duplicate_of, by }),
+    )
+}
+
+/// Check that `task_id` may be canceled as a duplicate of `duplicate_of`:
+/// the target must be another task that exists and is not canceled; a
+/// completed one means the task was already implemented there. A target
+/// canceled as a duplicate itself is refused with its own target, so the
+/// records never chain nor loop.
+pub(super) fn check_duplicate(
+    conn: &Connection,
+    task_id: TaskId,
+    duplicate_of: TaskId,
+) -> Result<()> {
     ensure!(
         task_id != duplicate_of,
         "task {task_id} cannot be a duplicate of itself"
@@ -1757,7 +1777,13 @@ pub(super) fn cancel_as_duplicate(
             ),
         }
     }
-    apply_transition(conn, task_id, TaskAction::Cancel, now, Some(duplicate_of))
+    Ok(())
+}
+
+/// What a cancel records as a duplicate in its `task_status_changed`.
+struct Duplicate<'a> {
+    duplicate_of: TaskId,
+    by: Option<&'a str>,
 }
 
 /// The task `task_id` was canceled as a duplicate of (ADR-0046 decision 5):
@@ -1805,7 +1831,7 @@ fn apply_transition(
     task_id: TaskId,
     action: TaskAction,
     now: &str,
-    duplicate_of: Option<TaskId>,
+    duplicate: Option<Duplicate>,
 ) -> Result<Task> {
     let task = read_task(conn, task_id)?;
     let from = task.status();
@@ -1826,8 +1852,17 @@ fn apply_transition(
         task_id,
         None,
         "task_status_changed",
-        match duplicate_of {
-            Some(target) => json!({"from": from, "to": task.status(), "duplicate_of": target}),
+        match duplicate {
+            Some(Duplicate {
+                duplicate_of,
+                by: Some(by),
+            }) => {
+                json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of, "by": by})
+            }
+            Some(Duplicate {
+                duplicate_of,
+                by: None,
+            }) => json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of}),
             None => json!({"from": from, "to": task.status()}),
         },
     )?;

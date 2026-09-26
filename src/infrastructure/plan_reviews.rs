@@ -13,7 +13,10 @@ use tracing::warn;
 use super::{
     asks::{insert_ask, read_ask},
     proposals, sessions,
-    sqlite::{SqliteQueue, enum_col, event, insert_dependency, read_task, transition_task},
+    sqlite::{
+        SqliteQueue, cancel_as_duplicate, check_duplicate, enum_col, event, insert_dependency,
+        read_task, transition_task,
+    },
 };
 use crate::{
     application::{
@@ -151,14 +154,7 @@ fn check_action(conn: &Connection, members: &[TaskId], action: &PlanReviewAction
             priority.as_str()
         ),
         PlanReviewAction::CancelDuplicate { duplicate_of, .. } => {
-            ensure!(
-                duplicate_of != &task_id,
-                "task {task_id} cannot duplicate itself"
-            );
-            ensure!(
-                read_task(conn, *duplicate_of)?.status() != TaskStatus::Canceled,
-                "task {duplicate_of} is canceled; task {task_id} duplicates nothing live"
-            );
+            check_duplicate(conn, task_id, *duplicate_of)?;
         }
     }
     Ok(())
@@ -178,14 +174,8 @@ fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Resu
             task_id,
             duplicate_of,
         } => {
-            transition_task(conn, *task_id, TaskAction::Cancel, now)?;
-            event(
-                conn,
-                *task_id,
-                None,
-                "task_canceled_as_duplicate",
-                json!({"duplicate_of": duplicate_of, "by": "plan_review"}),
-            )
+            cancel_as_duplicate(conn, *task_id, *duplicate_of, Some("plan_review"), now)?;
+            Ok(())
         }
     }
 }
