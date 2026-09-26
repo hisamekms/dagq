@@ -323,7 +323,15 @@ impl Supervisor<'_> {
             .result_commit()
             .cloned()
             .context("accepted run has no result commit")?;
-        let main = self.repository.main_head()?;
+        // A landing branch that does not resolve cannot be judged: the run
+        // goes on to land, and its landing waits until it resolves.
+        let main = match self.repository.main_head() {
+            Ok(main) => main,
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the conflict precheck could not read the landing branch: {error:#}; landing", run.id());
+                return Ok(land(session));
+            }
+        };
         let conflicts = match self
             .repository
             .merge_conflicts(main.as_str(), head.as_str())
@@ -384,6 +392,7 @@ impl Supervisor<'_> {
                 )?;
                 let request = ResumeRequest {
                     main: main.clone(),
+                    branch: self.repository.landing_branch()?.name,
                     reason: why.clone(),
                     kind: ResumeKind::Precheck,
                 };
@@ -596,6 +605,7 @@ impl Supervisor<'_> {
             // answer waits until it is found, or there is room.
             if answer == "land"
                 && (self.run_env_missing
+                    || self.landing_unresolved
                     || self.disk.landing_short
                     || self.used_slots() >= parallel
                     || !self

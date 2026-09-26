@@ -181,9 +181,9 @@ impl Inheritance {
     /// current main, resolve the conflicts, verify and write the receipt.
     fn section(&self) -> String {
         format!(
-            "Carried over from run {run}: its review passed, but its landing kept conflicting with main until its resumes were used up, so this run starts from its work instead of from scratch. \
+            "Carried over from run {run}: its review passed, but its landing kept conflicting with the landing branch until its resumes were used up, so this run starts from its work instead of from scratch. \
              Its work is commit {head} (kept as refs/dagq/runs/{run}{branch}); its own commits are {base}..{head}. \
-             Bring them onto your base, the current main (for example `git cherry-pick {base}..{head}` in your worktree), resolve the conflicts keeping what both sides meant, rerun your checks in the worktree as above, and write the receipt for your own head. \
+             Bring them onto your base, the current landing branch (for example `git cherry-pick {base}..{head}` in your worktree), resolve the conflicts keeping what both sides meant, rerun your checks in the worktree as above, and write the receipt for your own head. \
              Its receipt ({receipt}) summary: {summary}\n",
             run = self.run_id,
             head = self.head,
@@ -747,8 +747,10 @@ fn list_or_none(items: &[String]) -> String {
 
 /// What the resolution request tells a resumed session.
 pub(crate) struct ResumeRequest {
-    /// The `main` head the session rebases onto.
+    /// The landing branch's head the session rebases onto.
     pub main: CommitSha,
+    /// The landing branch's name (ADR-t615-1).
+    pub branch: String,
     pub reason: String,
     pub kind: ResumeKind,
 }
@@ -814,9 +816,10 @@ pub(crate) fn resume_request(
             task.id()
         ),
         ResumeKind::Precheck => format!(
-            "dagq: the supervisor's review of run {} (task {}) passed, but integrate would conflict with main, so the run was not landed.",
+            "dagq: the supervisor's review of run {} (task {}) passed, but integrate would conflict with {}, so the run was not landed.",
             run.id(),
-            task.id()
+            task.id(),
+            request.branch
         ),
         ResumeKind::Triage => format!(
             "dagq: run {} (task {}) failed or was interrupted, and the supervisor's triage sent it back to this session to finish, so the run is needs_session.",
@@ -824,21 +827,23 @@ pub(crate) fn resume_request(
             task.id()
         ),
         ResumeKind::Recheck => format!(
-            "dagq: run {} (task {}) was waiting to land, and after another landing moved main the supervisor's landing recheck found that it no longer lands, so the run is needs_session before anyone answers for it.",
+            "dagq: run {} (task {}) was waiting to land, and after another landing moved {} the supervisor's landing recheck found that it no longer lands, so the run is needs_session before anyone answers for it.",
             run.id(),
-            task.id()
+            task.id(),
+            request.branch
         ),
     }];
     lines.push(format!("Reason: {}", request.reason));
+    let branch = &request.branch;
     lines.push(format!(
-        "main is now {} (your base commit was {}).",
+        "{branch} is now {} (your base commit was {}).",
         request.main,
         run.base_commit()
     ));
     if landed.is_empty() {
-        lines.push("Tasks landed on main since your base: none.".to_owned());
+        lines.push(format!("Tasks landed on {branch} since your base: none."));
     } else {
-        lines.push("Tasks landed on main since your base:".to_owned());
+        lines.push(format!("Tasks landed on {branch} since your base:"));
         for task in landed {
             lines.push(format!(
                 "- task {}: {}; summary: {}",
@@ -862,13 +867,13 @@ pub(crate) fn resume_request(
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::SentBack {
         lines.push(format!(
-            "1. Fix the findings in the reason and commit; if main moved, git rebase {} first.",
+            "1. Fix the findings in the reason and commit; if {branch} moved, git rebase {} first.",
             request.main
         ));
         lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::Triage {
         lines.push(format!(
-            "1. Do what the reason asks in this worktree and commit; if main moved, git rebase {} first.",
+            "1. Do what the reason asks in this worktree and commit; if {branch} moved, git rebase {} first.",
             request.main
         ));
         lines.push(format!("2. {checks}"));
@@ -884,7 +889,7 @@ pub(crate) fn resume_request(
                 " If the reason is a verification command that failed after integrate's rebase, you may also run that command in the worktree to reproduce and fix the failure."
             }
             ResumeKind::Recheck => {
-                " If the reason is a command that failed on main with the run merged in (git found no conflict), run that command in the worktree after the rebase to reproduce and fix the failure."
+                " If the reason is a command that failed on the landing branch with the run merged in (git found no conflict), run that command in the worktree after the rebase to reproduce and fix the failure."
             }
             _ => "",
         };
@@ -999,7 +1004,7 @@ pub(crate) fn stall_nudge(
 /// schema and where `revise` ends and `concern` begins.
 pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
     format!(
-        "You review run {run_id} of dagq task {task_id} ({title}) before it lands on main.\n\
+        "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
          Read the review material at {review_path}: the task, its goal, the receipt, the commits and the full diff. Read the worktree if you need more. Do not change any file.\n\n\
          Acceptance criteria of the task:\n{acceptance}\n\n\
          Decide one verdict:\n\
@@ -1672,11 +1677,11 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          Ready and in-progress tasks, in summary, newest first (expected_files as for the proposal's tasks, and for an in-progress task also what its run changed so far; full_text_below marks a task given in full below):\n{queued}\n\n\
          In full, the ready and in-progress tasks among the candidates below or expected to touch a hotspot a task of the proposal is expected to touch:\n{queued_full}\n\n\
          Asks a person answered before (newest first):\n{precedents}\n\n\
-         Files the landings conflicted in most lately (`dagq stats` conflict_hotspots: conflicts, tasks, landings on main that changed the file, their ratio; alert when over the thresholds), each with the tasks of the proposal (proposal_tasks) and the ready and in-progress tasks (queued_tasks) expected to touch it:\n{hotspots}\n\n\
+         Files the landings conflicted in most lately (`dagq stats` conflict_hotspots: conflicts, tasks, landings that changed the file, their ratio; alert when over the thresholds), each with the tasks of the proposal (proposal_tasks) and the ready and in-progress tasks (queued_tasks) expected to touch it:\n{hotspots}\n\n\
          Candidates of duplicates and of changes already made, one line per task of the proposal (related: the tasks `dagq related` ranks highest, in any status, with the clues that relate them; search: the tasks and landed commits `dagq search` finds for the words of the task's title, with their status; at most {most} of each, none of the proposal's own tasks; an empty list means none was found):\n{candidates}\n\n\
          Check the meaning of the plan:\n\
-         - a task that repeats another task (ready, in progress, in another proposal, or already landed on main); start from its candidates above, a completed or canceled one included, and judge from their titles, clues and the source whether the task really repeats one;\n\
-         - a task whose change is already on main (read the source; a completed candidate or a landed commit is where to look);\n\
+         - a task that repeats another task (ready, in progress, in another proposal, or already landed); start from its candidates above, a completed or canceled one included, and judge from their titles, clues and the source whether the task really repeats one;\n\
+         - a task whose change has already landed (read the source; a completed candidate or a landed commit is where to look);\n\
          - a contradiction with an ADR or with the goal's constraints;\n\
          - an acceptance criterion that contradicts the task's own description or a sibling task's acceptance (for example a change of a type whose acceptance says a test file that uses the type is not changed);\n\
          - tasks that change the same files without a dependency between them, above all a file listed as conflicting often: for each hotspot whose proposal_tasks and queued_tasks are both non-empty, add a dependency (add_dependency, the task of the proposal waiting for the queued one) or say in summary why none is needed; you may read the source to see which files a task of the proposal really touches;\n\
@@ -1907,6 +1912,7 @@ mod tests {
         ] {
             let request = ResumeRequest {
                 main: CommitSha::try_from(SHA).unwrap(),
+                branch: "main".into(),
                 reason: "why".into(),
                 kind,
             };

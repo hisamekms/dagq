@@ -946,8 +946,10 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
         json!([])
     );
 
-    // An error out of the loop itself (here: main vanished before a claim)
-    // ends the process with nothing active, so it deregisters too.
+    // A landing branch that no longer resolves (here: main vanished)
+    // holds the claims while the supervisor stays (ADR-t615-1). An error
+    // out of the loop itself (here: main names no commit) ends the process
+    // with nothing active, so it deregisters too.
     let options = supervise_options(1, false);
     let supervisor = {
         let (db, repo, backend, options) =
@@ -961,6 +963,32 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
     queue
         .transition(TaskId::new(1), TaskAction::BypassReview)
         .unwrap();
+    // Two heartbeats: passes that found the task and claimed nothing.
+    for _ in 0..2 {
+        Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE supervisors SET heartbeat_at=0", [])
+            .unwrap();
+        wait_until(&db, Duration::from_secs(10), |queue| {
+            queue.supervisors().unwrap()[0].heartbeat_at > 0
+        });
+    }
+    assert!(queue.show(TaskId::new(1)).unwrap().runs.is_empty());
+    let blob = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["hash-object", "-w", "--stdin"])
+        .stdin(std::process::Stdio::null())
+        .bounded_output()
+        .unwrap();
+    assert!(blob.status.success());
+    let common_dir = git_out(&repo, &["rev-parse", "--git-common-dir"]);
+    let common_dir = repo.join(common_dir.trim());
+    fs::write(
+        common_dir.join("refs/heads/main"),
+        String::from_utf8_lossy(&blob.stdout).as_bytes(),
+    )
+    .unwrap();
     let error = format!(
         "{:#}",
         joined(supervisor, "the supervisor thread to return").unwrap_err()

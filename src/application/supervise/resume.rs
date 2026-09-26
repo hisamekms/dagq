@@ -60,6 +60,8 @@ impl Supervisor<'_> {
             }
             self.close_left_resume_workspaces(&run)?;
             let main = self.repository.main_head()?;
+            // Read before the resume begins, so a failure leaves the run parked.
+            let branch = self.repository.landing_branch()?.name;
             if let Some(head) = self.resolved_head(&run, &main)? {
                 self.skip_resume(&run, &head, &main)?;
                 continue;
@@ -81,6 +83,7 @@ impl Supervisor<'_> {
             };
             let request = ResumeRequest {
                 main,
+                branch,
                 reason: reason.unwrap_or_else(|| "(no reason recorded)".to_owned()),
                 kind,
             };

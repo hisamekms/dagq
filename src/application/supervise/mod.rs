@@ -478,6 +478,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         exec: None,
         run_env_missing: false,
         candidates: None,
+        landing_unresolved: false,
         draining: false,
         update: update::UpdateWatch::default(),
         rechecks: recheck::Rechecks::default(),
@@ -585,6 +586,10 @@ struct Supervisor<'a> {
     /// The `candidates_sampled` this process recorded last (ADR-0051
     /// decision 3); `None` until its first claim pass records one.
     candidates: Option<CandidatesSample>,
+    /// The landing branch did not resolve at the top of this pass
+    /// (ADR-t615-1): nothing is claimed and no passed run lands until it
+    /// does.
+    landing_unresolved: bool,
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
@@ -763,6 +768,7 @@ impl Supervisor<'_> {
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
+            self.check_landing_branch();
             self.mark_run_env_change()?;
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
@@ -893,10 +899,12 @@ impl Supervisor<'_> {
             self.apply_landing_answers(parallel)?;
         }
         self.apply_triage_answers()?;
-        if self.used_slots() < parallel {
+        // Resumes and triage read the landing branch: they wait with the
+        // claims until it resolves (ADR-t615-1).
+        if self.used_slots() < parallel && !self.landing_unresolved {
             self.resume_parked_runs(parallel)?;
         }
-        if self.used_slots() < parallel {
+        if self.used_slots() < parallel && !self.landing_unresolved {
             self.triage_runs(parallel)?;
         }
         // Takes no slot: only closes and frees what ended runs left.
@@ -906,7 +914,7 @@ impl Supervisor<'_> {
         // A run claimed now would fail every cargo command (ADR-0049
         // decision 9; checked at the top of the pass); the runs in flight,
         // their reviews and resumes go on.
-        if self.run_env_missing {
+        if self.run_env_missing || self.landing_unresolved {
             return Ok(());
         }
         // The runs in flight go on; only new claims wait (task 327).
@@ -1047,6 +1055,24 @@ impl Supervisor<'_> {
         }
         self.run_env_missing = !check.missing().is_empty();
         Ok(())
+    }
+    /// Resolve the landing branch (ADR-t615-1) and hold claims and
+    /// landings while it does not resolve, warning when that changes.
+    fn check_landing_branch(&mut self) {
+        match self.repository.landing_branch() {
+            Ok(branch) => {
+                if self.landing_unresolved {
+                    info!(branch = %branch.name, "the landing branch resolves again to {}; claiming and landing resume", branch.name);
+                }
+                self.landing_unresolved = false;
+            }
+            Err(error) => {
+                if !self.landing_unresolved {
+                    warn!(error = %format_args!("{error:#}"), "{error:#}; no task is claimed and no run lands until it resolves");
+                }
+                self.landing_unresolved = true;
+            }
+        }
     }
     /// Record `run_env_changed` when the normalized `[run.env]` of the main
     /// checkout hashes differently from the latest one on the queue
@@ -1520,12 +1546,14 @@ impl Supervisor<'_> {
                 // integration for a person (`review and integrate`).
                 // So would it, short of free disk space (task 377): it
                 // starts no verification until there is room.
-                if self.run_env_missing || self.disk.landing_short {
+                if self.run_env_missing || self.landing_unresolved || self.disk.landing_short {
                     if !self.draining {
                         return Ok(Step::Continue);
                     }
                     let why = if self.run_env_missing {
                         "a program [run.env] names is missing"
+                    } else if self.landing_unresolved {
+                        "the landing branch does not resolve"
                     } else {
                         "the free disk space is short of what its verification needs"
                     };

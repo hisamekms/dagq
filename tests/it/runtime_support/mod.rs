@@ -1326,7 +1326,7 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
         .bind_repository(&path_text(&repository.common_dir).unwrap())
         .unwrap();
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&repository.base_commit, token)
+        .claim_for_supervisor(&repository.main_head().unwrap(), token)
         .unwrap()
     else {
         panic!()

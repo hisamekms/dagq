@@ -539,7 +539,7 @@ pub struct IdleHook {
 pub trait MainRemote {
     /// Whether the repository has a remote named `remote`.
     fn has_remote(&self, remote: &str) -> Result<bool>;
-    /// Push `refs/heads/main` to the same branch of `remote`. An error is
+    /// Push the landing branch to the same branch of `remote`. An error is
     /// the failed push, with Git's message.
     fn push_main(&self, remote: &str) -> Result<()>;
 }
@@ -1766,7 +1766,12 @@ impl<T: TaskStore + RunStore + AskStore + DraftPlannerStore + PlanReviewStore + 
 /// the queue is bound to and on its run worktrees. Commits are named by
 /// their full SHA; a failed Git command is an error with Git's message.
 pub trait Repository {
-    /// Current `refs/heads/main`, read again on every call.
+    /// The branch runs land on (ADR-t615-1), resolved again on every call;
+    /// a repository that does not resolve one lands on `main`.
+    fn landing_branch(&self) -> Result<crate::domain::landing_branch::LandingBranch> {
+        Ok(crate::domain::landing_branch::LandingBranch::main())
+    }
+    /// The landing branch's current commit, read again on every call.
     fn main_head(&self) -> Result<CommitSha>;
     /// Main's first-parent history since `since` (unix seconds) and the
     /// paths it has now, for `conflict_hotspots`; a repository that cannot
@@ -1813,7 +1818,7 @@ pub trait Repository {
     /// One commit with `tree` on top of `parent`, `paragraphs` its message.
     fn commit_tree(&self, tree: &str, parent: &str, paragraphs: &[String]) -> Result<CommitSha>;
     fn update_ref(&self, name: &str, value: &str) -> Result<()>;
-    /// Fast-forward `refs/heads/main` from `from` to `to`.
+    /// Fast-forward the landing branch from `from` to `to`.
     fn advance_main(&self, from: &str, to: &str) -> Result<()>;
     /// Point the repository's record of a moved worktree at it again.
     fn repair_worktree(&self, worktree: &Path) -> Result<()>;
@@ -1833,7 +1838,7 @@ pub trait Repository {
     /// Whether Git tracks any file at or under `path` (relative to the
     /// worktree) in `worktree`.
     fn tracks(&self, worktree: &Path, path: &str) -> Result<bool>;
-    /// The worktree that has `main` checked out, if any.
+    /// The worktree that has the landing branch checked out, if any.
     fn main_checkout(&self) -> Result<Option<std::path::PathBuf>>;
     /// Add the run's worktree on its new branch from its base commit; Git's
     /// output.

@@ -34,7 +34,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、`dagq kpi`だけが読む（[kpi](kpi.md#目標targets)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。`load_kpi_settings`、解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[kpi]`を知るものに入れ替えてから足す（先に足すとqueue全体が止まる）。
 
-- `[repository]`は着地先のbranch（`branch`、既定は推定）、pushのremote（`remote`、既定`"origin"`）、pushするか（`push`、既定`true`）を持つ（[Landing branch](landing-branch.md)、[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。未実装で、実装が入るまでは足さない（今のバイナリは未知の表を拒む）。dagq自身のrepositoryは既定で今までどおり`main`と`origin`になるので足さない。
+- `[repository]`は着地先のbranch（`branch`、既定は推定）、pushのremote（`remote`、既定`"origin"`）、pushするか（`push`、既定`true`）を持つ（[Landing branch](landing-branch.md)、[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。今のバイナリが読むのは`branch`だけで、`remote`と`push`は未知のkeyとして拒む（後続のtaskが足す）。`[repository]`を知らない旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。dagq自身のrepositoryは既定で今までどおり`main`と`origin`になるので足さない。
 
 ## `[run.env]`が名指すプログラムの検査
 

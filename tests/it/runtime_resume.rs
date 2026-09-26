@@ -1122,7 +1122,7 @@ fn conflict_only_resumes_are_not_counted_and_a_used_up_run_is_retried_with_its_b
     let base = run.base_commit();
     assert!(
         prompt.contains(&format!(
-            "Carried over from run {}: its review passed, but its landing kept conflicting with main until its resumes were used up, so this run starts from its work instead of from scratch. Its work is commit {source} (kept as refs/dagq/runs/{id}, branch dagq/{id}); its own commits are {base}..{source}. Bring them onto your base",
+            "Carried over from run {}: its review passed, but its landing kept conflicting with the landing branch until its resumes were used up, so this run starts from its work instead of from scratch. Its work is commit {source} (kept as refs/dagq/runs/{id}, branch dagq/{id}); its own commits are {base}..{source}. Bring them onto your base",
             run.id(),
             id = run.id()
         )),

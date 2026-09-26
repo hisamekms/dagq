@@ -39,14 +39,19 @@ const STALL_TABLE: &str = "stall";
 const CONFLICTS_TABLE: &str = "conflicts";
 const RECHECK_TABLE: &str = "recheck";
 const DISK_TABLE: &str = "disk";
+/// `[repository]`: the landing branch (ADR-t615-1).
+const REPOSITORY_TABLE: &str = "repository";
+/// The key of `[repository]` this binary reads.
+const REPOSITORY_BRANCH: &str = "branch";
 /// `[kpi]` and its targets (ADR-0051), read by [`KpiTables`].
 const KPI_TABLE: &str = "kpi";
-const TABLES: [&str; 5] = [
+const TABLES: [&str; 6] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
     RECHECK_TABLE,
     DISK_TABLE,
+    REPOSITORY_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -91,6 +96,9 @@ pub struct Config {
     pub disk: DiskConfig,
     /// `[kpi]` and its `[kpi.targets."<kpi>"]`; `None` without any.
     pub kpi: Option<KpiSettings>,
+    /// `[repository] branch`: the landing branch; none guesses it
+    /// (ADR-t615-1).
+    pub branch: Option<String>,
 }
 
 /// Parse the whole file.
@@ -123,7 +131,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -175,6 +183,27 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     "{CONFIG_FILE_NAME}:{number}: {key} is blank"
                 );
                 config.recheck_command = Some(command);
+            }
+            Some(REPOSITORY_TABLE) => {
+                ensure!(
+                    key == REPOSITORY_BRANCH,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REPOSITORY_TABLE}]; the key is {REPOSITORY_BRANCH}"
+                );
+                ensure!(
+                    config.branch.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let branch = parse_string(rest.trim())
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                ensure!(
+                    !branch.trim().is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is blank"
+                );
+                ensure!(
+                    !branch.starts_with("refs/"),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is a branch name without refs/heads/, not {branch}"
+                );
+                config.branch = Some(branch);
             }
             Some(DISK_TABLE) => {
                 ensure!(
@@ -228,7 +257,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -330,6 +359,18 @@ pub fn load_recheck_command(root: &Path) -> Result<Option<String>> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .recheck_command)
+}
+
+/// `[repository] branch` of the `dagq.toml` in `root` (ADR-t615-1); no
+/// file, no table or no key is none.
+pub fn load_landing_branch(root: &Path) -> Result<Option<String>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .branch)
 }
 
 fn read_config(path: &Path) -> Result<Option<String>> {
@@ -749,6 +790,20 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[recheck]\nargs = 'x'", "unknown key args in [recheck]"),
             (
+                "[repository]\nremote = 'x'",
+                "unknown key remote in [repository]",
+            ),
+            ("[repository]\nbranch = ''", "branch is blank"),
+            (
+                "[repository]\nbranch = 'refs/heads/x'",
+                "without refs/heads/",
+            ),
+            ("[repository]\nbranch = x", "expected a quoted string"),
+            (
+                "[repository]\nbranch = 'a'\nbranch = 'b'",
+                "branch is defined twice",
+            ),
+            (
                 "[recheck]\ncommand = 'x'\ncommand = 'y'",
                 "command is defined twice",
             ),
@@ -802,6 +857,25 @@ LITERAL = 'no \n escapes # here'
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[recheck]\nnope = 1\n").unwrap();
         assert!(load_recheck_command(dir.path()).is_err());
+    }
+
+    #[test]
+    fn reads_the_landing_branch() {
+        let config = parse_config("[repository]\nbranch = \"master\" # trunk\n").unwrap();
+        assert_eq!(config.branch.as_deref(), Some("master"));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_landing_branch(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[run.env]\nA = 'x'\n[repository]\nbranch = 'trunk'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_landing_branch(dir.path()).unwrap().as_deref(),
+            Some("trunk")
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[repository]\nx = 1\n").unwrap();
+        assert!(load_landing_branch(dir.path()).is_err());
     }
 
     #[test]

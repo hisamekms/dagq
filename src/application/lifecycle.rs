@@ -154,11 +154,13 @@ pub struct QueuePaths {
 }
 
 /// The repository `up` starts the supervisor for: the checkout it was
-/// inspected from and its Git common directory.
+/// inspected from, its Git common directory, and its landing branch
+/// (ADR-t615-1) or why that did not resolve.
 #[derive(Debug, Clone)]
 pub struct RepositoryPaths {
     pub root: PathBuf,
     pub common_dir: PathBuf,
+    pub landing: std::result::Result<crate::domain::landing_branch::LandingBranch, String>,
 }
 
 /// What `up` and `down` reach the outside through. `queues` opens the queue at a database
@@ -268,6 +270,12 @@ pub fn up(
     if let Some(message) = run_env.missing_message() {
         bail!("{message}; the supervisor was not started");
     }
+    // Every claim and landing reads the landing branch: one that does not
+    // resolve would hold them all (ADR-t615-1).
+    let landing = match &repository.landing {
+        Ok(landing) => landing.clone(),
+        Err(error) => bail!("{error}; the supervisor was not started"),
+    };
     let plugin_dir = options
         .plugin_dir
         .as_deref()
@@ -364,6 +372,7 @@ pub fn up(
         "pruned_supervisors": pruned,
         "warnings": workspaces.take_warnings(),
         "doctor": open_work(queue, processes, ports.clock)?,
+        "repository": landing,
     });
     // What the preflight found, only for a repository with a dagq.toml.
     if run_env.config {

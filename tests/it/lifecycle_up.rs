@@ -102,10 +102,16 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
             "inbox",
             "migrated",
             "pruned_supervisors",
+            "repository",
             "retired_sessions",
             "supervisor",
             "warnings"
         ]
+    );
+    // What the preflight resolved (ADR-t615-1).
+    assert_eq!(
+        first["repository"],
+        json!({"branch": "main", "branch_source": "main"})
     );
     assert_eq!(first["retired_sessions"], 0);
     assert_eq!(first["pruned_supervisors"], json!([]));
@@ -544,7 +550,7 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
         .unwrap();
     let repository = GitRepository::inspect(&fixture.repo).unwrap();
     queue
-        .claim_for_supervisor(&repository.base_commit, "live")
+        .claim_for_supervisor(&repository.main_head().unwrap(), "live")
         .unwrap();
     let leases_before = queue.run_leases().unwrap();
     assert_eq!(leases_before.len(), 1);
@@ -619,7 +625,7 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
             .transition(task.id(), TaskAction::BypassReview)
             .unwrap();
         let dagq::domain::ClaimOutcome::Claimed { run } = queue
-            .claim_for_supervisor(&repository.base_commit, "gone")
+            .claim_for_supervisor(&repository.main_head().unwrap(), "gone")
             .unwrap()
         else {
             panic!()

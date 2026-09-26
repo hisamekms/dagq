@@ -54,7 +54,7 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
         .unwrap();
     let repository = GitRepository::inspect(&fixture.repo).unwrap();
     match queue
-        .claim_for_supervisor(&repository.base_commit, token)
+        .claim_for_supervisor(&repository.main_head().unwrap(), token)
         .unwrap()
     {
         dagq::domain::ClaimOutcome::Claimed { run } => run.id().to_string(),

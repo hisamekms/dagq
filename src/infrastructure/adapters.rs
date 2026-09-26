@@ -5,7 +5,8 @@ use crate::{
         stats::WorkspaceListing,
     },
     domain::{
-        CommitSha, Task, TaskId, TaskRun,
+        CommitSha, PUSH_REMOTE, Task, TaskId, TaskRun,
+        landing_branch::{self, LandingBranch},
         measure::HostVersions,
         recovery::ProcessInfo,
         stall::IDLE_LOG,
@@ -40,6 +41,7 @@ pub use crate::application::{
     },
     path_text,
 };
+use crate::infrastructure::run_env::load_landing_branch;
 
 pub fn executable(path: &Path) -> Result<PathBuf> {
     let candidate = if path.components().count() > 1 || path.is_absolute() {
@@ -527,17 +529,6 @@ pub fn commit_message(git_dir: &Path, commit: &str) -> Option<String> {
     .map(|message| message.trim_end().to_owned())
 }
 
-fn main_head(git: &Path, root: &Path) -> Result<CommitSha> {
-    object_id(
-        &output(Command::new(git).arg("-C").arg(root).args([
-            "rev-parse",
-            "--verify",
-            "refs/heads/main^{commit}",
-        ]))?,
-        "main commit",
-    )
-}
-
 /// The non-empty fields of Git's NUL-separated `-z` output.
 fn split_nul(text: &str) -> Vec<String> {
     text.split('\0')
@@ -557,8 +548,9 @@ pub use crate::application::DiffNumbers;
 pub struct GitRepository {
     pub root: PathBuf,
     pub common_dir: PathBuf,
-    /// `refs/heads/main` at inspection time; `main_head` rereads it.
-    pub base_commit: CommitSha,
+    /// The main checkout, whose `dagq.toml` names the landing branch: the
+    /// parent of a `.git` common directory, otherwise `root`.
+    pub checkout: PathBuf,
     git: PathBuf,
 }
 
@@ -576,13 +568,75 @@ impl GitRepository {
         )
         .canonicalize()?;
         let common_dir = git_common_dir(&root)?;
-        let base_commit = main_head(&git, &root)?;
+        let checkout = match common_dir.parent() {
+            Some(parent) if common_dir.file_name() == Some(".git".as_ref()) => parent.to_path_buf(),
+            _ => root.clone(),
+        };
         Ok(Self {
             root,
             common_dir,
-            base_commit,
+            checkout,
             git,
         })
+    }
+
+    /// The branch runs land on (ADR-t615-1), resolved now from the main
+    /// checkout's `dagq.toml` and the repository's branches; an error says
+    /// what could not be resolved and points at `[repository]`.
+    pub fn landing_branch(&self) -> Result<LandingBranch> {
+        let configured = load_landing_branch(&self.checkout).with_context(|| {
+            format!(
+                "cannot resolve the landing branch; {}",
+                landing_branch::HINT
+            )
+        })?;
+        if let Some(name) = &configured {
+            let (status, _, _) = capture(
+                Command::new(&self.git).args(["check-ref-format", "--branch", name]),
+                Duration::from_secs(30),
+            )?;
+            ensure!(
+                status.success(),
+                "[repository] branch = {name:?} of dagq.toml is not a valid branch name; {}",
+                landing_branch::HINT
+            );
+        }
+        let (status, stdout, _) = capture(
+            self.git_root().args([
+                "symbolic-ref",
+                "--quiet",
+                &format!("refs/remotes/{PUSH_REMOTE}/HEAD"),
+            ]),
+            Duration::from_secs(30),
+        )?;
+        let prefix = format!("refs/remotes/{PUSH_REMOTE}/");
+        let remote_head = status
+            .success()
+            .then(|| stdout.trim().strip_prefix(&prefix).map(str::to_owned))
+            .flatten();
+        landing_branch::resolve(configured.as_deref(), remote_head.as_deref(), &mut |name| {
+            let (status, _, stderr) = capture(
+                self.git_root().args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ]),
+                Duration::from_secs(30),
+            )?;
+            match status.code() {
+                Some(0) => Ok(true),
+                Some(1) => Ok(false),
+                _ => bail!("git show-ref failed ({status}): {stderr}"),
+            }
+        })
+    }
+
+    /// `git -C <root>`.
+    fn git_root(&self) -> Command {
+        let mut command = Command::new(&self.git);
+        command.arg("-C").arg(&self.root);
+        command
     }
 
     /// A read-only `git -C <worktree>` for a worktree a session may be
@@ -599,10 +653,19 @@ impl GitRepository {
         command
     }
 
-    /// Current `refs/heads/main`, read again so that a task unblocked by an
-    /// integration starts from the main that contains its predecessor.
+    /// The landing branch's current commit, resolved and read again so
+    /// that a task unblocked by an integration starts from the landing
+    /// branch that contains its predecessor.
     pub fn main_head(&self) -> Result<CommitSha> {
-        main_head(&self.git, &self.root)
+        let branch = self.landing_branch()?;
+        object_id(
+            &output(self.git_root().args([
+                "rev-parse",
+                "--verify",
+                &format!("{}^{{commit}}", branch.reference()),
+            ]))?,
+            "landing branch commit",
+        )
     }
 
     /// Symbolic HEAD of a worktree, or None when detached.
@@ -760,6 +823,7 @@ impl GitRepository {
     /// followed), and the paths main has now: what `conflict_hotspots`
     /// counts landings and tells deleted and renamed files by.
     pub fn main_history(&self, since: i64) -> Result<MainHistory> {
+        let branch = self.landing_branch()?.reference();
         let log = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
             "log",
             "-z",
@@ -770,7 +834,7 @@ impl GitRepository {
             "--name-status",
             "--format=%x01%ct",
             &format!("--max-age={}", since.max(0)),
-            "refs/heads/main",
+            &branch,
             "--",
         ]))?;
         let tree = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
@@ -778,7 +842,7 @@ impl GitRepository {
             "-r",
             "--name-only",
             "-z",
-            "refs/heads/main",
+            &branch,
         ]))?;
         Ok(MainHistory {
             commits: parse_main_log(&log),
@@ -1170,12 +1234,13 @@ impl GitRepository {
             .collect())
     }
 
-    /// The worktree that has `main` checked out, if any.
+    /// The worktree that has the landing branch checked out, if any.
     pub fn main_checkout(&self) -> Result<Option<PathBuf>> {
+        let line = format!("branch {}", self.landing_branch()?.reference());
         Ok(self
             .worktrees()?
             .into_iter()
-            .find(|(_, block)| block.lines().any(|line| line == "branch refs/heads/main"))
+            .find(|(_, block)| block.lines().any(|l| l == line))
             .map(|(path, _)| path))
     }
 
@@ -1190,11 +1255,12 @@ impl GitRepository {
             .unwrap_or_else(|| self.root.clone()))
     }
 
-    /// Fast-forward `refs/heads/main` from `from` to `to`. Where `main` is
+    /// Fast-forward the landing branch from `from` to `to`. Where it is
     /// checked out the merge goes through that worktree so its index and
     /// files move with the ref (local changes that collide make it fail);
     /// otherwise the ref is updated with `from` as the expected old value.
     pub fn advance_main(&self, from: &str, to: &str) -> Result<()> {
+        let branch = self.landing_branch()?;
         match self.main_checkout()? {
             Some(checkout) => {
                 output(
@@ -1204,15 +1270,15 @@ impl GitRepository {
                         .env("GIT_TERMINAL_PROMPT", "0")
                         .args(["merge", "--ff-only", to]),
                 )
-                .with_context(|| format!("fast-forward main in {}", checkout.display()))?;
+                .with_context(|| {
+                    format!("fast-forward {} in {}", branch.name, checkout.display())
+                })?;
             }
             None => {
-                output(Command::new(&self.git).arg("-C").arg(&self.root).args([
-                    "update-ref",
-                    "refs/heads/main",
-                    to,
-                    from,
-                ]))?;
+                output(
+                    self.git_root()
+                        .args(["update-ref", &branch.reference(), to, from]),
+                )?;
             }
         }
         Ok(())
@@ -1375,6 +1441,9 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
 /// The Git port over the inherent methods above, which callers that hold a
 /// `GitRepository` keep using directly.
 impl Repository for GitRepository {
+    fn landing_branch(&self) -> Result<LandingBranch> {
+        GitRepository::landing_branch(self)
+    }
     fn main_head(&self) -> Result<CommitSha> {
         GitRepository::main_head(self)
     }
@@ -1517,18 +1586,21 @@ impl MainRemote for GitRepository {
     }
 
     fn push_main(&self, remote: &str) -> Result<()> {
+        let branch = self.landing_branch()?;
+        let reference = branch.reference();
         let (status, stdout, stderr) = capture(
             Command::new(&self.git)
                 .current_dir(&self.common_dir)
                 .arg("--git-dir")
                 .arg(&self.common_dir)
                 .env("GIT_TERMINAL_PROMPT", "0")
-                .args(["push", remote, "refs/heads/main:refs/heads/main"]),
+                .args(["push", remote, &format!("{reference}:{reference}")]),
             PUSH_TIMEOUT,
         )?;
         ensure!(
             status.success(),
-            "git push {remote} main failed ({status}): {}",
+            "git push {remote} {} failed ({status}): {}",
+            branch.name,
             format!("{}\n{}", stderr.trim(), stdout.trim()).trim()
         );
         Ok(())
@@ -2393,6 +2465,62 @@ mod tests {
         );
         let git = GitRepository::inspect(dir.path()).unwrap();
         (dir, git)
+    }
+
+    /// The landing branch follows origin's HEAD before `main` and
+    /// `master`, and `[repository] branch` of the main checkout's
+    /// dagq.toml before all of them; an invalid name is refused.
+    #[test]
+    fn landing_branch_follows_origin_head_and_the_config() {
+        use crate::domain::landing_branch::BranchSource;
+        let (dir, git) = committed_repository();
+        let source = |git: &GitRepository| {
+            let branch = git.landing_branch().unwrap();
+            (branch.name, branch.source)
+        };
+        assert_eq!(source(&git), ("main".into(), BranchSource::Main));
+        assert!(git_in(dir.path(), &["branch", "dev"]).status.success());
+        // origin's HEAD, as a clone leaves it, without a network call.
+        let head = git_in(dir.path(), &["rev-parse", "HEAD"]);
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        for args in [
+            &["remote", "add", "origin", "/nonexistent/origin.git"][..],
+            &["update-ref", "refs/remotes/origin/dev", &head],
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/dev",
+            ],
+        ] {
+            assert!(git_in(dir.path(), args).status.success(), "{args:?}");
+        }
+        assert_eq!(source(&git), ("dev".into(), BranchSource::RemoteHead));
+        assert_eq!(git.main_head().unwrap().as_str(), head);
+        fs::write(
+            dir.path().join("dagq.toml"),
+            "[repository]\nbranch = \"main\"\n",
+        )
+        .unwrap();
+        assert_eq!(source(&git), ("main".into(), BranchSource::Config));
+        assert_eq!(
+            git.main_checkout().unwrap(),
+            Some(PathBuf::from(
+                String::from_utf8_lossy(
+                    &git_in(dir.path(), &["rev-parse", "--show-toplevel"]).stdout
+                )
+                .trim()
+            ))
+        );
+        fs::write(
+            dir.path().join("dagq.toml"),
+            "[repository]\nbranch = \"a..b\"\n",
+        )
+        .unwrap();
+        let error = format!("{:#}", git.landing_branch().unwrap_err());
+        assert!(error.contains("not a valid branch name"), "{error}");
+        fs::write(dir.path().join("dagq.toml"), "[repository]\nbranch = 1\n").unwrap();
+        let error = format!("{:#}", git.main_head().unwrap_err());
+        assert!(error.contains("[repository]"), "{error}");
     }
 
     /// `main_history` lists main's commits with the paths each changed,

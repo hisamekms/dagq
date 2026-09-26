@@ -273,6 +273,8 @@ pub fn supervise_with_reviewer(
         .canonicalize()
         .context("queue must already be initialized")?;
     let repository = GitRepository::inspect(repo)?;
+    // Every claim and landing reads it (ADR-t615-1).
+    repository.landing_branch()?;
     let stall = match options.stall {
         Some(stall) => stall,
         None => load_stall_config(&main_checkout(&repository))?.unwrap_or_default(),
@@ -524,14 +526,18 @@ impl OneShot {
                     queue.assert_repository(common_dir)?;
                 }
                 let run_env = doctor_run_env(&queue, db).map_err(|error| format!("{error:#}"));
-                health::doctor(
+                let mut report = health::doctor(
                     &queue,
                     &SystemProcesses,
                     &LocalRunFiles,
                     &*self.generators.clock,
                     full,
                     run_env,
-                )?
+                )?;
+                if let Some(repository) = doctor_repository(&queue)? {
+                    report["repository"] = repository;
+                }
+                report
             }
         };
         report["schema"] = serde_json::to_value(schema)?;
@@ -1060,9 +1066,13 @@ fn queue_paths(location: &QueueLocation) -> QueuePaths {
 
 fn inspect_repository(repo: &Path) -> Result<RepositoryPaths> {
     let repository = GitRepository::inspect(repo)?;
+    let landing = repository
+        .landing_branch()
+        .map_err(|error| format!("{error:#}"));
     Ok(RepositoryPaths {
         root: repository.root,
         common_dir: repository.common_dir,
+        landing,
     })
 }
 
@@ -1133,8 +1143,21 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
     .run_env_programs(None)
 }
 
-/// The main worktree of the repository: the parent of a `.git` common
-/// directory, or the inspected root for a bare common directory.
+/// The landing branch of the repository the queue is bound to, as `up`'s
+/// preflight resolves it (ADR-t615-1), or `error` with why it does not
+/// resolve; `None` for a queue bound to no checkout.
+fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
+    let Some(checkout) = bound_checkout(queue)? else {
+        return Ok(None);
+    };
+    let resolved =
+        GitRepository::inspect(&checkout).and_then(|repository| repository.landing_branch());
+    Ok(Some(match resolved {
+        Ok(branch) => serde_json::to_value(branch)?,
+        Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+    }))
+}
+
 /// The main checkout of the repository the queue is bound to: the parent
 /// of its `.git`; `None` for a queue bound to none, or to a bare one.
 /// What the KPIs and their reports of the queue at `db` are made with at

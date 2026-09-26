@@ -783,6 +783,8 @@ fn land(
     // until repaired, and removing it after landing would fail (ADR-0017).
     repository.repair_worktree(worktree)?;
     let branch = run.branch().context("missing branch")?;
+    // The landing branch's name, for the reasons a resumed session reads.
+    let onto = repository.landing_branch()?.name;
     let run_dir = Path::new(run.run_dir().context("missing run directory")?);
     // A rebase left behind by a crashed landing or an unfinished session is undone first.
     if repository.rebase_in_progress(worktree)? {
@@ -894,7 +896,7 @@ fn land(
         return defer(
             ReasonCode::RebaseConflict.into(),
             format!(
-                "rebase onto main {main} conflicted in {}; resolve it in the worktree (git rebase {main}), rerun your checks, and rewrite the receipt with the new head",
+                "rebase onto {onto} {main} conflicted in {}; resolve it in the worktree (git rebase {main}), rerun your checks, and rewrite the receipt with the new head",
                 if conflicts.is_empty() {
                     "the run branch".to_owned()
                 } else {
@@ -920,7 +922,7 @@ fn land(
         return defer(
             ReasonCode::RebaseEmpty.into(),
             format!(
-                "no commit remains on top of main {main} after the rebase; if the change is no longer needed, write a failed receipt with the reason"
+                "no commit remains on top of {onto} {main} after the rebase; if the change is no longer needed, write a failed receipt with the reason"
             ),
             json!({"main": main, "head": rebased}),
         );
@@ -960,7 +962,7 @@ fn land(
         return defer(
             ReasonCode::ScopeViolation.into(),
             format!(
-                "{} after the rebase onto main {main}; take them out of the run branch (or ask for the task's --paths to be widened), commit, and rewrite the receipt with the new head",
+                "{} after the rebase onto {onto} {main}; take them out of the run branch (or ask for the task's --paths to be widened), commit, and rewrite the receipt with the new head",
                 scope_violation_reason(&outside)
             ),
             json!({"main": main, "head": rebased, "scope_violation": outside, "allowed": task.paths()}),
