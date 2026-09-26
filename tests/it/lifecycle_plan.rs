@@ -68,6 +68,10 @@ fn inbox_and_planner_prompts_name_the_queue_and_their_one_job() {
     let command = inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p"))).unwrap();
     assert!(command.starts_with("'/opt/claude' '"), "{command}");
     assert!(command.contains("'--' 'You are the inbox of"), "{command}");
+    // A person works in the inbox: it has no settings of the runtime's, so
+    // Claude Code's prompt suggestions stay on (goal 48).
+    assert!(!command.contains("--settings"), "{command}");
+    assert!(!command.contains("promptSuggestion"), "{command}");
     assert_eq!(ROLE_ENV, "DAGQ_ROLE");
     assert_eq!(QUEUE_ENV, "DAGQ_QUEUE");
     assert!(

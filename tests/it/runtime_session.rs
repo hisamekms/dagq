@@ -1549,7 +1549,9 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
 
 #[test]
 fn claude_stop_hook_settings_publish_the_idle_marker() {
-    use dagq::infrastructure::adapters::{ClaudeCode, stop_hook_settings};
+    use dagq::infrastructure::adapters::{
+        ClaudeCode, runtime_session_settings, stop_hook_settings,
+    };
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join("run's dir");
     fs::create_dir(&run_dir).unwrap();
@@ -1588,9 +1590,30 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
     let text = fs::read_to_string(&settings).unwrap();
     assert_eq!(
         text,
-        stop_hook_settings(&run.idle_marker_path().unwrap()).unwrap()
+        runtime_session_settings(&run.idle_marker_path().unwrap()).unwrap()
     );
     let parsed: Value = serde_json::from_str(&text).unwrap();
+    // Nobody types in a worker's session: Claude Code's prompt suggestions,
+    // grey text in the input box that reads like a half-typed message, are
+    // off (goal 48). Otherwise the settings are the Stop hook's.
+    assert_eq!(parsed["promptSuggestionEnabled"], json!(false));
+    let mut hooks_only = parsed.clone();
+    hooks_only
+        .as_object_mut()
+        .unwrap()
+        .remove("promptSuggestionEnabled");
+    let expected: Value =
+        serde_json::from_str(&stop_hook_settings(&run.idle_marker_path().unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(hooks_only, expected);
+    // The resumed session writes the same settings.
+    fs::remove_file(&settings).unwrap();
+    ClaudeCode {
+        executable: "claude".into(),
+    }
+    .resume_command(&run)
+    .unwrap();
+    assert_eq!(fs::read_to_string(&settings).unwrap(), text);
     // A non-empty auto mode environment from flag settings keeps the
     // "Teach auto mode" dialog away; `$defaults` keeps the built-in entries.
     assert_eq!(parsed["autoMode"]["environment"], json!(["$defaults"]));

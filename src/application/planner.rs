@@ -273,11 +273,15 @@ pub fn run_planner_session(
     queue.register_planner_wrapper(id, pid)?;
     // An agent that never starts is an exit too, or the planner would look
     // lost rather than over.
-    let started = files
-        .read_to_string(&dir.join(PLANNER_PROMPT_FILE))
-        .map_err(anyhow::Error::from)
-        .and_then(|prompt| {
+    let started = queue
+        .planner(id)
+        .and_then(|planner| {
+            let prompt = files.read_to_string(&dir.join(PLANNER_PROMPT_FILE))?;
+            Ok((planner.origin, prompt))
+        })
+        .and_then(|(origin, prompt)| {
             provider.planner_command(&PlannerCommand {
+                origin,
                 dir,
                 cwd,
                 prompt: &prompt,

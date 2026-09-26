@@ -425,9 +425,11 @@ pub trait Transcripts {
 /// What the agent of a planner session is started with: the planner's
 /// directory (its prompt, settings, log and idle marker), the directory it
 /// works in (the repository's checkout), its first message and the plugin
-/// directory it loads.
+/// directory it loads, and who opened it (a person's planner keeps the
+/// session settings a person works with).
 #[derive(Debug, Clone, Copy)]
 pub struct PlannerCommand<'a> {
+    pub origin: PlannerOrigin,
     pub dir: &'a std::path::Path,
     pub cwd: &'a std::path::Path,
     pub prompt: &'a str,

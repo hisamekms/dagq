@@ -5,7 +5,7 @@ use crate::{
         stats::WorkspaceListing,
     },
     domain::{
-        CommitSha, Task, TaskId, TaskRun,
+        CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
         recovery::ProcessInfo,
@@ -2206,8 +2206,11 @@ impl AgentProvider for ClaudeCode {
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        fs::write(&settings, stop_hook_settings(&run.idle_marker_path()?)?)
-            .with_context(|| format!("write {}", settings.display()))?;
+        fs::write(
+            &settings,
+            runtime_session_settings(&run.idle_marker_path()?)?,
+        )
+        .with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2229,8 +2232,11 @@ impl AgentProvider for ClaudeCode {
     fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        fs::write(&settings, stop_hook_settings(&run.idle_marker_path()?)?)
-            .with_context(|| format!("write {}", settings.display()))?;
+        fs::write(
+            &settings,
+            runtime_session_settings(&run.idle_marker_path()?)?,
+        )
+        .with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2247,11 +2253,17 @@ impl AgentProvider for ClaudeCode {
 
     /// `claude` in the checkout with the planner directory's settings (its
     /// `Stop` hook writes the idle marker there), its debug file, the
-    /// directory added, and the plugin directory when one was given.
+    /// directory added, and the plugin directory when one was given. The
+    /// settings of a planner the runtime started also turn the prompt
+    /// suggestions off; a person's planner keeps them.
     fn planner_command(&self, planner: &PlannerCommand<'_>) -> Result<CommandSpec> {
         let settings = planner.dir.join("claude-settings.json");
-        fs::write(&settings, stop_hook_settings(&planner.idle_marker())?)
-            .with_context(|| format!("write {}", settings.display()))?;
+        let marker = planner.idle_marker();
+        let text = match planner.origin {
+            PlannerOrigin::Runtime => runtime_session_settings(&marker)?,
+            PlannerOrigin::Person => stop_hook_settings(&marker)?,
+        };
+        fs::write(&settings, text).with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(planner.cwd)
@@ -2429,6 +2441,18 @@ pub fn stop_hook_settings(idle_marker: &Path) -> Result<String> {
             "environment": ["$defaults"]
         }
     }))?)
+}
+
+/// The settings of a session the runtime starts (a worker, its resume and
+/// a planner the runtime starts): [`stop_hook_settings`] with Claude Code's
+/// prompt suggestions off (`promptSuggestionEnabled: false`). A suggestion
+/// fills the input box with grey text that reads on the screen like a
+/// half-typed message, and nobody types in these sessions (goal 48). The
+/// sessions a person works in (the inbox, a person's planner) keep them.
+pub fn runtime_session_settings(idle_marker: &Path) -> Result<String> {
+    let mut settings: serde_json::Value = serde_json::from_str(&stop_hook_settings(idle_marker)?)?;
+    settings["promptSuggestionEnabled"] = serde_json::Value::Bool(false);
+    Ok(serde_json::to_string_pretty(&settings)?)
 }
 
 /// The Bash permission rules a session's settings deny: commands that
@@ -2743,6 +2767,41 @@ mod tests {
         assert_eq!(report.outcome, crate::domain::PushResult::Skipped);
         assert_eq!(report.remote, "origin");
         assert!(report.error.is_none() && report.reason.is_none());
+    }
+
+    /// A planner the runtime started turns Claude Code's prompt
+    /// suggestions off like a worker; a person's planner keeps them (goal
+    /// 48), with the same hooks either way.
+    #[test]
+    fn only_a_runtime_planner_turns_the_prompt_suggestions_off() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let settings_of = |origin| {
+            let dir = tempfile::tempdir().unwrap();
+            let planner = PlannerCommand {
+                origin,
+                dir: dir.path(),
+                cwd: dir.path(),
+                prompt: "plan",
+                plugin_dir: None,
+            };
+            let command = claude.planner_command(&planner).unwrap();
+            let path = dir.path().join("claude-settings.json");
+            assert!(command.get_args().any(|arg| arg == path.as_os_str()));
+            let settings: Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let expected: Value =
+                serde_json::from_str(&stop_hook_settings(&planner.idle_marker()).unwrap()).unwrap();
+            (settings, expected)
+        };
+        let (runtime, mut expected) = settings_of(PlannerOrigin::Runtime);
+        assert_eq!(runtime["promptSuggestionEnabled"], Value::Bool(false));
+        expected["promptSuggestionEnabled"] = Value::Bool(false);
+        assert_eq!(runtime, expected);
+        let (person, expected) = settings_of(PlannerOrigin::Person);
+        assert_eq!(person.get("promptSuggestionEnabled"), None);
+        assert_eq!(person, expected);
     }
 
     #[test]
