@@ -2449,7 +2449,9 @@ impl SqliteQueue {
     }
 
     /// The workspaces of the runs that ended (`integrated`, `succeeded`,
-    /// `failed`, `interrupted`) and that nobody leases, except the runs the
+    /// `failed`, `interrupted`) and that no live supervisor leases (a stale
+    /// lease, [`lease_is_stale`], counts as none: its holder died between
+    /// ending the run and releasing the lease, task 396), except the runs the
     /// triage takes (the latest `failed` / `interrupted` run of an
     /// `in_progress` task): the worker's workspace and every workspace a
     /// `workspace_created` or `resume_finished` of the run names, whether
@@ -2462,7 +2464,6 @@ impl SqliteQueue {
                WHERE r.status IN ('integrated','succeeded','failed','interrupted')
                AND NOT (r.status IN ('failed','interrupted') AND t.status='in_progress'
                         AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id))
-               AND NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)
              )
              SELECT id, status, workspace_id, run_row, 0 AS event_id FROM ended
              WHERE workspace_id IS NOT NULL
@@ -2480,22 +2481,27 @@ impl SqliteQueue {
                 workspace_id: row.get(2)?,
             })
         })?;
+        let live = self.live_leased_runs()?;
         let mut seen = std::collections::HashSet::new();
         let mut workspaces: Vec<EndedRunWorkspace> = Vec::new();
         for row in rows {
             let row = row?;
-            if seen.insert((row.run_id.clone(), row.workspace_id.clone())) {
+            if !live.contains(&row.run_id)
+                && seen.insert((row.run_id.clone(), row.workspace_id.clone()))
+            {
                 workspaces.push(row);
             }
         }
         Ok(workspaces)
     }
 
-    /// The worktrees of the runs nobody leases that ended (`integrated`,
-    /// `succeeded`, `failed`, `interrupted`), or of any status once their
-    /// task is `completed` or `canceled`, by run; each is where the run's
-    /// worktree lives under the run directory, whether or not it is still
-    /// there.
+    /// The worktrees of the runs no live supervisor leases that ended
+    /// (`integrated`, `succeeded`, `failed`, `interrupted`; a stale lease,
+    /// [`lease_is_stale`], counts as none, as in
+    /// [`Self::ended_run_workspaces`]), or of any status and no lease at
+    /// all once their task is `completed` or `canceled`, by run; each is
+    /// where the run's worktree lives under the run directory, whether or
+    /// not it is still there.
     pub fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
         let mut statement = self.conn.prepare(
             "SELECT r.id, r.task_id, r.status AS run_status, t.status AS task_status, r.branch
@@ -2504,9 +2510,11 @@ impl SqliteQueue {
              WHERE r.worktree_path IS NOT NULL
              AND (r.status IN ('integrated','succeeded','failed','interrupted')
                   OR t.status IN ('completed','canceled'))
-             AND NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)
+             AND (r.status IN ('integrated','succeeded','failed','interrupted')
+                  OR NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id))
              ORDER BY r.rowid",
         )?;
+        let live = self.live_leased_runs()?;
         let rows = statement.query_map([], |row| {
             let run_id: RunId = row.get(0)?;
             Ok(EndedRunWorktree {
@@ -2521,7 +2529,36 @@ impl SqliteQueue {
                 branch: row.get(4)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut worktrees = Vec::new();
+        for row in rows {
+            let row = row?;
+            if !live.contains(&row.run_id) {
+                worktrees.push(row);
+            }
+        }
+        Ok(worktrees)
+    }
+
+    /// The runs whose lease is not stale ([`lease_is_stale`]): a live
+    /// supervisor still holds them. The sweep leaves the stale leases of
+    /// ended runs in place rather than deleting them: the heartbeat thread
+    /// renews every 2 seconds, so a stale lease's holder is dead or hung,
+    /// and all it may still do to an ended run is release the lease, which
+    /// would fail if the row were gone.
+    fn live_leased_runs(&self) -> Result<std::collections::HashSet<RunId>> {
+        let now = self.generators.clock.now();
+        let mut statement = self
+            .conn
+            .prepare("SELECT run_id,token,pid,heartbeat_at FROM run_leases")?;
+        let leases = statement.query_map([], lease_row)?;
+        let mut live = std::collections::HashSet::new();
+        for lease in leases {
+            let lease = lease?;
+            if !lease_is_stale(&lease, now) {
+                live.insert(lease.run_id);
+            }
+        }
+        Ok(live)
     }
 
     /// Apply the answer of a triage's `decide` ask to its `failed` or

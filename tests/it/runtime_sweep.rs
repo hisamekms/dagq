@@ -413,3 +413,72 @@ fn build_outputs_that_cannot_be_removed_are_retried_by_the_sweep() {
     assert!(!locked.exists());
     assert_eq!(payloads_of(&queue, &run, "build_outputs_removed").len(), 2);
 }
+
+/// Task 396: an ended run whose supervisor died before releasing its
+/// lease is swept as if nobody leased it: its workspace closes and its
+/// worktree is a cleanup candidate. A lease a live supervisor holds still
+/// keeps the sweep away.
+#[test]
+fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Integrated);
+    let raw = Connection::open(&db).unwrap();
+    raw.execute(
+        "UPDATE task_runs SET workspace_id='left-ws', workspace_closed_at=NULL WHERE id=?1",
+        [run.id()],
+    )
+    .unwrap();
+    backend.list("left-ws");
+    // A live supervisor's lease: its process is alive and its heartbeat
+    // is not old.
+    raw.execute(
+        "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'live',?2,unixepoch()+100000)",
+        rusqlite::params![run.id(), std::process::id()],
+    )
+    .unwrap();
+    let before = closes_of(&queue, &run).len();
+    let candidate = |queue: &SqliteQueue| {
+        queue
+            .ended_run_worktrees()
+            .unwrap()
+            .iter()
+            .any(|w| w.run_id == *run.id())
+    };
+    assert!(!candidate(&queue));
+    assert!(
+        !queue
+            .ended_run_workspaces()
+            .unwrap()
+            .iter()
+            .any(|w| w.run_id == *run.id())
+    );
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert_eq!(closes_of(&queue, &run).len(), before);
+    assert!(!backend.closed().contains(&"left-ws".to_owned()));
+
+    // Its holder dies before releasing it: the lease is stale.
+    raw.execute("UPDATE run_leases SET pid=?1", [dead_pid()])
+        .unwrap();
+    assert!(candidate(&queue));
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    let closed = closes_of(&queue, &run);
+    assert_eq!(
+        closed[before..],
+        [json!({"workspace_id": "left-ws", "by": "supervisor", "reason": "ended"})]
+    );
+    assert!(backend.closed().contains(&"left-ws".to_owned()));
+
+    // A heartbeat older than the limit is stale too.
+    raw.execute(
+        "UPDATE run_leases SET pid=?1, heartbeat_at=0",
+        [std::process::id()],
+    )
+    .unwrap();
+    assert!(candidate(&queue));
+}

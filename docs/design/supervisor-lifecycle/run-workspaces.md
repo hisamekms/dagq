@@ -4,8 +4,8 @@ type: design
 title: "Run workspaces"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -22,4 +22,4 @@ runが終わる経路ごとの close（task 180）:
 - **次のresumeの前**: `close_left_resume_workspaces`が前の試行が残したresumeのworkspaceを閉じ、`workspace_closed`（`by: supervisor`、`resume_attempt`）を記録する
 - **手での`integrate`・`recover`・人の`ready` / cancel、supervisorの外で終わったrun**: 下の掃除が閉じる
 
-**掃除**（`sweep_ended_workspaces`）: supervisorのfill passごとに、`sweep_interval`（既定60秒、最初のpassは即時）に1回、終わったrun（`integrated`・`succeeded`・`failed`・`interrupted`）のうち、leaseが無く、slotに居らず、triageの対象（`in_progress`のtaskの最新の`failed` / `interrupted`のrun）でないrunのworkspaceを集める（`ended_run_workspaces`。閉じた記録の有無に関わらずrunが開いたworkspaceすべて）。候補があれば全windowの`cmux workspace list`を1回だけ取り（`WorkspaceBackend::listed_workspace_ids`。task 246の`exists`と同じ listing）、listされているものだけを閉じる。DBの記録ではなくcmuxの一覧が正で、listされていないworkspaceには何も書かないので、2回目以降は何もしない。閉じたら`workspace_closed`（`workspace_id`、`by: supervisor`、`reason`: `failed` / `interrupted`は`superseded`、それ以外は`ended`。最初のsessionなら`workspace_closed_at`も）を記録し、そのrunの閉じていない`stuck_exit` / `answer_prompt` / `stalled`のaskを閉じる。closeの失敗は`cleanup_failed`（`workspace_id`、`message`、`by: supervisor`。`last_error`は変えない）にして残りを続け、次の掃除で再び閉じようとする（`cleanup_failed`はsupervisorのプロセスごとにworkspaceあたり1回だけ記録する）。listingの失敗やDBのerrorはsupervisor logに書いてその回を飛ばし、ループは止めない。worktree・branchは同じ回の[Run worktrees](run-worktrees.md#run-worktrees)の掃除が扱い、run_dirは消さない。
+**掃除**（`sweep_ended_workspaces`）: supervisorのfill passごとに、`sweep_interval`（既定60秒、最初のpassは即時）に1回、終わったrun（`integrated`・`succeeded`・`failed`・`interrupted`）のうち、生きているsupervisorのleaseが無く（staleなlease（`lease_is_stale`: pidが死んでいるかheartbeatが`HEARTBEAT_TIMEOUT_SECS`より古い）は無いものとして扱う。runを終わった状態にしてから`release_lease`までの間にsupervisorが死ぬと、leaseが残ってworkspaceが永久に拾われなくなるため。task 396。staleなleaseの行は消さずに残す）、slotに居らず、triageの対象（`in_progress`のtaskの最新の`failed` / `interrupted`のrun）でないrunのworkspaceを集める（`ended_run_workspaces`。閉じた記録の有無に関わらずrunが開いたworkspaceすべて）。候補があれば全windowの`cmux workspace list`を1回だけ取り（`WorkspaceBackend::listed_workspace_ids`。task 246の`exists`と同じ listing）、listされているものだけを閉じる。DBの記録ではなくcmuxの一覧が正で、listされていないworkspaceには何も書かないので、2回目以降は何もしない。閉じたら`workspace_closed`（`workspace_id`、`by: supervisor`、`reason`: `failed` / `interrupted`は`superseded`、それ以外は`ended`。最初のsessionなら`workspace_closed_at`も）を記録し、そのrunの閉じていない`stuck_exit` / `answer_prompt` / `stalled`のaskを閉じる。closeの失敗は`cleanup_failed`（`workspace_id`、`message`、`by: supervisor`。`last_error`は変えない）にして残りを続け、次の掃除で再び閉じようとする（`cleanup_failed`はsupervisorのプロセスごとにworkspaceあたり1回だけ記録する）。listingの失敗やDBのerrorはsupervisor logに書いてその回を飛ばし、ループは止めない。worktree・branchは同じ回の[Run worktrees](run-worktrees.md#run-worktrees)の掃除が扱い、run_dirは消さない。

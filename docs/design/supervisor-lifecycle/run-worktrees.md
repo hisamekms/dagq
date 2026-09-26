@@ -13,7 +13,7 @@ related:
 
 # Run worktrees
 
-終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける（task 376。goal 34のconstraintsの人の決定（2026-09-25）。2026-09-25に、消されずに残ったrunの`target/`（1 runあたり0.6〜3.4GB、合計20GB超）で空きが尽き、integrateの検証が`No space left on device`で落ちた）。対象は、leaseが無くslotに居ないrunのうち、`integrated`・`succeeded`・`failed`・`interrupted`で終わったものと、taskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。worktreeがもう無ければ何もしないので、何度見てもよい。
+終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける（task 376。goal 34のconstraintsの人の決定（2026-09-25）。2026-09-25に、消されずに残ったrunの`target/`（1 runあたり0.6〜3.4GB、合計20GB超）で空きが尽き、integrateの検証が`No space left on device`で落ちた）。対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[Run workspaces](run-workspaces.md#run-workspaces)の掃除と同じ。task 396）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。worktreeがもう無ければ何もしないので、何度見てもよい。
 
 - **taskが`completed` / `canceled`**: worktreeとbranchを消す（`git worktree remove --force`、branchがあれば`git branch -D`）。`worktree_removed`（`path`、`branch`、`bytes`、`by: supervisor`、`reason`: `task_completed` / `task_canceled`）を記録する。前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。run_dirとその記録、着地したcommitの`refs/dagq/runs/<run-id>`は残す
 - **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物（`target/`と`llvm-cov-target/`。`cargo llvm-cov`は既定で`target/llvm-cov-target`に作る）だけを消す。Gitがその下のfileをtrackしていれば消さず、linkはたどらない。`build_outputs_removed`（`paths`、`bytes`、`by: supervisor`）を記録する。ソース、commit、run_dirは残る。triageを待つrunも対象で、resumeされたら作り直す
