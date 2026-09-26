@@ -22,6 +22,7 @@ use super::{
 pub mod candidates;
 pub mod compare;
 pub mod config;
+pub mod observe;
 pub mod push;
 pub mod report;
 mod window;

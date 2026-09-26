@@ -158,7 +158,9 @@ fn escalated_long_background(
     backend: &TestWorkspace,
     supervisor: thread::JoinHandle<Result<Value>>,
 ) -> (dagq::domain::Ask, dagq::domain::TaskDetail) {
-    wait_until(db, Duration::from_secs(30), |queue| {
+    // Up to a step's limit: under the coverage gate's load the recovery job
+    // and its escalation take longer than a fixed 30 s (task 433's integrate).
+    wait_until(db, crate::common::STEP_LIMIT, |queue| {
         !stalled_asks(queue).is_empty()
     });
     let mut queue = SqliteQueue::open(db).unwrap();

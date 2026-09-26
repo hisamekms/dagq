@@ -627,8 +627,8 @@ pub use error::DomainError;
 use error::require;
 pub use finding::{
     DISMISS_OPTION, Finding, FindingAnswer, FindingOutcome, FindingQuery, FindingStatus,
-    FindingTarget, FindingUpdate, FindingView, Impact, MAX_FINDING_PLANNERS, NewFinding,
-    PROPOSE_OPTION,
+    FindingTarget, FindingUpdate, FindingView, Impact, ImprovementLimit, MAX_FINDING_PLANNERS,
+    NewFinding, PROPOSE_OPTION, improvement_running,
 };
 pub use follow_up::{DraftOrigin, DraftTarget, MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS};
 pub use goal::Goal;

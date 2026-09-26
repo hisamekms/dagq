@@ -333,6 +333,31 @@ pub const DISMISS_OPTION: &str = "dismiss";
 /// when they all end without deciding it, the inbox is told.
 pub const MAX_FINDING_PLANNERS: usize = super::MAX_DRAFT_PLANNERS;
 
+/// The improvement proposals running and the limit on them (ADR-0051
+/// decision 25): the proposals submitted linked to a finding that
+/// [`improvement_running`], and the planners of the runtime's opened for a
+/// finding still `open` (they may submit one), against `[kpi]`'s
+/// `max_improvement_proposals`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ImprovementLimit {
+    pub running: usize,
+    pub limit: usize,
+}
+
+impl ImprovementLimit {
+    /// No new planner of the runtime's is opened for a finding.
+    pub const fn reached(self) -> bool {
+        self.running >= self.limit
+    }
+}
+
+/// Whether a proposal linked to a finding still counts against the
+/// [`ImprovementLimit`]: not canceled and a task still to be done — the
+/// proposal [`settle`] leaves unsettled.
+pub fn improvement_running(proposal: ProposalStatus, tasks: &[super::TaskStatus]) -> bool {
+    settle(proposal, tasks).is_none()
+}
+
 /// A person's answer the runtime applies to a finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindingAnswer {
@@ -502,6 +527,39 @@ mod tests {
             propose: None,
             by: "observer".into(),
         }
+    }
+
+    #[test]
+    fn an_improvement_runs_until_its_proposal_ends_and_the_limit_counts_them() {
+        use crate::domain::TaskStatus;
+        assert!(improvement_running(
+            ProposalStatus::Submitted,
+            &[TaskStatus::Draft]
+        ));
+        assert!(improvement_running(
+            ProposalStatus::Accepted,
+            &[TaskStatus::Completed, TaskStatus::Ready]
+        ));
+        assert!(!improvement_running(
+            ProposalStatus::Accepted,
+            &[TaskStatus::Completed, TaskStatus::Canceled]
+        ));
+        assert!(!improvement_running(
+            ProposalStatus::Canceled,
+            &[TaskStatus::Draft]
+        ));
+        let limit = |running| ImprovementLimit { running, limit: 2 };
+        assert!(!limit(0).reached());
+        assert!(!limit(1).reached());
+        assert!(limit(2).reached());
+        assert!(limit(3).reached());
+        assert!(
+            ImprovementLimit {
+                running: 0,
+                limit: 0
+            }
+            .reached()
+        );
     }
 
     #[test]

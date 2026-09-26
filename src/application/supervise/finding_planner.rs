@@ -19,8 +19,28 @@ use crate::{
         planner::{PlannerView, open_draft_planner},
         prompt::{FindingPlannerMaterial, finding_planner_prompt},
     },
-    domain::{Ask, FindingId, GoalId, PlannerState},
+    domain::{
+        Ask, FindingId, GoalId, ImprovementLimit, PlannerState,
+        kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
+    },
 };
+
+/// No planner was opened: the improvements running reached their limit
+/// (ADR-0051 decision 25), so the findings after it wait too.
+#[derive(Debug)]
+struct ImprovementsAtLimit(ImprovementLimit);
+
+impl std::fmt::Display for ImprovementsAtLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} improvement proposals run (at most {}); it waits for one to end",
+            self.0.running, self.0.limit
+        )
+    }
+}
+
+impl std::error::Error for ImprovementsAtLimit {}
 
 impl Supervisor<'_> {
     /// Resolve the `proposed` findings whose proposal ended with a task
@@ -100,7 +120,7 @@ impl Supervisor<'_> {
                 }
             }
             PlannerAnswerRoute::NewPlanner if *runtime_open < options.runtime_planners => {
-                if let Some(workspace) = self.start_finding_planner(finding, Some(ask))? {
+                if let Some(workspace) = self.start_finding_planner(finding, Some(ask), 0)? {
                     *runtime_open += 1;
                     self.queue.ask_delivered(ask.id, &workspace)?;
                 }
@@ -120,37 +140,67 @@ impl Supervisor<'_> {
     }
 
     /// Open a planner for each finding waiting for one, the oldest mark
-    /// first, while the runtime's planners are below the limit.
+    /// first, while the runtime's planners are below the limit and the
+    /// improvements running below theirs (ADR-0051 decision 25).
     pub(super) fn open_finding_planners(
         &mut self,
         options: &LoopSettings,
         runtime_open: &mut usize,
     ) -> Result<()> {
-        for finding in self.queue.planner_findings()? {
+        let findings = self.queue.planner_findings()?;
+        if findings.is_empty() {
+            return Ok(());
+        }
+        let limit = self.max_improvement_proposals();
+        for finding in findings {
             if *runtime_open >= options.runtime_planners {
                 break;
             }
-            if self.start_finding_planner(finding.id, None)?.is_some() {
-                *runtime_open += 1;
+            match self.start_finding_planner(finding.id, None, limit) {
+                Ok(Some(_)) => *runtime_open += 1,
+                Ok(None) => {}
+                Err(error) if error.is::<ImprovementsAtLimit>() => {
+                    tracing::debug!("finding {}: {error}", finding.id);
+                    break;
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(())
     }
 
+    /// `[kpi]`'s `max_improvement_proposals`, read again each time; the
+    /// default when the settings do not read.
+    fn max_improvement_proposals(&self) -> usize {
+        match (self.max_improvement_proposals)() {
+            Ok(limit) => limit,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the [kpi] settings do not read: {error:#}; at most {DEFAULT_MAX_IMPROVEMENT_PROPOSALS} improvement proposals run");
+                DEFAULT_MAX_IMPROVEMENT_PROPOSALS
+            }
+        }
+    }
+
     /// Record a planner for `finding` (carrying `answer`), write its prompt
     /// and open its workspace; the workspace's UUID, or `None` when the
     /// finding was not taken (another supervisor took it, it moved on, or
-    /// its planners are used up).
+    /// its planners are used up), or the error [`ImprovementsAtLimit`].
+    /// `limit` is ignored when the planner carries `answer`.
     fn start_finding_planner(
         &mut self,
         finding: FindingId,
         answer: Option<&Ask>,
+        limit: usize,
     ) -> Result<Option<String>> {
-        let (planner, attempt) = match self
-            .queue
-            .open_finding_planner(finding, answer.map(|ask| ask.id))?
-        {
+        let (planner, attempt) = match self.queue.open_finding_planner(
+            finding,
+            answer.map(|ask| ask.id),
+            limit,
+        )? {
             FindingPlannerStart::Skipped => return Ok(None),
+            FindingPlannerStart::AtLimit(improvements) => {
+                return Err(ImprovementsAtLimit(improvements).into());
+            }
             FindingPlannerStart::Exhausted { attempts } => {
                 warn!(
                     "finding {finding}: {attempts} planners of the runtime's ended without deciding it; the inbox is told"

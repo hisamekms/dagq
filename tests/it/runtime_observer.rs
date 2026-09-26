@@ -489,3 +489,86 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
     .unwrap();
     assert_eq!(forced["outcome"], "succeeded", "{forced}");
 }
+
+/// ADR-0051 decisions 24 and 25: the observer reads the KPIs judged
+/// against the checkout's `[kpi]` targets and the improvements running
+/// against their limit, and a breach it records again under one subject
+/// stays one `kpi` finding.
+#[test]
+fn observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_subject() {
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[kpi]\nmax_improvement_proposals = 3\n[kpi.targets.\"lead_time\"]\nmax = 60\n",
+    )
+    .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .bind_repository(repo.join(".git").to_str().unwrap())
+        .unwrap();
+
+    let dry = observe(
+        &db,
+        &ObserverProvider {
+            script: "exit 1".into(),
+        },
+        &dagq::observer::ObserveOptions {
+            dry_run: true,
+            ..observe_options(ObserveMode::Hourly)
+        },
+    )
+    .unwrap();
+    let prompt = dry["prompt"].as_str().unwrap();
+    assert!(prompt.contains("Reading the KPIs"), "{prompt}");
+    assert!(prompt.contains("--kind kpi --queue --subject"), "{prompt}");
+
+    let provider = ObserverProvider {
+        script: r#"
+set -e
+q() { dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }
+q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead time 90s over 60s for 3 days' --evidence 1
+q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead time 95s over 60s for 4 days' --evidence 2
+"#
+        .into(),
+    };
+    let done = observe(&db, &provider, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    let dir = PathBuf::from(done["dir"].as_str().unwrap());
+    let input: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
+    let targets = input["kpi"]["targets"].as_array().unwrap();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|t| (t["period"].clone(), t["kpi"].clone(), t["max"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!("day"), json!("lead_time"), json!(60.0)),
+            (json!("week"), json!("lead_time"), json!(60.0)),
+        ],
+        "{input}"
+    );
+    // No landing: nothing is judged, so nothing is in breach.
+    assert!(
+        targets.iter().all(|t| t["state"] == "not_judged"),
+        "{input}"
+    );
+    assert_eq!(input["kpi"]["breaches"], json!([]));
+    assert_eq!(input["kpi"]["trend"]["day"].as_array().unwrap().len(), 7);
+    assert_eq!(
+        input["improvements"],
+        json!({"running": 0, "limit": 3, "reached": false, "waiting": []})
+    );
+
+    let findings = SqliteQueue::open(&db)
+        .unwrap()
+        .findings(&dagq::domain::FindingQuery {
+            kinds: vec!["kpi".into()],
+            ..dagq::domain::FindingQuery::default()
+        })
+        .unwrap();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].finding.subject, "lead_time/all");
+    assert_eq!(findings[0].finding.evidence.len(), 2);
+}

@@ -370,6 +370,8 @@ pub fn supervise_with_reviewer(
             push_target,
         }
     });
+    let limit_checkout = main_checkout(&repository);
+    let max_improvement_proposals = Arc::new(move || max_improvement_proposals(&limit_checkout));
     let ports = Ports {
         queues: Arc::new(SqliteOpener {
             db: db.clone(),
@@ -397,6 +399,7 @@ pub fn supervise_with_reviewer(
         free_space: options.free_space,
         host_versions,
         reports,
+        max_improvement_proposals,
         layout,
     };
     supervisor::supervise(&ports, &options.settings(stall, conflicts, disk))
@@ -701,6 +704,71 @@ impl OneShot {
                 query,
             )?,
         )?)
+    }
+
+    /// What the observer reads of the KPIs (ADR-0051 decision 24): `kpi`
+    /// of the last 7 days and the last 4 weeks as [`Self::kpi_of`] judges
+    /// them, with the open breaches' events
+    /// ([`crate::domain::kpi::observe::observer_input`]).
+    pub fn observer_kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<serde_json::Value> {
+        use crate::domain::kpi::{KpiQuery, Period, observe};
+        let now = self.generators.clock.now();
+        let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+        let setup = report_setup(
+            db,
+            bound_checkout(queue)?.as_deref(),
+            None,
+            host_wide.as_deref(),
+            now,
+        )?;
+        let of = |period, last| {
+            crate::application::kpi::kpi(
+                queue,
+                now,
+                setup.host,
+                &setup.config,
+                &KpiQuery {
+                    period,
+                    last,
+                    ..KpiQuery::default()
+                },
+            )
+        };
+        let (day, week) = (of(Period::Day, 7)?, of(Period::Week, 4)?);
+        Ok(observe::observer_input(
+            &day,
+            &week,
+            &queue.kpi_breach_events_open()?,
+        ))
+    }
+
+    /// The improvement proposals running against `[kpi]`'s
+    /// `max_improvement_proposals` of the main checkout's `dagq.toml`
+    /// (ADR-0051 decision 25), and when they reached it, the findings
+    /// waiting for a planner because of it.
+    pub fn improvements_of(&self, queue: &SqliteQueue) -> Result<serde_json::Value> {
+        let limit = match bound_checkout(queue)? {
+            Some(checkout) => max_improvement_proposals(&checkout)?,
+            None => crate::domain::kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
+        };
+        let improvements = queue.improvements(limit)?;
+        let waiting: Vec<serde_json::Value> = if improvements.reached() {
+            queue
+                .planner_findings()?
+                .iter()
+                .map(|finding| {
+                    serde_json::json!({"finding_id": finding.id, "reason": "improvement_limit"})
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(serde_json::json!({
+            "running": improvements.running,
+            "limit": improvements.limit,
+            "reached": improvements.reached(),
+            "waiting": waiting,
+        }))
     }
 
     /// `report` (ADR-0051 decision 21): the KPI report of the `period` that
@@ -1271,6 +1339,15 @@ fn report_setup(
         keep: load_host_report(queue_dir, host_wide)?,
         build: crate::VERSION.to_owned(),
     })
+}
+
+/// `[kpi]`'s `max_improvement_proposals` of `checkout`'s `dagq.toml`, or
+/// its default (ADR-0051 decision 25; the host's settings do not change
+/// it).
+fn max_improvement_proposals(checkout: &Path) -> Result<usize> {
+    Ok(load_kpi_settings(checkout)?
+        .and_then(|settings| settings.max_improvement_proposals)
+        .unwrap_or(crate::domain::kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS))
 }
 
 /// The KPI reports' directory in the queue's (ADR-0051 decision 20).

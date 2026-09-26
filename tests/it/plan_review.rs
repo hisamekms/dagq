@@ -53,7 +53,7 @@ fn git(repo: &Path, args: &[&str]) {
 
 pub(crate) struct Fixture {
     _dir: TempDir,
-    repo: PathBuf,
+    pub(crate) repo: PathBuf,
     pub(crate) db: PathBuf,
     claude: PathBuf,
     /// Times the test while held (task 324).

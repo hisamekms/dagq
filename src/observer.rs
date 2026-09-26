@@ -105,7 +105,8 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     let cmux = crate::infrastructure::adapters::executable(Path::new("cmux"))
         .ok()
         .map(|executable| crate::infrastructure::adapters::Cmux { executable });
-    let stats = crate::compose::OneShot::new(queue.generators().clone()).stats_of(
+    let one_shot = crate::compose::OneShot::new(queue.generators().clone());
+    let stats = one_shot.stats_of(
         &queue,
         &db,
         &StatsQuery {
@@ -128,12 +129,21 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     })?;
     let findings = queue.findings(&FindingQuery::default())?;
     let graph = dependency_graph(queue.graph_input()?, None);
-    let input = json!({
-        "stats": stats,
-        "findings": findings,
-        "notes": notes.notes,
-        "open_asks": asks,
-        "graph": {"candidates": graph.candidates, "critical": graph.critical},
+    // A KPI that does not read leaves the rest of the observation to run.
+    let kpi = one_shot
+        .observer_kpi(&queue, &db)
+        .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
+    let improvements = one_shot
+        .improvements_of(&queue)
+        .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
+    let input = observer_input(ObserverInput {
+        stats,
+        kpi,
+        findings: serde_json::to_value(findings)?,
+        improvements,
+        notes: serde_json::to_value(notes.notes)?,
+        open_asks: serde_json::to_value(asks)?,
+        graph: json!({"candidates": graph.candidates, "critical": graph.critical}),
     });
     let command = shell_join(&[
         "dagq".into(),
@@ -218,6 +228,35 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         options.mode.as_str()
     );
     Ok(payload)
+}
+
+/// What one observation reads, each part as JSON.
+pub struct ObserverInput {
+    pub stats: Value,
+    /// [`crate::compose::OneShot::observer_kpi`], or `{"error": ...}`.
+    pub kpi: Value,
+    pub findings: Value,
+    /// [`crate::compose::OneShot::improvements_of`], or `{"error": ...}`.
+    pub improvements: Value,
+    pub notes: Value,
+    pub open_asks: Value,
+    pub graph: Value,
+}
+
+/// The input the prompt carries and `input.json` keeps: `stats`, the KPIs
+/// (ADR-0051 decision 24), the unsettled findings with the improvements
+/// running and their limit (decision 25), the notes, the open asks and
+/// the graph.
+pub fn observer_input(input: ObserverInput) -> Value {
+    json!({
+        "stats": input.stats,
+        "kpi": input.kpi,
+        "findings": input.findings,
+        "improvements": input.improvements,
+        "notes": input.notes,
+        "open_asks": input.open_asks,
+        "graph": input.graph,
+    })
 }
 
 /// When the last observation of `mode` that ran its agent succeeded and no
@@ -405,7 +444,7 @@ pub fn observer_prompt(
          - When the problem no longer occurs, resolve its finding with the evidence in the reason: `{dagq} finding resolve ID --reason '...'`.\n\
          - Raise what needs a person now (an alert past its threshold that waiting does not clear) to the inbox as a blocked ask on its finding: `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' [--task ID | --run ID]`, with your reading of it and the next moves a person can choose as options. \
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
-         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} notes`, `{dagq} show ID`, `{dagq} events --all`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
+         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} events --all`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
          \n\
          Reading the stalled-session thresholds (ADR-0043 decision 6, ADR-0044 decision 21):\n\
          - stats' `stall_thresholds` has one entry per `[stall]` setting (`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`), each with \
@@ -418,13 +457,26 @@ pub fn observer_prompt(
          - When a threshold needs revisiting, record a finding with `--kind threshold --subject <the setting's name>` (a missed detection too, on the run), and add `--propose` when it recurs. \
            You never change the threshold yourself.\n\
          \n\
+         Reading the KPIs (ADR-0051 decisions 18 and 24; `kpi` in the inputs, `{dagq} kpi` for more):\n\
+         - `kpi.targets` is each target of `[kpi.targets]` judged on the days and on the weeks: `state` is `ok`, `missed` (off target fewer periods in a row than `kpi.config.breach_periods` days or `breach_weeks` weeks), \
+           `breach` (off target that many judged periods in a row, `streak` of them since `breach_since`) or `not_judged` (too few samples or no value); `values` are the periods' values, the latest in progress not judged (`partial`).\n\
+         - Each entry of `kpi.breaches` is a target in `breach`: record it as a finding of kind `kpi` on the queue with its `subject` (`<kpi>/<stratum>`), \
+           its `evidence_event_id` (the `kpi_breach_started` event; a breach without one is not recorded by the supervisor yet, so leave it for the next observation) as the evidence, \
+           and in the summary and detail the `value`, the target (`min` / `max` of `stat`), the `streak` since `breach_since`, and the `marks` (the changes that took effect since it started), copied as they are: \
+           `{dagq} finding record --kind kpi --queue --subject '<subject>' --summary '...' --detail '...' --evidence <evidence_event_id>`. \
+           A breach of the days and of the weeks of one KPI and stratum is one finding, as is a breach that goes on: record it again only with a new event.\n\
+         - `missed` and `not_judged` are no findings. When an open `kpi` finding's target is `ok` again, resolve it with the period it came back in: `{dagq} finding resolve ID --reason '...'`.\n\
+         - `kpi.trend` lists the periods with their runs, their marks and the KPIs judged worse than the period before (`worsened`); read a change next to its marks, and never compute a number the inputs do not give.\n\
+         - Add `--propose '<why>'` to a `kpi` finding when its impact and the periods it went on call for a remedy. Never raise a breach as an ask. \
+           `improvements` shows the improvement proposals `running` against their `limit` (`[kpi] max_improvement_proposals`); while it is `reached`, a marked finding waits (`waiting`) and no planner is opened for it until one ends.\n\
+         \n\
          Do not:\n\
          - Write notes, goals or tasks, resolve individual stalls, answer asks, dismiss findings, or change the state of runs, tasks or goals (ready, cancel, integrate, recover, goal ready/close); the queue refuses those from your environment.\n\
          - Edit files or run anything but the queue commands above.\n\
          \n\
          When you are done, print one line saying how many findings you recorded or updated and how many asks you wrote.\n\
          \n\
-         Inputs (JSON: stats, the open and proposed findings, the latest {PROMPT_NOTES} notes, the open asks, and the graph's candidates and critical chain):\n\
+         Inputs (JSON: stats, the KPIs, the open and proposed findings, the improvements running, the latest {PROMPT_NOTES} notes, the open asks, and the graph's candidates and critical chain):\n\
          ```json\n{}\n```\n",
         serde_json::to_string_pretty(input)?
     ))
@@ -433,6 +485,61 @@ pub fn observer_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_input_carries_the_kpis_and_the_improvements_next_to_the_rest() {
+        let input = observer_input(ObserverInput {
+            stats: json!({"runs": 3}),
+            kpi: json!({"breaches": [{"subject": "lead_time/all", "evidence_event_id": 7}]}),
+            findings: json!([]),
+            improvements: json!({"running": 2, "limit": 2, "reached": true, "waiting": [{"finding_id": 4}]}),
+            notes: json!([]),
+            open_asks: json!([]),
+            graph: json!({"candidates": [], "critical": []}),
+        });
+        let keys: Vec<&str> = input
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in [
+            "stats",
+            "kpi",
+            "findings",
+            "improvements",
+            "notes",
+            "open_asks",
+            "graph",
+        ] {
+            assert!(keys.contains(&key), "{key} is missing: {input}");
+        }
+        assert_eq!(input["kpi"]["breaches"][0]["evidence_event_id"], 7);
+        assert_eq!(input["improvements"]["reached"], true);
+        let prompt = observer_prompt(ObserveMode::Daily, "dagq", None, &input).unwrap();
+        assert!(prompt.contains("\"lead_time/all\""), "{prompt}");
+    }
+
+    #[test]
+    fn prompt_explains_how_to_read_the_kpis() {
+        let prompt =
+            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"kpi": {}})).unwrap();
+        for text in [
+            "`kpi.targets`",
+            "`breach` (off target that many judged periods in a row",
+            "kind `kpi` on the queue with its `subject` (`<kpi>/<stratum>`)",
+            "`evidence_event_id`",
+            "`dagq finding record --kind kpi --queue --subject '<subject>'",
+            "`missed` and `not_judged` are no findings",
+            "`kpi.trend`",
+            "never compute a number the inputs do not give",
+            "Never raise a breach as an ask.",
+            "`improvements` shows the improvement proposals `running` against their `limit`",
+            "`dagq kpi`, `dagq marks`",
+        ] {
+            assert!(prompt.contains(text), "the prompt lacks {text:?}");
+        }
+    }
 
     #[test]
     fn prompt_explains_how_to_read_the_stall_thresholds() {

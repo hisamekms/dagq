@@ -269,6 +269,9 @@ pub struct Ports<'a> {
     /// Writes the daily KPI reports (ADR-0051 decision 20); `None` writes
     /// none.
     pub reports: Option<ReportPort>,
+    /// `[kpi]`'s `max_improvement_proposals` of the main checkout's
+    /// `dagq.toml` (ADR-0051 decision 25), read again each time.
+    pub max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     pub layout: Layout,
 }
 
@@ -488,6 +491,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         load_average: ports.load_average,
         host_versions: ports.host_versions,
         reports: ports.reports.clone(),
+        max_improvement_proposals: ports.max_improvement_proposals.clone(),
         report: report::ReportWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
@@ -607,6 +611,8 @@ struct Supervisor<'a> {
     host_versions: fn(&Path, &Path) -> HostVersions,
     /// Writes the daily KPI reports; `None` writes none.
     reports: Option<ReportPort>,
+    /// Reads the limit on the improvement proposals running.
+    max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     /// The report job and the day the reports were last found written.
     report: report::ReportWatch,
     /// The KPI push's messages waiting and the one being sent.

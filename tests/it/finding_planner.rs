@@ -78,6 +78,15 @@ fn finding_events(db: &Path, id: FindingId, kind: &str) -> Vec<Value> {
 /// A draft task of `goal` that waits for the fixture's blocker, so it is
 /// never claimed once ready.
 fn draft(queue: &mut SqliteQueue, goal: dagq::domain::GoalId, title: &str) -> TaskId {
+    draft_at(queue, goal, title, Priority::Normal)
+}
+
+fn draft_at(
+    queue: &mut SqliteQueue,
+    goal: dagq::domain::GoalId,
+    title: &str,
+    priority: Priority,
+) -> TaskId {
     queue
         .add(NewTask {
             kind: None,
@@ -87,7 +96,7 @@ fn draft(queue: &mut SqliteQueue, goal: dagq::domain::GoalId, title: &str) -> Ta
             verification_commands: vec!["true".into()],
             required_evidence: Vec::new(),
             paths: Vec::new(),
-            priority: Priority::Normal,
+            priority,
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
             goal_id: Some(goal),
@@ -159,7 +168,7 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
     );
     assert_eq!(queue.planners(false).unwrap().len(), 1);
     assert!(matches!(
-        queue.open_finding_planner(marked, None).unwrap(),
+        queue.open_finding_planner(marked, None, 2).unwrap(),
         dagq::application::FindingPlannerStart::Skipped
     ));
 
@@ -233,6 +242,118 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
     assert_eq!(
         finding_events(&fx.db, marked, "finding_planner_opened").len(),
         1
+    );
+}
+
+/// ADR-0051 decisions 25 and 26: the improvements running (the planners
+/// of the runtime's for an open finding and the proposals linked to a
+/// finding with a task to do) stop new planners at `[kpi]
+/// max_improvement_proposals` of the checkout's `dagq.toml`; the finding
+/// waits, `open`, and `findings` says why, until one ends. Plan review's
+/// pass lowers an improvement's task to `normal`.
+#[test]
+fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
+    let fx = fixture();
+    std::fs::write(
+        fx.repo.join("dagq.toml"),
+        "[kpi]\nmax_improvement_proposals = 1\n",
+    )
+    .unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let first = record(&mut queue, FindingTarget::Queue, "src/a.rs", Some("a"));
+    let second = record(&mut queue, FindingTarget::Queue, "src/b.rs", Some("b"));
+    let pass = json!({"verdict": "pass", "reasons": [], "summary": "ok"});
+    let reviewer = StubReviewer::new(&[pass.clone(), pass]);
+    let backend = PlanWorkspace::default();
+    let three = options(3, Duration::from_secs(3600));
+
+    // Room for three planners, but one improvement: the oldest mark's.
+    supervise_with(&fx, &backend, &reviewer, &three);
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1, "{planners:?}");
+    assert_eq!(planners[0].finding_id, Some(first));
+    assert!(finding_events(&fx.db, second, "finding_planner_opened").is_empty());
+    assert!(matches!(
+        queue.open_finding_planner(second, None, 1).unwrap(),
+        dagq::application::FindingPlannerStart::AtLimit(dagq::domain::ImprovementLimit {
+            running: 1,
+            limit: 1
+        })
+    ));
+    let one_shot = dagq::compose::OneShot::new(dagq::infrastructure::clock::system());
+    assert_eq!(
+        one_shot.improvements_of(&queue).unwrap(),
+        json!({"running": 1, "limit": 1, "reached": true,
+               "waiting": [{"finding_id": second, "reason": "improvement_limit"}]})
+    );
+
+    // Its planner submits a high task: the proposal is the improvement
+    // running now, and plan review's pass lowers the task to normal.
+    let task = draft_at(&mut queue, goal, "split a", Priority::High);
+    queue
+        .submit_linking(
+            Submission {
+                tasks: vec![task],
+                goals: Vec::new(),
+                proposal: None,
+                owner: runtime_owner("RT1"),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(finding(&queue, first).status, FindingStatus::Proposed);
+    assert_eq!(queue.show(task).unwrap().task.priority(), Priority::High);
+    idle(&queue, &fx.db, planners[0].id);
+    queue
+        .planner_exited(planners[0].id, std::process::id(), 0)
+        .unwrap();
+    supervise_with(&fx, &backend, &reviewer, &three);
+    assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+    assert_eq!(queue.show(task).unwrap().task.priority(), Priority::Normal);
+    let lowered = events(&mut queue, task, "task_priority_changed");
+    assert_eq!(lowered.len(), 1, "{lowered:?}");
+    assert_eq!(
+        (&lowered[0]["from"], &lowered[0]["to"], &lowered[0]["by"]),
+        (&json!("high"), &json!("normal"), &json!("plan_review"))
+    );
+    assert!(finding_events(&fx.db, second, "finding_planner_opened").is_empty());
+    assert_eq!(finding(&queue, second).status, FindingStatus::Open);
+
+    // The improvement ends: the waiting finding gets its planner.
+    queue.transition(task, TaskAction::Cancel).unwrap();
+    supervise_with(&fx, &backend, &reviewer, &three);
+    supervise_with(&fx, &backend, &reviewer, &three);
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1, "{planners:?}");
+    assert_eq!(planners[0].finding_id, Some(second));
+    assert_eq!(
+        one_shot.improvements_of(&queue).unwrap()["running"],
+        json!(1)
+    );
+
+    // A proposal a person submits from a planner of their own is not
+    // counted.
+    let third = record(&mut queue, FindingTarget::Queue, "src/c.rs", None);
+    let own = draft_at(&mut queue, goal, "split c", Priority::High);
+    queue
+        .submit_linking(
+            Submission {
+                tasks: vec![own],
+                goals: Vec::new(),
+                proposal: None,
+                owner: PlannerOwner {
+                    origin: PlannerOrigin::Person,
+                    workspace_id: Some("P1".into()),
+                },
+            },
+            &[third],
+        )
+        .unwrap();
+    assert_eq!(finding(&queue, third).status, FindingStatus::Proposed);
+    assert_eq!(
+        one_shot.improvements_of(&queue).unwrap()["running"],
+        json!(1)
     );
 }
 

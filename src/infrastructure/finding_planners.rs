@@ -20,8 +20,8 @@ use super::{
 use crate::application::{FindingPlannerStart, PlannerAnswerRoute};
 use crate::domain::{
     Ask, AskId, AskKind, Finding, FindingAnswer, FindingId, FindingStatus, FindingTarget,
-    MAX_FINDING_PLANNERS, NewFinding, PlannerId, PlannerOrigin, Proposal, ProposalId,
-    ProposalStatus, Submission, TaskStatus, finding,
+    ImprovementLimit, MAX_FINDING_PLANNERS, NewFinding, PlannerId, PlannerOrigin, Proposal,
+    ProposalId, ProposalStatus, Submission, TaskStatus, finding,
 };
 
 /// The findings waiting for a planner of the runtime's: `open`, marked for
@@ -91,10 +91,14 @@ impl SqliteQueue {
     /// `planner_question` about the finding, whose planner is gone. A
     /// finding that had [`MAX_FINDING_PLANNERS`] planners since its mark
     /// records `finding_planner_exhausted` (the inbox's attention) instead.
+    /// Without `answer`, no planner is opened while the improvements
+    /// running reach `limit` (ADR-0051 decision 25), counted in the same
+    /// transaction.
     pub fn open_finding_planner(
         &mut self,
         finding: FindingId,
         answer: Option<AskId>,
+        limit: usize,
     ) -> Result<FindingPlannerStart> {
         let now = self.generators.clock.now();
         let tx = self
@@ -110,6 +114,15 @@ impl SqliteQueue {
         };
         if !eligible {
             return Ok(FindingPlannerStart::Skipped);
+        }
+        // A person's answer is carried past the limit, as past
+        // MAX_FINDING_PLANNERS: it is a person's decision, and its planner
+        // stays counted until it submits or ends.
+        if answer.is_none() {
+            let improvements = improvement_limit(&tx, limit)?;
+            if improvements.reached() {
+                return Ok(FindingPlannerStart::AtLimit(improvements));
+            }
         }
         let current = read_finding(&tx, finding)?;
         let opened = planners_since_mark(&tx, &current)?;
@@ -155,6 +168,12 @@ impl SqliteQueue {
             finding: Box::new(current),
             attempt,
         })
+    }
+
+    /// The improvement proposals running against `limit` (ADR-0051
+    /// decision 25).
+    pub fn improvements(&self, limit: usize) -> Result<ImprovementLimit> {
+        improvement_limit(&self.conn, limit)
     }
 
     /// The asks about `finding`, oldest first: the observer's `blocked`
@@ -306,6 +325,41 @@ fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
         |r| r.get(0),
     )?;
     Ok(usize::try_from(count)?)
+}
+
+/// The improvements running ([`ImprovementLimit`]): each distinct
+/// proposal of a planner of the runtime's (`owner_origin` `runtime`)
+/// linked to a finding while [`finding::improvement_running`] (a proposal a
+/// person submitted from a planner of their own is not counted, ADR-0051
+/// decision 25), and each planner of the runtime's not closed whose finding
+/// is still `open`: it may submit one, and counting it keeps planners
+/// opened together from going past the limit (one that submitted made its
+/// finding `proposed`, and its proposal is the one counted).
+fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit> {
+    let proposals: Vec<ProposalId> = conn
+        .prepare(
+            "SELECT DISTINCT f.proposal_id FROM findings f JOIN proposals p ON p.id = f.proposal_id
+             WHERE p.owner_origin='runtime'",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut running = 0;
+    for proposal in proposals {
+        let (status, tasks) = proposal_state(conn, proposal)?;
+        if finding::improvement_running(status, &tasks) {
+            running += 1;
+        }
+    }
+    let planners: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM planners p JOIN findings f ON f.id = p.finding_id
+         WHERE p.origin='runtime' AND p.closed_at IS NULL AND f.status='open'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(ImprovementLimit {
+        running: running + usize::try_from(planners).unwrap_or_default(),
+        limit,
+    })
 }
 
 /// The proposal's status and the statuses of the tasks it holds.

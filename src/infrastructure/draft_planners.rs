@@ -394,8 +394,12 @@ impl DraftPlannerStore for SqliteQueue {
         &mut self,
         finding: FindingId,
         answer: Option<AskId>,
+        limit: usize,
     ) -> Result<FindingPlannerStart> {
-        SqliteQueue::open_finding_planner(self, finding, answer)
+        SqliteQueue::open_finding_planner(self, finding, answer, limit)
+    }
+    fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit> {
+        SqliteQueue::improvements(self, limit)
     }
     fn finding_view(&self, finding: FindingId) -> Result<FindingView> {
         SqliteQueue::findings(

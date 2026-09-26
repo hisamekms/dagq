@@ -1510,6 +1510,9 @@ pub enum FindingPlannerStart {
     /// deciding the finding: `finding_planner_exhausted` is recorded and a
     /// person decides.
     Exhausted { attempts: usize },
+    /// The improvements running reached the limit (ADR-0051 decision 25):
+    /// the finding waits, `open`, for one to end.
+    AtLimit(crate::domain::ImprovementLimit),
     /// Not now: the finding moved on, or another planner took it.
     Skipped,
 }
@@ -1597,11 +1600,16 @@ pub trait DraftPlannerStore {
     /// (`finding_planner_opened`) after re-checking it in the same write
     /// transaction. With `answer`, the planner carries that answered
     /// `planner_question` about the finding, whose planner is gone.
+    /// Without `answer`, none is opened while the improvements running
+    /// reach `limit` (ADR-0051 decision 25).
     fn open_finding_planner(
         &mut self,
         finding: FindingId,
         answer: Option<AskId>,
+        limit: usize,
     ) -> Result<FindingPlannerStart>;
+    /// The improvement proposals running against `limit`.
+    fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit>;
     /// One finding as `findings ID --full` shows it.
     fn finding_view(&self, finding: FindingId) -> Result<FindingView>;
     /// The asks about the finding, oldest first.

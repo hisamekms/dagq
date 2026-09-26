@@ -1794,18 +1794,25 @@ fn execute(cli: Cli) -> Result<Value> {
             goal,
             queue: on_queue,
             full,
-        } => json!({"findings": queue.findings(&FindingQuery {
-            id: id.map(FindingId::new),
-            all,
-            statuses: status
-                .iter()
-                .map(|value| value.parse())
-                .collect::<Result<_, _>>()?,
-            kinds,
-            target: finding_target(task, run, goal)?
-                .or(on_queue.then_some(FindingTarget::Queue)),
-            full,
-        })?}),
+        } => {
+            let findings = queue.findings(&FindingQuery {
+                id: id.map(FindingId::new),
+                all,
+                statuses: status
+                    .iter()
+                    .map(|value| value.parse())
+                    .collect::<Result<_, _>>()?,
+                kinds,
+                target: finding_target(task, run, goal)?
+                    .or(on_queue.then_some(FindingTarget::Queue)),
+                full,
+            })?;
+            // The limit's settings not reading does not hide the findings.
+            let improvements = one_shot
+                .improvements_of(&queue)
+                .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
+            json!({"findings": findings, "improvements": improvements})
+        }
         Command::Search {
             query,
             status,

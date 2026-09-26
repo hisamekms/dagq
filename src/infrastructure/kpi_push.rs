@@ -8,40 +8,49 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 
 use super::sqlite::SqliteQueue;
+use crate::domain::EventId;
 use crate::domain::kpi::push::{
     KPI_BREACH_KINDS, KPI_BREACH_STARTED, KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS, breach_key,
 };
 
-/// Every breach event, oldest first: (kind, payload).
-fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(String, Value)>> {
+/// Every breach event, oldest first: (id, kind, payload).
+fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, String, Value)>> {
     let mut statement = tx.prepare(
-        "SELECT kind, payload FROM run_events WHERE kind IN (?1, ?2)
+        "SELECT id, kind, payload FROM run_events WHERE kind IN (?1, ?2)
            AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL ORDER BY id",
     )?;
     let rows = statement.query_map(params![KPI_BREACH_KINDS[0], KPI_BREACH_KINDS[1]], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        Ok((
+            EventId::new(r.get(0)?),
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
     })?;
     let mut events = Vec::new();
     for row in rows {
-        let (kind, payload) = row?;
-        events.push((kind, serde_json::from_str(&payload).unwrap_or(Value::Null)));
+        let (id, kind, payload) = row?;
+        events.push((
+            id,
+            kind,
+            serde_json::from_str(&payload).unwrap_or(Value::Null),
+        ));
     }
     Ok(events)
 }
 
 /// The breaches started and not resolved: the latest event of each
-/// period, KPI and stratum when it is a start.
-fn open_in(conn: &rusqlite::Connection) -> Result<Vec<Value>> {
-    let mut latest: Vec<(String, Value)> = Vec::new();
-    for (kind, payload) in breach_events(conn)? {
+/// period, KPI and stratum when it is a start, with its id.
+fn open_in(conn: &rusqlite::Connection) -> Result<Vec<(EventId, Value)>> {
+    let mut latest: Vec<(EventId, String, Value)> = Vec::new();
+    for (id, kind, payload) in breach_events(conn)? {
         let key = breach_key(&payload);
-        latest.retain(|(_, kept)| breach_key(kept) != key);
-        latest.push((kind, payload));
+        latest.retain(|(_, _, kept)| breach_key(kept) != key);
+        latest.push((id, kind, payload));
     }
     Ok(latest
         .into_iter()
-        .filter(|(kind, _)| kind == KPI_BREACH_STARTED)
-        .map(|(_, payload)| payload)
+        .filter(|(_, kind, _)| kind == KPI_BREACH_STARTED)
+        .map(|(id, _, payload)| (id, payload))
         .collect())
 }
 
@@ -49,6 +58,16 @@ impl SqliteQueue {
     /// The breaches started and not resolved, each its
     /// `kpi_breach_started` payload.
     pub fn kpi_breaches_open(&self) -> Result<Vec<Value>> {
+        Ok(open_in(&self.conn)?
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect())
+    }
+
+    /// [`Self::kpi_breaches_open`] with each `kpi_breach_started` event's
+    /// id: the evidence of the observer's `kpi` finding (ADR-0051
+    /// decision 24).
+    pub fn kpi_breach_events_open(&self) -> Result<Vec<(EventId, Value)>> {
         open_in(&self.conn)
     }
 
@@ -68,7 +87,9 @@ impl SqliteQueue {
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let key = breach_key(&payload);
-        let open = open_in(&tx)?.iter().any(|open| breach_key(open) == key);
+        let open = open_in(&tx)?
+            .iter()
+            .any(|(_, open)| breach_key(open) == key);
         if open == (kind == KPI_BREACH_STARTED) {
             tx.commit()?;
             return Ok(None);
@@ -78,7 +99,7 @@ impl SqliteQueue {
                 let today = breach_events(&tx).map_or(0, |events| {
                     events
                         .iter()
-                        .filter(|(kind, event)| {
+                        .filter(|(_, kind, event)| {
                             kind == KPI_BREACH_STARTED
                                 && event.get("pushed") == Some(&Value::Bool(true))
                                 && event.get("day").and_then(Value::as_i64) == Some(day)

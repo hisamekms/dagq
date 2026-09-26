@@ -183,6 +183,38 @@ fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Resu
     }
 }
 
+/// An improvement proposal's tasks are `normal` at most (ADR-0051
+/// decision 26): for a proposal linked to a finding, a `lower_priority` to
+/// `normal` for each of its submitted `members` still above `normal` after
+/// the verdict's own actions. A pass applies them, so the job's missing one
+/// does not leave an improvement task `high`; a person may raise it again
+/// with `set-priority`.
+fn improvement_priorities(
+    conn: &Connection,
+    proposal: ProposalId,
+    members: &[TaskId],
+) -> Result<Vec<PlanReviewAction>> {
+    let linked: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM findings WHERE proposal_id=?1)",
+        [proposal],
+        |r| r.get(0),
+    )?;
+    if !linked {
+        return Ok(Vec::new());
+    }
+    let mut actions = Vec::new();
+    for &task_id in members {
+        let task = read_task(conn, task_id)?;
+        if task.status() == TaskStatus::Submitted && task.priority() > Priority::Normal {
+            actions.push(PlanReviewAction::LowerPriority {
+                task_id,
+                priority: Priority::Normal,
+            });
+        }
+    }
+    Ok(actions)
+}
+
 fn set_priority(
     conn: &Connection,
     task_id: TaskId,
@@ -612,6 +644,9 @@ impl PlanReviewStore for SqliteQueue {
             PlanReviewDecision::Pass => {
                 for action in &apply.verdict.actions {
                     apply_action(&tx, action, &stamp)?;
+                }
+                for action in improvement_priorities(&tx, job.proposal_id, &members)? {
+                    apply_action(&tx, &action, &stamp)?;
                 }
                 proposals::approve(&tx, job.proposal_id, &stamp)?;
             }
