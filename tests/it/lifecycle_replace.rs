@@ -789,6 +789,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE supervisors DROP COLUMN auto_update;
              ALTER TABLE supervisors DROP COLUMN max_waiting;
              DROP TABLE binary_updates;
+             DROP TABLE draft_reopens;
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
@@ -853,6 +854,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
             "ALTER TABLE supervisors DROP COLUMN auto_update;
              ALTER TABLE supervisors DROP COLUMN max_waiting;
              DROP TABLE binary_updates;
+             DROP TABLE draft_reopens;
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;

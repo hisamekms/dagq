@@ -45,7 +45,7 @@ related:
 - `TaskRun`: 1回の実行試行。provider、worktree、branch、結果、実行statusを持つ。
 - `AgentSession`: providerが起動したセッション。プロセスとprovider固有識別子を持つ。
 - `Workspace`: cmux workspace。TaskRunと1対1で関連し、receipt検証を通った後にsupervisorが閉じる。閉じたことの確認は`TaskRun.workspace_closed_at`で持つ。
-- draft origin: runtimeやjobが作ったdraftの出どころ（`DraftOrigin`: `follow_up` | `goal_gap`）と、そのplannerに見せる材料（JSON object）。表`draft_origins`の行で、人が`add`で作ったdraftには無い（[Draft planners](#draft-planners)）。
+- draft origin: runtimeやjobが作ったdraftの出どころ（`DraftOrigin`: `follow_up` | `goal_gap` | `reopened`）と、そのplannerに見せる材料（JSON object）。表`draft_origins`の行（`reopened`は表`draft_reopens`の行）で、人が`add`で作ったdraftには無い（[Draft planners](#draft-planners)）。
 - `RunLease`: 1つのrunを所有するプロセス（実行中はsupervisor、着地中は`integrate`）のPIDとheartbeat。runごとに高々1つで、そのプロセスがrunを扱っている間だけ存在する。
 - `RunProcess`: runごとのsession wrapperとagentのPID、heartbeat、終了コード。
 - `RunEvent`: 実行中に発生した永続イベント。
@@ -277,7 +277,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 
 [ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定16（task 282）。goal 22のfollow-up triage job（[ADR-0037](../adr/0037-follow-up-triage-job-decides-follow-up-drafts.md)、task 205）のverdict・適用・answerの型は消し、runtimeやjobが作ったdraft 1件ごとにruntimeが立てるplannerに置き換えた。規則と型は`src/domain/follow_up.rs`、storeは`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）、supervisorの流れは[supervisor-lifecycle](supervisor-lifecycle/draft-planners.md#draft-planners-supervisor)。
 
-- **出どころ**: `DraftOrigin`（`follow_up` | `goal_gap`）と材料（JSON object）を`record_draft_origin`でdraftごとに1回記録する。`DraftTarget`は対象のdraft（`Task`、出どころ、材料、それまでに立てたplannerの数）。`PlannerSession.draft_task_id`はplannerが立てられたdraft。
+- **出どころ**: `DraftOrigin`（`follow_up` | `goal_gap`）と材料（JSON object）を`record_draft_origin`でdraftごとに1回記録する。`reopened`（task 418）は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14）が、そのproposalのwithdrawで`draft`に戻ったときにwithdrawが記録する出どころで、材料は`reopened_material`の`{"reason"（verdictのreopenのreason）, "proposal_id"（withdrawしたproposal）, "reviewed_proposal_id"（reopenしたplan reviewのproposal）}`。`record_draft_origin`では書けない。readyには戻さず（食い違いを見つけたgateを飛ばさないため）、runtimeのplannerが直してsubmitするか、cancelするか、決めきれなければ`planner_question`にする。`DraftTarget`は対象のdraft（`Task`、出どころ、材料、それまでに立てたplannerの数）。`PlannerSession.draft_task_id`はplannerが立てられたdraft。
 - **上限**: `MAX_DRAFT_PLANNERS`（3）件のplannerが決めずに終わったdraftには立てない（`draft_planner_exhausted`、`AttentionNext::DecideDraft` = `decide the draft in a planner`）。
 - **人を経ない採用の上限**: `adopt_needs_person(FollowUpFacts { goal_open, depth })`が、goalがnullか閉じている、`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（2）以上、の順に理由を返す。runtimeのplannerのsubmitは、そのdraftへの`planner_question`（旧`follow_up`）に人が`adopt`と答えていなければこれで拒否される。
 - **深さ**: `tasks.follow_up_depth`はdomainの`Task`に持たせず、storeの列として`follow_up_depth` / `set_follow_up_depth`で読み書きする。`add`は0、`integrate`の登録は元のtask+1、runtimeのplannerが人を経ずにsubmitしたtaskはそのまま、人が開いたplannerのsubmit、人の`adopt`を経たsubmit、`ready --bypass-review`（`TaskAction::BypassReview`）は0。

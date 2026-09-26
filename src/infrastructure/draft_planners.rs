@@ -33,18 +33,23 @@ use crate::domain::{
 pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 
 /// The drafts waiting for a planner of the runtime's: `draft`, in no
-/// proposal (or in one withdrawn: a canceled proposal holds no draft), with an origin, no planner of the runtime's open for it, no
-/// `planner_question` about it nobody closed, not kept as a draft by an
+/// proposal (or in one withdrawn: a canceled proposal holds no draft), with an origin (in `draft_origins`, or `reopened` in `draft_reopens`), no planner of the runtime's open for it, no
+/// planner of the runtime's still open for the withdrawn proposal it was
+/// in, no `planner_question` about it nobody closed, not kept as a draft by an
 /// answer and not exhausted. A `follow_up` ask the retired triage left
 /// holds a draft back only when answered `keep_draft`: nothing applies its
 /// other answers any more. Drafts registered before this existed match too (the
 /// migration gave them their origin).
 fn targets() -> String {
     format!(
-        "SELECT t.id FROM tasks t JOIN draft_origins o ON o.task_id=t.id
-    WHERE t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
+        "SELECT t.id FROM tasks t
+    WHERE (EXISTS(SELECT 1 FROM draft_origins o WHERE o.task_id=t.id)
+        OR EXISTS(SELECT 1 FROM draft_reopens r WHERE r.task_id=t.id
+            AND json_extract(r.material,'$.proposal_id')=t.proposal_id))
+    AND t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
         WHERE x.id=t.proposal_id AND x.status!='canceled')
-    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.draft_task_id=t.id AND p.closed_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.closed_at IS NULL
+        AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)))
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.task_id=t.id AND a.run_id IS NULL
         AND ((a.kind='planner_question' AND a.closed_at IS NULL)
              OR (a.kind IN ('planner_question','follow_up') AND trim(a.answer)='keep_draft')))
@@ -64,6 +69,10 @@ impl SqliteQueue {
         ensure!(
             material.is_object(),
             "the material of a draft's origin must be a JSON object"
+        );
+        ensure!(
+            origin != DraftOrigin::Reopened,
+            "a reopened draft's origin is recorded by withdrawing its proposal"
         );
         let tx = self
             .conn
@@ -444,10 +453,45 @@ fn target(conn: &Connection, draft: TaskId) -> Result<DraftTarget> {
     })
 }
 
+/// Record that the draft `task` is a ready task plan review reopened and
+/// whose proposal was withdrawn (origin `reopened`, task 418), inside the
+/// caller's write transaction; a later withdrawal replaces the material.
+pub(super) fn record_reopened(
+    conn: &Connection,
+    task: TaskId,
+    material: &Value,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO draft_reopens(task_id, material, created_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(task_id) DO UPDATE SET material=excluded.material, created_at=excluded.created_at",
+        params![task, serde_json::to_string(material)?, now],
+    )?;
+    Ok(())
+}
+
+/// Where the draft came from and its material: `reopened` when plan review
+/// reopened it and its proposal was withdrawn (while the task is still of
+/// that proposal: a later proposal it joins makes the row stale), else its
+/// `draft_origins` row.
 pub(super) fn draft_origin(
     conn: &Connection,
     task: TaskId,
 ) -> Result<Option<(DraftOrigin, Value)>> {
+    let reopened: Option<String> = conn
+        .query_row(
+            "SELECT r.material FROM draft_reopens r JOIN tasks t ON t.id=r.task_id
+             WHERE r.task_id=?1 AND json_extract(r.material,'$.proposal_id')=t.proposal_id",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(material) = reopened {
+        return Ok(Some((
+            DraftOrigin::Reopened,
+            serde_json::from_str(&material)?,
+        )));
+    }
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT origin, material FROM draft_origins WHERE task_id=?1",
@@ -675,7 +719,7 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         };
         let kind = match origin {
             DraftOrigin::FollowUp => event_kind::FOLLOW_UP_ADOPTED,
-            DraftOrigin::GoalGap => event_kind::DRAFT_ADOPTED,
+            DraftOrigin::GoalGap | DraftOrigin::Reopened => event_kind::DRAFT_ADOPTED,
         };
         let recorded: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2)",
@@ -786,6 +830,90 @@ mod tests {
             queue.open_draft_planner(task, None).unwrap(),
             DraftPlannerStart::Skipped
         ));
+    }
+
+    /// Withdrawing a proposal gives origin `reopened` to the member plan
+    /// review reopened into it, with the reason and both proposals, and
+    /// none to the other member; neither becomes ready (task 418).
+    #[test]
+    fn a_withdrawn_reopen_gives_its_task_origin_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let reopened = draft(&mut queue, "reopened");
+        let plain = draft(&mut queue, "plain");
+        assert!(
+            queue
+                .record_draft_origin(reopened, DraftOrigin::Reopened, &json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("withdrawing")
+        );
+        let proposal = queue
+            .submit(crate::domain::Submission {
+                tasks: vec![reopened, plain],
+                goals: Vec::new(),
+                proposal: None,
+                owner: crate::domain::PlannerOwner {
+                    origin: PlannerOrigin::Runtime,
+                    workspace_id: None,
+                },
+            })
+            .unwrap()
+            .id();
+        // A reopen into another proposal is not this withdrawal's.
+        for (into, reason) in [
+            (proposal.as_i64() + 100, "elsewhere"),
+            (proposal.as_i64(), "it must use the new API"),
+        ] {
+            event(
+                &queue.conn,
+                reopened,
+                None,
+                event_kind::TASK_REOPENED,
+                json!({"proposal_id": into, "reviewed_proposal_id": 9, "reason": reason}),
+            )
+            .unwrap();
+        }
+        assert!(queue.planner_drafts().unwrap().is_empty());
+        queue.withdraw_proposal(proposal).unwrap();
+        for task in [reopened, plain] {
+            assert_eq!(queue.show(task).unwrap().task.status(), TaskStatus::Draft);
+        }
+        let material = json!({"reason": "it must use the new API", "proposal_id": proposal, "reviewed_proposal_id": 9});
+        assert_eq!(
+            queue.draft_origin(reopened).unwrap(),
+            Some((DraftOrigin::Reopened, material.clone()))
+        );
+        assert_eq!(queue.draft_origin(plain).unwrap(), None);
+        // Only `draft_origins` is what stats counts as registered drafts.
+        assert!(queue.draft_origins().unwrap().is_empty());
+        let targets = queue.planner_drafts().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].task.id(), reopened);
+        assert_eq!(targets[0].origin, DraftOrigin::Reopened);
+        assert_eq!(targets[0].material, material);
+
+        // Submitted into another proposal and withdrawn again, it is no
+        // longer the reopen's: the stale row gives it no origin.
+        let later = queue
+            .submit(crate::domain::Submission {
+                tasks: vec![reopened],
+                goals: Vec::new(),
+                proposal: None,
+                owner: crate::domain::PlannerOwner {
+                    origin: PlannerOrigin::Person,
+                    workspace_id: None,
+                },
+            })
+            .unwrap()
+            .id();
+        queue.withdraw_proposal(later).unwrap();
+        assert_eq!(
+            queue.show(reopened).unwrap().task.status(),
+            TaskStatus::Draft
+        );
+        assert_eq!(queue.draft_origin(reopened).unwrap(), None);
+        assert!(queue.planner_drafts().unwrap().is_empty());
     }
 
     #[test]

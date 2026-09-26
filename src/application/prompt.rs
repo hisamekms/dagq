@@ -492,9 +492,14 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     let task = &target.task;
     let id = task.id();
     let mut out = format!(
-        "You are a planner the dagq runtime opened for draft task {id} of the queue at {db}; no person watches this session. The {origin} draft is not ready: the runtime or a job registered it, and you decide what becomes of it (planner {attempt} of at most {max} the runtime opens for it).\n",
+        "You are a planner the dagq runtime opened for draft task {id} of the queue at {db}; no person watches this session. The {origin} draft is not ready: {whence}, and you decide what becomes of it (planner {attempt} of at most {max} the runtime opens for it).\n",
         db = super::path_text(material.db)?,
         origin = target.origin.as_str(),
+        whence = match target.origin {
+            DraftOrigin::Reopened =>
+                "plan review took it back from ready and the proposal it was reopened into was withdrawn",
+            DraftOrigin::FollowUp | DraftOrigin::GoalGap => "the runtime or a job registered it",
+        },
         attempt = material.attempt,
         max = MAX_DRAFT_PLANNERS,
     );
@@ -545,6 +550,14 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
                 ));
             }
         }
+        DraftOrigin::Reopened => {
+            out.push_str(&format!(
+                "It was a ready task. The plan review of proposal {reviewed} found that it has to change and reopened it into proposal {proposal} (ADR-0044 decision 14), which was then withdrawn, so it returned to draft. The reason plan review gave:\n\n{reason}\n",
+                reviewed = target.material["reviewed_proposal_id"],
+                proposal = target.material["proposal_id"],
+                reason = or_none(target.material["reason"].as_str().unwrap_or_default()),
+            ));
+        }
         DraftOrigin::GoalGap => {
             out.push_str(
                 "A job that judged the goal below against its acceptance found this gap. Its findings:\n",
@@ -585,20 +598,24 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     out.push_str(&format!(
         "\n## What to do\n\n\
          Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR numbers. Look for tasks that already cover the draft or code that already does it (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. Then do exactly one of these three:\n\
-         1. Adopt: complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `{context_head}`), add its dependencies with `dagq dependency add`, check it with `dagq lint {id}` and submit it with `dagq submit {id}`. Plan review checks it before it becomes ready.\n\
+         1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {id}` and submit it with `dagq submit {id}`. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {id}` and record why with `dagq note --task {id} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {id} --duplicate-of <that task>` instead, so the queue records which task it duplicates.\n\
          3. Ask: when you cannot decide without a person (the plan's intent, its scope, whether it belongs to this goal or a new one), run `dagq ask --task {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option adopt --option cancel --option keep_draft`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is and stop.\n\
          The runtime refuses your submit of a follow_up draft whose goal is closed or that is two follow-ups from a person's judgement unless a person answered adopt: ask then.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this draft. Never open the queue database directly; use the dagq CLI only.\n",
-        context_head = match target.origin {
+        adopt = match target.origin {
             DraftOrigin::FollowUp => format!(
-                "follow-up draft（task {} の run {} の receipt が提案）",
+                "complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `follow-up draft（task {} の run {} の receipt が提案）`),",
                 target.material["source_task_id"],
                 target.material["source_run_id"].as_str().unwrap_or("?"),
             ),
             DraftOrigin::GoalGap => format!(
-                "goal gap draft（goal {} の判断が提案）",
+                "complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `goal gap draft（goal {} の判断が提案）`),",
                 task.goal_id().map_or("?".to_owned(), |g| g.to_string())
+            ),
+            DraftOrigin::Reopened => format!(
+                "fix what plan review's reason points at with `dagq edit {id}` (its description, acceptance, `--verify`, `--paths`, `--evidence`, and a line in `--context` on the reopen of proposal {}), keeping the task's intent,",
+                target.material["proposal_id"],
             ),
         },
     ));

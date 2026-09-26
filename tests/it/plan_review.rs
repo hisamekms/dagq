@@ -1121,6 +1121,96 @@ fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
     );
 }
 
+/// A reopened task whose proposal is withdrawn goes back to `draft` with
+/// origin `reopened`, and a planner of the runtime's takes it up with the
+/// reopen's reason; the proposal's other member only goes back to `draft`
+/// (task 418).
+#[test]
+fn a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let blocker = TaskId::new(1);
+    let ready = add(&mut queue, "ready one", &[blocker], Priority::Normal);
+    queue.transition(ready, TaskAction::BypassReview).unwrap();
+    let running = add(&mut queue, "new one", &[blocker], Priority::Normal);
+    let reviewed = submit(&mut queue, &[running], None);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "pass", "reasons": [], "summary": "ok",
+        "reopen": [{"task_id": ready, "reason": "it must use the new API"}]
+    })]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let own = ProposalId::new(
+        events(&mut queue, ready, "task_reopened")[0]["proposal_id"]
+            .as_i64()
+            .unwrap(),
+    );
+    // Its planner adds a draft of its own to the proposal, then withdraws it.
+    let extra = add(&mut queue, "extra one", &[blocker], Priority::Normal);
+    queue
+        .submit(Submission {
+            tasks: vec![extra],
+            goals: Vec::new(),
+            proposal: Some(own),
+            owner: PlannerOwner {
+                origin: PlannerOrigin::Runtime,
+                workspace_id: None,
+            },
+        })
+        .unwrap();
+    queue.withdraw_proposal(own).unwrap();
+    assert_eq!(status(&mut queue, ready), TaskStatus::Draft);
+    assert_eq!(status(&mut queue, extra), TaskStatus::Draft);
+    assert_eq!(
+        queue.draft_origin(ready).unwrap(),
+        Some((
+            DraftOrigin::Reopened,
+            json!({"reason": "it must use the new API", "proposal_id": own, "reviewed_proposal_id": reviewed})
+        ))
+    );
+    assert_eq!(queue.draft_origin(extra).unwrap(), None);
+
+    // While the planner of the withdrawn proposal is open, no other is
+    // opened for its task; once it ends, one is.
+    let options = options(3, Duration::from_secs(3600));
+    supervise_with(&fx, &backend, &reviewer, &options);
+    let own_planner = queue.planners(false).unwrap();
+    assert_eq!(own_planner.len(), 1, "{own_planner:?}");
+    assert_eq!(own_planner[0].proposal_id, Some(own));
+    queue
+        .register_planner_wrapper(own_planner[0].id, 1)
+        .unwrap();
+    queue.planner_exited(own_planner[0].id, 1, 0).unwrap();
+    supervise_with(&fx, &backend, &reviewer, &options);
+    supervise_with(&fx, &backend, &reviewer, &options);
+    let planners = queue.planners(false).unwrap();
+    let planner = planners
+        .iter()
+        .find(|p| p.draft_task_id == Some(ready))
+        .unwrap_or_else(|| panic!("{planners:?}"));
+    assert!(planners.iter().all(|p| p.draft_task_id != Some(extra)));
+    assert_eq!(
+        events(&mut queue, ready, "draft_planner_opened")[0]["origin"],
+        "reopened"
+    );
+    let prompt = planner_prompt(&fx.db, planner.id);
+    for expected in [
+        format!("draft task {ready}"),
+        "## Where it came from: reopened".to_owned(),
+        "it must use the new API".to_owned(),
+        format!("The plan review of proposal {reviewed} found"),
+        format!("reopened it into proposal {own}"),
+        format!("dagq edit {ready}"),
+        format!("dagq submit {ready}"),
+        format!("dagq cancel {ready}"),
+        format!("dagq ask --task {ready} --kind planner_question --because scope"),
+    ] {
+        assert!(prompt.contains(&expected), "{expected}\n{prompt}");
+    }
+    // Nothing made it ready: only a submit and plan review do.
+    assert_eq!(status(&mut queue, ready), TaskStatus::Draft);
+}
+
 /// A draft as the runtime or a job registers it: `origin` with `material`.
 fn runtime_draft(
     queue: &mut SqliteQueue,

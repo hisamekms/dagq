@@ -12,7 +12,8 @@ use serde_json::json;
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
     ANSWERED_BY_RUNTIME, Ask, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId,
-    ProposalRecord, ProposalStatus, Submission, TaskAction, TaskId, TaskStatus, goal, proposal,
+    ProposalRecord, ProposalStatus, Submission, TaskAction, TaskId, TaskStatus,
+    follow_up::reopened_material, goal, proposal,
 };
 
 /// Submit `submission` inside the caller's write transaction: its tasks
@@ -239,7 +240,11 @@ pub(super) fn send_back(conn: &Connection, id: ProposalId, now: &str) -> Result<
 /// `proposal_withdrawn` on each member task and goal. A concern's
 /// `approve_plan` ask nobody closed is closed, answered `withdrawn` when
 /// still open (`ask_answered` with `runtime_closed: true`): left open, its
-/// answer would reach the proposal its task joins next.
+/// answer would reach the proposal its task joins next. A member plan
+/// review reopened into this proposal (ADR-0044 decision 14) that ends as
+/// `draft` gets origin `reopened` with the reopen's reason (task 418), so a
+/// planner of the runtime's takes it up; it is not made ready here, which
+/// would skip the gate that found it has to change.
 pub(super) fn withdraw(
     conn: &Connection,
     id: ProposalId,
@@ -268,6 +273,11 @@ pub(super) fn withdraw(
             payload.clone(),
         )?;
         close_plan_asks(conn, task_id, now_secs)?;
+        if status(conn, task_id)? == TaskStatus::Draft
+            && let Some(material) = reopened_into(conn, task_id, id)?
+        {
+            super::draft_planners::record_reopened(conn, task_id, &material, now_secs)?;
+        }
     }
     for &goal_id in withdrawn.goal_ids() {
         goal_event(
@@ -278,6 +288,25 @@ pub(super) fn withdraw(
         )?;
     }
     read(conn, id)
+}
+
+/// The material of origin `reopened` when plan review reopened `task_id`
+/// into proposal `id` (its `task_reopened` event), else `None`.
+fn reopened_into(
+    conn: &Connection,
+    task_id: TaskId,
+    id: ProposalId,
+) -> Result<Option<serde_json::Value>> {
+    let reopened: Option<(String, Option<ProposalId>)> = conn
+        .query_row(
+            "SELECT json_extract(payload,'$.reason'), json_extract(payload,'$.reviewed_proposal_id')
+             FROM run_events WHERE task_id=?1 AND kind=?3
+             AND json_extract(payload,'$.proposal_id')=?2 ORDER BY id DESC LIMIT 1",
+            params![task_id, id, event_kind::TASK_REOPENED],
+            |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?)),
+        )
+        .optional()?;
+    Ok(reopened.map(|(reason, reviewed)| reopened_material(&reason, id, reviewed)))
 }
 
 /// Close the task's `approve_plan` asks nobody closed, answering an open

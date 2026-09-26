@@ -184,7 +184,7 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 
 `draft_flow`（task 470）は、着地1件あたりにruntimeやjobが登録するdraftの数と、それが決着する速さを同じwindowで読むためのもの。集計は`domain::stats::drafts`がrun_eventsと既存の`draft_origins`（draftの出どころ）から再導出し、新しい表もeventも持たない。
 
-- **対象のdraft**: `draft_origins`に出どころ（`follow_up` / `goal_gap`）のあるtaskと、`follow_up_registered`の`task_id`が指すtask（出どころの記録が無ければ`follow_up`）。人が`add`で登録したdraftは数えない。`by_origin`は出どころごと、トップレベルは全部の合計
+- **対象のdraft**: `draft_origins`に出どころ（`follow_up` / `goal_gap`）のあるtaskと、`follow_up_registered`の`task_id`が指すtask（出どころの記録が無ければ`follow_up`）。人が`add`で登録したdraftと、reopenされてwithdrawで戻ったtask（出どころ`reopened`、`draft_reopens`）は数えない。`by_origin`は出どころごと、トップレベルは全部の合計
 - **`landings`**: windowの`run_integrated`の数（KPIの`landings`と同じ規則。ADR-0051の決定1）
 - **`registered`**: windowにそのtaskの`task_created`があるdraft
 - **`adopted` / `canceled`**: そのtaskの最初の`from: draft`の`task_status_changed`がwindowにあるもの。`to`が`canceled`なら`canceled`、それ以外（`submitted`、`ready --bypass-review`の`ready`）なら`adopted`。reviseで`draft`に戻って出し直したものは数え直さない

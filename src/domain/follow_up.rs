@@ -5,8 +5,11 @@
 //!
 //! `integrate` registers a draft from each landed receipt's `follow_ups`
 //! (origin `follow_up`); a job that judges a goal may register one for a gap
-//! it found (origin `goal_gap`). A draft a person registers with `add` has
-//! no origin, and no planner is opened for it.
+//! it found (origin `goal_gap`). A ready task plan review reopened into a
+//! proposal of its own (ADR-0044 decision 14) that returns to `draft` when
+//! that proposal is withdrawn gets origin `reopened` (task 418). A draft a
+//! person registers with `add` has no origin, and no planner is opened for
+//! it.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +19,23 @@ use super::DomainError;
 string_enum!(DraftOrigin {
     FollowUp => "follow_up",
     GoalGap => "goal_gap",
+    Reopened => "reopened",
 });
+
+/// The material of a `reopened` draft: why plan review reopened the task
+/// (the verdict's reopen reason), the proposal it was reopened into and
+/// that was withdrawn, and the proposal whose plan review reopened it.
+pub fn reopened_material(
+    reason: &str,
+    proposal_id: super::ProposalId,
+    reviewed_proposal_id: Option<super::ProposalId>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "reason": reason,
+        "proposal_id": proposal_id,
+        "reviewed_proposal_id": reviewed_proposal_id,
+    })
+}
 
 /// The options of the `planner_question` ask a planner of the runtime's
 /// opens about its draft when it cannot decide (ADR-0041 decision 16). The
@@ -108,6 +127,27 @@ mod tests {
             DraftOrigin::GoalGap
         );
         assert_eq!(DraftOrigin::FollowUp.as_str(), "follow_up");
+        assert_eq!(
+            "reopened".parse::<DraftOrigin>().unwrap(),
+            DraftOrigin::Reopened
+        );
         assert!("person".parse::<DraftOrigin>().is_err());
+    }
+
+    #[test]
+    fn a_reopened_draft_keeps_the_reason_and_both_proposals() {
+        let material = reopened_material(
+            "clashes with task 3",
+            crate::domain::ProposalId::new(7),
+            Some(crate::domain::ProposalId::new(5)),
+        );
+        assert_eq!(
+            material,
+            serde_json::json!({"reason": "clashes with task 3", "proposal_id": 7, "reviewed_proposal_id": 5})
+        );
+        assert!(
+            reopened_material("r", crate::domain::ProposalId::new(7), None)["reviewed_proposal_id"]
+                .is_null()
+        );
     }
 }
