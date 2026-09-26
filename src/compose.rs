@@ -20,7 +20,7 @@ use std::{
 use crate::{
     application::{
         AgentProvider, Generators, LaunchAgent, MainRemote, ProcessControl, QueueOpener,
-        Repository, Spawner, Verifier, WorkspaceBackend, health,
+        Repository, RunFiles, Spawner, Verifier, WorkspaceBackend, health,
         install::{self as installation, Binaries, InstallOptions},
         integrate::{self as integration, IntegrateTarget, Integration},
         lifecycle::{
@@ -160,6 +160,19 @@ pub struct SuperviseOptions {
     pub disk: Option<crate::domain::disk::DiskConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// The run files the supervisor works with; `None` is the local file
+    /// system. Tests set it (a slow removal, task 405).
+    pub files: Option<RunFilesPort>,
+}
+
+/// The run files [`SuperviseOptions::files`] gives the supervisor.
+#[derive(Clone)]
+pub struct RunFilesPort(pub Arc<dyn RunFiles>);
+
+impl std::fmt::Debug for RunFilesPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunFilesPort")
+    }
 }
 
 impl SuperviseOptions {
@@ -189,6 +202,7 @@ impl SuperviseOptions {
             load_average,
             disk: None,
             free_space: free_disk_bytes,
+            files: None,
         }
     }
 
@@ -328,7 +342,10 @@ pub fn supervise_with_reviewer(
         signals: &agent,
         reviewer,
         spawner: &LocalSpawner,
-        files: Arc::new(LocalRunFiles),
+        files: options.files.as_ref().map_or_else(
+            || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
+            |port| port.0.clone(),
+        ),
         processes: Arc::new(SystemProcesses),
         generators,
         review_material: &review_material,

@@ -83,6 +83,7 @@ use crate::domain::{
 
 mod adopt;
 mod claim_defer;
+mod cleanup;
 mod deliver;
 mod dialog;
 mod disk;
@@ -481,6 +482,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         free_space: ports.free_space,
         disk: disk::DiskWatch::default(),
         free: None,
+        cleanup: cleanup::CleanupWatch::default(),
     };
     if settings.handoff_token.is_some() {
         supervisor.rebuild_own_runs(previous_version.as_deref())?;
@@ -595,6 +597,8 @@ struct Supervisor<'a> {
     disk: disk::DiskWatch,
     /// The free bytes of the queue's directory read this pass.
     free: Option<u64>,
+    /// The cleanup of ended runs' worktrees off the loop (task 405).
+    cleanup: cleanup::CleanupWatch,
 }
 
 /// One executing run between provisioning and rest.
@@ -697,6 +701,12 @@ impl Supervisor<'_> {
     /// database may be unreachable), and it goes stale with the leases.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
+        // A loop that ended on an error lets the cleanup job end after its
+        // current worktree, and records what it did (task 405).
+        if result.is_err() {
+            self.poll_cleanup(true);
+            self.finish_cleanup();
+        }
         if self.exec.is_none() && self.heartbeat.check().is_ok() {
             // The mark of the stop (ADR-0051 decision 10); an exec leaves it
             // to the next process's handoff mark.
@@ -730,6 +740,9 @@ impl Supervisor<'_> {
                 return Err(error);
             }
             let stopping = options.stop.load(Ordering::SeqCst);
+            // What the cleanup job removed is recorded before the disk is
+            // read (task 405).
+            self.poll_cleanup(stopping || self.handoff.is_some());
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
@@ -756,9 +769,11 @@ impl Supervisor<'_> {
                     // A landing recheck in progress is waited for: its
                     // command would go on in the scratch worktree the next
                     // process uses (ADR-0068). None starts meanwhile (this
-                    // pass drains).
+                    // pass drains). So is the cleanup job, which ends after
+                    // its current worktree (task 405).
                     self.recheck_pass();
                     if !self.rechecks.running()
+                        && !self.cleanup.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         let runs = self.prepare_handoff();
@@ -800,13 +815,19 @@ impl Supervisor<'_> {
             // pass, which claims them.
             let progressed = self.plan_review_pass(options, !stopping && self.claiming);
             if self.slots.is_empty() {
-                // A running observer, plan review or landing recheck is
-                // waited for like a run: it is bounded by its own timeout
-                // or its command. A recheck just applied is followed by one
-                // more pass, which resumes the runs it parked.
+                // A running observer, plan review, landing recheck or
+                // cleanup for disk space or one a triage or resume waits
+                // for is waited for like a run: it is
+                // bounded by its own timeout, its command or its worktrees.
+                // A recheck just applied is followed by one more pass, which
+                // resumes the runs it parked; a cleanup for room by one
+                // that claims if there is room now. Any other cleanup is
+                // joined once the loop ends.
                 let job = self.observer.is_some()
                     || self.plan_review.is_some()
                     || self.rechecks.running()
+                    || self.cleanup.for_disk()
+                    || self.cleanup.deferred
                     || rechecked;
                 if !job && !progressed && (options.once || stopping || !self.claiming) {
                     break;
@@ -817,6 +838,7 @@ impl Supervisor<'_> {
             self.tick(false);
             thread::sleep(options.tick);
         }
+        self.finish_cleanup();
         if let Some(message) = &self.provisioning_error {
             bail!(
                 "{message}; claiming stopped and {} active run(s) were drained; inspect doctor before recovery",
@@ -927,11 +949,19 @@ impl Supervisor<'_> {
     /// the answer differs from the hold in place on the queue (task 327).
     /// Returns whether they are held.
     fn hold_claims(&mut self) -> Result<bool> {
+        let needed = self.disk_needs()?.claim;
+        // Short while a cleanup for room runs: wait for it without a hold
+        // (task 405).
+        if self.disk.cleaning
+            && matches!((self.free, needed), (Some(free), Some(need)) if free < need)
+        {
+            return Ok(true);
+        }
         let hold = ClaimHold::judge(&HoldInputs {
             load_average: (self.load_average)(),
             max_load: self.max_load,
             free_bytes: self.free,
-            needed_bytes: self.disk_needs()?.claim,
+            needed_bytes: needed,
         });
         self.record_hold(claim_hold::CLAIMS, hold.as_ref())
     }

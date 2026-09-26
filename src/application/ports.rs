@@ -1721,6 +1721,11 @@ pub trait Repository {
     /// Remove the worktree and its branch; a branch already gone is not
     /// an error.
     fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()>;
+    /// The local branches, by their short name (`dagq/<run-id>`).
+    fn branches(&self) -> Result<Vec<String>>;
+    /// Delete the local branch (`git branch -D`); one already gone is not
+    /// an error.
+    fn delete_branch(&self, branch: &str) -> Result<()>;
     /// Whether Git tracks any file at or under `path` (relative to the
     /// worktree) in `worktree`.
     fn tracks(&self, worktree: &Path, path: &str) -> Result<bool>;

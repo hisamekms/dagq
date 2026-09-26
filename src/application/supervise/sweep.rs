@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::{
-    application::{EndedRunWorkspace, EndedRunWorktree},
+    application::EndedRunWorkspace,
     domain::run::{RunWorkspace, run_workspaces},
 };
 
@@ -122,8 +122,8 @@ impl Supervisor<'_> {
     /// retried on every sweep) and the others go on. Worktrees, branches and run
     /// directories stay for a person.
     ///
-    /// The same pass then frees the disk of the ended runs
-    /// ([`Self::clean_ended_worktrees`]), after their workspaces closed.
+    /// The same pass asks for the disk of the ended runs to be freed
+    /// ([`Self::clean_ended_worktrees`]), which a job does off the loop.
     pub(super) fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
         if self
             .last_sweep
@@ -132,9 +132,8 @@ impl Supervisor<'_> {
             return Ok(());
         }
         self.last_sweep = Some(Instant::now());
-        let closed = self.sweep_ended_workspaces();
-        let cleaned = self.clean_ended_worktrees(None);
-        closed.and(cleaned.map(|_| ()))
+        self.clean_ended_worktrees(None);
+        self.sweep_ended_workspaces()
     }
     fn sweep_ended_workspaces(&mut self) -> Result<()> {
         let candidates: Vec<EndedRunWorkspace> = self
@@ -198,13 +197,18 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Free the disk the worktrees of ended runs take, for every such run
-    /// or only `task`'s (task 376). A run nobody leases and no slot holds
-    /// qualifies once it is `integrated`, `succeeded`, `failed` or
+    /// or only `task`'s (task 376), off the loop (task 405: a job thread
+    /// does it, see [`super::cleanup`]). A run nobody leases and no slot
+    /// holds qualifies once it is `integrated`, `succeeded`, `failed` or
     /// `interrupted`, or whatever its status once its task is over:
     ///
     /// - its task `completed` or `canceled`: the worktree and its branch are
     ///   removed, recorded as `worktree_removed` (`path`, `branch`, `bytes`,
-    ///   `by: supervisor`, `reason` `task_completed` / `task_canceled`);
+    ///   `by: supervisor`, `reason` `task_completed` / `task_canceled`, and
+    ///   `repaired: true` when the worktree had to be repaired first, after
+    ///   the queue's rebind). A worktree whose directory is already gone
+    ///   loses its branch (after `git worktree prune`), recorded the same
+    ///   with `bytes` 0 and `worktree_missing: true`;
     /// - otherwise (the task may run it again, or retry it on a new run):
     ///   only the build outputs ([`BUILD_OUTPUT_DIRS`]) go, and the sources,
     ///   commits and run directory stay; recorded as
@@ -212,127 +216,15 @@ impl Supervisor<'_> {
     ///
     /// `bytes` is what the removed files took on disk. Only a worktree
     /// under the run directory is touched, never the checkout the
-    /// supervisor was given; one already gone is left at that, so every
-    /// pass can look again. A failure records `cleanup_failed` (`path`,
+    /// supervisor was given. A failure records `cleanup_failed` (`path`,
     /// `message`, `by: supervisor`) once per worktree and process, is
-    /// retried on the next sweep, and the others go on. Returns what was
-    /// removed (for the cleanup for disk space, task 377).
-    pub(super) fn clean_ended_worktrees(
-        &mut self,
-        task: Option<TaskId>,
-    ) -> Result<super::disk::Cleaned> {
-        let candidates: Vec<EndedRunWorktree> = self
-            .queue
-            .ended_run_worktrees()?
-            .into_iter()
-            .filter(|w| task.is_none_or(|task| w.task_id == task))
-            .filter(|w| !self.slots.iter().any(|slot| *slot.run.id() == w.run_id))
-            .collect();
-        let mut cleaned = super::disk::Cleaned::default();
-        for candidate in candidates {
-            match self.clean_worktree(&candidate) {
-                Ok(bytes) => cleaned.add(&candidate.run_id, bytes),
-                Err(error) => {
-                    let path = &candidate.worktree;
-                    if self.sweep_failures.contains(path) {
-                        warn!(run_id = %candidate.run_id, "run {}: worktree {path} still could not be cleaned: {error:#}", candidate.run_id);
-                        continue;
-                    }
-                    self.sweep_failures.push(path.clone());
-                    let message = format!("worktree {path} could not be cleaned: {error:#}");
-                    warn!(run_id = %candidate.run_id, "run {}: {message}", candidate.run_id);
-                    self.queue.record_runtime_event(
-                        &candidate.run_id,
-                        "cleanup_failed",
-                        reason_of_error(&error, ReasonCode::Other)
-                            .on(json!({"path": path, "message": message, "by": "supervisor"})),
-                    )?;
-                }
-            }
-        }
-        Ok(cleaned)
+    /// retried on the next sweep, and the others go on.
+    pub(super) fn clean_ended_worktrees(&mut self, task: Option<TaskId>) {
+        self.request_cleanup(task, None);
     }
-    /// Clean one ended run's worktree ([`Self::clean_ended_worktrees`]);
-    /// the bytes removed.
-    fn clean_worktree(&mut self, candidate: &EndedRunWorktree) -> Result<u64> {
-        let worktree = Path::new(&candidate.worktree);
-        let repo_root = &self.layout.repo_root;
-        if !worktree.starts_with(&self.layout.runs_dir)
-            || repo_root.starts_with(worktree)
-            || !self.files.is_dir(worktree)
-        {
-            return Ok(0);
-        }
-        let run_id = &candidate.run_id;
-        if matches!(
-            candidate.task_status,
-            TaskStatus::Completed | TaskStatus::Canceled
-        ) {
-            let Some(branch) = candidate.branch.as_deref() else {
-                return Ok(0);
-            };
-            let bytes = self
-                .files
-                .tree_size(worktree)
-                .with_context(|| format!("measure {}", worktree.display()))?
-                .unwrap_or(0);
-            self.repository
-                .remove_worktree_and_branch(worktree, branch)?;
-            let reason = format!("task_{}", candidate.task_status.as_str());
-            info!(run_id = %run_id, task_id = %candidate.task_id, "task {} is {}; removed worktree {} and branch {branch} of run {run_id} ({bytes} bytes)", candidate.task_id, candidate.task_status.as_str(), candidate.worktree);
-            self.queue.record_runtime_event(
-                run_id,
-                "worktree_removed",
-                json!({"path": candidate.worktree, "branch": branch, "bytes": bytes, "by": "supervisor", "reason": reason}),
-            )?;
-            return Ok(bytes);
-        }
-        if !matches!(
-            candidate.status,
-            RunStatus::Integrated
-                | RunStatus::Succeeded
-                | RunStatus::Failed
-                | RunStatus::Interrupted
-        ) {
-            return Ok(0);
-        }
-        let mut paths = Vec::new();
-        let mut bytes = 0;
-        for name in BUILD_OUTPUT_DIRS {
-            let dir = worktree.join(name);
-            let Some(size) = self
-                .files
-                .tree_size(&dir)
-                .with_context(|| format!("measure {}", dir.display()))?
-            else {
-                continue;
-            };
-            if self.repository.tracks(worktree, name)? {
-                continue;
-            }
-            self.files
-                .remove_dir_all(&dir)
-                .with_context(|| format!("remove {}", dir.display()))?;
-            paths.push(dir.to_string_lossy().into_owned());
-            bytes += size;
-        }
-        if paths.is_empty() {
-            return Ok(0);
-        }
-        info!(run_id = %run_id, "run {run_id} is {}; removed the build outputs of its worktree ({bytes} bytes)", candidate.status.as_str());
-        self.queue.record_runtime_event(
-            run_id,
-            "build_outputs_removed",
-            json!({"paths": paths, "bytes": bytes, "by": "supervisor"}),
-        )?;
-        Ok(bytes)
-    }
-    /// [`Self::clean_ended_worktrees`] for `task` as one of its runs ends,
-    /// where a failure is only logged.
+    /// [`Self::clean_ended_worktrees`] for `task` as one of its runs ends.
     pub(super) fn clean_task_worktrees(&mut self, task: TaskId) {
-        if let Err(error) = self.clean_ended_worktrees(Some(task)) {
-            warn!(task_id = %task, error = %format_args!("{error:#}"), "task {task}: the worktrees of its ended runs could not all be cleaned: {error:#}");
-        }
+        self.clean_ended_worktrees(Some(task));
     }
     /// Record `cleanup_failed` for a workspace of the run cmux could not
     /// close.

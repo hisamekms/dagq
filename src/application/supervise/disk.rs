@@ -2,16 +2,17 @@
 //! task 377): on every pass the supervisor reads the free bytes of the
 //! queue's directory and what a claim and a landing need
 //! ([`DiskConfig::needs`]). Short of either, it cleans what the ended runs
-//! left ([`Supervisor::clean_ended_worktrees`] and `git worktree prune`)
-//! and reads again, recording `auto_repaired` (`repair: disk_cleanup`)
-//! when that freed something. Still short, it opens the queue's one `cost`
-//! ask about the disk (`subject: disk`) once, and the runs whose landing
-//! waits for the disk join it. The claims are held through
+//! left ([`Supervisor::clean_ended_worktrees`] and `git worktree prune`,
+//! off the loop: task 405) and reads again once that is done, recording
+//! `auto_repaired` (`repair: disk_cleanup`) when it freed something; the
+//! claims and landings wait for it without a hold. Still short, it opens
+//! the queue's one `cost` ask about the disk (`subject: disk`) once, and
+//! the runs whose landing waits for the disk join it. The claims are held through
 //! [`Supervisor::hold_claims`] (`claim_held`, reason `disk_space`), the
 //! landings through `landing_held` / `landing_resumed`; a run waiting to
 //! land stays awaiting integration and starts no verification.
 
-use super::*;
+use super::{cleanup::DiskRequest, *};
 use crate::domain::{
     Ask,
     claim_hold::LANDINGS,
@@ -43,6 +44,9 @@ pub(super) struct DiskWatch {
     joined: Vec<RunId>,
     /// There is not room for a landing's verification.
     pub(super) landing_short: bool,
+    /// A cleanup for room runs or waits to: nothing is held or asked for
+    /// until it is done.
+    pub(super) cleaning: bool,
 }
 
 impl Supervisor<'_> {
@@ -59,13 +63,17 @@ impl Supervisor<'_> {
             .collect();
         self.apply_disk_answers(&unclosed)?;
         let needs = self.disk_needs()?;
-        let mut free = self.free_bytes();
+        let free = self.free_bytes();
         let short = |free: Option<u64>, need: Option<u64>| matches!((free, need), (Some(free), Some(need)) if free < need);
         let most = needs.claim.max(needs.landing);
         if short(free, most) {
-            free = self.clean_for_disk(free, most)?;
+            self.clean_for_disk(free, most);
         }
         self.free = free;
+        // Short while the cleanup for room runs: the claims and landings
+        // wait for it, and nothing is held or asked for yet.
+        let cleaning = short(free, most) && self.cleanup.for_disk();
+        self.disk.cleaning = cleaning;
         let landings: Vec<RunId> = self
             .slots
             .iter()
@@ -73,6 +81,9 @@ impl Supervisor<'_> {
             .map(|slot| slot.run.id().clone())
             .collect();
         self.disk.landing_short = short(free, needs.landing);
+        if cleaning {
+            return Ok(());
+        }
         if short(free, most) {
             let held: Vec<RunId> = if self.disk.landing_short {
                 landings.clone()
@@ -132,52 +143,49 @@ impl Supervisor<'_> {
         self.disk.needs = Some((Instant::now(), needs));
         Ok(needs)
     }
-    /// Clean what the ended runs left for room (at most once every
-    /// [`CLEANUP_INTERVAL`]), record `auto_repaired` when it freed
-    /// something, and read the free bytes again.
-    fn clean_for_disk(&mut self, free: Option<u64>, needed: Option<u64>) -> Result<Option<u64>> {
+    /// Ask for what the ended runs left to be cleaned for room (at most
+    /// once every [`CLEANUP_INTERVAL`]); the job does it off the loop, and
+    /// [`Self::cleaned_for_disk`] follows.
+    fn clean_for_disk(&mut self, free: Option<u64>, needed: Option<u64>) {
         if self
             .disk
             .cleaned
             .is_some_and(|at| at.elapsed() < CLEANUP_INTERVAL)
         {
-            return Ok(free);
+            return;
         }
         self.disk.cleaned = Some(Instant::now());
-        let removed = match self.clean_ended_worktrees(None) {
-            Ok(removed) => removed,
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "the worktrees of ended runs could not all be cleaned for disk space: {error:#}");
-                Cleaned::default()
-            }
-        };
-        if let Err(error) = self.repository.prune_worktrees() {
-            warn!(error = %format_args!("{error:#}"), "git worktree prune failed: {error:#}");
+        self.request_cleanup(None, Some(DiskRequest { free, needed }));
+    }
+    /// Once a cleanup for room is done: record `auto_repaired` when it
+    /// freed something, with the free bytes read again.
+    pub(super) fn cleaned_for_disk(&mut self, request: DiskRequest, removed: &Cleaned) {
+        if removed.bytes == 0 {
+            return;
         }
         let after = self.free_bytes();
-        if removed.bytes > 0 {
-            info!(
-                "the free disk space was short: removed {} bytes of what {} ended run(s) left",
-                removed.bytes,
-                removed.runs.len()
-            );
-            self.queue.record_queue_event(
-                "auto_repaired",
-                json!({
-                    "repair": DISK_CLEANUP,
-                    "layer": "runtime",
-                    "conditions": {
-                        "free_bytes": free,
-                        "needed_bytes": needed,
-                        "free_bytes_after": after,
-                    },
-                    "detail": {"bytes": removed.bytes, "runs": removed.runs},
-                    "bytes": removed.bytes,
-                    "supervisor": self.token,
-                }),
-            )?;
+        info!(
+            "the free disk space was short: removed {} bytes of what {} ended run(s) left",
+            removed.bytes,
+            removed.runs.len()
+        );
+        if let Err(error) = self.queue.record_queue_event(
+            "auto_repaired",
+            json!({
+                "repair": DISK_CLEANUP,
+                "layer": "runtime",
+                "conditions": {
+                    "free_bytes": request.free,
+                    "needed_bytes": request.needed,
+                    "free_bytes_after": after,
+                },
+                "detail": {"bytes": removed.bytes, "runs": removed.runs},
+                "bytes": removed.bytes,
+                "supervisor": self.token,
+            }),
+        ) {
+            warn!(error = %format_args!("{error:#}"), "the cleanup for disk space could not be recorded: {error:#}");
         }
-        Ok(after)
     }
     /// Open the disk ask of this shortage, or add the runs whose landing
     /// waits for the disk to the open one; once opened it is not opened

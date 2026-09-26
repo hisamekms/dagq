@@ -1495,6 +1495,12 @@ mod tests {
         fn remove_worktree_and_branch(&self, _: &Path, _: &str) -> Result<()> {
             unimplemented!()
         }
+        fn branches(&self) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
         fn main_checkout(&self) -> Result<Option<PathBuf>> {
             unimplemented!()
         }

@@ -65,10 +65,18 @@ impl Supervisor<'_> {
                 continue;
             }
             let (reason, kind) = resume_reason(&*self.queue, &run)?;
-            let Some((run, attempt)) =
-                self.queue
-                    .begin_resume(run.id(), &self.token, &main, reason.as_deref())?
-            else {
+            // Not while the cleanup job clears the run's worktree (task 405).
+            let cleaning = self.cleanup.cleaning();
+            let guard = cleanup::lock_cleaning(&cleaning);
+            if guard.contains(run.id()) {
+                self.cleanup.deferred = true;
+                continue;
+            }
+            let begun = self
+                .queue
+                .begin_resume(run.id(), &self.token, &main, reason.as_deref())?;
+            drop(guard);
+            let Some((run, attempt)) = begun else {
                 continue;
             };
             let request = ResumeRequest {

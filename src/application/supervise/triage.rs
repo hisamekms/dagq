@@ -191,8 +191,17 @@ impl Supervisor<'_> {
                     (Some(request), done + 1)
                 }
             };
-            let Some((run, round)) = self.queue.begin_triage(run.id(), &self.token, request)?
-            else {
+            // Not while the cleanup job is to clear the run's worktree (task
+            // 405).
+            let cleaning = self.cleanup.cleaning();
+            let guard = cleanup::lock_cleaning(&cleaning);
+            if guard.contains(run.id()) {
+                self.cleanup.deferred = true;
+                continue;
+            }
+            let begun = self.queue.begin_triage(run.id(), &self.token, request)?;
+            drop(guard);
+            let Some((run, round)) = begun else {
                 continue;
             };
             if attempt > MAX_RECOVERY_ATTEMPTS {

@@ -1239,11 +1239,37 @@ impl GitRepository {
                 .args(["worktree", "remove", "--force"])
                 .arg(worktree),
         )?;
+        self.delete_branch_from(&primary, branch)
+    }
+
+    /// The local branches, by their short name.
+    pub fn branches(&self) -> Result<Vec<String>> {
+        let listed = output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/",
+        ]))?;
+        Ok(listed
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("refs/heads/"))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Delete a local branch, administered from the main working tree; one
+    /// already gone is left at that.
+    pub fn delete_branch(&self, branch: &str) -> Result<()> {
+        self.delete_branch_from(&self.primary_worktree()?, branch)
+    }
+
+    /// [`Self::delete_branch`] from `primary`, resolved before `root` may
+    /// have been removed.
+    fn delete_branch_from(&self, primary: &Path, branch: &str) -> Result<()> {
         let reference = format!("refs/heads/{}", branch.trim_start_matches("refs/heads/"));
         let (status, _, _) = capture(
             Command::new(&self.git)
                 .arg("-C")
-                .arg(&primary)
+                .arg(primary)
                 .args(["show-ref", "--verify", "--quiet", &reference]),
             OUTPUT_TIMEOUT,
         )?;
@@ -1251,7 +1277,7 @@ impl GitRepository {
             output(
                 Command::new(&self.git)
                     .arg("-C")
-                    .arg(&primary)
+                    .arg(primary)
                     .args(["branch", "-D", branch]),
             )?;
         }
@@ -1413,6 +1439,12 @@ impl Repository for GitRepository {
     }
     fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()> {
         GitRepository::remove_worktree_and_branch(self, worktree, branch)
+    }
+    fn branches(&self) -> Result<Vec<String>> {
+        GitRepository::branches(self)
+    }
+    fn delete_branch(&self, branch: &str) -> Result<()> {
+        GitRepository::delete_branch(self, branch)
     }
     fn tracks(&self, worktree: &Path, path: &str) -> Result<bool> {
         GitRepository::tracks(self, worktree, path)
