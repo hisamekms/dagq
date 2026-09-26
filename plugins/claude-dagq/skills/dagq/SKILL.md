@@ -1,6 +1,6 @@
 ---
 name: dagq
-description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, close a goal after reviewing its tasks' receipts and follow_ups, adopt or reject a draft goal, record or read notes (observations), or find the dagq binary and queue database.
+description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, close a goal after reviewing its tasks' receipts and follow_ups, adopt or reject a draft goal, decide findings, read events and run timelines, record or read notes, or find the dagq binary and queue database.
 ---
 
 # dagq: register and inspect tasks
@@ -9,7 +9,7 @@ dagq runs development tasks in cmux workspaces and isolated Git worktrees. This 
 
 A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering, submitting and closing belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, then runs and lands the queue; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed: `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, `graph`, `search` / `related`, priority, editing) and `reference/goal-close.md` (closing a goal), all in the same directory.
+Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing) and `reference/goal-close.md` (closing a goal).
 
 ## 1. Locate the binary and the queue
 
@@ -27,9 +27,9 @@ The queue is per repository, resolved from the current directory: run the launch
 
 ## 2. Register a goal and decompose it into tasks
 
-Hear the problem → `goal add` → decompose it into tasks, each registered with `add --goal` → `lint` and `submit` them for plan review, which makes them `ready`. Look for duplicates and done work with `search` before `add` and `related ID` before `submit`; cancel one with `--duplicate-of X` (`reference/inspect.md`). Each task's prompt shows the goal, its dependencies' receipt summaries and landed commits, and siblings in progress, so siblings agree on names and boundaries.
+Hear the problem → `goal add` → decompose it into tasks, each registered with `add --goal` → `lint` and `submit` them for plan review, which makes them `ready`. Look for duplicates and done work with `search` before `add` and `related ID` before `submit`; cancel one with `--duplicate-of X` (`reference/inspect.md`). A task's prompt shows its goal, its dependencies' receipt summaries and commits, and siblings in progress, so siblings agree on names and boundaries.
 
-Skip the goal only for a one-shot task that finishes the problem by itself (a typo fix, a clippy warning). If a second task will exist, or a later task needs to know what this one decided (a name, a boundary, a format), register a goal. When unsure, register it.
+Skip the goal only for a one-shot task that finishes the problem by itself (a typo fix, a clippy warning). If a second task will exist, or a later task needs to know what this one decided, register a goal. When unsure, register it.
 
 ### Register the goal
 
@@ -39,7 +39,7 @@ Collect from the user, asking only for what is missing: title (the problem, one 
 "$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc docs/adr/NNNN-name.md
 ```
 
-A goal has no verification commands; a goal-level check is a final task depending on all the others. Its state is draft or open: `goal add --draft` registers a proposed goal whose tasks are never claimed, even when `ready`. Adopt it by submitting it (`submit --goal ID`; a `pass` lifts the draft), or reject it with `goal close ID --verdict abandoned`. Review the observer's drafts, notes and `blocked` asks with the user per `reference/observer.md`.
+A goal has no verification commands; a goal-level check is a final task depending on all the others. It is draft or open: the tasks of a `goal add --draft` goal are never claimed, even when `ready`. Adopt it by submitting it (`submit --goal ID`; a `pass` lifts the draft), or reject it with `goal close ID --verdict abandoned`. The observer's findings, and how they become proposals: `reference/observer.md`.
 
 ### Register the tasks
 
@@ -61,7 +61,7 @@ A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (
 
 ## 3. Inspect
 
-`goal list`, `goal show ID`, `list` (unfinished tasks, paged: `--before NEXT` while `next` is not null), `show ID`, `graph [--goal ID]` (what waits on what, `critical`, claim order), `search` / `related`, `notes` / `note` (observations) and `stats` (time per run and goal, `alerts`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
+`goal list`, `goal show ID`, `list` (unfinished tasks, paged: `--before NEXT` while `next` is not null), `show ID`, `graph [--goal ID]` (what waits on what, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went), `observe --history`, `notes` / `note` and `stats` (time per run and goal, `alerts`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
 
 ## 4. Report results
 
