@@ -4,8 +4,8 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: persistence
 related:
   - adr-0067
@@ -227,7 +227,7 @@ SQLiteはCHECK制約を変更できないため、statusの追加はtableの作�
 `dagq related TASK`（[ADR-0046](../adr/0046-full-text-search-related-and-duplicate-of.md)の決定4）は、表を足さずに既存の表と`search_index`を読む。読むのは`src/infrastructure/related.rs`、手がかりの取り出しと点数は`src/domain/related.rs`。
 
 - **読むもの**: すべての状態のtaskの`title` / `description` / `acceptance` / `context` / `goal_id` / `paths`、`landed_commits`の`message`（completedのtaskの本文に足す）、`run_events`のkind `follow_up_registered`（行の`run_id`と`task_id`が提案したrunとそのtask、payloadの`task_id`が登録されたtask）、今`canceled`のtaskの最後の`task_status_changed`（`to: canceled`）のpayloadの`duplicate_of`（決定5。無ければ出さない）。
-- **本文の手がかり**: ASCIIの英数字と`_-./*`の連なりを語として取り出す。ファイル名は拡張子が`rs` / `md` / `sql` / `toml` / `sh` / `json` / `yml` / `yaml`の語（前の`./`と後ろの`.`を除き、書かれたとおりの文字列で比べる。`tests/runtime.rs`と`runtime.rs`は別の手がかり）。テスト名は英小文字・数字の3語以上のsnake_case（`resume_prompt_delay`のような識別子も同じ形なので拾う）と、`--test NAME`の`NAME`。ADR番号は`ADR-NNNN` / `adr-NNNN` / `docs/adr/NNNN-`の4桁。task番号は`task` / `tasks` / `タスク`の後の数字で、`task 203,164`、`task 178 と 179`のような列挙も読む（自分の番号は除く）。
+- **本文の手がかり**: ASCIIの英数字と`_-./*`の連なりを語として取り出す。ファイル名は拡張子が`rs` / `md` / `sql` / `toml` / `sh` / `json` / `yml` / `yaml`の語（前の`./`と後ろの`.`を除き、書かれたとおりの文字列で比べる。`tests/runtime.rs`と`runtime.rs`は別の手がかり）。テスト名は英小文字・数字の3語以上のsnake_case（`resume_prompt_delay`のような識別子も同じ形なので拾う）と、`--test NAME`の`NAME`。ただし`NAME`が`it`（e2eとplugin以外のintegration testをまとめた1つのtest binary。ADR-0078）のときは`it`を拾わず（ほぼ全taskが共有して意味がない）、直後の語が`<module>::`か`<module>::<test>`の形の英小文字・数字・`_`の識別子ならその`<module>`（最初の`::`の前）を拾う。`--test it`だけで絞り込みが無ければ何も拾わない（`<test>`の部分は3語以上のsnake_caseの規則で拾われる）。ADR番号は`ADR-NNNN` / `adr-NNNN` / `docs/adr/NNNN-`の4桁。task番号は`task` / `tasks` / `タスク`の後の数字で、`task 203,164`、`task 178 と 179`のような列挙も読む（自分の番号は除く）。
 - **点数**: 手がかりごとの重みの和。重みは全体で共有するtaskの数`df`（taskの総数`n`）で`rarity = ln((n+1)/df) / ln((n+1)/2)`（2件だけが共有すれば1、全件なら0）を掛けて割り引く。
 
   | 手がかり | `clue` | 重み |

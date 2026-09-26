@@ -5,7 +5,8 @@
 //!
 //! The clues and their weights (docs/design/persistence.md lists them):
 //! declared `paths` that overlap, file names, test names (snake_case
-//! identifiers of three or more words, and `--test NAME`), ADR numbers and
+//! identifiers of three or more words, `--test NAME`, and the module of
+//! `--test it <module>::`), ADR numbers and
 //! task numbers in the texts, follow-ups of the same run, the same goal,
 //! and how strongly the index matches one title against the other task
 //! (`search`). A clue many tasks share counts less: its weight is scaled by
@@ -140,14 +141,41 @@ fn add_text_clues(clues: &mut TextClues, text: &str) {
             clues.tests.insert(word.to_owned());
         }
         if word == "--test"
-            && let Some((_, name)) = ascii_words(&text[start + word.len()..]).next()
-            && text[start + word.len()..].trim_start().starts_with(name)
+            && let Some(name) = next_word(&text[start + word.len()..])
             && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         {
-            clues.tests.insert(name.to_owned());
+            if name == "it" {
+                if let Some(module) = test_module(&text[start + word.len()..]) {
+                    clues.tests.insert(module.to_owned());
+                }
+            } else {
+                clues.tests.insert(name.to_owned());
+            }
         }
     }
     clues.tasks.extend(task_numbers(text));
+}
+
+/// The word right after `rest`'s leading whitespace.
+fn next_word(rest: &str) -> Option<&str> {
+    let (_, word) = ascii_words(rest).next()?;
+    rest.trim_start().starts_with(word).then_some(word)
+}
+
+/// The module that `--test it <module>::` or `--test it <module>::<test>`
+/// filters on, given the text after `--test`. `it` is the one integration
+/// test binary (ADR-0078) nearly every task names, so the module is the
+/// clue and `it` is not.
+fn test_module(rest: &str) -> Option<&str> {
+    let rest = rest.trim_start().strip_prefix("it")?;
+    let module = next_word(rest)?;
+    let after = &rest[rest.find(module)? + module.len()..];
+    (after.starts_with("::")
+        && module.starts_with(|c: char| c.is_ascii_lowercase())
+        && module
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+    .then_some(module)
 }
 
 /// The maximal runs of ASCII characters a path, an identifier or an ADR
@@ -543,6 +571,25 @@ mod tests {
         );
         assert!(text_clues("--test").tests.is_empty());
         assert!(text_clues("--test Foo-bar").tests.is_empty());
+    }
+
+    #[test]
+    fn test_it_gives_the_module_it_filters_on() {
+        let tests = |text| text_clues(text).tests;
+        assert_eq!(
+            tests("`cargo test --locked --test it runtime_claim::`"),
+            set(&["runtime_claim".to_owned()])
+        );
+        assert_eq!(
+            tests("cargo test --locked --test it runtime_claim::foo_bar_baz"),
+            set(&["foo_bar_baz".to_owned(), "runtime_claim".into()])
+        );
+        assert!(tests("cargo test --locked --test it").is_empty());
+        assert!(tests("cargo test --locked --test it -- --ignored").is_empty());
+        assert!(tests("--test it runtime_claim").is_empty());
+        assert!(tests("--test it Runtime::").is_empty());
+        assert_eq!(tests("--test e2e -- --ignored"), set(&["e2e".to_owned()]));
+        assert_eq!(tests("--test plugin"), set(&["plugin".to_owned()]));
     }
 
     #[test]
