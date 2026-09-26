@@ -458,6 +458,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         observers_launched: Vec::new(),
         last_sweep: None,
         last_turns: None,
+        process_sample: None,
         sweep_failures: Vec::new(),
         triaged: Vec::new(),
         generators: ports.generators.clone(),
@@ -493,6 +494,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     }
     result
 }
+
+/// A listing of this user's processes with the wall time it was taken.
+type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 
 struct Supervisor<'a> {
     queue: Box<dyn Queue + Send>,
@@ -536,6 +540,10 @@ struct Supervisor<'a> {
     /// When this process last recorded the transcript turns of the open
     /// session spans (ADR-0048 decision 8); `None` until the first pass.
     last_turns: Option<Instant>,
+    /// The latest listing of this user's processes for the `idle_process`
+    /// alert (task 469): when it was taken, and the listing with its wall
+    /// time, `None` when it failed. One listing serves every run.
+    process_sample: Option<(Instant, Option<ProcessSample>)>,
     /// The workspaces the sweep could not close: retried on every sweep,
     /// their `cleanup_failed` recorded once per process.
     sweep_failures: Vec<String>,

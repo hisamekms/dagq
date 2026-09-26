@@ -90,7 +90,7 @@ a run whose resumes are used up is failed with its resume_exhausted alert)
                        (retry / resume / cancel + the job's options), applied once answered;
                        a job's option goes back to the job
       job failed → triage_failed (triage by hand, read as recover by hand)
-live session alert (long_background, stuck_exit, prompt_waiting)
+live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
     a failed job → recovery_failed (recover by hand); ADR-t609-1 turns it into the alert's ask (task 562)
 ```
@@ -219,7 +219,7 @@ live session alert (long_background, stuck_exit, prompt_waiting)
 
 ### backgroundの処理が終わらないときの復旧job
 
-- [生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md)（`long_background`、`stuck_exit`、`prompt_waiting`）
+- [生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md)（`long_background`、`idle_process`、`stuck_exit`、`prompt_waiting`）
 
 ### workerの質問への回答の送信
 

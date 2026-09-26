@@ -162,8 +162,12 @@ impl ProcessControl for SystemProcesses {
     fn list(&self) -> Result<Vec<ProcessInfo>> {
         // SAFETY: getuid(2) has no failure and no memory effects.
         let uid = unsafe { libc::getuid() }.to_string();
-        let listing =
-            output(Command::new("ps").args(["-U", &uid, "-o", "pid=,ppid=,etime=,command="]))?;
+        let listing = output(Command::new("ps").args([
+            "-U",
+            &uid,
+            "-o",
+            "pid=,ppid=,etime=,time=,command=",
+        ]))?;
         let mut processes = parse_ps(&listing);
         let cwds = working_directories(&uid, &processes);
         for process in &mut processes {
@@ -176,8 +180,8 @@ impl ProcessControl for SystemProcesses {
     }
 }
 
-/// The lines of `ps -o pid=,ppid=,etime=,command=`; a line that does not
-/// read is skipped.
+/// The lines of `ps -o pid=,ppid=,etime=,time=,command=`; a line that does
+/// not read is skipped.
 fn parse_ps(listing: &str) -> Vec<ProcessInfo> {
     listing
         .lines()
@@ -186,6 +190,7 @@ fn parse_ps(listing: &str) -> Vec<ProcessInfo> {
             let pid = fields.next()?.parse().ok()?;
             let ppid = fields.next()?.parse().ok()?;
             let elapsed_secs = parse_etime(fields.next()?)?;
+            let cpu_ms = parse_cpu_time(fields.next()?);
             let command = fields.collect::<Vec<_>>().join(" ");
             Some(ProcessInfo {
                 pid,
@@ -193,6 +198,7 @@ fn parse_ps(listing: &str) -> Vec<ProcessInfo> {
                 elapsed_secs,
                 command,
                 cwd: None,
+                cpu_ms,
             })
         })
         .collect()
@@ -209,6 +215,23 @@ fn parse_etime(text: &str) -> Option<u64> {
         secs = secs * 60 + part.parse::<u64>().ok()?;
     }
     Some(days * 86_400 + secs)
+}
+
+/// `ps`'s `time`, `[dd-][hh:]mm:ss[.ff]` (macOS prints hundredths, Linux
+/// whole seconds), in milliseconds.
+fn parse_cpu_time(text: &str) -> Option<u64> {
+    let (clock, fraction) = match text.split_once('.') {
+        Some((clock, fraction)) => (clock, fraction),
+        None => (text, ""),
+    };
+    let secs = parse_etime(clock)?;
+    let digits: String = fraction.chars().take(3).collect();
+    let millis = if digits.is_empty() {
+        0
+    } else {
+        digits.parse::<u64>().ok()? * 10u64.pow(3 - u32::try_from(digits.len()).ok()?)
+    };
+    Some(secs * 1000 + millis)
 }
 
 /// The working directories of `processes`: `/proc/<pid>/cwd` where there is
@@ -2206,12 +2229,24 @@ mod tests {
         assert_eq!(parse_etime("02:01:05"), Some(7265));
         assert_eq!(parse_etime("3-02:01:05"), Some(3 * 86_400 + 7265));
         assert_eq!(parse_etime("x"), None);
-        let processes =
-            parse_ps("  1     0  3-00:00:00 /sbin/launchd\n 42  1 01:05 sleep 600 --x\nbad line\n");
+        assert_eq!(parse_cpu_time("0:00.01"), Some(10));
+        assert_eq!(
+            parse_cpu_time("562:29.18"),
+            Some((562 * 60 + 29) * 1000 + 180)
+        );
+        assert_eq!(parse_cpu_time("01:02:03"), Some(3_723_000));
+        assert_eq!(parse_cpu_time("1-00:00:01"), Some(86_401_000));
+        assert_eq!(parse_cpu_time("0:01.5"), Some(1500));
+        assert_eq!(parse_cpu_time("x"), None);
+        let processes = parse_ps(
+            "  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
+        );
         assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].cpu_ms, Some(720_500));
         assert_eq!(processes[1].pid, 42);
         assert_eq!(processes[1].ppid, 1);
         assert_eq!(processes[1].elapsed_secs, 65);
+        assert_eq!(processes[1].cpu_ms, None);
         assert_eq!(processes[1].command, "sleep 600 --x");
         assert_eq!(
             parse_lsof_cwd("p42\nfcwd\nn/tmp/a b\np43\nfcwd\nn/\n"),
@@ -2234,6 +2269,7 @@ mod tests {
         let found = listed.iter().find(|p| p.pid == child.id()).unwrap();
         assert_eq!(found.ppid, std::process::id());
         assert!(found.command.contains("sleep 30"), "{found:?}");
+        assert!(found.cpu_ms.is_some(), "{found:?}");
         let cwd = PathBuf::from(found.cwd.as_deref().unwrap());
         assert_eq!(cwd.canonicalize().unwrap(), dir);
     }

@@ -4,8 +4,8 @@ type: design
 title: "Stall thresholds"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -21,6 +21,7 @@ related:
 | `idle_without_receipt_secs` | 1200（20分） | receiptの無いidleが促しまで続く時間と、促しの後にaskまで続く時間。`stats`の`idle_without_receipt`の閾値 |
 | `send_confirm_secs` | 60 | 送った文が処理されるのを待つ時間と、Enterの送り直しの後に待つ時間 |
 | `background_alert_secs` | 1800（30分） | `stats`の`long_background`の閾値と、supervisorが[復旧job](background-recovery-job.md#backgroundの処理が終わらないときの復旧job)を起動する閾値 |
+| `idle_process_secs` | 1800（30分） | runのプロセスがCPU時間をほとんど使わないまま生きている時間が、supervisorが`idle_process`の[復旧job](background-recovery-job.md#cpu時間が伸びないプロセスidle_process)を起動する閾値（task 469）。`stats`の閾値の集計（`thresholds`）にはまだ入らない |
 
 - 書式は`KEY = 秒`（正の整数。`_`の桁区切りと`#`以降のcommentを許す）。未知のkey、整数でない値、0以下、重複したkeyはエラー。表もkeyも無ければ既定値。
-- `stats`は、supervisorが起動時に記録した最新の`stall_config_loaded`（payloadは3つの値）があればその値を使い（出力の`stall_config.source`が`supervisor`）、無ければmain checkoutの`dagq.toml`（`file`）、それも無ければ既定値（`default`）で判定する。main checkoutはqueueが束縛されたGit common directoryが`.git`ならその親で、そうでなければ既定値。supervisorは起動時（登録の直後）にmain checkoutの`dagq.toml`の`[stall]`を読み（fileが無ければ既定値。書式の誤りは起動のエラー）、3つの値と自分の`supervisor` tokenをpayloadにしたtaskの無い`stall_config_loaded`を記録して、その値で[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)を行う（task 288。値を変えたら`down --wait` → `up`）。`send_confirm_secs`を使う送信の確認（ADR-0043の決定2）はgoal 30の後続taskで入る。
+- `stats`は、supervisorが起動時に記録した最新の`stall_config_loaded`（payloadは`[stall]`の各値。task 469で`idle_process_secs`が加わった）があればその値を使い（出力の`stall_config.source`が`supervisor`）、無ければmain checkoutの`dagq.toml`（`file`）、それも無ければ既定値（`default`）で判定する。main checkoutはqueueが束縛されたGit common directoryが`.git`ならその親で、そうでなければ既定値。supervisorは起動時（登録の直後）にmain checkoutの`dagq.toml`の`[stall]`を読み（fileが無ければ既定値。書式の誤りは起動のエラー）、各値と自分の`supervisor` tokenをpayloadにしたtaskの無い`stall_config_loaded`を記録して、その値で[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)を行う（task 288。値を変えたら`down --wait` → `up`）。`send_confirm_secs`を使う送信の確認（ADR-0043の決定2）はgoal 30の後続taskで入る。

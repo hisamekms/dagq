@@ -17,6 +17,7 @@ string_enum!(RecoveryAlert {
     PromptWaiting => "prompt_waiting",
     Stalled => "stalled",
     LongBackground => "long_background",
+    IdleProcess => "idle_process",
 });
 
 string_enum!(RecoveryDecision {
@@ -72,7 +73,7 @@ impl RecoveryAlert {
             Self::Failed | Self::Interrupted | Self::ResumeExhausted => AskKind::Decide,
             Self::StuckExit => AskKind::StuckExit,
             Self::PromptWaiting => AskKind::AnswerPrompt,
-            Self::Stalled | Self::LongBackground => AskKind::Stalled,
+            Self::Stalled | Self::LongBackground | Self::IdleProcess => AskKind::Stalled,
         }
     }
 }
@@ -225,6 +226,10 @@ pub struct ProcessInfo {
     pub command: String,
     /// The working directory; `None` when it could not be read.
     pub cwd: Option<String>,
+    /// The CPU time it used so far (user and system, `ps`'s `time`), in
+    /// milliseconds; `None` when it could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<u64>,
 }
 
 /// Whether `path` is `root` or under it.
@@ -291,6 +296,7 @@ mod tests {
             elapsed_secs: 5,
             command: format!("cmd {pid}"),
             cwd: (!cwd.is_empty()).then(|| cwd.to_owned()),
+            cpu_ms: None,
         }
     }
 

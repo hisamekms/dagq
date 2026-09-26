@@ -1137,10 +1137,14 @@ pub fn recovery_prompt(
             .iter()
             .map(|p| {
                 format!(
-                    "- pid {} (parent {}, running {}s, cwd {}): {}",
+                    "- pid {} (parent {}, running {}s, cpu {}, cwd {}): {}",
                     p.pid,
                     p.ppid,
                     p.elapsed_secs,
+                    p.cpu_ms.map_or_else(
+                        || "unknown".to_owned(),
+                        |ms| format!("{}.{:03}s", ms / 1000, ms % 1000)
+                    ),
                     p.cwd.as_deref().unwrap_or("unknown"),
                     tail(&p.command, 300)
                 )
@@ -1208,6 +1212,8 @@ pub fn recovery_prompt(
             RecoveryAlert::PromptWaiting =>
                 "the session waits at a dialog the runtime does not answer by itself.",
             RecoveryAlert::Stalled => "the session looks stuck.",
+            RecoveryAlert::IdleProcess =>
+                "processes of the run (listed in the alert facts with how long they have used almost no CPU time) are alive but have not made progress for longer than the threshold; the session may be waiting for them.",
         },
         worktree = run.worktree_path().unwrap_or("none"),
         description = or_none(task.description()),

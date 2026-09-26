@@ -407,13 +407,12 @@ impl SessionWatch {
                     info!(run_id = %run.id(), "exit requested for {} after its wrapper went silent; waiting for session exit", run.id());
                     self.exit_requested = Some(Instant::now());
                     self.exit_for_silence = true;
-                    // Background work is followed only before the /exit.
-                    self.recovery.stop_for(
-                        sv,
-                        run,
-                        Some(RecoveryAlert::LongBackground),
-                        "exit_requested",
-                    );
+                    // Background work and idle processes are followed
+                    // only before the /exit.
+                    for alert in [RecoveryAlert::LongBackground, RecoveryAlert::IdleProcess] {
+                        self.recovery
+                            .stop_for(sv, run, Some(alert), "exit_requested");
+                    }
                 }
                 WrapperPulse::Silent => (),
                 WrapperPulse::Exited => return Ok(None),
@@ -444,6 +443,7 @@ impl SessionWatch {
                             self.answer_start = Some(start);
                         }
                         self.watch_background(sv, run)?;
+                        self.watch_idle_processes(sv, run)?;
                     }
                     if let Some(agent) = processes.iter().find(|p| p.role == "agent") {
                         self.watch_prompt(sv, run, agent)?;

@@ -4,8 +4,8 @@ type: design
 title: "Implementation status"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -35,3 +35,5 @@ related:
 wrapperの生存判定の時刻源は実時計のままにする（task 201の判断。wrapperに時刻源を渡し、`run_events` / `asks`の`created_at`をbindする案は採らない）。wrapperの`run_processes`の`heartbeat_at`は、登録時はDBのDEFAULT（`unixepoch()`）、その後は別プロセスの`session`がsystemの`Clock`で書き（どちらも実時計）、`run_events` / `asks`の`created_at`はDBのDEFAULT（SQLiteの`'now'` / `unixepoch()`）で決まる。supervisorはwrapperのheartbeat（`SessionWatch`・`ResumeWatch`・`ReviseWatch`・`ExitWatch`とadopt）を注入された`Clock`の`now()`と比べる。理由は3つ。(1) wrapperはsupervisorより長く生き、別のsupervisorにadoptされ、`recover` / `doctor` / `status`からも鮮度を見られる（[ADR-0012](../../adr/0012-adopt-stale-lease-of-live-wrapper.md)）ので、書く側と読む側で共有できる時計はhostの壁時計しかない。supervisorの注入した`Clock`をwrapperに渡す（CLIの引数や環境変数で）仕組みは、本番では常に`SystemClock`を渡すだけのテスト専用の経路になり、別プロセスの間で時刻を固定する意味も持たない。(2) `created_at`はDBのDEFAULTと`SystemClock`が本番で一致しており、askの経過時間（`status`の`age_secs`）の固定時刻のテストは`created_at`をSQLで書いて固定している（`status_and_doctor_measure_to_the_injected_clock`）。workerの質問への回答の送信は`created_at`をidle markerのmtime（壁時計）と比べるので、注入した`Clock`に揃えるとかえってずれる。(3) task 186で`tests/it/runtime_*.rs`（当時の`tests/runtime.rs`）の「run lease is missing or stale」の原因（hostのsleepによる壁時計の跳び）は、supervisorに`SteadyClock`（作った時点の壁時計＋`Instant::elapsed`）を注入して取り除いた（task 260からは、自分のtokenのleaseはstaleでもlease付きの書き込みが更新して続けるので、この拒否そのものが起きない。下の7）。この時計は作った時点で壁時計と一致するので、supervisorのテストでwrapperが書くheartbeatとも一致し、実時刻から離れた固定時刻でwrapperのいる`supervise`を走らせるテストは無い（`ManualClock`で固定するのは、wrapperのいない`register_supervisor`・claim・`integrate`・`status` / `doctor`のテスト）。残るずれは、1つのsupervisorが動いている間にhostがsleepした場合だけで、そのときwrapperのheartbeatは`SteadyClock`より未来になり、wrapperはsleepした時間だけ長く生存に見える（期限切れの誤判定にはならない）。したがって、wrapperのいる`supervise`のテストで固定時刻の`Clock`を使ってはならない（使うなら、wrapperの鮮度に依存しない経路に限る）。固定時刻でwrapperの生存判定を検証する必要が出たら、そのときに(a)を改めて検討する。
 
 task 441（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40）で、task 98のtriage job（verdict `retry` / `resume` / `ask`）を復旧jobに置き換え、`failed` / `interrupted` / `resume_exhausted`（[Triage](triage.md#triage-supervisor)）と生きているsessionの`stuck_exit` / `prompt_waiting`（[生きているsessionの復旧job](background-recovery-job.md#生きているsessionの復旧job)。task 360の`long_background`と同じ機構）のalertを`recovery_requested`として同じverdict（`repair` / `escalate`）で扱うようにした。前提を再検査して適用した操作は`auto_repaired`（`layer: recovery`）と`recovery_finished`に残り、それ以外はalertのkindのask（`decide` / `stuck_exit` / `answer_prompt`）になる。resumeを使い切ったrunはすぐ`decide`のaskにせず復旧jobに渡す。
+
+task 469で、生きているsessionの復旧jobに`idle_process`のalertを足した。supervisorがrunのプロセスのCPU時間（`ps`の`time`）を標本に取り、子孫と合わせて`[stall].idle_process_secs`のあいだほとんど伸びないまま生きているプロセスを復旧jobに渡す（判定は`domain::idle_process`、詳細は[生きているsessionの復旧job](background-recovery-job.md#cpu時間が伸びないプロセスidle_process)）。`stats`の閾値の集計にはまだ入れていない。

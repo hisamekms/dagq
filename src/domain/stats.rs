@@ -2271,7 +2271,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&result.stall_config).unwrap(),
-            json!({"idle_without_receipt_secs": 1200, "send_confirm_secs": 60, "background_alert_secs": 1800, "source": "default"})
+            json!({"idle_without_receipt_secs": 1200, "send_confirm_secs": 60, "background_alert_secs": 1800, "idle_process_secs": 1800, "source": "default"})
         );
         assert_eq!(described_run("dagq role=worker queue=hash"), None);
         assert_eq!(described_run("run x"), None);

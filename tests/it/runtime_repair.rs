@@ -29,15 +29,37 @@ fn supervise_long_background(
     Arc<TestReviewer>,
     thread::JoinHandle<Result<Value>>,
 ) {
-    let backend = Arc::new(TestWorkspace::new(db, false, ORPHAN_AGENT));
-    let reviewer = Arc::new(
-        TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[recovery.to_owned()]),
-    );
-    let options = SuperviseOptions {
-        stall: Some(dagq::domain::stall::StallConfig {
+    supervise_repair(
+        db,
+        repo,
+        ORPHAN_AGENT,
+        dagq::domain::stall::StallConfig {
             background_alert_secs: 1,
             ..Default::default()
-        }),
+        },
+        &[recovery],
+    )
+}
+
+/// Supervise the fixture's task with `agent`, the thresholds `stall`, and
+/// `recoveries` as the recovery jobs' scripts, on a thread.
+fn supervise_repair(
+    db: &Path,
+    repo: &Path,
+    agent: &str,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[&str],
+) -> (
+    Arc<TestWorkspace>,
+    Arc<TestReviewer>,
+    thread::JoinHandle<Result<Value>>,
+) {
+    let backend = Arc::new(TestWorkspace::new(db, false, agent));
+    let recoveries: Vec<String> = recoveries.iter().map(|r| (*r).to_owned()).collect();
+    let reviewer =
+        Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&recoveries));
+    let options = SuperviseOptions {
+        stall: Some(stall),
         ..supervise_options(4, true)
     };
     let supervisor = {
@@ -238,4 +260,121 @@ fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
     let finished = payloads(&detail, "recovery_finished");
     assert_eq!(finished[0]["escalated"], true);
     assert_eq!(finished[0]["confidence"], "low");
+}
+
+/// The worker of the `idle_process` tests: it commits, leaves an orphan in
+/// its worktree (`child`, its pid in `bg.pid` of the run directory), polls
+/// for it without going idle (short `sleep`s, never one process that
+/// lives long), and writes its receipt once the orphan is gone. `wait` is
+/// how the session waits: until the orphan ends, or a bounded wait after
+/// which it stops the orphan itself.
+fn idle_agent(child: &str, wait: &str) -> String {
+    format!(
+        r#"
+commit work
+bg="$(dirname "$RECEIPT")/bg.pid"
+( {child} >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
+pid=$(cat "$bg")
+{wait}
+receipt "$(git rev-parse HEAD)"; idle; await_exit
+"#
+    )
+}
+
+/// Thresholds with the `idle_process` alert after two seconds.
+fn idle_process_stall() -> dagq::domain::stall::StallConfig {
+    dagq::domain::stall::StallConfig {
+        idle_process_secs: 2,
+        ..Default::default()
+    }
+}
+
+/// Task 469: an orphan of the worktree that stays alive without using CPU
+/// time is the `idle_process` alert, whose recovery job gets the idle
+/// processes with their CPU time and stops the orphan; the session then
+/// writes its receipt and the run lands without an ask.
+#[test]
+fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job() {
+    let (_dir, repo, db) = fixture();
+    let (backend, reviewer, supervisor) = supervise_repair(
+        &db,
+        &repo,
+        &idle_agent(
+            "sleep 300",
+            r#"while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done"#,
+        ),
+        idle_process_stall(),
+        &[&recovery_verdict(&json!({
+            "verdict": "repair",
+            "confidence": "high",
+            "diagnosis": "an orphan sleep uses no CPU and holds the session",
+            "actions": [{"action": "stop_processes", "pids": ["PID"]}],
+        }))],
+    );
+    let outcome = supervisor.join().unwrap().unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let run = &detail.runs[0];
+    let pid: u32 = fs::read_to_string(Path::new(run.run_dir().unwrap()).join("bg.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!pid_alive(pid));
+    let requested = payloads(&detail, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    let requested = requested[0];
+    assert_eq!(requested["alert"], "idle_process");
+    assert_eq!(requested["threshold"], "idle_process_secs");
+    assert_eq!(requested["threshold_secs"], 2);
+    assert_eq!(requested["phase"], "session");
+    let idle = requested["idle_processes"].as_array().unwrap();
+    assert_eq!(idle.len(), 1, "{idle:?}");
+    assert_eq!(idle[0]["pid"], pid);
+    assert!(idle[0]["command"].as_str().unwrap().contains("sleep 300"));
+    assert!(idle[0]["idle_secs"].as_i64().unwrap() >= 2, "{idle:?}");
+    let prompts = reviewer.triage_prompts();
+    assert_eq!(prompts.len(), 1);
+    for part in ["idle_process", &format!("- pid {pid} (parent "), ", cpu 0."] {
+        assert!(prompts[0].0.contains(part), "{part}: {}", prompts[0].0);
+    }
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["alert"], "idle_process");
+    assert_eq!(repaired[0]["repair"], "stop_processes");
+    assert_eq!(repaired[0]["processes"][0]["pid"], pid);
+    let finished = payloads(&detail, "recovery_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["alert"], "idle_process");
+    assert_eq!(finished[0]["applied"], json!(["stop_processes"]));
+    assert!(stalled_asks(&queue).is_empty());
+}
+
+/// A process that lives past the threshold but keeps using CPU time is
+/// making progress: no `idle_process` alert and no recovery job.
+#[test]
+fn a_long_process_that_uses_cpu_time_is_not_an_idle_process_alert() {
+    let (_dir, repo, db) = fixture();
+    let (backend, reviewer, supervisor) = supervise_repair(
+        &db,
+        &repo,
+        &idle_agent(
+            "yes",
+            r#"i=0; while [ $i -lt 120 ]; do sleep 0.05; i=$((i + 1)); done; kill "$pid""#,
+        ),
+        idle_process_stall(),
+        &[],
+    );
+    let outcome = supervisor.join().unwrap().unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert!(payloads(&detail, "recovery_requested").is_empty());
+    assert!(reviewer.triage_prompts().is_empty());
+    assert!(stalled_asks(&queue).is_empty());
 }

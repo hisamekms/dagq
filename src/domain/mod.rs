@@ -558,6 +558,7 @@ mod error;
 pub mod finding;
 pub mod follow_up;
 pub mod goal;
+pub mod idle_process;
 pub mod ids;
 mod input;
 pub mod kpi;

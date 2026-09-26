@@ -884,6 +884,28 @@ impl ResumeWatch {
         Ok(())
     }
 
+    /// The resumed session's processes before its `/exit` (task 469): the
+    /// `idle_process` alert. The resume ends at its timeout by itself, so
+    /// an escalation is left to that ([`leave_idle_to_phase`]).
+    fn watch_idle_processes(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+        let live = Live {
+            workspace: &self.workspace,
+            run_dir: &self.run_dir,
+            allowed: &IDLE_PROCESS_ACTIONS,
+            exit_typed: false,
+            at_prompt: false,
+            lands: false,
+        };
+        if let LiveStep::Escalate(attempt, escalation) =
+            self.live
+                .recovery
+                .watch_idle(sv, run, &live, RESUME_PHASE)?
+        {
+            leave_idle_to_phase(sv, run, attempt, &escalation, RESUME_PHASE)?;
+        }
+        Ok(())
+    }
+
     /// The stage ends: the dialog recorded during it is cleared and its
     /// recovery job stopped, as a revise's.
     fn end_live(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
@@ -1246,6 +1268,7 @@ impl ResumeWatch {
         if sv.queue.has_unclosed_worker_question(run.id())? {
             return Ok(None);
         }
+        self.watch_idle_processes(sv, run)?;
         // An answer delivered by hand (or by the supervisor this one took
         // the run over from) is input too: its close, in a later second
         // than the last input, moves the last input there.

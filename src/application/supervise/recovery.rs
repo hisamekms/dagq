@@ -1,8 +1,10 @@
 //! The recovery job of a live session's alert (ADR-0047 decisions 39 and
 //! 40): background work past `[stall].background_alert_secs`
-//! (`long_background`), a session that holds the supervisor's `/exit` back
-//! after the runtime's own repairs (`stuck_exit`), and a dialog the runtime
-//! does not answer by itself (`prompt_waiting`). The supervisor records
+//! (`long_background`), processes of the run that stay alive without
+//! using CPU time (`idle_process`, task 469), a session that holds the
+//! supervisor's `/exit` back after the runtime's own repairs
+//! (`stuck_exit`), and a dialog the runtime does not answer by itself
+//! (`prompt_waiting`). The supervisor records
 //! `recovery_requested` and starts a headless job with the screen, the
 //! run's processes and the worktree's state; the job only reads and prints
 //! a verdict. The runtime checks every action's preconditions again, and
@@ -17,15 +19,25 @@
 //! `triage.rs`, with the same verdict.
 
 use super::*;
+use crate::domain::idle_process::{
+    CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
+};
 use crate::domain::recovery::{
-    MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS, RecoveryAction, attempts,
-    failed_live, run_processes,
+    MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS, ProcessInfo, RecoveryAction,
+    attempts, failed_live, run_processes,
 };
 
 /// The actions a recovery job may choose for a running session's
 /// `long_background` alert.
 pub(super) const LONG_BACKGROUND_ACTIONS: [&str; 3] =
     ["stop_processes", "send_instruction", "wait"];
+
+/// The actions a recovery job may choose for an `idle_process` alert;
+/// `send_instruction` holds only while the session is idle at its prompt.
+pub(super) const IDLE_PROCESS_ACTIONS: [&str; 3] = ["stop_processes", "send_instruction", "wait"];
+
+/// The setting the `idle_process` alert is judged by.
+pub(super) const IDLE_PROCESS_THRESHOLD: &str = "idle_process_secs";
 
 /// The actions for a `stuck_exit` of a run that does not land after its
 /// exit: [`STUCK_EXIT_ACTIONS`] without `close_and_proceed`.
@@ -58,7 +70,17 @@ pub(super) struct RecoveryWatch {
     job: Option<Box<RecoveryJob>>,
     seen: Option<SystemTime>,
     recheck: Option<SystemTime>,
-    held: Option<(RecoveryAlert, SystemTime)>,
+    /// The `wait` of each alert whose job answered it, until when.
+    held: Vec<(RecoveryAlert, SystemTime)>,
+    /// The CPU time of the run's processes (`idle_process`), the time of the
+    /// process sample it last took and the idle processes it last handed
+    /// to a job.
+    cpu: CpuWatch,
+    cpu_sampled: Option<SystemTime>,
+    idle: Vec<IdleProcess>,
+    /// When the watch first looked for idle processes: the first sample
+    /// waits one sample interval, so a short session is never sampled.
+    idle_watched: Option<Instant>,
 }
 
 /// What the watch of a live session offers the recovery job of an alert.
@@ -394,8 +416,8 @@ impl RecoveryWatch {
         alert: Option<RecoveryAlert>,
         outcome: &str,
     ) {
-        if alert.is_some_and(|alert| self.held.is_some_and(|(held, _)| held == alert)) {
-            self.held = None;
+        if let Some(alert) = alert {
+            self.held.retain(|(held, _)| *held != alert);
         }
         if self
             .job
@@ -530,7 +552,8 @@ impl RecoveryWatch {
             return Ok(match apply_live(sv, run, live, &job, verdict)? {
                 Ok(applied) => {
                     if let Some(at) = applied_recheck(sv, &job, run)? {
-                        self.held = Some((alert, at));
+                        self.held.retain(|(held, _)| *held != alert);
+                        self.held.push((alert, at));
                     }
                     LiveStep::Repaired(applied)
                 }
@@ -540,14 +563,15 @@ impl RecoveryWatch {
         if self.job.is_some()
             || self
                 .held
-                .is_some_and(|(held, at)| held == alert && sv.files.now() < at)
+                .iter()
+                .any(|&(held, at)| held == alert && sv.files.now() < at)
         {
             return Ok(LiveStep::Pending);
         }
         if failed_live(&sv.queue.run_events(run.id())?, Some(alert)).is_some() {
             return Ok(LiveStep::Pending);
         }
-        self.held = None;
+        self.held.retain(|(held, _)| *held != alert);
         Ok(match self.start(sv, run, live, alert, facts(), None)? {
             Some((attempt, Escalation::JobFailed(error))) => {
                 fail_live(sv, run, live.workspace, alert, attempt, &error)?;
@@ -557,6 +581,153 @@ impl RecoveryWatch {
             None => LiveStep::Pending,
         })
     }
+    /// One look at the run's processes for the `idle_process` alert (task
+    /// 469): follow its job in progress, or, at each new process sample,
+    /// start one when a process of the run and its descendants have used
+    /// almost no CPU time for `[stall].idle_process_secs`
+    /// ([`CpuWatch::idle`]) and no other alert's job runs. Processes handed
+    /// to a job are not an alert again until they make progress, unless
+    /// its verdict was `wait`. `phase` names where the session is, for the
+    /// facts and for what an escalation does.
+    pub(super) fn watch_idle(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        live: &Live<'_>,
+        phase: &str,
+    ) -> Result<LiveStep> {
+        let alert = RecoveryAlert::IdleProcess;
+        if self.job.as_ref().is_some_and(|job| job.alert == alert) {
+            let step = self.follow(sv, run, live, alert, || json!({}))?;
+            return Ok(self.after_idle(step));
+        }
+        if self.job.is_some() {
+            return Ok(LiveStep::Pending);
+        }
+        let threshold = sv.stall.idle_process_secs;
+        let interval = sample_interval(threshold);
+        if self.idle_watched.get_or_insert_with(Instant::now).elapsed() < interval {
+            return Ok(LiveStep::Pending);
+        }
+        let Some((at, all)) = process_sample(sv, interval, self.cpu_sampled) else {
+            return Ok(LiveStep::Pending);
+        };
+        self.cpu_sampled = Some(at);
+        // Without the session's wrapper and agent registered there are no
+        // processes of the run to judge.
+        let Ok(own) = own_of(sv, run, &all) else {
+            return Ok(LiveStep::Pending);
+        };
+        let agent = sv
+            .queue
+            .processes(run.id())?
+            .iter()
+            .find(|p| p.role == "agent")
+            .and_then(|agent| all.iter().find(|p| p.pid == agent.pid))
+            .cloned();
+        let own = without_session_helpers(own, agent.as_ref());
+        let at_ms = millis(at);
+        self.cpu.observe(&own, at_ms);
+        let idle = self.cpu.idle(&own, at_ms, threshold);
+        if idle.is_empty() {
+            return Ok(LiveStep::Pending);
+        }
+        let facts = json!({
+            "idle_processes": idle,
+            "threshold": IDLE_PROCESS_THRESHOLD,
+            "threshold_secs": threshold,
+            "progress_cpu_per_mille": PROGRESS_CPU_PER_MILLE,
+            "phase": phase,
+        });
+        let step = self.follow(sv, run, live, alert, || facts)?;
+        // Handed to a job (or straight to a person): not again until the
+        // processes make progress. A `wait` that holds the alert or a
+        // failed job a person recovers leaves them for the next look.
+        if self.job.is_some() || matches!(step, LiveStep::Escalate(..) | LiveStep::Failed) {
+            info!(run_id = %run.id(), "run {}: processes {:?} have used almost no CPU time for {threshold}s", run.id(), idle.iter().map(|p| p.pid).collect::<Vec<_>>());
+            self.cpu.hand(&idle);
+            self.idle = idle;
+        }
+        Ok(self.after_idle(step))
+    }
+
+    /// A `wait` applied to an `idle_process` alert lets the same processes
+    /// raise it again once the wait is over.
+    fn after_idle(&mut self, step: LiveStep) -> LiveStep {
+        if let LiveStep::Repaired(applied) = &step
+            && applied.names.contains(&"wait")
+        {
+            self.cpu = std::mem::take(&mut self.cpu).released();
+        }
+        step
+    }
+
+    /// The idle processes last handed to a job, for its ask.
+    pub(super) fn idle_processes(&self) -> &[IdleProcess] {
+        &self.idle
+    }
+}
+
+/// How often the processes are sampled for the `idle_process` alert: a
+/// tenth of its threshold, between one second and a minute.
+fn sample_interval(threshold_secs: i64) -> Duration {
+    Duration::from_secs(u64::try_from(threshold_secs / 10).unwrap_or(0).clamp(1, 60))
+}
+
+/// The user's processes as the supervisor listed them at most `interval`
+/// ago (one listing serves every run), with the time of the listing;
+/// `None` when that listing is the one taken `last`, or when they could
+/// not be listed (tried again after `interval`).
+fn process_sample(
+    sv: &mut Supervisor<'_>,
+    interval: Duration,
+    last: Option<SystemTime>,
+) -> Option<(SystemTime, Vec<ProcessInfo>)> {
+    if sv
+        .process_sample
+        .as_ref()
+        .is_none_or(|(at, _)| at.elapsed() >= interval)
+    {
+        let sample = match sv.processes.list() {
+            Ok(all) => Some((sv.files.now(), all)),
+            Err(error) => {
+                tracing::debug!(error = %format_args!("{error:#}"), "the processes could not be listed for the idle_process alert: {error:#}");
+                None
+            }
+        };
+        sv.process_sample = Some((Instant::now(), sample));
+    }
+    sv.process_sample
+        .as_ref()
+        .and_then(|(_, sample)| sample.as_ref())
+        .filter(|(at, _)| Some(*at) != last)
+        .cloned()
+}
+
+/// An `idle_process` escalation of a phase that asks the inbox by itself
+/// when it runs out (the wait on background work after the receipt ends at
+/// the resume timeout, a held `/exit` becomes the `stuck_exit` alert):
+/// the job's diagnosis is recorded (`outcome: left_to_phase`) for that
+/// ask's recovery job to read, and no ask of its own is opened.
+pub(super) fn leave_idle_to_phase(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    attempt: usize,
+    escalation: &Escalation,
+    phase: &str,
+) -> Result<()> {
+    let alert = RecoveryAlert::IdleProcess;
+    let note = escalation.note(run, alert, attempt);
+    warn!(run_id = %run.id(), "run {}: idle processes: {}; left to the {phase} phase's own timeout", run.id(), note.why);
+    escalation.record(
+        sv,
+        run,
+        alert,
+        attempt,
+        &note,
+        None,
+        json!({"outcome": "left_to_phase", "phase": phase}),
+    )
 }
 
 /// When the `wait` of the job's applied verdict ends, from its
@@ -582,13 +753,15 @@ fn applied_recheck(
 
 /// The run's processes that `stop_processes` may stop: those of its
 /// worktree or under its session, never the session's wrapper or agent.
-fn own_processes(
-    sv: &Supervisor<'_>,
-    run: &TaskRun,
-) -> Result<Vec<crate::domain::recovery::ProcessInfo>> {
+fn own_processes(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<ProcessInfo>> {
+    let all = sv.processes.list()?;
+    own_of(sv, run, &all)
+}
+
+/// The run's processes among `all`, as [`own_processes`] picks them.
+fn own_of(sv: &Supervisor<'_>, run: &TaskRun, all: &[ProcessInfo]) -> Result<Vec<ProcessInfo>> {
     let worktree = run.worktree_path().context("the run has no worktree")?;
     let processes = sv.queue.processes(run.id())?;
-    let all = sv.processes.list()?;
     let pid = |role: &str| {
         processes
             .iter()
@@ -597,7 +770,7 @@ fn own_processes(
             .with_context(|| format!("the session's {role} is not registered"))
     };
     Ok(run_processes(
-        &all,
+        all,
         Path::new(worktree),
         Some(pid("wrapper")?),
         Some(pid("agent")?),
@@ -1165,6 +1338,128 @@ impl SessionWatch {
         Ok(())
     }
 
+    /// One look at the session's processes before its `/exit` (task 469):
+    /// the `idle_process` alert, before and after the receipt. Before the
+    /// receipt an escalation is the `stalled` ask, as `long_background`'s;
+    /// after it the wait on background work ends at the resume timeout by
+    /// itself, so it is left to that ([`leave_idle_to_phase`]). No job
+    /// starts while a `stalled` ask of the run is open.
+    pub(super) fn watch_idle_processes(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+    ) -> Result<()> {
+        if !self.recovery.running() && sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
+            return Ok(());
+        }
+        let phase = if self.receipt_seen {
+            "after_receipt"
+        } else {
+            "session"
+        };
+        let live = Live {
+            workspace: &self.workspace,
+            run_dir: &self.run_dir,
+            allowed: &IDLE_PROCESS_ACTIONS,
+            exit_typed: false,
+            at_prompt: self.at_prompt(sv),
+            lands: false,
+        };
+        match self.recovery.watch_idle(sv, run, &live, phase)? {
+            LiveStep::Pending | LiveStep::Failed => Ok(()),
+            LiveStep::Repaired(applied) => {
+                if let Some((text, sent_at, submission)) = applied.sent {
+                    self.stall.input_sent(sent_at);
+                    self.answer_start = Some(StartCheck::new(
+                        "recovery instruction",
+                        &text,
+                        sent_at,
+                        &submission,
+                    ));
+                }
+                Ok(())
+            }
+            LiveStep::Escalate(attempt, escalation) if self.receipt_seen => {
+                leave_idle_to_phase(sv, run, attempt, &escalation, phase)
+            }
+            LiveStep::Escalate(attempt, escalation) => {
+                self.escalate_idle(sv, run, attempt, &escalation)
+            }
+        }
+    }
+
+    /// Raise the `idle_process` alert to the inbox as a `stalled` ask with
+    /// the idle processes, the job's diagnosis and why a person is needed,
+    /// and hand the ask to the [`StallWatch`].
+    fn escalate_idle(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        attempt: usize,
+        escalation: &Escalation,
+    ) -> Result<()> {
+        let alert = RecoveryAlert::IdleProcess;
+        let note = escalation.note(run, alert, attempt);
+        if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
+            escalation.record(sv, run, alert, attempt, &note, None, json!({}))?;
+            warn!(run_id = %run.id(), "run {}: {}; a stalled ask is already open, so no other is asked", run.id(), note.why);
+            return Ok(());
+        }
+        let idle = self.recovery.idle_processes();
+        let listed = idle
+            .iter()
+            .map(|p| {
+                format!(
+                    "pid {} (parent {}, {}s without progress, {}ms of CPU time in it): {}",
+                    p.pid,
+                    p.ppid,
+                    p.idle_secs,
+                    p.cpu_growth_ms,
+                    crate::application::tail(&p.command, 200)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let idle_secs = idle.iter().map(|p| p.idle_secs).max().unwrap_or(0);
+        let question = format!(
+            "The session of run {run_id} (task {task_id}) in workspace {workspace} has processes that have used almost no CPU time for over {threshold}s (alert: idle_process): {listed}. And {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop the processes, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
+            run_id = run.id(),
+            task_id = run.task_id(),
+            workspace = self.workspace,
+            threshold = sv.stall.idle_process_secs,
+            why = note.why,
+            text = note.text,
+        );
+        let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
+        for option in &note.options {
+            if !options.contains(option) {
+                options.push(option.clone());
+            }
+        }
+        let outcome = ask::ask(
+            &mut *sv.queue,
+            &sv.layout.repo_root,
+            NewAsk {
+                kind: AskKind::Stalled,
+                task_id: Some(run.task_id()),
+                run_id: Some(run.id().clone()),
+                question,
+                options,
+                asked_by: SessionRole::Supervisor.as_str().into(),
+                reason_category: note.category,
+                finding_id: None,
+            },
+            sv.cmux,
+        )?;
+        let id = AskId::new(outcome["id"].as_i64().context("ask returned no id")?);
+        let now = sv.files.now();
+        self.stall
+            .escalated(id, now, idle_secs, IDLE_PROCESS_THRESHOLD);
+        escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))?;
+        warn!(ask_id = %id, run_id = %run.id(), "run {}: {}; stalled ask {id} (notified: {})", run.id(), note.why, outcome["notified"]);
+        Ok(())
+    }
+
     /// The session holds its `/exit` back past the exit timeout: its
     /// recovery job (`stuck_exit`), and the `stuck_exit` ask once it
     /// escalates. A repair that answered a dialog or stopped processes
@@ -1174,14 +1469,13 @@ impl SessionWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<()> {
-        // A `long_background` job is only followed before the `/exit`: left
-        // running, it would hold this alert's job back for good.
-        self.recovery.stop_for(
-            sv,
-            run,
-            Some(RecoveryAlert::LongBackground),
-            "exit_requested",
-        );
+        // A `long_background` or `idle_process` job is only followed
+        // before the `/exit`: left running, it would hold this alert's job
+        // back for good.
+        for alert in [RecoveryAlert::LongBackground, RecoveryAlert::IdleProcess] {
+            self.recovery
+                .stop_for(sv, run, Some(alert), "exit_requested");
+        }
         let live = Live {
             workspace: &self.workspace,
             run_dir: &self.run_dir,
@@ -1287,8 +1581,7 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
         .iter()
         .map(|pid| (pid, own.iter().find(|p| p.pid == *pid)))
         .partition(|(_, found)| found.is_some());
-    let targets: Vec<&crate::domain::recovery::ProcessInfo> =
-        targets.into_iter().filter_map(|(_, found)| found).collect();
+    let targets: Vec<&ProcessInfo> = targets.into_iter().filter_map(|(_, found)| found).collect();
     for process in &targets {
         if let Err(error) = sv.processes.terminate(process.pid)
             && sv.processes.alive(process.pid)

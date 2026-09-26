@@ -38,6 +38,10 @@ pub(super) struct ExitWatch {
     pub(super) then: AfterExit,
 }
 
+/// The phase of an `idle_process` alert while the `/exit` after the review
+/// waits for background work.
+const EXIT_WAIT_PHASE: &str = "exit_wait";
+
 impl ExitWatch {
     pub(super) fn new(session: Option<SessionRef>, then: AfterExit) -> Self {
         Self {
@@ -144,8 +148,12 @@ impl ExitWatch {
                     self.background_noted = true;
                     info!(run_id = %run.id(), "session of {} has background work running; /exit waits for it", run.id());
                 }
+                self.watch_idle_processes(sv, run, &session.workspace)?;
             }
             None => {
+                // Idle processes are followed only before the /exit.
+                self.recovery
+                    .stop_for(sv, run, Some(RecoveryAlert::IdleProcess), "exit_requested");
                 // Recorded before sending: the session may exit, and its
                 // wrapper record `session_exited`, before the send returns.
                 let timeout = sv.cmux.exit_timeout();
@@ -221,6 +229,34 @@ impl ExitWatch {
             info!(run_id = %run.id(), "session of {} still has the background work it was waited for after its receipt; /exit goes without waiting again", run.id());
         }
         Ok(!waited_out)
+    }
+
+    /// While the `/exit` waits for background work (up to the resume
+    /// timeout): the `idle_process` alert of the session's processes (task
+    /// 469). The wait ends at the resume timeout by itself, and a held
+    /// `/exit` is the `stuck_exit` alert, so an escalation is left to them
+    /// ([`leave_idle_to_phase`]).
+    fn watch_idle_processes(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+    ) -> Result<()> {
+        let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
+        let live = Live {
+            workspace,
+            run_dir: &run_dir,
+            allowed: &IDLE_PROCESS_ACTIONS,
+            exit_typed: false,
+            at_prompt: false,
+            lands: false,
+        };
+        if let LiveStep::Escalate(attempt, escalation) =
+            self.recovery.watch_idle(sv, run, &live, EXIT_WAIT_PHASE)?
+        {
+            leave_idle_to_phase(sv, run, attempt, &escalation, EXIT_WAIT_PHASE)?;
+        }
+        Ok(())
     }
 
     /// The session holds its `/exit` back (or the `/exit` never reached

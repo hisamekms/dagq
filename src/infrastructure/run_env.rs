@@ -815,6 +815,7 @@ LITERAL = 'no \n escapes # here'
                 idle_without_receipt_secs: 600,
                 send_confirm_secs: crate::domain::stall::DEFAULT_SEND_CONFIRM_SECS,
                 background_alert_secs: 3600,
+                idle_process_secs: crate::domain::stall::DEFAULT_IDLE_PROCESS_SECS,
             }
         );
         assert_eq!(parse_config("").unwrap().stall, StallConfig::default());

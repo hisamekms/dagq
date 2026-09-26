@@ -50,7 +50,8 @@ struct Asked {
     /// Its answer is applied (its `stall_resolved` is recorded).
     applied: bool,
     /// The setting of the detection it came from: [`IDLE_THRESHOLD`], or
-    /// `background_alert_secs` for a recovery job's escalation.
+    /// `background_alert_secs` / `idle_process_secs` for a recovery job's
+    /// escalation.
     threshold: &'static str,
 }
 
@@ -172,19 +173,22 @@ impl StallWatch {
         }
         if let Some(ask) = queue.unclosed_stalled_ask(run.id())? {
             let applied = ask.answered_at.is_some() && resolved("ask", Some(ask.id));
-            // A recovery job's escalation names its ask (ADR-0047).
+            // A recovery job's escalation names its ask (ADR-0047), and its
+            // alert the setting it was judged by.
             let recovery = events
                 .iter()
-                .any(|e| e.kind == "recovery_finished" && e.payload["ask_id"] == json!(ask.id));
+                .find(|e| e.kind == "recovery_finished" && e.payload["ask_id"] == json!(ask.id));
             watch.asked = Some(Asked {
                 id: ask.id,
                 at: at_unix(ask.created_at + 1),
                 detected_after_secs: 0,
                 applied,
-                threshold: if recovery {
-                    BACKGROUND_THRESHOLD
-                } else {
-                    IDLE_THRESHOLD
+                threshold: match recovery {
+                    Some(e) if e.payload["alert"] == RecoveryAlert::IdleProcess.as_str() => {
+                        IDLE_PROCESS_THRESHOLD
+                    }
+                    Some(_) => BACKGROUND_THRESHOLD,
+                    None => IDLE_THRESHOLD,
                 },
             });
             if applied {
@@ -244,10 +248,10 @@ impl StallWatch {
             "phase": PHASE,
             "detection": detection,
             "threshold": threshold,
-            "threshold_secs": if threshold == BACKGROUND_THRESHOLD {
-                sv.stall.background_alert_secs
-            } else {
-                sv.stall.idle_without_receipt_secs
+            "threshold_secs": match threshold {
+                BACKGROUND_THRESHOLD => sv.stall.background_alert_secs,
+                IDLE_PROCESS_THRESHOLD => sv.stall.idle_process_secs,
+                _ => sv.stall.idle_without_receipt_secs,
             },
             "detected_after_secs": detected_after_secs,
             "outcome": outcome,
