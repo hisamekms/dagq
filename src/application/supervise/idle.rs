@@ -141,6 +141,11 @@ mod tests {
     }
 
     #[test]
+    fn the_transcript_is_the_whole_screen_by_default() {
+        assert_eq!(Signals.transcript("work\n❯\n12:04"), "work\n❯\n12:04");
+    }
+
+    #[test]
     fn idle_marker_is_idle_unless_background_work_runs() {
         let files = MemoryFiles::default();
         let marker = Path::new("/run/idle.json");

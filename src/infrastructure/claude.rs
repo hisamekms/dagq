@@ -228,11 +228,24 @@ fn is_rule(line: &str) -> bool {
 /// when a dialog replaced the box, or once Claude Code exited and left its
 /// last frame above `Resume this session with:`.
 fn input_box(screen: &str) -> Option<Vec<&str>> {
-    let lines: Vec<&str> = screen
+    let lines = framed_lines(screen);
+    let (open, close) = input_box_rows(&lines)?;
+    Some(lines[open..close].to_vec())
+}
+
+/// The non-empty lines of a screen, frame stripped, as [`input_box`] and
+/// [`transcript`] read them.
+fn framed_lines(screen: &str) -> Vec<&str> {
+    screen
         .lines()
         .map(strip_frame)
         .filter(|line| !line.is_empty())
-        .collect();
+        .collect()
+}
+
+/// Where the input box is in `lines` ([`framed_lines`]): its first line
+/// (the prompt line, just under the rule above it) and the closing rule.
+fn input_box_rows(lines: &[&str]) -> Option<(usize, usize)> {
     let close = (lines.len().saturating_sub(INPUT_FOOTER_LINES + 1)..lines.len())
         .rev()
         .find(|&i| is_rule(lines[i]))?;
@@ -244,8 +257,20 @@ fn input_box(screen: &str) -> Option<Vec<&str>> {
     }
     let open = (0..close).rev().find(|&i| is_rule(lines[i]))? + 1;
     let prompt = lines.get(open).filter(|_| open < close)?;
-    (prompt.starts_with(['❯', '>', '!']) && option_text(prompt).is_none())
-        .then(|| lines[open..close].to_vec())
+    (prompt.starts_with(['❯', '>', '!']) && option_text(prompt).is_none()).then_some((open, close))
+}
+
+/// The transcript of a screen: the lines above the input box's rule, the
+/// part only the agent's work changes (task 319). What Claude Code draws
+/// under the box (the status line with its clock and cost, hints,
+/// notifications) and the box itself are left out. A screen without the
+/// box is all transcript.
+pub fn transcript(screen: &str) -> String {
+    let lines = framed_lines(screen);
+    match input_box_rows(&lines) {
+        Some((open, _)) => lines[..open - 1].join("\n"),
+        None => lines.join("\n"),
+    }
 }
 
 /// Whether Claude Code's input box is drawn and no dialog is on the
@@ -361,6 +386,10 @@ impl AgentSignals for ClaudeCode {
 
     fn working(&self, screen: &str) -> bool {
         agent_working(screen)
+    }
+
+    fn transcript(&self, screen: &str) -> String {
+        transcript(screen)
     }
 
     fn known_dialog(&self, screen: &str) -> Option<DialogAnswer> {
@@ -719,6 +748,86 @@ worktree on  dagq/68a96a60 took 8h32m49s
         // A dialog scrolled far above the bottom no longer counts.
         let scrolled = format!("{AUTO_MODE}{}", "output line\n".repeat(PROMPT_SCAN_LINES));
         assert_eq!(detect_prompt(&scrolled), None);
+    }
+
+    /// The resolution request just submitted: echoed in the transcript,
+    /// the box empty, the status line under it at one time and cost.
+    const SUBMITTED: &str = "\
+⏺ The receipt is written; the run is ready for review.
+
+> dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.
+  Reason: rebase conflicted in src/runtime.rs ...
+
+──────────────────────────────────────────────────────────────────────
+❯\u{a0}
+──────────────────────────────────────────────────────────────────────
+  Opus 5.5 · $1.84 · 12:04:31 · ctx 42%
+  ⏵⏵ auto mode on (shift+tab to cycle)
+";
+
+    /// [`SUBMITTED`] a minute on with nothing done: only the status
+    /// line's clock and cost moved, and a notification came up.
+    const SUBMITTED_TICKED: &str = "\
+⏺ The receipt is written; the run is ready for review.
+
+> dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.
+  Reason: rebase conflicted in src/runtime.rs ...
+
+──────────────────────────────────────────────────────────────────────
+❯\u{a0}
+──────────────────────────────────────────────────────────────────────
+  Opus 5.5 · $1.86 · 12:05:31 · ctx 42%
+  ⏵⏵ auto mode on (shift+tab to cycle)       ✓ Update installed · Restart to apply
+";
+
+    /// [`SUBMITTED`] after the agent took the request up.
+    const SUBMITTED_ANSWERED: &str = "\
+⏺ The receipt is written; the run is ready for review.
+
+> dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.
+  Reason: rebase conflicted in src/runtime.rs ...
+
+⏺ Bash(git status)
+  ⎿  interactive rebase in progress; onto 3da0244
+
+──────────────────────────────────────────────────────────────────────
+❯\u{a0}
+──────────────────────────────────────────────────────────────────────
+  Opus 5.5 · $1.92 · 12:05:31 · ctx 43%
+  ⏵⏵ auto mode on (shift+tab to cycle)
+";
+
+    #[test]
+    fn transcript_leaves_out_the_input_box_and_what_is_under_it() {
+        assert_eq!(
+            transcript(SUBMITTED),
+            "⏺ The receipt is written; the run is ready for review.\n\
+             > dagq: integrate could not land run f8f7c65d (task 221) and returned needs_session.\n\
+             Reason: rebase conflicted in src/runtime.rs ..."
+        );
+        // A clock, a cost or a notification under the box is no change.
+        assert_eq!(transcript(SUBMITTED), transcript(SUBMITTED_TICKED));
+        assert_ne!(transcript(SUBMITTED), transcript(SUBMITTED_ANSWERED));
+        // Nor is text typed into the box, or the slash menu under it.
+        let typed = SUBMITTED.replace("❯\u{a0}", "❯ /exit") + "  /exit   Exit the REPL\n";
+        assert_eq!(transcript(SUBMITTED), transcript(&typed));
+        assert_eq!(transcript(EXIT_PENDING), "");
+        assert_eq!(transcript(LONG_PENDING), "");
+        assert_eq!(transcript(READY_BOXED), "");
+        // The transcript of a working session ends at its spinner.
+        assert!(transcript(WORK).ends_with("✽ Compiling… (esc to interrupt)"));
+        // A screen without the box is all transcript.
+        for screen in [BOOT, BOOT_BANNER, TRUST, EXITED] {
+            assert_eq!(
+                transcript(screen),
+                framed_lines(screen).join("\n"),
+                "{screen}"
+            );
+        }
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        assert_eq!(claude.transcript(SUBMITTED), transcript(SUBMITTED_TICKED));
     }
 
     #[test]

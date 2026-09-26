@@ -474,6 +474,13 @@ pub trait AgentSignals {
     fn input_pending(&self, screen: &str, text: &str) -> bool;
     /// Whether the screen shows the agent at work on a turn.
     fn working(&self, screen: &str) -> bool;
+    /// The part of `screen` only the agent's work changes (its
+    /// transcript), compared for a sign of work after a submit: what the
+    /// TUI redraws by itself (a clock, a cost, a notification) is left
+    /// out. The whole screen by default.
+    fn transcript(&self, screen: &str) -> String {
+        screen.to_owned()
+    }
     /// The dialog of the fixed list the supervisor answers by rule
     /// (ADR-0047 decision 29) at the bottom of `screen`, with the keys that
     /// answer it, or `None` for any other screen, however much a dialog.

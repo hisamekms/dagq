@@ -262,7 +262,7 @@ pub(super) fn ask_unsubmitted(
 /// request or an answer, of whether it took it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StartSign {
-    /// At work, or the screen moved on since the submit.
+    /// At work, or the transcript moved on since the submit.
     Started,
     /// A dialog holds the session.
     Dialog(&'static str),
@@ -274,7 +274,10 @@ pub(super) enum StartSign {
 }
 
 /// Judge `screen`, read a while after `text` was submitted, against
-/// `submitted` (the screen read right after the submit, if any).
+/// `submitted` (the screen read right after the submit, if any). Only a
+/// change of the transcript ([`AgentSignals::transcript`]) is a sign of
+/// work: a status line whose clock or cost ticks, or a notification under
+/// the input box, does not hide a lost text (task 319).
 pub(super) fn start_sign(
     signals: &dyn AgentSignals,
     screen: &str,
@@ -284,7 +287,9 @@ pub(super) fn start_sign(
     if let Some(kind) = signals.detect_prompt(screen) {
         return StartSign::Dialog(kind);
     }
-    if signals.working(screen) || submitted.is_some_and(|before| before != screen) {
+    if signals.working(screen)
+        || submitted.is_some_and(|before| signals.transcript(before) != signals.transcript(screen))
+    {
         return StartSign::Started;
     }
     if signals.input_ready(screen) && !signals.input_pending(screen, text) {
@@ -296,7 +301,7 @@ pub(super) fn start_sign(
 
 /// Watches a request or an answer sent to a live session until the session
 /// shows a sign of work: its idle marker written after it, the agent at
-/// work, or its screen changed. With none after `start_wait`, a text the
+/// work, or its transcript changed. With none after `start_wait`, a text the
 /// input box lost is sent once more (`submit_resent`); otherwise, or when
 /// that is lost too, the run records `submit_not_started` and the inbox is
 /// asked, instead of waiting out the resume timeout.
@@ -561,12 +566,21 @@ mod tests {
     }
 
     /// Screens as words: `ready`, `pending:<text>` (in the box), `dialog`,
-    /// `working`, `boot`.
+    /// `working`, `boot`, each maybe followed by `|<status line>` under
+    /// the input box, which is not transcript.
     struct Signals;
+
+    /// The screen word of `screen`, its status line cut off.
+    fn word(screen: &str) -> &str {
+        screen.split('|').next().unwrap_or_default()
+    }
 
     impl AgentSignals for Signals {
         fn detect_prompt(&self, screen: &str) -> Option<&'static str> {
-            (screen == "dialog").then_some("choice")
+            (word(screen) == "dialog").then_some("choice")
+        }
+        fn transcript(&self, screen: &str) -> String {
+            word(screen).to_owned()
         }
         fn screen_excerpt(&self, screen: &str) -> String {
             screen.to_owned()
@@ -575,13 +589,13 @@ mod tests {
             IdleHook::default()
         }
         fn input_ready(&self, screen: &str) -> bool {
-            screen == "ready" || screen.starts_with("pending:")
+            word(screen) == "ready" || screen.starts_with("pending:")
         }
         fn input_pending(&self, screen: &str, text: &str) -> bool {
-            screen.strip_prefix("pending:") == Some(text)
+            word(screen).strip_prefix("pending:") == Some(text)
         }
         fn working(&self, screen: &str) -> bool {
-            screen == "working"
+            word(screen) == "working"
         }
     }
 
@@ -667,6 +681,29 @@ mod tests {
             StartSign::Held
         );
         assert_eq!(start_sign(&Signals, "boot", None, TEXT), StartSign::Held);
+    }
+
+    #[test]
+    fn start_sign_takes_no_ticking_status_line_for_work() {
+        // Only the status line's clock and cost moved: the text was lost.
+        assert_eq!(
+            start_sign(
+                &Signals,
+                "ready|12:05 $1.86",
+                Some("ready|12:04 $1.84"),
+                TEXT
+            ),
+            StartSign::Lost
+        );
+        assert_eq!(
+            start_sign(&Signals, "boot|12:05", Some("boot|12:04"), TEXT),
+            StartSign::Held
+        );
+        // The transcript above the box moved: a sign of work.
+        assert_eq!(
+            start_sign(&Signals, "ready|12:05", Some("boot|12:04"), TEXT),
+            StartSign::Started
+        );
     }
 
     #[test]
