@@ -10,6 +10,8 @@ supersedes:
   - adr-0019
   - adr-0043
   - adr-0044
+amended_by:
+  - adr-t609-1
 owners:
   - hisamekms
 tags:

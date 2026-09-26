@@ -92,7 +92,7 @@ a run whose resumes are used up is failed with its resume_exhausted alert)
       job failed → triage_failed (triage by hand, read as recover by hand)
 live session alert (long_background, stuck_exit, prompt_waiting)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
-    a failed job → recovery_failed (recover by hand)
+    a failed job → recovery_failed (recover by hand); ADR-t609-1 turns it into the alert's ask (task 562)
 ```
 
 各節は`supervisor-lifecycle/`の下の別のファイルにある。下の見出しは各ファイルへの目次で、以前この文書の中にあった節へのリンク（見出しのanchor）もここに届く。
