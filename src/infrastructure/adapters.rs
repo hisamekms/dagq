@@ -2156,6 +2156,9 @@ pub fn claude_trusts_repository(config: &Path, root: &Path) -> Result<bool> {
 /// environment and, being a non-empty environment from flag settings, keeps
 /// the "Teach auto mode about your environment?" dialog from opening in a
 /// run session (docs/design/provider-lifecycle.md).
+///
+/// `permissions.deny` refuses [`SIGNAL_BY_NAME_DENIED`]: the session may
+/// stop what it started by pid, never processes picked by name or pattern.
 pub fn stop_hook_settings(idle_marker: &Path) -> Result<String> {
     let log = path_text(&idle_marker.with_file_name(IDLE_LOG))?;
     let marker = path_text(idle_marker)?;
@@ -2174,11 +2177,22 @@ pub fn stop_hook_settings(idle_marker: &Path) -> Result<String> {
                 "hooks": [{"type": "command", "command": command, "timeout": 10}]
             }]
         },
+        "permissions": {
+            "deny": SIGNAL_BY_NAME_DENIED
+        },
         "autoMode": {
             "environment": ["$defaults"]
         }
     }))?)
 }
+
+/// The Bash permission rules a session's settings deny: commands that
+/// signal processes chosen by name or pattern. Every run session's command
+/// line holds its prompt, which names the checks (`cargo test`, `cargo
+/// llvm-cov`), so a worker's `pkill -f llvm-cov` also ended the other
+/// runs' sessions (exit 143) and `integrate`'s checks (task 359). Claude
+/// Code applies a deny rule to each command of a `;` / `&&` chain.
+pub const SIGNAL_BY_NAME_DENIED: [&str; 2] = ["Bash(pkill:*)", "Bash(killall:*)"];
 
 #[cfg(test)]
 mod tests {

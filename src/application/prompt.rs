@@ -214,7 +214,10 @@ pub fn siblings_in_progress(task: &Task, in_progress: Vec<Task>) -> Vec<Task> {
 /// session to stop its own background work before the receipt: a leftover
 /// background shell makes Claude Code answer the supervisor's `/exit` with a
 /// confirmation screen, and the exit request times out.
-pub const STOP_BACKGROUND: &str = "Before writing the receipt, stop every background process you started (run_in_background shells, wait loops, watches); if any is left, /exit stops at a confirmation screen.";
+/// Its last clause keeps a session from signalling by name or pattern: every
+/// run session's command line holds its prompt, so `pkill -f llvm-cov` from
+/// one worker ended the others' sessions and `integrate`'s checks (task 359).
+pub const STOP_BACKGROUND: &str = "Before writing the receipt, stop every background process you started (run_in_background shells, wait loops, watches); if any is left, /exit stops at a confirmation screen. Stop only what you started, by its pid or task; never signal by name or pattern (pkill, killall, kill $(pgrep ...)), which also hits other runs' sessions and checks on this host.";
 
 /// What a worker reads before it starts, and nothing more: everything else
 /// about its run is in the prompt, and reading the queue or the whole docs

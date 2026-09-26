@@ -1594,6 +1594,13 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
     // A non-empty auto mode environment from flag settings keeps the
     // "Teach auto mode" dialog away; `$defaults` keeps the built-in entries.
     assert_eq!(parsed["autoMode"]["environment"], json!(["$defaults"]));
+    // The session never signals processes by name or pattern: other runs'
+    // sessions carry their prompts, and so the checks' names, in their
+    // command lines (task 359).
+    assert_eq!(
+        parsed["permissions"]["deny"],
+        json!(["Bash(pkill:*)", "Bash(killall:*)"])
+    );
     let hook = &parsed["hooks"]["Stop"][0]["hooks"][0];
     assert_eq!(hook["type"], "command");
     // Run the hook exactly as Claude would: shell command, event JSON on stdin.

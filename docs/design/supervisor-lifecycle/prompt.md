@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -27,7 +27,7 @@ related:
 
 判断が要るときの手順も載せる: terminalに質問を書いて待つのではなく、worktreeで`dagq ask --run <run-id> --kind worker_question --question '...'`を打ち、短く報告して止まる。回答は`answer to ask <id>: ...`としてterminalに届く（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。
 
-末尾の「receiptを書いたら短く報告して止まる」の直前に`STOP_BACKGROUND`の一文を置く: receiptを書く前に、自分が起動したbackgroundの処理（`run_in_background`のshell、待ちループ、watchなど）をすべて止める。残っているとClaude Codeが`/exit`に「Background work is running — Exit and stop tasks / Move to background and exit / Stay」の確認画面を出して止まり、`exit_request_timed_out`になる（2026-09-23にtask 49・75・74・118で起きた）。同じ一文をresumeの定型の解消依頼（[`needs_session`](needs-session.md#needs_session)）にも手順4として載せる。残った確認画面は、`/exit`のexit timeoutでsupervisorが画面を読み、worktreeがcleanでreceiptの`commit`がHEADのときだけ「Exit and stop tasks」を選ぶ（ADR-0047の決定29。[既知のダイアログ](prompt-waiting.md#既知のダイアログ)）。条件がそろわなければ今までどおり`stuck_exit`のaskになる。
+末尾の「receiptを書いたら短く報告して止まる」の直前に`STOP_BACKGROUND`の一文を置く: receiptを書く前に、自分が起動したbackgroundの処理（`run_in_background`のshell、待ちループ、watchなど）をすべて止める。残っているとClaude Codeが`/exit`に「Background work is running — Exit and stop tasks / Move to background and exit / Stay」の確認画面を出して止まり、`exit_request_timed_out`になる（2026-09-23にtask 49・75・74・118で起きた）。同じ一文をresumeの定型の解消依頼（[`needs_session`](needs-session.md#needs_session)）にも手順4として載せる。残った確認画面は、`/exit`のexit timeoutでsupervisorが画面を読み、worktreeがcleanでreceiptの`commit`がHEADのときだけ「Exit and stop tasks」を選ぶ（ADR-0047の決定29。[既知のダイアログ](prompt-waiting.md#既知のダイアログ)）。条件がそろわなければ今までどおり`stuck_exit`のaskになる。同じ定数の後半は、止めるのは自分が起動したものだけをpidかtaskで、名前やパターン（`pkill`、`killall`、`kill $(pgrep ...)`）では送らないと書く。どのrunのsessionもcommand lineにpromptを持つので、`pkill -f llvm-cov`が他のrunのsessionと`integrate`の検証を止めた（task 359。設定側の`permissions.deny`は[provider lifecycle](../provider-lifecycle.md)）。
 
 verification commandsは`Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):`の見出しで一覧を見せ、その直後に`local_checks`の一文を置く: worktreeで流すのはrepositoryの指示（AGENTS.mdかCLAUDE.md）がworkerに求める検証で、それはverification commandsの一部をintegrateに任せてよく、指示が何も求めないときはverification commandsを流す。同じ一文をresume（`evidence_missing`・`scope_violation`・`sent_back`・triage・rebase（`Landing`）・reviewのpass後の衝突（`Precheck`））とreviseの手順2にも載せ（そこではverification commandsをJSONの一覧で書く）、integrateのrebase（`Landing`）の手順2には「reasonがintegrateのrebase後に落ちた検証コマンドなら、そのコマンドを手元で流して再現して直してよい」を足す。retryが引き継いだrunの節も「上の検証を流し直す」と書く。runtimeはcargoやllvm-covなど特定のツールの名前を決め打ちしない（dagqは他のrepositoryでも動く。どの検証をintegrateだけに任せるかはrepositoryの指示が決める）（task 510）。新しいADRは作らない: [ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定1の「同じcommitのverificationはintegrateの1回が正」に沿ってpromptの文面を直すだけで、決定は変わらないため。
 
