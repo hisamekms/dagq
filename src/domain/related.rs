@@ -6,7 +6,7 @@
 //! The clues and their weights (docs/design/persistence.md lists them):
 //! declared `paths` that overlap, file names, test names (snake_case
 //! identifiers of three or more words, `--test NAME`, and the module of
-//! `--test it <module>::`), ADR numbers and
+//! `--test it <module>::`), ADR IDs (`ADR-0046`, `ADR-t598-1`) and
 //! task numbers in the texts, follow-ups of the same run, the same goal,
 //! and how strongly the index matches one title against the other task
 //! (`search`). A clue many tasks share counts less: its weight is scaled by
@@ -64,8 +64,26 @@ pub struct RelatedDoc {
 pub struct TextClues {
     pub files: BTreeSet<String>,
     pub tests: BTreeSet<String>,
-    pub adrs: BTreeSet<u32>,
+    pub adrs: BTreeSet<AdrId>,
     pub tasks: BTreeSet<i64>,
+}
+
+/// An ADR's ID: the four-digit number of the ADRs before ADR-t598-1, or the
+/// ID and branch number of the task that wrote it (`ADR-t<task>-<N>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AdrId {
+    Number(u32),
+    Task(i64, u32),
+}
+
+impl std::fmt::Display for AdrId {
+    /// `0046` or `t598-1`, the ID after `ADR-`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(number) => write!(f, "{number:04}"),
+            Self::Task(task, branch) => write!(f, "t{task}-{branch}"),
+        }
+    }
 }
 
 string_enum!(ClueKind {
@@ -121,7 +139,7 @@ pub fn rarity(df: usize, n: usize) -> f64 {
     (((n + 1.0) / df).ln() / full).clamp(0.0, 1.0)
 }
 
-/// Files, test names, ADR numbers and task numbers named in `text`.
+/// Files, test names, ADR IDs and task numbers named in `text`.
 pub fn text_clues(text: &str) -> TextClues {
     let mut clues = TextClues::default();
     add_text_clues(&mut clues, text);
@@ -133,7 +151,7 @@ fn add_text_clues(clues: &mut TextClues, text: &str) {
         if let Some(file) = file_name(word) {
             clues.files.insert(file.to_owned());
         }
-        if let Some(adr) = adr_number(word) {
+        if let Some(adr) = adr_id(word) {
             clues.adrs.insert(adr);
         }
         let word = word.trim_end_matches('.');
@@ -212,15 +230,71 @@ fn file_name(word: &str) -> Option<&str> {
     .then_some(word)
 }
 
-/// `ADR-0046`, `adr-0046` or `docs/adr/0046-...`.
-fn adr_number(word: &str) -> Option<u32> {
+/// `ADR-0046`, `adr-0046` or `docs/adr/0046-...`, and `ADR-t598-1`,
+/// `adr-t598-1` or `docs/adr/2026-09-26-t598-1-...`: the first `adr-` or
+/// `adr/` in `word` that one of them follows, so a slug such as
+/// `0042-adr-is-...` or `t598-1-adr-id-...` does not hide the ID before it.
+fn adr_id(word: &str) -> Option<AdrId> {
     let lower = word.to_ascii_lowercase();
-    let rest = lower
-        .find("adr-")
-        .map(|i| &lower[i + 4..])
-        .or_else(|| lower.find("adr/").map(|i| &lower[i + 4..]))?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    (digits.len() == 4).then(|| digits.parse().ok()).flatten()
+    lower.match_indices("adr").find_map(|(i, _)| {
+        let rest = &lower[i + 3..];
+        if let Some(rest) = rest.strip_prefix('-') {
+            task_adr(rest).or_else(|| numbered_adr(rest))
+        } else if let Some(rest) = rest.strip_prefix('/') {
+            // A file named by date is never a numbered ADR, even when its ID
+            // is malformed.
+            let b = rest.as_bytes();
+            let dated = b.len() >= 11
+                && b[..10].iter().enumerate().all(|(k, c)| {
+                    if k == 4 || k == 7 {
+                        *c == b'-'
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                })
+                && b[10] == b'-';
+            if dated {
+                dated_adr(rest)
+            } else {
+                numbered_adr(rest)
+            }
+        } else {
+            None
+        }
+    })
+}
+
+/// The leading ASCII digits of `text` and what follows them.
+fn leading_digits(text: &str) -> (&str, &str) {
+    text.split_at(text.bytes().take_while(u8::is_ascii_digit).count())
+}
+
+/// `0046` at the start of `rest`: exactly four digits.
+fn numbered_adr(rest: &str) -> Option<AdrId> {
+    let (digits, _) = leading_digits(rest);
+    (digits.len() == 4)
+        .then(|| digits.parse().ok().map(AdrId::Number))
+        .flatten()
+}
+
+/// `t598-1` at the start of `rest`.
+fn task_adr(rest: &str) -> Option<AdrId> {
+    let (task, rest) = leading_digits(rest.strip_prefix('t')?);
+    let (branch, _) = leading_digits(rest.strip_prefix('-')?);
+    Some(AdrId::Task(task.parse().ok()?, branch.parse().ok()?))
+}
+
+/// `2026-09-26-t598-1` at the start of `rest`, a file name's date and ID.
+fn dated_adr(rest: &str) -> Option<AdrId> {
+    let mut rest = rest;
+    for width in [4, 2, 2] {
+        let (digits, after) = leading_digits(rest);
+        if digits.len() != width {
+            return None;
+        }
+        rest = after.strip_prefix('-')?;
+    }
+    task_adr(rest)
 }
 
 /// The shape of a test function's name: lowercase snake_case of at least
@@ -306,7 +380,7 @@ struct RelatedIndex<'a> {
     clues: Vec<TextClues>,
     files: HashMap<String, usize>,
     tests: HashMap<String, usize>,
-    adrs: HashMap<u32, usize>,
+    adrs: HashMap<AdrId, usize>,
     mentions: HashMap<i64, usize>,
     globs: HashMap<String, usize>,
     goals: HashMap<i64, usize>,
@@ -466,7 +540,7 @@ fn score_pair(
     for adr in ca.adrs.intersection(&cb.adrs) {
         push(
             ClueKind::Adr,
-            format!("{adr:04}"),
+            adr.to_string(),
             ADR_WEIGHT * rarity(index.adrs[adr], n),
         );
     }
@@ -563,7 +637,7 @@ mod tests {
                 "resume_prompt_delay".into(),
             ])
         );
-        assert_eq!(clues.adrs, set(&[41, 46]));
+        assert_eq!(clues.adrs, set(&[AdrId::Number(41), AdrId::Number(46)]));
         assert_eq!(clues.tasks, set(&[7, 8, 9, 11, 121, 153, 164, 203]));
         assert_eq!(
             text_clues("タスク 12 と task\u{3000}13").tasks,
@@ -571,6 +645,44 @@ mod tests {
         );
         assert!(text_clues("--test").tests.is_empty());
         assert!(text_clues("--test Foo-bar").tests.is_empty());
+    }
+
+    #[test]
+    fn adrs_named_by_task_id_are_one_clue_however_written() {
+        let adrs = |text| text_clues(text).adrs;
+        let t598_1 = AdrId::Task(598, 1);
+        for text in [
+            "ADR-t598-1",
+            "adr-t598-1 の決定 1",
+            "docs/adr/2026-09-26-t598-1-adr-id-is-task-id.md",
+            "[ADR-t598-1](2026-09-26-t598-1-slug.md)",
+            "id: adr-t598-1",
+        ] {
+            assert_eq!(adrs(text), set(&[t598_1]), "{text}");
+        }
+        assert_eq!(
+            adrs("ADR-t598-1 と ADR-t598-2、docs/adr/2026-09-27-t598-2-x.md"),
+            set(&[t598_1, AdrId::Task(598, 2)])
+        );
+        assert_eq!(adrs("ADR-t12-3"), set(&[AdrId::Task(12, 3)]));
+        assert_eq!(t598_1.to_string(), "t598-1");
+        assert_eq!(AdrId::Number(46).to_string(), "0046");
+        for text in [
+            "ADR-t598",
+            "ADR-t-1",
+            "adr-tx-1",
+            "docs/adr/2026-09-26-x598-1-x.md",
+            "docs/adr/t598-1-x.md",
+        ] {
+            assert!(adrs(text).is_empty(), "{text}");
+        }
+        // The four-digit numbers read as before, and a date is not one.
+        assert_eq!(
+            adrs("ADR-0046、adr-0041、docs/adr/0042-adr-is-superseded.md、adr-12、adr-00461"),
+            set(&[AdrId::Number(41), AdrId::Number(42), AdrId::Number(46)])
+        );
+        assert_eq!(adrs("docs/adr/2026-09-26-slug.md"), set(&[]));
+        assert_eq!(adrs("docs/adr/0046-2nd-x.md"), set(&[AdrId::Number(46)]));
     }
 
     #[test]

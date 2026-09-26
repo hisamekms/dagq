@@ -227,7 +227,7 @@ SQLiteはCHECK制約を変更できないため、statusの追加はtableの作�
 `dagq related TASK`（[ADR-0046](../adr/0046-full-text-search-related-and-duplicate-of.md)の決定4）は、表を足さずに既存の表と`search_index`を読む。読むのは`src/infrastructure/related.rs`、手がかりの取り出しと点数は`src/domain/related.rs`。
 
 - **読むもの**: すべての状態のtaskの`title` / `description` / `acceptance` / `context` / `goal_id` / `paths`、`landed_commits`の`message`（completedのtaskの本文に足す）、`run_events`のkind `follow_up_registered`（行の`run_id`と`task_id`が提案したrunとそのtask、payloadの`task_id`が登録されたtask）、今`canceled`のtaskの最後の`task_status_changed`（`to: canceled`）のpayloadの`duplicate_of`（決定5。無ければ出さない）。
-- **本文の手がかり**: ASCIIの英数字と`_-./*`の連なりを語として取り出す。ファイル名は拡張子が`rs` / `md` / `sql` / `toml` / `sh` / `json` / `yml` / `yaml`の語（前の`./`と後ろの`.`を除き、書かれたとおりの文字列で比べる。`tests/runtime.rs`と`runtime.rs`は別の手がかり）。テスト名は英小文字・数字の3語以上のsnake_case（`resume_prompt_delay`のような識別子も同じ形なので拾う）と、`--test NAME`の`NAME`。ただし`NAME`が`it`（e2eとplugin以外のintegration testをまとめた1つのtest binary。ADR-0078）のときは`it`を拾わず（ほぼ全taskが共有して意味がない）、直後の語が`<module>::`か`<module>::<test>`の形の英小文字・数字・`_`の識別子ならその`<module>`（最初の`::`の前）を拾う。`--test it`だけで絞り込みが無ければ何も拾わない（`<test>`の部分は3語以上のsnake_caseの規則で拾われる）。ADR番号は`ADR-NNNN` / `adr-NNNN` / `docs/adr/NNNN-`の4桁。task番号は`task` / `tasks` / `タスク`の後の数字で、`task 203,164`、`task 178 と 179`のような列挙も読む（自分の番号は除く）。
+- **本文の手がかり**: ASCIIの英数字と`_-./*`の連なりを語として取り出す。ファイル名は拡張子が`rs` / `md` / `sql` / `toml` / `sh` / `json` / `yml` / `yaml`の語（前の`./`と後ろの`.`を除き、書かれたとおりの文字列で比べる。`tests/runtime.rs`と`runtime.rs`は別の手がかり）。テスト名は英小文字・数字の3語以上のsnake_case（`resume_prompt_delay`のような識別子も同じ形なので拾う）と、`--test NAME`の`NAME`。ただし`NAME`が`it`（e2eとplugin以外のintegration testをまとめた1つのtest binary。ADR-0078）のときは`it`を拾わず（ほぼ全taskが共有して意味がない）、直後の語が`<module>::`か`<module>::<test>`の形の英小文字・数字・`_`の識別子ならその`<module>`（最初の`::`の前）を拾う。`--test it`だけで絞り込みが無ければ何も拾わない（`<test>`の部分は3語以上のsnake_caseの規則で拾われる）。ADRのIDは、4桁の番号の`ADR-NNNN` / `adr-NNNN` / `docs/adr/NNNN-`と、書いたtaskのIDと枝番の`ADR-t<ID>-<N>` / `adr-t<ID>-<N>` / `docs/adr/<YYYY-MM-DD>-t<ID>-<N>-`（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)の決定1）。大文字小文字と書き方を問わず同じADRは同じ手がかりで、枝番の違うADR（`t598-1`と`t598-2`）は別の手がかり。語の中の`adr-` / `adr/`を前から順に見て、IDが続く最初のものを拾う（slugの`adr-is-...`に前のIDを隠されない）。日付（`YYYY-MM-DD-`）で始まる`docs/adr/`のファイル名は4桁の番号として読まない。手がかりの値（`adr`のclueのvalue）は`ADR-`の後のIDで、`0046`や`t598-1`。task番号は`task` / `tasks` / `タスク`の後の数字で、`task 203,164`、`task 178 と 179`のような列挙も読む（自分の番号は除く）。
 - **点数**: 手がかりごとの重みの和。重みは全体で共有するtaskの数`df`（taskの総数`n`）で`rarity = ln((n+1)/df) / ln((n+1)/2)`（2件だけが共有すれば1、全件なら0）を掛けて割り引く。
 
   | 手がかり | `clue` | 重み |
@@ -235,7 +235,7 @@ SQLiteはCHECK制約を変更できないため、statusの追加はtableの作�
   | 宣言したglobが同じか一方が他方に一致する（`src/**`と`src/domain/*.rs`） | `path` | 1.0 × rarity（対象のglobごとに1回、2つのglobのうち多く使われる方のdf） |
   | 同じファイル名 | `file` | 2.0 × rarity |
   | 同じテスト名 | `test` | 3.0 × rarity |
-  | 同じADR番号 | `adr` | 2.0 × rarity |
+  | 同じADR | `adr` | 2.0 × rarity |
   | 対象が候補の番号を書いている / 候補が対象の番号を書いている | `mentions` / `mentioned_by` | 3.0 |
   | 両方が同じ別のtaskの番号を書いている | `shared_mention` | 2.0 × rarity |
   | 一方が他方のrunのfollow_upとして登録された | `follow_up_of` | 3.0 |
