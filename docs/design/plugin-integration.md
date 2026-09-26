@@ -19,6 +19,8 @@ related:
   - adr-0028
   - adr-0030
   - adr-0048
+  - adr-t617-1
+  - adr-t617-2
 ---
 
 # Claude Code and Codex plugin integration
@@ -163,6 +165,15 @@ claude plugin install claude-dagq@dagq
 ```
 
 `add`はGitHubのrepositoryをcloneし、`install`はそのcloneの`./plugins/claude-dagq`からuser scopeに入れる。更新は`claude plugin marketplace update dagq`と`claude plugin update claude-dagq@dagq`。pluginはskillと`SessionStart` / `SessionEnd` hookだけでinstallに`-y`を要する宣言commandはなく、runtimeバイナリは同梱しない（Releaseから別に入れる。launcherのエラー文がその手順を持つ）。
+
+**決定済み・未実装（[ADR-t617-1](../adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)、[ADR-t617-2](../adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)）**: 実装が入るまでは上のとおりmainのHEADのpluginを配る。実装後の姿は次のとおり。
+
+- marketplaceのentryの`source`は`{"source": "git-subdir", "url": "hisamekms/dagq", "path": "plugins/claude-dagq", "ref": "v<X.Y.Z>"}`で、`ref`は最新のリリースのtag。entryに`version`は書かない（versionはtagの`plugins/claude-dagq/.claude-plugin/plugin.json`の`X.Y.Z`になり、cacheは`~/.claude/plugins/cache/dagq/claude-dagq/<X.Y.Z>/`）。利用者の導線（`marketplace add hisamekms/dagq`・`install claude-dagq@dagq`・`plugin update claude-dagq@dagq`）は変わらない。
+- `release.yml`はtagの`Cargo.toml`の`[package].version`と`plugin.json`の`version`がtagの`X.Y.Z`と一致することを検査し、違えばbuildの前に止まる。
+- `-dev`を外してversionを`X.Y.Z`にするリリースの変更で、entryの`ref`をこれから打つ`vX.Y.Z`に書き換え、着地したらすぐにtagをpushする（release skillの手順）。`release.yml`はtagの`marketplace.json`のentryの`ref`がそのtagであることも検査する。切り替えは次のリリース（`v0.4.0`）から。
+- 利用者の更新はバイナリの`cargo install --locked dagq`とpluginの`claude plugin update claude-dagq@dagq`の組。launcherのmajor.minorの警告は残す。
+- `up`・`plan`は`--plugin-dir`が無ければ`claude`に何も足さず、installしたpluginを使う。skillは`$CLAUDE_PLUGIN_ROOT`を`--plugin-dir`に渡さず、repositoryの指示が指定するpathがあるときだけ付ける。`--plugin-dir`が無く`claude-dagq`がinstallされて有効なことを確かめられなければ、`up`・`plan`はsessionを開く前に止めてinstallのコマンドを案内する（確かめ方は実装のtaskで決める）。dagqのrepositoryはAGENTS.mdのとおり`--plugin-dir <repository>/plugins/claude-dagq`を付け、`--plugin-dir`のpluginが同じ名前のinstall済みのpluginより優先される。
+- Anthropicのdirectoryと公式のmarketplace（`claude-plugins-official`）には出さない。
 
 ### 読み込みと検証
 

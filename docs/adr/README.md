@@ -83,6 +83,8 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t615-1](2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md) | 着地先のbranchとpushのremoteとpushするかをrepositoryごとにdagq.tomlで決められるようにし、指定が無ければdefault branchを推定し、解決できなければupで止める（ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends） | 2026-09-27 |
 | [ADR-t616-1](2026-09-27-t616-1-runtime-fixed-strings-are-english.md) | runtimeが出す固定の文字列（prompt・ask・error・event・contextの見出し・commitの定型部分・pushのメッセージ）は英語にする | 2026-09-27 |
 | [ADR-t616-2](2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md) | AIが人に向けて書く文の言語を、利用者ごとの設定を既定にrepositoryのdagq.tomlで上書きして指定でき、runtimeがすべてのsessionとjobのpromptに指示を足す | 2026-09-27 |
+| [ADR-t617-1](2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md) | pluginはこのrepositoryのmarketplaceからClaude Codeの公式の手順で配り、marketplaceのentryを最新のリリースのtagに固定して、pluginのversionをバイナリのリリースと合わせる | 2026-09-27 |
+| [ADR-t617-2](2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md) | runtimeが開くsessionはinstallしたpluginを使い、upとplanに--plugin-dirを付けるのはpluginを開発するとき（dagqのrepository）だけにする | 2026-09-27 |
 
 ## 置き換え・廃止されたADR
 
