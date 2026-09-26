@@ -117,6 +117,15 @@ Fix a draft or submitted task in place instead of canceling it and registering i
 - The change is recorded as a `task_edited` event whose `from` and `to` hold only the fields that changed (under their task JSON names); `show ID` lists it with long texts cut to 300 characters, `show ID --full` has the whole values. Nothing changed, nothing recorded.
 - Priority, goal and dependencies have their own commands: `set-priority`, `set-goal`, `dependency add|remove`.
 
+## A run that needs paths outside its task
+
+A task registered with `--paths` may change only what they match (`reference/scope.md`). Two signs say a run needed more:
+
+- **`scope_violation`.** Validation parked the run as `needs_session` (`events --run RUN --kind scope_violation --full` has `paths`, the changed paths no glob matches, and `allowed`), or `integrate` deferred it (`integration_deferred` with `scope_violation`). The supervisor resumes the session to restore those paths; nothing is needed while the task's paths are right.
+- **A `failed` receipt naming paths.** The worker found the task truly needs a path outside its globs and stopped; its `summary` names the path and the work.
+
+Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `set-paths TASK --paths ...` (every glob it should keep) or remove the limit with `--none`. A run already claimed keeps the paths it started with, so after a failed run register the task again with wider `--paths` and the verification those paths need (a `src/` path takes the runtime checks).
+
 ## Change a goal or a task's goal
 
 

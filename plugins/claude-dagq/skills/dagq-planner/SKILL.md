@@ -13,23 +13,23 @@ Which planner you are is in your initial prompt: opened by a person (they are at
 
 ## 1. Plan with the person and submit
 
-Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--kind` per the repository's AGENTS.md). Name in a runtime task's description the files it mainly touches (e.g. `tests/it/plan_review.rs`): a forecast plan review and `related` match across tasks, not a limit, and never `--paths` (`skills/dagq/reference/scope.md`). Fix a draft in place with `edit`. Before each `add`, `"$DAGQ" search` the problem's file names, test names, ADR numbers and title words; after it, `"$DAGQ" related ID` on the draft, and read only the top candidates in full (`show ID --full`). A duplicate or work already done (a `completed` candidate or landed commit) is not submitted: `"$DAGQ" cancel ID --duplicate-of X` (steps: `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/inspect.md`). Check the order with `"$DAGQ" graph --goal ID`, then run the mechanical checks and submit once the person agrees with the decomposition:
+Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--kind` per AGENTS.md). Name in a runtime task's description the files it mainly touches (e.g. `tests/it/plan_review.rs`): a forecast plan review and `related` match across tasks, not a limit, and never `--paths` (`skills/dagq/reference/scope.md`). Fix a draft in place with `edit`. A task that truly needs paths outside its `--paths` (a `failed` receipt names them): `set-paths` before a claim, else add it again wider (`skills/dagq/reference/scope.md`). Before each `add`, `"$DAGQ" search` the problem's file names, test names, ADR numbers and title words; after it, `"$DAGQ" related ID` on the draft, and read only the top candidates in full (`show ID --full`). A duplicate or work already done (a `completed` candidate or landed commit) is not submitted: `"$DAGQ" cancel ID --duplicate-of X` (steps: `skills/dagq/reference/inspect.md`). Check the order with `"$DAGQ" graph --goal ID`, then run the mechanical checks and submit once the person agrees with the decomposition:
 
 ```sh
 "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
 "$DAGQ" submit TASK...          # or --goal GOAL (the goal with its draft tasks)
 ```
 
-`submit` refuses what `lint` rejects. It makes this session the proposal's owner and its tasks `submitted`, which nothing claims. Report the proposal ID to the person. Drafts you do not submit stay `draft` and never run.
+`submit` refuses what `lint` rejects and makes this session the proposal's owner and its tasks `submitted`, which nothing claims. Report the proposal ID. Unsubmitted drafts never run.
 
-Leave the traffic control to plan review: it checks the proposal against the other proposals and the ready tasks (duplicates, work already done, conflicts with ADRs and constraints, dependencies between tasks touching the same files, the repository's rules such as ADR numbers), and it adds dependencies, lowers priorities or cancels an obvious duplicate itself. Beyond your own `search` / `related` check, do not take stock of other drafts or other plans' ADR numbers, and do not re-wire or park other tasks for it. Give a task a priority only when the person says it goes first or can wait (`add --priority`, `set-priority`); never draft other tasks or bend dependencies to hurry one.
+Leave the traffic control to plan review: it checks the proposal against the other proposals and the ready tasks (duplicates, work already done, conflicts with ADRs and constraints, dependencies between tasks touching the same files, the repository's rules such as ADR numbers), and it adds dependencies, lowers priorities or cancels an obvious duplicate itself. Beyond your `search` / `related`, do not take stock of other drafts or ADR numbers, or re-wire or park other tasks. Give a task a priority only when the person says it goes first or can wait (`add --priority`, `set-priority`); never draft other tasks or bend dependencies to hurry one.
 
 ## 2. When plan review sends it back (revise)
 
-The supervisor types "Plan review sent proposal N back" with the reasons into this terminal (a runtime planner gets them in its initial prompt). The proposal's drafts are `draft` again (tasks plan review reopened stay `submitted` and go again as they are). Fix what the reasons point at with `edit`, `dependency`, `add` or `cancel`, `lint --proposal N`, then `"$DAGQ" submit --proposal N`. A fix that changes the plan's intent (acceptance, scope, the relation to the goal):
+The supervisor types "Plan review sent proposal N back" with the reasons into this terminal (a runtime planner: in its initial prompt). The proposal's drafts are `draft` again (tasks plan review reopened stay `submitted` and go again as they are). Fix what the reasons point at with `edit`, `dependency`, `add` or `cancel`, `lint --proposal N`, then `"$DAGQ" submit --proposal N`. A fix that changes the plan's intent (acceptance, scope, the relation to the goal):
 
 - **Opened by a person**: ask the person here before changing it. If you leave a revise unanswered, the inbox is told after a while (`check the planner`); nothing closes this workspace.
-- **Opened by the runtime**: `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, your recommendation), report briefly and stop. The answer arrives here as `answer to ask <id>: ...`; apply it.
+- **Opened by the runtime**: `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, your recommendation), report and stop. The answer arrives here as `answer to ask <id>: ...`; apply it.
 
 A ready task plan review must change is moved back to `submitted` (never claimed) into a proposal of its own for a runtime planner, with the reasons: fix it and `submit --proposal N`. A person's concern about a proposal goes to the inbox as an `approve_plan` ask, never here; its `send_back` answer returns as a revise.
 
@@ -39,7 +39,7 @@ A runtime planner for a draft (origin `follow_up` from a receipt's `follow_ups`,
 
 ## 4. Follow a goal, findings
 
-`"$DAGQ" goal list`, `goal show ID` and `graph --goal ID` show progress; report which tasks are done, in progress or blocked. A run waiting on the person is the inbox's. Decide the observer's findings with the person per `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/observer.md`: `findings`, then `submit ... --finding ID` or `finding dismiss ID --reason`.
+`"$DAGQ" goal list`, `goal show ID` and `graph --goal ID` show progress; report which tasks are done, in progress or blocked. Runs waiting on a person are the inbox's. Decide the observer's findings with the person per `${CLAUDE_PLUGIN_ROOT}/skills/dagq/reference/observer.md`: `findings`, then `submit ... --finding ID` or `finding dismiss ID --reason`.
 
 ## 5. Close a goal
 
