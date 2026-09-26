@@ -19,9 +19,9 @@ use super::{
 use crate::application::{AskStore, Generators, RunStore, timestamp, unix_seconds};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
-    PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunId, RunLease,
-    RunPaths, RunProcess, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration, Task,
-    TaskAction, TaskId, TaskKind, TaskRun,
+    PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunHistory, RunId,
+    RunLease, RunPaths, RunProcess, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration,
+    Task, TaskAction, TaskId, TaskKind, TaskRun, event_kind,
     kpi::report::REPORT_WRITTEN,
     related::RelatedPage,
     resume::{self, ResumeCount},
@@ -100,7 +100,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 run.id(),
-                "lease_acquired",
+                event_kind::LEASE_ACQUIRED,
                 json!({"pid": std::process::id()}),
             )?;
         }
@@ -414,7 +414,12 @@ impl SqliteQueue {
             )? == 1,
             "run lease was lost"
         );
-        run_event(&tx, id, "lease_released", json!({"reason": "finished"}))?;
+        run_event(
+            &tx,
+            id,
+            event_kind::LEASE_RELEASED,
+            json!({"reason": "finished"}),
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -521,7 +526,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "run_adopted",
+            event_kind::RUN_ADOPTED,
             json!({
                 "previous_token": lease.token,
                 "previous_pid": lease.pid,
@@ -590,7 +595,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "runtime_error",
+            event_kind::RUNTIME_ERROR,
             reason.on(json!({"message": message, "lease_released": released == 1})),
         )?;
         tx.commit()?;
@@ -722,7 +727,12 @@ impl SqliteQueue {
             || "run cannot be provisioned twice".to_owned(),
             |run| run::start_provisioning(run, plan),
         )?;
-        run_event(&tx, id, "run_planned", serde_json::to_value(plan)?)?;
+        run_event(
+            &tx,
+            id,
+            event_kind::RUN_PLANNED,
+            serde_json::to_value(plan)?,
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -743,7 +753,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "workspace_created",
+            event_kind::WORKSPACE_CREATED,
             json!({"workspace_id": workspace}),
         )?;
         tx.commit()?;
@@ -779,9 +789,9 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<()> {
         match run {
-            Some(id) => run_event(&self.conn, id, "backend_call_failed", payload),
+            Some(id) => run_event(&self.conn, id, event_kind::BACKEND_CALL_FAILED, payload),
             None => self
-                .record_queue_event("backend_call_failed", payload)
+                .record_queue_event(event_kind::BACKEND_CALL_FAILED, payload)
                 .map(drop),
         }
     }
@@ -941,9 +951,13 @@ impl SqliteQueue {
     pub fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         Ok(self.conn.query_row(
             "SELECT max(CAST(strftime('%s',created_at) AS INTEGER)) FROM run_events
-             WHERE kind IN ('observe_started','observe_finished')
+             WHERE kind IN (?2,?3)
                AND json_extract(payload,'$.mode')=?1",
-            [mode],
+            params![
+                mode,
+                event_kind::OBSERVE_STARTED,
+                event_kind::OBSERVE_FINISHED
+            ],
             |r| r.get(0),
         )?)
     }
@@ -972,8 +986,8 @@ impl SqliteQueue {
                 .collect::<rusqlite::Result<_>>()?)
         };
         Ok(WrittenBy {
-            recorded: findings("finding_recorded")?,
-            updated: findings("finding_updated")?,
+            recorded: findings(event_kind::FINDING_RECORDED)?,
+            updated: findings(event_kind::FINDING_UPDATED)?,
             asks: self
                 .conn
                 .prepare("SELECT id FROM asks WHERE id>?2 AND asked_by=?1 ORDER BY id")?
@@ -988,10 +1002,13 @@ impl SqliteQueue {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, payload FROM run_events
-                 WHERE kind='observe_finished' AND json_extract(payload,'$.mode')=?1
+                &format!(
+                    "SELECT id, payload FROM run_events
+                 WHERE kind='{}' AND json_extract(payload,'$.mode')=?1
                    AND ifnull(json_extract(payload,'$.outcome'),'')<>'skipped'
                  ORDER BY id DESC LIMIT 1",
+                    event_kind::OBSERVE_FINISHED
+                ),
                 [mode],
                 |r| Ok((r.get(0)?, json_col(r, "payload")?)),
             )
@@ -1004,17 +1021,26 @@ impl SqliteQueue {
     /// spans (`span_kind`), and the KPIs' bookkeeping
     /// ([`crate::domain::kpi::BOOKKEEPING_KINDS`], ADR-0051 decision 24).
     pub fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
-        let mut ignored = vec!["observe_started", "observe_finished"];
+        let mut ignored = vec![event_kind::OBSERVE_STARTED, event_kind::OBSERVE_FINISHED];
         ignored.extend_from_slice(crate::domain::kpi::BOOKKEEPING_KINDS);
         let ignored = serde_json::to_string(&ignored)?;
         Ok(self.conn.query_row(
-            "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
+            &format!(
+                "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
                kind IN (SELECT value FROM json_each(?4))
-               OR (kind IN ('finding_recorded','finding_updated','finding_status_changed')
+               OR (kind IN ('{}','{}','{}')
                    AND json_extract(payload,'$.by') IS ?1)
-               OR (kind='ask_opened' AND json_extract(payload,'$.asked_by') IS ?1)
-               OR (kind IN ('session_opened','session_closed','session_turns')
+               OR (kind='{}' AND json_extract(payload,'$.asked_by') IS ?1)
+               OR (kind IN ('{}','{}','{}')
                    AND json_extract(payload,'$.kind') IS ?2))",
+                event_kind::FINDING_RECORDED,
+                event_kind::FINDING_UPDATED,
+                event_kind::FINDING_STATUS_CHANGED,
+                event_kind::ASK_OPENED,
+                event_kind::SESSION_OPENED,
+                event_kind::SESSION_CLOSED,
+                event_kind::SESSION_TURNS
+            ),
             params![role, span_kind, after, ignored],
             |r| r.get(0),
         )?)
@@ -1024,7 +1050,7 @@ impl SqliteQueue {
     /// `observe_finished` with the `observe_started` of the same directory
     /// when there is one (a skipped observation has none).
     pub fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>> {
-        let finished = self.latest_events_of("observe_finished", limit)?;
+        let finished = self.latest_events_of(event_kind::OBSERVE_FINISHED, limit)?;
         finished
             .into_iter()
             .map(|finished| {
@@ -1032,9 +1058,12 @@ impl SqliteQueue {
                     Some(dir) => self
                         .conn
                         .query_row(
-                            "SELECT * FROM run_events WHERE kind='observe_started'
+                            &format!(
+                                "SELECT * FROM run_events WHERE kind='{}'
                                AND id<?1 AND json_extract(payload,'$.dir')=?2
                              ORDER BY id DESC LIMIT 1",
+                                event_kind::OBSERVE_STARTED
+                            ),
                             params![finished.id, dir],
                             event_row,
                         )
@@ -1097,7 +1126,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "runtime_error",
+            event_kind::RUNTIME_ERROR,
             reason.on(json!({"message": message})),
         )?;
         tx.commit()?;
@@ -1120,7 +1149,7 @@ impl SqliteQueue {
             params![id, pid],
         )
         .context("wrapper is already registered; a resume may only launch once")?;
-        run_event(&tx, id, "wrapper_started", json!({"pid": pid}))?;
+        run_event(&tx, id, event_kind::WRAPPER_STARTED, json!({"pid": pid}))?;
         tx.commit()?;
         Ok(())
     }
@@ -1133,7 +1162,7 @@ impl SqliteQueue {
         agent_pid: u32,
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["agent_started"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::AGENT_STARTED]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1145,7 +1174,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "agent_started",
+            event_kind::AGENT_STARTED,
             json!({"pid": agent_pid, "session_id": id}),
         )?;
         tx.commit()?;
@@ -1165,14 +1194,14 @@ impl SqliteQueue {
             params![id, pid],
         )
         .context("wrapper is already registered; a run may only launch once")?;
-        run_event(&tx, id, "wrapper_started", json!({"pid": pid}))?;
+        run_event(&tx, id, event_kind::WRAPPER_STARTED, json!({"pid": pid}))?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["agent_started"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::AGENT_STARTED]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1192,7 +1221,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "agent_started",
+            event_kind::AGENT_STARTED,
             json!({"pid": agent_pid, "session_id": id}),
         )?;
         tx.commit()?;
@@ -1211,7 +1240,7 @@ impl SqliteQueue {
 
     pub fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["session_exited"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::SESSION_EXITED]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1221,7 +1250,12 @@ impl SqliteQueue {
              WHERE run_id=?1 AND exited_at IS NULL",
             params![id, exit_code, self.generators.clock.now()],
         )?;
-        run_event(&tx, id, "session_exited", json!({"exit_code": exit_code}))?;
+        run_event(
+            &tx,
+            id,
+            event_kind::SESSION_EXITED,
+            json!({"exit_code": exit_code}),
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1250,7 +1284,7 @@ impl SqliteQueue {
         mut report: serde_json::Value,
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["run_recovered"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::RUN_RECOVERED]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1290,7 +1324,7 @@ impl SqliteQueue {
         report["status"] = json!(run.status());
         report["lease_deleted"] = json!(leases_deleted == 1);
         Reason::new(ReasonCode::Orphaned).apply_to(&mut report);
-        run_event(&tx, id, "run_recovered", report)?;
+        run_event(&tx, id, event_kind::RUN_RECOVERED, report)?;
         // The task stays in_progress; a retry is an explicit `ready` and a new run.
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -1325,7 +1359,7 @@ impl SqliteQueue {
         if code != 0 {
             Reason::of_exit_code(code).apply_to(&mut payload);
         }
-        run_event(&tx, id, "supervision_finished", payload)?;
+        run_event(&tx, id, event_kind::SUPERVISION_FINISHED, payload)?;
         // Completion and dependency release belong to the next validation stage.
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -1351,7 +1385,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "supervision_finished",
+            event_kind::SUPERVISION_FINISHED,
             json!({"status": run.status(), "exit_code": null, "session_live": true}),
         )?;
         tx.commit()?;
@@ -1409,7 +1443,7 @@ impl SqliteQueue {
         )?;
         payload["status"] = json!(run.status());
         payload["reason"] = json!(reason);
-        run_event(&tx, id, "landing_decided", payload)?;
+        run_event(&tx, id, event_kind::LANDING_DECIDED, payload)?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }
@@ -1458,7 +1492,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 id,
-                "lease_released",
+                event_kind::LEASE_RELEASED,
                 json!({"reason": crate::domain::recheck::LANDING_RECHECK_FAILED}),
             )?;
         }
@@ -1509,14 +1543,14 @@ impl SqliteQueue {
         let status = run.status();
         let mut payload = serde_json::to_value(validation)?;
         payload["status"] = json!(status);
-        run_event(&tx, id, "validation_finished", payload)?;
+        run_event(&tx, id, event_kind::VALIDATION_FINISHED, payload)?;
         // No `status` in the payloads: `validation_finished` already
         // reports the park, and `stats` counts it once.
         if status == RunStatus::NeedsSession && !validation.scope_violation.is_empty() {
             run_event(
                 &tx,
                 id,
-                "scope_violation",
+                event_kind::SCOPE_VIOLATION,
                 json!({
                     "code": ReasonCode::ScopeViolation,
                     "paths": validation.scope_violation,
@@ -1528,7 +1562,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 id,
-                "evidence_missing",
+                event_kind::EVIDENCE_MISSING,
                 json!({
                     "code": ReasonCode::EvidenceMissing,
                     "checks": validation.evidence_missing,
@@ -1667,11 +1701,14 @@ impl SqliteQueue {
             .conn
             .prepare(
                 "SELECT r.* FROM task_runs r WHERE r.status='integrated'
-                 AND r.id IN (SELECT run_id FROM run_events WHERE kind='push_failed'
-                   AND id>(SELECT COALESCE(MAX(id),0) FROM run_events WHERE kind='push_finished'))
+                 AND r.id IN (SELECT run_id FROM run_events WHERE kind=?1
+                   AND id>(SELECT COALESCE(MAX(id),0) FROM run_events WHERE kind=?2))
                  ORDER BY r.rowid",
             )?
-            .query_map([], run_row(&self.runs_dir))?
+            .query_map(
+                [event_kind::PUSH_FAILED, event_kind::PUSH_FINISHED],
+                run_row(&self.runs_dir),
+            )?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1694,10 +1731,10 @@ impl SqliteQueue {
             .query_row(
                 "SELECT r.* FROM task_runs r WHERE r.status='awaiting_integration'
                  ORDER BY (SELECT MIN(e.id) FROM run_events e
-                           WHERE e.run_id=r.id AND e.kind='validation_finished') NULLS LAST,
+                           WHERE e.run_id=r.id AND e.kind=?1) NULLS LAST,
                           r.rowid
                  LIMIT 1",
-                [],
+                [event_kind::VALIDATION_FINISHED],
                 run_row(&self.runs_dir),
             )
             .optional()?)
@@ -1762,7 +1799,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "integration_started",
+            event_kind::INTEGRATION_STARTED,
             json!({"main": main, "previous_status": previous, "pid": std::process::id()}),
         )?;
         tx.commit()?;
@@ -1834,20 +1871,20 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "lease_acquired",
+            event_kind::LEASE_ACQUIRED,
             json!({"pid": std::process::id(), "reason": "resume", "previous_token": previous}),
         )?;
         run_event(
             &tx,
             id,
-            "resume_started",
+            event_kind::RESUME_STARTED,
             json!({"attempt": attempt, "counted": counted, "reason": reason.or(run.last_error()), "main": main}),
         )?;
         if let Some(basis) = basis {
             run_event(
                 &tx,
                 id,
-                "auto_repaired",
+                event_kind::AUTO_REPAIRED,
                 json!({
                     "layer": "runtime",
                     "repair": "conflict_resume_uncounted",
@@ -1905,13 +1942,13 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "lease_acquired",
+            event_kind::LEASE_ACQUIRED,
             json!({"pid": std::process::id(), "reason": "resume_skipped", "previous_token": previous}),
         )?;
         run_event(
             &tx,
             id,
-            "resume_skipped",
+            event_kind::RESUME_SKIPPED,
             json!({"head": head, "main": main, "approved": approved, "status": status.as_str()}),
         )?;
         tx.commit()?;
@@ -1951,7 +1988,10 @@ impl SqliteQueue {
         payload["status"] = json!(status.as_str());
         // The work of the resumed session, closed when it exited (task 514).
         let resumed: i64 = tx.query_row(
-            "SELECT coalesce(max(id),0) FROM run_events WHERE run_id=?1 AND kind='resume_started'",
+            &format!(
+                "SELECT coalesce(max(id),0) FROM run_events WHERE run_id=?1 AND kind='{}'",
+                event_kind::RESUME_STARTED
+            ),
             [id],
             |r| r.get(0),
         )?;
@@ -1972,7 +2012,7 @@ impl SqliteQueue {
         )? {
             payload["tokens"] = tokens;
         }
-        run_event(&tx, id, "resume_finished", payload)?;
+        run_event(&tx, id, event_kind::RESUME_FINISHED, payload)?;
         if !keep_lease {
             tx.execute(
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
@@ -1981,7 +2021,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 id,
-                "lease_released",
+                event_kind::LEASE_RELEASED,
                 json!({"reason": "resume_finished"}),
             )?;
         }
@@ -2009,7 +2049,7 @@ impl SqliteQueue {
             token,
             |run| run::defer_integration(run, reason.to_owned()),
             reason,
-            "integration_deferred",
+            event_kind::INTEGRATION_DEFERRED,
             detail,
         )
     }
@@ -2029,7 +2069,7 @@ impl SqliteQueue {
             token,
             |run| run::fail_integration(run, reason.to_owned()),
             reason,
-            "integration_failed",
+            event_kind::INTEGRATION_FAILED,
             json!({"code": ReasonCode::WorkerFailed, "receipt": receipt}),
         )
     }
@@ -2050,7 +2090,7 @@ impl SqliteQueue {
             token,
             |run| run::abort_integration(run, revert_to, message.to_owned()),
             message,
-            "integration_error",
+            event_kind::INTEGRATION_ERROR,
             reason.on(json!({})),
         )
     }
@@ -2083,7 +2123,7 @@ impl SqliteQueue {
         detail["status"] = json!(run.status());
         detail["reason"] = json!(reason);
         run_event(&tx, id, kind, detail)?;
-        run_event(&tx, id, "lease_released", json!({"reason": kind}))?;
+        run_event(&tx, id, event_kind::LEASE_RELEASED, json!({"reason": kind}))?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }
@@ -2129,13 +2169,18 @@ impl SqliteQueue {
         let mut payload = serde_json::to_value(landing)?;
         payload["result_commit"] = json!(landing.commit);
         payload["git_common_dir"] = json!(common_dir);
-        run_event(&tx, id, "run_integrated", payload)?;
-        run_event(&tx, id, "lease_released", json!({"reason": "integrated"}))?;
+        run_event(&tx, id, event_kind::RUN_INTEGRATED, payload)?;
+        run_event(
+            &tx,
+            id,
+            event_kind::LEASE_RELEASED,
+            json!({"reason": "integrated"}),
+        )?;
         event(
             &tx,
             run.task_id(),
             Some(id),
-            "task_status_changed",
+            event_kind::TASK_STATUS_CHANGED,
             json!({"from": "in_progress", "to": "completed"}),
         )?;
         let task = read_task(&tx, run.task_id())?;
@@ -2165,7 +2210,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "cleanup_failed",
+            event_kind::CLEANUP_FAILED,
             reason.on(json!({"message": message})),
         )?;
         tx.commit()?;
@@ -2178,7 +2223,10 @@ impl SqliteQueue {
     /// still recorded as open qualifies; the worktree and branch stay for integration.
     pub fn workspace_closed(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["workspace_closed"]))?;
+        let _read = read_before(
+            &self.conn,
+            Closing::Run(id, &[event_kind::WORKSPACE_CLOSED]),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2196,7 +2244,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "workspace_closed",
+            event_kind::WORKSPACE_CLOSED,
             json!({"workspace_id": result.workspace_id(), "closed_at": result.workspace_closed_at()}),
         )?;
         tx.commit()?;
@@ -2228,7 +2276,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            "cleanup_failed",
+            event_kind::CLEANUP_FAILED,
             reason.on(json!({"workspace_id": result.workspace_id(), "message": message})),
         )?;
         tx.commit()?;
@@ -2264,7 +2312,7 @@ impl SqliteQueue {
         request: Option<serde_json::Value>,
     ) -> Result<Option<(TaskRun, usize)>> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["triage_started"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::TRIAGE_STARTED]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2307,20 +2355,20 @@ impl SqliteQueue {
             "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
             params![id, token, std::process::id(), now],
         )?;
-        let attempt = events.iter().filter(|e| e.kind == "triage_started").count() + 1;
+        let attempt = RunHistory::from_events(&events).triage_attempts() + 1;
         run_event(
             &tx,
             id,
-            "lease_acquired",
+            event_kind::LEASE_ACQUIRED,
             json!({"pid": std::process::id(), "reason": "triage", "previous_token": lease.map(|l| l.token)}),
         )?;
         if let Some(request) = request {
-            run_event(&tx, id, "recovery_requested", request)?;
+            run_event(&tx, id, event_kind::RECOVERY_REQUESTED, request)?;
         }
         run_event(
             &tx,
             id,
-            "triage_started",
+            event_kind::TRIAGE_STARTED,
             // The job's Claude session id (ADR-0048 decision 4).
             json!({"attempt": attempt, "status": run.status().as_str(), "session_id": self.generators.ids.uuid()}),
         )?;
@@ -2343,7 +2391,7 @@ impl SqliteQueue {
         also: Vec<(&'static str, serde_json::Value)>,
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let kinds: Vec<&str> = std::iter::once("triage_finished")
+        let kinds: Vec<&str> = std::iter::once(event_kind::TRIAGE_FINISHED)
             .chain(also.iter().map(|(kind, _)| *kind))
             .collect();
         let _read = read_before(&self.conn, Closing::Run(id, &kinds))?;
@@ -2412,7 +2460,7 @@ impl SqliteQueue {
         )?;
         payload["action"] = json!(action.as_str());
         payload["status"] = json!(result.status().as_str());
-        run_event(&tx, id, "triage_finished", payload)?;
+        run_event(&tx, id, event_kind::TRIAGE_FINISHED, payload)?;
         for (kind, payload) in also {
             run_event(&tx, id, kind, payload)?;
         }
@@ -2439,7 +2487,7 @@ impl SqliteQueue {
         reason: &str,
     ) -> Result<Option<TaskRun>> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["triage_finished"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::TRIAGE_FINISHED]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2504,7 +2552,7 @@ impl SqliteQueue {
                 let resumed = events
                     .iter()
                     .rev()
-                    .find(|e| e.kind == "resume_finished")
+                    .find(|e| e.kind == event_kind::RESUME_FINISHED)
                     .map(|e| e.id);
                 payload["alert"] = json!(crate::domain::recovery::RecoveryAlert::ResumeExhausted);
                 payload["attempt"] = json!(
@@ -2514,7 +2562,7 @@ impl SqliteQueue {
                     ) + 1
                 );
                 payload["evidence"] = json!(resumed.into_iter().collect::<Vec<_>>());
-                run_event(&tx, id, "recovery_requested", payload)?;
+                run_event(&tx, id, event_kind::RECOVERY_REQUESTED, payload)?;
                 tx.commit()?;
                 return Ok(Some(result.relocated(&self.runs_dir)));
             }
@@ -2531,7 +2579,7 @@ impl SqliteQueue {
                 run_event(
                     &tx,
                     id,
-                    "auto_repaired",
+                    event_kind::AUTO_REPAIRED,
                     json!({
                         "layer": "runtime",
                         "repair": "inherit_retry",
@@ -2548,7 +2596,7 @@ impl SqliteQueue {
                 )?;
             }
         }
-        run_event(&tx, id, "triage_finished", payload)?;
+        run_event(&tx, id, event_kind::TRIAGE_FINISHED, payload)?;
         tx.commit()?;
         Ok(Some(result.relocated(&self.runs_dir)))
     }
@@ -2564,7 +2612,10 @@ impl SqliteQueue {
         mut payload: serde_json::Value,
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &["workspace_closed"]))?;
+        let _read = read_before(
+            &self.conn,
+            Closing::Run(id, &[event_kind::WORKSPACE_CLOSED]),
+        )?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2575,7 +2626,7 @@ impl SqliteQueue {
             save_run(&tx, &run, from, None)?;
         }
         payload["workspace_id"] = json!(workspace_id);
-        run_event(&tx, id, "workspace_closed", payload)?;
+        run_event(&tx, id, event_kind::WORKSPACE_CLOSED, payload)?;
         tx.commit()?;
         Ok(())
     }
@@ -2590,7 +2641,7 @@ impl SqliteQueue {
     /// or not its close is recorded (cmux's list decides), ordered by run.
     pub fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         let mut statement = self.conn.prepare(
-            "WITH ended AS (
+            &format!("WITH ended AS (
                SELECT r.id, r.status, r.workspace_id, r.rowid AS run_row FROM task_runs r
                JOIN tasks t ON t.id=r.task_id
                WHERE r.status IN ('integrated','succeeded','failed','interrupted')
@@ -2602,9 +2653,9 @@ impl SqliteQueue {
              UNION ALL
              SELECT ended.id, ended.status, json_extract(e.payload,'$.workspace_id'), ended.run_row, e.id
              FROM run_events e JOIN ended ON ended.id=e.run_id
-             WHERE e.kind IN ('workspace_created','resume_finished')
+             WHERE e.kind IN ('{}','{}')
              AND json_extract(e.payload,'$.workspace_id') IS NOT NULL
-             ORDER BY 4, 5",
+             ORDER BY 4, 5", event_kind::WORKSPACE_CREATED, event_kind::RESUME_FINISHED),
         )?;
         let rows = statement.query_map([], |row| {
             Ok(EndedRunWorkspace {
@@ -2813,7 +2864,7 @@ impl SqliteQueue {
         if !matches!(answer, "retry" | "resume" | "cancel") {
             payload["action"] = json!(crate::domain::RECOVER_AGAIN);
         }
-        run_event(&tx, id, "triage_decided", payload)?;
+        run_event(&tx, id, event_kind::TRIAGE_DECIDED, payload)?;
         tx.commit()?;
         Ok(result)
     }
@@ -3637,7 +3688,7 @@ impl RunStore for SqliteQueue {
         super::sessions::close_gone_hook_spans(&self.conn, gone)
     }
     fn close_review_session(&self, id: &RunId) -> Result<usize> {
-        let _read = read_before(&self.conn, Closing::Run(id, &["review_failed"]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::REVIEW_FAILED]))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let closed = super::sessions::close_review(&tx, id)?;
         tx.commit()?;

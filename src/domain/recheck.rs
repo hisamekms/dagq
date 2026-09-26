@@ -11,7 +11,7 @@ use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId};
 /// 3). Its `action` says what followed: [`RESUMED`] (it was parked for a
 /// resume in the same transaction) or [`HELD`] (a session or the landing
 /// holds it; it is parked when it would land).
-pub const LANDING_RECHECK_FAILED: &str = "landing_recheck_failed";
+pub const LANDING_RECHECK_FAILED: &str = super::event_kind::LANDING_RECHECK_FAILED;
 
 /// One recheck ended, recorded on the run whose landing moved main: the
 /// main it checked against and what it found.

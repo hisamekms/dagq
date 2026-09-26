@@ -19,7 +19,7 @@ pub const DEFAULT_BACKGROUND_ALERT_SECS: i64 = 30 * 60;
 pub const DEFAULT_IDLE_PROCESS_SECS: i64 = 30 * 60;
 
 /// The event the supervisor records with the values it loaded at start.
-pub const STALL_CONFIG_LOADED: &str = "stall_config_loaded";
+pub const STALL_CONFIG_LOADED: &str = super::event_kind::STALL_CONFIG_LOADED;
 
 /// One background task an idle marker lists as `running`: its ID and what
 /// it runs, as the agent described it.

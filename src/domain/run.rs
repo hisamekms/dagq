@@ -13,6 +13,13 @@ use super::{
     Task, TaskId, TaskStatus, require,
 };
 
+mod history;
+
+pub use history::{
+    AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
+    after_validation, decide_conflict, decide_revise, run_attention_of,
+};
+
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no
 /// `Deserialize`: a run is built by [`TaskRun::new`] or [`TaskRun::restore`] only.
 #[derive(Debug, Clone, Serialize)]

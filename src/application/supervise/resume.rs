@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::domain::{
-    RunEvent,
+    ParkCause, RunEvent,
     resume::CONFLICT_ONLY_RESUME_LIMIT,
     run::{RunWorkspace, run_workspaces},
 };
@@ -126,27 +126,7 @@ impl Supervisor<'_> {
         run: &TaskRun,
         main: &CommitSha,
     ) -> Result<Option<CommitSha>> {
-        const PARKING: [&str; 6] = [
-            "integration_deferred",
-            "integration_error",
-            "evidence_missing",
-            "scope_violation",
-            "landing_decided",
-            crate::domain::recheck::LANDING_RECHECK_FAILED,
-        ];
-        let events = self.queue.run_events(run.id())?;
-        let parked = events
-            .iter()
-            .rev()
-            .find(|e| PARKING.contains(&e.kind.as_str()));
-        let last = events.iter().rev().find(|e| {
-            PARKING.contains(&e.kind.as_str())
-                || matches!(e.kind.as_str(), "resume_finished" | "resume_skipped")
-        });
-        if parked.is_none_or(|e| e.kind == "landing_decided")
-            || last
-                .is_none_or(|e| e.kind != "resume_finished" || e.payload["outcome"] != "unresolved")
-        {
+        if !RunHistory::from_events(&self.queue.run_events(run.id())?).unresolved_since_park() {
             return Ok(None);
         }
         let (Some(worktree), Some(receipt_path)) = (&run.worktree_path(), &run.receipt_path())
@@ -196,7 +176,9 @@ impl Supervisor<'_> {
         head: &CommitSha,
         main: &CommitSha,
     ) -> Result<()> {
-        let approved = self.queue.has_run_event(run.id(), "integration_approved")?;
+        let approved = self
+            .queue
+            .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?;
         let Some(run) = self
             .queue
             .skip_resume(run.id(), &self.token, head, main, approved)?
@@ -391,7 +373,7 @@ impl Supervisor<'_> {
         // finds this one to close.
         self.queue.record_runtime_event(
             run.id(),
-            "workspace_created",
+            event_kind::WORKSPACE_CREATED,
             json!({"workspace_id": workspace, "resume_attempt": attempt}),
         )?;
         Ok(ResumeWatch {
@@ -411,7 +393,9 @@ impl Supervisor<'_> {
             exit_requested: None,
             exit_typed: false,
             required_evidence: task.required_evidence().to_vec(),
-            approved: self.queue.has_run_event(run.id(), "integration_approved")?,
+            approved: self
+                .queue
+                .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
             silent: false,
             exit_for_silence: false,
             stale: None,
@@ -514,7 +498,7 @@ impl Supervisor<'_> {
             .map(|at: f64| UNIX_EPOCH + Duration::from_secs_f64(at.max(0.0)));
         let exit = since
             .iter()
-            .filter(|e| e.kind == "exit_requested")
+            .filter(|e| e.kind == event_kind::EXIT_REQUESTED)
             .find(of_attempt);
         // A silent wrapper's `/exit` follows its expiry in the same tick;
         // a silence that ended before an `/exit` for another reason does
@@ -524,7 +508,7 @@ impl Supervisor<'_> {
                 .iter()
                 .rev()
                 .find(|e| e.id < exit.id)
-                .is_some_and(|e| e.kind == "wrapper_heartbeat_expired")
+                .is_some_and(|e| e.kind == event_kind::WRAPPER_HEARTBEAT_EXPIRED)
         });
         self.rebuilt_resume(
             run,
@@ -534,10 +518,12 @@ impl Supervisor<'_> {
                 started_at,
                 message,
                 message_sent_at,
-                not_ready_asked: since.iter().any(|e| e.kind == "input_not_ready"),
+                not_ready_asked: since.iter().any(|e| e.kind == event_kind::INPUT_NOT_READY),
                 exit_requested: exit.is_some(),
                 exit_for_silence,
-                approved: self.queue.has_run_event(run.id(), "integration_approved")?,
+                approved: self
+                    .queue
+                    .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
             },
         )
     }
@@ -558,7 +544,7 @@ impl Supervisor<'_> {
     ) -> Result<Step> {
         let approved = self
             .queue
-            .has_run_event(slot.run.id(), "integration_approved")?;
+            .has_run_event(slot.run.id(), event_kind::INTEGRATION_APPROVED)?;
         let reviewed = matches!(verdict.kind, ResumeOutcome::Resolved) && !approved;
         // A session let go after the exit timeout still runs: its
         // workspace stays, and blocks the next attempt until it ends. A
@@ -669,38 +655,18 @@ pub(super) fn resume_reason(
     run: &TaskRun,
 ) -> Result<(Option<String>, ResumeKind)> {
     let events = queue.run_events(run.id())?;
-    let parked = events.iter().rev().find(|e| {
-        matches!(
-            e.kind.as_str(),
-            "integration_deferred"
-                | "integration_error"
-                | "evidence_missing"
-                | "scope_violation"
-                | "landing_decided"
-                | "triage_finished"
-                | "triage_decided"
-        ) || crate::domain::recheck::parks(e)
-    });
-    // The triage's resume asks for its `instruction`, not its reason.
-    let key = match parked {
-        Some(e) if e.kind == "triage_finished" => "instruction",
-        _ => "reason",
-    };
+    let parked = RunHistory::from_events(&events).last_park();
     let reason = parked
-        .and_then(|e| e.payload.get(key).and_then(Value::as_str))
+        .and_then(|park| park.reason)
         .map(str::to_owned)
         .or_else(|| run.last_error().map(str::to_owned));
-    let kind = match parked {
-        Some(e) if e.kind == "evidence_missing" || e.payload.get("checks").is_some() => {
-            ResumeKind::EvidenceMissing
-        }
-        Some(e) if e.kind == "scope_violation" || e.payload.get("scope_violation").is_some() => {
-            ResumeKind::ScopeViolation
-        }
-        Some(e) if e.kind == "landing_decided" => ResumeKind::SentBack,
-        Some(e) if e.kind.starts_with("triage_") => ResumeKind::Triage,
-        Some(e) if e.kind == crate::domain::recheck::LANDING_RECHECK_FAILED => ResumeKind::Recheck,
-        _ => ResumeKind::Landing,
+    let kind = match parked.map(|park| park.cause) {
+        Some(ParkCause::EvidenceMissing) => ResumeKind::EvidenceMissing,
+        Some(ParkCause::ScopeViolation) => ResumeKind::ScopeViolation,
+        Some(ParkCause::SentBack) => ResumeKind::SentBack,
+        Some(ParkCause::Triage) => ResumeKind::Triage,
+        Some(ParkCause::Recheck) => ResumeKind::Recheck,
+        Some(ParkCause::Landing) | None => ResumeKind::Landing,
     };
     Ok((reason, kind))
 }
@@ -803,16 +769,16 @@ pub(super) fn resume_in_progress(events: &[RunEvent]) -> Option<(EventId, usize,
     let started = events.iter().rev().find(|e| {
         matches!(
             e.kind.as_str(),
-            "resume_started" | "resume_finished" | "resume_skipped"
+            event_kind::RESUME_STARTED | event_kind::RESUME_FINISHED | event_kind::RESUME_SKIPPED
         )
     })?;
-    if started.kind != "resume_started" {
+    if started.kind != event_kind::RESUME_STARTED {
         return None;
     }
     let attempt = started.payload["attempt"].as_u64()?;
     let workspace = events
         .iter()
-        .filter(|e| e.id > started.id && e.kind == "workspace_created")
+        .filter(|e| e.id > started.id && e.kind == event_kind::WORKSPACE_CREATED)
         .find(|e| e.payload["resume_attempt"].as_u64() == Some(attempt))?
         .payload["workspace_id"]
         .as_str()?
@@ -879,7 +845,7 @@ impl ResumeWatch {
     fn request_exit(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun, typed: bool) -> Result<()> {
         sv.queue.record_runtime_event(
             run.id(),
-            "exit_requested",
+            event_kind::EXIT_REQUESTED,
             json!({
                 "workspace_id": self.workspace,
                 "timeout_secs": sv.cmux.exit_timeout().as_secs(),
@@ -1030,7 +996,7 @@ impl ResumeWatch {
                 let prompt = sv.signals.detect_prompt(&screen);
                 sv.queue.record_runtime_event(
                     run.id(),
-                    "input_not_ready",
+                    event_kind::INPUT_NOT_READY,
                     json!({
                         "workspace_id": self.workspace,
                         "waited_secs": timeout.as_secs(),
@@ -1130,7 +1096,7 @@ impl ResumeWatch {
                 )?,
                 Err(error) => sv.queue.record_runtime_event(
                     run.id(),
-                    "screen_capture_failed",
+                    event_kind::SCREEN_CAPTURE_FAILED,
                     reason_of_error(&error, ReasonCode::BackendFailed)
                         .on(json!({"error": format!("{error:#}")})),
                 )?,

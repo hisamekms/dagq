@@ -64,14 +64,15 @@ use super::{
     tail, unix_seconds,
 };
 use crate::domain::{
-    AskId, AskKind, AskReason, ClaimOutcome, CommitSha, EventId, EvidenceCheck,
-    HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS, MAX_RESUME_ATTEMPTS,
-    MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode, Receipt, ReceiptResult,
-    ReviewDecision, ReviewVerdict, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus,
-    SessionRole, TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun, TaskStatus,
-    TriageState,
+    AfterValidation, AskId, AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId,
+    EvidenceCheck, HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS,
+    MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode,
+    Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision,
+    RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus, SessionRole,
+    TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun, TaskStatus, TriageState,
+    after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
-    heartbeat_stale,
+    decide_conflict, decide_revise, event_kind, heartbeat_stale,
     kpi::{CANDIDATES_SAMPLED, CandidatesSample},
     marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
@@ -1674,36 +1675,27 @@ impl Supervisor<'_> {
                     .queue
                     .finish_validation(slot.run.id(), &self.token, &validation)?;
                 let session = session.take();
-                slot.phase = match run.status() {
-                    // An approved run (its integrate was called) lands without
-                    // a review, as before (ADR-0027 decision 3).
-                    RunStatus::AwaitingIntegration
-                        if self.queue.has_run_event(run.id(), "integration_approved")? =>
+                let events = self.queue.run_events(run.id())?;
+                let history = RunHistory::from_events(&events);
+                // A landing recheck resumed the run without waiting for the
+                // answer to its approve_landing ask (ADR-0068 decision 4).
+                let awaits_landing_answer = run.status() == RunStatus::AwaitingIntegration
+                    && !history.approved()
+                    && crate::domain::resume::parked_by_recheck(history.events())
+                    && self
+                        .queue
+                        .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?;
+                slot.phase =
+                    match after_validation(run.status(), history.approved(), awaits_landing_answer)
                     {
-                        Phase::Exiting(ExitWatch::new(session, AfterExit::Land))
-                    }
-                    // A landing recheck resumed the run without waiting for
-                    // the answer to its approve_landing ask (ADR-0068
-                    // decision 4): the rebased run waits for it instead of
-                    // a new review.
-                    RunStatus::AwaitingIntegration
-                        if crate::domain::resume::parked_by_recheck(
-                            &self.queue.run_events(run.id())?,
-                        ) && self
-                            .queue
-                            .has_unclosed_ask(run.id(), AskKind::ApproveLanding)? =>
-                    {
-                        Phase::Exiting(ExitWatch::new(session, AfterExit::Rest { close: true }))
-                    }
-                    RunStatus::AwaitingIntegration => self.start_review(&run, session)?,
-                    // A run parked for evidence gives up its workspace, since a
-                    // resume opens one of its own; a failed one keeps it for
-                    // inspection.
-                    RunStatus::NeedsSession => {
-                        Phase::Exiting(ExitWatch::new(session, AfterExit::Rest { close: true }))
-                    }
-                    _ => Phase::Exiting(ExitWatch::new(session, AfterExit::Rest { close: false })),
-                };
+                        AfterValidation::Land => {
+                            Phase::Exiting(ExitWatch::new(session, AfterExit::Land))
+                        }
+                        AfterValidation::Review => self.start_review(&run, session)?,
+                        AfterValidation::Rest { close } => {
+                            Phase::Exiting(ExitWatch::new(session, AfterExit::Rest { close }))
+                        }
+                    };
                 slot.run = run;
                 Ok(Step::Continue)
             }
@@ -1719,7 +1711,7 @@ impl Supervisor<'_> {
                     ReviewEnd::Verdict(verdict) => {
                         self.queue.record_runtime_event(
                             run.id(),
-                            "review_finished",
+                            event_kind::REVIEW_FINISHED,
                             json!({
                                 "verdict": verdict.verdict,
                                 "reasons": verdict.reasons,
@@ -1760,8 +1752,8 @@ impl Supervisor<'_> {
                 match outcome {
                     ReviseOutcome::Rewritten(head) => {
                         let kind = match watch.fix {
-                            Fix::Revise(_) => "revise_finished",
-                            Fix::Conflict(_) => "conflict_resolved",
+                            Fix::Revise(_) => event_kind::REVISE_FINISHED,
+                            Fix::Conflict(_) => event_kind::CONFLICT_RESOLVED,
                         };
                         self.queue.record_runtime_event(
                             slot.run.id(),
@@ -1797,8 +1789,8 @@ impl Supervisor<'_> {
                                     ),
                                 );
                                 let kind = match watch.fix {
-                                    Fix::Revise(_) => "revise_receipt_rejected",
-                                    Fix::Conflict(_) => "conflict_receipt_rejected",
+                                    Fix::Revise(_) => event_kind::REVISE_RECEIPT_REJECTED,
+                                    Fix::Conflict(_) => event_kind::CONFLICT_RECEIPT_REJECTED,
                                 };
                                 self.queue.record_runtime_event(
                                     slot.run.id(),
@@ -1897,8 +1889,11 @@ impl Supervisor<'_> {
                         if let Some(ask) = ask {
                             payload["ask_id"] = json!(ask);
                         }
-                        self.queue
-                            .record_runtime_event(run.id(), "review_failed", payload)?;
+                        self.queue.record_runtime_event(
+                            run.id(),
+                            event_kind::REVIEW_FAILED,
+                            payload,
+                        )?;
                         self.queue.release_lease(run.id(), &self.token)?;
                         Ok(Step::Done(Box::new(self.queue.run(run.id())?)))
                     }
@@ -1969,9 +1964,14 @@ fn latest_review_reasons(queue: &dyn Queue, run_id: &RunId) -> Result<Vec<String
         .run_events(run_id)?
         .into_iter()
         .rev()
-        .find(|e| matches!(e.kind.as_str(), "review_finished" | "review_failed"))
+        .find(|e| {
+            matches!(
+                e.kind.as_str(),
+                event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED
+            )
+        })
         .and_then(|e| match e.kind.as_str() {
-            "review_failed" => e.payload["error"]
+            event_kind::REVIEW_FAILED => e.payload["error"]
                 .as_str()
                 .map(|error| vec![format!("the headless review failed: {error}")]),
             _ => serde_json::from_value(e.payload["reasons"].clone()).ok(),

@@ -160,7 +160,7 @@ impl StallWatch {
         let events = queue.run_events(run.id())?;
         let resolved = |detection: &str, ask: Option<AskId>| {
             events.iter().any(|e| {
-                e.kind == "stall_resolved"
+                e.kind == event_kind::STALL_RESOLVED
                     && e.payload["phase"] == PHASE
                     && e.payload["detection"] == detection
                     && ask.is_none_or(|id| e.payload["ask_id"] == json!(id))
@@ -173,7 +173,7 @@ impl StallWatch {
         if let Some(event) = events
             .iter()
             .rev()
-            .find(|e| e.kind == "stall_nudged" && e.payload["phase"] == PHASE)
+            .find(|e| e.kind == event_kind::STALL_NUDGED && e.payload["phase"] == PHASE)
         {
             let at = at_event(event).unwrap_or(UNIX_EPOCH);
             watch.nudge = Some(Nudge {
@@ -186,7 +186,7 @@ impl StallWatch {
         // An answer the previous supervisor typed is an input too.
         for at in events
             .iter()
-            .filter(|e| e.kind == "ask_delivered")
+            .filter(|e| e.kind == event_kind::ASK_DELIVERED)
             .filter_map(at_event)
         {
             watch.input_sent(at, None);
@@ -196,7 +196,7 @@ impl StallWatch {
                 .iter()
                 .rev()
                 .find(|e| {
-                    e.kind == "stall_resolved"
+                    e.kind == event_kind::STALL_RESOLVED
                         && e.payload["phase"] == PHASE
                         && e.payload["outcome"] == outcome
                 })
@@ -226,9 +226,9 @@ impl StallWatch {
             let applied = ask.answered_at.is_some() && resolved("ask", Some(ask.id));
             // A recovery job's escalation names its ask (ADR-0047), and its
             // alert the setting it was judged by.
-            let recovery = events
-                .iter()
-                .find(|e| e.kind == "recovery_finished" && e.payload["ask_id"] == json!(ask.id));
+            let recovery = events.iter().find(|e| {
+                e.kind == event_kind::RECOVERY_FINISHED && e.payload["ask_id"] == json!(ask.id)
+            });
             watch.asked = Some(Asked {
                 id: ask.id,
                 at: at_unix(ask.created_at + 1),
@@ -345,7 +345,7 @@ impl StallWatch {
         }
         sv.queue.record_runtime_event(
             run.id(),
-            "stall_preempted",
+            event_kind::STALL_PREEMPTED,
             json!({
                 "phase": PHASE,
                 "threshold": IDLE_THRESHOLD,
@@ -405,7 +405,7 @@ impl StallWatch {
             payload["ask_id"] = json!(id);
         }
         sv.queue
-            .record_runtime_event(run.id(), "stall_resolved", payload)?;
+            .record_runtime_event(run.id(), event_kind::STALL_RESOLVED, payload)?;
         info!(run_id = %run.id(), "stall of {} ({detection}) ended: {outcome}", run.id());
         Ok(())
     }
@@ -638,7 +638,7 @@ impl StallWatch {
         let background = idle.background_tasks();
         sv.queue.record_runtime_event(
             run.id(),
-            "stall_nudged",
+            event_kind::STALL_NUDGED,
             json!({
                 "phase": PHASE,
                 "idle_secs": idle_secs,

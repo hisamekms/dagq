@@ -239,7 +239,7 @@ impl Supervisor<'_> {
         warn!(run_id = %run_id, "run {run_id}: {message}");
         self.queue.record_runtime_event(
             run_id,
-            "cleanup_failed",
+            event_kind::CLEANUP_FAILED,
             reason_of_error(error, ReasonCode::Other)
                 .on(json!({"workspace_id": workspace, "message": message, "by": closer.by()})),
         )

@@ -6,6 +6,7 @@
 //! what such a planner submits without a person. Opening a planner is one
 //! write transaction that re-checks the draft first, so two supervisors
 //! never open one for the same draft.
+use crate::domain::event_kind;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, ensure};
@@ -38,7 +39,9 @@ pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 /// holds a draft back only when answered `keep_draft`: nothing applies its
 /// other answers any more. Drafts registered before this existed match too (the
 /// migration gave them their origin).
-const TARGETS: &str = "SELECT t.id FROM tasks t JOIN draft_origins o ON o.task_id=t.id
+fn targets() -> String {
+    format!(
+        "SELECT t.id FROM tasks t JOIN draft_origins o ON o.task_id=t.id
     WHERE t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
         WHERE x.id=t.proposal_id AND x.status!='canceled')
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.draft_task_id=t.id AND p.closed_at IS NULL)
@@ -46,7 +49,10 @@ const TARGETS: &str = "SELECT t.id FROM tasks t JOIN draft_origins o ON o.task_i
         AND ((a.kind='planner_question' AND a.closed_at IS NULL)
              OR (a.kind IN ('planner_question','follow_up') AND trim(a.answer)='keep_draft')))
     AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
-        AND e.kind='draft_planner_exhausted')";
+        AND e.kind='{}')",
+        event_kind::DRAFT_PLANNER_EXHAUSTED
+    )
+}
 
 impl SqliteQueue {
     pub fn record_draft_origin(
@@ -103,7 +109,7 @@ impl SqliteQueue {
     pub fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
         let ids: Vec<TaskId> = self
             .conn
-            .prepare(&format!("{TARGETS} ORDER BY t.id"))?
+            .prepare(&format!("{} ORDER BY t.id", targets()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter().map(|id| target(&self.conn, id)).collect()
@@ -140,7 +146,7 @@ impl SqliteQueue {
                 &tx,
                 draft,
                 None,
-                "draft_planner_exhausted",
+                event_kind::DRAFT_PLANNER_EXHAUSTED,
                 json!({
                     "planners": opened,
                     "ask_id": answer,
@@ -167,7 +173,7 @@ impl SqliteQueue {
             &tx,
             draft,
             None,
-            "draft_planner_opened",
+            event_kind::DRAFT_PLANNER_OPENED,
             json!({
                 "planner_id": planner,
                 "attempt": attempt,
@@ -227,9 +233,12 @@ impl SqliteQueue {
         }
         let now = self.generators.clock.now();
         let claimed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='planner_answer_claimed'
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND json_extract(payload,'$.ask_id')=?1
              AND COALESCE(json_extract(payload,'$.claimed_at'), 0) > ?2)",
+                event_kind::PLANNER_ANSWER_CLAIMED
+            ),
             params![id, now - PLANNER_ANSWER_CLAIM_SECS],
             |r| r.get(0),
         )?;
@@ -240,9 +249,16 @@ impl SqliteQueue {
         match (ask.finding_id, ask.task_id) {
             (Some(finding), _) => {
                 let finding = super::findings::read_finding(&tx, finding)?;
-                super::findings::finding_event(&tx, &finding, "planner_answer_claimed", payload)?;
+                super::findings::finding_event(
+                    &tx,
+                    &finding,
+                    event_kind::PLANNER_ANSWER_CLAIMED,
+                    payload,
+                )?;
             }
-            (None, Some(task)) => event(&tx, task, None, "planner_answer_claimed", payload)?,
+            (None, Some(task)) => {
+                event(&tx, task, None, event_kind::PLANNER_ANSWER_CLAIMED, payload)?
+            }
             (None, None) => return Ok(false),
         }
         tx.commit()?;
@@ -265,9 +281,14 @@ impl SqliteQueue {
         let payload = json!({"ask_id": id, "reason": why});
         if let Some(finding) = ask.finding_id {
             let finding = super::findings::read_finding(&tx, finding)?;
-            super::findings::finding_event(&tx, &finding, "planner_answer_closed", payload)?;
+            super::findings::finding_event(
+                &tx,
+                &finding,
+                event_kind::PLANNER_ANSWER_CLOSED,
+                payload,
+            )?;
         } else if let Some(task) = ask.task_id {
-            event(&tx, task, None, "planner_answer_closed", payload)?;
+            event(&tx, task, None, event_kind::PLANNER_ANSWER_CLOSED, payload)?;
         }
         tx.commit()?;
         Ok(())
@@ -276,11 +297,12 @@ impl SqliteQueue {
     pub fn exhausted_drafts(&self) -> Result<Vec<Task>> {
         let ids: Vec<TaskId> = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT t.id FROM tasks t WHERE t.status='draft' AND EXISTS(
                      SELECT 1 FROM run_events e WHERE e.task_id=t.id
-                     AND e.kind='draft_planner_exhausted') ORDER BY t.id",
-            )?
+                     AND e.kind='{}') ORDER BY t.id",
+                event_kind::DRAFT_PLANNER_EXHAUSTED
+            ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter()
@@ -406,7 +428,7 @@ impl DraftPlannerStore for SqliteQueue {
 
 fn is_target(conn: &Connection, draft: TaskId) -> Result<bool> {
     Ok(conn.query_row(
-        &format!("SELECT EXISTS({TARGETS} AND t.id=?1)"),
+        &format!("SELECT EXISTS({} AND t.id=?1)", targets()),
         [draft],
         |r| r.get(0),
     )?)
@@ -439,7 +461,10 @@ pub(super) fn draft_origin(
 
 fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
     let count: i64 = conn.query_row(
-        "SELECT count(*) FROM run_events WHERE task_id=?1 AND kind='draft_planner_opened'",
+        &format!(
+            "SELECT count(*) FROM run_events WHERE task_id=?1 AND kind='{}'",
+            event_kind::DRAFT_PLANNER_OPENED
+        ),
         [draft],
         |r| r.get(0),
     )?;
@@ -489,7 +514,10 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         return Ok(PlannerAnswerRoute::Person);
     }
     let exhausted: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='draft_planner_exhausted')",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}')",
+            event_kind::DRAFT_PLANNER_EXHAUSTED
+        ),
         [task_id],
         |r| r.get(0),
     )?;
@@ -579,9 +607,13 @@ pub(super) fn check_adoptions(
         // A draft a person already adopted (a revise sends it back to
         // `draft`) is not asked about again.
         let adopted_by_person: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1
-             AND kind IN ('follow_up_adopted','draft_adopted')
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1
+             AND kind IN ('{}','{}')
              AND json_extract(payload,'$.by')='person')",
+                event_kind::FOLLOW_UP_ADOPTED,
+                event_kind::DRAFT_ADOPTED
+            ),
             [task_id],
             |r| r.get(0),
         )?;
@@ -642,8 +674,8 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
             continue;
         };
         let kind = match origin {
-            DraftOrigin::FollowUp => "follow_up_adopted",
-            DraftOrigin::GoalGap => "draft_adopted",
+            DraftOrigin::FollowUp => event_kind::FOLLOW_UP_ADOPTED,
+            DraftOrigin::GoalGap => event_kind::DRAFT_ADOPTED,
         };
         let recorded: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2)",

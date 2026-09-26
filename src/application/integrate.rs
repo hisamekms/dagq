@@ -20,9 +20,9 @@ use super::{
     Verifier, path_text, reason_of_error, tail,
 };
 use crate::domain::{
-    CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, MAX_RESUME_ATTEMPTS, NewTask,
-    PushReport, PushResult, Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunId,
-    RunStatus, Task, TaskId, TaskRun, evidence_missing_reason, heartbeat_stale,
+    CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
+    Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus,
+    Task, TaskId, TaskRun, event_kind, evidence_missing_reason, heartbeat_stale,
     landing_branch::{DEFAULT_REMOTE, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
     scope::{out_of_scope, scope_violation_reason},
@@ -315,10 +315,10 @@ pub fn begin(
     // The call is the approval to land (ADR-0016 decision 5): a run it
     // parks as `needs_session` is landed by the supervisor once a resumed
     // session resolved it (ADR-0019 decision 1).
-    if !queue.has_run_event(run.id(), "integration_approved")? {
+    if !queue.has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)? {
         queue.record_runtime_event(
             run.id(),
-            "integration_approved",
+            event_kind::INTEGRATION_APPROVED,
             json!({"status": run.status().as_str(), "pid": ctx.pid, "push": ctx.remote.is_some()}),
         )?;
     }
@@ -433,8 +433,7 @@ pub fn land_integrating(
             );
             // How many more times the supervisor resumes it (ADR-0019); the
             // event is a person's only once none are left (as an ask).
-            detail["resumes_left"] =
-                json!(MAX_RESUME_ATTEMPTS.saturating_sub(resume_attempts(queue, run.id())));
+            detail["resumes_left"] = json!(resumes_left(queue, run.id()));
             let run = queue.defer_integration(run.id(), token, &reason, detail)?;
             IntegrationOutcome::NeedsSession {
                 run: Box::new(run),
@@ -513,15 +512,15 @@ fn push_main(
     };
     let (kind, payload) = match report.outcome {
         PushResult::Pushed => (
-            "push_finished",
+            event_kind::PUSH_FINISHED,
             json!({"remote": report.remote, "branch": report.branch, "commit": commit}),
         ),
         PushResult::Skipped => (
-            "push_skipped",
+            event_kind::PUSH_SKIPPED,
             json!({"remote": report.remote, "branch": report.branch, "commit": commit, "reason": report.reason}),
         ),
         PushResult::Failed => (
-            "push_failed",
+            event_kind::PUSH_FAILED,
             json!({"code": ReasonCode::PushFailed, "remote": report.remote, "branch": report.branch, "commit": commit, "error": report.error}),
         ),
     };
@@ -581,11 +580,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
         return Vec::new();
     };
     let registered: Vec<u64> = match queue.run_events(run_id) {
-        Ok(events) => events
-            .iter()
-            .filter(|e| e.kind == "follow_up_registered")
-            .filter_map(|e| e.payload["index"].as_u64())
-            .collect(),
+        Ok(events) => RunHistory::from_events(&events).registered_follow_ups(),
         Err(error) => {
             warn!(
                 op = "follow_up",
@@ -657,7 +652,8 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 "skipped": reason,
                 "follow_up": entry,
             });
-            if let Err(error) = queue.record_runtime_event(run_id, "follow_up_registered", payload)
+            if let Err(error) =
+                queue.record_runtime_event(run_id, event_kind::FOLLOW_UP_REGISTERED, payload)
             {
                 warn!(
                     op = "follow_up",
@@ -732,7 +728,9 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
         if goal_closed {
             payload["goal_closed"] = json!(true);
         }
-        if let Err(error) = queue.record_runtime_event(run_id, "follow_up_registered", payload) {
+        if let Err(error) =
+            queue.record_runtime_event(run_id, event_kind::FOLLOW_UP_REGISTERED, payload)
+        {
             warn!(
                 op = "follow_up",
                 run_id = %run_id,
@@ -805,7 +803,7 @@ fn land(
         repository.rebase_abort(worktree)?;
         queue.record_runtime_event(
             run.id(),
-            "integration_rebase_aborted",
+            event_kind::INTEGRATION_REBASE_ABORTED,
             json!({"code": ReasonCode::RebaseInProgress, "reason": "a rebase was left in progress"}),
         )?;
     }
@@ -876,7 +874,7 @@ fn land(
     // DB otherwise keeps only the receipt seen at validation time.
     queue.record_runtime_event(
         run.id(),
-        "integration_receipt",
+        event_kind::INTEGRATION_RECEIPT,
         json!({
             "main": main,
             "commit": receipt.commit,
@@ -929,7 +927,7 @@ fn land(
     let rebased = repository.head(worktree)?;
     queue.record_runtime_event(
         run.id(),
-        "integration_rebased",
+        event_kind::INTEGRATION_REBASED,
         json!({"main": main, "head_before": head, "head_after": rebased}),
     )?;
     if rebased == *main {
@@ -1034,7 +1032,7 @@ fn land(
         let omitted_json = json!(failed_tests.as_ref().map(|tests| tests.omitted));
         queue.record_runtime_event(
             run.id(),
-            "verification_command",
+            event_kind::VERIFICATION_COMMAND,
             json!({
                 "phase": "integration",
                 "attempt": attempt,
@@ -1237,7 +1235,7 @@ fn renumber_migration(
     };
     queue.record_runtime_event(
         run.id(),
-        "migration_renumbered",
+        event_kind::MIGRATION_RENUMBERED,
         json!({
             "main": main,
             "from": old,
@@ -1418,7 +1416,7 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
     let recorded = match repository.remove_worktree_and_branch(Path::new(worktree), branch) {
         Ok(()) => queue.record_runtime_event(
             run.id(),
-            "worktree_removed",
+            event_kind::WORKTREE_REMOVED,
             json!({"path": worktree, "branch": branch}),
         ),
         Err(error) => {
@@ -1438,14 +1436,13 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
     }
 }
 
-/// How many resumes of the run count toward [`MAX_RESUME_ATTEMPTS`]
-/// (ADR-0047 decision 24: a resume of a run parked only by a conflict after
-/// its review passed does not); unreadable counts as the last attempt.
-pub fn resume_attempts<Q: RunStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
-    queue
-        .run_events(id)
-        .map(|events| crate::domain::resume::ResumeCount::of(&events).counted)
-        .unwrap_or(MAX_RESUME_ATTEMPTS)
+/// How many more counted resumes the run has (ADR-0047 decision 24: a
+/// resume of a run parked only by a conflict after its review passed is
+/// not counted); unreadable events leave none.
+fn resumes_left<Q: RunStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
+    queue.run_events(id).map_or(0, |events| {
+        RunHistory::from_events(&events).resumes().left()
+    })
 }
 
 #[cfg(test)]

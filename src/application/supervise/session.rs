@@ -114,7 +114,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         if let Some(inherited) = &inherited {
             self.queue.record_runtime_event(
                 run.id(),
-                "run_inherited",
+                event_kind::RUN_INHERITED,
                 json!({"inherit_from_run": inherited.run_id, "head": inherited.head, "branch": inherited.branch}),
             )?;
             info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} carries run {}'s work over from {}", run.id(), run.task_id(), inherited.run_id, inherited.head);
@@ -128,7 +128,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             .write(&run_dir.join("worktree-create.txt"), git_output.as_bytes())?;
         self.queue.record_runtime_event(
             run.id(),
-            "worktree_created",
+            event_kind::WORKTREE_CREATED,
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
         let command = shell_join(&[
@@ -302,7 +302,7 @@ impl SessionWatch {
                 payload.as_object_mut().expect("an object").extend(load);
             }
             sv.queue
-                .record_runtime_event(run.id(), "receipt_observed", payload)?;
+                .record_runtime_event(run.id(), event_kind::RECEIPT_OBSERVED, payload)?;
             info!(run_id = %run.id(), "receipt received for {}; waiting for the session to go idle (or a person's /exit)", run.id());
         }
         self.stall.settle(sv, run, self.receipt_seen)?;
@@ -344,7 +344,7 @@ impl SessionWatch {
                 return Ok(None);
             }
             sv.queue
-                .record_runtime_event(run.id(), "session_idle_observed", evidence)?;
+                .record_runtime_event(run.id(), event_kind::SESSION_IDLE_OBSERVED, evidence)?;
             // The session stays open through validation and review, and
             // is asked to exit only once the verdict is known (ADR-0027
             // decision 1).
@@ -363,7 +363,7 @@ impl SessionWatch {
                         .write(&self.run_dir.join("terminal-final.txt"), screen.as_bytes())?,
                     Err(error) => sv.queue.record_runtime_event(
                         run.id(),
-                        "screen_capture_failed",
+                        event_kind::SCREEN_CAPTURE_FAILED,
                         reason_of_error(&error, ReasonCode::BackendFailed)
                             .on(json!({"error": format!("{error:#}")})),
                     )?,
@@ -399,7 +399,7 @@ impl SessionWatch {
                     let timeout = sv.cmux.exit_timeout();
                     sv.queue.record_runtime_event(
                         run.id(),
-                        "exit_requested",
+                        event_kind::EXIT_REQUESTED,
                         json!({"workspace_id": self.workspace, "timeout_secs": timeout.as_secs()}),
                     )?;
                     let workspace = self.workspace.clone();
@@ -475,7 +475,7 @@ impl SessionWatch {
                 // the recovery job looks at it (ADR-0047 decision 39).
                 sv.queue.record_runtime_event(
                     run.id(),
-                    "exit_request_timed_out",
+                    event_kind::EXIT_REQUEST_TIMED_OUT,
                     json!({"code": ReasonCode::ExitTimeout, "workspace_id": self.workspace, "timeout_secs": timeout.as_secs()}),
                 )?;
                 warn!(run_id = %run.id(), "session for {} did not exit within {}s of the exit request in workspace {}; keeping the run for its recovery job", run.id(), timeout.as_secs(), self.workspace);
@@ -539,7 +539,7 @@ impl SessionWatch {
         if head != *run.base_commit() {
             sv.queue.record_runtime_event(
                 run.id(),
-                "first_commit_observed",
+                event_kind::FIRST_COMMIT_OBSERVED,
                 json!({"commit": head, "base_commit": run.base_commit()}),
             )?;
             self.first_commit_seen = true;
@@ -615,7 +615,7 @@ impl SessionWatch {
                 if self.prompt_hash.as_deref() != Some(hash.as_str()) {
                     sv.queue.record_runtime_event(
                         run.id(),
-                        "prompt_waiting",
+                        event_kind::PROMPT_WAITING,
                         json!({
                             "workspace_id": self.workspace,
                             "excerpt": excerpt,
@@ -659,14 +659,7 @@ impl SessionWatch {
             Err(error) => return Err(error).context("inspect idle marker"),
         };
         let mut typed = None;
-        let failed: Vec<AskId> = sv
-            .queue
-            .run_events(run.id())?
-            .iter()
-            .filter(|e| e.kind == "ask_delivery_failed")
-            .filter_map(|e| e.payload.get("ask_id").and_then(Value::as_i64))
-            .map(AskId::new)
-            .collect();
+        let failed = RunHistory::from_events(&sv.queue.run_events(run.id())?).failed_deliveries();
         for ask in answers {
             if failed.contains(&ask.id) || idle_at < ask.created_at {
                 continue;
@@ -698,7 +691,7 @@ impl SessionWatch {
                 Err(error) => {
                     sv.queue.record_runtime_event(
                         run.id(),
-                        "ask_delivery_failed",
+                        event_kind::ASK_DELIVERY_FAILED,
                         reason_of_error(&error, ReasonCode::BackendFailed).on(json!({
                             "ask_id": ask.id,
                             "workspace_id": self.workspace,
@@ -724,7 +717,7 @@ impl SessionWatch {
             );
             sv.queue.record_runtime_event(
                 run.id(),
-                "prompt_cleared",
+                event_kind::PROMPT_CLEARED,
                 json!({"workspace_id": self.workspace}),
             )?;
             info!(run_id = %run.id(), "dialog of {} is gone", run.id());
@@ -803,7 +796,7 @@ pub(super) fn raise_auth(
         .run_events(run.id())?
         .into_iter()
         .rev()
-        .find(|e| e.kind == "auth_required");
+        .find(|e| e.kind == event_kind::AUTH_REQUIRED);
     if let Some(last) = last
         && last.payload.get("screen_hash").and_then(Value::as_str) == Some(hash.as_str())
         && let Some(id) = last.payload.get("ask_id").and_then(Value::as_i64)
@@ -827,7 +820,7 @@ pub(super) fn raise_auth(
     if outcome.joined {
         sv.queue.record_runtime_event(
             run.id(),
-            "auth_required",
+            event_kind::AUTH_REQUIRED,
             json!({
                 "workspace_id": workspace,
                 "excerpt": excerpt,

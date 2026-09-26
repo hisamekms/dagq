@@ -88,7 +88,7 @@ pub(super) fn adopted_stale_nudge(
     let Some(nudged) = events
         .iter()
         .rev()
-        .find(|e| e.kind == "stale_receipt_nudged" && of_phase(e))
+        .find(|e| e.kind == event_kind::STALE_RECEIPT_NUDGED && of_phase(e))
     else {
         return Ok(None);
     };
@@ -100,7 +100,7 @@ pub(super) fn adopted_stale_nudge(
         typed_at: at,
         settled: events
             .iter()
-            .any(|e| e.kind == "stale_receipt_resolved" && of_phase(e)),
+            .any(|e| e.kind == event_kind::STALE_RECEIPT_RESOLVED && of_phase(e)),
     }))
 }
 
@@ -124,7 +124,7 @@ pub(super) fn nudge_stale_receipt(
         payload["attempt"] = json!(attempt);
     }
     sv.queue
-        .record_runtime_event(run.id(), "stale_receipt_nudged", payload)?;
+        .record_runtime_event(run.id(), event_kind::STALE_RECEIPT_NUDGED, payload)?;
     let text = stale_receipt_nudge(run, &stale.receipt_commit, &stale.head)?;
     let sent_at = sv.files.now();
     match submit(
@@ -145,7 +145,7 @@ pub(super) fn nudge_stale_receipt(
             if matches!(submission, Submission::Submitted(_))
                 && let Err(error) = sv.queue.record_runtime_event(
                     run.id(),
-                    "auto_repaired",
+                    event_kind::AUTO_REPAIRED,
                     json!({
                         "layer": "runtime",
                         "repair": "receipt_rewrite_requested",
@@ -220,7 +220,7 @@ impl StaleNudge {
             payload["attempt"] = json!(attempt);
         }
         sv.queue
-            .record_runtime_event(run.id(), "stale_receipt_resolved", payload)?;
+            .record_runtime_event(run.id(), event_kind::STALE_RECEIPT_RESOLVED, payload)?;
         info!(run_id = %run.id(), "the request to rewrite the receipt of {} ended: {outcome}", run.id());
         Ok(())
     }

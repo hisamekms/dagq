@@ -19,10 +19,11 @@ impl Supervisor<'_> {
     /// Only `stats` reads it, so a failure to record it is only reported:
     /// the step it follows has already changed the run.
     pub(super) fn queue_landing(&mut self, run: &TaskRun, via: &str) {
-        if let Err(error) =
-            self.queue
-                .record_runtime_event(run.id(), "landing_queued", json!({"via": via}))
-        {
+        if let Err(error) = self.queue.record_runtime_event(
+            run.id(),
+            event_kind::LANDING_QUEUED,
+            json!({"via": via}),
+        ) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record landing_queued: {error:#}", run.id());
         }
     }
@@ -45,12 +46,7 @@ impl Supervisor<'_> {
         let pid = self.layout.pid;
         let token = self.token.clone();
         let common_dir = path_text(&self.layout.common_dir)?;
-        let push = self
-            .queue
-            .run_events(run.id())?
-            .iter()
-            .find(|e| e.kind == "integration_approved")
-            .is_none_or(|e| e.payload.get("push") != Some(&json!(false)));
+        let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
         let load_average = self.load_average;
         Ok(spawn_traced(move || {
@@ -101,7 +97,7 @@ impl Supervisor<'_> {
     ) -> Result<Phase> {
         self.queue.record_runtime_event(
             run.id(),
-            "review_retried",
+            event_kind::REVIEW_RETRIED,
             json!({"attempt": attempt, "error": error}),
         )?;
         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} printed no readable verdict: {error}; reviewing it once more", run.id());
@@ -113,13 +109,8 @@ impl Supervisor<'_> {
         session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
-        let attempt = self
-            .queue
-            .run_events(run.id())?
-            .iter()
-            .filter(|e| e.kind == "review_started")
-            .count()
-            + 1;
+        let attempt =
+            RunHistory::from_events(&self.queue.run_events(run.id())?).review_attempts() + 1;
         let live = match &session {
             Some(_) => session_alive(self, run.id())?,
             None => false,
@@ -128,7 +119,7 @@ impl Supervisor<'_> {
         let session_id = self.generators.ids.uuid();
         self.queue.record_runtime_event(
             run.id(),
-            "review_started",
+            event_kind::REVIEW_STARTED,
             json!({
                 "attempt": attempt,
                 "workspace_id": session.as_ref().map(|s| s.workspace.clone()),
@@ -237,11 +228,18 @@ impl Supervisor<'_> {
             ReviewDecision::Pass => self.precheck(run, session, verdict),
             ReviewDecision::Concern => Ok(ask(None, verdict, session)),
             ReviewDecision::Revise => {
-                let revises = sent_revises(&self.queue.run_events(run.id())?);
-                if revises >= MAX_REVISE_ATTEMPTS {
-                    let why = format!("the review still asks for changes after {revises} revises");
-                    return Ok(ask(Some(why), verdict, session));
-                }
+                let events = self.queue.run_events(run.id())?;
+                let history = RunHistory::from_events(&events);
+                let attempt = match decide_revise(&history) {
+                    ReviseDecision::Request { attempt } => attempt,
+                    ReviseDecision::Ask => {
+                        let why = format!(
+                            "the review still asks for changes after {} revises",
+                            history.revise_attempts()
+                        );
+                        return Ok(ask(Some(why), verdict, session));
+                    }
+                };
                 let Some(live) = session
                     .clone()
                     .filter(|_| session_alive(self, run.id()).unwrap_or(false))
@@ -249,7 +247,6 @@ impl Supervisor<'_> {
                     let why = "the session had ended, so nobody could revise the run".to_owned();
                     return Ok(ask(Some(why), verdict, session));
                 };
-                let attempt = revises + 1;
                 let task = self.queue.show(run.task_id())?.task;
                 let message = revise_request(&task, run, attempt, &verdict.reasons)?;
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);
@@ -263,7 +260,7 @@ impl Supervisor<'_> {
                 // rather than sending the request a second time.
                 self.queue.record_runtime_event(
                     run.id(),
-                    "revise_requested",
+                    event_kind::REVISE_REQUESTED,
                     json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": unix_seconds(sent_at)}),
                 )?;
                 let submission = match submit(
@@ -279,7 +276,7 @@ impl Supervisor<'_> {
                         warn!(run_id = %run.id(), "run {}: {why}", run.id());
                         self.queue.record_runtime_event(
                             run.id(),
-                            "revise_unsent",
+                            event_kind::REVISE_UNSENT,
                             json!({"attempt": attempt, "error": why}),
                         )?;
                         return Ok(ask(Some(why), verdict, session));
@@ -346,10 +343,11 @@ impl Supervisor<'_> {
             return Ok(land(session));
         }
         let events = self.queue.run_events(run.id())?;
-        let requested = sent_conflict_requests(&events);
+        let history = RunHistory::from_events(&events);
+        let requested = history.conflict_requests();
         // Resumes of the run parked only by a conflict after its review
         // passed are not counted (ADR-0047 decision 24).
-        let resumes = ResumeCount::of(&events).counted;
+        let resumes = history.resumes().counted;
         let attempt = requested + 1;
         let mut payload = json!({
             "code": ReasonCode::RebaseConflict,
@@ -365,12 +363,12 @@ impl Supervisor<'_> {
             "git merge-tree finds that main {main} conflicts with the run in {}",
             conflicts.join(", ")
         );
-        if requested + resumes >= MAX_RESUME_ATTEMPTS {
+        if decide_conflict(&history) == ConflictDecision::Ask {
             let why = format!("{why}, after {requested} conflict requests and {resumes} resumes");
             // What an adopter asks, if it takes the run over before the ask.
             payload["asked"] = json!(why);
             self.queue
-                .record_runtime_event(run.id(), "conflict_precheck", payload)?;
+                .record_runtime_event(run.id(), event_kind::CONFLICT_PRECHECK, payload)?;
             info!(run_id = %run.id(), "run {}: {why}; asking a person", run.id());
             return Ok(Phase::Exiting(ExitWatch::new(
                 session,
@@ -408,8 +406,11 @@ impl Supervisor<'_> {
                 let mut sending = payload.clone();
                 sending["requested"] = json!(true);
                 sending["sent_at"] = json!(unix_seconds(sent_at));
-                self.queue
-                    .record_runtime_event(run.id(), "conflict_precheck", sending)?;
+                self.queue.record_runtime_event(
+                    run.id(),
+                    event_kind::CONFLICT_PRECHECK,
+                    sending,
+                )?;
                 submit(
                     self,
                     run,
@@ -439,7 +440,7 @@ impl Supervisor<'_> {
                 }
             }
             self.queue
-                .record_runtime_event(run.id(), "conflict_precheck", payload)?;
+                .record_runtime_event(run.id(), event_kind::CONFLICT_PRECHECK, payload)?;
             warn!(run_id = %run.id(), error = %error, "run {}: {why}, and {error}; landing, whose rebase parks it for a resume", run.id());
             return Ok(land(session));
         };
@@ -466,7 +467,7 @@ impl Supervisor<'_> {
                 match self.cmux.close(&session.workspace) {
                     Ok(()) => self.queue.record_runtime_event(
                         run.id(),
-                        "workspace_closed",
+                        event_kind::WORKSPACE_CLOSED,
                         json!({"workspace_id": session.workspace, "resume_attempt": attempt}),
                     )?,
                     Err(error) => {
@@ -630,10 +631,13 @@ impl Supervisor<'_> {
         let payload = json!({"ask_id": ask_id, "answer": answer});
         match answer {
             "land" => {
-                if !self.queue.has_run_event(run.id(), "integration_approved")? {
+                if !self
+                    .queue
+                    .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?
+                {
                     self.queue.record_runtime_event(
                         run.id(),
-                        "integration_approved",
+                        event_kind::INTEGRATION_APPROVED,
                         json!({"status": run.status().as_str(), "pid": self.layout.pid, "push": true, "ask_id": ask_id}),
                     )?;
                 }
@@ -681,25 +685,4 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
-}
-
-/// The revise requests sent to the run's session: each `revise_requested`
-/// but those a `revise_unsent` withdrew (the request is recorded before it
-/// is typed).
-pub(super) fn sent_revises(events: &[crate::domain::RunEvent]) -> usize {
-    let count = |kind: &str| events.iter().filter(|e| e.kind == kind).count();
-    count("revise_requested").saturating_sub(count("revise_unsent"))
-}
-
-/// The conflict requests sent to the run's session: each
-/// `conflict_precheck` with `requested: true` but those a later one with
-/// `unsent: true` withdrew (the request is recorded before it is typed).
-pub(super) fn sent_conflict_requests(events: &[crate::domain::RunEvent]) -> usize {
-    let count = |key: &str| {
-        events
-            .iter()
-            .filter(|e| e.kind == "conflict_precheck" && e.payload[key] == true)
-            .count()
-    };
-    count("requested").saturating_sub(count("unsent"))
 }

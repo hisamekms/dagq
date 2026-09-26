@@ -143,7 +143,7 @@ pub(super) fn fail_live(
     warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; the session waits to be recovered by hand", run.id(), alert.as_str());
     sv.queue.record_runtime_event(
         run.id(),
-        "recovery_finished",
+        event_kind::RECOVERY_FINISHED,
         json!({
             "alert": alert,
             "attempt": attempt,
@@ -155,7 +155,7 @@ pub(super) fn fail_live(
     )?;
     sv.queue.record_runtime_event(
         run.id(),
-        "recovery_failed",
+        event_kind::RECOVERY_FAILED,
         json!({
             "code": ReasonCode::JobFailed,
             "alert": alert,
@@ -359,7 +359,7 @@ impl Escalation {
     ) -> Result<()> {
         let payload = self.finished(alert, attempt, note, ask_id, extra);
         sv.queue
-            .record_runtime_event(run.id(), "recovery_finished", payload)?;
+            .record_runtime_event(run.id(), event_kind::RECOVERY_FINISHED, payload)?;
         Ok(())
     }
 }
@@ -374,8 +374,8 @@ pub(super) fn job_file(alert: RecoveryAlert, attempt: usize, what: &str) -> Stri
 /// its `recovery_requested`.
 fn evidence_kind(alert: RecoveryAlert) -> Option<&'static str> {
     match alert {
-        RecoveryAlert::StuckExit => Some("exit_request_timed_out"),
-        RecoveryAlert::PromptWaiting => Some("prompt_waiting"),
+        RecoveryAlert::StuckExit => Some(event_kind::EXIT_REQUEST_TIMED_OUT),
+        RecoveryAlert::PromptWaiting => Some(event_kind::PROMPT_WAITING),
         _ => None,
     }
 }
@@ -394,7 +394,7 @@ impl RecoveryWatch {
             .filter(alert)
             // A job the previous supervisor left running is gone: its
             // marker gets a new one (counted as another attempt).
-            .rfind(|e| e.kind == "recovery_finished")
+            .rfind(|e| e.kind == event_kind::RECOVERY_FINISHED)
         {
             watch.seen = event.payload["marker_at_ms"].as_i64().map(at_millis);
             watch.recheck = event.payload["recheck_at_ms"].as_i64().map(at_millis);
@@ -430,7 +430,7 @@ impl RecoveryWatch {
         job.job.stop();
         let recorded = sv.queue.record_runtime_event(
             run.id(),
-            "recovery_finished",
+            event_kind::RECOVERY_FINISHED,
             json!({
                 "alert": job.alert,
                 "attempt": job.attempt,
@@ -488,7 +488,7 @@ impl RecoveryWatch {
             payload.extend(facts);
         }
         sv.queue
-            .record_runtime_event(run.id(), "recovery_requested", payload.clone())?;
+            .record_runtime_event(run.id(), event_kind::RECOVERY_REQUESTED, payload.clone())?;
         info!(run_id = %run.id(), "run {}: alert {}; recovery job {attempt} starts", run.id(), alert.as_str());
         match spawn_live(sv, run, live, alert, attempt, &payload) {
             Ok(job) => {
@@ -743,7 +743,7 @@ fn applied_recheck(
         .iter()
         .rev()
         .find(|e| {
-            e.kind == "recovery_finished"
+            e.kind == event_kind::RECOVERY_FINISHED
                 && e.payload["alert"] == job.alert.as_str()
                 && e.payload["attempt"] == job.attempt
         })
@@ -851,7 +851,12 @@ pub(super) fn repair_history(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<V
         .queue
         .run_events(run.id())?
         .iter()
-        .filter(|e| matches!(e.kind.as_str(), "recovery_finished" | "auto_repaired"))
+        .filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                event_kind::RECOVERY_FINISHED | event_kind::AUTO_REPAIRED
+            )
+        })
         .map(super::super::health::compact_event)
         .collect())
 }
@@ -1000,7 +1005,7 @@ pub(super) fn apply_live(
             payload.extend(detail);
         }
         sv.queue
-            .record_runtime_event(run.id(), "auto_repaired", payload)
+            .record_runtime_event(run.id(), event_kind::AUTO_REPAIRED, payload)
     };
     for action in &verdict.actions {
         match action {
@@ -1101,7 +1106,7 @@ pub(super) fn apply_live(
     }
     sv.queue.record_runtime_event(
         run.id(),
-        "recovery_finished",
+        event_kind::RECOVERY_FINISHED,
         json!({
             "alert": job.alert,
             "attempt": job.attempt,

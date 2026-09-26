@@ -12,14 +12,14 @@ use std::{collections::HashMap, path::Path};
 
 use super::{AskQuery, Clock, PlannerAnswerRoute, ProcessControl, Queue, RunFiles, TRIAGE_ASKER};
 use crate::domain::{
-    ASK_EVENT_KINDS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
-    LANDING_OPTIONS, ReasonCode, RunEvent, RunId, RunLease, RunProcess, RunStatus, SessionRole,
-    SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun, TriageState,
-    UPDATE_FAILED_OPTIONS, event_attention, heartbeat_stale,
+    AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS, LANDING_OPTIONS, ReasonCode,
+    RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus, SessionRole, SupervisorMode,
+    SupervisorPulse, SupervisorRegistration, TaskId, TaskRun, UPDATE_FAILED_OPTIONS,
+    event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
-    reason, recheck, run_attention,
+    reason, recheck, run_attention, run_attention_of,
     run_env::{RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING, RunEnvCheck},
-    session_takes_answers, supervisor_attention, triage_state,
+    session_takes_answers, supervisor_attention,
     waiting::{WaitCount, WaitState},
 };
 
@@ -739,50 +739,12 @@ pub fn attention(
             });
             continue;
         }
-        let exit_pending = events
-            .iter()
-            .rev()
-            .find(|e| matches!(e.kind.as_str(), "exit_request_timed_out" | "session_exited"))
-            .is_some_and(|e| e.kind == "exit_request_timed_out");
-        let Some(next) = run_attention(run.status(), exit_pending, false, leased) else {
+        let Some((next, kind)) =
+            run_attention_of(&RunHistory::from_events(&events), run.status(), leased)
+        else {
             continue;
         };
-        // A failed or interrupted run is the supervisor's triage until it
-        // finished (its verdict moved the task or the run on, or its ask is
-        // the attention) or failed (a person's).
-        let next = match (next, triage_state(&events)) {
-            (AttentionNext::Triaging, TriageState::Finished) => continue,
-            (AttentionNext::Triaging, TriageState::Failed) => AttentionNext::TriageByHand,
-            (next, _) => next,
-        };
-        let kind = events
-            .iter()
-            .rev()
-            .find(|e| match next {
-                // The error the owner gave up with, whatever its payload.
-                AttentionNext::RecoverRun => e.kind == "runtime_error",
-                // Whatever parked the run for a session last.
-                AttentionNext::Resuming => {
-                    e.payload.get("status").and_then(Value::as_str)
-                        == Some(RunStatus::NeedsSession.as_str())
-                }
-                // A failed review whose `approve_landing` ask was closed
-                // without moving the run (task 328) is reviewed by hand.
-                AttentionNext::ReviewAndIntegrate if e.kind == "review_failed" => true,
-                // An ask about the run is its own attention, not the run's.
-                _ => {
-                    !ASK_EVENT_KINDS.contains(&e.kind.as_str())
-                        && event_attention(&e.kind, &e.payload).is_some()
-                }
-            })
-            .map_or_else(|| run.status().as_str().to_owned(), |e| e.kind.clone());
-        // After a failed headless review the run is a person's to review.
-        let next = match next {
-            AttentionNext::ReviewAndIntegrate if kind == "review_failed" => {
-                AttentionNext::ReviewByHand
-            }
-            next => next,
-        };
+        let kind = kind.unwrap_or(run.status().as_str()).to_owned();
         attention.push(Attention {
             run_id: Some(run.id().clone()),
             task_id: Some(run.task_id()),
@@ -800,17 +762,10 @@ pub fn attention(
         let Some(next) = run_attention(run.status(), false, true, false) else {
             continue;
         };
-        let error = queue
-            .run_events(run.id())?
-            .into_iter()
-            .rev()
-            .find(|e| e.kind == "push_failed")
-            .and_then(|e| {
-                e.payload
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(truncate_reason)
-            });
+        let events = queue.run_events(run.id())?;
+        let error = RunHistory::from_events(&events)
+            .push_failure()
+            .map(truncate_reason);
         attention.push(Attention {
             run_id: Some(run.id().clone()),
             task_id: Some(run.task_id()),
@@ -818,7 +773,7 @@ pub fn attention(
             ask_id: None,
             reason_category: None,
             status: run.status().as_str().into(),
-            kind: "push_failed".into(),
+            kind: event_kind::PUSH_FAILED.into(),
             last_error_code: error.as_ref().map(|_| ReasonCode::PushFailed),
             last_error: error,
             next,
@@ -882,7 +837,7 @@ pub fn attention(
             ask_id: None,
             reason_category: None,
             status: draft.status().as_str().into(),
-            kind: "draft_planner_exhausted".into(),
+            kind: event_kind::DRAFT_PLANNER_EXHAUSTED.into(),
             last_error: None,
             last_error_code: None,
             next: AttentionNext::DecideDraft,
@@ -899,7 +854,7 @@ pub fn attention(
             ask_id: None,
             reason_category: None,
             status: finding.status.as_str().into(),
-            kind: "finding_planner_exhausted".into(),
+            kind: event_kind::FINDING_PLANNER_EXHAUSTED.into(),
             last_error: Some(truncate_reason(&format!(
                 "finding {}: {}",
                 finding.id, finding.summary
@@ -910,7 +865,7 @@ pub fn attention(
     }
     for hold in queue.plan_review_holds()? {
         let (status, next) = match hold.kind {
-            "plan_review_failed" => ("submitted", AttentionNext::PlanReviewByHand),
+            event_kind::PLAN_REVIEW_FAILED => ("submitted", AttentionNext::PlanReviewByHand),
             _ => ("revising", AttentionNext::CheckPlanner),
         };
         attention.push(Attention {
@@ -930,7 +885,7 @@ pub fn attention(
         let (status, kind, next) = if ask.is_open() {
             (
                 "open",
-                "ask_opened",
+                event_kind::ASK_OPENED,
                 AttentionNext::AnswerAsk { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::WorkerQuestion
@@ -941,7 +896,7 @@ pub fn attention(
             // failed send, a run no longer running or one nobody supervises
             // leaves it to the inbox.
             let failed = queue.run_events(run_id)?.iter().any(|e| {
-                e.kind == "ask_delivery_failed"
+                e.kind == event_kind::ASK_DELIVERY_FAILED
                     && e.payload
                         .get("ask_id")
                         .and_then(Value::as_i64)
@@ -951,7 +906,7 @@ pub fn attention(
             if failed {
                 (
                     "answered",
-                    "ask_delivery_failed",
+                    event_kind::ASK_DELIVERY_FAILED,
                     AttentionNext::DeliverAnswer { ask_id: ask.id },
                 )
             } else if session_takes_answers(queue.run(run_id)?.status(), &queue.run_events(run_id)?)
@@ -961,13 +916,13 @@ pub fn attention(
             {
                 (
                     "answered",
-                    "ask_answered",
+                    event_kind::ASK_ANSWERED,
                     AttentionNext::DeliveringAnswer { ask_id: ask.id },
                 )
             } else {
                 (
                     "answered",
-                    "ask_answered",
+                    event_kind::ASK_ANSWERED,
                     AttentionNext::DeliverAnswer { ask_id: ask.id },
                 )
             }
@@ -987,7 +942,7 @@ pub fn attention(
             // or hands another option of the ask back to the recovery job.
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::UpdateFailed
@@ -1003,7 +958,7 @@ pub fn attention(
             // update (ADR-0045 decision 17).
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::ApprovePlan && queue.applies_plan_answer(&ask)? {
@@ -1011,7 +966,7 @@ pub fn attention(
             // (ADR-0041 decision 11).
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::PlannerQuestion
@@ -1022,13 +977,13 @@ pub fn attention(
             // decision 13).
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::DeliveringAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::PlannerQuestion {
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::DeliverAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::Stalled
@@ -1043,7 +998,7 @@ pub fn attention(
             // and closes the ask (ADR-0043 decision 1).
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
         } else if ask.kind == AskKind::ApproveLanding
@@ -1057,13 +1012,13 @@ pub fn attention(
             // The supervisor lands, sends back or cancels the run itself.
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
         } else {
             (
                 "answered",
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 AttentionNext::ReadAnswer { ask_id: ask.id },
             )
         };

@@ -7,6 +7,7 @@
 //! resolves the finding or opens it again. Opening a planner is one write
 //! transaction that re-checks the finding first, so two supervisors never
 //! open one for the same finding.
+use crate::domain::event_kind;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
@@ -27,14 +28,19 @@ use crate::domain::{
 /// a proposal, no planner of the runtime's open for it, no
 /// `planner_question` about it nobody closed, and its planners since the
 /// mark not used up.
-const TARGETS: &str = "SELECT f.id FROM findings f
+fn targets() -> String {
+    format!(
+        "SELECT f.id FROM findings f
     WHERE f.status='open' AND f.propose_reason IS NOT NULL
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.finding_id=f.id AND p.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.finding_id=f.id
         AND a.kind='planner_question' AND a.closed_at IS NULL)
-    AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.kind='finding_planner_exhausted'
+    AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
         AND json_extract(e.payload,'$.finding_id')=f.id
-        AND json_extract(e.payload,'$.marked_at') IS f.propose_requested_at)";
+        AND json_extract(e.payload,'$.marked_at') IS f.propose_requested_at)",
+        event_kind::FINDING_PLANNER_EXHAUSTED
+    )
+}
 
 impl SqliteQueue {
     /// Submit `submission` (see [`crate::application::TaskStore::submit`])
@@ -68,7 +74,10 @@ impl SqliteQueue {
     pub fn planner_findings(&self) -> Result<Vec<Finding>> {
         let ids: Vec<FindingId> = self
             .conn
-            .prepare(&format!("{TARGETS} ORDER BY f.propose_requested_at, f.id"))?
+            .prepare(&format!(
+                "{} ORDER BY f.propose_requested_at, f.id",
+                targets()
+            ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter()
@@ -109,7 +118,7 @@ impl SqliteQueue {
             finding_event(
                 &tx,
                 &current,
-                "finding_planner_exhausted",
+                event_kind::FINDING_PLANNER_EXHAUSTED,
                 json!({
                     "finding_id": finding,
                     "planners": opened,
@@ -131,7 +140,7 @@ impl SqliteQueue {
         finding_event(
             &tx,
             &current,
-            "finding_planner_opened",
+            event_kind::FINDING_PLANNER_OPENED,
             json!({
                 "finding_id": finding,
                 "planner_id": planner,
@@ -208,7 +217,7 @@ impl SqliteQueue {
             finding_event(
                 &tx,
                 &current,
-                "finding_status_changed",
+                event_kind::FINDING_STATUS_CHANGED,
                 json!({
                     "finding_id": current.id,
                     "from": current.status,
@@ -229,13 +238,14 @@ impl SqliteQueue {
     pub fn exhausted_findings(&self) -> Result<Vec<Finding>> {
         Ok(self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT * FROM findings f WHERE f.status='open' AND f.propose_reason IS NOT NULL
-                 AND EXISTS(SELECT 1 FROM run_events e WHERE e.kind='finding_planner_exhausted'
+                 AND EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
                      AND json_extract(e.payload,'$.finding_id')=f.id
                      AND json_extract(e.payload,'$.marked_at') IS f.propose_requested_at)
                  ORDER BY f.id",
-            )?
+                event_kind::FINDING_PLANNER_EXHAUSTED
+            ))?
             .query_map([], finding_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -255,9 +265,12 @@ impl SqliteQueue {
     /// (`ask_delivered`).
     pub fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='ask_delivered'
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND json_extract(payload,'$.ask_id')=?1
              AND json_extract(payload,'$.workspace_id')=?2)",
+                event_kind::ASK_DELIVERED
+            ),
             params![ask, workspace],
             |r| r.get(0),
         )?)
@@ -266,8 +279,11 @@ impl SqliteQueue {
     /// Whether typing the answer of `ask` ever failed (`ask_delivery_failed`).
     pub fn ask_delivery_failed(&self, ask: AskId) -> Result<bool> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='ask_delivery_failed'
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND json_extract(payload,'$.ask_id')=?1)",
+                event_kind::ASK_DELIVERY_FAILED
+            ),
             [ask],
             |r| r.get(0),
         )?)
@@ -276,7 +292,7 @@ impl SqliteQueue {
 
 fn is_target(conn: &Connection, finding: FindingId) -> Result<bool> {
     Ok(conn.query_row(
-        &format!("SELECT EXISTS({TARGETS} AND f.id=?1)"),
+        &format!("SELECT EXISTS({} AND f.id=?1)", targets()),
         [finding],
         |r| r.get(0),
     )?)
@@ -340,9 +356,12 @@ pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerA
     }
     let current = read_finding(conn, finding)?;
     let exhausted: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='finding_planner_exhausted'
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
          AND json_extract(payload,'$.finding_id')=?1
          AND json_extract(payload,'$.marked_at') IS ?2)",
+            event_kind::FINDING_PLANNER_EXHAUSTED
+        ),
         params![finding, current.propose_requested_at],
         |r| r.get(0),
     )?;
@@ -404,7 +423,7 @@ pub(super) fn link_findings(
         finding_event(
             conn,
             &current,
-            "finding_status_changed",
+            event_kind::FINDING_STATUS_CHANGED,
             json!({
                 "finding_id": id,
                 "from": current.status,
@@ -475,7 +494,7 @@ pub(super) fn apply_answer(
                     finding_event(
                         conn,
                         &marked,
-                        "finding_status_changed",
+                        event_kind::FINDING_STATUS_CHANGED,
                         json!({
                             "finding_id": id,
                             "from": current.status,
@@ -489,7 +508,7 @@ pub(super) fn apply_answer(
                 finding_event(
                     conn,
                     &marked,
-                    "finding_updated",
+                    event_kind::FINDING_UPDATED,
                     json!({
                         "finding_id": id,
                         "changed": ["propose_reason"],
@@ -539,8 +558,11 @@ fn record_from_ask(
     };
     let opened: Option<crate::domain::EventId> = conn
         .query_row(
-            "SELECT id FROM run_events WHERE kind='ask_opened'
+            &format!(
+                "SELECT id FROM run_events WHERE kind='{}'
              AND json_extract(payload,'$.ask_id')=?1 ORDER BY id LIMIT 1",
+                event_kind::ASK_OPENED
+            ),
             [ask.id],
             |r| r.get(0),
         )

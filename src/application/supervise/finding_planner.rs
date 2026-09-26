@@ -87,7 +87,7 @@ impl Supervisor<'_> {
                         warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; it is left to the inbox", ask.id, planner.id);
                         self.queue.record_finding_event(
                             finding,
-                            "ask_delivery_failed",
+                            event_kind::ASK_DELIVERY_FAILED,
                             json!({
                                 "ask_id": ask.id,
                                 "workspace_id": workspace,

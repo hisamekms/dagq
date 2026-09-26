@@ -4,6 +4,7 @@
 //! plan-review path ([`approve`]) is what makes them `ready`, a send back
 //! returns them to `draft` for the planner, and a [`withdraw`] releases
 //! them as drafts.
+use crate::domain::event_kind;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -46,7 +47,7 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
                     conn,
                     task_id,
                     None,
-                    "proposal_resubmitted",
+                    event_kind::PROPOSAL_RESUBMITTED,
                     json!({"proposal_id": retried.id()}),
                 )?;
             }
@@ -135,7 +136,7 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
             conn,
             task_id,
             None,
-            "task_submitted",
+            event_kind::TASK_SUBMITTED,
             json!({"proposal_id": id}),
         )?;
     }
@@ -146,7 +147,12 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
             params![id, goal_id],
         )?;
         if joined != 0 {
-            goal_event(conn, goal_id, "goal_submitted", json!({"proposal_id": id}))?;
+            goal_event(
+                conn,
+                goal_id,
+                event_kind::GOAL_SUBMITTED,
+                json!({"proposal_id": id}),
+            )?;
         }
     }
     read(conn, id)
@@ -172,7 +178,7 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
                     conn,
                     task_id,
                     None,
-                    "approve_withheld",
+                    event_kind::APPROVE_WITHHELD,
                     json!({"proposal_id": id, "goal_id": goal_id, "verdict": verdict}),
                 )?;
             }
@@ -192,7 +198,7 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
             goal_event(
                 conn,
                 goal_id,
-                "goal_status_changed",
+                event_kind::GOAL_STATUS_CHANGED,
                 json!({"from": GoalStatus::Draft, "to": opened.status()}),
             )?;
         }
@@ -254,11 +260,22 @@ pub(super) fn withdraw(
         if status(conn, task_id)? == TaskStatus::Submitted {
             transition_task(conn, task_id, TaskAction::Draft, now)?;
         }
-        event(conn, task_id, None, "proposal_withdrawn", payload.clone())?;
+        event(
+            conn,
+            task_id,
+            None,
+            event_kind::PROPOSAL_WITHDRAWN,
+            payload.clone(),
+        )?;
         close_plan_asks(conn, task_id, now_secs)?;
     }
     for &goal_id in withdrawn.goal_ids() {
-        goal_event(conn, goal_id, "proposal_withdrawn", payload.clone())?;
+        goal_event(
+            conn,
+            goal_id,
+            event_kind::PROPOSAL_WITHDRAWN,
+            payload.clone(),
+        )?;
     }
     read(conn, id)
 }
@@ -285,7 +302,7 @@ fn close_plan_asks(conn: &Connection, task_id: TaskId, now: i64) -> Result<()> {
                 now,
                 &mut payload,
             )?;
-            event(conn, task_id, None, "ask_answered", payload)?;
+            event(conn, task_id, None, event_kind::ASK_ANSWERED, payload)?;
         }
         conn.execute(
             "UPDATE asks SET closed_at=?2 WHERE id=?1",

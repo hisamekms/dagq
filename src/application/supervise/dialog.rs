@@ -12,10 +12,10 @@ use crate::{application::KnownDialog, domain::RunEvent};
 /// The events that begin a stage of a run's session: a dialog is answered
 /// at most once after the last of them.
 const STAGE_EVENTS: &[&str] = &[
-    "agent_started",
-    "resume_started",
-    "revise_requested",
-    "exit_requested",
+    event_kind::AGENT_STARTED,
+    event_kind::RESUME_STARTED,
+    event_kind::REVISE_REQUESTED,
+    event_kind::EXIT_REQUESTED,
 ];
 
 /// Answer the known dialog on `screen` of the session of `run` in
@@ -82,7 +82,7 @@ pub(super) fn answer_known_dialog(
                 payload["attempt"] = json!(attempt);
             }
             sv.queue
-                .record_runtime_event(run.id(), "auto_repaired", payload)?;
+                .record_runtime_event(run.id(), event_kind::AUTO_REPAIRED, payload)?;
             info!(run_id = %run.id(), "run {} was held by the {dialog} dialog in workspace {workspace}; answered it with {:?}", run.id(), answer.keys);
             Ok(true)
         }
@@ -90,7 +90,7 @@ pub(super) fn answer_known_dialog(
             let error = result.err().map(|error| format!("{error:#}"));
             sv.queue.record_runtime_event(
                 run.id(),
-                "known_dialog_unanswered",
+                event_kind::KNOWN_DIALOG_UNANSWERED,
                 json!({
                     "dialog": dialog,
                     "conditions": conditions,
@@ -159,12 +159,12 @@ fn in_stage(events: &[RunEvent], dialog: &str, unanswered: bool) -> bool {
         .rev()
         .take_while(|e| !STAGE_EVENTS.contains(&e.kind.as_str()))
         .any(|e| {
-            let answered = e.kind == "auto_repaired"
+            let answered = e.kind == event_kind::AUTO_REPAIRED
                 && matches!(
                     e.payload.get("repair").and_then(Value::as_str),
                     Some(DIALOG_ANSWERED | RECOVERY_DIALOG_ANSWERED)
                 );
-            (answered || (unanswered && e.kind == "known_dialog_unanswered"))
+            (answered || (unanswered && e.kind == event_kind::KNOWN_DIALOG_UNANSWERED))
                 && e.payload.get("dialog").and_then(Value::as_str) == Some(dialog)
         })
 }

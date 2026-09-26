@@ -6,6 +6,7 @@
 //! triage, and the requests it types into a live session (a resume, a
 //! revise, a receipt that does not match).
 
+use crate::domain::event_kind;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -1144,7 +1145,9 @@ pub fn ended_run_material(
             let actions: Vec<String> = detail
                 .events
                 .iter()
-                .filter(|e| e.run_id.as_ref() == Some(r.id()) && e.kind == "triage_finished")
+                .filter(|e| {
+                    e.run_id.as_ref() == Some(r.id()) && e.kind == event_kind::TRIAGE_FINISHED
+                })
                 .map(|e| format!("{}", e.payload.get("action").unwrap_or(&Value::Null)))
                 .collect();
             format!(

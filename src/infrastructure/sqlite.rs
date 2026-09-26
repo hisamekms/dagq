@@ -1,3 +1,4 @@
+use crate::domain::event_kind;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -770,7 +771,7 @@ impl TaskStore for SqliteQueue {
             &tx,
             task_id,
             None,
-            "dependency_removed",
+            event_kind::DEPENDENCY_REMOVED,
             json!({"predecessor_id": predecessor_id}),
         )?;
         tx.commit()?;
@@ -804,7 +805,7 @@ impl TaskStore for SqliteQueue {
             &tx,
             task_id,
             None,
-            "goal_dependency_removed",
+            event_kind::GOAL_DEPENDENCY_REMOVED,
             json!({"goal_id": goal_id}),
         )?;
         tx.commit()?;
@@ -911,7 +912,7 @@ impl TaskStore for SqliteQueue {
             ],
         )?;
         let result = read_goal(&tx, id)?;
-        goal_event(&tx, id, "goal_created", json!({"goal": result}))?;
+        goal_event(&tx, id, event_kind::GOAL_CREATED, json!({"goal": result}))?;
         tx.commit()?;
         Ok(result)
     }
@@ -991,7 +992,7 @@ impl TaskStore for SqliteQueue {
         goal_event(
             &tx,
             goal_id,
-            "goal_updated",
+            event_kind::GOAL_UPDATED,
             json!({"old": old_json, "new": new}),
         )?;
         let result = read_goal(&tx, goal_id)?;
@@ -1022,7 +1023,7 @@ impl TaskStore for SqliteQueue {
         goal_event(
             &tx,
             goal_id,
-            "goal_closed",
+            event_kind::GOAL_CLOSED,
             json!({"verdict": verdict, "tasks": counts}),
         )?;
         let result = read_goal(&tx, goal_id)?;
@@ -1099,7 +1100,7 @@ impl TaskStore for SqliteQueue {
         goal_event(
             &tx,
             goal_id,
-            "goal_status_changed",
+            event_kind::GOAL_STATUS_CHANGED,
             json!({"from": from, "to": opened.status()}),
         )?;
         let result = read_goal(&tx, goal_id)?;
@@ -1213,7 +1214,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                "task_goal_changed",
+                event_kind::TASK_GOAL_CHANGED,
                 json!({"from": from, "to": task.goal_id()}),
             )?;
         }
@@ -1244,7 +1245,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                "task_paths_changed",
+                event_kind::TASK_PATHS_CHANGED,
                 json!({"from": from, "to": task.paths()}),
             )?;
         }
@@ -1294,7 +1295,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                "task_edited",
+                event_kind::TASK_EDITED,
                 json!({"from": from, "to": to}),
             )?;
         }
@@ -1323,7 +1324,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                "task_priority_changed",
+                event_kind::TASK_PRIORITY_CHANGED,
                 json!({"from": from, "to": task.priority()}),
             )?;
         }
@@ -1372,7 +1373,7 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
         tx,
         id,
         None,
-        "task_created",
+        event_kind::TASK_CREATED,
         json!({"goal_id": task.goal_id()}),
     )?;
     // Inserted after the task, which is in its goal already, so the
@@ -1696,7 +1697,7 @@ pub(super) fn claim_task(
             run.created_at()
         ],
     )?;
-    event(tx, task.id(), Some(run.id()), "run_claimed", {
+    event(tx, task.id(), Some(run.id()), event_kind::RUN_CLAIMED, {
         let mut payload =
             json!({"from": "ready", "to": task.status(), "provider": run.actual_provider()});
         if let (Some(payload), Some(serde_json::Value::Object(attributes))) =
@@ -1787,9 +1788,12 @@ struct Duplicate<'a> {
 pub(super) fn duplicate_target(conn: &Connection, task_id: TaskId) -> Result<Option<TaskId>> {
     Ok(conn
         .query_row(
-            "SELECT json_extract(payload,'$.to'), json_extract(payload,'$.duplicate_of')
-             FROM run_events WHERE task_id=?1 AND kind='task_status_changed'
+            &format!(
+                "SELECT json_extract(payload,'$.to'), json_extract(payload,'$.duplicate_of')
+             FROM run_events WHERE task_id=?1 AND kind='{}'
              ORDER BY id DESC LIMIT 1",
+                event_kind::TASK_STATUS_CHANGED
+            ),
             [task_id],
             |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
         )
@@ -1805,11 +1809,12 @@ pub(super) fn duplicate_target(conn: &Connection, task_id: TaskId) -> Result<Opt
 /// The canceled tasks recorded as duplicates of `task_id`, ascending.
 fn duplicates_of(conn: &Connection, task_id: TaskId) -> Result<Vec<TaskId>> {
     let candidates: Vec<TaskId> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id=e.task_id
-             WHERE e.kind='task_status_changed' AND t.status='canceled'
+             WHERE e.kind='{}' AND t.status='canceled'
              AND json_extract(e.payload,'$.duplicate_of')=?1 ORDER BY e.task_id",
-        )?
+            event_kind::TASK_STATUS_CHANGED
+        ))?
         .query_map([task_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut duplicates = Vec::with_capacity(candidates.len());
@@ -1846,7 +1851,7 @@ fn apply_transition(
         conn,
         task_id,
         None,
-        "task_status_changed",
+        event_kind::TASK_STATUS_CHANGED,
         match duplicate {
             Some(Duplicate {
                 duplicate_of,
@@ -1867,7 +1872,7 @@ fn apply_transition(
             conn,
             task_id,
             None,
-            "review_bypassed",
+            event_kind::REVIEW_BYPASSED,
             json!({"from": from}),
         )?;
     }
@@ -1914,7 +1919,7 @@ pub(super) fn insert_dependency(
             conn,
             task_id,
             None,
-            "dependency_added",
+            event_kind::DEPENDENCY_ADDED,
             json!({"predecessor_id": predecessor_id}),
         )?;
     }
@@ -1944,7 +1949,7 @@ fn insert_goal_dependency(
             conn,
             task_id,
             None,
-            "goal_dependency_added",
+            event_kind::GOAL_DEPENDENCY_ADDED,
             json!({"goal_id": goal_id}),
         )?;
     }

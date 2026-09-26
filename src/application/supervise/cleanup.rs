@@ -261,7 +261,7 @@ impl Supervisor<'_> {
                     cleaned.add(&run_id, bytes);
                     self.queue.record_runtime_event(
                         &run_id,
-                        "build_outputs_removed",
+                        event_kind::BUILD_OUTPUTS_REMOVED,
                         json!({"paths": paths, "bytes": bytes, "by": "supervisor"}),
                     )
                 }
@@ -288,7 +288,7 @@ impl Supervisor<'_> {
                     }
                     cleaned.add(&run_id, bytes);
                     self.queue
-                        .record_runtime_event(&run_id, "worktree_removed", payload)
+                        .record_runtime_event(&run_id, event_kind::WORKTREE_REMOVED, payload)
                 }
                 Outcome::Failed {
                     run_id,
@@ -304,7 +304,7 @@ impl Supervisor<'_> {
                     warn!(run_id = %run_id, "run {run_id}: {message}");
                     self.queue.record_runtime_event(
                         &run_id,
-                        "cleanup_failed",
+                        event_kind::CLEANUP_FAILED,
                         reason_of_error(&error, ReasonCode::Other)
                             .on(json!({"path": path, "message": message, "by": "supervisor"})),
                     )

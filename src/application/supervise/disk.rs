@@ -170,7 +170,7 @@ impl Supervisor<'_> {
             removed.runs.len()
         );
         if let Err(error) = self.queue.record_queue_event(
-            "auto_repaired",
+            event_kind::AUTO_REPAIRED,
             json!({
                 "repair": DISK_CLEANUP,
                 "layer": "runtime",

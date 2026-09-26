@@ -56,7 +56,7 @@ pub const DERIVED_PREFIX: &str = "derived:";
 /// The longest label `dagq mark` takes, in characters.
 pub const MAX_LABEL_CHARS: usize = 120;
 
-const RUN_CLAIMED: &str = "run_claimed";
+const RUN_CLAIMED: &str = super::event_kind::RUN_CLAIMED;
 
 /// The normalized `[run.env]`: the hash of its `KEY=VALUE` lines in key
 /// order, and each key's own hash so the next change can name the keys it

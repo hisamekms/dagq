@@ -165,7 +165,7 @@ pub(super) fn submit(
     if retries > 0 {
         note(
             sv,
-            "submit_retried",
+            event_kind::SUBMIT_RETRIED,
             json!({
                 "workspace_id": workspace,
                 "input": input.name(),
@@ -181,7 +181,7 @@ pub(super) fn submit(
         if matches!(submission, Submission::Submitted(Some(_))) {
             note(
                 sv,
-                "auto_repaired",
+                event_kind::AUTO_REPAIRED,
                 json!({
                     "layer": "runtime",
                     "repair": "submit_enter_retry",
@@ -195,7 +195,7 @@ pub(super) fn submit(
         let excerpt = sv.signals.screen_excerpt(screen);
         note(
             sv,
-            "submit_unconfirmed",
+            event_kind::SUBMIT_UNCONFIRMED,
             json!({
                 "workspace_id": workspace,
                 "input": input.name(),
@@ -427,7 +427,7 @@ impl StartCheck {
             StartSign::Lost if !self.resent => {
                 sv.queue.record_runtime_event(
                     run.id(),
-                    "submit_resent",
+                    event_kind::SUBMIT_RESENT,
                     json!({
                         "workspace_id": workspace,
                         "what": self.what,
@@ -446,7 +446,7 @@ impl StartCheck {
                 self.done = true;
                 sv.queue.record_runtime_event(
                     run.id(),
-                    "submit_not_started",
+                    event_kind::SUBMIT_NOT_STARTED,
                     json!({
                         "workspace_id": workspace,
                         "what": self.what,

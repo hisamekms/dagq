@@ -10,7 +10,7 @@
 use serde::Serialize;
 
 /// The run event whose `bytes` measure what a run built.
-pub const BUILD_OUTPUTS_REMOVED: &str = "build_outputs_removed";
+pub const BUILD_OUTPUTS_REMOVED: &str = super::event_kind::BUILD_OUTPUTS_REMOVED;
 /// The `subject` of the `cost` ask about the disk (ADR-0047 decision 42).
 pub const DISK_SUBJECT: &str = "disk";
 /// The options of the disk ask (ADR-0047 decision 44): `done` once a

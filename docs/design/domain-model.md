@@ -201,6 +201,14 @@ failed / interrupted ──resume_after_triage──▶ needs_session ──exha
 
 storeの保存は「`stored_run`で読む → domainのコマンド → `save_run`で書く」の形で、[persistence](persistence.md#集約の読み書き)にある。
 
+### runの履歴（`RunHistory`）
+
+runの状態のうちstatusの外にあるもの（承認、resume・revise・reviewの回数、conflictの依頼、recoveryの進み、`/exit`の待ち、最後に`needs_session`にした理由など）は、`run_events`をdomainの`RunHistory`（`src/domain/run/history.rs`）に畳み込んで読む。`RunHistory::from_events(&events)`はapplicationかinfrastructureが読んだ1 runのevent（古い順）を借りるだけの読み取り専用の型で、I/Oはしない。クエリは`approved()`（`integration_approved`がある）、`landing_pushes()`、`resumes()`（`domain::resume::ResumeCount`。数えるresumeと、review通過後の衝突だけのresumeの内訳）、`revise_attempts()`（`revise_requested`から`revise_unsent`を引いた数）、`review_attempts()` / `triage_attempts()`、`conflict_requests()`（`requested: true`の`conflict_precheck`から`unsent: true`のものを引いた数）、`triage_state()`（`domain::triage_state`）、`exit_pending()`、`last_park()`（`ParkCause`と理由。landing recheckがresumeにしたものは`Recheck`）、`unresolved_since_park()`、`last_resume_skipped()`、`resumed_session()`、`waiting_prompt_hash()`、`failed_deliveries()`、`registered_follow_ups()`、`push_failure()`と、汎用の`has` / `count` / `last` / `last_of` / `last_before` / `has_after`。
+
+回数上限と承認で決まる判断もdomainの関数にある。`decide_conflict(&history)`は送信済みのconflictの依頼と数えるresume（`resumes().counted`）の和が`MAX_RESUME_ATTEMPTS`に達していれば`Ask`、でなければ`RequestRebase`、`decide_revise(&history)`は送信済みのreviseが`MAX_REVISE_ATTEMPTS`に達していれば`Ask`、でなければ`Request { attempt }`、resumeの上限は`ResumeCount::exhausted` / `left`（[needs_session](supervisor-lifecycle/needs-session.md)）、`after_validation(status, approved, awaits_landing_answer)`はvalidationの後の行き先（承認済みの`awaiting_integration`は`Land`、landing recheckが閉じていない`approve_landing`のaskを残してresumeにしたrunは`Rest { close: true }`、ほかの`awaiting_integration`は`Review`、`needs_session`は`Rest { close: true }`、それ以外は`Rest { close: false }`）、`run_attention_of(&history, status, leased)`は`in_progress`のtaskの最新runのattention（次の一手と、そこへ運んだeventのkind）。`MAX_RESUME_ATTEMPTS` / `MAX_REVISE_ATTEMPTS`と比べるのはdomainの関数だけで、supervisor・`integrate`・healthは結果に従ってI/Oを行う（applicationはこの定数を文面に出すだけ）。
+
+`run_events`のkind名は`domain::event_kind`の定数（`event_kind::INTEGRATION_APPROVED`など）か、機能のmoduleの定数（`recheck::LANDING_RECHECK_FAILED`、`sessions::SESSION_CLOSED`、`claim_hold::CLAIM_HELD`など。`event_kind`にもある名前はその定数を指す）で、applicationとinfrastructureは書く側も読む側も文字列リテラルで名指さない。kind名はCLIの出力と同じ公開契約（ADR-0016）なので、定数の値は変えない。SQLの中で絞り込む`run_events`のkindも、定数をパラメータで渡すか`format!`でSQLに埋める。
+
 ## DomainError
 
 domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）で返す。`std::error::Error`と`Display`を実装し、`anyhow`・`rusqlite`などI/OやDBのライブラリには依存しない。I/Oを行うapplication / infrastructure / runtimeは境界で`?`により`anyhow::Error`へ変換し、原因の説明が要る場所だけ`context`を足す。`Display`はCLIが`{"error": ...}`に出す文、runtimeが`last_error`に書く文そのもので、`DomainError`の導入前の文字列と一致する。variantは業務上の拒否だけで、汎用の`Other(String)`は持たない。

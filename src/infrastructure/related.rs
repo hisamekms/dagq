@@ -2,6 +2,7 @@
 //! task with its landed commits' messages, follow-up origins and duplicate
 //! mark, asks the search index how strongly the task's title matches each
 //! other task, and leaves the scoring to [`crate::domain::related`].
+use crate::domain::event_kind;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, ensure};
@@ -98,14 +99,15 @@ impl SqliteQueue {
         // the task it ran; the registered task is in the payload.
         let follow_ups: Vec<(i64, String, i64)> = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT CAST(json_extract(payload, '$.task_id') AS INTEGER), run_id, task_id
                  FROM run_events
-                 WHERE kind = 'follow_up_registered' AND run_id IS NOT NULL
+                 WHERE kind = '{}' AND run_id IS NOT NULL
                    AND task_id IS NOT NULL
                    AND json_type(payload, '$.task_id') = 'integer'
                  ORDER BY id",
-            )?
+                event_kind::FOLLOW_UP_REGISTERED
+            ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (registered, run_id, source) in follow_ups {
@@ -117,15 +119,16 @@ impl SqliteQueue {
         // cancel of a task still canceled is the one that holds.
         let duplicates: Vec<(i64, Option<i64>)> = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT e.task_id,
                         CASE WHEN json_type(e.payload, '$.duplicate_of') = 'integer'
                              THEN json_extract(e.payload, '$.duplicate_of') END
                  FROM run_events e JOIN tasks t ON t.id = e.task_id
-                 WHERE e.kind = 'task_status_changed' AND t.status = 'canceled'
+                 WHERE e.kind = '{}' AND t.status = 'canceled'
                    AND json_extract(e.payload, '$.to') = 'canceled'
                  ORDER BY e.id",
-            )?
+                event_kind::TASK_STATUS_CHANGED
+            ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (task_id, duplicate_of) in duplicates {

@@ -83,7 +83,7 @@ impl Supervisor<'_> {
                             warn!(task_id = %task, ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; it is left to the inbox", ask.id, planner.id);
                             self.queue.record_task_event(
                                 task,
-                                "ask_delivery_failed",
+                                event_kind::ASK_DELIVERY_FAILED,
                                 json!({
                                     "ask_id": ask.id,
                                     "workspace_id": workspace,
@@ -117,7 +117,7 @@ impl Supervisor<'_> {
 
     fn delivery_failed(&mut self, task: TaskId, ask: AskId) -> Result<bool> {
         Ok(self.queue.show(task)?.events.iter().any(|event| {
-            event.kind == "ask_delivery_failed"
+            event.kind == event_kind::ASK_DELIVERY_FAILED
                 && event.payload.get("ask_id").and_then(Value::as_i64) == Some(ask.as_i64())
         }))
     }
@@ -204,7 +204,7 @@ impl Supervisor<'_> {
                 .run_events(&RunId::new(run)?)?
                 .into_iter()
                 .rev()
-                .find(|event| event.kind == "integration_receipt")
+                .find(|event| event.kind == event_kind::INTEGRATION_RECEIPT)
                 .map(|event| event.payload["receipt"].clone()),
             _ => None,
         };

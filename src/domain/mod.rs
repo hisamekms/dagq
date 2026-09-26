@@ -555,6 +555,7 @@ pub mod claim_defer;
 pub mod claim_hold;
 pub mod disk;
 mod error;
+pub mod event_kind;
 pub mod finding;
 pub mod follow_up;
 pub mod goal;
@@ -612,7 +613,10 @@ pub use plan_review::{
 pub use planner::{IdleProbe, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
-pub use run::TaskRun;
+pub use run::{
+    AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
+    TaskRun, after_validation, decide_conflict, decide_revise, run_attention_of,
+};
 pub use task::{Task, TaskAction};
 pub use views::{
     ClaimOutcome, EventFilter, GoalDetail, GoalPredecessor, GoalSummary, GoalTask,
@@ -881,7 +885,7 @@ pub struct AskOutcome {
 
 /// Run event kind of a note (ADR-0024 decision 4): a free-form observation
 /// attached to a task, a run or a goal, with payload `{text, kind, by}`.
-pub const OBSERVATION_KIND: &str = "observation";
+pub const OBSERVATION_KIND: &str = event_kind::OBSERVATION;
 /// `kind` of a note registered without one.
 pub const DEFAULT_NOTE_KIND: &str = "note";
 
@@ -1549,11 +1553,13 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         {
             Some(AttentionNext::RecoverRun)
         }
-        ("resume_finished", Some(RunStatus::AwaitingIntegration)) => {
+        (event_kind::RESUME_FINISHED, Some(RunStatus::AwaitingIntegration)) => {
             Some(AttentionNext::ReviewAndIntegrate)
         }
-        ("ask_opened", _) => ask_id(payload).map(|ask_id| AttentionNext::AnswerAsk { ask_id }),
-        ("ask_answered", _)
+        (event_kind::ASK_OPENED, _) => {
+            ask_id(payload).map(|ask_id| AttentionNext::AnswerAsk { ask_id })
+        }
+        (event_kind::ASK_ANSWERED, _)
             if payload.get("runtime_closed") == Some(&serde_json::Value::Bool(true)) =>
         {
             None
@@ -1592,8 +1598,10 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         {
             None
         }
-        ("ask_answered", _) => ask_id(payload).map(|ask_id| AttentionNext::ReadAnswer { ask_id }),
-        ("ask_delivery_failed", _) => {
+        (event_kind::ASK_ANSWERED, _) => {
+            ask_id(payload).map(|ask_id| AttentionNext::ReadAnswer { ask_id })
+        }
+        (event_kind::ASK_DELIVERY_FAILED, _) => {
             ask_id(payload).map(|ask_id| AttentionNext::DeliverAnswer { ask_id })
         }
         _ => None,
@@ -1662,7 +1670,7 @@ pub fn run_attention(
         RunStatus::AwaitingIntegration => Some(AttentionNext::ReviewAndIntegrate),
         RunStatus::NeedsSession => Some(AttentionNext::Resuming),
         // The caller tells a triage that failed or finished apart by the
-        // run's events ([`triage_state`]); by the status alone, the
+        // run's events ([`RunHistory::triage_state`]); by the status alone, the
         // supervisor triages the run.
         RunStatus::Failed | RunStatus::Interrupted => Some(AttentionNext::Triaging),
         _ => None,

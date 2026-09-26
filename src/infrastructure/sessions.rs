@@ -8,6 +8,7 @@
 //! lock (task 543): a write that may close spans reads theirs first
 //! ([`read_before`]), and the close takes what was read.
 
+use crate::domain::event_kind;
 use std::cell::RefCell;
 
 use anyhow::Result;
@@ -221,7 +222,7 @@ pub(super) fn follow(
     // was typed (as before task 241) comes later than that.
     let at = payload["sent_at"]
         .as_i64()
-        .filter(|_| kind == "revise_requested")
+        .filter(|_| kind == event_kind::REVISE_REQUESTED)
         .map(|secs| millis_text(secs * 1000))
         .filter(|sent| rfc3339_millis(sent) < rfc3339_millis(&at))
         .unwrap_or(at);
@@ -240,7 +241,7 @@ pub(super) fn follow(
     }
     // The session's exit carries the work (task 514) and the tokens (task
     // 199) of the span it ended.
-    if kind == "session_exited" {
+    if kind == event_kind::SESSION_EXITED {
         for (key, value) in [("work_breakdown", exited.work), ("tokens", exited.tokens)] {
             if let Some(value) = value {
                 conn.execute(
@@ -863,8 +864,8 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         worktree,
         run_dir,
         workspace_id,
-        resumes: count("resume_started")?,
-        revises: count("revise_requested")? - count("revise_unsent")?,
+        resumes: count(event_kind::RESUME_STARTED)?,
+        revises: count(event_kind::REVISE_REQUESTED)? - count(event_kind::REVISE_UNSENT)?,
         goal_ids: Vec::new(),
     })
 }

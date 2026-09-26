@@ -150,7 +150,7 @@ impl Supervisor<'_> {
         }
         if let Err(error) = self.queue.record_runtime_event(
             run.id(),
-            "auto_repaired",
+            event_kind::AUTO_REPAIRED,
             json!({
                 "layer": "runtime",
                 "repair": "resume_adopted",
@@ -191,33 +191,16 @@ impl Supervisor<'_> {
             _ => {
                 let receipt_path =
                     PathBuf::from(run.receipt_path().context("missing receipt path")?);
-                let receipt_seen = self.files.is_file(&receipt_path)
-                    && self.queue.has_run_event(run.id(), "receipt_observed")?;
-                let exit_requested = self
-                    .queue
-                    .has_run_event(run.id(), "exit_requested")?
-                    .then(Instant::now);
-                let exit_timed_out = self
-                    .queue
-                    .has_run_event(run.id(), "exit_request_timed_out")?;
-                let first_commit_seen = self
-                    .queue
-                    .has_run_event(run.id(), "first_commit_observed")?;
+                let events = self.queue.run_events(run.id())?;
+                let history = RunHistory::from_events(&events);
+                let receipt_seen =
+                    self.files.is_file(&receipt_path) && history.has(event_kind::RECEIPT_OBSERVED);
+                let exit_requested = history.has(event_kind::EXIT_REQUESTED).then(Instant::now);
+                let exit_timed_out = history.has(event_kind::EXIT_REQUEST_TIMED_OUT);
+                let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
                 // A dialog recorded before adoption is not recorded again
                 // while the same screen stays up.
-                let prompt_hash = self
-                    .queue
-                    .run_events(run.id())?
-                    .into_iter()
-                    .rev()
-                    .find(|e| {
-                        matches!(
-                            e.kind.as_str(),
-                            "prompt_waiting" | "prompt_cleared" | "receipt_observed"
-                        )
-                    })
-                    .filter(|e| e.kind == "prompt_waiting")
-                    .and_then(|e| e.payload["screen_hash"].as_str().map(str::to_owned));
+                let prompt_hash = history.waiting_prompt_hash().map(str::to_owned);
                 Phase::Session(SessionWatch {
                     workspace: run
                         .workspace_id()
@@ -254,18 +237,7 @@ impl Supervisor<'_> {
     /// Whether the run's last resume event is `resume_skipped`: it was moved
     /// on without a session, and no resume opened one since.
     pub(super) fn skipped_resume(&self, id: &RunId) -> Result<bool> {
-        Ok(self
-            .queue
-            .run_events(id)?
-            .iter()
-            .rev()
-            .find(|e| {
-                matches!(
-                    e.kind.as_str(),
-                    "resume_started" | "resume_finished" | "resume_skipped"
-                )
-            })
-            .is_some_and(|e| e.kind == "resume_skipped"))
+        Ok(RunHistory::from_events(&self.queue.run_events(id)?).last_resume_skipped())
     }
     /// The session an accepted run keeps open (ADR-0027): the workspace of
     /// the resume that handed its live session to validation
@@ -274,32 +246,16 @@ impl Supervisor<'_> {
     /// workspace while it is not closed.
     pub(super) fn session_of(&self, run: &TaskRun) -> Result<Option<SessionRef>> {
         let events = self.queue.run_events(run.id())?;
-        let resumed = events.iter().rev().find(|e| {
-            matches!(
-                e.kind.as_str(),
-                "resume_started" | "resume_finished" | "resume_skipped"
-            )
-        });
-        // A run moved on by `resume_skipped` has no session open.
-        if let Some(event) = resumed {
-            if event.kind == "resume_finished"
-                && event.payload["status"] == RunStatus::Validating.as_str()
-                && let (Some(workspace), Some(attempt)) = (
-                    event.payload["workspace_id"].as_str(),
-                    event.payload["attempt"].as_u64(),
-                )
-            {
-                let closed = events.iter().any(|e| {
-                    e.id > event.id
-                        && e.kind == "workspace_closed"
-                        && e.payload["workspace_id"] == workspace
-                });
-                return Ok((!closed).then(|| SessionRef {
+        match RunHistory::from_events(&events).resumed_session() {
+            ResumedSession::Open { workspace, attempt } => {
+                return Ok(Some(SessionRef {
                     workspace: workspace.to_owned(),
-                    resume: Some(attempt as usize),
+                    resume: Some(attempt),
                 }));
             }
-            return Ok(None);
+            // A run moved on by `resume_skipped` has no session open.
+            ResumedSession::Closed => return Ok(None),
+            ResumedSession::NotResumed => {}
         }
         Ok(run
             .workspace_id()
@@ -322,16 +278,17 @@ impl Supervisor<'_> {
     pub(super) fn adopt_review(&mut self, run: &TaskRun) -> Result<Phase> {
         let session = self.session_of(run)?;
         let events = self.queue.run_events(run.id())?;
+        let history = RunHistory::from_events(&events);
         let Some(anchor) = crate::domain::review_anchor(&events) else {
             return self.start_review(run, session);
         };
-        if anchor.kind == "review_started"
+        if anchor.kind == event_kind::REVIEW_STARTED
             && let Some(phase) = self.adopt_failed_review_ask(run, &session, &events, anchor)?
         {
             return Ok(phase);
         }
         let then = match anchor.kind.as_str() {
-            "revise_requested" => {
+            event_kind::REVISE_REQUESTED => {
                 if let Some(live) = session.clone()
                     && session_alive(self, run.id())?
                 {
@@ -355,8 +312,8 @@ impl Supervisor<'_> {
             }
             // A conflict request with nothing after it waits for the live
             // session again, with the passed verdict before it.
-            "conflict_precheck" if anchor.payload["requested"] == true => {
-                let passed = passed_before(&events, anchor.id);
+            event_kind::CONFLICT_PRECHECK if anchor.payload["requested"] == true => {
+                let passed = passed_before(&history, anchor.id);
                 if let Some(live) = session.clone()
                     && let Some(verdict) = passed
                     && session_alive(self, run.id())?
@@ -378,13 +335,15 @@ impl Supervisor<'_> {
             }
             // A revise request recorded but not sent asks a person, as it
             // did before the supervisor was replaced.
-            "revise_unsent" => passed_before(&events, anchor.id).map(|verdict| AfterExit::Ask {
-                why: anchor.payload["error"].as_str().map(str::to_owned),
-                decision: verdict.verdict,
-                reasons: verdict.reasons,
-                summary: verdict.summary,
-            }),
-            "review_finished" => {
+            event_kind::REVISE_UNSENT => {
+                passed_before(&history, anchor.id).map(|verdict| AfterExit::Ask {
+                    why: anchor.payload["error"].as_str().map(str::to_owned),
+                    decision: verdict.verdict,
+                    reasons: verdict.reasons,
+                    summary: verdict.summary,
+                })
+            }
+            event_kind::REVIEW_FINISHED => {
                 match serde_json::from_value::<ReviewVerdict>(json!({
                     "verdict": anchor.payload["verdict"],
                     "reasons": anchor.payload["reasons"],
@@ -394,9 +353,7 @@ impl Supervisor<'_> {
                     // (again): main may have moved.
                     Ok(verdict)
                         if verdict.verdict == ReviewDecision::Pass
-                            && !events
-                                .iter()
-                                .any(|e| e.id > anchor.id && e.kind == "exit_requested") =>
+                            && !history.has_after(anchor.id, event_kind::EXIT_REQUESTED) =>
                     {
                         return self.precheck(run, session, verdict);
                     }
@@ -415,12 +372,8 @@ impl Supervisor<'_> {
             // A precheck that sent nothing decided to land (no session to
             // ask) or to ask a person (past the limit); before its /exit it
             // is prechecked again, as main may have moved.
-            "conflict_precheck" => match passed_before(&events, anchor.id) {
-                Some(verdict)
-                    if !events
-                        .iter()
-                        .any(|e| e.id > anchor.id && e.kind == "exit_requested") =>
-                {
+            event_kind::CONFLICT_PRECHECK => match passed_before(&history, anchor.id) {
+                Some(verdict) if !history.has_after(anchor.id, event_kind::EXIT_REQUESTED) => {
                     return self.precheck(run, session, verdict);
                 }
                 Some(verdict) => Some(match anchor.payload["asked"].as_str() {
@@ -429,12 +382,16 @@ impl Supervisor<'_> {
                 }),
                 None => None,
             },
-            "validation_finished" if events.iter().any(|e| e.kind == "integration_approved") => {
+            event_kind::VALIDATION_FINISHED
+                if events
+                    .iter()
+                    .any(|e| e.kind == event_kind::INTEGRATION_APPROVED) =>
+            {
                 Some(AfterExit::Land)
             }
             // A rebased run a landing recheck resumed waits for the answer
             // to its approve_landing ask, not a review (ADR-0068 decision 4).
-            "validation_finished"
+            event_kind::VALIDATION_FINISHED
                 if crate::domain::resume::parked_by_recheck(&events)
                     && self
                         .queue
@@ -459,10 +416,10 @@ impl Supervisor<'_> {
         let after = |kind: &str| events.iter().any(|e| e.id > anchor.id && e.kind == kind);
         let mut watch = ExitWatch::new(session, then);
         // Never a second /exit; its timeout restarts now.
-        if after("exit_requested") {
+        if after(event_kind::EXIT_REQUESTED) {
             watch.requested = Some(Instant::now());
         }
-        watch.timed_out = after("exit_request_timed_out");
+        watch.timed_out = after(event_kind::EXIT_REQUEST_TIMED_OUT);
         // A timeout recorded without its ask still gets one; one asked
         // before is not asked again (as for a running run, task 104).
         watch.exit_asked = !watch.timed_out || self.queue.has_stuck_exit_ask(run.id())?;
@@ -488,7 +445,7 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         let after = |kind: &str| events.iter().any(|e| e.id > started.id && e.kind == kind);
-        if !after("review_failed") {
+        if !after(event_kind::REVIEW_FAILED) {
             let attempt = started.payload["attempt"].as_u64().unwrap_or(1);
             // The failure is in the ask's first line (`open_failed_review_ask`),
             // and a `send_back` names it to the resumed session.
@@ -503,7 +460,7 @@ impl Supervisor<'_> {
                 );
             self.queue.record_runtime_event(
                 run.id(),
-                "review_failed",
+                event_kind::REVIEW_FAILED,
                 json!({
                     "code": ReasonCode::JobFailed,
                     "attempt": attempt,
@@ -518,10 +475,10 @@ impl Supervisor<'_> {
         let mut watch = ExitWatch::new(session.clone(), AfterExit::Rest { close: true });
         // The failed review's /exit was requested before the ask: never a
         // second one.
-        if after("exit_requested") {
+        if after(event_kind::EXIT_REQUESTED) {
             watch.requested = Some(Instant::now());
         }
-        watch.timed_out = after("exit_request_timed_out");
+        watch.timed_out = after(event_kind::EXIT_REQUEST_TIMED_OUT);
         watch.exit_asked = !watch.timed_out || self.queue.has_stuck_exit_ask(run.id())?;
         Ok(Some(Phase::Exiting(watch)))
     }
@@ -535,7 +492,7 @@ impl Supervisor<'_> {
     ) -> Result<Option<crate::domain::Ask>> {
         let opened = events.iter().rev().find(|e| {
             e.id > anchor.id
-                && e.kind == "ask_opened"
+                && e.kind == event_kind::ASK_OPENED
                 && e.payload["kind"] == AskKind::ApproveLanding.as_str()
                 && e.payload["asked_by"] == "supervisor"
         });
@@ -554,14 +511,9 @@ impl Supervisor<'_> {
 
 /// The verdict of the last `review_finished` before event `before`: the
 /// pass a conflict precheck followed, or the revise a `revise_unsent` did.
-pub(super) fn passed_before(
-    events: &[crate::domain::RunEvent],
-    before: EventId,
-) -> Option<ReviewVerdict> {
-    events
-        .iter()
-        .rev()
-        .find(|e| e.id < before && e.kind == "review_finished")
+pub(super) fn passed_before(history: &RunHistory<'_>, before: EventId) -> Option<ReviewVerdict> {
+    history
+        .last_before(before, event_kind::REVIEW_FINISHED)
         .and_then(|e| {
             serde_json::from_value(json!({
                 "verdict": e.payload["verdict"],

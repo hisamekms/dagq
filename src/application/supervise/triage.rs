@@ -97,12 +97,9 @@ impl Supervisor<'_> {
                 self.queue.close_ask(ask.id)?;
                 continue;
             }
-            let reason = self
-                .queue
-                .run_events(run.id())?
-                .iter()
-                .rev()
-                .find(|e| e.kind == "triage_finished")
+            let events = self.queue.run_events(run.id())?;
+            let reason = RunHistory::from_events(&events)
+                .last(event_kind::TRIAGE_FINISHED)
                 .and_then(|e| e.payload.get("reason").and_then(Value::as_str))
                 .map_or_else(
                     || run.last_error().map(str::to_owned).unwrap_or_default(),
@@ -177,9 +174,9 @@ impl Supervisor<'_> {
                     if let Some(decided) = events
                         .iter()
                         .rev()
-                        .take_while(|e| e.kind != "triage_started")
+                        .take_while(|e| e.kind != event_kind::TRIAGE_STARTED)
                         .find(|e| {
-                            e.kind == "triage_decided"
+                            e.kind == event_kind::TRIAGE_DECIDED
                                 && e.payload["action"] == crate::domain::RECOVER_AGAIN
                         })
                     {
@@ -253,7 +250,7 @@ impl Supervisor<'_> {
         let facts = events
             .iter()
             .rev()
-            .find(|e| e.kind == "recovery_requested")
+            .find(|e| e.kind == event_kind::RECOVERY_REQUESTED)
             .map_or_else(|| json!({"alert": alert}), |e| e.payload.clone());
         let processes = match run.worktree_path().map(Path::new) {
             Some(worktree) if self.files.is_dir(worktree) => self
@@ -289,7 +286,7 @@ impl Supervisor<'_> {
         let session_id = events
             .iter()
             .rev()
-            .find(|e| e.kind == "triage_started")
+            .find(|e| e.kind == event_kind::TRIAGE_STARTED)
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
         let job = start_job(self, &dir, alert, attempt, &prompt, session_id.as_deref())?;
@@ -358,7 +355,7 @@ impl Supervisor<'_> {
         let mut also = Vec::new();
         if !matches!(action, TriageAction::Wait { .. }) {
             also.push((
-                "auto_repaired",
+                event_kind::AUTO_REPAIRED,
                 json!({
                     "layer": "recovery",
                     "repair": name,
@@ -369,7 +366,7 @@ impl Supervisor<'_> {
             ));
         }
         also.push((
-            "recovery_finished",
+            event_kind::RECOVERY_FINISHED,
             json!({
                 "alert": alert,
                 "attempt": attempt,
@@ -534,7 +531,11 @@ impl Supervisor<'_> {
         let head = match (run.result_commit(), worktree) {
             (Some(commit), _) => commit.to_string(),
             (None, Some(worktree)) => self.repository.head(worktree)?.to_string(),
-            (None, None) if !self.queue.has_run_event(run.id(), "worktree_created")? => {
+            (None, None)
+                if !self
+                    .queue
+                    .has_run_event(run.id(), event_kind::WORKTREE_CREATED)? =>
+            {
                 return Ok(false);
             }
             (None, None) => bail!("its worktree is gone and it has no reviewed commit"),
@@ -635,7 +636,7 @@ impl Supervisor<'_> {
             &self.token,
             &TriageAction::Ask { ask_id },
             payload,
-            vec![("recovery_finished", finished)],
+            vec![(event_kind::RECOVERY_FINISHED, finished)],
         ) {
             Ok(asked) => asked,
             Err(error) => {
@@ -684,7 +685,7 @@ impl Supervisor<'_> {
         warn!(run_id = %run.id(), error = %error, "run {} recovery job {attempt} of {} failed: {error}; the run waits to be recovered by hand", run.id(), alert.as_str());
         for (kind, payload) in [
             (
-                "triage_failed",
+                event_kind::TRIAGE_FAILED,
                 json!({
                     "code": ReasonCode::JobFailed,
                     "attempt": round,
@@ -696,7 +697,7 @@ impl Supervisor<'_> {
                 }),
             ),
             (
-                "recovery_finished",
+                event_kind::RECOVERY_FINISHED,
                 json!({
                     "alert": alert,
                     "attempt": attempt,

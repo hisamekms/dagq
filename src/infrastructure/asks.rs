@@ -1,6 +1,7 @@
 //! Asks (ADR-0022): questions for a person kept as queue rows. Registering
 //! and answering one also writes `ask_opened` / `ask_answered` to
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
+use crate::domain::event_kind;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -93,7 +94,7 @@ impl SqliteQueue {
                     &tx,
                     task_id,
                     hold.run_id.as_ref(),
-                    "ask_updated",
+                    event_kind::ASK_UPDATED,
                     json!({
                         "ask_id": ask.id,
                         "kind": ask.kind,
@@ -129,7 +130,7 @@ impl SqliteQueue {
                     &tx,
                     None,
                     None,
-                    "ask_opened",
+                    event_kind::ASK_OPENED,
                     json!({
                         "ask_id": id,
                         "kind": AskKind::QueueHold,
@@ -201,7 +202,7 @@ impl SqliteQueue {
                 &tx,
                 ask.task_id,
                 ask.run_id.as_ref(),
-                "ask_answered",
+                event_kind::ASK_ANSWERED,
                 payload,
             )?;
             if ask.kind == AskKind::Blocked {
@@ -211,7 +212,7 @@ impl SqliteQueue {
                     &tx,
                     ask.task_id,
                     ask.run_id.as_ref(),
-                    "ask_closed",
+                    event_kind::ASK_CLOSED,
                     json!({"ask_id": id, "kind": ask.kind}),
                 )?;
             }
@@ -314,7 +315,7 @@ impl SqliteQueue {
             &tx,
             ask.task_id,
             ask.run_id.as_ref(),
-            "ask_answered",
+            event_kind::ASK_ANSWERED,
             payload,
         )?;
         let answered = read_ask(&tx, id)?;
@@ -346,7 +347,7 @@ impl SqliteQueue {
             &tx,
             ask.task_id,
             ask.run_id.as_ref(),
-            "ask_closed",
+            event_kind::ASK_CLOSED,
             json!({"ask_id": id, "kind": ask.kind}),
         )?;
         let closed = read_ask(&tx, id)?;
@@ -415,7 +416,7 @@ impl SqliteQueue {
                 "UPDATE asks SET closed_at=?2 WHERE id=?1",
                 params![ask.id, now],
             )?;
-            ask_event(&tx, None, None, "ask_answered", payload)?;
+            ask_event(&tx, None, None, event_kind::ASK_ANSWERED, payload)?;
         }
         tx.execute(
             "INSERT INTO asks(kind,question,options,asked_by,reason_category)
@@ -433,7 +434,7 @@ impl SqliteQueue {
             &tx,
             None,
             None,
-            "ask_opened",
+            event_kind::ASK_OPENED,
             json!({
                 "ask_id": id,
                 "kind": kind,
@@ -533,7 +534,7 @@ impl SqliteQueue {
             &tx,
             ask.task_id,
             ask.run_id.as_ref(),
-            "ask_delivered",
+            event_kind::ASK_DELIVERED,
             json!({"ask_id": id, "workspace_id": workspace_id}),
         )?;
         let closed = read_ask(&tx, id)?;
@@ -621,7 +622,7 @@ impl SqliteQueue {
                 &tx,
                 ask.task_id,
                 Some(run_id),
-                "ask_updated",
+                event_kind::ASK_UPDATED,
                 json!({"ask_id": ask.id, "kind": ask.kind, "why": why}),
             )?;
             noted.push(read_ask(&tx, ask.id)?);
@@ -657,13 +658,13 @@ impl SqliteQueue {
                 let mut payload =
                     json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
                 write_answer(&tx, &ask, answer, ANSWERED_BY_RUNTIME, now, &mut payload)?;
-                ask_event(&tx, None, None, "ask_answered", payload)?;
+                ask_event(&tx, None, None, event_kind::ASK_ANSWERED, payload)?;
             } else {
                 ask_event(
                     &tx,
                     None,
                     None,
-                    "ask_closed",
+                    event_kind::ASK_CLOSED,
                     json!({"ask_id": ask.id, "kind": ask.kind}),
                 )?;
             }
@@ -700,14 +701,20 @@ impl SqliteQueue {
                 let mut payload =
                     json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
                 write_answer(&tx, &ask, answer, ANSWERED_BY_RUNTIME, now, &mut payload)?;
-                ask_event(&tx, ask.task_id, Some(run_id), "ask_answered", payload)?;
+                ask_event(
+                    &tx,
+                    ask.task_id,
+                    Some(run_id),
+                    event_kind::ASK_ANSWERED,
+                    payload,
+                )?;
             } else {
                 // An answer given before is applied by this close.
                 ask_event(
                     &tx,
                     ask.task_id,
                     Some(run_id),
-                    "ask_closed",
+                    event_kind::ASK_CLOSED,
                     json!({"ask_id": ask.id, "kind": ask.kind}),
                 )?;
             }
@@ -796,7 +803,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
         tx,
         task_id,
         ask.run_id.as_ref(),
-        "ask_opened",
+        event_kind::ASK_OPENED,
         json!({
             "ask_id": id,
             "kind": ask.kind,
