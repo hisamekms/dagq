@@ -896,6 +896,25 @@ enum Command {
         #[arg(long = "goal")]
         goal_id: Option<i64>,
     },
+    /// When the open tasks (ready and in progress, outside a draft goal) and the open goals are
+    /// likely to finish if the plan flows as it is now (ADR-0070): the p50 and p90 of a seeded
+    /// simulation over the dependencies, the claim order, the slots and each kind's landed runs
+    /// (the whole distribution for a kind with fewer than `[kpi]` `min_samples`), with what it
+    /// assumed. New tasks are not added. Reads only and records nothing; JSON.
+    Forecast {
+        /// Only this task, and its goal.
+        #[arg(long = "task")]
+        task_id: Option<i64>,
+        /// Only this goal and its tasks.
+        #[arg(long = "goal")]
+        goal_id: Option<i64>,
+        /// Simulate this many slots instead of the live supervisors' `parallel` together.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(0..=256))]
+        parallel: Option<u16>,
+        /// Simulation trials.
+        #[arg(long, default_value_t = dagq::domain::forecast::DEFAULT_TRIALS as u32, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        trials: u32,
+    },
     /// Write the KPI report of a day or ISO week (ADR-0051 decision 21) as the supervisor writes it
     /// daily: `dagq kpi --period P --at <the period>` with the build, the time and the top open
     /// findings, as JSON and as one self-contained HTML page (no script, CSS, font or image from
@@ -1151,6 +1170,7 @@ fn reads_only(command: &Command) -> bool {
             | Command::Timeline { .. }
             | Command::Stats { .. }
             | Command::Kpi { .. }
+            | Command::Forecast { .. }
             | Command::Doctor { .. }
             | Command::Notes { .. }
             | Command::Marks { .. }
@@ -1203,6 +1223,7 @@ fn observer_access(command: &Command) -> ObserverAccess {
         | Command::Watch { .. }
         | Command::Stats { .. }
         | Command::Kpi { .. }
+        | Command::Forecast { .. }
         | Command::Doctor { .. }
         | Command::Notes { .. }
         | Command::Marks { .. }
@@ -2184,6 +2205,21 @@ fn execute(cli: Cli) -> Result<Value> {
                 compare,
                 window_days: window,
                 goal_id: goal_id.map(GoalId::new),
+            },
+        )?,
+        Command::Forecast {
+            task_id,
+            goal_id,
+            parallel,
+            trials,
+        } => one_shot.forecast_of(
+            &queue,
+            &db,
+            &dagq::application::forecast::ForecastQuery {
+                task_id: task_id.map(TaskId::new),
+                goal_id: goal_id.map(GoalId::new),
+                parallel: parallel.map(usize::from),
+                trials: trials as usize,
             },
         )?,
         Command::Report {

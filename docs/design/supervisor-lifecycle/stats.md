@@ -195,13 +195,23 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 
 ADR-0051のKPIの一覧（決定1）にdraftの流入と流出は無いので、KPIの集計（[`kpi`](kpi.md)）はこの値を読まない。足すときは`landings`と同じ名前で、この規則をKPIの規則として決める。
 
-## 完了見込み（予定）
+## 完了見込み
 
-[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。まだ実装していない。goal 40の後続taskが持つ。
+[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。見込みの計算と`dagq forecast`はtask 474で実装した。snapshotの記録と答え合わせはまだ実装していない。goal 40の後続taskが持つ。
 
-- **見込み**: `src/domain`の純粋関数が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とgoalの完了のp50 / p90を、依存のグラフ（goal依存はgoalが閉じるまで待つ）・効く優先度によるclaimの順・生きているsupervisorの`parallel`の合計・taskの種類ごとの`work` / `validate` / `wait_to_land`（この文書の区間。`startup`は`work`に含まれるので走っているrunの条件付けにだけ使う）とresume・延期の確率・`ask_wait`（待ちのrunはslotを空ける）・goalを閉じるまでの遅れからsimulationで出す。流入（新しいtask、follow_up）は含めない。`dagq forecast [--task ID] [--goal ID]`は読むだけで記録しない。
-- **snapshot**: supervisorが、plan reviewのpass、変更の印（[変更の印](marks.md)の記録する印（`parallel`の変化はsupervisorの起動・引き継ぎの印で拾う）、`task_priority_changed`、依存の変更）、着地（前のsnapshotからp50が動いたtask / goalがあるとき）、日次（[レポート](report.md)と同じtimer）で、open なtaskとgoalすべての見込みと前提を1件のevent（名前は実装taskが決める。例: `forecast_recorded`）に記録する。KPIの記帳のevent（[Observer](observer.md)の`BOOKKEEPING_KINDS`）に足す。
-- **答え合わせ**: taskの`completed`とgoalの`achieved`の時点で、その対象のsnapshotすべてに実績を当てる。p50の誤差（秒と、見込みの残り時間に対する比）の中央値と偏りの向き、p90の的中率、残り時間の帯ごと・taskの種類ごと・`method`ごとの誤差、snapshotから完了までの変更の印の数（0の標本だけの誤差も）をeventから導き、[`kpi`](kpi.md)のKPIとして完了の時刻で期間に入れる。
+- **見込み**（実装済み、`method` 1）: `domain::forecast::forecast`（純粋関数）が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とopen なgoal（`draft`でなく閉じていない）の完了のp50 / p90をsimulationで出す。`application::forecast`がqueueを読んで入力を組み立てる。
+  - **入力**: 依存は`graph`の`ready_after`（未完了の前のtaskと、achievedで閉じていないgoal）。見込みに入らないtask（`draft` / `submitted`）やgoal（`draft`、abandonedで閉じた）を待つtaskは終わらない。claimの順は`graph`と同じ`ClaimRank`（効く優先度、`unblocks`、ID。`domain`に移した）を今の時点で固定して使う。slotは生きているsupervisorの`parallel`の合計（`stats`の空きslotと同じ判定。`--parallel N`で置き換えられる）。
+  - **分布**: `domain::forecast::history`が`stats`（`full`）の着地したrun（`integrated`で`work` / `validate` / `wait_to_land`がそろったもの）を1件の標本にし、3つの区間を同じrunから一緒に引く。resumeと着地の延期はその区間に含まれるので、別の確率として足さない（二重に数えないため）。taskの種類（nullは`unknown`）の標本が`[kpi]`の`min_samples`に満たなければ全体（`all`）を使い、出力の`assumptions.substituted`と各taskの`distribution`に書く。goalを閉じるまでの遅れは、achievedの`goal_closed`とそのgoalの最後の`run_integrated`の差。人の答えの待ちは`stats::asks::human_waits`（`ask_opened` → 最初の`ask_answered`）。遅れと待ちの標本が無ければ0とする。経過が0のときは0秒の標本も引く。
+  - **走っているrun**: そのrunのeventから`stats`と同じ段（最初の`validation_finished`の後は`wait_to_land`、最初の`receipt_observed`の後は`validate`、それより前は`work`）と段の経過秒を出し、その段が経過より長かった標本だけから残りを引く（無ければ段を丸ごと引き直す）。後の段は同じ標本の値を足す。`run_waiting_started`の後で終わっていない待ちのrunはslotを持たず、経過より長い`ask_wait`の残りを足す（標本の区間も待ちを含むので遅い側に寄りうる。ADR-0070の決定1どおり）。
+  - **計算**: 1回の試行で、時刻0からslotの空きにclaimの順で放たれたtaskを入れて標本の合計の後に終え、goalはそのopen なtaskがすべて終わった時刻に閉じるまでの遅れを足して閉じる（open なtaskが無いgoalは最後の着地からの経過より長い遅れの残り）。見込みに入らない`draft` / `submitted`のtaskを持つgoalと、taskを1つも持たないgoalは閉じない。goalに依存するtaskはそのgoalが閉じるまで待つ。これを試行の回数（既定1,000、`--trials`）繰り返し、各taskとgoalの完了の秒の最近順位のp50 / p90を出す。乱数は`SplitMix64`で、種は今の時刻とqueueの最新のevent IDから決める（`domain::forecast::seed`）ので、同じ時点の同じqueueからは同じ見込みになる。流入（新しいtask、follow_up、plan reviewの差し戻し）と失敗したrunのretryは含めない。
+  - **終わらないもの**: どれかの試行で終わらなかったtask / goalはp50 / p90がnullで、`reason`が`no_samples`（着地したrunが1件も無い）、`no_slots`（`parallel`が0）、`blocked`（見込みに入らないtaskかgoal、閉じないgoalを直接か他を通して待つ）のどれかになる。理由はtask / goalごとに決め、`blocked`は`no_slots`より先に出す。
+- **`dagq forecast [--task ID] [--goal ID] [--parallel N] [--trials N]`**: read-onlyの接続で読み、何も記録しない。queue全体をsimulationしてから、`--task`はそのtaskとそのgoalに、`--goal`はそのgoalとそのtaskに出力を絞る。observerにも許す読み取りのコマンド。出力（JSON）:
+  - `method`、`at`（計算の時刻）、`seed`、`trials`
+  - `assumptions`: `parallel`、`min_samples`、`samples`（`all`、種類ごとの`{runs, distribution}`、`close_delay`、`ask_wait`の標本数）、`substituted`（全体の分布に代えた種類）、`left_out`（含めないもの）
+  - `tasks[]`: `id`、`goal_id`、`kind`、`phase`（走っているrunの段。slotを待つtaskはnull）、`waiting`、`distribution`、`p50` / `p90`（時刻）、`p50_secs` / `p90_secs`（今からの秒）、終わらないときの`reason`
+  - `goals[]`: `id`、`open_tasks`、`unplanned_tasks`（見込みに入らない`draft` / `submitted`のtaskの数）、`p50` / `p90`、`p50_secs` / `p90_secs`、`reason`
+- **snapshot**（予定）: supervisorが、plan reviewのpass、変更の印（[変更の印](marks.md)の記録する印（`parallel`の変化はsupervisorの起動・引き継ぎの印で拾う）、`task_priority_changed`、依存の変更）、着地（前のsnapshotからp50が動いたtask / goalがあるとき）、日次（[レポート](report.md)と同じtimer）で、open なtaskとgoalすべての見込みと前提を1件のevent（名前は実装taskが決める。例: `forecast_recorded`）に記録する。KPIの記帳のevent（[Observer](observer.md)の`BOOKKEEPING_KINDS`）に足す。
+- **答え合わせ**（予定）: taskの`completed`とgoalの`achieved`の時点で、その対象のsnapshotすべてに実績を当てる。p50の誤差（秒と、見込みの残り時間に対する比）の中央値と偏りの向き、p90の的中率、残り時間の帯ごと・taskの種類ごと・`method`ごとの誤差、snapshotから完了までの変更の印の数（0の標本だけの誤差も）をeventから導き、[`kpi`](kpi.md)のKPIとして完了の時刻で期間に入れる。
 
 初めの値（ADR-0070。調整はADRを置き換えずにここを直す）:
 

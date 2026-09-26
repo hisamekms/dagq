@@ -9,6 +9,7 @@ mod common;
 #[macro_use]
 mod runtime_support;
 
+mod cli_forecast;
 mod cli_goals;
 mod cli_kpi;
 mod cli_proposals;

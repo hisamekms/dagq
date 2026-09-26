@@ -537,6 +537,34 @@ impl Priority {
     }
 }
 
+/// Where a task stands in the claim order (ADR-0040 decision 4); the
+/// smaller rank is claimed first. The one ordering `candidates`, `graph`
+/// and the supervisor's claims share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClaimRank {
+    /// Highest effective priority first.
+    priority: std::cmp::Reverse<Priority>,
+    // The goal's rank (goal 13) goes here, once goals have one: after the
+    // priority, before `unblocks`.
+    /// Most tasks released first.
+    unblocks: std::cmp::Reverse<usize>,
+    /// Lowest ID first.
+    id: TaskId,
+}
+
+impl ClaimRank {
+    /// `effective_priority` is the priority the claim order compares for
+    /// the task (`crate::application::effective_priority`) and
+    /// `unblocks` how many unfinished tasks wait for it.
+    pub fn new(effective_priority: Priority, unblocks: usize, id: TaskId) -> Self {
+        Self {
+            priority: std::cmp::Reverse(effective_priority),
+            unblocks: std::cmp::Reverse(unblocks),
+            id,
+        }
+    }
+}
+
 impl std::str::FromStr for Priority {
     type Err = DomainError;
     /// Only the names; a number is not a level.
@@ -558,6 +586,7 @@ mod error;
 pub mod event_kind;
 pub mod finding;
 pub mod follow_up;
+pub mod forecast;
 pub mod goal;
 pub mod idle_process;
 pub mod ids;

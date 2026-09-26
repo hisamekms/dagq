@@ -674,6 +674,35 @@ impl OneShot {
         )?)?)
     }
 
+    /// `forecast` (ADR-0070 decision 2): see
+    /// [`crate::application::forecast::forecast`], at these generators' now,
+    /// with the `min_samples` of the `[kpi]` settings `kpi` judges by.
+    pub fn forecast_of(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        query: &crate::application::forecast::ForecastQuery,
+    ) -> Result<Value> {
+        let now = self.generators.clock.now();
+        let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+        let setup = report_setup(
+            db,
+            bound_checkout(queue)?.as_deref(),
+            None,
+            host_wide.as_deref(),
+            now,
+        )?;
+        Ok(serde_json::to_value(
+            crate::application::forecast::forecast(
+                queue,
+                &SystemProcesses,
+                now,
+                setup.config.min_samples,
+                query,
+            )?,
+        )?)
+    }
+
     /// `report` (ADR-0051 decision 21): the KPI report of the `period` that
     /// holds `at` (now without; today's and this week's are partial),
     /// made as the supervisor makes it and written under `out` (the
