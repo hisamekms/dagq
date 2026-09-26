@@ -59,7 +59,6 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0036](0036-delete-frozen-work-records.md) | 凍結済みのdocs/journal/を削除し、今も効く手順と観測事実だけをdesign文書へ移す | 2026-09-25 |
 | [ADR-0038](0038-task-depends-on-a-goal-until-it-is-achieved.md) | taskがgoalに依存でき、依存先のgoalがachievedで閉じるまでclaimされない | 2026-09-25 |
 | [ADR-0039](0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md) | supervisorが死んだrunは、wrapperが生きていれば次のsupervisorが引き継ぎ、自分のtokenのままstaleになったleaseは更新して続ける | 2026-09-25 |
-| [ADR-0046](0046-full-text-search-related-and-duplicate-of.md) | taskの全文検索（search）と決まった規則の関連（related）と重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する | 2026-09-25 |
 | [ADR-0047](0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md) | イレギュラーをruntimeの自動修正・復旧job・inboxの3層で扱い、askに人が要る理由の分類を必須にし、自動修正を数え、goalの達成をgoal review jobが判断する（ADR-0019・ADR-0043・ADR-0044を統合） | 2026-09-26 |
 | [ADR-0048](0048-record-claude-sessions-by-kind-with-open-and-active-time.md) | dagqが使うClaude sessionをkindごとの区間としてrun_eventsに記録し、開いている時間と、transcriptのturnから導く稼働時間をstatsで集計する | 2026-09-26 |
 | [ADR-0049](0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md) | 検証をintegrateの1回にし、reviewをsupervisorの工程にし、dagq.tomlでrunのenvを渡してsccacheでcompileの結果をrun間で共有し、taskの5段階の優先度と解放数でclaim順を決め、statsで詰まりを数える（ADR-0040を統合） | 2026-09-26 |
@@ -67,6 +66,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0052](0052-rust-single-binary-and-plugin-with-cmux-first.md) | runtimeをRustの単一バイナリdagqとpluginで配り、cmuxを最初のworkspace backendにする（ADR-0001・ADR-0002・ADR-0005・ADR-0015を統合） | 2026-09-26 |
 | [ADR-0053](0053-queue-in-data-dir-run-paths-from-queue-and-rebind.md) | repositoryごとのqueueをデータディレクトリに置き、runのpathをqueueから解決し、repositoryとqueueの移動をrebindで扱う（ADR-0006・ADR-0017・ADR-0020を統合） | 2026-09-26 |
 | [ADR-0054](0054-run-lease-ownership-parallel-supervisors-and-recover.md) | supervisorがrun単位のleaseでrunのlifecycleを所有して並列に実行し、死んだsupervisorのrunを引き継ぎ、手放したrunをrecoverに回す（ADR-0003・ADR-0007・ADR-0025を統合） | 2026-09-26 |
+| [ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md) | taskの全文検索（search）と、task番号の言及と検索の一致の強さを含む決まった規則の関連（related）と、重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する（ADR-0046を統合） | 2026-09-27 |
 | [ADR-0068](0068-recheck-waiting-runs-after-each-landing.md) | 着地のたびに着地待ちのrunをmerge-treeと軽い検査で先回りして確かめ、着地しなくなったrunは人の回答や着地の順番を待たずにresumeする | 2026-09-26 |
 | [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | 衝突の多いファイルで進行中のrunと重なるtaskはそのpassでclaimせずに次の候補へ進み、控えた理由と時間をstatusとstatsに出す | 2026-09-26 |
 | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 人の答えを待つrunを、最初のsessionと/exitに加えて差し戻しと解消依頼の段でもslotから外し、待ちのあいだ段の計時を止め、leaseを持ったまま軽く見張り、戻り待ちも含めて待ちの数に上限を付け、待ちが終わったrunを新しいclaimより先にslotへ戻す（ADR-0062を統合） | 2026-09-26 |
@@ -107,4 +107,5 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0043](0043-detect-stalled-worker-sessions-nudge-once-then-ask.md) | superseded | [ADR-0047](0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md) | 2026-09-26 |
 | [ADR-0044](0044-findings-proposals-from-findings-and-quiet-observer.md) | superseded | [ADR-0047](0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md) | 2026-09-26 |
 | [ADR-0045](0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md) | superseded | [ADR-0073](0073-kind-additions-are-compatible.md) | 2026-09-26 |
+| [ADR-0046](0046-full-text-search-related-and-duplicate-of.md) | superseded | [ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md) | 2026-09-27 |
 | [ADR-0062](0062-runs-waiting-for-a-person-leave-the-slot.md) | superseded | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 2026-09-26 |

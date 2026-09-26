@@ -26,7 +26,7 @@ The `--verify` commands are integrate's gate, not the worker's checklist: the wo
 A runtime task (`src/`, `tests/`, `migrations/`) registers no `--paths`, so without help nothing says which files it will change. Write them in its `--description`, e.g. "mainly touches `src/application/supervise/plan_review.rs` and `tests/it/plan_review.rs`". Two readers use them:
 
 - plan review, to find tasks that touch the same files, especially the stats' conflict hotspots, and add the dependency that keeps them from running side by side;
-- `related`, whose clues include file names in a task's text (ADR-0046 decision 4), so `related` ranks the right completed tasks higher, and their landed files are what ADR-0069 forecasts this task will touch.
+- `related`, whose clues include file names in a task's text (ADR-0063 decision 4), so `related` ranks the right completed tasks higher, and their landed files are what ADR-0069 forecasts this task will touch.
 
 The list is a forecast, not a limit: the worker may change other files as the work needs, and nothing checks the list (`lint` does not require it). Do not write it as `--paths` instead: `--paths` declares what a run may change, and a path outside it parks the run (`scope_violation`, ADR-0029); the repository gives runtime tasks no `--paths`; and ADR-0069 forecasts from declared `--paths` instead of `related` when a task has them, so a wide glob matches more hot files and the supervisor defers claiming the task more often.
 

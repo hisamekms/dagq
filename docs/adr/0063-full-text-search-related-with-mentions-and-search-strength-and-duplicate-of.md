@@ -1,13 +1,13 @@
 ---
-id: adr-0046
+id: adr-0063
 type: adr
-title: taskの全文検索（search）と決まった規則の関連（related）と重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する
-status: superseded
-created: 2026-09-25
-updated: 2026-09-25
-accepted_on: 2026-09-25
-superseded_by: adr-0063
-superseded_on: 2026-09-27
+title: taskの全文検索（search）と、task番号の言及と検索の一致の強さを含む決まった規則の関連（related）と、重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する（ADR-0046を統合）
+status: accepted
+created: 2026-09-27
+updated: 2026-09-27
+accepted_on: 2026-09-27
+supersedes:
+  - adr-0046
 owners:
   - hisamekms
 tags:
@@ -20,13 +20,14 @@ related:
   - adr-0040
   - adr-0041
   - adr-0045
+  - adr-0046
+  - adr-0073
+  - adr-t598-1
   - design-persistence
   - design-plugin-integration
 ---
 
-# ADR-0046: taskの全文検索（search）と決まった規則の関連（related）と重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する
-
-> **置き換え済み（2026-09-27）**: このADRの決定は現在有効ではない。現行の決定は[ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)を読む。
+# ADR-0063: taskの全文検索（search）と、task番号の言及と検索の一致の強さを含む決まった規則の関連（related）と、重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する（ADR-0046を統合）
 
 ## Context
 
@@ -42,9 +43,11 @@ taskが積み上がると、重複や実装済みのtaskを見つけるのに全
 - plannerは`add`の前に`search` / `related`で候補を確かめる。plan review（goal 29）、follow_upのplanner（task 282）、findingからのplanner（goal 31）は、`search` / `related`で候補を取り出してからLLMで判断する。
 - migrationはgoal 32のtask 308の規則（[ADR-0045](0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の互換の宣言、openではmigrateしない）に従う。
 
+[ADR-0046](0046-full-text-search-related-and-duplicate-of.md)はこれを決め、決定4でrelatedの手がかりの種類を限り（本文は「5つ」とするが、列挙は6種類）、種類を足す・減らすには置き換えるADRが要るとした。task 338は`related`を実装するとき、taskのdescriptionに従って、本文に出るtask番号の言及と、`search`の索引での一致の強さも手がかりにして着地した。この2つが重複の組の確かめの結果を担っているので、このADRはADR-0046を丸ごと置き換えて、手がかりの種類として受け入れる。ほかの決定は変えない。なお、ADR-0045はADR-0073に置き換えられているので、以下の決定が名指すADR-0045の規則（互換の宣言、openではmigrateしない）は、今はADR-0073が引き継いでいる。
+
 ## Decision
 
-この ADR は既存の ADR の決定を変えない。ADR-0041の決定10〜11（plan reviewの入力とverdict）と決定16（follow_upのplanner）には、入力と記録の手段を足すだけで、そこに書かれた入力・権限・verdictは変えない。
+このADRはADR-0046を丸ごと置き換える。決定1〜3・5〜8はADR-0046の決定1〜3・5〜8を中身を変えずに引き継ぎ、決定4だけが関連の手がかりの種類を広げる。ADR-0046と同じく、ADR-0041の決定10〜11（plan reviewの入力とverdict）と決定16（follow_upのplanner）には、入力と記録の手段を足すだけで、そこに書かれた入力・権限・verdictは変えない。
 
 1. **`dagq search QUERY`は、SQLiteのFTS5で4種類の文書を全文検索する。**
    - 対象: task（title・description・acceptance・context）、goal（title・description・acceptance・constraints）、note（kindが`observation`のrun_event）、着地したcommitのmessage（決定3）。対象はすべての状態を含み、`draft`から`completed`・`canceled`まで、closeしたgoalも含む。
@@ -64,16 +67,19 @@ taskが積み上がると、重複や実装済みのtaskを見つけるのに全
    - migrationより前に着地したrunと、この決定を知らないバイナリが着地させたrunは、`run_integrated`の`result_commit`からgitでmessageを読んで埋める。埋める契機（`migrate`か、`search`が欠けを見たときか）は実装taskが決める。
 
 4. **`dagq related TASK`は、決まった規則の手がかりで点数を付けて関連の強いtaskを並べ、理由を出す。**
-   - 手がかりは次の5つに限る。
+   - 手がかりは次の種類に限る（ADR-0046の決定4の6種類に、task番号の言及と検索の一致の強さを足し、follow_upを2つに分け、ADR番号をADR-t598-1のIDの形にも広げた）。
      - **宣言した`paths`の重なり**（[ADR-0029](0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）: 2つのtaskのglobが同じか、一方が他方の一致する範囲を含む。
-     - **本文に出るファイル名**: title・description・acceptance・contextと、completedのtaskでは着地したcommitのmessageから、repositoryのpathの形（`src/...rs`、`tests/*.rs`、`docs/...md`、`migrations/...sql`など）を取り出し、同じものを共有する。
+     - **本文に出るファイル名**: title・description・acceptance・contextと、completedのtaskでは着地したcommitのmessage（決定3）から、repositoryのpathの形（`src/...rs`、`tests/*.rs`、`docs/...md`、`migrations/...sql`など）を取り出し、同じものを共有する。
      - **本文に出るテスト名**: 同じ本文から、テスト関数の名前の形（snake_caseで複数語の識別子で、`#[test]`の関数名に使われる形）と`--test NAME`の形を取り出し、同じものを共有する。
-     - **本文に出るADR番号**: `ADR-NNNN`と`docs/adr/NNNN-`の形を取り出し、同じ番号を共有する。
-     - **同じrunのfollow_up**: 2つのtaskが同じrunの`follow_up_registered`で登録された、または一方が他方のrunのfollow_upとして登録された。
+     - **本文に出るADRのID**: 4桁の番号と、task IDと枝番の形（[ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)）を取り出し、同じADRを共有する。
+     - **本文に出るtask番号の言及**: 同じ本文から「task」の後の番号を取り出す。一方が他方の番号を書いている（`mentions` / `mentioned_by`）か、両方が同じ第三のtaskの番号を書いている（`shared_mention`）。
+     - **follow_up**: 一方が他方のrunのfollow_upとして登録された（`follow_up_of`）か、2つのtaskが同じrunのfollow_upとして登録された（`same_run`）。区別するのは、前者が「あるtaskの作業から生まれた続き」という強い関係で、後者は兄弟にとどまるからである。
      - **同じgoal**: 2つのtaskが同じgoalに属する。
-   - 点数は手がかりごとの重みの和にする。ファイル名・テスト名・ADR番号は、多くのtaskに出るもの（`AGENTS.md`など）ほど効かないよう、出るtaskの数で重みを割り引く（IDFの形）。重みの数値と割り引きの式は実装taskが決め、[persistence](../design/persistence.md)などのdesign文書に書く。重みはこのADRを置き換えずに変えてよい。
-   - 対象はすべての状態のtaskで、`--status`で絞り込める。既定の件数は10件。出力はtaskごとに、ID・状態・title・点数と、点数に効いた手がかりの一覧（例: `test: a_ready_task_lifts_what_it_waits_for`、`path: src/infrastructure/sqlite.rs`、`adr: 0041`、`follow_up of run <id>`、`goal 33`）を返す。重複としてcancelされたtask（決定5）は、その重複先を添える。
-   - 手がかりの妥当性は、2026-09-25の棚卸しで見つけた重複の組で確かめる: 少なくとも半分の組で、一方の`related`の上位5件にもう一方が出ること（goal 33のacceptance (4)）。実装taskは本番のqueueを読み取りだけで使ってこれを確かめ、結果をreceiptに書く。
+     - **検索の一致の強さ**: 対象のtitleを3文字の窓に切って`search`の索引（決定1・2）のtaskのtitleとdescriptionを引いた一致の強さを、対象自身の一致で割って0〜1にしたもの。小さすぎる一致は数えない。言い回しは違っても同じ語を多く共有する重複を、ファイル名などの記号を書かないtaskでも拾う。
+   - 点数は手がかりごとの重みの和にする。ファイル名・テスト名・ADR・第三のtaskの言及・goalは、多くのtaskに出るもの（`AGENTS.md`など）ほど効かないよう、出るtaskの数で重みを割り引く（IDFの形）。重みの数値、割り引きの式、検索の一致の強さの問い合わせの作り方と下限は、[persistence](../design/persistence.md)の「関連（related）」に書く。重みはこのADRを置き換えずに変えてよい。
+   - 対象はすべての状態のtaskで、`--status`で絞り込める。既定の件数は10件。出力はtaskごとに、ID・状態・title・点数と、点数に効いた手がかりの一覧（例: `test: a_ready_task_lifts_what_it_waits_for`、`path: src/infrastructure/sqlite.rs`、`adr: 0041`、`mentions: 317`、`follow_up_of`、`goal 33`、`search`）を返す。重複としてcancelされたtask（決定5）は、その重複先を添える。
+   - 手がかりの妥当性は、2026-09-25の棚卸しで見つけた重複の組で確かめる: 少なくとも半分の組で、一方の`related`の上位5件にもう一方が出ること（goal 33のacceptance (4)）。
+   - **task番号の言及と検索の一致の強さを受け入れる根拠**: task 338（`related`の実装）は、taskのdescriptionに従ってこの2つとfollow_upの区別、着地したcommitのmessageを本文に含めることを実装して着地した。そのreceiptの確かめでは、本番のqueueの読み取り専用の複製（2026-09-26、396件）で9組中8組が上位5件に出た（出ないのは289/285だけ）。そのうち324/317は言及で、323/280は検索の一致の強さで見つかり、ADR-0046の手がかりだけでは上位に届かない。結果の多くを担う手がかりを落とさず、種類として受け入れる（planner の判断、2026-09-26）。
 
 5. **`cancel TASK --duplicate-of X`で、重複としてcancelしたことを構造として残す。**
    - `X`はTASKと違う存在するtaskで、`canceled`でないこと。`X`が`completed`なら「Xで実装済み」の意味になり、実装済みのtaskもこの形で記録する。`X`自身が重複でcancelされていれば拒否し、その重複先を案内する。
@@ -104,6 +110,7 @@ taskが積み上がると、重複や実装済みのtaskを見つけるのに全
 - **`dagq lint`の重複検査をqueue全体のtitleに広げる**: titleだけでは言い回しの違う重複を拾えず、実装済みも見えない。lintは決まった規則で通すか止めるかを決める検査で、候補を理由つきで並べる用途に合わない。
 - **relatedに着地したcommitが実際に変えたファイルを使う**: 実装済みの検出には強い手がかりだが、goal 33のconstraintsの手がかりに入っていない。決定4の確かめが足りないときの次の候補にする。
 - **埋め込みによる意味の検索**: 決定8のとおり今回は入れない。
+- **task番号の言及と検索の一致の強さを外し、ADR-0046の手がかりに戻す**: ADR-0046の文言には合うが、324/317と323/280が上位5件から落ち、確かめの結果が弱まる。着地済みの実装を削る作業も要る。
 
 ## Consequences
 
@@ -112,3 +119,4 @@ taskが積み上がると、重複や実装済みのtaskを見つけるのに全
 - FTS5の索引の分だけDBが大きくなり、書き込みごとにtriggerが走る。queueの規模（数百〜数千件）では問題にならない。
 - 手がかりは文字列の形に依存するので、本文にファイル名・テスト名・ADR番号を書かないtaskは`related`に出にくい。skillは、taskの本文にこれらを具体的に書くよう求める。
 - 重みの数値はdesign文書に置き、このADRを置き換えずに調整できる。手がかりの種類を足す・減らすときは、このADRを置き換える統合ADRを書く。
+- task番号の言及は、本文にtaskの番号を書く習慣（follow_upの説明や「task 205と同じ」など）に依存する。検索の一致の強さはtitleの語に依存するので、titleが短く一般的な語だけのtaskでは効きにくい。
