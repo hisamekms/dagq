@@ -12,7 +12,8 @@ use super::{
     adapters::process_alive,
     sessions::{Closing, read_before},
     sqlite::{
-        SqliteQueue, claim_task, enum_col, event, event_row, read_task, run_row, stored_run_row,
+        SqliteQueue, claim_task, enum_col, event, event_row, json_col, read_task, run_row,
+        stored_run_row,
     },
 };
 use crate::application::{AskStore, Generators, RunStore, timestamp, unix_seconds};
@@ -32,6 +33,15 @@ pub use crate::application::{
     TRIAGE_ASKER, TriageAction, Validation,
 };
 pub use crate::domain::{HEARTBEAT_TIMEOUT_SECS, RunPlan};
+
+/// What one role wrote in a window ([`SqliteQueue::written_by`]): finding
+/// ids it recorded and updated, and its asks' ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WrittenBy {
+    pub recorded: Vec<i64>,
+    pub updated: Vec<i64>,
+    pub asks: Vec<i64>,
+}
 
 /// Whether a lease no longer has a working process behind it: its pid is
 /// dead or its heartbeat is older than `HEARTBEAT_TIMEOUT_SECS`. The rule
@@ -895,25 +905,91 @@ impl SqliteQueue {
             .query_row("SELECT ifnull(max(id),0) FROM asks", [], |r| r.get(0))?)
     }
 
-    /// What `role` wrote after the marks: findings it recorded and updated
-    /// (`finding_recorded`, `finding_updated` after `event_id`) and asks
-    /// after `ask_id`.
-    pub fn written_by(
-        &self,
-        role: &str,
-        event_id: EventId,
-        ask_id: AskId,
-    ) -> Result<(i64, i64, i64)> {
+    /// What `role` wrote after the marks: the ids of the findings it
+    /// recorded and updated (`finding_recorded`, `finding_updated` after
+    /// `event_id`, each id once, oldest first) and of its asks after
+    /// `ask_id`.
+    pub fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy> {
+        let findings = |kind: &str| -> Result<Vec<i64>> {
+            Ok(self
+                .conn
+                .prepare(
+                    "SELECT json_extract(payload,'$.finding_id') AS finding FROM run_events
+                     WHERE id>?2 AND kind=?3 AND json_extract(payload,'$.by')=?1
+                     GROUP BY finding ORDER BY min(id)",
+                )?
+                .query_map(params![role, event_id, kind], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        };
+        Ok(WrittenBy {
+            recorded: findings("finding_recorded")?,
+            updated: findings("finding_updated")?,
+            asks: self
+                .conn
+                .prepare("SELECT id FROM asks WHERE id>?2 AND asked_by=?1 ORDER BY id")?
+                .query_map(params![role, ask_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?,
+        })
+    }
+
+    /// The last observation of `mode` that ran its agent: the id and the
+    /// payload of its `observe_finished` (a skipped one is not).
+    pub fn last_observation(&self, mode: &str) -> Result<Option<(EventId, Value)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, payload FROM run_events
+                 WHERE kind='observe_finished' AND json_extract(payload,'$.mode')=?1
+                   AND ifnull(json_extract(payload,'$.outcome'),'')<>'skipped'
+                 ORDER BY id DESC LIMIT 1",
+                [mode],
+                |r| Ok((r.get(0)?, json_col(r, "payload")?)),
+            )
+            .optional()?)
+    }
+
+    /// How many events after `after` the observer did not write itself
+    /// (ADR-0044): every event but `observe_started` / `observe_finished`,
+    /// the findings and asks `role` wrote, and the session events of its
+    /// own spans (`span_kind`).
+    pub fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
         Ok(self.conn.query_row(
-            "SELECT
-               (SELECT count(*) FROM run_events WHERE id>?2 AND kind='finding_recorded'
-                  AND json_extract(payload,'$.by')=?1),
-               (SELECT count(*) FROM run_events WHERE id>?2 AND kind='finding_updated'
-                  AND json_extract(payload,'$.by')=?1),
-               (SELECT count(*) FROM asks WHERE id>?3 AND asked_by=?1)",
-            params![role, event_id, ask_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
+               kind IN ('observe_started','observe_finished')
+               OR (kind IN ('finding_recorded','finding_updated','finding_status_changed')
+                   AND json_extract(payload,'$.by') IS ?1)
+               OR (kind='ask_opened' AND json_extract(payload,'$.asked_by') IS ?1)
+               OR (kind IN ('session_opened','session_closed','session_turns')
+                   AND json_extract(payload,'$.kind') IS ?2))",
+            params![role, span_kind, after],
+            |r| r.get(0),
         )?)
+    }
+
+    /// The newest `limit` observations, newest first: each
+    /// `observe_finished` with the `observe_started` of the same directory
+    /// when there is one (a skipped observation has none).
+    pub fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>> {
+        let finished = self.latest_events_of("observe_finished", limit)?;
+        finished
+            .into_iter()
+            .map(|finished| {
+                let started = match finished.payload["dir"].as_str() {
+                    Some(dir) => self
+                        .conn
+                        .query_row(
+                            "SELECT * FROM run_events WHERE kind='observe_started'
+                               AND id<?1 AND json_extract(payload,'$.dir')=?2
+                             ORDER BY id DESC LIMIT 1",
+                            params![finished.id, dir],
+                            event_row,
+                        )
+                        .optional()?,
+                    None => None,
+                };
+                Ok((finished, started))
+            })
+            .collect()
     }
 
     /// The latest run whose session opened in `workspace_id`, if any.

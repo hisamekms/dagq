@@ -26,6 +26,10 @@ impl AgentProvider for ObserverProvider {
         command.current_dir(cwd).arg("-c").arg(&self.script);
         Ok(command)
     }
+    /// The script's `$0`, which it writes to `mcp.txt` when asked to.
+    fn without_mcp(&self, command: &mut CommandSpec) {
+        command.option_args(["no-mcp"]);
+    }
     fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
         bail!("the observer reviews no run")
     }
@@ -62,6 +66,7 @@ fn observe_records_findings_and_a_blocked_ask_and_advances_the_cursor() {
         script: r#"
 set -e
 printf '%s' "$DAGQ_ROLE" > role.txt
+printf '%s' "$0" > mcp.txt
 q() { dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1 --evidence 2
@@ -105,6 +110,8 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
         fs::read_to_string(dir.join("role.txt")).unwrap(),
         "observer"
     );
+    // The agent was started without MCP servers.
+    assert_eq!(fs::read_to_string(dir.join("mcp.txt")).unwrap(), "no-mcp");
     for denied in ["ready.err", "ask.err", "goal.err", "note.err", "draft.err"] {
         assert!(
             fs::read_to_string(dir.join(denied))
@@ -151,16 +158,33 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
         std::slice::from_ref(&first)
     );
 
-    // The next observation reads past the saved cursor; a failed one keeps it.
+    // Nothing but the observer's own events since: the next observation
+    // starts no agent and records a skipped finish.
     let failing = ObserverProvider {
         script: "exit 7".into(),
     };
+    let skipped = observe(&db, &failing, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(skipped["outcome"], "skipped", "{skipped}");
+    assert_eq!(skipped["since"], cursor);
+    assert_eq!(skipped["dir"], Value::Null);
+    assert_eq!(queue_events(&db, "observe_started").len(), 1);
+    assert_eq!(queue_events(&db, "observe_finished").len(), 2);
+    assert_eq!(read_cursor(&db).unwrap(), Some(EventId::new(cursor)));
+    // An event of someone else ends the quiet.
+    queue
+        .record_queue_event("stall_config_loaded", json!({}))
+        .unwrap();
+
+    // The next observation reads past the saved cursor; a failed one keeps it.
     let second = observe(&db, &failing, &observe_options(ObserveMode::Hourly)).unwrap();
     assert_eq!(second["since"], cursor);
     assert_eq!(second["outcome"], "failed");
     assert_eq!(second["exit_code"], 7);
     assert_eq!(second["cursor_saved"], false);
     assert_eq!(read_cursor(&db).unwrap(), Some(EventId::new(cursor)));
+    // After a failed one the next runs its agent again, quiet or not.
+    let retried = observe(&db, &failing, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(retried["outcome"], "failed", "{retried}");
 
     // A dry run only returns the prompt.
     let dry = observe(
@@ -188,7 +212,7 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     );
     assert!(prompt.contains("task 1 waits for a slot"), "{prompt}");
     assert!(prompt.contains("idle_slots"), "{prompt}");
-    assert_eq!(queue_events(&db, "observe_started").len(), 2);
+    assert_eq!(queue_events(&db, "observe_started").len(), 3);
 
     // An agent that cannot start is an error outcome, not a failed observe.
     let broken = observe(
@@ -210,6 +234,72 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     // The daily one reads the last 24 hours and leaves the cursor alone.
     assert_eq!(broken["since"], 0);
     assert_eq!(read_cursor(&db).unwrap(), Some(EventId::new(cursor)));
+
+    // `observe --history` lists them newest first with what each read and
+    // wrote; the observer may read it too.
+    let output = {
+        use crate::common::Bounded;
+        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .args(["--db", db.to_str().unwrap(), "observe", "--history"])
+            .env("DAGQ_ROLE", "observer")
+            .bounded_output()
+            .unwrap()
+    };
+    assert!(output.status.success(), "{output:?}");
+    let history: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let observations = history["observations"].as_array().unwrap();
+    assert_eq!(
+        observations
+            .iter()
+            .map(|o| (o["mode"].as_str().unwrap(), o["outcome"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
+        [
+            ("daily", "error"),
+            ("hourly", "failed"),
+            ("hourly", "failed"),
+            ("hourly", "skipped"),
+            ("hourly", "succeeded"),
+        ]
+    );
+    let quiet = &observations[3];
+    assert_eq!(quiet["skipped"], true);
+    assert_eq!(quiet["started_at"], quiet["finished_at"]);
+    assert_eq!(quiet["input"], json!({"since": cursor, "through": cursor}));
+    let first_entry = &observations[4];
+    assert_eq!(first_entry["skipped"], false);
+    assert_eq!(
+        first_entry["input"],
+        json!({"since": null, "through": cursor})
+    );
+    assert_eq!(
+        first_entry["findings"],
+        json!({"recorded": 2, "updated": 1, "recorded_ids": [1, 2], "updated_ids": [1]})
+    );
+    assert_eq!(
+        first_entry["asks"],
+        json!({"count": 1, "ids": [asks[0].id]})
+    );
+    assert_eq!(first_entry["dir"], first["dir"]);
+    assert!(first_entry["duration_secs"].is_u64());
+    assert!(
+        first_entry["started_at"].as_str().unwrap() <= first_entry["finished_at"].as_str().unwrap()
+    );
+    let limited = {
+        use crate::common::Bounded;
+        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .args([
+                "--db",
+                db.to_str().unwrap(),
+                "observe",
+                "--history",
+                "--limit",
+                "1",
+            ])
+            .bounded_output()
+            .unwrap()
+    };
+    let limited: Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(limited["observations"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -359,4 +449,36 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     // Once the interval passed, the next pass observes again.
     supervise_observed();
     assert_eq!(queue_events(&db, "observe_started").len(), 4);
+}
+
+#[test]
+fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, _repo, db) = fixture();
+    // Someone else's note lands after the input was read, before the finish.
+    let noting = ObserverProvider {
+        script:
+            r#"DAGQ_ROLE= dagq --db "$DAGQ_QUEUE" note --task 1 --text 'meanwhile' > /dev/null"#
+                .into(),
+    };
+    let quiet = ObserverProvider {
+        script: "true".into(),
+    };
+    let first = observe(&db, &noting, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(first["outcome"], "succeeded", "{first}");
+    let second = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(second["outcome"], "succeeded", "{second}");
+    let third = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(third["outcome"], "skipped", "{third}");
+    // A cursor given by hand reads whatever happened.
+    let forced = observe(
+        &db,
+        &quiet,
+        &dagq::observer::ObserveOptions {
+            since: Some(EventId::new(0)),
+            ..observe_options(ObserveMode::Hourly)
+        },
+    )
+    .unwrap();
+    assert_eq!(forced["outcome"], "succeeded", "{forced}");
 }

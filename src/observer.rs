@@ -4,7 +4,10 @@
 //! `blocked` asks. The CLI refuses everything else under
 //! `DAGQ_ROLE=observer`, notes and goals included. The supervisor starts it on
 //! a timer (`--observe-interval`, `--observe-daily`); `observe` starts it
-//! by hand.
+//! by hand. An observation that finds no event since the last one but its
+//! own starts no agent and records a skipped `observe_finished`; the agent
+//! loads no MCP server; `observe --history` reads what each observation
+//! read and wrote.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -18,11 +21,13 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{AgentProvider, TaskStore, dependency_graph},
-    domain::{EventId, FindingQuery, NoteQuery, stats::StatsQuery},
+    domain::{EventId, FindingQuery, NoteQuery, RunEvent, stats::StatsQuery},
     infrastructure::{adapters::shell_join, asks::AskQuery, sqlite::SqliteQueue},
     lifecycle::{OBSERVER_ROLE, QUEUE_ENV, ROLE_ENV},
 };
 
+/// Observations `observe --history` lists by default.
+pub const HISTORY_LIMIT: usize = 20;
 /// Notes the prompt carries.
 pub const PROMPT_NOTES: usize = 20;
 /// How long one observer run may take before it is killed.
@@ -87,6 +92,13 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         (None, ObserveMode::Hourly) => read_cursor(&db)?,
         (None, ObserveMode::Daily) => Some(queue.event_id_before(started - DAILY_WINDOW_SECS)?),
     };
+    // A cursor given by hand asks to read past it whatever happened since.
+    if options.since.is_none()
+        && !options.dry_run
+        && let Some(payload) = skip(&queue, options.mode, since)?
+    {
+        return Ok(payload);
+    }
     // The cmux on PATH lists the workspaces for `workspace_mismatch`;
     // without one, only that alert is left unjudged.
     let cmux = crate::infrastructure::adapters::executable(Path::new("cmux"))
@@ -165,7 +177,12 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
             Ok(code) => ("failed", code, None),
             Err(error) => ("error", None, Some(format!("{error:#}"))),
         };
-    let (recorded, updated, asks) = queue.written_by(OBSERVER_ROLE, event_mark, ask_mark)?;
+    let written = queue.written_by(OBSERVER_ROLE, event_mark, ask_mark)?;
+    let (recorded, updated, asks) = (
+        written.recorded.len(),
+        written.updated.len(),
+        written.asks.len(),
+    );
     let saved = outcome == "succeeded" && options.mode == ObserveMode::Hourly;
     if saved {
         write_cursor(&db, cursor)?;
@@ -181,6 +198,9 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "findings_recorded": recorded,
         "findings_updated": updated,
         "asks": asks,
+        "recorded_finding_ids": written.recorded,
+        "updated_finding_ids": written.updated,
+        "ask_ids": written.asks,
         "duration_secs": clock.elapsed().as_secs(),
         "dir": dir,
     });
@@ -197,6 +217,88 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         options.mode.as_str()
     );
     Ok(payload)
+}
+
+/// When the last observation of `mode` that ran its agent succeeded and no
+/// event but the observer's own came after the events it read, record a skipped
+/// `observe_finished` without starting anything, and return its payload.
+fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Result<Option<Value>> {
+    let Some((previous, last)) = queue.last_observation(mode.as_str())? else {
+        return Ok(None);
+    };
+    // Counted past what its input read, not past its finish: events of
+    // others while its agent ran are unread too.
+    let read = last["cursor"].as_i64().map_or(previous, EventId::new);
+    if last["outcome"] != "succeeded"
+        || queue.events_besides(OBSERVER_ROLE, crate::domain::sessions::OBSERVER, read)? > 0
+    {
+        return Ok(None);
+    }
+    let payload = json!({
+        "mode": mode.as_str(),
+        "outcome": "skipped",
+        "reason": "no events but the observer's own since the last observation",
+        "previous_event_id": previous,
+        "since": since,
+        "cursor": since,
+        "cursor_saved": false,
+        "findings_recorded": 0,
+        "findings_updated": 0,
+        "asks": 0,
+        "recorded_finding_ids": [],
+        "updated_finding_ids": [],
+        "ask_ids": [],
+        "duration_secs": 0,
+        "dir": null,
+    });
+    queue.record_queue_event("observe_finished", payload.clone())?;
+    tracing::info!(
+        mode = mode.as_str(),
+        previous = previous.as_i64(),
+        "observer ({}) skipped: nothing happened since event {previous}",
+        mode.as_str()
+    );
+    Ok(Some(payload))
+}
+
+/// `observe --history`: the newest `limit` observations, newest first, each
+/// with the events it read (after `since` through `cursor`), the findings
+/// and asks it wrote, how long it took and whether it was skipped.
+/// Observations recorded before the ids were kept give the counts only.
+pub fn history(queue: &SqliteQueue, limit: usize) -> Result<Value> {
+    let observations = queue
+        .observations(limit)?
+        .into_iter()
+        .map(|(finished, started)| history_entry(&finished, started.as_ref()))
+        .collect::<Vec<_>>();
+    Ok(json!({"observations": observations}))
+}
+
+fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
+    let payload = &finished.payload;
+    let field = |name: &str| payload.get(name).cloned().unwrap_or(Value::Null);
+    let outcome = field("outcome");
+    json!({
+        "event_id": finished.id,
+        "mode": field("mode"),
+        "outcome": outcome,
+        "skipped": outcome == "skipped",
+        "started_at": started.map_or(&finished.created_at, |started| &started.created_at),
+        "finished_at": finished.created_at,
+        "duration_secs": field("duration_secs"),
+        "input": {"since": field("since"), "through": field("cursor")},
+        "cursor_saved": field("cursor_saved"),
+        "findings": {
+            "recorded": field("findings_recorded"),
+            "updated": field("findings_updated"),
+            "recorded_ids": field("recorded_finding_ids"),
+            "updated_ids": field("updated_finding_ids"),
+        },
+        "asks": {"count": field("asks"), "ids": field("ask_ids")},
+        "exit_code": field("exit_code"),
+        "error": field("error"),
+        "dir": field("dir"),
+    })
 }
 
 /// `<queue dir>/observer/<started_at>/`, suffixed when one already exists
@@ -234,6 +336,7 @@ fn run_agent(
     let log = fs::File::create(dir.join("output.log"))?;
     let mut spec = provider.headless_command(dir, prompt, ALLOWED_TOOLS)?;
     provider.assign_session_id(&mut spec, session_id);
+    provider.without_mcp(&mut spec);
     let mut command = crate::infrastructure::process::command(&spec);
     let mut path = std::env::var_os("PATH").unwrap_or_default();
     if let Some(bin) = options.dagq.parent() {

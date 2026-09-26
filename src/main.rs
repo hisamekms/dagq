@@ -574,7 +574,16 @@ enum Command {
     /// Run the observer job once: headless Claude under DAGQ_ROLE=observer reads stats past the
     /// cursor, the open findings, the latest notes, the open asks and the graph, and writes
     /// findings and blocked asks on them only (ADR-0044 decision 4). Records observe_started / observe_finished and saves the new cursor.
+    /// When no event but the observer's own came since the last observation, starts no agent and records
+    /// observe_finished with outcome skipped (unless --since is given). The agent loads no MCP server.
     Observe {
+        /// List the past observations instead, newest first: the events each read, the findings and asks it
+        /// wrote, how long it took and whether it was skipped.
+        #[arg(long)]
+        history: bool,
+        /// With --history, how many observations to list.
+        #[arg(long, requires = "history", default_value_t = dagq::observer::HISTORY_LIMIT)]
+        limit: usize,
         /// Event id to read stats past; defaults to the cursor the last observe saved
         /// (<queue dir>/observer/cursor), or with --daily the last event 24 hours ago.
         #[arg(long)]
@@ -1115,6 +1124,7 @@ fn reads_only(command: &Command) -> bool {
             | Command::Goal {
                 command: GoalCommand::List | GoalCommand::Show { .. },
             }
+            | Command::Observe { history: true, .. }
     )
 }
 
@@ -1168,7 +1178,8 @@ fn observer_access(command: &Command) -> ObserverAccess {
         | Command::Lint { .. }
         | Command::Goal {
             command: GoalCommand::List | GoalCommand::Show { .. },
-        } => ObserverAccess::Allowed,
+        }
+        | Command::Observe { history: true, .. } => ObserverAccess::Allowed,
         // The threshold crossings it raises to the inbox, each on its
         // finding (ADR-0044 decision 23), and nothing else.
         Command::Ask {
@@ -2149,11 +2160,18 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Observe {
+            history: true,
+            limit,
+            ..
+        } => dagq::observer::history(&queue, limit)?,
+        Command::Observe {
+            history: false,
             since,
             dry_run,
             daily,
             timeout,
             claude,
+            ..
         } => {
             use dagq::infrastructure::adapters::{ClaudeCode, executable};
             use dagq::observer::{ObserveMode, ObserveOptions};
@@ -2212,7 +2230,7 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
             log_dir.clone().unwrap_or_else(|| location.log_dir.clone()),
         )),
         Command::Integrate { .. } => Some(("integrate", location.log_dir.clone())),
-        Command::Observe { .. } => Some(("observe", location.log_dir.clone())),
+        Command::Observe { history: false, .. } => Some(("observe", location.log_dir.clone())),
         Command::Session { .. } => Some(("session", location.log_dir.clone())),
         Command::PlannerSession { .. } => Some(("planner-session", location.log_dir.clone())),
         Command::AutoUpdate { .. } => Some(("auto-update", location.log_dir.clone())),

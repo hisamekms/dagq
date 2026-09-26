@@ -2152,6 +2152,12 @@ impl AgentProvider for ClaudeCode {
     fn assign_session_id(&self, command: &mut CommandSpec, session_id: &str) {
         command.option_args(["--session-id", session_id]);
     }
+    /// `--strict-mcp-config` without an `--mcp-config`: Claude Code loads
+    /// the servers of no configuration, the user's, the project's, the
+    /// plugins' and claude.ai's alike.
+    fn without_mcp(&self, command: &mut CommandSpec) {
+        command.option_args(["--strict-mcp-config"]);
+    }
 }
 
 /// Settings of the headless review: no hooks, and the same `autoMode`
@@ -2525,6 +2531,19 @@ mod tests {
         assert_eq!(
             named.get_args().collect::<Vec<_>>(),
             ["-p", "--session-id", "s-1", "--", "p"]
+        );
+        // The observer loads no MCP server (ADR-0044).
+        claude.without_mcp(&mut named);
+        assert_eq!(
+            named.get_args().collect::<Vec<_>>(),
+            [
+                "-p",
+                "--session-id",
+                "s-1",
+                "--strict-mcp-config",
+                "--",
+                "p"
+            ]
         );
         let mut plain = CommandSpec::new("x");
         plain.arg("a").option_args(["b"]);

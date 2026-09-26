@@ -383,6 +383,14 @@ pub trait AgentProvider {
     fn assign_session_id(&self, command: &mut CommandSpec, session_id: &str) {
         let _ = (command, session_id);
     }
+    /// Start a headless job (`command`, from
+    /// [`AgentProvider::headless_command`]) without any MCP server: the
+    /// observer's job reads the queue through its CLI only (ADR-0044), and
+    /// loading the user's servers costs every observation their start. A
+    /// provider without MCP leaves it as it is.
+    fn without_mcp(&self, command: &mut CommandSpec) {
+        let _ = command;
+    }
     /// How long the headless review may take before it counts as failed.
     fn review_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(600)
