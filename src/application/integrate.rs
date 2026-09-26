@@ -1001,6 +1001,20 @@ fn land(
         // Why it failed, from its exit and its log (task 467).
         let failure = (exit_code != 0)
             .then(|| verify_failure::classify(command, status.code, status.signal, &output));
+        // The tests it names as failed, when tests failed or ran out of
+        // time (task 515).
+        let failed_tests = failure
+            .as_ref()
+            .filter(|failure| {
+                matches!(
+                    failure.class,
+                    verify_failure::FailureClass::TestFailure
+                        | verify_failure::FailureClass::Timeout
+                )
+            })
+            .map(|_| verify_failure::failed_tests(&output));
+        let tests_json = json!(failed_tests.as_ref().map(|tests| &tests.names));
+        let omitted_json = json!(failed_tests.as_ref().map(|tests| tests.omitted));
         queue.record_runtime_event(
             run.id(),
             "verification_command",
@@ -1012,6 +1026,8 @@ fn land(
                 "exit_code": exit_code,
                 "signal": status.signal,
                 "failure": failure.as_ref().map(|failure| failure.to_json()),
+                "failed_tests": tests_json,
+                "failed_tests_omitted": omitted_json,
                 "duration_secs": duration_secs,
                 "load_avg_mean": load.load_avg_mean,
                 "load_avg_max": load.load_avg_max,
@@ -1035,6 +1051,8 @@ fn land(
                     "exit_code": exit_code,
                     "signal": status.signal,
                     "failure": failure.to_json(),
+                    "failed_tests": tests_json,
+                    "failed_tests_omitted": omitted_json,
                 }),
             );
         }

@@ -57,6 +57,13 @@ pub const CATEGORIES: [&str; 14] = [
 /// `timeline`.
 pub const HEAVY: [&str; 5] = [CHAIN, E2E, LLVM_COV, TEST, BUILD];
 
+/// The categories of commands that run tests, whose output is read for
+/// the failed tests (task 515).
+pub const TEST_KINDS: [&str; 4] = [CHAIN, E2E, LLVM_COV, TEST];
+
+/// The most failed test names one span's `work` keeps (task 515).
+pub const MAX_SPAN_FAILED_TESTS: usize = 50;
+
 /// Tools that only wait (for a wakeup, a monitor, a background output).
 const WAIT_TOOLS: [&str; 4] = ["ScheduleWakeup", "Monitor", "TaskOutput", "BashOutput"];
 
@@ -223,6 +230,12 @@ pub struct Command {
     pub status: Option<String>,
     /// The shell command, for the run directory's `worktime.jsonl` only.
     pub command: Option<String>,
+    /// The tests its output names as failed (task 515), whatever its exit
+    /// (`cargo test … | tail` exits 0): a foreground command that runs
+    /// tests ([`TEST_KINDS`]) only, since a background command's output is
+    /// not in the transcript, and another command's output (a file shown,
+    /// a search) may quote the marks.
+    pub failed_tests: Vec<String>,
 }
 
 impl Command {
@@ -261,6 +274,7 @@ impl Command {
             "failed": self.failed,
             "status": self.status,
             "command": command,
+            "failed_tests": self.failed_tests,
         })
     }
 }
@@ -322,6 +336,12 @@ pub fn commands(records: &[TranscriptRecord], from: i64, to: i64) -> Vec<Command
             } else {
                 (TOOL, false, result.map(|(at, _)| at))
             };
+            let failed_tests = match (background, result) {
+                (false, Some((_, result))) if shell && TEST_KINDS.contains(&category) => {
+                    result.failed_tests.names.clone()
+                }
+                _ => Vec::new(),
+            };
             let (exit_code, failed, status) = match (background, notice, result) {
                 (true, Some((_, notice)), _) => (
                     notice.exit_code,
@@ -351,6 +371,7 @@ pub fn commands(records: &[TranscriptRecord], from: i64, to: i64) -> Vec<Command
                 failed,
                 status,
                 command: tool_use.command.clone(),
+                failed_tests,
             });
         }
     }
@@ -480,7 +501,7 @@ impl Breakdown {
             count.0 += 1;
             count.1 += usize::from(command.failed == Some(true));
         }
-        json!({
+        let mut payload = json!({
             "total_secs": secs(self.total_millis),
             "secs": secs_by,
             "commands": counts
@@ -502,7 +523,19 @@ impl Breakdown {
                     "failed": c.failed,
                 }))
                 .collect::<Vec<_>>(),
-        })
+        });
+        // The tests its commands named as failed, each once in the order
+        // first named (task 515); left out when none, as before.
+        let mut failed_tests: Vec<&String> = Vec::new();
+        for name in self.commands.iter().flat_map(|c| &c.failed_tests) {
+            if failed_tests.len() < MAX_SPAN_FAILED_TESTS && !failed_tests.contains(&name) {
+                failed_tests.push(name);
+            }
+        }
+        if !failed_tests.is_empty() {
+            payload["failed_tests"] = json!(failed_tests);
+        }
+        payload
     }
 }
 
@@ -826,9 +859,73 @@ mod tests {
             failed: Some(false),
             status: None,
             command: Some("あ".repeat(200)),
+            failed_tests: Vec::new(),
         };
         let line = command.line(&json!({}));
         assert_eq!(line["secs"], 2);
         assert_eq!(line["command"].as_str().unwrap().chars().count(), 100);
+    }
+
+    /// A failed foreground command's tests are kept on it, in its line and
+    /// in the span's `work`; a passing one, a background one and a span
+    /// without any add nothing (task 515).
+    #[test]
+    fn a_failed_commands_tests_are_named() {
+        let failed = "Exit code 101\ntest a::breaks ... FAILED\ntest b::too ... FAILED\n\ntest result: FAILED. 0 passed; 2 failed";
+        let lines = [
+            input(0, "go"),
+            bash(1, "t1", "cargo test --locked --lib a", false),
+            result(5, "t1", failed, true),
+            bash(6, "t2", "cargo test --locked --lib a", false),
+            result(9, "t2", "test a::breaks ... ok", false),
+            bash(10, "t3", "cargo test --locked --test it b::", true),
+            result(11, "t3", "Command running in background with ID: x", false),
+            notice(
+                20,
+                "t3",
+                "failed",
+                "Background command failed with exit code 101",
+            ),
+            // Piped to tail it exits 0, and its output still says.
+            bash(21, "t4", "cargo test --locked --lib 2>&1 | tail -5", false),
+            result(
+                24,
+                "t4",
+                "test b::too ... FAILED\ntest c::piped ... FAILED",
+                false,
+            ),
+            // A file shown is not a test run, whatever it quotes.
+            bash(25, "t5", "sed -n 1,9p src/domain/worktime.rs", false),
+            result(26, "t5", "test z::quoted ... FAILED", false),
+        ];
+        let records = records(&lines);
+        let work = breakdown(&records, ms(0), ms(30), &[]);
+        let names: Vec<&[String]> = work
+            .commands
+            .iter()
+            .map(|c| c.failed_tests.as_slice())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                &["a::breaks".to_owned(), "b::too".to_owned()][..],
+                &[],
+                &[],
+                &["b::too".to_owned(), "c::piped".to_owned()],
+                &[],
+            ]
+        );
+        // Each once in the span.
+        assert_eq!(
+            work.payload()["failed_tests"],
+            json!(["a::breaks", "b::too", "c::piped"])
+        );
+        let span = json!({"opened_event_id": 1, "kind": "worker", "attempt": 1});
+        assert_eq!(
+            work.commands[0].line(&span)["failed_tests"],
+            json!(["a::breaks", "b::too"])
+        );
+        let quiet = breakdown(&records, ms(6), ms(21), &[]);
+        assert!(quiet.payload().get("failed_tests").is_none());
     }
 }

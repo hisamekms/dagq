@@ -185,6 +185,121 @@ pub fn classify(
     }
 }
 
+/// The most test names one failed command keeps (task 515); the rest
+/// are only counted.
+pub const MAX_FAILED_TESTS: usize = 20;
+
+/// The tests a failed command's output names as failed (task 515): the
+/// first [`MAX_FAILED_TESTS`] in the order they appear, each once, and how
+/// many more there were.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FailedTests {
+    pub names: Vec<String>,
+    pub omitted: usize,
+}
+
+impl FailedTests {
+    /// Whether it names none.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty() && self.omitted == 0
+    }
+}
+
+/// The tests `log` names as failed, from the marks of cargo test
+/// (`test <name> ... FAILED`, `---- <name> stdout ----`, the list under
+/// `failures:`, a test thread's `thread '<name>' panicked`), of nextest
+/// (`FAIL [`, `TIMEOUT [`, `SIG… [` with the test last) and of
+/// `tests/common`'s `within` (`test <name> timed out: …`). A failure that
+/// names no test (a panic outside a test, `error: test failed` alone)
+/// gives none.
+pub fn failed_tests(log: &str) -> FailedTests {
+    let text = strip_ansi(log);
+    let mut found: Vec<String> = Vec::new();
+    let mut in_list = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if in_list {
+            // `failures:` then one indented name per line, to a blank line.
+            if !line.is_empty() && raw.starts_with([' ', '\t']) {
+                found.extend(test_name(line));
+                continue;
+            }
+            in_list = false;
+        }
+        if raw.trim_end() == "failures:" {
+            in_list = true;
+            continue;
+        }
+        let name = if let Some(rest) = line.strip_prefix("test ") {
+            rest.strip_suffix(" ... FAILED").or_else(|| {
+                rest.contains("did not happen within")
+                    .then(|| rest.split(" timed out: ").next())
+                    .flatten()
+            })
+        } else if let Some(rest) = line.strip_prefix("---- ") {
+            rest.strip_suffix(" stdout ----")
+                .or_else(|| rest.strip_suffix(" stderr ----"))
+        } else if let Some(rest) = line.strip_prefix("thread '") {
+            // Only a test's thread: tests are paths.
+            rest.split_once("' panicked")
+                .map(|(name, _)| name)
+                .filter(|name| name.contains("::"))
+        } else if nextest_failure(line) {
+            line.split_once(']')
+                .and_then(|(_, rest)| rest.split_whitespace().last())
+        } else {
+            None
+        };
+        found.extend(name.and_then(test_name));
+    }
+    let mut names: Vec<String> = Vec::new();
+    for name in found {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let omitted = names.len().saturating_sub(MAX_FAILED_TESTS);
+    names.truncate(MAX_FAILED_TESTS);
+    FailedTests { names, omitted }
+}
+
+/// A nextest status line of a failed test: `FAIL [`, `TRY 2 FAIL [`,
+/// `TIMEOUT [`, `SIGKILL [` and the other signals.
+fn nextest_failure(line: &str) -> bool {
+    let Some((status, rest)) = line.split_once(" [") else {
+        return false;
+    };
+    // The status starts the line (`TRY n` may come first), and a binary
+    // and a test follow the time: not a line that only says `SIGTERM [`.
+    let status = match status.split_whitespace().collect::<Vec<_>>()[..] {
+        [status] => status,
+        ["TRY", n, status] if n.chars().all(|c| c.is_ascii_digit()) => status,
+        _ => return false,
+    };
+    let after: Vec<&str> = rest
+        .split_once(']')
+        .map(|(_, after)| after.split_whitespace().collect())
+        .unwrap_or_default();
+    let words = after
+        .iter()
+        .filter(|word| !word.starts_with('(') && !word.ends_with(')'));
+    let is_status = matches!(status, "FAIL" | "LEAK-FAIL" | "TIMEOUT" | "ABORT")
+        || (status.len() > 3
+            && status.starts_with("SIG")
+            && status[3..].chars().all(|c| c.is_ascii_uppercase()));
+    is_status && words.count() >= 2
+}
+
+/// `text` when it looks like a test's name (a Rust path).
+fn test_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+    .then(|| text.to_owned())
+}
+
 fn signal_name(signal: i32) -> &'static str {
     match signal {
         1 => "SIGHUP",
@@ -475,6 +590,101 @@ TOTAL  1000  100  90.00%  20000  4100  79.50%\n";
             FailureClass::Unknown,
         ] {
             assert_eq!(json!(class), json!(class.as_str()));
+        }
+    }
+
+    fn names(log: &str) -> Vec<String> {
+        failed_tests(log).names
+    }
+
+    #[test]
+    fn one_failed_test_is_named_once() {
+        // cargo test names it on its line, over its output and in the list.
+        let log = "running 2 tests\n\
+test a::passes ... ok\n\
+test a::breaks ... FAILED\n\
+\n\
+failures:\n\
+\n\
+---- a::breaks stdout ----\n\
+assertion failed: false\n\
+\n\
+\n\
+failures:\n\
+    a::breaks\n\
+\n\
+test result: FAILED. 1 passed; 1 failed; 0 ignored\n\
+error: test failed, to rerun pass `--lib`\n";
+        assert_eq!(
+            failed_tests(log),
+            FailedTests {
+                names: vec!["a::breaks".to_owned()],
+                omitted: 0
+            }
+        );
+    }
+
+    #[test]
+    fn several_failed_tests_keep_their_order_up_to_the_limit() {
+        let log = "\u{1b}[31mtest b::one ... FAILED\u{1b}[0m\ntest a::two ... FAILED\n\nfailures:\n    b::one\n    a::two\n    c::three\n\ntest result: FAILED. 0 passed; 3 failed\n";
+        assert_eq!(names(log), ["b::one", "a::two", "c::three"]);
+        // nextest: the test is the last word of the status line.
+        let nextest = "        PASS [   0.010s] (1/4) dagq::it a::b\n\
+        FAIL [   4.935s] (2/4) dagq::it runtime_session::exit_request\n\
+     TIMEOUT [ 600.003s] (3/4) dagq::it runtime_claim::waits\n\
+     SIGKILL [   1.000s] dagq e2e_happy_path\n\
+   LEAK-FAIL [   0.200s] (4/4) dagq::it runtime_claim::leaks\n\
+sent SIGTERM [pid 42] to worker\n\
+        FAIL [   0.100s]\n\
+  TRY 2 FAIL [   0.100s] dagq::it runtime_session::exit_request\n\
+     Summary [ 610.000s] 4 tests run: 1 passed, 3 failed\n\
+        FAIL [   4.935s] (2/4) dagq::it runtime_session::exit_request\n\
+error: test run failed\n";
+        assert_eq!(
+            names(nextest),
+            [
+                "runtime_session::exit_request",
+                "runtime_claim::waits",
+                "e2e_happy_path",
+                "runtime_claim::leaks"
+            ]
+        );
+        let many: String = (0..MAX_FAILED_TESTS + 3)
+            .map(|i| format!("test t::n{i} ... FAILED\n"))
+            .collect();
+        let failed = failed_tests(&many);
+        assert_eq!(failed.names.len(), MAX_FAILED_TESTS);
+        assert_eq!(failed.names[0], "t::n0");
+        assert_eq!(failed.omitted, 3);
+        assert!(!failed.is_empty());
+    }
+
+    #[test]
+    fn a_panic_or_a_timeout_names_its_test() {
+        // A test's thread that panicked, before cargo's own lines (cut off).
+        let log = "thread 'runtime_claim::claims' panicked at tests/it/runtime_claim.rs:10:5:\n\
+assertion `left == right` failed\n";
+        assert_eq!(names(log), ["runtime_claim::claims"]);
+        // tests/common's within: the test that ran out of time.
+        let log = "test runtime_x::waits timed out: the run to land did not happen within 20s\n";
+        assert_eq!(names(log), ["runtime_x::waits"]);
+        // The quoted text of an assertion is not a mark.
+        let log = "stderr: \"test a::b timed out: x did not happen within 1s\"\n";
+        assert!(names(log).is_empty());
+    }
+
+    #[test]
+    fn a_failure_without_a_name_names_none() {
+        for log in [
+            "",
+            "error: test failed, to rerun pass `--test it`\n",
+            "thread 'main' panicked at src/main.rs:1:1:\nboom\n",
+            "test result: FAILED. 0 passed; 0 failed\n",
+            "failures:\n\n---- odd name with spaces stdout ----\n",
+            "   Compiling dagq\nerror[E0063]: missing field\n",
+        ] {
+            let failed = failed_tests(log);
+            assert!(failed.is_empty(), "{log:?}: {failed:?}");
         }
     }
 }

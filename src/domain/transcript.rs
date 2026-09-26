@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::stats::rfc3339_millis;
+use super::verify_failure::{FailedTests, failed_tests};
 
 /// What a record is, for the turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +76,8 @@ pub struct ToolResult {
     pub is_error: bool,
     /// The `Exit code N` a failed shell command's result starts with.
     pub exit_code: Option<i64>,
+    /// The tests its output names as failed (task 515).
+    pub failed_tests: FailedTests,
 }
 
 /// A `<task-notification>`: the background command or subagent started by
@@ -181,10 +184,15 @@ fn tool_result(part: &Value) -> Option<ToolResult> {
     let exit_code = text
         .and_then(|text| text.strip_prefix("Exit code "))
         .and_then(leading_number);
+    let is_error = part["is_error"].as_bool() == Some(true);
+    // Read whatever the exit: `cargo test … | tail` exits 0. Which results
+    // count (a test command's) is the work breakdown's to say.
+    let failed_tests = text.map(failed_tests).unwrap_or_default();
     Some(ToolResult {
         tool_use_id: part["tool_use_id"].as_str()?.to_owned(),
-        is_error: part["is_error"].as_bool() == Some(true),
+        is_error,
         exit_code,
+        failed_tests,
     })
 }
 
@@ -673,6 +681,8 @@ mod tests {
         assert_eq!(records[1].tool_results[0].exit_code, Some(2));
         assert!(records[1].tool_results[0].is_error);
         assert_eq!(records[1].tool_results[1].exit_code, None);
+        assert!(records[1].tool_results[0].failed_tests.is_empty());
+        assert!(records[1].tool_results[1].failed_tests.is_empty());
         assert_eq!(
             records[2].notification,
             Some(Notification {

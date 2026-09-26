@@ -138,6 +138,14 @@ mod stats {
             22,
             json!({"phase": "recheck", "command": "cargo llvm-cov", "duration_secs": 1.0}),
         );
+        // Task 515: the worker's own command named a failed test too.
+        events.push(
+            1,
+            Some("a"),
+            "session_closed",
+            15,
+            json!({"kind": "worker", "work": {"failed_tests": ["x", "y"]}}),
+        );
         events.run(1, "a", "run_integrated", 30);
         events.push(
             2,
@@ -173,6 +181,8 @@ mod stats {
             failed["attempt"] = json!(1);
             failed["index"] = json!(3);
             failed["failure"] = json!({"class": "timeout", "evidence": "test x timed out"});
+            // Task 515: the tests it named.
+            failed["failed_tests"] = json!(["x"]);
             failed
         });
         events.push(
@@ -288,6 +298,20 @@ mod stats {
             report["verification_failures"],
             json!([{"class": "timeout", "count": 1, "runs": 1}])
         );
+        // Task 515: "x" failed in two runs, at integrate and in the worker;
+        // with one run's integrate only it is not a flaky candidate.
+        let failed_tests = &report["failed_tests"];
+        assert_eq!(failed_tests["flaky_runs"], 2);
+        assert_eq!(failed_tests["tests"].as_array().unwrap().len(), 2);
+        let x = &failed_tests["tests"][0];
+        assert_eq!(x["name"], "x");
+        assert_eq!(x["failures"], 2);
+        assert_eq!(x["integrate"], 1);
+        assert_eq!(x["worker"], 1);
+        assert_eq!(x["runs"], 2);
+        assert_eq!(x["integrate_runs"], 1);
+        assert!(x["last_failed_at"].is_string());
+        assert_eq!(failed_tests["flaky_candidates"], json!([]));
     }
 
     #[test]

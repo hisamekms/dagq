@@ -1862,6 +1862,39 @@ fn a_failed_verification_is_classified_in_its_events() {
     assert_eq!(verifications[2]["signal"], 15);
 }
 
+/// A verification command whose tests failed names them on its event and
+/// the deferral (task 515); one that failed otherwise names none.
+#[test]
+fn a_failed_test_is_named_in_the_verification_events() {
+    let (_dir, db, detail) = run_agent(
+        "echo a > a.txt && git add a.txt && git commit -q -m a; receipt \"$(git rev-parse HEAD)\"",
+    );
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let repo = Path::new(&db).parent().unwrap().join("repo's directory");
+    let failing_tests = r#"echo 'test a::passes ... ok'; echo 'test runtime_claim::waits ... FAILED'; echo 'test b::breaks ... FAILED'; echo; echo 'failures:'; echo '    runtime_claim::waits'; echo '    b::breaks'; echo; echo 'test result: FAILED. 1 passed; 2 failed'; exit 101"#;
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [json!(["true", failing_tests]).to_string()],
+        )
+        .unwrap();
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let names = json!(["runtime_claim::waits", "b::breaks"]);
+    let deferred = payloads(&detail, "integration_deferred");
+    assert_eq!(deferred[0]["failure"]["class"], "test_failure");
+    assert_eq!(deferred[0]["failed_tests"], names);
+    assert_eq!(deferred[0]["failed_tests_omitted"], 0);
+    let verifications = integration_verifications(&detail);
+    assert_eq!(verifications[0]["failed_tests"], Value::Null);
+    assert_eq!(verifications[1]["failed_tests"], names);
+}
+
 /// Integrate's verification logs are numbered per attempt; a run directory
 /// with the name used before (`integrate-verify-N.log`) is still read, as
 /// the attempt before the numbered ones.

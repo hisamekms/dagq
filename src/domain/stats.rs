@@ -18,6 +18,7 @@ pub mod asks;
 pub mod auto_repairs;
 pub mod conflicts;
 pub mod drafts;
+pub mod failed_tests;
 pub mod landing;
 pub mod measures;
 pub mod predictions;
@@ -427,6 +428,10 @@ pub struct Stats {
     /// The verification commands of `integrate` that failed, per class of
     /// their failure, in the same window as `backend_failures` (task 467).
     pub verification_failures: Vec<FailureClassStats>,
+    /// The tests that `integrate`'s verification and the runs' own
+    /// sessions named as failed, per test, and the flaky candidates among
+    /// them, in the same window as `backend_failures` (task 515).
+    pub failed_tests: failed_tests::FailedTests,
     /// The Claude sessions per kind (ADR-0048 decision 12) that overlap the
     /// same window as `backend_failures`, their time cut to it. With
     /// `--goal`, only that goal's runs' sessions and its proposals' plan
@@ -868,6 +873,7 @@ pub fn stats(
         measures::verification_commands(events, window_start, next_cursor, counts);
     let verification_failures =
         measures::verification_failures(events, window_start, next_cursor, counts);
+    let failed_tests = failed_tests::failed_tests(events, window_start, next_cursor, counts);
     let waiting = super::waiting::waiting_stats(events, window_start, next_cursor, counts);
     let stall_thresholds = thresholds::thresholds(
         &thresholds::detections(events, now * 1000),
@@ -974,6 +980,7 @@ pub fn stats(
         load_bands,
         verification_commands,
         verification_failures,
+        failed_tests,
         sessions,
         waiting,
         asks: ask_stats,
