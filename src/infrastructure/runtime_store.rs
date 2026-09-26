@@ -408,16 +408,17 @@ impl SqliteQueue {
         Ok(())
     }
 
-    /// `running`, `validating` and `awaiting_integration` runs whose lease
-    /// carries a token other than `token`, oldest run first, each with its
-    /// wrapper registration. An `awaiting_integration` run is leased only
-    /// while its supervisor reviews it (ADR-0027). Runs in other statuses
+    /// `running`, `validating`, `awaiting_integration` and `needs_session`
+    /// runs whose lease carries a token other than `token`, oldest run
+    /// first, each with its wrapper registration. An `awaiting_integration`
+    /// run is leased only while its supervisor reviews it (ADR-0027), a
+    /// `needs_session` one while it is resumed or waits to land (task 356). Runs in other statuses
     /// and runs without a lease are not adoptable, so they are not listed.
     pub fn runs_leased_by_others(&self, token: &str) -> Result<Vec<LeasedRun>> {
         let mut statement = self.conn.prepare(
             "SELECT r.*, l.token, l.pid, l.heartbeat_at FROM task_runs r
              JOIN run_leases l ON l.run_id=r.id
-             WHERE r.status IN ('running','validating','awaiting_integration') AND l.token<>?1
+             WHERE r.status IN ('running','validating','awaiting_integration','needs_session') AND l.token<>?1
              ORDER BY r.rowid",
         )?;
         let rows = statement
@@ -451,7 +452,8 @@ impl SqliteQueue {
             .collect()
     }
 
-    /// Take over a `running` or `validating` run whose supervisor is gone
+    /// Take over a `running`, `validating`, `awaiting_integration` or
+    /// `needs_session` run whose supervisor is gone
     /// (ADR-0012): the lease row keeps its run but gets this process's
     /// `token`, `pid` and a fresh heartbeat, `task_runs.supervisor_token`
     /// follows so the lease-guarded transitions accept the adopter, and a
@@ -479,7 +481,7 @@ impl SqliteQueue {
                 "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l
                  JOIN task_runs r ON r.id=l.run_id
                  WHERE l.run_id=?1 AND l.token=?2
-                 AND r.status IN ('running','validating','awaiting_integration')",
+                 AND r.status IN ('running','validating','awaiting_integration','needs_session')",
                 params![id, previous_token],
                 lease_row,
             )

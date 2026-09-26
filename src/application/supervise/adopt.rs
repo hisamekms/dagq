@@ -58,10 +58,13 @@ impl Supervisor<'_> {
                     Some(None) => "gone".to_owned(),
                     None => "none".to_owned(),
                 }, run.task_id(), run.workspace_id().unwrap_or("?"));
-            let phase = if run.status() == RunStatus::AwaitingIntegration {
-                self.adopt_review(&run)
-            } else {
-                self.resume(&run)
+            let phase = match run.status() {
+                RunStatus::AwaitingIntegration => self.adopt_review(&run),
+                RunStatus::NeedsSession => self.adopt_resume(&run).map(|watch| {
+                    self.note_resume_adopted(&run, &watch, None);
+                    Phase::Resume(watch)
+                }),
+                _ => self.resume(&run),
             };
             match phase {
                 Ok(phase) => {
@@ -85,15 +88,20 @@ impl Supervisor<'_> {
     /// `awaiting_integration` run always; a run moved on by `resume_skipped`
     /// (it has no session of its own since: its supervisor alone owned it,
     /// whatever the wrapper of an earlier session left behind); otherwise
-    /// only one whose wrapper is alive or has reported its exit. Never a
-    /// run outside `running` / `validating` / `awaiting_integration`
-    /// (`claimed` / `starting` need the claimer's token).
+    /// only one whose wrapper is alive or has reported its exit; a
+    /// `needs_session` run only in a resume whose session lives on
+    /// ([`Self::resume_adoptable`]). Never a run outside `running` /
+    /// `validating` / `awaiting_integration` / `needs_session` (`claimed` /
+    /// `starting` need the claimer's token).
     pub(super) fn adoptable(
         &self,
         run: &TaskRun,
         wrapper: Option<&RunProcess>,
         now: i64,
     ) -> Result<bool> {
+        if run.status() == RunStatus::NeedsSession {
+            return self.resume_adoptable(run, wrapper);
+        }
         if !matches!(
             run.status(),
             RunStatus::Running | RunStatus::Validating | RunStatus::AwaitingIntegration
@@ -104,6 +112,58 @@ impl Supervisor<'_> {
             return Ok(true);
         }
         Ok(wrapper.is_some() && self.wrapper_alive(wrapper, now) != Some(false))
+    }
+    /// Whether a `needs_session` run whose lease went stale is in a resume
+    /// whose session lives on (task 356): its last resume event is
+    /// `resume_started` with the workspace of its attempt recorded, and the
+    /// wrapper of that session has not reported
+    /// its exit and its process lives, however silent (a silent one is
+    /// asked to exit by the adopter's watch). `resume_parked_runs` never
+    /// joins such a session, so without the adoption nobody would watch it.
+    /// A session that ended, or never registered, is left to
+    /// `resume_parked_runs` and its next attempt; one whose workspace was
+    /// never recorded has nothing to watch it through, and blocks the next
+    /// attempt until it ends.
+    fn resume_adoptable(&self, run: &TaskRun, wrapper: Option<&RunProcess>) -> Result<bool> {
+        Ok(
+            wrapper.is_some_and(|w| w.exited_at.is_none() && self.processes.alive(w.pid))
+                && resume_in_progress(&self.queue.run_events(run.id())?).is_some(),
+        )
+    }
+    /// Record that a resumed session is watched on by this process instead
+    /// of being resumed again: `auto_repaired` (`repair: resume_adopted`,
+    /// ADR-0047 decision 24), `handoff` telling an exec'd process (with the
+    /// version it came from) from an adopter. A record that fails is only
+    /// noted: the run is taken over either way.
+    pub(super) fn note_resume_adopted(
+        &mut self,
+        run: &TaskRun,
+        watch: &ResumeWatch,
+        handoff: Option<Option<&str>>,
+    ) {
+        let mut detail = json!({
+            "workspace_id": watch.workspace,
+            "version": self.layout.version,
+        });
+        if let Some(previous_version) = handoff {
+            detail["previous_version"] = json!(previous_version);
+        }
+        if let Err(error) = self.queue.record_runtime_event(
+            run.id(),
+            "auto_repaired",
+            json!({
+                "layer": "runtime",
+                "repair": "resume_adopted",
+                "conditions": {
+                    "handoff": handoff.is_some(),
+                    "attempt": watch.attempt,
+                    "request_sent": watch.message_sent.is_some(),
+                },
+                "detail": detail,
+            }),
+        ) {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
+        }
     }
     /// Whether the wrapper that has not reported its exit is alive (its
     /// process lives and its heartbeat is within the lease TTL); `None`

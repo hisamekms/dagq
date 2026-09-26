@@ -270,6 +270,97 @@ fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
     );
 }
 
+/// Task 356: a supervisor that stops during a resume (its lease goes
+/// stale while the resumed session lives on, and it leaves no
+/// `handoff.json`) is replaced by one with another token, which adopts the
+/// `needs_session` run, rebuilds the resume from its events and goes on
+/// watching the session: no second resume and no second resolution
+/// request, and the run lands. The adoption is `run_adopted` and
+/// `auto_repaired` (`repair: resume_adopted`, `handoff: false`).
+#[test]
+fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    backend.resume_script_for(
+        2,
+        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    // The first supervisor stops once the request is typed; the handoff
+    // only ends its loop, and dropping its state and its pid makes it one
+    // that died.
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
+    });
+    fs::remove_file(Path::new(run.run_dir().unwrap()).join("handoff.json")).unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_leases SET pid=?2 WHERE run_id=?1",
+            rusqlite::params![run.id(), dead_pid()],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::NeedsSession
+    );
+    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
+
+    let next = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"run_adopted")
+    });
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(next, "the adopting supervisor").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 1);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| **k == "resume_request_sent")
+            .count(),
+        1
+    );
+    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
+    assert!(!kinds.contains(&"supervisor_handed_off"), "{kinds:?}");
+    let requests = backend
+        .texts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, text)| text.contains("main is now"))
+        .count();
+    assert_eq!(requests, 1);
+    let adopted = adoption_events(&detail);
+    assert_eq!(adopted.len(), 1, "{kinds:?}");
+    assert_eq!(adopted[0]["previous_token"], json!(token));
+    assert_eq!(adopted[0]["wrapper"]["alive"], true);
+    let repaired: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "resume_adopted")
+        .collect();
+    assert_eq!(repaired.len(), 1, "{kinds:?}");
+    assert_eq!(repaired[0]["conditions"]["handoff"], false);
+    assert_eq!(repaired[0]["conditions"]["attempt"], 1);
+    assert_eq!(repaired[0]["conditions"]["request_sent"], true);
+    assert!(repaired[0]["detail"].get("previous_version").is_none());
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["outcome"], "resolved");
+}
+
 /// A handoff that finds a leased run it has nothing to rebuild from (a
 /// resting run without a `handoff.json`) gives the lease back, and a
 /// registration that is gone refuses the continuation.

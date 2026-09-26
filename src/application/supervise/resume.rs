@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::domain::{
+    RunEvent,
     resume::CONFLICT_ONLY_RESUME_LIMIT,
     run::{RunWorkspace, run_workspaces},
 };
@@ -407,6 +408,128 @@ impl Supervisor<'_> {
             live: Box::new(SessionWatch::fixing(run, &workspace, self.files.now())?),
         })
     }
+    /// A [`ResumeWatch`] that goes on watching a resumed session another
+    /// process started: after a handoff from its `handoff.json`, after an
+    /// adoption from the run's events ([`Self::adopt_resume`]). Nothing is
+    /// sent or asked twice: the request only when `message_sent_at` is
+    /// unknown, never a second `/exit` (its timeout restarts now).
+    pub(super) fn rebuilt_resume(
+        &mut self,
+        run: &TaskRun,
+        state: ResumeState,
+    ) -> Result<ResumeWatch> {
+        let ResumeState {
+            workspace,
+            attempt,
+            started_at,
+            message,
+            message_sent_at,
+            not_ready_asked,
+            exit_requested,
+            exit_for_silence,
+            approved,
+        } = state;
+        let task = self.queue.show(run.task_id())?.task;
+        let now = Instant::now();
+        // Answers and dialogs are followed from the request on; an answer
+        // typed since closed its ask, which moves the last input on
+        // (ADR-0071 decision 17).
+        let live = Box::new(SessionWatch::fixing(
+            run,
+            &workspace,
+            message_sent_at.unwrap_or(started_at),
+        )?);
+        Ok(ResumeWatch {
+            live,
+            stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
+            workspace,
+            attempt,
+            run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
+            receipt_path: PathBuf::from(run.receipt_path().context("missing receipt path")?),
+            idle_marker: run.idle_marker_path()?,
+            started_at,
+            startup: now,
+            message,
+            agent_seen: None,
+            ready_since: None,
+            not_ready_asked,
+            // The resume timeout runs from the send, not the takeover.
+            message_sent: message_sent_at.map(|at| {
+                let ago = self.files.now().duration_since(at).unwrap_or_default();
+                (now.checked_sub(ago).unwrap_or(now), at)
+            }),
+            // Whether the session took the request is not checked again, as
+            // for an adopted revise request.
+            start: None,
+            // Never a second /exit; its timeout restarts now.
+            exit_requested: exit_requested.then_some(now),
+            // Whether that /exit was typed is not carried over: its
+            // "Background work is running" dialog is left to the stuck_exit
+            // ask (ADR-0047 decision 29).
+            exit_typed: false,
+            required_evidence: task.required_evidence().to_vec(),
+            approved,
+            silent: false,
+            exit_for_silence,
+            // A recovery job the previous process ran is gone: the exit
+            // timeout starts another (counted as an attempt).
+            recovery: RecoveryWatch::default(),
+        })
+    }
+    /// Rebuild the resume of an adopted `needs_session` run from its
+    /// events and run files (task 356, ADR-0047 decision 24): the attempt
+    /// of the last `resume_started`, the workspace its `workspace_created`
+    /// recorded, the request from `resume-<attempt>.txt` (its mtime stands
+    /// for the start: a receipt no newer is from before the resume), and
+    /// whether the request was sent (`resume_request_sent`), the inbox asked
+    /// about the input box (`input_not_ready`) and `/exit` requested
+    /// (`exit_requested` of the attempt) since.
+    pub(super) fn adopt_resume(&mut self, run: &TaskRun) -> Result<ResumeWatch> {
+        let events = self.queue.run_events(run.id())?;
+        let (started, attempt, workspace) =
+            resume_in_progress(&events).context("adopted run has no resume in progress")?;
+        let since: Vec<&RunEvent> = events.iter().filter(|e| e.id > started).collect();
+        let of_attempt =
+            |e: &&&RunEvent| e.payload["resume_attempt"].as_u64() == Some(attempt as u64);
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        let request = run_dir.join(format!("resume-{attempt}.txt"));
+        let message = self.files.read_to_string(&request)?;
+        let started_at = self.files.modified(&request)?;
+        let message_sent_at = since
+            .iter()
+            .filter(|e| e.kind == RESUME_REQUEST_SENT)
+            .find(of_attempt)
+            .and_then(|e| e.payload["sent_at"].as_f64())
+            .map(|at: f64| UNIX_EPOCH + Duration::from_secs_f64(at.max(0.0)));
+        let exit = since
+            .iter()
+            .filter(|e| e.kind == "exit_requested")
+            .find(of_attempt);
+        // A silent wrapper's `/exit` follows its expiry in the same tick;
+        // a silence that ended before an `/exit` for another reason does
+        // not make that one a silent exit.
+        let exit_for_silence = exit.is_some_and(|exit| {
+            since
+                .iter()
+                .rev()
+                .find(|e| e.id < exit.id)
+                .is_some_and(|e| e.kind == "wrapper_heartbeat_expired")
+        });
+        self.rebuilt_resume(
+            run,
+            ResumeState {
+                workspace,
+                attempt,
+                started_at,
+                message,
+                message_sent_at,
+                not_ready_asked: since.iter().any(|e| e.kind == "input_not_ready"),
+                exit_requested: exit.is_some(),
+                exit_for_silence,
+                approved: self.queue.has_run_event(run.id(), "integration_approved")?,
+            },
+        )
+    }
     /// The resumed session ended, or resolved the run: record
     /// `resume_finished` and move the run on. A resolved run whose
     /// integrate was approved has exited; its workspace is closed and it
@@ -662,6 +785,48 @@ pub(super) struct ResumeWatch {
     pub(super) live: Box<SessionWatch>,
 }
 
+/// The resume a run is in, from its events: the last resume event is a
+/// `resume_started` and the workspace of its attempt was recorded
+/// (`workspace_created`); its event ID, attempt and workspace.
+pub(super) fn resume_in_progress(events: &[RunEvent]) -> Option<(EventId, usize, String)> {
+    let started = events.iter().rev().find(|e| {
+        matches!(
+            e.kind.as_str(),
+            "resume_started" | "resume_finished" | "resume_skipped"
+        )
+    })?;
+    if started.kind != "resume_started" {
+        return None;
+    }
+    let attempt = started.payload["attempt"].as_u64()?;
+    let workspace = events
+        .iter()
+        .filter(|e| e.id > started.id && e.kind == "workspace_created")
+        .find(|e| e.payload["resume_attempt"].as_u64() == Some(attempt))?
+        .payload["workspace_id"]
+        .as_str()?
+        .to_owned();
+    Some((started.id, attempt as usize, workspace))
+}
+
+/// The run event recording that the resolution request of a resume was
+/// typed (`resume_attempt`, `workspace_id`, `sent_at` on the files' wall clock):
+/// a supervisor that adopts the resume does not send it again.
+pub const RESUME_REQUEST_SENT: &str = "resume_request_sent";
+
+/// What a [`ResumeWatch`] taken over from another process starts from.
+pub(super) struct ResumeState {
+    pub(super) workspace: String,
+    pub(super) attempt: usize,
+    pub(super) started_at: SystemTime,
+    pub(super) message: String,
+    pub(super) message_sent_at: Option<SystemTime>,
+    pub(super) not_ready_asked: bool,
+    pub(super) exit_requested: bool,
+    pub(super) exit_for_silence: bool,
+    pub(super) approved: bool,
+}
+
 /// What a resumed session left behind when it exited.
 pub(super) enum ResumeOutcome {
     /// A rewritten `succeeded` receipt names the worktree head.
@@ -874,6 +1039,19 @@ impl ResumeWatch {
         )?;
         self.message_sent = Some((Instant::now(), sent_at));
         self.live.input_at = Some(sent_at);
+        // A supervisor that adopts this resume does not send it again; a
+        // record that fails is only noted.
+        if let Err(error) = sv.queue.record_runtime_event(
+            run.id(),
+            RESUME_REQUEST_SENT,
+            json!({
+                "resume_attempt": self.attempt,
+                "workspace_id": self.workspace,
+                "sent_at": sent_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64(),
+            }),
+        ) {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{RESUME_REQUEST_SENT} of {} could not be recorded: {error:#}", run.id());
+        }
         self.start = Some(StartCheck::new(
             "resolution request",
             &message,
@@ -1161,5 +1339,58 @@ impl ResumeWatch {
             info!(run_id = %run.id(), "resumed session of {} {why} (head {head}); exit requested", run.id());
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::TaskId;
+
+    fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: Some(RunId::new("r").unwrap()),
+            kind: kind.to_owned(),
+            payload,
+            created_at: format!("t{id}"),
+        }
+    }
+
+    /// The resume a run is in needs its `resume_started` to be the last
+    /// resume event and the workspace of that attempt recorded after it.
+    #[test]
+    fn the_resume_in_progress_is_the_last_started_one_with_its_workspace() {
+        let first = [
+            event(1, "resume_started", json!({"attempt": 1})),
+            event(
+                2,
+                "workspace_created",
+                json!({"workspace_id": "w1", "resume_attempt": 1}),
+            ),
+        ];
+        assert_eq!(
+            resume_in_progress(&first),
+            Some((EventId::new(1), 1, "w1".to_owned()))
+        );
+        let mut finished = first.to_vec();
+        finished.push(event(3, "resume_finished", json!({"attempt": 1})));
+        assert_eq!(resume_in_progress(&finished), None);
+        // A second attempt whose workspace was never recorded: the first
+        // attempt's workspace is not taken for it.
+        finished.push(event(4, "resume_started", json!({"attempt": 2})));
+        assert_eq!(resume_in_progress(&finished), None);
+        finished.push(event(
+            5,
+            "workspace_created",
+            json!({"workspace_id": "w2", "resume_attempt": 2}),
+        ));
+        assert_eq!(
+            resume_in_progress(&finished),
+            Some((EventId::new(4), 2, "w2".to_owned()))
+        );
+        assert_eq!(resume_in_progress(&[]), None);
     }
 }

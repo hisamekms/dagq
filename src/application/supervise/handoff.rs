@@ -219,29 +219,8 @@ impl Supervisor<'_> {
                     info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} taken over after the handoff ({})", run.id(), run.task_id(), run.status().as_str());
                     // A resumed session goes on watched instead of being
                     // resumed again (ADR-0047 decision 24).
-                    // A record that fails is only noted: the run is taken
-                    // over either way.
-                    if let (true, Phase::Resume(watch)) = (resumed, &phase)
-                        && let Err(error) = self.queue.record_runtime_event(
-                            run.id(),
-                            "auto_repaired",
-                            json!({
-                                "layer": "runtime",
-                                "repair": "resume_adopted",
-                                "conditions": {
-                                    "handoff": true,
-                                    "attempt": watch.attempt,
-                                    "request_sent": watch.message_sent.is_some(),
-                                },
-                                "detail": {
-                                    "workspace_id": watch.workspace,
-                                    "previous_version": previous_version,
-                                    "version": self.layout.version,
-                                },
-                            }),
-                        )
-                    {
-                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
+                    if let (true, Phase::Resume(watch)) = (resumed, &phase) {
+                        self.note_resume_adopted(&run, watch, Some(previous_version));
                     }
                     let mut slot = Slot::new(run, phase);
                     // Kept as it was, even past the limit (ADR-0062
@@ -288,57 +267,20 @@ impl Supervisor<'_> {
                 exit_requested,
                 exit_for_silence,
                 approved,
-            } => {
-                let task = self.queue.show(run.task_id())?.task;
-                let now = Instant::now();
-                // Answers and dialogs are followed from the request on; an
-                // answer typed since closed its ask, which moves the last
-                // input on (ADR-0071 decision 17).
-                let live = Box::new(SessionWatch::fixing(
-                    run,
-                    &workspace,
-                    time(message_sent_at.unwrap_or(started_at)),
-                )?);
-                Phase::Resume(ResumeWatch {
-                    live,
+            } => Phase::Resume(self.rebuilt_resume(
+                run,
+                ResumeState {
                     workspace,
                     attempt,
-                    run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
-                    receipt_path: PathBuf::from(
-                        run.receipt_path().context("missing receipt path")?,
-                    ),
-                    idle_marker: run.idle_marker_path()?,
                     started_at: time(started_at),
-                    startup: now,
                     message,
-                    agent_seen: None,
-                    ready_since: None,
+                    message_sent_at: message_sent_at.map(time),
                     not_ready_asked,
-                    // The resume timeout runs from the send, not the exec.
-                    message_sent: message_sent_at.map(|at| {
-                        let at = time(at);
-                        let ago = self.files.now().duration_since(at).unwrap_or_default();
-                        (now.checked_sub(ago).unwrap_or(now), at)
-                    }),
-                    // Whether the session took the request is not checked
-                    // again, as for an adopted revise request.
-                    start: None,
-                    // Never a second /exit; its timeout restarts now.
-                    exit_requested: exit_requested.then_some(now),
-                    // Whether that /exit was typed is not handed over: its
-                    // "Background work is running" dialog is left to the
-                    // stuck_exit ask (ADR-0047 decision 29).
-                    exit_typed: false,
-                    required_evidence: task.required_evidence().to_vec(),
-                    approved,
-                    silent: false,
+                    exit_requested,
                     exit_for_silence,
-                    stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
-                    // A recovery job the previous process ran is gone: the
-                    // exit timeout starts another (counted as an attempt).
-                    recovery: RecoveryWatch::default(),
-                })
-            }
+                    approved,
+                },
+            )?),
             Snapshot::Exit {
                 workspace,
                 resume,
