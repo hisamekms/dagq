@@ -1,13 +1,13 @@
 # Inspect commands and their fields
 
-Read this when you need a field of `list`, `show`, `goal show`, `graph`, `search`, `related`, `findings`, `events`, `timeline`, `status`, `stats` or `doctor`, the meaning of a task or run status, how to find a duplicate or work already done before submitting, how priority orders claiming, or how to edit a draft or submitted task.
+Read this when you need a field of `list`, `show`, `goal show`, `graph`, `search`, `related`, `findings`, `events`, `timeline`, `status`, `stats` or `doctor`, the meaning of a task or run status, how to find a duplicate or work already done before submitting, how priority orders claiming, how to make a task wait for another goal, or how to edit a draft or submitted task.
 
 | Command | Use |
 | --- | --- |
 | `"$DAGQ" goal list` | All goals with `id`, `title`, `status` (`draft` or `open`), `closed`, `verdict`, and `tasks` counts (`total`, `draft`, `submitted`, `ready`, `in_progress`, `completed`, `canceled`) |
-| `"$DAGQ" goal show ID` | `goal` (all fields), `tasks` (`id`, `title`, `status`), `closed`, `events` (`goal_created`, `goal_updated`, `goal_status_changed`, `goal_closed`, `observation`; only `kind` and `created_at` of the latest 10, `events_total` counts them all), `observations` (the goal's latest 5 notes: `id`, `created_at`, `text`, `kind`, `by`) |
+| `"$DAGQ" goal show ID` | `goal` (all fields), `tasks` (`id`, `title`, `status`), `closed`, `events` (`goal_created`, `goal_updated`, `goal_status_changed`, `goal_closed`, `observation`; only `kind` and `created_at` of the latest 10, `events_total` counts them all), `observations` (the goal's latest 5 notes: `id`, `created_at`, `text`, `kind`, `by`), `dependents` (unfinished tasks of any goal that depend on this goal: `id`, `title`, `status`) |
 | `"$DAGQ" list` | One page of unfinished tasks, newest first: `{"tasks", "next", "total"}` (see below) |
-| `"$DAGQ" show ID` | `task` (with `goal_id` and `context`), `dependencies`, `runs` (only the latest: `id`, `status`, `branch`, `result_commit`, `last_error`, `last_error_code` when known, `worktree_path`, `workspace_id`; `runs_total` counts them all), `events` (the latest 10, `--events N` for more, with `id`, `kind`, `created_at`, `run_id` when the event belongs to a run, and only `status` / `reason` / `last_error` / `from` / `to` / `code` (the reason code) of the payload; `events_total` counts them all), `processes` (the latest run's), `observations` (the latest 5 notes on the task or its runs: `id`, `created_at`, `run_id`, `text`, `kind`, `by`) |
+| `"$DAGQ" show ID` | `task` (with `goal_id` and `context`), `dependencies`, `goal_dependencies` (the goals it depends on, ascending IDs), `runs` (only the latest: `id`, `status`, `branch`, `result_commit`, `last_error`, `last_error_code` when known, `worktree_path`, `workspace_id`; `runs_total` counts them all), `events` (the latest 10, `--events N` for more, with `id`, `kind`, `created_at`, `run_id` when the event belongs to a run, and only `status` / `reason` / `last_error` / `from` / `to` / `code` (the reason code) of the payload; `events_total` counts them all), `processes` (the latest run's), `observations` (the latest 5 notes on the task or its runs: `id`, `created_at`, `run_id`, `text`, `kind`, `by`) |
 | `"$DAGQ" note --task ID \| --run RUN_ID \| --goal ID --text "..." [--kind SLUG]` | Records one note (an `observation` event) on a task, a run or a goal |
 | `"$DAGQ" notes [--goal ID] [--task ID] [--since CURSOR]` | Notes as `{"notes", "cursor"}`, oldest first: the latest `--limit` (default 20), or with `--since CURSOR` the first `--limit` after it. `--goal ID` keeps the goal's notes and its tasks' and runs'; `--task ID` the task's and its runs'. Each note is a run event of kind `observation` with payload `text`, `kind` (a slug, default `note`) and `by` (`DAGQ_ROLE` of the writer, or `human`) |
 | `"$DAGQ" findings [ID] [--all \| --status S,...] [--kind K,...] [--task ID \| --run RUN_ID \| --goal ID \| --queue] [--full]` | Findings (ADR-0044 decision 18) as `{"findings"}`: by default the `open` and `proposed` ones, biggest impact first (`impact`, `occurrences`, `last_seen`), each with `proposal_status` and `open_asks`; `ID` gives one in any status, `--full` adds `evidence_events`. What they mean and how to decide them: `reference/observer.md` |
@@ -78,6 +78,20 @@ A queue with many tasks cannot be compared by reading every task in full. Take c
 `show ID` of a task canceled this way prints `duplicate_of`, `show X` lists `duplicates` (the tasks canceled as X's duplicates), `list` adds `duplicate_of` to a canceled row, `related` marks such a candidate with `duplicate_of`, and `stats` counts them in `duplicate_cancels` (`{count, tasks: [{task_id, duplicate_of}]}`, same window and `--goal` as the rest).
 
 The same steps apply to every planner, including one the runtime opened for a draft from a receipt's `follow_ups` or from a finding: run `related` on the draft (and `search` before adding any task of your own) and close a duplicate with `--duplicate-of`. `search` and `related` change nothing, so any role may run them. Plan review does the same for each task of a proposal; it does not replace your own check, which catches the obvious cases before a review.
+
+## Wait for another goal (goal dependencies)
+
+A task can depend on a goal as well as on tasks (ADR-0038). It is not claimed until that goal is closed with `goal close --verdict achieved`; whether the goal's tasks are all finished does not matter, since `integrate` may still add drafts from `follow_ups` to it until the planner closes it.
+
+```sh
+"$DAGQ" add "TITLE" --goal 2 --depends-on-goal 1 ...   # repeatable; combines with --depends-on
+"$DAGQ" dependency add TASK --goal 1                    # or remove; instead of a PREDECESSOR
+```
+
+- **When to use which.** To wait for another goal's outcome, depend on that goal, not on its last task: a task dependency is met as soon as that task is `completed`, even while follow-up drafts added to the goal later are still unfinished. Order inside one goal stays task dependencies.
+- **Rules.** Like task dependencies, only a `draft`, `submitted` or `ready` task gains or loses one. Refused: a dependency on the task's own goal (`OwnGoalDependency`), and any cycle through task dependencies, goal dependencies and goal membership (`GoalDependencyCycle`; `set-goal` into a goal the task waits on: `OwnGoalDependency` when it depends on it directly, else `GoalMembershipCycle`; a task dependency closing such a cycle: `DependencyCycle`). Events `goal_dependency_added` / `goal_dependency_removed` (`goal_id`).
+- **Where it shows.** `show` and `list`: `goal_dependencies`. `goal show GOAL`: `dependents`, the unfinished tasks waiting on it. `graph`: `goal_dependencies`, `{"goal": ID}` in `ready_after` until the goal is closed as achieved, and the waiting tasks in `blocks` / `unblocks` of the open goal's unfinished tasks. A worker's prompt lists the goal's completed tasks and their receipts' summaries.
+- **Abandoned.** A goal closed `abandoned` never releases its dependents: they stay in `ready_after` as `{"goal": ID}` until a planner removes the dependency (`dependency remove TASK --goal ID`), points it elsewhere or cancels the task, with the person (`reference/goal-close.md`).
 
 ## Decide what to run first with `graph`
 
