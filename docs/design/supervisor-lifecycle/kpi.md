@@ -64,7 +64,7 @@ related:
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` | 計画の品質（下の[計画の品質](#計画の品質)） | 計画の層 |
 
-- `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（`candidates_sampled`を記録するsupervisorはまだ無い）、`improvement_proposals`の`not_recorded`。
+- `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（期間に重なる`candidates_sampled`が無い。supervisorはclaimのpassごとに標本を数え、値が変わったときと起動・引き継ぎの直後の最初のpassで記録する（[`supervise`](supervise.md)の5のcandidatesの標本）ので、supervisorの動いていた期間には標本がある。記録を始める前の期間と、supervisorが1度も動いていない期間に出る）、`improvement_proposals`の`not_recorded`。
 - `--goal`はそのgoalのtaskのrun・ask・findingだけを数える（`slot_usage`の分母はqueue全体のまま）。
 
 ### 計画の品質

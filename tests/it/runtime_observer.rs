@@ -158,8 +158,15 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
         std::slice::from_ref(&first)
     );
 
-    // Nothing but the observer's own events since: the next observation
-    // starts no agent and records a skipped finish.
+    // Nothing but the observer's own events and the KPIs' bookkeeping
+    // (ADR-0051 decision 24) since: the next observation starts no agent
+    // and records a skipped finish.
+    queue
+        .record_queue_event(
+            dagq::domain::kpi::CANDIDATES_SAMPLED,
+            json!({"candidates": 1, "free_slots": 2, "ready": 1}),
+        )
+        .unwrap();
     let failing = ObserverProvider {
         script: "exit 7".into(),
     };

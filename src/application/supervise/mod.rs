@@ -72,6 +72,7 @@ use crate::domain::{
     TriageState,
     claim_hold::{self, ClaimHold, HoldInputs},
     heartbeat_stale,
+    kpi::{CANDIDATES_SAMPLED, CandidatesSample},
     marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
@@ -476,6 +477,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         handoff: None,
         exec: None,
         run_env_missing: false,
+        candidates: None,
         draining: false,
         update: update::UpdateWatch::default(),
         rechecks: recheck::Rechecks::default(),
@@ -580,6 +582,9 @@ struct Supervisor<'a> {
     /// at the last claim pass (ADR-0049 decision 9): nothing is claimed and
     /// no passed run lands until it does.
     run_env_missing: bool,
+    /// The `candidates_sampled` this process recorded last (ADR-0051
+    /// decision 3); `None` until its first claim pass records one.
+    candidates: Option<CandidatesSample>,
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
@@ -814,6 +819,7 @@ impl Supervisor<'_> {
             }
             if self.claiming && !stopping {
                 self.fill_slots(options.parallel, options.sweep_interval)?;
+                self.sample_candidates(options.parallel);
             }
             self.poll_observer();
             self.record_session_turns(false);
@@ -958,6 +964,36 @@ impl Supervisor<'_> {
             }
         }
         Ok(())
+    }
+    /// Record `candidates_sampled` (ADR-0051 decision 3) when this pass's
+    /// claimable ready tasks (`graph`'s `candidates`), free slots or ready
+    /// tasks differ from the sample this process recorded last, and on its
+    /// first claim pass. A failure is logged: the sample is bookkeeping for
+    /// `kpi`, and the next pass tries again.
+    fn sample_candidates(&mut self, parallel: usize) {
+        let sample = self.queue.graph_input().map(|input| {
+            let graph = dependency_graph(input, None);
+            CandidatesSample {
+                candidates: graph.candidates.len(),
+                free_slots: parallel.saturating_sub(self.used_slots()),
+                ready: graph
+                    .tasks
+                    .iter()
+                    .filter(|node| node.status == TaskStatus::Ready)
+                    .count(),
+            }
+        });
+        let result = sample.and_then(|sample| {
+            if let Some(mut payload) = sample.transition(self.candidates.as_ref()) {
+                payload["supervisor"] = json!(self.token);
+                self.queue.record_queue_event(CANDIDATES_SAMPLED, payload)?;
+                self.candidates = Some(sample);
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            warn!(error = %format_args!("{error:#}"), "the candidates could not be sampled: {error:#}");
+        }
     }
     /// Judge whether new claims are held now ([`ClaimHold::judge`]: the
     /// free disk space this pass read against what a claim needs (task

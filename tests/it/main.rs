@@ -38,6 +38,7 @@ mod queue_tasks;
 mod related;
 mod runtime_adopt;
 mod runtime_ask;
+mod runtime_candidates;
 mod runtime_claim;
 mod runtime_claim_defer;
 mod runtime_claim_hold;

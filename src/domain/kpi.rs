@@ -19,14 +19,21 @@ use super::{
     stats::{Cursor, landing::p90, median, median_f64, timestamp_millis},
 };
 
+pub mod candidates;
 pub mod compare;
 pub mod config;
 pub mod report;
 mod window;
 
+pub use candidates::CandidatesSample;
 pub use compare::{Comparison, Confounder, Side, Split, WindowSpan};
 pub use config::{KpiConfig, KpiSettings, Stat, Target, TargetReport};
-pub use window::WindowKpis;
+pub use window::{CANDIDATES_SAMPLED, WindowKpis};
+
+/// The KPIs' bookkeeping events (ADR-0051 decision 24): the observer's
+/// quiet check does not count them as others' events, so they alone never
+/// start its agent. A task that adds one lists it here.
+pub const BOOKKEEPING_KINDS: &[&str] = &[CANDIDATES_SAMPLED, report::REPORT_WRITTEN];
 
 use window::Context;
 

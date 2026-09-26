@@ -1000,18 +1000,22 @@ impl SqliteQueue {
 
     /// How many events after `after` the observer did not write itself
     /// (ADR-0044): every event but `observe_started` / `observe_finished`,
-    /// the findings and asks `role` wrote, and the session events of its
-    /// own spans (`span_kind`).
+    /// the findings and asks `role` wrote, the session events of its own
+    /// spans (`span_kind`), and the KPIs' bookkeeping
+    /// ([`crate::domain::kpi::BOOKKEEPING_KINDS`], ADR-0051 decision 24).
     pub fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
+        let mut ignored = vec!["observe_started", "observe_finished"];
+        ignored.extend_from_slice(crate::domain::kpi::BOOKKEEPING_KINDS);
+        let ignored = serde_json::to_string(&ignored)?;
         Ok(self.conn.query_row(
             "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
-               kind IN ('observe_started','observe_finished','report_written')
+               kind IN (SELECT value FROM json_each(?4))
                OR (kind IN ('finding_recorded','finding_updated','finding_status_changed')
                    AND json_extract(payload,'$.by') IS ?1)
                OR (kind='ask_opened' AND json_extract(payload,'$.asked_by') IS ?1)
                OR (kind IN ('session_opened','session_closed','session_turns')
                    AND json_extract(payload,'$.kind') IS ?2))",
-            params![role, span_kind, after],
+            params![role, span_kind, after, ignored],
             |r| r.get(0),
         )?)
     }
