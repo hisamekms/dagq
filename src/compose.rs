@@ -164,6 +164,12 @@ pub struct SuperviseOptions {
     /// (ADR-0051 decision 20): off unless asked for (`supervise
     /// --report-daily`, on by default in the CLI).
     pub report_daily: bool,
+    /// The host-wide `host.toml` the supervisor reads (`[kpi]`, `[report]`,
+    /// `[push]`); `None` is `$XDG_CONFIG_HOME/dagq/host.toml`. Tests set it.
+    pub host_config: Option<PathBuf>,
+    /// The delays before the second and the third attempt of a KPI push
+    /// (ADR-0051 decision 23: 1 and 5 minutes); tests shorten them.
+    pub push_retry: [Duration; 2],
     /// The run files the supervisor works with; `None` is the local file
     /// system. Tests set it (a slow removal, task 405).
     pub files: Option<RunFilesPort>,
@@ -207,6 +213,8 @@ impl SuperviseOptions {
             disk: None,
             free_space: free_disk_bytes,
             report_daily: false,
+            host_config: None,
+            push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
         }
     }
@@ -335,9 +343,31 @@ pub fn supervise_with_reviewer(
     let review_material = move |task_id: TaskId| review(&review_db, task_id);
     let reports = options.report_daily.then(|| {
         let (db, checkout) = (db.clone(), main_checkout(&repository));
+        let host_wide = options
+            .host_config
+            .clone()
+            .or_else(crate::infrastructure::kpi_config::host_wide_file);
+        let name = checkout.file_name().map_or_else(
+            || "dagq".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let push_target = crate::application::push::PushTarget {
+            name,
+            queue: db.display().to_string(),
+        };
+        let (setup_db, setup_wide) = (db.clone(), host_wide.clone());
+        let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
         crate::application::supervise::ReportPort {
             utc_offset: clock::local_utc_offset,
-            setup: Arc::new(move |now| report_setup(&db, Some(&checkout), None, now)),
+            setup: Arc::new(move |now| {
+                report_setup(&setup_db, Some(&checkout), None, setup_wide.as_deref(), now)
+            }),
+            push_config: Arc::new(move || {
+                crate::infrastructure::push::load_host_push(&queue_dir, host_wide.as_deref())
+            }),
+            run_push: crate::infrastructure::push::run_push,
+            push_retry: options.push_retry,
+            push_target,
         }
     });
     let ports = Ports {
@@ -627,7 +657,14 @@ impl OneShot {
         query: &crate::domain::kpi::KpiQuery,
     ) -> Result<Value> {
         let now = self.generators.clock.now();
-        let setup = report_setup(db, bound_checkout(queue)?.as_deref(), None, now)?;
+        let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+        let setup = report_setup(
+            db,
+            bound_checkout(queue)?.as_deref(),
+            None,
+            host_wide.as_deref(),
+            now,
+        )?;
         Ok(serde_json::to_value(crate::application::kpi::kpi(
             queue,
             now,
@@ -652,7 +689,14 @@ impl OneShot {
     ) -> Result<Value> {
         use crate::application::report;
         let now = self.generators.clock.now();
-        let setup = report_setup(db, bound_checkout(queue)?.as_deref(), out, now)?;
+        let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+        let setup = report_setup(
+            db,
+            bound_checkout(queue)?.as_deref(),
+            out,
+            host_wide.as_deref(),
+            now,
+        )?;
         let made = report::make(queue, &setup, now, period, at)?;
         if print {
             return Ok(serde_json::to_value(made)?);
@@ -1178,19 +1222,16 @@ fn report_setup(
     db: &Path,
     checkout: Option<&Path>,
     out: Option<&Path>,
+    host_wide: Option<&Path>,
     now: i64,
 ) -> Result<crate::application::report::ReportSetup> {
-    use crate::infrastructure::{
-        kpi_config::{host_wide_file, load_host_kpi},
-        report_config::load_host_report,
-    };
+    use crate::infrastructure::{kpi_config::load_host_kpi, report_config::load_host_report};
     let repository = match checkout {
         Some(checkout) => load_kpi_settings(checkout)?,
         None => None,
     };
     let queue_dir = db.parent().unwrap_or(Path::new("."));
-    let host_wide = host_wide_file();
-    let host = load_host_kpi(queue_dir, host_wide.as_deref())?;
+    let host = load_host_kpi(queue_dir, host_wide)?;
     Ok(crate::application::report::ReportSetup {
         root: out.map_or_else(|| queue_dir.join(REPORTS_DIR), Path::to_path_buf),
         host: crate::application::kpi::Host {
@@ -1198,7 +1239,7 @@ fn report_setup(
             cores: clock::logical_cores(),
         },
         config: crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref()),
-        keep: load_host_report(queue_dir, host_wide.as_deref())?,
+        keep: load_host_report(queue_dir, host_wide)?,
         build: crate::VERSION.to_owned(),
     })
 }

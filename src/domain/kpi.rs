@@ -22,6 +22,7 @@ use super::{
 pub mod candidates;
 pub mod compare;
 pub mod config;
+pub mod push;
 pub mod report;
 mod window;
 
@@ -32,8 +33,15 @@ pub use window::{CANDIDATES_SAMPLED, WindowKpis};
 
 /// The KPIs' bookkeeping events (ADR-0051 decision 24): the observer's
 /// quiet check does not count them as others' events, so they alone never
-/// start its agent. A task that adds one lists it here.
-pub const BOOKKEEPING_KINDS: &[&str] = &[CANDIDATES_SAMPLED, report::REPORT_WRITTEN];
+/// start its agent. A task that adds one lists it here. A push's failures
+/// reach the inbox as an attention, so they are not counted either.
+pub const BOOKKEEPING_KINDS: &[&str] = &[
+    CANDIDATES_SAMPLED,
+    report::REPORT_WRITTEN,
+    push::KPI_PUSH_SENT,
+    push::KPI_PUSH_FAILED,
+    push::KPI_PUSH_ABANDONED,
+];
 
 use window::Context;
 

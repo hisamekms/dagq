@@ -1092,6 +1092,21 @@ pub trait RunStore {
     /// Record `report_written` with `payload` (its `period` and `label`)
     /// unless the same report is recorded; `false` when it is.
     fn record_report_written(&self, payload: serde_json::Value) -> Result<bool>;
+    /// The KPI breaches started and not resolved (ADR-0051 decision 18),
+    /// each its `kpi_breach_started` payload.
+    fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>>;
+    /// Record a breach's start or end unless it already stands so; a
+    /// start is marked `pushed` while `push_day` (the local day, the
+    /// day's limit) allows. Returns the payload recorded.
+    fn record_kpi_breach(
+        &self,
+        kind: &str,
+        payload: serde_json::Value,
+        push_day: Option<(i64, usize)>,
+    ) -> Result<Option<serde_json::Value>>;
+    /// Record `kpi_push_abandoned` unless one stands since the latest
+    /// push that succeeded (ADR-0051 decision 23); `false` when it does.
+    fn record_kpi_push_abandoned(&self, payload: serde_json::Value) -> Result<bool>;
     /// Where every draft the runtime or a job registered came from, for
     /// `stats`' `draft_flow`.
     fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>>;

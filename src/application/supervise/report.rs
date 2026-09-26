@@ -6,10 +6,15 @@
 //! supervisors do not write it again. It takes no run slot and uses no
 //! LLM; the loop does not wait for it but like the observer, before it
 //! ends. A failure is logged and tried again after [`RETRY`]; it stops no
-//! claim nor landing.
+//! claim nor landing. After the reports the same job records the targets'
+//! breaches that started and ended and makes the messages of the host's
+//! push command (ADR-0051 decisions 18 and 23), which [`super::push`]
+//! sends.
 
 use super::*;
+use crate::application::push::{self, PushOutcome, PushRequest, PushTarget};
 use crate::application::report::{self, ReportSetup, Written};
+use crate::domain::kpi::push::{PushConfig, PushMessage};
 
 /// How long after a failed report job the reports are looked for again.
 const RETRY: Duration = Duration::from_secs(600);
@@ -22,13 +27,28 @@ pub struct ReportPort {
     /// Where and how the reports are made at a unix second: the `[kpi]`
     /// settings and the retention are read again each time.
     pub setup: Arc<dyn Fn(i64) -> Result<ReportSetup> + Send + Sync>,
+    /// The host's `[push]`, read again each time; `None` pushes nothing.
+    pub push_config: Arc<dyn Fn() -> Result<Option<PushConfig>> + Send + Sync>,
+    /// Runs the push command once.
+    pub run_push: fn(&PushRequest) -> PushOutcome,
+    /// The delays before the second and the third attempt of a message.
+    pub push_retry: [Duration; 2],
+    /// The queue's name and database the messages are about.
+    pub push_target: PushTarget,
+}
+
+/// What one report job did: the reports written, and the messages for the
+/// push command with the `[push]` they go by.
+pub(super) struct ReportJob {
+    written: Vec<Written>,
+    push: Option<(PushConfig, Vec<PushMessage>)>,
 }
 
 /// The report job running now, and the local day the reports were last
 /// found written.
 #[derive(Default)]
 pub(super) struct ReportWatch {
-    job: Option<(i64, thread::JoinHandle<Result<Vec<Written>>>)>,
+    job: Option<(i64, thread::JoinHandle<Result<ReportJob>>)>,
     checked: Option<i64>,
     failed: Option<Instant>,
 }
@@ -52,8 +72,8 @@ impl Supervisor<'_> {
                 return;
             }
             match job.join() {
-                Ok(Ok(written)) => {
-                    for report in &written {
+                Ok(Ok(done)) => {
+                    for report in &done.written {
                         info!(
                             "KPI report of {} written: {}",
                             report.label,
@@ -62,6 +82,9 @@ impl Supervisor<'_> {
                     }
                     self.report.checked = Some(day);
                     self.report.failed = None;
+                    if let Some((config, messages)) = done.push {
+                        self.queue_pushes(config, messages);
+                    }
                 }
                 Ok(Err(error)) => {
                     warn!(error = %format_args!("{error:#}"), "the KPI reports could not be written: {error:#}");
@@ -89,10 +112,35 @@ impl Supervisor<'_> {
         let queues = self.queues.clone();
         let files = self.files.clone();
         let token = self.token.clone();
-        let job = spawn_traced(move || -> Result<Vec<Written>> {
+        let job = spawn_traced(move || -> Result<ReportJob> {
             let setup = (port.setup)(now)?;
             let queue = queues.open()?;
-            report::write_due(&*queue, &*files, &setup, now, &token)
+            let written = report::write_due(&*queue, &*files, &setup, now, &token)?;
+            // A broken [push] stops no report nor breach record.
+            let config = (port.push_config)().unwrap_or_else(|error| {
+                warn!(error = %format_args!("{error:#}"), "the [push] of host.toml could not be read: {error:#}");
+                None
+            });
+            // The reports are recorded already: a failure from here on is
+            // logged and does not fail the job, which would not write them
+            // again.
+            let push = push::check_breaches(&*queue, &setup, config.as_ref(), now)
+                .and_then(|breaches| {
+                    config
+                        .map(|config| {
+                            push::messages(&*queue, &config, &port.push_target, &breaches, &written)
+                                .map(|messages| (config, messages))
+                        })
+                        .transpose()
+                })
+                .unwrap_or_else(|error| {
+                    warn!(error = %format_args!("{error:#}"), "the KPI breaches or push messages could not be made: {error:#}");
+                    None
+                });
+            Ok(ReportJob {
+                written: written.into_iter().map(|(written, _)| written).collect(),
+                push,
+            })
         });
         self.report.job = Some((day, job));
     }

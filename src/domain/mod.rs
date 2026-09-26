@@ -1263,6 +1263,11 @@ pub enum AttentionNext {
     /// (`update_installed`, ADR-0073 decision 17): a notice the inbox
     /// passes on to the person, who acts on nothing.
     ReportUpdate,
+    /// The host's KPI push command failed on a message three times and the
+    /// message was given up (`kpi_push_abandoned`, ADR-0051 decision 23):
+    /// a person fixes the command or the service behind it. It ends with
+    /// the next push that succeeds.
+    FixPush,
 }
 
 /// How many times the supervisor resumes one `needs_session` run (one
@@ -1304,6 +1309,7 @@ impl fmt::Display for AttentionNext {
             Self::DecideFinding => f.write_str("decide the finding in a planner"),
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
+            Self::FixPush => f.write_str("fix the push command"),
         }
     }
 }
@@ -1334,6 +1340,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "draft_planner_exhausted",
     run_env::RUN_ENV_PROGRAM_MISSING,
     UPDATE_INSTALLED,
+    kpi::push::KPI_PUSH_ABANDONED,
     "ask_opened",
     "ask_answered",
     "ask_delivery_failed",
@@ -1415,6 +1422,13 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     kpi::report::REPORT_WRITTEN,
     // The supervisor's samples of the candidates (ADR-0051 decision 3).
     kpi::CANDIDATES_SAMPLED,
+    // The breaches of the KPIs' targets and their push (ADR-0051
+    // decisions 18 and 23).
+    kpi::push::KPI_BREACH_STARTED,
+    kpi::push::KPI_BREACH_RESOLVED,
+    kpi::push::KPI_PUSH_SENT,
+    kpi::push::KPI_PUSH_FAILED,
+    kpi::push::KPI_PUSH_ABANDONED,
     claim_hold::CLAIM_HELD,
     claim_hold::CLAIM_RESUMED,
     claim_hold::LANDING_HELD,
@@ -1529,6 +1543,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
+        (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         ("runtime_error", _)
             if payload.get("lease_released") == Some(&serde_json::Value::Bool(true)) =>
         {
@@ -2163,6 +2178,12 @@ mod attention_tests {
                 None,
             ),
             (
+                "kpi_push_abandoned",
+                json!({"push_kind": "daily", "period": "2026-09-26"}),
+                Some(FixPush),
+            ),
+            ("kpi_push_failed", json!({"attempt": 1}), None),
+            (
                 "push_finished",
                 json!({"remote": "origin", "commit": "c"}),
                 None,
@@ -2329,6 +2350,7 @@ mod attention_tests {
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(ReportUpdate.to_string(), "report the update");
+        assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(
             DeliveringAnswer {
                 ask_id: AskId::new(2)

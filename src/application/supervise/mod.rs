@@ -96,6 +96,7 @@ mod idle;
 mod jobs;
 mod landing;
 mod plan_review;
+mod push;
 mod recheck;
 mod recovery;
 mod report;
@@ -487,6 +488,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         host_versions: ports.host_versions,
         reports: ports.reports.clone(),
         report: report::ReportWatch::default(),
+        push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
         disk_config: settings.disk,
@@ -606,6 +608,8 @@ struct Supervisor<'a> {
     reports: Option<ReportPort>,
     /// The report job and the day the reports were last found written.
     report: report::ReportWatch,
+    /// The KPI push's messages waiting and the one being sent.
+    push: push::PushWatch,
     /// The load samples of each held run's current interval (task 197).
     loads: HashMap<RunId, LoadWindow>,
     /// The claims deferred on conflict hotspots (ADR-0069).
@@ -797,6 +801,8 @@ impl Supervisor<'_> {
                     self.recheck_pass();
                     if !self.rechecks.running()
                         && !self.cleanup.running()
+                        && !self.push.running()
+                        && !self.report.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         let runs = self.prepare_handoff();
@@ -818,6 +824,7 @@ impl Supervisor<'_> {
                     self.draining = true;
                     self.poll_observer();
                     self.report_pass(false);
+                    self.push_pass(false);
                     self.tick(true);
                     thread::sleep(options.tick);
                     continue;
@@ -834,6 +841,8 @@ impl Supervisor<'_> {
             // nor starting plan reviews, nor updating itself.
             // Reaped on every pass, started only by a supervisor at work.
             self.report_pass(!stopping && self.claiming);
+            // A message waiting is sent while the supervisor does not stop.
+            self.push_pass(!stopping);
             if !stopping && self.claiming {
                 self.start_observer_when_due(options);
                 self.auto_update_pass(options);
@@ -852,6 +861,11 @@ impl Supervisor<'_> {
                 // joined once the loop ends.
                 let job = self.observer.is_some()
                     || self.report.running()
+                    // A message being sent is bounded by the command's
+                    // timeout; `--once` also waits for those still to be
+                    // tried, a stop does not.
+                    || self.push.running()
+                    || (options.once && !stopping && self.push.busy())
                     || self.plan_review.is_some()
                     || self.rechecks.running()
                     || self.cleanup.for_disk()

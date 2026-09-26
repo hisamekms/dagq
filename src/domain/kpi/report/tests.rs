@@ -10,9 +10,9 @@ use crate::domain::{
 };
 
 /// 2026-09-21T00:00:00+09:00, a Monday, in unix seconds.
-const MONDAY: i64 = 1_789_916_400;
-const HOUR: i64 = 3600;
-const DAY: i64 = 24 * HOUR;
+pub(crate) const MONDAY: i64 = 1_789_916_400;
+pub(crate) const HOUR: i64 = 3600;
+pub(crate) const DAY: i64 = 24 * HOUR;
 const JST: i64 = 9 * HOUR;
 
 /// What a page may not contain if it loads nothing from anywhere else.
@@ -139,7 +139,7 @@ fn finding(id: i64, summary: &str) -> Finding {
 
 /// The report of Thursday, judged at Friday noon with a target on the
 /// landings that three days in a row missed.
-fn report(now: i64, at: i64, period: Period) -> Report {
+pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
     let (events, kinds, goals) = events();
     let settings = KpiSettings {
         targets: vec![Target {

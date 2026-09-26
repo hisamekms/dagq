@@ -15,6 +15,11 @@ mod html;
 
 pub use html::{index_html, render_html};
 
+/// A KPI's value in its unit as the report shows it; `—` for none.
+pub fn format_value(kpi: &str, value: Option<f64>) -> String {
+    html::value(kpi, value)
+}
+
 /// The open findings a report lists, larger impact first.
 pub const FINDINGS_LISTED: usize = 10;
 /// The days before today the supervisor writes the reports it missed.
@@ -266,4 +271,4 @@ pub fn expired(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

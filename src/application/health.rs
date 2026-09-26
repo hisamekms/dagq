@@ -15,7 +15,9 @@ use crate::domain::{
     ASK_EVENT_KINDS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
     LANDING_OPTIONS, ReasonCode, RunEvent, RunId, RunLease, RunProcess, RunStatus, SessionRole,
     SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun, TriageState,
-    UPDATE_FAILED_OPTIONS, event_attention, heartbeat_stale, reason, recheck, run_attention,
+    UPDATE_FAILED_OPTIONS, event_attention, heartbeat_stale,
+    kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
+    reason, recheck, run_attention,
     run_env::{RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING, RunEnvCheck},
     session_takes_answers, supervisor_attention, triage_state,
     waiting::{WaitCount, WaitState},
@@ -843,6 +845,28 @@ pub fn attention(
                 .map(truncate_reason),
             last_error_code: None,
             next: AttentionNext::InstallTool,
+        });
+    }
+    // The host's KPI push command that failed a message three times waits
+    // for a person until a push succeeds (ADR-0051 decision 23).
+    if let Some(event) = queue.latest_queue_event(&KPI_PUSH_ATTENTION_KINDS)?
+        && event.kind == KPI_PUSH_ABANDONED
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: Some(crate::domain::AskReason::RecoveryFailed),
+            status: "failed".into(),
+            kind: KPI_PUSH_ABANDONED.into(),
+            last_error: event
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::FixPush,
         });
     }
     // A proposal whose plan review failed, or whose planner did not answer

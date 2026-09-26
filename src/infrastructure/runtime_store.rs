@@ -3239,6 +3239,20 @@ impl RunStore for SqliteQueue {
     fn record_report_written(&self, payload: serde_json::Value) -> Result<bool> {
         SqliteQueue::record_report_written(self, payload)
     }
+    fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>> {
+        SqliteQueue::kpi_breaches_open(self)
+    }
+    fn record_kpi_breach(
+        &self,
+        kind: &str,
+        payload: serde_json::Value,
+        push_day: Option<(i64, usize)>,
+    ) -> Result<Option<serde_json::Value>> {
+        SqliteQueue::record_kpi_breach(self, kind, payload, push_day)
+    }
+    fn record_kpi_push_abandoned(&self, payload: serde_json::Value) -> Result<bool> {
+        SqliteQueue::record_kpi_push_abandoned(self, payload)
+    }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         SqliteQueue::latest_task_events(self, kinds)
     }

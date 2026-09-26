@@ -121,15 +121,16 @@ pub fn write(
 
 /// Write the reports the supervisor owes at `now` (the days and the week
 /// [`report::due`] names that no `report_written` records), oldest first,
-/// recording each as `report_written` by `supervisor`. A report another
-/// supervisor recorded meanwhile is not recorded twice.
+/// recording each as `report_written` by `supervisor`, with the report
+/// made. A report another supervisor recorded meanwhile is not recorded
+/// twice nor returned.
 pub fn write_due(
     queue: &dyn Queue,
     files: &dyn RunFiles,
     setup: &ReportSetup,
     now: i64,
     supervisor: &str,
-) -> Result<Vec<Written>> {
+) -> Result<Vec<(Written, Report)>> {
     let written = queue.reports_written()?;
     let offset_ms = setup.host.utc_offset_secs * 1000;
     let mut done = Vec::new();
@@ -158,7 +159,7 @@ pub fn write_due(
             "supervisor": supervisor,
         }))?;
         if recorded {
-            done.push(output);
+            done.push((output, report));
         }
     }
     Ok(done)

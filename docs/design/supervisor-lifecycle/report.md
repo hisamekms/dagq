@@ -40,6 +40,7 @@ related:
 - `supervise --report-daily`（既定true。ライブラリの`SuperviseOptions::report_daily`は既定false）。`application::supervise::report`が、周回ごとにhostのlocal timezoneの今日（`local_day`）を見て、前に書き終えた日と違えば（起動直後の最初の周回を含む）job threadで`application::report::write_due`を走らせる。書くのは、今日より前の7日（`BACKFILL_DAYS`）と先週（ISO週）のうち`report_written`が記録されていないものを古い順に（保持の日数が7日より短ければ、保持がすぐ消す日は書かない）。設定（dagq.tomlの`[kpi]`、host.tomlの`[kpi]`と`[report]`、timezone）は書くたびに読み直す。
 - 書いたレポートごとにqueueのevent `report_written`（taskの無いqueueのevent。payloadは`period`・`label`・`html`・`json`・`removed`（保持で消したファイルの数）・`build`・`supervisor`）を記録する。記録は同じ`period`と`label`の`report_written`が無いことを同じ書き込みのトランザクションで確かめてから入れる（`SqliteQueue::record_report_written`）ので、2つのsupervisorが同じレポートを書いても記録は1つで、同じ日は二度書かない（ファイルはどちらが書いても同じ中身をrenameで置く）。
 - 始めるのはclaimを続けているsupervisorだけ（drain中・停止中・引き継ぎの待ちでは始めず、走っているjobの終わりだけを拾う）。loopはjobを待たないが、`--once`で終わる前には待つ。失敗は`warn`のlogだけで、10分後に書いていない分をもう一度試す。claimと着地は止めない。引き継ぎのexecで途中のjobが切れても、記録の無いレポートは次のプロセスが書く。
+- 同じjobが、レポートを書いた後に目標割れの始まりと解消を記録し、host.tomlの`[push]`があればpushのメッセージを作る（[push](push.md)。`write_due`は書いたレポートと一緒に作った`Report`を返す）。pushの失敗はレポートの記録を戻さない。
 - observerの「自分以外のeventが無ければ起動しない」の判定（`events_besides`）は`report_written`を数えない（ADR-0051の決定24）。
 
 ## `dagq report`

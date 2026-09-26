@@ -56,6 +56,7 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 - `decide the draft in a planner` (`draft_planner_exhausted`), `decide the finding in a planner` (`finding_planner_exhausted`), `check the planner` (`planner_unresponsive`), `plan review by hand` (`plan_review_failed`): tell the person, who works in a planner (`dagq-recover` section 8).
 - `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH, so it claims and lands nothing; the person installs it. It clears by itself.
 - `report the update` (`update_installed`): tell the person its `version` and `commit`.
+- `fix the push command` (`kpi_push_abandoned`): the host's KPI push command (`[push]` of `host.toml`) failed one message three times and it was given up; tell the person, who fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`, with the person.
 - `recover run`: the `dagq-recover` skill.

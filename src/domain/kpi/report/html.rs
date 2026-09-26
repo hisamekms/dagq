@@ -489,7 +489,7 @@ fn number(value: f64) -> String {
 }
 
 /// A KPI's value in its unit; `—` for none.
-fn value(kpi: &str, value: Option<f64>) -> String {
+pub(super) fn value(kpi: &str, value: Option<f64>) -> String {
     let Some(value) = value else {
         return "—".to_owned();
     };

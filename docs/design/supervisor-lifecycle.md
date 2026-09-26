@@ -330,6 +330,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### `report`
 
 - [KPIのレポート（`report`）](supervisor-lifecycle/report.md)（supervisorが日次でKPIのレポートをHTMLとJSONで`<queue dir>/reports/`に書き、`dagq report`で手でも書く。ADR-0051の決定20・21）
+- [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
 
 ### `doctor`
 
