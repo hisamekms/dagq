@@ -1,0 +1,97 @@
+---
+id: design-supervisor-lifecycle-landing-branch
+type: design
+title: "Landing branch"
+status: current
+created: 2026-09-27
+updated: 2026-09-27
+last_verified: 2026-09-27
+scope: runtime
+related:
+  - design-supervisor-lifecycle
+  - design-supervisor-lifecycle-integrate
+  - design-supervisor-lifecycle-run-environment
+  - design-supervisor-lifecycle-up-down
+  - design-supervisor-lifecycle-doctor
+  - adr-t615-1
+  - adr-0008
+  - adr-0047
+  - adr-0054
+---
+
+# Landing branch
+
+着地先のbranch、着地後のpushのremote、pushするかは、repositoryの`dagq.toml`の`[repository]`で指定でき、指定が無ければruntimeが決める（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)。ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends）。
+
+**実装状況**: `[repository]`と下の解決はまだ実装していない（goal 52の後続のtask）。今は`refs/heads/main`（`src/infrastructure/adapters.rs`の`main_head`・`main_history`・`main_checkout`・`advance_main`・`push_main`）と`origin`（`src/domain/mod.rs`の`PUSH_REMOTE`）の固定で動き、default branchが`main`でないrepositoryでは`up`・`supervise`・`integrate`・`plan`・`stats`・`review`・`rebind`がrev-parseの失敗で止まる（`GitRepository::inspect`が`refs/heads/main`を先に読んで`base_commit`にするため。実装では`inspect`がmainを先に読むのをやめ、着地先を解決してから読む）。
+
+## `[repository]`の欄
+
+読むのは`[run.env]`と同じmain checkoutの作業ファイルの`dagq.toml`（[Run environment](run-environment.md)）。表もkeyも省略でき、表が無ければすべて既定になる。
+
+| key | 型 | 既定 | 意味 |
+| --- | --- | --- | --- |
+| `branch` | 文字列 | 無し（下の推定） | 着地先のbranchの名前（`refs/heads/`を付けない。例`"master"`） |
+| `remote` | 文字列 | `"origin"` | 着地後にpushするremoteの名前 |
+| `push` | 真偽値 | `true` | `false`なら着地後にpushしない |
+
+```toml
+[repository]
+branch = "master"
+remote = "upstream"
+push = false
+```
+
+- 書式の誤りはerrorにする: 表の中の未知のkey、型の違い、空の文字列、`refs/`で始まる`branch`、`git check-ref-format --branch`に通らない`branch`、remoteの名前として使えない`remote`。
+- `dagq.toml`の他の表と同じく、`[repository]`を知らない旧バイナリは未知の表として拒むので、表を足すのはそれを知るバイナリに入れ替えた後にする。dagq自身のrepositoryは表を足さない（既定の推定で今までどおり`main`と`origin`になる）。
+
+## branchの解決
+
+`branch`があればそれを使う。そのbranchがローカルに無い（`refs/heads/<branch>`が無い）ときは推定に落とさず、解決できないとする。
+
+`branch`が無ければ、次の順でローカルに`refs/heads/<name>`が在る最初のものを使う。
+
+1. pushのremote（`remote`、既定`origin`）のHEAD: `git symbolic-ref refs/remotes/<remote>/HEAD`が指す`refs/remotes/<remote>/<name>`の`<name>`（cloneが作る。無ければ`git remote set-head <remote> --auto`で作れる）。remoteが無いか、refが無いときは飛ばす。runtimeはfetchもnetworkへの問い合わせもしない。
+2. `main`
+3. `master`
+
+どれも無ければ解決できない。main checkoutが今checkoutしているbranch（`HEAD`）は見ない。
+
+解決は使うたびにその時点のrepositoryと`dagq.toml`で行い、DBにもsupervisorの登録にも保存しない。途中で指定を変えたときは、次のclaimと次の着地から新しいbranchを使う（claim済みのrunは着地のrebaseで新しいbranchに載る）。
+
+解決の結果は`branch`（名前）と`branch_source`（`config` / `remote_head` / `main` / `master`）で表す。
+
+## 解決したbranchを使う箇所
+
+今`refs/heads/main`を読んでいる箇所は、すべて`refs/heads/<branch>`を読む。
+
+- claimのbase commit（[supervise](supervise.md)、ADR-0054決定7）と、着地開始時のmain head・rebase先・`commit-tree`の親（[integrate](integrate.md)の手順4・6、ADR-0008決定3）。
+- 着地のbranchの進め方（ADR-0008決定4）: `branch refs/heads/<branch>`をcheckoutしているworktreeがあればそこで`merge --ff-only`、なければ`update-ref refs/heads/<branch> <commit> <old>`。
+- main checkoutの判定のうち「着地先をcheckoutしているworktree」を探すもの（`main_checkout`）。`dagq.toml`を読むmain checkout（Git common directoryの親）の決め方は変えない。
+- mainの履歴（`main_history`。`stats`の`conflict_hotspots`、claimのhotspot、`plan`）、merge-treeの事前判定、landing recheck、resumeの依頼文に書くrebase先と着地したtaskの一覧。
+- runtimeがsessionやaskに書く文面は、「main」の代わりに解決したbranchの名前を書く。
+
+## pushの解決
+
+| 状況 | 結果 | event |
+| --- | --- | --- |
+| `integrate --no-push` | pushしない | `push_skipped`（`reason: "--no-push"`） |
+| `push = false` | remoteを見ずにpushしない | `push_skipped`（`reason: "push = false in dagq.toml"`） |
+| `remote`を書かず、`origin`が無い | pushしない（今までどおり） | `push_skipped`（`reason: "the repository has no remote origin"`） |
+| `remote`を書き、そのremoteが無い | 設定の誤り。着地は取り消さない | `push_failed`（`error`にremoteが無いこと） |
+| remoteが在る | `git push <remote> refs/heads/<branch>:refs/heads/<branch>` | 成功は`push_finished`、失敗は`push_failed` |
+
+- payloadは今の`remote`・`commit`（・`reason` / `error`、`push_failed`は`code: push_failed`も）に`branch`を足す。`push_failed`のattention（`push main`）と、runが`integrated`のまま残る扱いは変えない。人の手のpushは`git push <remote> <branch>`になる。
+- remote側のbranchの名前はローカルと同じで、別の名前へpushする設定は持たない。
+
+解決の結果は`remote`・`remote_source`（`config` / `default`）・`remote_exists`・`push`で表す。
+
+## `up`のpreflightと`doctor`
+
+- **`up`**: cmux・Claude・trust・`[run.env]`のプログラムの検査と同じpreflightで、supervisorを起動する前に解決する。次のどれかならsupervisorを起動せず、何が解決できなかったかと、`dagq.toml`の`[repository]`に`branch`（と`remote`）を書く案内を付けたerrorで止まる: `dagq.toml`が読めない・`[repository]`の書式が誤っている、`branch`が解決できない、書いた`branch`がローカルに無い、書いた`remote`が無い（`push = false`なら`remote`は見ない）。通れば出力に`repository`（`branch`・`branch_source`・`remote`・`remote_source`・`remote_exists`・`push`）が付く。
+- **`doctor`**: 状態を変えずに同じ解決を行い、`repository`の欄に上の欄と、解決できなければ`error`（`up`のerrorと同じ文面）を出す。既定の出力にも出す。
+- **ほかのコマンド**: `supervise`・`integrate`・`plan`・`stats`など着地先を読むコマンドは、解決できなければ同じ文面のerrorで止まる（既定のbranchを仮定しない）。supervisorが走っている間に解決できなくなったときは、そのpassではclaimと着地を始めない。
+
+## 既存のqueueの互換
+
+`[repository]`の無い`dagq.toml`（とファイルの無いrepository）では、`origin`のHEADが`main`を指すか、`main`が在れば着地先は`main`、pushは`origin`へ行う。dagq自身のrepositoryはこれに当たり、設定を足さずに今までと同じ振る舞いになる。DBのschemaとeventのkindは変わらない（payloadに`branch`が増えるだけ）。

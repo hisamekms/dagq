@@ -79,6 +79,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t610-1](2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md) | statusのslots.usedとstatsのidle_slotsを、supervisorがclaimと戻りの判定に使うslotと同じ集合で数え、着地中のrunも埋まったslotに数える（ADR-0071決定12・13をamends） | 2026-09-27 |
 | [ADR-t614-1](2026-09-27-t614-1-dagq-source-only-features-by-one-check.md) | dagqの開発でだけ要る機能を、queueのrepositoryがdagqのソースかの判定1つで有効にし、ソースでないrepositoryではmigrationの振り直し・--fromなしのinstall・source buildの自動更新・cargo専用の計測を動かさない（ADR-0067決定3・ADR-0073決定14・17をamends） | 2026-09-27 |
 | [ADR-t614-2](2026-09-27-t614-2-released-migrations-are-immutable.md) | リリース済み（最新のv*のtagに含まれる）のmigrationは中身も名前も変えず消さず、それを検査のscriptとCIとreleaseで止める | 2026-09-27 |
+| [ADR-t615-1](2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md) | 着地先のbranchとpushのremoteとpushするかをrepositoryごとにdagq.tomlで決められるようにし、指定が無ければdefault branchを推定し、解決できなければupで止める（ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends） | 2026-09-27 |
 
 ## 置き換え・廃止されたADR
 

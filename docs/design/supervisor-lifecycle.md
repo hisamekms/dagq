@@ -168,6 +168,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### Source repository
 
 - [Source repository](supervisor-lifecycle/source-repository.md)（dagqのソースのrepositoryでだけ動く機能と判定）
+- [Landing branch](supervisor-lifecycle/landing-branch.md)（着地先のbranchとpushのremoteの`dagq.toml`の`[repository]`と、指定が無いときの推定。未実装）
 
 ### 人への通知（`cmux notify`）
 

@@ -9,6 +9,7 @@ last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
+  - design-supervisor-lifecycle-landing-branch
   - adr-0008
   - adr-0067
   - adr-0013
@@ -40,3 +41,5 @@ related:
 supervisorが着地させたrunが`integrated`で終わるたびに、着地待ちのrunをその後のmainに対して`git merge-tree`と`[recheck] command`で確かめ、着地しなくなったrunは次の`integrate`を待たずに`needs_session`にする（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)）。人が打った`integrate`の着地の後には走らない。
 
 上の手順5のmigrationの番号の振り直しは、queueのrepositoryがdagqのソースのときだけ動く（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。ソースでないrepositoryでは番号を見ず、`migrations/`の変更を他のファイルと同じに扱う。判定と対象の一覧は[Source repository](source-repository.md)にある。判定はまだ実装していない。
+
+手順4・6の`refs/heads/main`と手順9の`origin`は、`dagq.toml`の`[repository]`で指定でき、指定が無ければ推定するbranchとremoteに変わる（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。`push = false`は`push_skipped`、明示したremoteが無いのは`push_failed`になる。解決の規則とeventのpayloadは[Landing branch](landing-branch.md)にある。まだ実装していない（今は`main`と`origin`の固定）。
