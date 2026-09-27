@@ -1,13 +1,12 @@
 //! Read-only views the store assembles and the CLI prints, and the
-//! outcomes and receipt that travel between the runtime's steps. They are
+//! outcomes that travel between the runtime's steps. They are
 //! not aggregates, so their fields are public.
 
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CheckStatus, CommitSha, DomainError, EventId, EvidenceCheck, Goal, GoalId, GoalStatus,
-    GoalVerdict, PushReport, ReceiptResult, RunId, SupervisorMode, Task, TaskId, TaskRun,
-    TaskStatus, require,
+    CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, PushReport, RunId, SupervisorMode,
+    Task, TaskId, TaskRun, TaskStatus,
 };
 
 /// Number of a goal's tasks in each status; progress is derived from these.
@@ -256,127 +255,6 @@ pub enum IntegrationOutcome {
 pub struct RegisteredFollowUp {
     pub task_id: TaskId,
     pub title: String,
-}
-
-/// Completion receipt written by the agent. Its claims are cross-checked by
-/// the supervisor; the receipt alone never marks a run successful.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Receipt {
-    pub run_id: String,
-    pub result: ReceiptResult,
-    pub commit: String,
-    pub tests: ReceiptCheck,
-    pub e2e: ReceiptCheck,
-    pub subagent_review: ReceiptCheck,
-    #[serde(default)]
-    pub summary: String,
-    /// Follow-up tasks the agent proposes, as `{"title", "description"}`
-    /// objects. Only its shape (an array) is checked here; `integrate`
-    /// registers each entry with a title as a draft task once the run lands,
-    /// and a person decides whether it becomes ready.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub follow_ups: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiptCheck {
-    pub status: CheckStatus,
-    #[serde(default)]
-    pub evidence_or_reason: String,
-}
-
-impl Receipt {
-    pub fn parse(text: &str) -> Result<Self, DomainError> {
-        serde_json::from_str(text).map_err(|error| DomainError::MalformedReceipt {
-            reason: error.to_string(),
-        })
-    }
-
-    /// Structural consistency only; Git state and verification commands are checked by the supervisor.
-    pub fn check(&self, run_id: &RunId) -> Result<(), DomainError> {
-        self.check_requiring(run_id, &[])
-    }
-
-    /// [`Self::check`], except that a `required` check reported `failed` or
-    /// with a blank `evidence_or_reason` is left to
-    /// [`Self::missing_evidence`]: the run then waits for a session instead
-    /// of failing (ADR-0019 decision 5).
-    pub fn check_requiring(
-        &self,
-        run_id: &RunId,
-        required: &[EvidenceCheck],
-    ) -> Result<(), DomainError> {
-        require(self.run_id == run_id.as_str(), || {
-            DomainError::ReceiptRunMismatch {
-                receipt_run_id: self.run_id.clone(),
-                run_id: run_id.clone(),
-            }
-        })?;
-        require(self.result == ReceiptResult::Succeeded, || {
-            DomainError::AgentReportedResult {
-                result: self.result,
-                summary: self.summary.clone(),
-            }
-        })?;
-        for evidence in [
-            EvidenceCheck::Tests,
-            EvidenceCheck::E2e,
-            EvidenceCheck::SubagentReview,
-        ] {
-            let name = evidence.as_str();
-            let check = self.evidence(evidence);
-            if required.contains(&evidence) {
-                continue;
-            }
-            require(check.status != CheckStatus::Failed, || {
-                DomainError::ReceiptCheckFailed {
-                    check: name,
-                    evidence_or_reason: check.evidence_or_reason.clone(),
-                }
-            })?;
-            require(!check.evidence_or_reason.trim().is_empty(), || {
-                DomainError::ReceiptCheckUnexplained {
-                    check: name,
-                    status: check.status,
-                }
-            })?;
-        }
-        CommitSha::parse(self.commit.as_str(), "receipt commit")?;
-        require(
-            self.follow_ups.as_ref().is_none_or(|f| f.is_array()),
-            || DomainError::FollowUpsNotArray,
-        )
-    }
-}
-
-impl Receipt {
-    fn evidence(&self, check: EvidenceCheck) -> &ReceiptCheck {
-        match check {
-            EvidenceCheck::Tests => &self.tests,
-            EvidenceCheck::E2e => &self.e2e,
-            EvidenceCheck::SubagentReview => &self.subagent_review,
-        }
-    }
-
-    /// The `required` checks this receipt does not back: a status other
-    /// than `passed`, or no evidence.
-    pub fn missing_evidence(&self, required: &[EvidenceCheck]) -> Vec<EvidenceCheck> {
-        required
-            .iter()
-            .copied()
-            .filter(|check| {
-                let claim = self.evidence(*check);
-                claim.status != CheckStatus::Passed || claim.evidence_or_reason.trim().is_empty()
-            })
-            .collect()
-    }
-}
-
-/// The `last_error` of a run parked for `missing` evidence, such as
-/// `evidence missing: e2e`.
-pub fn evidence_missing_reason(missing: &[EvidenceCheck]) -> String {
-    let names: Vec<&str> = missing.iter().map(|c| c.as_str()).collect();
-    format!("evidence missing: {}", names.join(", "))
 }
 
 /// Where a run's files live: `<runs dir>/<run id>/` holds the worktree, the

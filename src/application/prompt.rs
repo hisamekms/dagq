@@ -59,7 +59,7 @@ impl PredecessorSummary {
             .and_then(|text| Receipt::parse(&text).ok())
             .map(|receipt| {
                 receipt
-                    .summary
+                    .summary()
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -161,7 +161,7 @@ impl Inheritance {
             .and_then(|text| Receipt::parse(&text).ok())
             .map(|receipt| {
                 receipt
-                    .summary
+                    .summary()
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")

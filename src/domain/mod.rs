@@ -651,6 +651,7 @@ pub mod planner;
 pub mod prediction;
 pub mod proposal;
 pub mod reason;
+mod receipt;
 pub mod recheck;
 pub mod recovery;
 pub mod related;
@@ -691,6 +692,7 @@ pub use plan_review::{
 pub use planner::{IdleProbe, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
+pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason};
 pub use run::{
     AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
     TaskRun, after_validation, decide_conflict, decide_revise, run_attention_of,
@@ -698,9 +700,8 @@ pub use run::{
 pub use task::{Task, TaskAction};
 pub use views::{
     ClaimOutcome, EventFilter, GoalDetail, GoalPredecessor, GoalSummary, GoalTask,
-    IntegrationOutcome, Predecessor, Receipt, ReceiptCheck, RegisteredFollowUp, RunEvent, RunLease,
-    RunPaths, RunProcess, SupervisorRegistration, TaskDetail, TaskStatusCounts,
-    evidence_missing_reason,
+    IntegrationOutcome, Predecessor, RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess,
+    SupervisorRegistration, TaskDetail, TaskStatusCounts,
 };
 
 /// A question for a person (ADR-0022): about a task, or one of its runs when
@@ -1210,61 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_evidence_is_a_required_check_not_passed_with_evidence() {
-        let check = |status: &str, evidence: &str| serde_json::json!({"status": status, "evidence_or_reason": evidence});
-        let receipt: Receipt = serde_json::from_value(serde_json::json!({
-            "run_id": "r",
-            "result": "succeeded",
-            "commit": "0".repeat(40),
-            "tests": check("passed", "ran"),
-            "e2e": check("not_applicable", "no surface"),
-            "subagent_review": check("passed", " "),
-        }))
-        .unwrap();
-        assert!(receipt.missing_evidence(&[]).is_empty());
-        assert!(receipt.missing_evidence(&[EvidenceCheck::Tests]).is_empty());
-        // A blank or failed check fails the receipt unless it is required;
-        // a required one is left to missing_evidence.
-        assert!(receipt.check(&RunId::new("r").unwrap()).is_err());
-        assert!(
-            receipt
-                .check_requiring(&RunId::new("r").unwrap(), &[EvidenceCheck::SubagentReview])
-                .is_ok()
-        );
-        let mut failed = receipt.clone();
-        failed.subagent_review.evidence_or_reason = "reviewed".into();
-        failed.e2e.status = CheckStatus::Failed;
-        assert_eq!(
-            failed
-                .check(&RunId::new("r").unwrap())
-                .unwrap_err()
-                .to_string(),
-            "receipt reports e2e as failed: no surface"
-        );
-        assert!(
-            failed
-                .check_requiring(&RunId::new("r").unwrap(), &[EvidenceCheck::Tests])
-                .is_err()
-        );
-        assert!(
-            failed
-                .check_requiring(&RunId::new("r").unwrap(), &[EvidenceCheck::E2e])
-                .is_ok()
-        );
-        assert_eq!(
-            failed.missing_evidence(&[EvidenceCheck::E2e]),
-            [EvidenceCheck::E2e]
-        );
-        let missing = receipt.missing_evidence(&[
-            EvidenceCheck::SubagentReview,
-            EvidenceCheck::Tests,
-            EvidenceCheck::E2e,
-        ]);
-        assert_eq!(missing, [EvidenceCheck::SubagentReview, EvidenceCheck::E2e]);
-        assert_eq!(
-            evidence_missing_reason(&missing),
-            "evidence missing: subagent_review, e2e"
-        );
+    fn required_evidence_is_deduplicated_in_order() {
         let task = NewTask {
             title: "t".into(),
             description: String::new(),

@@ -224,21 +224,19 @@ impl ReviseWatch {
                 .and_then(|text| Ok(Receipt::parse(&text)?));
             return Ok(Some(match parsed {
                 // A session that gives the change up is validation's to fail.
-                Ok(receipt) if receipt.result == ReceiptResult::Failed => {
+                Ok(receipt) if receipt.result() == ReceiptResult::Failed => {
                     ReviseOutcome::Rewritten(head)
                 }
-                Ok(receipt) if receipt.commit.to_ascii_lowercase() == head.as_str() && clean => {
+                Ok(receipt) if receipt.names_commit(head.as_str()) && clean => {
                     ReviseOutcome::Rewritten(head)
                 }
-                Ok(receipt) if receipt.commit.to_ascii_lowercase() != head.as_str() => {
-                    ReviseOutcome::Mismatch(
-                        ReasonCode::CommitMismatch,
-                        format!(
-                            "the rewritten receipt names commit {} but the worktree HEAD is {head}",
-                            receipt.commit
-                        ),
-                    )
-                }
+                Ok(receipt) if !receipt.names_commit(head.as_str()) => ReviseOutcome::Mismatch(
+                    ReasonCode::CommitMismatch,
+                    format!(
+                        "the rewritten receipt names commit {} but the worktree HEAD is {head}",
+                        receipt.commit()
+                    ),
+                ),
                 Ok(_) => ReviseOutcome::Mismatch(
                     ReasonCode::WorktreeDirty,
                     format!("the worktree has uncommitted changes on top of HEAD {head}"),

@@ -229,8 +229,8 @@ fn background_work_conditions(
         .receipt_path()
         .and_then(|path| sv.files.read_to_string(Path::new(path)).ok())
         .and_then(|text| Receipt::parse(&text).ok())
-        .filter(|receipt| receipt.run_id == *run.id().as_str());
-    let receipt_commit = receipt.map(|receipt| receipt.commit);
+        .filter(|receipt| receipt.run_id() == run.id().as_str());
+    let receipt_commit = receipt.map(|receipt| receipt.commit().to_owned());
     let at_head = matches!((&receipt_commit, &head), (Some(commit), Some(head)) if commit.eq_ignore_ascii_case(head.as_str()));
     (
         exit_requested && clean == Some(true) && at_head,

@@ -51,13 +51,13 @@ pub(super) fn stale_receipt(sv: &Supervisor<'_>, run: &TaskRun) -> Option<StaleR
         .read_to_string(Path::new(run.receipt_path()?))
         .ok()
         .and_then(|text| Receipt::parse(&text).ok())?;
-    if receipt.run_id != *run.id().as_str() || receipt.result != ReceiptResult::Succeeded {
+    if receipt.run_id() != run.id().as_str() || receipt.result() != ReceiptResult::Succeeded {
         return None;
     }
     let worktree = Path::new(run.worktree_path()?);
     let head = sv.repository.head(worktree).ok()?;
     let base = run.base_commit();
-    let stale = head.as_str() != receipt.commit.to_ascii_lowercase()
+    let stale = !receipt.names_commit(head.as_str())
         && head != *base
         && sv
             .repository
@@ -68,7 +68,7 @@ pub(super) fn stale_receipt(sv: &Supervisor<'_>, run: &TaskRun) -> Option<StaleR
             .is_ancestor(base.as_str(), head.as_str())
             .unwrap_or(false);
     stale.then_some(StaleReceipt {
-        receipt_commit: receipt.commit,
+        receipt_commit: receipt.commit().to_owned(),
         head,
     })
 }

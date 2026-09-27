@@ -71,7 +71,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId) -> Result<Value> {
         .or(run.worktree_path())
         .context("run has no repository path")?;
     let repository = open_repository(Path::new(checkout))?;
-    let head = receipt.commit.to_ascii_lowercase();
+    let head = receipt.commit().to_ascii_lowercase();
     let main = repository.main_head()?;
     let base = if main != *run.base_commit() && repository.is_ancestor(main.as_str(), &head)? {
         main.into_string()
@@ -205,20 +205,20 @@ fn review_markdown(
     }
     out.push_str(&format!(
         "\n## Receipt\n\n### Summary\n\n{summary}\n",
-        summary = or_none(&receipt.summary)
+        summary = or_none(receipt.summary())
     ));
     for (name, check) in [
-        ("Tests", &receipt.tests),
-        ("E2E", &receipt.e2e),
-        ("Subagent review", &receipt.subagent_review),
+        ("Tests", receipt.tests()),
+        ("E2E", receipt.e2e()),
+        ("Subagent review", receipt.subagent_review()),
     ] {
         out.push_str(&format!(
             "\n### {name}: {status}\n\n{evidence}\n",
-            status = check.status.as_str(),
-            evidence = or_none(&check.evidence_or_reason),
+            status = check.status().as_str(),
+            evidence = or_none(check.evidence_or_reason()),
         ));
     }
-    let follow_ups = match &receipt.follow_ups {
+    let follow_ups = match receipt.follow_ups() {
         Some(Value::Array(items)) if !items.is_empty() => items
             .iter()
             .map(|item| {

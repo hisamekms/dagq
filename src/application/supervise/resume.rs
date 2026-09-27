@@ -142,8 +142,8 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         let task = self.queue.show(run.task_id())?.task;
-        if receipt.run_id != *run.id().as_str()
-            || receipt.result != ReceiptResult::Succeeded
+        if receipt.run_id() != run.id().as_str()
+            || receipt.result() != ReceiptResult::Succeeded
             || !receipt
                 .missing_evidence(task.required_evidence())
                 .is_empty()
@@ -154,7 +154,7 @@ impl Supervisor<'_> {
         let Ok(head) = self.repository.head(worktree) else {
             return Ok(None);
         };
-        let resolved = head.as_str() == receipt.commit.to_ascii_lowercase()
+        let resolved = receipt.names_commit(head.as_str())
             && head != *main
             && self
                 .repository
@@ -949,13 +949,12 @@ impl ResumeWatch {
         head: Option<&CommitSha>,
     ) -> ResumeOutcome {
         match self.rewritten_receipt(files) {
-            Some(receipt) if receipt.run_id != *run.id().as_str() => ResumeOutcome::Unresolved,
-            Some(receipt) if receipt.result == ReceiptResult::Failed => ResumeOutcome::Failed(
-                format!("session reported the run as failed: {}", receipt.summary),
+            Some(receipt) if receipt.run_id() != run.id().as_str() => ResumeOutcome::Unresolved,
+            Some(receipt) if receipt.result() == ReceiptResult::Failed => ResumeOutcome::Failed(
+                format!("session reported the run as failed: {}", receipt.summary()),
             ),
             Some(receipt)
-                if head
-                    .is_some_and(|head| head.as_str() == receipt.commit.to_ascii_lowercase())
+                if head.is_some_and(|head| receipt.names_commit(head.as_str()))
                     && receipt.missing_evidence(&self.required_evidence).is_empty() =>
             {
                 ResumeOutcome::Resolved

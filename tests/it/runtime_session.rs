@@ -328,7 +328,7 @@ fn receipt_structure_is_checked_before_git() {
     assert!(Receipt::parse(&valid.replace("passed", "maybe")).is_err());
     // follow_ups is optional and only its shape is checked.
     let without = Receipt::parse(valid).unwrap();
-    assert!(without.follow_ups.is_none());
+    assert!(without.follow_ups().is_none());
     assert!(
         !serde_json::to_string(&without)
             .unwrap()
@@ -340,7 +340,7 @@ fn receipt_structure_is_checked_before_git() {
     );
     let receipt = Receipt::parse(&with).unwrap();
     receipt.check(&RunId::new("r").unwrap()).unwrap();
-    assert_eq!(receipt.follow_ups.as_ref().unwrap()[0]["title"], "next");
+    assert_eq!(receipt.follow_ups().unwrap()[0]["title"], "next");
     assert_eq!(
         serde_json::to_value(&receipt).unwrap()["follow_ups"][0]["description"],
         "later"

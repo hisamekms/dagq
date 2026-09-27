@@ -119,12 +119,12 @@ pub fn check_receipt(
         }
     }
     let head = repository.head(worktree)?;
-    if head.as_str() != receipt.commit.to_ascii_lowercase() {
+    if !receipt.names_commit(head.as_str()) {
         return reject(
             ReasonCode::CommitMismatch,
             format!(
                 "receipt commit {} is not the head of {branch} ({head})",
-                receipt.commit
+                receipt.commit()
             ),
             None,
             Some(receipt),
@@ -846,9 +846,9 @@ fn land(
         }
         Err(error) => return Err(error).context("read receipt"),
     };
-    if receipt.result == ReceiptResult::Failed {
+    if receipt.result() == ReceiptResult::Failed {
         return Ok(Verdict::ReceiptFailed {
-            reason: format!("session reported the run as failed: {}", receipt.summary),
+            reason: format!("session reported the run as failed: {}", receipt.summary()),
             receipt: serde_json::to_value(&receipt)?,
         });
     }
@@ -877,16 +877,16 @@ fn land(
         event_kind::INTEGRATION_RECEIPT,
         json!({
             "main": main,
-            "commit": receipt.commit,
+            "commit": receipt.commit(),
             "receipt": serde_json::to_value(&receipt)?,
         }),
     )?;
-    if head.as_str() != receipt.commit.to_ascii_lowercase() {
+    if !receipt.names_commit(head.as_str()) {
         return defer(
             ReasonCode::CommitMismatch.into(),
             format!(
                 "receipt commit {} is not the head of {branch} ({head}); rerun your checks and rewrite the receipt for the current head",
-                receipt.commit
+                receipt.commit()
             ),
             json!({"head": head}),
         );
@@ -1089,7 +1089,7 @@ fn land(
             message: paragraphs.join("\n\n"),
             verification_skipped: false,
         },
-        receipt.follow_ups,
+        receipt.into_follow_ups(),
     ))
 }
 
@@ -1375,7 +1375,7 @@ pub fn integrate_logs(files: &dyn RunFiles, run_dir: &Path) -> (Vec<PathBuf>, Ve
 /// the queue, as paragraphs.
 fn commit_message(task: &Task, run: &TaskRun, receipt: &Receipt) -> Vec<String> {
     let mut paragraphs = vec![task.title().trim().to_owned()];
-    let summary = receipt.summary.trim();
+    let summary = receipt.summary().trim();
     if !summary.is_empty() {
         paragraphs.push(summary.to_owned());
     }
