@@ -1513,43 +1513,75 @@ fn a_stuck_exit_after_a_pass_is_closed_and_landed_by_its_recovery_job() {
     }
 }
 
-/// A live session's recovery job that fails (here it exits non-zero) is
-/// no ask: it is `recovery_failed`, the `recover by hand` attention
-/// (ADR-0047 decision 40), and no other job starts for the alert. Once the
-/// person has the session exit, the attention is gone and the run lands.
+/// A live session's recovery job that fails (here it exits non-zero) opens
+/// the `stuck_exit` ask (ADR-t609-1): its question says the job failed and
+/// why, its reason is `recovery_failed`, and no `recover by hand`
+/// attention is made. Returns the ask, once its `recovery_finished` is
+/// recorded too.
+fn failed_stuck_exit_job_ask(db: &Path, run: &TaskRun) -> dagq::domain::Ask {
+    wait_until(db, Duration::from_secs(30), |queue| {
+        !queue.asks(AskQuery::default()).unwrap().is_empty()
+            && !events_of(db, run.id(), "recovery_finished").is_empty()
+    });
+    let queue = SqliteQueue::open(db).unwrap();
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let ask = asks[0].clone();
+    assert_eq!(ask.kind, AskKind::StuckExit);
+    assert_eq!(ask.run_id.as_ref(), Some(run.id()));
+    assert_eq!(ask.options, ["exit", "wait"]);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::RecoveryFailed);
+    for part in [
+        "Its recovery job looked first, and the recovery job failed (",
+        "broken",
+        "Why a person: recovery_failed",
+        "recovery-stuck_exit-1.prompt.txt",
+    ] {
+        assert!(ask.question.contains(part), "{part}: {}", ask.question);
+    }
+    assert!(!ask.question.contains("by hand"), "{}", ask.question);
+    let finished = events_of(db, run.id(), "recovery_finished");
+    assert_eq!(finished[0]["outcome"], "job_failed");
+    assert_eq!(finished[0]["escalated"], true);
+    assert_eq!(finished[0]["ask_id"], json!(ask.id));
+    assert_eq!(finished[0]["reason_category"], "recovery_failed");
+    assert!(
+        finished[0]["error"].as_str().unwrap().contains("broken"),
+        "{finished:?}"
+    );
+    assert!(events_of(db, run.id(), "recovery_failed").is_empty());
+    let status = runtime::status(db).unwrap();
+    assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
+    ask
+}
+
+/// A failed `stuck_exit` job's ask answered `exit`: the answer comes back
+/// to the inbox as for any `stuck_exit` ask, no other job starts while it
+/// is open, and once the person's `/exit` ends the session the ask is
+/// closed by the runtime and the run lands.
 #[test]
-fn a_failed_stuck_exit_job_is_recovered_by_hand() {
+fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit() {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     let run = stuck_exit_after_a_pass(&repo, &db, &backend);
     let (reviewer, supervisor) =
         supervise_recovering(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !events_of(&db, run.id(), "recovery_failed").is_empty()
-            && queue.asks(AskQuery::default()).unwrap().is_empty()
-    });
-    let failed = events_of(&db, run.id(), "recovery_failed");
-    assert_eq!(failed[0]["alert"], "stuck_exit");
-    assert_eq!(failed[0]["code"], "job_failed");
-    assert_eq!(failed[0]["reason_category"], "recovery_failed");
-    assert!(
-        failed[0]["error"].as_str().unwrap().contains("broken"),
-        "{failed:?}"
-    );
-    let finished = events_of(&db, run.id(), "recovery_finished");
-    assert_eq!(finished[0]["outcome"], "job_failed");
+    let ask = failed_stuck_exit_job_ask(&db, &run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask.id, "exit").unwrap();
     let status = runtime::status(&db).unwrap();
-    let attention = run_attention_of(&status, run.id()).unwrap();
-    assert_eq!(attention["next"], "recover by hand", "{status}");
-    assert_eq!(attention["kind"], "recovery_failed");
-    assert_eq!(attention["reason_category"], "recovery_failed");
-    // No other job, and no ask, while it waits for the person.
+    assert!(
+        status["attention"].as_array().unwrap().iter().any(|a| {
+            a["ask_id"] == json!(ask.id)
+                && a["next"] == format!("read the answer of ask {} and close it", ask.id)
+        }),
+        "{status}"
+    );
+    // No other job while the ask is open.
     thread::sleep(Duration::from_millis(500));
     assert_eq!(reviewer.triage_prompts().len(), 1);
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
-    // The person has the session exit; the run lands.
+    // The person carries out `exit`: the session exits and the run lands.
     fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
@@ -1560,8 +1592,43 @@ fn a_failed_stuck_exit_job_is_recovered_by_hand() {
         "test task",
         &base,
     );
-    let status = runtime::status(&db).unwrap();
-    assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+}
+
+/// A failed `stuck_exit` job's ask answered `wait` and closed by the
+/// person: the session is left as it is and no other job starts for the
+/// alert; the run lands once the session exits by itself later.
+#[test]
+fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_wait() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let run = stuck_exit_after_a_pass(&repo, &db, &backend);
+    let (reviewer, supervisor) =
+        supervise_recovering(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
+    let ask = failed_stuck_exit_job_ask(&db, &run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask.id, "wait").unwrap();
+    queue.close_ask(ask.id).unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+    assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
+    assert_eq!(
+        queue.show(TaskId::new(1)).unwrap().runs[0].status(),
+        RunStatus::AwaitingIntegration
+    );
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_landed(
+        &repo,
+        &queue.show(TaskId::new(1)).unwrap().runs[0],
+        "test task",
+        &base,
+    );
+    assert_eq!(reviewer.triage_prompts().len(), 1);
 }
 
 /// A `stuck_exit` repair the runtime cannot apply (a key to a dialog that

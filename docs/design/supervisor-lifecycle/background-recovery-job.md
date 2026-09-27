@@ -4,8 +4,8 @@ type: design
 title: "生きているsessionの復旧job"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -16,7 +16,7 @@ related:
 
 # 生きているsessionの復旧job
 
-[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40（task 360、task 441、task 469、task 442、`application::supervise::recovery`と`stall_recovery`）。復旧jobを、生きているsessionのalertにも広げたもの。runtimeの自動修正（決定25・29など）が直さなかったものを、jobが状況を読んで許された操作で直し、直せないか自信が無いときだけ、今までそのalertがなっていたaskでinboxに上げる。終わったrun（`failed` / `interrupted` / `resume_exhausted`）は[Triage](triage.md#triage-supervisor)が同じverdictで扱う。
+[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40（task 360、task 441、task 469、task 442、task 562、`application::supervise::recovery`と`stall_recovery`）。復旧jobを、生きているsessionのalertにも広げたもの。runtimeの自動修正（決定25・29など）が直さなかったものを、jobが状況を読んで許された操作で直し、直せないか自信が無いときだけ、今までそのalertがなっていたaskでinboxに上げる。終わったrun（`failed` / `interrupted` / `resume_exhausted`）は[Triage](triage.md#triage-supervisor)が同じverdictで扱う。
 
 ## alert
 
@@ -62,11 +62,14 @@ related:
 
 ## jobの失敗
 
-[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)（ADR-0047の決定40をamends）は、生きているrunのalertのjobの失敗を、`recover by hand`のattentionではなく、escalateと同じそのalertのask（上の「escalate」のkindとoptions、`reason_category: recovery_failed`、questionにjobの失敗とそのerror）にすると決めた。答えの適用、askを待つ間に同じalertのjobを立てないこと、sessionが動いたときの閉じ方は、そのalertの今のaskに従う。終わったrunの[Triage](triage.md)の失敗（`triage_failed`）は変えない。実装はtask 562が行い、着地するまでのruntimeは次のとおりattentionにする。
+[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)（ADR-0047の決定40をamends、task 562）。生きているrunのどのalertでも、jobの失敗（起動できない、非0終了、timeout、verdictが無いか形に合わない）は、escalateと同じそのalertのask（上の「escalate」のkindとoptions）にする。`recover by hand`のattentionは作らない。`RecoveryWatch::follow_for`と`watch_background`はjobの失敗を`Escalation::JobFailed`として返し、各watchがescalateと同じ経路でaskを開く。
 
-`stalled`のalertはtask 442の受け入れ条件で先にそうしており、jobの失敗（起動できない、非0終了、timeout、verdictが無い）をescalateと同じ`stalled`のask（`Why a person: recovery_failed`、`the recovery job failed (<error>), so recover it by hand`、optionsは`wait` / `intervene`）にし、`recovery_finished`（`outcome: job_failed`、`error`、`escalated: true`、`ask_id`）を記録する（`Live::ask_on_failure`）。`recovery_failed`のattentionは記録しない。
+- askの`reason_category`は`recovery_failed`で、questionのescalateの理由は`the recovery job failed (<error>)`、`Why a person: recovery_failed`と`recovery-<alert>-<attempt>.prompt.txt`のpathが続く（jobのverdictが無いので`Diagnosis`と`Recommended`は無い）。
+- `recovery_finished`は`outcome: job_failed`、`error`、`escalated: true`、`ask_id`、`reason_category: recovery_failed`。`recovery_failed`のeventは記録しない。
+- 答えの適用、askを待つ間に同じalertのjobを立てないこと、sessionが動いたときの閉じ方は、そのalertのaskのもの。`stuck_exit`は`ExitWatch` / `SessionWatch`がaskを開いた後にjobを立てず（`exit_asked`）、sessionの終了でaskを閉じる（`exit`の答えは人が`dagq-recover`の手順でworkspaceに送り、`wait`は人がaskを閉じる）。`ResumeWatch`はaskを開いた後、今までどおりsessionを`unresolved`として手放す。`prompt_waiting`は`answer_prompt`のaskが閉じるまでjobを立てず、ダイアログが消えれば閉じる。`long_background`・`idle_process`・`stalled`は`StallWatch`の`stalled`のask（`wait` / `intervene`）で、sessionが動けば閉じる。`idle_process`のreceiptの後の段は、escalateと同じく`outcome: left_to_phase`を記録するだけでaskを開かない。
+- 終わったrunの[Triage](triage.md)の失敗（`triage_failed`、`triage by hand`）は変えない。
 
-それ以外のalertでは、今のruntimeはjobの失敗をaskにせず、決定40のとおり`recover by hand`のattentionにする（`recovery::fail_live`）。`recovery_finished`（`outcome: job_failed`、`error`、`reason_category: recovery_failed`）と`recovery_failed`（`code: job_failed`、`alert`、`attempt`、`error`、`workspace_id`、`reason_category: recovery_failed`）を記録し、sessionには触らない。`recovery_failed`は`ATTENTION_KINDS`のひとつで`event_attention`は`recover by hand`（`AttentionNext::RecoverByHand`）を返し、`status`はleaseのある生きているrunでも、未解消の`recovery_failed`（`domain::recovery::failed_live`）があればそのrunのattention（`kind: recovery_failed`、`reason_category: recovery_failed`、`last_error`はjobのerror、`last_error_code: job_failed`）を出す。解消するのは、その後に`session_exited`・`workspace_closed`・`supervision_finished`・`run_recovered`・`runtime_error`か、`prompt_waiting`なら`prompt_cleared`、`long_background`なら`receipt_observed`、`stalled`なら`receipt_observed`か`detection: recovery`の`stall_resolved`（sessionが動いた）が記録されたとき。未解消の間、そのalertのjobはもう起動しない。`stuck_exit`はaskを作った後と同じく人を待つ（`ExitWatch` / `SessionWatch`はsessionの終了を待ち続け、`ResumeWatch`は今までどおりsessionを`unresolved`として手放す）。人はinboxから画面を読んで`dagq-recover`の手順で直す。
+ADR-t609-1より前のruntimeは、`stalled`以外のalertのjobの失敗を`recover by hand`のattentionにしていた（`recovery_finished`の`outcome: job_failed`と、`recovery_failed`のevent（`code: job_failed`、`alert`、`attempt`、`error`、`workspace_id`、`reason_category: recovery_failed`））。そのruntimeが記録してまだ解消していない`recovery_failed`（`domain::recovery::failed_live`）は、adoptしたruntimeも読む: `status`はleaseのある生きているrunでもそのrunのattention（`recover by hand`、`kind: recovery_failed`、`last_error`はjobのerror、`last_error_code: job_failed`）を出し、そのalertのjobは立てない。解消するのは、その後に`session_exited`・`workspace_closed`・`supervision_finished`・`run_recovered`・`runtime_error`か、`prompt_waiting`なら`prompt_cleared`、`long_background`なら`receipt_observed`、`stalled`なら`receipt_observed`か`detection: recovery`の`stall_resolved`が記録されたとき。
 
 ## 引き継ぎ
 

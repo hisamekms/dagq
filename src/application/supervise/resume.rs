@@ -931,7 +931,6 @@ impl ResumeWatch {
             at_prompt: false,
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         if let LiveStep::Escalate(attempt, escalation) =
             self.live
@@ -1220,7 +1219,6 @@ impl ResumeWatch {
                     at_prompt: false,
                     lands: false,
                     park: false,
-                    ask_on_failure: false,
                 };
                 let (timeout, attempt) = (sv.cmux.exit_timeout().as_secs(), self.attempt);
                 let step = self
@@ -1236,10 +1234,7 @@ impl ResumeWatch {
                         }
                         return Ok(None);
                     }
-                    // A failed job is the `recover by hand` attention: no
-                    // ask; the session is let go as below.
-                    LiveStep::Failed => (0, None),
-                    LiveStep::Escalate(attempt, escalation) => (attempt, Some(escalation)),
+                    LiveStep::Escalate(attempt, escalation) => (attempt, escalation),
                 };
                 warn!(run_id = %run.id(), "resumed session of {} did not exit within {}s of the exit request; letting it go as unresolved (its workspace {} is kept)", run.id(), sv.cmux.exit_timeout().as_secs(), self.workspace);
                 // Its dialog stays until someone answers it: raise it to
@@ -1254,22 +1249,20 @@ impl ResumeWatch {
                         "The run stays needs_session, and the supervisor resumes it again once the session exits"
                     },
                 );
-                if let Some(escalation) = escalation {
-                    let note = escalation.note(run, RecoveryAlert::StuckExit, attempt);
-                    let workspace = self.workspace.clone();
-                    match ask_stuck_exit(sv, run, &workspace, &after, Some(&note)) {
-                        Ok(id) => escalation.record(
-                            sv,
-                            run,
-                            RecoveryAlert::StuckExit,
-                            attempt,
-                            &note,
-                            Some(id),
-                            json!({}),
-                        )?,
-                        Err(error) => {
-                            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "stuck_exit ask for {} could not be opened: {error:#}", run.id());
-                        }
+                let note = escalation.note(run, RecoveryAlert::StuckExit, attempt);
+                let workspace = self.workspace.clone();
+                match ask_stuck_exit(sv, run, &workspace, &after, Some(&note)) {
+                    Ok(id) => escalation.record(
+                        sv,
+                        run,
+                        RecoveryAlert::StuckExit,
+                        attempt,
+                        &note,
+                        Some(id),
+                        json!({}),
+                    )?,
+                    Err(error) => {
+                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "stuck_exit ask for {} could not be opened: {error:#}", run.id());
                     }
                 }
                 return Ok(Some(ResumeVerdict {

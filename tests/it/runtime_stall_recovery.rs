@@ -300,8 +300,8 @@ fn a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth() {
 }
 
 /// Acceptance (4): a recovery job that prints no verdict opens the
-/// `stalled` ask (task 442; not the `recover by hand` attention the other
-/// live alerts give), with no other job while it is open, and the ask
+/// `stalled` ask (task 442; every live alert opens its own ask since
+/// ADR-t609-1), with no other job while it is open, and the ask
 /// closes once the session moves on.
 #[test]
 fn a_failed_stalled_job_raises_the_stalled_ask() {
@@ -322,8 +322,7 @@ fn a_failed_stalled_job_raises_the_stalled_ask() {
     assert_eq!(ask.options[..2], ["wait", "intervene"]);
     for part in [
         "reason: idle_without_receipt",
-        "the recovery job failed",
-        "recover it by hand",
+        "the recovery job failed (",
         "Why a person: recovery_failed",
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);

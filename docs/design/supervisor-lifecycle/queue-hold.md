@@ -4,8 +4,8 @@ type: design
 title: "認証と利用上限のaskの待ちとanswer"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - adr-0047
@@ -45,7 +45,7 @@ answerがaskのoptionsのどれか（`queue_hold::applies`）なら、`answer`�
   - 終わったrunの復旧job（`triage_failed`）: runが`failed` / `interrupted`でleaseが無く、triageの状態が`Failed`でその失敗が最新なら、runに`job_restarted`（`job: triage`、`ask_id`、失敗の`event_id`）を書く。`triage_state`は`job_restarted`（`job: triage`）を`Pending`に戻すので、次のpassの`triage_runs`が拾う（試行回数は数え続け、上限を超えれば従来どおりaskになる）
   - plan review（`plan_review_failed`）: proposalがまだ失敗で止まっていれば、`submit --proposal ID`と同じく出し直す（`proposal_resubmitted`）
   - goal review（`goal_review_failed`）: goalがまだ失敗で止まっていれば、`goal review ID`と同じくrearmする（`goal_review_rearmed`）
-  - 起動し直さないもの: runのreviewの失敗は失敗のときに`approve_landing`のaskを開いている（task 328）ので人の答えに任せる。生きているsessionの復旧jobの失敗（`recover by hand`）はsessionが進めば消え、次のalertで新しいjobが始まる。observerは次の間隔で動く
+  - 起動し直さないもの: runのreviewの失敗は失敗のときに`approve_landing`のaskを開いている（task 328）ので人の答えに任せる。生きているsessionの復旧jobの失敗はそのalertのask（ADR-t609-1）になり人の答えに任せ、askはsessionが進めば閉じる。observerは次の間隔で動く
 
   最後にaskを閉じ（`ask_closed`）、queueに`queue_hold_applied`（`ask_id`、`answer`、`reason_category`、`subject`、`continued`、`released`（空）、`moved_on`（このsupervisorのslotに居るが、もうsessionの段に居ないrun）、`restarted`（`{job, run_id | proposal_id | goal_id}`の配列）、`elsewhere`、`supervisor`）を書く。
 - **`cancel_affected`**（`Supervisor::hold_canceled`）: `affected`のrunのうちこのsupervisorのslotで生きているsessionの段（`Session` / `Revise` / `Resume`）かreviewの待ち（`ReviewHeld`）に居るものを、slotから外してheadless jobを止め、`abandon`と同じく手放す: `runtime_error`（`message`、コード`hold_canceled`、`lease_released: true`）を書いてleaseを返す。statusは変えず、sessionとworktreeは残る。inboxには`recover run`のattentionとして出る（成果を捨てるかどうかは、この答えを選んだ人の判断で、`recover`の手順で決める）。このsupervisorのslotに居ても自分で先へ進んだrun（validation・review・着地の途中）はもう止まっていないので手放さず、`moved_on`に書く。別のsupervisorのslotのrunは`elsewhere`に書く。askを閉じ、`queue_hold_applied`（`released`に手放したrun、`moved_on`、`elsewhere`。どのrunもこの3つのどれか1つにだけ載る）を書く。

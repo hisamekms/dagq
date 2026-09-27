@@ -180,8 +180,8 @@ impl Supervisor<'_> {
     /// `job_restarted` makes its triage due), a plan review (the proposal
     /// goes to plan review again as it is) and a goal review (rearmed). A
     /// failed review of a run already opened its `approve_landing` ask, and
-    /// a live session's recovery job its `recover by hand`: those stay a
-    /// person's. What could not be started again is logged.
+    /// a live session's recovery job its alert's ask (ADR-t609-1): those
+    /// stay a person's. What could not be started again is logged.
     fn restart_failed_jobs(&mut self, ask: &Ask) -> Vec<Value> {
         let since_ms = (ask.created_at - FAILED_BEFORE_ASK_SECS) * 1000;
         let failures = |sv: &Self, kind: &str| -> Vec<RunEvent> {

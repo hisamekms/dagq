@@ -18,7 +18,7 @@
 //! the `approve_landing` ask), and at the resume timeout otherwise.
 
 use super::*;
-use crate::domain::recovery::{IDLE_WITHOUT_RECEIPT, SEND_UNCONFIRMED, attempts};
+use crate::domain::recovery::{IDLE_WITHOUT_RECEIPT, SEND_UNCONFIRMED};
 
 /// The setting the idle detections are judged by.
 pub(super) const IDLE_THRESHOLD: &str = "idle_without_receipt_secs";
@@ -977,16 +977,6 @@ impl StallWatch {
         }
         match step {
             LiveStep::Pending => Ok(None),
-            // Not reached for this alert (its failed job is escalated to
-            // the ask, `Live::ask_on_failure`); kept so a job failure
-            // recorded as the attention still ends once the session moves.
-            LiveStep::Failed => {
-                if self.recovering.is_none() {
-                    let attempt = attempts(&sv.queue.run_events(run.id())?, RecoveryAlert::Stalled);
-                    self.recovery_started(sv, run, attempt, idle_secs, now)?;
-                }
-                Ok(None)
-            }
             LiveStep::Repaired(applied) => {
                 // A `wait` repairs nothing: the session moving after it
                 // moved by itself.

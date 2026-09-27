@@ -266,7 +266,6 @@ impl ExitWatch {
             at_prompt: false,
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         if let LiveStep::Escalate(attempt, escalation) =
             self.recovery.watch_idle(sv, run, &live, EXIT_WAIT_PHASE)?
@@ -297,7 +296,6 @@ impl ExitWatch {
             at_prompt: false,
             lands,
             park: false,
-            ask_on_failure: false,
         };
         let timeout = sv.cmux.exit_timeout().as_secs();
         let unsent = self.unsent.clone();
@@ -308,11 +306,6 @@ impl ExitWatch {
             })?;
         match step {
             LiveStep::Pending => Ok(false),
-            // A person recovers it by hand from the attention: asked.
-            LiveStep::Failed => {
-                self.exit_asked = true;
-                Ok(false)
-            }
             LiveStep::Repaired(applied) if applied.closed => {
                 match self.session.take().and_then(|session| session.resume) {
                     None => {

@@ -107,9 +107,6 @@ pub(super) struct Live<'a> {
     /// The run is running in its first session, which `resume` parks as
     /// `needs_session` for a session of its own (task 442).
     pub(super) park: bool,
-    /// A failed job is the alert's ask, not the `recover by hand`
-    /// attention (the `stalled` alert, task 442's acceptance).
-    pub(super) ask_on_failure: bool,
 }
 
 /// What a `repair` applied to a live session changed.
@@ -136,53 +133,9 @@ pub(super) enum LiveStep {
     Pending,
     /// The job's repair was applied.
     Repaired(Applied),
-    /// A person is asked: the job's number and why.
+    /// A person is asked: the job's number and why. A failed job is one
+    /// too: the alert's own ask opens (ADR-t609-1).
     Escalate(usize, Escalation),
-    /// The job failed: recorded as `recovery_failed`, the attention a
-    /// person recovers the session by hand from (ADR-0047 decision 40); no
-    /// ask is opened.
-    Failed,
-}
-
-/// Record a live session's recovery job that failed (it could not start,
-/// exited non-zero, timed out or printed no verdict, ADR-0047 decision 40):
-/// `recovery_finished` (`outcome: job_failed`) and `recovery_failed`, the
-/// `recover by hand` attention, which waits until the session moves on
-/// ([`failed_live`]). Nothing is asked and the session is left as it is.
-pub(super) fn fail_live(
-    sv: &mut Supervisor<'_>,
-    run: &TaskRun,
-    workspace: &str,
-    alert: RecoveryAlert,
-    attempt: usize,
-    error: &str,
-) -> Result<()> {
-    warn!(run_id = %run.id(), "run {}: recovery job {attempt} of {} failed: {error}; the session waits to be recovered by hand", run.id(), alert.as_str());
-    sv.queue.record_runtime_event(
-        run.id(),
-        event_kind::RECOVERY_FINISHED,
-        json!({
-            "alert": alert,
-            "attempt": attempt,
-            "outcome": "job_failed",
-            "escalated": false,
-            "error": error,
-            "reason_category": AskReason::RecoveryFailed,
-        }),
-    )?;
-    sv.queue.record_runtime_event(
-        run.id(),
-        event_kind::RECOVERY_FAILED,
-        json!({
-            "code": ReasonCode::JobFailed,
-            "alert": alert,
-            "attempt": attempt,
-            "error": error,
-            "workspace_id": workspace,
-            "reason_category": AskReason::RecoveryFailed,
-        }),
-    )?;
-    Ok(())
 }
 
 /// A person's note for the ask an escalation opens.
@@ -272,7 +225,7 @@ impl Escalation {
     pub(super) fn note(&self, run: &TaskRun, alert: RecoveryAlert, attempt: usize) -> Note {
         let why = match self {
             Self::JobFailed(error) => {
-                format!("the recovery job failed ({error}), so recover it by hand")
+                format!("the recovery job failed ({error})")
             }
             Self::Verdict(verdict) if verdict.verdict == RecoveryDecision::Escalate => {
                 "the recovery job could not repair it".to_owned()
@@ -626,9 +579,10 @@ impl RecoveryWatch {
 
     /// Follow a `stuck_exit` or `prompt_waiting` alert that holds now: act
     /// on its job once it ended, or start one when no job runs, no `wait`
-    /// holds the alert and no failed job of it waits for a person
-    /// ([`failed_live`]). A job that failed is recorded by [`fail_live`]
-    /// and returned as [`LiveStep::Failed`].
+    /// holds the alert and no failed job of it recorded by an earlier
+    /// runtime waits for a person ([`failed_live`]). A job that failed is
+    /// returned as [`LiveStep::Escalate`] with [`Escalation::JobFailed`]:
+    /// the alert's ask opens (ADR-t609-1).
     pub(super) fn follow(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -656,15 +610,11 @@ impl RecoveryWatch {
         if let Some((job, verdict)) = self.ended(sv, alert, reason)? {
             let verdict = match verdict {
                 Ok(verdict) => verdict,
-                Err(error) if live.ask_on_failure => {
+                Err(error) => {
                     return Ok(LiveStep::Escalate(
                         job.attempt,
                         Escalation::JobFailed(error),
                     ));
-                }
-                Err(error) => {
-                    fail_live(sv, run, live.workspace, alert, job.attempt, &error)?;
-                    return Ok(LiveStep::Failed);
                 }
             };
             return Ok(match apply_live(sv, run, live, &job, verdict)? {
@@ -694,10 +644,6 @@ impl RecoveryWatch {
             .retain(|(held, why, _)| !(*held == alert && *why == reason));
         Ok(
             match self.start(sv, run, live, alert, reason, facts(), None)? {
-                Some((attempt, Escalation::JobFailed(error))) if !live.ask_on_failure => {
-                    fail_live(sv, run, live.workspace, alert, attempt, &error)?;
-                    LiveStep::Failed
-                }
                 Some((attempt, escalation)) => LiveStep::Escalate(attempt, escalation),
                 None => LiveStep::Pending,
             },
@@ -763,9 +709,9 @@ impl RecoveryWatch {
         });
         let step = self.follow(sv, run, live, alert, || facts)?;
         // Handed to a job (or straight to a person): not again until the
-        // processes make progress. A `wait` that holds the alert or a
-        // failed job a person recovers leaves them for the next look.
-        if self.job.is_some() || matches!(step, LiveStep::Escalate(..) | LiveStep::Failed) {
+        // processes make progress. A `wait` that holds the alert leaves
+        // them for the next look.
+        if self.job.is_some() || matches!(step, LiveStep::Escalate(..)) {
             info!(run_id = %run.id(), "run {}: processes {:?} have used almost no CPU time for {threshold}s", run.id(), idle.iter().map(|p| p.pid).collect::<Vec<_>>());
             self.cpu.hand(&idle);
             self.idle = idle;
@@ -1386,7 +1332,6 @@ impl SessionWatch {
             at_prompt: self.at_prompt(sv),
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         let started = self.recovery.start(
             sv,
@@ -1438,7 +1383,6 @@ impl SessionWatch {
             at_prompt: self.at_prompt(sv),
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         match apply_live(sv, run, &live, job, verdict)? {
             Ok(applied) => {
@@ -1473,10 +1417,6 @@ impl SessionWatch {
         escalation: Escalation,
     ) -> Result<()> {
         let alert = RecoveryAlert::LongBackground;
-        if let Escalation::JobFailed(error) = &escalation {
-            let workspace = self.workspace.clone();
-            return fail_live(sv, run, &workspace, alert, attempt, error);
-        }
         let note = escalation.note(run, alert, attempt);
         let extra = json!({"marker_at_ms": millis(marker)});
         // A `stalled` ask opened meanwhile (the idle detection's) already
@@ -1555,10 +1495,9 @@ impl SessionWatch {
             at_prompt: self.at_prompt(sv),
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         match self.recovery.watch_idle(sv, run, &live, phase)? {
-            LiveStep::Pending | LiveStep::Failed => Ok(()),
+            LiveStep::Pending => Ok(()),
             LiveStep::Repaired(applied) => {
                 if let Some((text, sent_at, submission)) = applied.sent {
                     self.stall.input_sent(sent_at, Some(&text));
@@ -1676,7 +1615,6 @@ impl SessionWatch {
             at_prompt: false,
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         let timeout = sv.cmux.exit_timeout().as_secs();
         let step = self.recovery.follow(sv, run, &live, RecoveryAlert::StuckExit, || {
@@ -1684,8 +1622,6 @@ impl SessionWatch {
         })?;
         match step {
             LiveStep::Pending => {}
-            // A person recovers it by hand from the attention: asked.
-            LiveStep::Failed => self.exit_asked = true,
             LiveStep::Repaired(applied) => {
                 if applied.exit_again {
                     self.exit_requested = Some(Instant::now());
@@ -1736,7 +1672,6 @@ impl SessionWatch {
             at_prompt: false,
             lands: false,
             park: false,
-            ask_on_failure: false,
         };
         let hash = self.prompt_hash.clone();
         let step = self.recovery.follow(
@@ -1747,7 +1682,7 @@ impl SessionWatch {
             || json!({"prompt": kind, "screen_hash": hash, "excerpt": excerpt}),
         )?;
         match step {
-            LiveStep::Pending | LiveStep::Repaired(_) | LiveStep::Failed => {}
+            LiveStep::Pending | LiveStep::Repaired(_) => {}
             LiveStep::Escalate(attempt, escalation) => {
                 let note = escalation.note(run, RecoveryAlert::PromptWaiting, attempt);
                 let workspace = self.workspace.clone();

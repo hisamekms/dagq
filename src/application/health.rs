@@ -785,8 +785,10 @@ pub fn attention(
             continue;
         }
         let events = queue.run_events(run.id())?;
-        // A live session whose recovery job failed waits for a person to
-        // recover it by hand (ADR-0047 decision 40), whatever its status.
+        // A live session whose recovery job failed under a runtime from
+        // before ADR-t609-1 waits for a person to recover it by hand
+        // (ADR-0047 decision 40), whatever its status; a failed job opens
+        // the alert's own ask now.
         if let Some(failed) = crate::domain::recovery::failed_live(&events, None) {
             attention.push(Attention {
                 run_id: Some(run.id().clone()),

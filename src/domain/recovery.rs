@@ -156,7 +156,9 @@ fn clears(event: &RunEvent, alert: &str) -> bool {
 /// The latest `recovery_failed` of a live session (of `alert`, or any)
 /// that still waits for a person to recover the session by hand: nothing
 /// after it cleared it (see [`clears`]). While it waits, the runtime starts
-/// no other job for that alert.
+/// no other job for that alert. Only a runtime from before ADR-t609-1
+/// records it for a live session (a failed job opens the alert's ask
+/// now); it is still read for a run adopted from one.
 pub fn failed_live(events: &[RunEvent], alert: Option<RecoveryAlert>) -> Option<&RunEvent> {
     let (index, failed) = events.iter().enumerate().rev().find(|(_, e)| {
         e.kind == "recovery_failed"

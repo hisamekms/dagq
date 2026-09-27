@@ -1447,7 +1447,9 @@ pub enum AttentionNext {
     TriageByHand,
     /// The recovery job of a live session's alert failed
     /// (`recovery_failed`, ADR-0047 decision 40): a person looks at the
-    /// session and recovers it by hand, until the session moves on.
+    /// session and recovers it by hand, until the session moves on. Only a
+    /// runtime from before ADR-t609-1 records it; a failed job opens the
+    /// alert's own ask now.
     RecoverByHand,
     /// The headless plan review of a proposal failed
     /// (`plan_review_failed`): a person readies its tasks with the bypass

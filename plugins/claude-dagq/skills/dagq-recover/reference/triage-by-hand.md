@@ -8,4 +8,4 @@ Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `fail
 
 ## `recover by hand`
 
-Attention `recover by hand` (`kind` `recovery_failed`): a live run's recovery job failed (`last_error` its error); the session is untouched and the job does not retry that alert. Read the screen with the person and carry out what they decide as in the skill's section 7 (`reference/session.md`, `reference/stalled.md`, `reference/stuck-exit.md`). It clears once the session exits.
+Attention `recover by hand` (`kind` `recovery_failed`): a live run's recovery job failed under a runtime from before ADR-t609-1 (`last_error` its error); the session is untouched and the job does not retry that alert. The runtime now opens the alert's own ask instead (`stuck_exit`, `answer_prompt`, `stalled`, `reason_category` `recovery_failed`), carried out as that kind's answer. Read the screen with the person and carry out what they decide as in the skill's section 7 (`reference/session.md`, `reference/stalled.md`, `reference/stuck-exit.md`). It clears once the session exits.

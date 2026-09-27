@@ -5,9 +5,9 @@
 //! (`submit_unconfirmed` of a text, `submit_not_started`, reason
 //! `send_unconfirmed`). Both go to the recovery job before any ask; only
 //! an escalation, a verdict of low confidence, a repair whose preconditions
-//! no longer hold, a failed job (task 442's acceptance, through
-//! `Live::ask_on_failure`; the other live alerts still give the `recover by
-//! hand` attention) and an alert past its attempts open the `stalled` ask,
+//! no longer hold, a failed job (task 442's acceptance; every live alert
+//! does the same since ADR-t609-1) and an alert past its attempts open the
+//! `stalled` ask,
 //! which the [`StallWatch`] follows. A `resume` repair parks a run in its
 //! first session for a session of its own ([`SessionWatch::park_for_resume`]).
 //!
@@ -134,7 +134,6 @@ impl SessionWatch {
             at_prompt: self.at_prompt(sv),
             lands: false,
             park: self.input_at.is_none(),
-            ask_on_failure: true,
         };
         let start = self.stall.poll(
             sv,
@@ -301,7 +300,6 @@ impl SessionWatch {
             at_prompt: self.at_prompt(sv),
             lands: false,
             park: self.input_at.is_none(),
-            ask_on_failure: true,
         };
         let step =
             self.recovery
@@ -316,7 +314,7 @@ impl SessionWatch {
             self.send_resolved(sv, run, id, before, requested, "escalated")?;
         }
         match step {
-            LiveStep::Pending | LiveStep::Failed => Ok(None),
+            LiveStep::Pending => Ok(None),
             LiveStep::Repaired(applied) => {
                 if let Some(instruction) = applied.resume {
                     self.stall.request_park(instruction);
