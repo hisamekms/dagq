@@ -569,6 +569,7 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
             "abandoned",
             "exit request timed out",
             &ReasonCode::Other.into(),
+            None,
         )
         .unwrap();
     assert!(queue.run_lease(leaseless.id()).unwrap().is_none());

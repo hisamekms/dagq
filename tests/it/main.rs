@@ -40,6 +40,7 @@ mod queue_schema;
 mod queue_search;
 mod queue_tasks;
 mod related;
+mod runtime_abandon;
 mod runtime_adopt;
 mod runtime_ask;
 mod runtime_candidates;

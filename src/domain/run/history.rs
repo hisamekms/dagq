@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::domain::resume::{CONFLICT_ONLY_RESUME_LIMIT, ResumeCount};
 use crate::domain::{
     ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
-    RunEvent, RunStatus, TriageState, event_attention, event_kind, recheck, run_attention,
-    triage_state,
+    RunEvent, RunStatus, TriageState, abandon_left_session_open, event_attention, event_kind,
+    recheck, run_attention, triage_state,
 };
 
 /// The events of one run, oldest first, borrowed from whoever read them.
@@ -356,6 +356,17 @@ impl<'a> RunHistory<'a> {
             .collect()
     }
 
+    /// Whether the supervisor gave the run up with its live session left
+    /// open, the `/exit` not sent (task 237), and no session has exited
+    /// since.
+    pub fn session_left_open(&self) -> bool {
+        self.events
+            .iter()
+            .rev()
+            .take_while(|e| e.kind != event_kind::SESSION_EXITED)
+            .any(|e| abandon_left_session_open(&e.kind, &e.payload))
+    }
+
     /// The `error` of the latest `push_failed`.
     pub fn push_failure(&self) -> Option<&'a str> {
         self.last(event_kind::PUSH_FAILED)
@@ -379,32 +390,35 @@ pub fn run_attention_of<'a>(
         (AttentionNext::Triaging, TriageState::Failed) => AttentionNext::TriageByHand,
         (next, _) => next,
     };
-    let kind = history
-        .events
-        .iter()
-        .rev()
-        .find(|e| match next {
-            // The error the owner gave up with, whatever its payload.
-            AttentionNext::RecoverRun => e.kind == event_kind::RUNTIME_ERROR,
-            // Whatever parked the run for a session last.
-            AttentionNext::Resuming => {
-                e.payload.get("status").and_then(Value::as_str)
-                    == Some(RunStatus::NeedsSession.as_str())
-            }
-            // A failed review whose `approve_landing` ask was closed
-            // without moving the run (task 328) is reviewed by hand.
-            AttentionNext::ReviewAndIntegrate if e.kind == event_kind::REVIEW_FAILED => true,
-            // An ask about the run is its own attention, not the run's.
-            _ => {
-                !ASK_EVENT_KINDS.contains(&e.kind.as_str())
-                    && event_attention(&e.kind, &e.payload).is_some()
-            }
-        })
-        .map(|e| e.kind.as_str());
-    // After a failed headless review the run is a person's to review.
+    let event = history.events.iter().rev().find(|e| match next {
+        // The error the owner gave up with, whatever its payload.
+        AttentionNext::RecoverRun => e.kind == event_kind::RUNTIME_ERROR,
+        // Whatever parked the run for a session last.
+        AttentionNext::Resuming => {
+            e.payload.get("status").and_then(Value::as_str)
+                == Some(RunStatus::NeedsSession.as_str())
+        }
+        // A failed review whose `approve_landing` ask was closed
+        // without moving the run (task 328) is reviewed by hand.
+        AttentionNext::ReviewAndIntegrate if e.kind == event_kind::REVIEW_FAILED => true,
+        // An ask about the run is its own attention, not the run's.
+        _ => {
+            !ASK_EVENT_KINDS.contains(&e.kind.as_str())
+                && event_attention(&e.kind, &e.payload).is_some()
+        }
+    });
+    let kind = event.map(|e| e.kind.as_str());
     let next = match next {
+        // After a failed headless review the run is a person's to review.
         AttentionNext::ReviewAndIntegrate if kind == Some(event_kind::REVIEW_FAILED) => {
             AttentionNext::ReviewByHand
+        }
+        // Given up on with its session left open (task 237): the session
+        // is ended first, and its exit brings the run's own attention back.
+        AttentionNext::ReviewAndIntegrate | AttentionNext::RecoverRun
+            if history.session_left_open() =>
+        {
+            AttentionNext::ExitSession
         }
         next => next,
     };
@@ -992,6 +1006,45 @@ mod tests {
                 false
             ),
             Some((AttentionNext::RecoverRun, Some("runtime_error".into())))
+        );
+        // Given up on with its session left open (task 237): the session
+        // is a person's to end first, until it exits.
+        let left_open = event(
+            1,
+            "runtime_error",
+            json!({"message": "x", "lease_released": true, "session": {"workspace_id": "w", "exit": "failed"}}),
+        );
+        for (status, then) in [
+            (
+                RunStatus::AwaitingIntegration,
+                AttentionNext::ReviewAndIntegrate,
+            ),
+            (RunStatus::Validating, AttentionNext::RecoverRun),
+        ] {
+            assert_eq!(
+                attention(std::slice::from_ref(&left_open), status, false),
+                Some((AttentionNext::ExitSession, Some("runtime_error".into())))
+            );
+            assert_eq!(
+                attention(
+                    &[left_open.clone(), event(2, "session_exited", json!({}))],
+                    status,
+                    false
+                ),
+                Some((then, Some("runtime_error".into())))
+            );
+        }
+        let sent = event(
+            1,
+            "runtime_error",
+            json!({"message": "x", "lease_released": true, "session": {"workspace_id": "w", "exit": "sent"}}),
+        );
+        assert_eq!(
+            attention(&[sent], RunStatus::AwaitingIntegration, false),
+            Some((
+                AttentionNext::ReviewAndIntegrate,
+                Some("runtime_error".into())
+            ))
         );
         // Whatever parked the run for a session last.
         assert_eq!(

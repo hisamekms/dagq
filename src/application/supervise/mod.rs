@@ -65,13 +65,13 @@ use super::{
     tail, unix_seconds,
 };
 use crate::domain::{
-    AfterValidation, AskId, AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId,
-    EvidenceCheck, HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS,
-    MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode,
-    Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision,
-    RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus, SessionRole,
-    TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun, TaskStatus, TriageState,
-    after_validation,
+    ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, AfterValidation, AskId,
+    AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId, EvidenceCheck,
+    HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS, MAX_RESUME_ATTEMPTS,
+    MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode, Receipt, ReceiptResult,
+    ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision, RunHistory, RunId, RunLease,
+    RunPaths, RunPlan, RunProcess, RunStatus, SessionRole, TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES,
+    TaskAction, TaskId, TaskRun, TaskStatus, TriageState, after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
     decide_conflict, decide_revise, event_kind, heartbeat_stale,
     kpi::{CANDIDATES_SAMPLED, CandidatesSample},
@@ -1304,13 +1304,18 @@ impl Supervisor<'_> {
                     // session may be alive. Disown the run, delete nothing,
                     // and keep serving the other slots. A headless review in
                     // progress is stopped: nobody would read its verdict.
+                    // A session kept open through validation, review, revise
+                    // or its `/exit` is asked to end, since nothing would
+                    // watch it any more (task 237).
                     stop_job(&mut slot);
+                    let session = self.exit_abandoned_session(&slot);
                     let message = format!("{error:#}");
                     warn!(run_id = %slot.run.id(), "run {} retained for inspection: {message}; see show {} and doctor", slot.run.id(), slot.run.task_id());
-                    self.abandon(
+                    self.abandon_with_session(
                         &slot.run,
                         message,
                         &reason_of_error(&error, ReasonCode::Other),
+                        session.as_ref(),
                     );
                 }
             }
@@ -1497,9 +1502,20 @@ impl Supervisor<'_> {
         });
     }
     fn abandon(&mut self, run: &TaskRun, message: String, reason: &Reason) {
+        self.abandon_with_session(run, message, reason, None);
+    }
+    /// [`abandon`](Self::abandon) a run whose live session the supervisor
+    /// kept open, recording what became of it (`exit_abandoned_session`).
+    fn abandon_with_session(
+        &mut self,
+        run: &TaskRun,
+        message: String,
+        reason: &Reason,
+        session: Option<&Value>,
+    ) {
         if let Err(error) = self
             .queue
-            .abandon_run(run.id(), &self.token, &message, reason)
+            .abandon_run(run.id(), &self.token, &message, reason, session)
         {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record the error: {error:#}", run.id());
         }
@@ -1508,6 +1524,54 @@ impl Supervisor<'_> {
             task_id: run.task_id(),
             message,
         });
+    }
+    /// Ask the live session of a slot being given up on to end (task 237):
+    /// the session kept open through validation, review, revise or its
+    /// `/exit` would otherwise be left open with nobody watching it, the
+    /// run without a lease. `None` when the slot holds no such session, it
+    /// ended already, its workspace is gone, or the lease is not known to
+    /// be this supervisor's; else the `session` of the `runtime_error`:
+    /// `exit` is `sent`, `requested_before` (the `/exit` was typed already
+    /// and is never typed twice) or `failed` with the `error`, which
+    /// leaves the session to a person (`AttentionNext::ExitSession`).
+    fn exit_abandoned_session(&mut self, slot: &Slot) -> Option<Value> {
+        let (workspace, requested) = open_session(&slot.phase)?;
+        let workspace = workspace.to_owned();
+        // Nothing is typed into a session this supervisor may no longer own
+        // (the lease check itself failed), nor into one that ended already.
+        if !matches!(self.queue.holds_lease(slot.run.id(), &self.token), Ok(true))
+            || matches!(session_alive(self, slot.run.id()), Ok(false))
+            || matches!(self.cmux.exists(&workspace), Ok(false))
+        {
+            return None;
+        }
+        let (exit, error) = if requested {
+            (ABANDON_EXIT_REQUESTED_BEFORE, None)
+        } else {
+            let failed = |why: String| (ABANDON_EXIT_FAILED, Some(why));
+            match submit(self, &slot.run, &workspace, Input::Exit, "/exit") {
+                Ok(Submission::Submitted(_)) => (ABANDON_EXIT_SENT, None),
+                Ok(Submission::Dialog(_)) => {
+                    failed("a dialog is on the screen, so /exit was not submitted".into())
+                }
+                Ok(Submission::Stuck(_)) => failed("/exit stayed in the input box".into()),
+                Ok(Submission::Unsent) => failed("/exit did not get to the session".into()),
+                Err(error) => failed(format!("{error:#}")),
+            }
+        };
+        match &error {
+            Some(error) => {
+                warn!(run_id = %slot.run.id(), "run {}: /exit could not be sent to its session in {workspace}: {error}; the session is left to a person", slot.run.id());
+            }
+            None => {
+                info!(run_id = %slot.run.id(), "run {}: its session in {workspace} is asked to exit ({exit})", slot.run.id());
+            }
+        }
+        let mut session = json!({"workspace_id": workspace, "exit": exit});
+        if let Some(error) = error {
+            session["error"] = json!(error);
+        }
+        Some(session)
     }
     /// A resume that failed in itself (not the session's verdict): record
     /// `resume_finished` with outcome `error` and give the lease back; the
@@ -1737,7 +1801,9 @@ impl Supervisor<'_> {
                 let run = self
                     .queue
                     .finish_validation(slot.run.id(), &self.token, &validation)?;
-                let session = session.take();
+                // Kept in the phase until it is replaced, so an error before
+                // that still finds the session to ask to exit (task 237).
+                let session = session.clone();
                 let events = self.queue.run_events(run.id())?;
                 let history = RunHistory::from_events(&events);
                 // A landing recheck resumed the run without waiting for the
@@ -1768,7 +1834,8 @@ impl Supervisor<'_> {
                 };
                 let attempt = watch.attempt;
                 let duration_secs = watch.job.started.elapsed().as_secs();
-                let session = watch.session.take();
+                // Kept in the phase until it is replaced (task 237).
+                let session = watch.session.clone();
                 let run = self.queue.run(slot.run.id())?;
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
@@ -1980,6 +2047,26 @@ fn stop_job(slot: &mut Slot) {
         Phase::Review(watch) => watch.job.stop(),
         Phase::Recovery(watch) => watch.job.stop(),
         _ => stop_recovery(slot),
+    }
+}
+
+/// The live session a slot keeps open through validation, review, revise
+/// or its `/exit` (ADR-0027), and whether the `/exit` was typed into it
+/// already.
+fn open_session(phase: &Phase) -> Option<(&str, bool)> {
+    match phase {
+        Phase::Validating(_, Some(session)) => Some((&session.workspace, false)),
+        Phase::Review(watch) => watch
+            .session
+            .as_ref()
+            .map(|session| (session.workspace.as_str(), false)),
+        Phase::Revise(watch) => Some((&watch.session.workspace, false)),
+        Phase::Exiting(watch) => watch.session.as_ref().map(|session| {
+            // A `/exit` that never got there (task 354) was not typed.
+            let typed = watch.requested.is_some() && watch.unsent.is_none();
+            (session.workspace.as_str(), typed)
+        }),
+        _ => None,
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: dagq-recover
-description: What a person does by hand in a dagq queue, from the inbox or a planner session and only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer in a run's cmux workspace; bypass or resubmit a plan review; start, stop or update the runtime (up / down / install). Use when status or watch shows "recover run", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+description: What a person does by hand in a dagq queue, from the inbox or a planner, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer in a run's cmux workspace; bypass or resubmit a plan review; start, stop or update the runtime (up / down / install). Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
 ---
 
 # dagq: what a person does by hand
@@ -19,7 +19,7 @@ It shows the supervisors, each unfinished run's lease, processes and `blockers` 
 
 ## 2. Stop what is still running
 
-Recovery is refused while a process of the run lives or its lease is fresh. The person ends them (`/exit` in its workspace, or stopping a hung supervisor); never kill processes yourself.
+Recovery is refused while a run process lives or its lease is fresh. The person ends them (`/exit` in its workspace, also for `exit the session`, or stop a hung supervisor); never kill them.
 
 ## 3. Recover (only without a supervisor)
 

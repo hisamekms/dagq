@@ -67,13 +67,16 @@ impl SqliteQueue {
     /// or touching its processes and resources. Dropping the lease lets
     /// `recover` judge the run by its registered processes alone while this
     /// supervisor keeps serving other runs; a wrapper that has not registered
-    /// yet can no longer do so.
+    /// yet can no longer do so. `session` says what became of the run's
+    /// live session (the `/exit` the supervisor sent it, or why none got
+    /// there), recorded as the event's `session`.
     pub fn abandon_run(
         &mut self,
         id: &RunId,
         token: &str,
         message: &str,
         reason: &Reason,
+        session: Option<&Value>,
     ) -> Result<TaskRun> {
         let tx = self
             .conn
@@ -94,7 +97,7 @@ impl SqliteQueue {
             &tx,
             id,
             event_kind::RUNTIME_ERROR,
-            reason.on(json!({"message": message, "lease_released": released == 1})),
+            reason.on(abandon_payload(message, released == 1, session)),
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -739,8 +742,9 @@ impl RunTransitions for SqliteQueue {
         token: &str,
         message: &str,
         reason: &Reason,
+        session: Option<&Value>,
     ) -> Result<TaskRun> {
-        SqliteQueue::abandon_run(self, id, token, message, reason)
+        SqliteQueue::abandon_run(self, id, token, message, reason, session)
     }
     fn begin_integration(&mut self, id: &RunId, token: &str, main: &CommitSha) -> Result<TaskRun> {
         SqliteQueue::begin_integration(self, id, token, main)
@@ -875,4 +879,14 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<()> {
         SqliteQueue::record_workspace_closed(self, id, workspace_id, payload)
     }
+}
+
+/// The payload of an abandon's `runtime_error`: the message, whether the
+/// lease went, and what became of the run's live session, when it had one.
+fn abandon_payload(message: &str, lease_released: bool, session: Option<&Value>) -> Value {
+    let mut payload = json!({"message": message, "lease_released": lease_released});
+    if let Some(session) = session {
+        payload["session"] = session.clone();
+    }
+    payload
 }

@@ -59,7 +59,7 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 - `fix the push command` (`kpi_push_abandoned`): the KPI push command (`[push]` of `host.toml`) gave up a message after three failures; the person fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`, with the person.
-- `recover run`: the `dagq-recover` skill.
+- `recover run`, `exit the session`: `dagq-recover`.
 
 ## Where your authority ends
 

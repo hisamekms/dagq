@@ -1332,6 +1332,13 @@ pub enum AttentionNext {
     /// a person fixes the command or the service behind it. It ends with
     /// the next push that succeeds.
     FixPush,
+    /// The supervisor gave up on a run whose session it kept open through
+    /// validation, review, revise or its `/exit`, and could not send that
+    /// session `/exit` (a `runtime_error` with `lease_released` and
+    /// `session.exit` `failed`, task 237): a person ends the session in
+    /// its workspace. Once it exited (`session_exited`), the run's own
+    /// attention (`review and integrate`, `recover run`) comes back.
+    ExitSession,
 }
 
 /// How many times the supervisor resumes one `needs_session` run (one
@@ -1375,6 +1382,7 @@ impl fmt::Display for AttentionNext {
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
             Self::FixPush => f.write_str("fix the push command"),
+            Self::ExitSession => f.write_str("exit the session"),
         }
     }
 }
@@ -1539,6 +1547,25 @@ pub const ASK_EVENT_KINDS: &[&str] = &[
     "ask_closed",
 ];
 
+/// `session.exit` of an abandon's `runtime_error` (task 237): the
+/// supervisor sent the run's live session `/exit`.
+pub const ABANDON_EXIT_SENT: &str = "sent";
+/// The `/exit` was typed into the session already (it is never typed twice).
+pub const ABANDON_EXIT_REQUESTED_BEFORE: &str = "requested_before";
+/// The `/exit` could not be sent: the session is left open to a person.
+pub const ABANDON_EXIT_FAILED: &str = "failed";
+
+/// Whether a `runtime_error` is an abandon that left the run's live session
+/// open: the lease went and the `/exit` could not be sent (task 237).
+pub fn abandon_left_session_open(kind: &str, payload: &serde_json::Value) -> bool {
+    kind == event_kind::RUNTIME_ERROR
+        && payload.get("lease_released") == Some(&serde_json::Value::Bool(true))
+        && payload
+            .pointer("/session/exit")
+            .and_then(serde_json::Value::as_str)
+            == Some(ABANDON_EXIT_FAILED)
+}
+
 /// Whether a run event is a transition that stops at a person's judgment,
 /// and what to do about it. The run comes to rest in
 /// `status` (`awaiting_integration`, `needs_session`, `failed`), or the
@@ -1613,6 +1640,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // the inbox as their asks; only the replaced binary is a notice.
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
+        (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
+            Some(AttentionNext::ExitSession)
+        }
         ("runtime_error", _)
             if payload.get("lease_released") == Some(&serde_json::Value::Bool(true)) =>
         {
@@ -2278,6 +2308,17 @@ mod attention_tests {
                 None,
             ),
             ("runtime_error", json!({"message": "x"}), None),
+            // An abandon that could not send its live session `/exit`.
+            (
+                "runtime_error",
+                json!({"message": "x", "lease_released": true, "session": {"workspace_id": "w", "exit": "failed", "error": "e"}}),
+                Some(ExitSession),
+            ),
+            (
+                "runtime_error",
+                json!({"message": "x", "lease_released": true, "session": {"workspace_id": "w", "exit": "sent"}}),
+                Some(RecoverRun),
+            ),
             (
                 "prompt_waiting",
                 json!({"workspace_id": "w", "excerpt": "x", "screen_hash": "h"}),
@@ -2421,6 +2462,7 @@ mod attention_tests {
             "applying the answer of ask 7 (runtime)"
         );
         assert_eq!(RecoverRun.to_string(), "recover run");
+        assert_eq!(ExitSession.to_string(), "exit the session");
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(ReportUpdate.to_string(), "report the update");

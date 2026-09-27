@@ -973,13 +973,15 @@ pub trait RunTransitions {
         base_commit: &CommitSha,
         token: &str,
     ) -> Result<ClaimOutcome>;
-    /// Record a runtime error and give the lease up, leaving the status.
+    /// Record a runtime error and give the lease up, leaving the status;
+    /// `session` is what became of the run's live session, if it had one.
     fn abandon_run(
         &mut self,
         id: &RunId,
         token: &str,
         message: &str,
         reason: &Reason,
+        session: Option<&serde_json::Value>,
     ) -> Result<TaskRun>;
     /// Take the single integration slot for `id` under `token`.
     fn begin_integration(&mut self, id: &RunId, token: &str, main: &CommitSha) -> Result<TaskRun>;
