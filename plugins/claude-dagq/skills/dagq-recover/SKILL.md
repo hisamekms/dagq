@@ -33,9 +33,7 @@ The run becomes `interrupted` (an `integrating` one `awaiting_integration`); its
 
 ## 4. Triage by hand, and recover by hand
 
-Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged: no plan review; to change it, use a planner), `cancel ID` drops it. Its workspaces stay open until then, so read the screen first; close one by hand only while no supervisor runs.
-
-Attention `recover by hand` (`kind` `recovery_failed`): a live run's recovery job failed (`last_error` its error); the session is untouched and the job does not retry that alert. Read the screen with the person and carry out what they decide as in section 7. It clears once the session exits.
+Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again. `recover by hand` (`recovery_failed`): a live run's recovery job failed; the session is untouched. Before bringing either to the person, read `reference/triage-by-hand.md`: what to read, and `ready ID` / `cancel ID` or section 7 on their answer.
 
 ## 5. Start, stop and update the runtime
 
@@ -61,4 +59,4 @@ A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialog
 
 Only plan review makes a task `ready`. A person may skip it with `"$DAGQ" ready ID --bypass-review` (a draft or submitted task; `review_bypassed`): on their explicit word only, per task, for an urgent fix, a failed plan review, or a concern they already decided. Never bypass as a habit or on a planner's judgment; a retry needs none (section 4).
 
-Attention `plan review by hand` (`kind` `plan_review_failed`): the headless plan review of a proposal could not start, timed out or printed no valid verdict; the proposal stays `submitted` and held, and is not reviewed again by itself. Read `last_error` and the job's files under `<queue dir>/plan-reviews/<plan review id>/` (the job's ID, not the proposal's), `"$DAGQ" proposal show ID` and the tasks, and bring the choice to the person: `ready --bypass-review` each task, have a planner (theirs, `dagq plan`) run `"$DAGQ" submit --proposal ID` to send it through plan review again as it is, or `cancel` the tasks. `check the planner` (`planner_unresponsive`): the person looks at that planner's workspace (`dagq planners`); nothing is closed or readied for it.
+Attention `plan review by hand` (`plan_review_failed`): a proposal's headless plan review failed; it stays `submitted` and held. `check the planner` (`planner_unresponsive`): the person looks at that planner's workspace. What to read and the person's choices: `reference/plan-review-by-hand.md`.

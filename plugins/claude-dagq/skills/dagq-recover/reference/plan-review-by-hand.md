@@ -1,0 +1,5 @@
+# Plan review by hand, and an unresponsive planner
+
+Read this when the attention `plan review by hand` or `check the planner` reaches the person (the `dagq-recover` skill, section 8). Act only on the person's word; `ready --bypass-review` follows the rules of section 8.
+
+Attention `plan review by hand` (`kind` `plan_review_failed`): the headless plan review of a proposal could not start, timed out or printed no valid verdict; the proposal stays `submitted` and held, and is not reviewed again by itself. Read `last_error` and the job's files under `<queue dir>/plan-reviews/<plan review id>/` (the job's ID, not the proposal's), `"$DAGQ" proposal show ID` and the tasks, and bring the choice to the person: `ready --bypass-review` each task, have a planner (theirs, `dagq plan`) run `"$DAGQ" submit --proposal ID` to send it through plan review again as it is, or `cancel` the tasks. `check the planner` (`planner_unresponsive`): the person looks at that planner's workspace (`dagq planners`); nothing is closed or readied for it.
