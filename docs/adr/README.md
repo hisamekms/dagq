@@ -4,8 +4,8 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 tags:
   - architecture
   - documentation
@@ -98,6 +98,9 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t768-1](2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md) | 着地の検証のnextestは落ちたtestを1回だけ流し直してFLAKYを見分けるが検証は失敗のままにし、落ちたtestが全てFLAKYならworkerをresumeせずに着地を1回やり直す（ADR-0076決定2をamends） | 2026-09-27 |
 | [ADR-t803-1](2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md) | idle の印（Stop hook）を主な信号のまま残し、印が無いか最後の入力より古いときだけ画面から idle を推定する | 2026-09-27 |
 | [ADR-t808-1](2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md) | runtimeのplannerが人の判断を経ずにsubmitできないfollow_upの深さを2以上から3以上に上げる（ADR-0047決定16・20をamends） | 2026-09-28 |
+| [ADR-t813-1](2026-09-28-t813-1-headless-worker-path.md) | workerの非対話の経路を足し、1 turnを1回の非対話の呼び出しにして、answer・revise・resume・催促を同じsessionのresumeの呼び出しで送り、processをcmuxのworkspaceのsession wrapperの中で動かす。対話の経路はClaudeの既定に残し、非対話で起きる止まりはADR-0047の3層で扱い新しいactorは足さない（ADR-0027決定1・2・4、ADR-0071決定1・2・6・16、ADR-0047決定30・31・37・39・40をamends） | 2026-09-28 |
+| [ADR-t813-2](2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md) | workerのproviderをtaskごとに選び（claude / codex、既定claude）、使えないときだけ両方向に切り替えて同じworktreeで新しいsessionを始める。認証と利用上限の控えをproviderごとにし、workerのclaimを止めてaskを開くのは両方が使えないとき（Claudeだけの役割のためClaudeの控えはaskを開く）（ADR-0004決定1、ADR-0047決定42をamends） | 2026-09-28 |
+| [ADR-t813-3](2026-09-28-t813-3-codex-worker-permissions.md) | Codexのworkerをworkspace-writeのsandboxで動かし、書く場所をrunのworktreeのgitの管理dir・objects・run branchのref・runのdir・cargoのregistryに絞り、networkは開け、承認はnever、queueにはrunのdirを経てsupervisorが取り込み、pkill / killallはsandboxが拒みrulesが補う。設定は起動の引数で渡す | 2026-09-28 |
 
 ## 置き換え・廃止されたADR
 
