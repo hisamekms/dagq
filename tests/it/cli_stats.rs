@@ -814,7 +814,7 @@ mod stats {
     #[test]
     fn cli_stats_reads_the_queue_and_since_returns_only_new_runs() {
         use dagq::{
-            domain::{ClaimOutcome, CommitSha},
+            domain::{ClaimOutcome, CommitSha, LeaseToken},
             infrastructure::sqlite::SqliteQueue,
         };
         let dir = tempfile::tempdir().unwrap();
@@ -832,7 +832,7 @@ mod stats {
         let base = "0123456789abcdef0123456789abcdef01234567";
         let finish = |queue: &mut SqliteQueue| {
             let ClaimOutcome::Claimed { run } = queue
-                .claim_for_supervisor(&CommitSha::try_from(base).unwrap(), "t")
+                .claim_for_supervisor(&CommitSha::try_from(base).unwrap(), &LeaseToken::new("t"))
                 .unwrap()
             else {
                 panic!("nothing to claim");
@@ -890,7 +890,7 @@ mod stats {
 /// `derived:toolchain` mark and writes no event (ADR-0051 decisions 10, 12).
 #[test]
 fn marks_are_recorded_retracted_and_derived_from_the_claims() {
-    use dagq::domain::{ClaimOutcome, CommitSha};
+    use dagq::domain::{ClaimOutcome, CommitSha, LeaseToken};
     use dagq::infrastructure::sqlite::SqliteQueue;
     use serde_json::json;
     let (_dir, db) = queue();
@@ -905,7 +905,10 @@ fn marks_are_recorded_retracted_and_derived_from_the_claims() {
         ("x86_64-apple-darwin", "01"),
         ("aarch64-apple-darwin", "02"),
     ] {
-        let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor(&base, &LeaseToken::new("t"))
+            .unwrap()
+        else {
             panic!("nothing to claim");
         };
         // The attributes a supervisor's claim records (task 197).

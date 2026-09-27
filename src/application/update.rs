@@ -24,6 +24,7 @@ use super::{
     Clock, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
     install::{self, Binaries, InstallOptions, Source, previous_path},
 };
+use crate::domain::LeaseToken;
 use crate::domain::{
     APPROVE_UPDATE_OPTIONS, AskKind, EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent,
     SupervisorRegistration, UPDATE_FAILED_OPTIONS,
@@ -236,7 +237,7 @@ pub fn retry_requested(updates: &[RunEvent]) -> bool {
 pub struct JobOptions {
     pub commit: String,
     /// The supervisor that started the job, whose handoff it watches.
-    pub token: String,
+    pub token: LeaseToken,
     /// The fixed binary to replace: the supervisor's own.
     pub target: PathBuf,
     /// A checkout of the repository the update's worktree is added from.
@@ -357,7 +358,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
                 // `install` put the old binary back itself if it had
                 // replaced it; the supervisor may be gone with the new one.
                 let serving = before.as_ref().map(|before| before.token.clone());
-                let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_deref())?;
+                let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_ref())?;
                 return failed(
                     queue,
                     options,
@@ -467,12 +468,12 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
 
 fn registration(
     queue: &dyn RunCoordination,
-    token: &str,
+    token: &LeaseToken,
 ) -> Result<Option<SupervisorRegistration>> {
     Ok(queue
         .supervisors()?
         .into_iter()
-        .find(|registration| registration.token == token))
+        .find(|registration| registration.token == *token))
 }
 
 /// Check a build that waits for a person as `install` would (its version
@@ -497,15 +498,15 @@ fn stage(ports: &JobPorts, binary: &Path, staged: &Path) -> Result<String> {
 /// The supervisors the install handed over, by token and pid: the ones
 /// its report names without an error, or the job's own supervisor when it
 /// names none.
-fn handed_over(report: &Value, before: Option<&SupervisorRegistration>) -> Vec<(String, u32)> {
-    let handed: Vec<(String, u32)> = report["supervisors"]
+fn handed_over(report: &Value, before: Option<&SupervisorRegistration>) -> Vec<(LeaseToken, u32)> {
+    let handed: Vec<(LeaseToken, u32)> = report["supervisors"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|supervisor| supervisor["error"].is_null())
         .filter_map(|supervisor| {
             Some((
-                supervisor["token"].as_str()?.to_owned(),
+                LeaseToken::new(supervisor["token"].as_str()?),
                 u32::try_from(supervisor["pid"].as_u64()?).ok()?,
             ))
         })
@@ -527,7 +528,7 @@ fn refused(report: &Value) -> Vec<Watched> {
         .flatten()
         .filter_map(|supervisor| {
             let error = supervisor["error"].as_str()?;
-            let token = supervisor["token"].as_str()?.to_owned();
+            let token = LeaseToken::new(supervisor["token"].as_str()?);
             Some(Watched {
                 now: token.clone(),
                 token,
@@ -545,9 +546,9 @@ fn refused(report: &Value) -> Vec<Watched> {
 /// the new build) or why it failed.
 #[derive(Debug)]
 struct Watched {
-    token: String,
+    token: LeaseToken,
     pid: u32,
-    now: String,
+    now: LeaseToken,
     first: Option<i64>,
     done: bool,
     error: Option<String>,
@@ -580,7 +581,7 @@ fn successor<'a>(
 fn watch(
     ports: &JobPorts,
     queue: &dyn Queue,
-    handed: &[(String, u32)],
+    handed: &[(LeaseToken, u32)],
     version: &str,
     options: &JobOptions,
 ) -> Result<Vec<Watched>> {
@@ -689,7 +690,7 @@ fn bring_back(
     ports: &JobPorts,
     queue: &dyn Queue,
     before: Option<&SupervisorRegistration>,
-    serving: Option<&str>,
+    serving: Option<&LeaseToken>,
 ) -> Result<Value> {
     let Some(before) = before else {
         return Ok(json!({"state": "not_registered"}));

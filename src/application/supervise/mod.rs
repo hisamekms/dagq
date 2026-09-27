@@ -24,6 +24,7 @@
 //! and the landing), `revise`, `resume`, `triage`, `adopt` and `idle` (the
 //! idle marker). The prompts and requests are in [`super::prompt`].
 
+use crate::domain::LeaseToken;
 use crate::domain::language::with_instruction;
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -203,7 +204,7 @@ pub struct LoopSettings {
     pub planner_timeout: Duration,
     /// The token of the supervisor this process continues after an exec
     /// (ADR-0045 decision 10); `None` registers a new one.
-    pub handoff_token: Option<String>,
+    pub handoff_token: Option<LeaseToken>,
     /// How `up` started this process (`supervise --mode`): what its start
     /// mark records, since `up` writes the registration's mode only after
     /// it sees the registration (ADR-0051 decision 10).
@@ -362,7 +363,7 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    pub fn start(queues: Arc<dyn QueueOpener>, token: String) -> Self {
+    pub fn start(queues: Arc<dyn QueueOpener>, token: LeaseToken) -> Self {
         let (stop, recv) = mpsc::channel();
         let failed = Arc::new(AtomicBool::new(false));
         let flag = failed.clone();
@@ -461,7 +462,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             token.clone()
         }
         None => {
-            let token = ports.generators.ids.uuid();
+            let token = ports.generators.ids.lease_token();
             // Registered before the first heartbeat so the loop is visible
             // to `status` from its first second, runs or not.
             queue.register_supervisor(&token, pid, parallel, &layout.version)?;
@@ -623,7 +624,7 @@ struct Supervisor<'a> {
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,
     review_material: &'a dyn Fn(TaskId) -> Result<Value>,
-    token: String,
+    token: LeaseToken,
     heartbeat: Heartbeat,
     slots: Vec<Slot>,
     /// `--parallel`: the slots in use (the runs not waiting) are held under
@@ -2393,7 +2394,7 @@ fn spawn_validation(
 fn close_workspace(
     queue: &mut dyn Queue,
     cmux: &dyn WorkspaceBackend,
-    token: &str,
+    token: &LeaseToken,
     run: &TaskRun,
 ) -> Result<TaskRun> {
     let workspace = run.workspace_id().context("missing workspace")?;

@@ -1,5 +1,6 @@
 //! Runtime tests: Runs that need a session: conflicts and the resumed sessions.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -549,14 +550,20 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
 fn unresolved_attempt(db: &Path, run: &TaskRun, main: &str) {
     let mut queue = SqliteQueue::open(db).unwrap();
     let (_, attempt) = queue
-        .begin_resume(run.id(), "earlier", &sha(main), None, Default::default())
+        .begin_resume(
+            run.id(),
+            &LeaseToken::new("earlier"),
+            &sha(main),
+            None,
+            Default::default(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(attempt, 1);
     queue
         .finish_resume(
             run.id(),
-            "earlier",
+            &LeaseToken::new("earlier"),
             None,
             None,
             false,
@@ -821,7 +828,7 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
     let skipped = queue
         .skip_resume(
             run.id(),
-            "dead",
+            &LeaseToken::new("dead"),
             &sha(&resolved),
             &sha(&first_landed),
             false,
@@ -834,7 +841,7 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
         queue
             .skip_resume(
                 run.id(),
-                "other",
+                &LeaseToken::new("other"),
                 &sha(&resolved),
                 &sha(&first_landed),
                 false
@@ -1786,7 +1793,7 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
     let (_, attempt) = queue
         .begin_resume(
             run.id(),
-            "dead-supervisor",
+            &LeaseToken::new("dead-supervisor"),
             &sha(&first_landed),
             None,
             Default::default(),
@@ -1798,7 +1805,7 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
         queue
             .begin_resume(
                 run.id(),
-                "another",
+                &LeaseToken::new("another"),
                 &sha(&first_landed),
                 None,
                 Default::default()
@@ -1807,11 +1814,19 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
             .is_none()
     );
     queue
-        .register_resume_wrapper(run.id(), "dead-supervisor", std::process::id())
+        .register_resume_wrapper(
+            run.id(),
+            &LeaseToken::new("dead-supervisor"),
+            std::process::id(),
+        )
         .unwrap();
     assert!(
         queue
-            .register_resume_wrapper(run.id(), "dead-supervisor", std::process::id())
+            .register_resume_wrapper(
+                run.id(),
+                &LeaseToken::new("dead-supervisor"),
+                std::process::id()
+            )
             .is_err()
     );
     age_lease(&db, &run, 60);

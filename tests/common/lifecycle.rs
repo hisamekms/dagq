@@ -2,6 +2,7 @@
 //! lifecycle tests (`tests/lifecycle_*.rs`).
 
 use super::Bounded;
+use dagq::domain::LeaseToken;
 
 use anyhow::{Result, bail};
 use dagq::{
@@ -153,7 +154,7 @@ impl LaunchAgent for FakeLaunchd {
         self.load(Some(std::process::id()));
         if self.registers_on_install {
             SqliteQueue::open(&self.db)?.register_supervisor(
-                &uuid::Uuid::new_v4().to_string(),
+                &LeaseToken::new(uuid::Uuid::new_v4().to_string()),
                 std::process::id(),
                 2,
                 VERSION,
@@ -407,7 +408,7 @@ impl WorkspaceBackend for FakeCmux {
                 queue.heartbeat(&registration.token)?;
             }
             queue.register_supervisor(
-                &uuid::Uuid::new_v4().to_string(),
+                &LeaseToken::new(uuid::Uuid::new_v4().to_string()),
                 std::process::id(),
                 2,
                 VERSION,
@@ -523,9 +524,11 @@ pub fn down(
 pub fn handoff_supervisor(fixture: &Fixture, token: &str, mode: SupervisorMode) -> SqliteQueue {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     queue
-        .register_supervisor(token, std::process::id(), 4, "0.0.1")
+        .register_supervisor(&LeaseToken::new(token), std::process::id(), 4, "0.0.1")
         .unwrap();
-    queue.accept_handoff(token).unwrap();
-    queue.set_supervisor_mode(token, mode, None).unwrap();
+    queue.accept_handoff(&LeaseToken::new(token)).unwrap();
+    queue
+        .set_supervisor_mode(&LeaseToken::new(token), mode, None)
+        .unwrap();
     queue
 }

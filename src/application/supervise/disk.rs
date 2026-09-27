@@ -268,7 +268,7 @@ impl Supervisor<'_> {
         // The supervisors running now: a hold another one recorded is in
         // place only while it runs (its registration's heartbeat is fresh).
         let now = self.generators.clock.now();
-        let live: Vec<String> = self
+        let live: Vec<LeaseToken> = self
             .queue
             .supervisors()?
             .into_iter()
@@ -282,7 +282,7 @@ impl Supervisor<'_> {
             .collect();
         if let Some((kind, payload)) =
             claim_hold::transition_of(kinds, hold, last.as_ref(), &self.token, |holder| {
-                live.iter().any(|token| token == holder)
+                live.iter().any(|token| token.as_str() == holder)
             })
         {
             self.queue.record_queue_event(kind, payload)?;

@@ -1,5 +1,6 @@
 //! Runtime tests: The handoff of a supervisor to the next process.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -47,7 +48,7 @@ fn hand_off_when(
     let kept = only_registration(db);
     assert_eq!(kept.token, registration.token);
     assert_eq!(kept.handoff_binary.as_deref(), Some("/next/dagq"));
-    (outcome, registration.token)
+    (outcome, registration.token.into_string())
 }
 
 /// The supervisor the exec'd binary runs: the same token, continued.
@@ -62,7 +63,7 @@ fn supervise_after_handoff(
         repo,
         backend,
         &SuperviseOptions {
-            handoff_token: Some(token.to_owned()),
+            handoff_token: Some(LeaseToken::new(token)),
             ..supervise_options(4, true)
         },
     )
@@ -370,12 +371,20 @@ fn after_a_handoff_a_run_without_state_gives_its_lease_back() {
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
-        .register_supervisor("gone-by", std::process::id(), 1, "0.0.1")
+        .register_supervisor(&LeaseToken::new("gone-by"), std::process::id(), 1, "0.0.1")
         .unwrap();
     // No handoff for a registration that does not take one.
-    assert!(!queue.request_handoff("gone-by", "/next/dagq").unwrap());
-    queue.accept_handoff("gone-by").unwrap();
-    assert!(queue.request_handoff("gone-by", "/next/dagq").unwrap());
+    assert!(
+        !queue
+            .request_handoff(&LeaseToken::new("gone-by"), "/next/dagq")
+            .unwrap()
+    );
+    queue.accept_handoff(&LeaseToken::new("gone-by")).unwrap();
+    assert!(
+        queue
+            .request_handoff(&LeaseToken::new("gone-by"), "/next/dagq")
+            .unwrap()
+    );
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "gone-by");
     backend.join();
     Connection::open(&db)
@@ -385,11 +394,22 @@ fn after_a_handoff_a_run_without_state_gives_its_lease_back() {
             [run.id()],
         )
         .unwrap();
-    assert_eq!(queue.runs_leased_by("gone-by").unwrap().len(), 1);
+    assert_eq!(
+        queue
+            .runs_leased_by(&LeaseToken::new("gone-by"))
+            .unwrap()
+            .len(),
+        1
+    );
     let outcome = supervise_after_handoff(&db, &repo, &backend, "gone-by").unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(queue.run_lease(run.id()).unwrap().is_none());
-    assert!(queue.runs_leased_by("gone-by").unwrap().is_empty());
+    assert!(
+        queue
+            .runs_leased_by(&LeaseToken::new("gone-by"))
+            .unwrap()
+            .is_empty()
+    );
     let error = supervise_after_handoff(&db, &repo, &backend, "gone-by").unwrap_err();
     assert!(
         format!("{error:#}").contains("is no longer registered"),

@@ -37,6 +37,7 @@ use super::{
     prompt::inbox_prompt,
     recording::RecordingBackend,
 };
+use crate::domain::LeaseToken;
 use crate::domain::language::{Language, with_instruction};
 use crate::{
     VERSION,
@@ -658,7 +659,11 @@ fn recorded_workspace(
 /// supervisor being replaced does not decide it: `up --in-cmux` moves a
 /// launchd queue into a workspace and a plain `up` moves it back, and
 /// either way the old one has already been drained and its agent unloaded.
-fn start_supervisor(up: &Up, existing: &HashSet<String>, detached_proven: bool) -> Result<Value> {
+fn start_supervisor(
+    up: &Up,
+    existing: &HashSet<LeaseToken>,
+    detached_proven: bool,
+) -> Result<Value> {
     if up.options.in_cmux {
         start_in_cmux(up, existing)
     } else {
@@ -794,7 +799,7 @@ once `status` shows it gone",
     // the row on purpose because the database may be unreachable). Those
     // rows go the way `down --force` drops them, so none is left pointing
     // at the workspace closed just below.
-    let surviving: Vec<String> = queue
+    let surviving: Vec<LeaseToken> = queue
         .supervisors()?
         .into_iter()
         .map(|registration| registration.token)
@@ -811,7 +816,7 @@ once `status` shows it gone",
     // Whatever survived the drain (an alive-but-silent supervisor `up`
     // neither reuses nor kills) belongs to another process, not to the one
     // started below.
-    let existing: HashSet<String> = queue
+    let existing: HashSet<LeaseToken> = queue
         .supervisors()?
         .into_iter()
         .map(|registration| registration.token)
@@ -913,7 +918,7 @@ pub struct Handed {
     pub registration: SupervisorRegistration,
     /// The token it took back under the new build: its own, or the one its
     /// pid registered under again.
-    pub now: Option<String>,
+    pub now: Option<LeaseToken>,
     pub error: Option<String>,
 }
 
@@ -924,7 +929,7 @@ impl Handed {
     pub fn report(&self) -> Value {
         let registration = &self.registration;
         let mut value = json!({
-            "token": self.now.as_deref().unwrap_or(&registration.token),
+            "token": self.now.as_ref().unwrap_or(&registration.token),
             "pid": registration.pid,
             "mode": registration.mode.map(SupervisorMode::as_str),
             "workspace_id": registration.workspace_id,
@@ -1076,7 +1081,7 @@ fn look_at_handoff(
     now: i64,
     binary_text: &str,
     version: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<LeaseToken>> {
     let name = format!(
         "supervisor {} (pid {})",
         registration.token, registration.pid
@@ -1165,7 +1170,7 @@ fn prove_detached_cmux(cmux: &dyn WorkspaceBackend, spec: &LaunchAgentSpec) -> R
 /// `KeepAlive` would otherwise restart a supervisor that cannot work.
 fn start_under_launchd(
     up: &Up,
-    existing: &HashSet<String>,
+    existing: &HashSet<LeaseToken>,
     detached_proven: bool,
 ) -> Result<Value> {
     let Up {
@@ -1215,7 +1220,7 @@ fn start_under_launchd(
 /// one that is alive but no longer heartbeating (which `up` never reuses
 /// and never kills). Either way it is a person's to close, and `up`
 /// stops rather than open a second one or interfere with the first.
-fn start_in_cmux(up: &Up, existing: &HashSet<String>) -> Result<Value> {
+fn start_in_cmux(up: &Up, existing: &HashSet<LeaseToken>) -> Result<Value> {
     let Up {
         location,
         repository,
@@ -1397,14 +1402,14 @@ fn set_auto_update(
     enabled: bool,
 ) -> Result<Value> {
     let kept = supervisor["outcome"] == "reused" || supervisor["handoff"] == true;
-    let tokens: Vec<String> = if kept {
+    let tokens: Vec<LeaseToken> = if kept {
         live.iter()
             .map(|registration| registration.token.clone())
             .collect()
     } else {
         supervisor["token"]
             .as_str()
-            .map(str::to_owned)
+            .map(LeaseToken::new)
             .into_iter()
             .collect()
     };
@@ -1421,7 +1426,10 @@ fn set_auto_update(
 /// again mid-wait (an alive but silent supervisor `up` neither reuses nor
 /// kills), and taking it for ours would stamp this start's mode and
 /// workspace onto a supervisor that never ran in it.
-fn wait_for_registration(up: &Up, existing: &HashSet<String>) -> Result<SupervisorRegistration> {
+fn wait_for_registration(
+    up: &Up,
+    existing: &HashSet<LeaseToken>,
+) -> Result<SupervisorRegistration> {
     let Up {
         queue,
         processes,

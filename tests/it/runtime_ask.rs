@@ -1,5 +1,6 @@
 //! Runtime tests: Asks, attention for the inbox, `watch` and `status`.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -577,7 +578,9 @@ fn watch_returns_when_supervisor_registrations_or_health_change() {
 
     // A supervisor registers.
     let watcher = spawn_watch(&db, Some(cursor));
-    queue.register_supervisor("first", pid, 2, VERSION).unwrap();
+    queue
+        .register_supervisor(&LeaseToken::new("first"), pid, 2, VERSION)
+        .unwrap();
     let woke = joined(watcher, "the watch thread to return");
     assert_eq!(woke["events"], json!([]));
     assert_eq!(woke["supervisors_changed"], true);
@@ -616,7 +619,11 @@ fn watch_returns_when_supervisor_registrations_or_health_change() {
 
     // Its registration disappears.
     let watcher = spawn_watch(&db, Some(cursor));
-    assert!(queue.deregister_supervisor("first").unwrap());
+    assert!(
+        queue
+            .deregister_supervisor(&LeaseToken::new("first"))
+            .unwrap()
+    );
     let woke = joined(watcher, "the watch thread to return");
     assert_eq!(woke["supervisors_changed"], true);
     assert_eq!(woke["supervisors"], json!([]));

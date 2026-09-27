@@ -11,7 +11,7 @@ impl SqliteQueue {
     pub fn claim_for_supervisor(
         &mut self,
         base_commit: &CommitSha,
-        token: &str,
+        token: &LeaseToken,
     ) -> Result<ClaimOutcome> {
         self.claim_for_supervisor_in_order(base_commit, token, &[], None, &WorkerTrial::default())
     }
@@ -23,7 +23,7 @@ impl SqliteQueue {
     pub fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
-        token: &str,
+        token: &LeaseToken,
         order: &[TaskId],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
@@ -73,7 +73,7 @@ impl SqliteQueue {
     pub fn abandon_run(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         message: &str,
         reason: &Reason,
         session: Option<&Value>,
@@ -103,7 +103,7 @@ impl SqliteQueue {
         Ok(run.relocated(&self.runs_dir))
     }
 
-    pub fn plan_run(&mut self, id: &RunId, token: &str, plan: &RunPlan) -> Result<()> {
+    pub fn plan_run(&mut self, id: &RunId, token: &LeaseToken, plan: &RunPlan) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -126,7 +126,12 @@ impl SqliteQueue {
         Ok(())
     }
 
-    pub fn workspace_created(&mut self, id: &RunId, token: &str, workspace: &str) -> Result<()> {
+    pub fn workspace_created(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        workspace: &str,
+    ) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -176,7 +181,7 @@ impl SqliteQueue {
         Ok(())
     }
 
-    pub fn finish_supervision(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    pub fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -202,7 +207,7 @@ impl SqliteQueue {
     /// with the session still alive (ADR-0027 decision 1): `running` becomes
     /// `validating` under the same lease, and `supervision_finished` records
     /// `session_live: true` with no exit code.
-    pub fn finish_supervision_live(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    pub fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -223,7 +228,7 @@ impl SqliteQueue {
     /// reviews it, after its live session rewrote the receipt for a
     /// `revise` verdict (ADR-0027 decision 2); `revise_finished` is the
     /// record of why.
-    pub fn restart_validation(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    pub fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -280,7 +285,7 @@ impl SqliteQueue {
     pub fn park_live(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -311,21 +316,21 @@ impl SqliteQueue {
     pub fn park_rechecked(
         &mut self,
         id: &RunId,
-        token: Option<&str>,
+        token: Option<&LeaseToken>,
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let lease: Option<String> = tx
+        let lease: Option<LeaseToken> = tx
             .query_row("SELECT token FROM run_leases WHERE run_id=?1", [id], |r| {
                 r.get(0)
             })
             .optional()?;
         let waiting = stored_run(&tx, id)?
             .is_some_and(|run| run.status() == crate::domain::RunStatus::AwaitingIntegration);
-        if lease.as_deref() != token || !waiting {
+        if lease.as_ref() != token || !waiting {
             return Ok(None);
         }
         let mut events = Vec::new();
@@ -362,7 +367,7 @@ impl SqliteQueue {
     pub fn finish_validation(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun> {
         let tx = self
@@ -391,7 +396,7 @@ impl SqliteQueue {
     pub fn begin_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
         let tx = self
@@ -455,7 +460,7 @@ impl SqliteQueue {
     pub fn defer_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -476,7 +481,7 @@ impl SqliteQueue {
     pub fn hold_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -496,7 +501,7 @@ impl SqliteQueue {
     pub fn fail_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         receipt: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -515,7 +520,7 @@ impl SqliteQueue {
     pub fn abort_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         revert_to: &str,
         message: &str,
         reason: &Reason,
@@ -534,7 +539,7 @@ impl SqliteQueue {
     fn leave_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         command: impl FnOnce(TaskRun) -> Result<TaskRun, DomainError>,
         reason: &str,
         kind: &str,
@@ -571,7 +576,7 @@ impl SqliteQueue {
     pub fn finish_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         landing: &Landing,
         common_dir: &str,
     ) -> Result<(Task, TaskRun)> {
@@ -654,7 +659,7 @@ impl SqliteQueue {
     }
     /// Record a confirmed cmux close. Only an accepted run whose workspace is
     /// still recorded as open qualifies; the worktree and branch stay for integration.
-    pub fn workspace_closed(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(
             &self.conn,
@@ -689,7 +694,7 @@ impl SqliteQueue {
     pub fn cleanup_failed(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun> {
@@ -753,27 +758,32 @@ impl RunTransitions for SqliteQueue {
     fn claim_for_supervisor(
         &mut self,
         base_commit: &CommitSha,
-        token: &str,
+        token: &LeaseToken,
     ) -> Result<ClaimOutcome> {
         SqliteQueue::claim_for_supervisor(self, base_commit, token)
     }
     fn abandon_run(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         message: &str,
         reason: &Reason,
         session: Option<&Value>,
     ) -> Result<TaskRun> {
         SqliteQueue::abandon_run(self, id, token, message, reason, session)
     }
-    fn begin_integration(&mut self, id: &RunId, token: &str, main: &CommitSha) -> Result<TaskRun> {
+    fn begin_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+    ) -> Result<TaskRun> {
         SqliteQueue::begin_integration(self, id, token, main)
     }
     fn defer_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -782,7 +792,7 @@ impl RunTransitions for SqliteQueue {
     fn hold_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -791,7 +801,7 @@ impl RunTransitions for SqliteQueue {
     fn fail_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         receipt: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -800,7 +810,7 @@ impl RunTransitions for SqliteQueue {
     fn abort_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         revert_to: &str,
         message: &str,
         reason: &Reason,
@@ -810,7 +820,7 @@ impl RunTransitions for SqliteQueue {
     fn finish_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         landing: &Landing,
         common_dir: &str,
     ) -> Result<(Task, TaskRun)> {
@@ -819,13 +829,13 @@ impl RunTransitions for SqliteQueue {
     fn record_cleanup_failure(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {
         SqliteQueue::record_cleanup_failure(self, id, message, reason)
     }
-    fn workspace_closed(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::workspace_closed(self, id, token)
     }
     fn cleanup_failed(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun> {
@@ -834,7 +844,7 @@ impl RunTransitions for SqliteQueue {
     fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
-        token: &str,
+        token: &LeaseToken,
         order: &[TaskId],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
@@ -851,27 +861,32 @@ impl RunTransitions for SqliteQueue {
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {
         SqliteQueue::record_runtime_error(self, id, message, reason)
     }
-    fn plan_run(&mut self, id: &RunId, token: &str, plan: &crate::domain::RunPlan) -> Result<()> {
+    fn plan_run(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        plan: &crate::domain::RunPlan,
+    ) -> Result<()> {
         SqliteQueue::plan_run(self, id, token, plan)
     }
-    fn workspace_created(&mut self, id: &RunId, token: &str, workspace: &str) -> Result<()> {
+    fn workspace_created(&mut self, id: &RunId, token: &LeaseToken, workspace: &str) -> Result<()> {
         SqliteQueue::workspace_created(self, id, token, workspace)
     }
-    fn finish_supervision(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::finish_supervision(self, id, token)
     }
-    fn finish_supervision_live(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::finish_supervision_live(self, id, token)
     }
     fn finish_validation(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun> {
         SqliteQueue::finish_validation(self, id, token, validation)
     }
-    fn restart_validation(&mut self, id: &RunId, token: &str) -> Result<TaskRun> {
+    fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         SqliteQueue::restart_validation(self, id, token)
     }
     fn decide_landing(
@@ -886,7 +901,7 @@ impl RunTransitions for SqliteQueue {
     fn park_live(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
@@ -895,7 +910,7 @@ impl RunTransitions for SqliteQueue {
     fn park_rechecked(
         &mut self,
         id: &RunId,
-        token: Option<&str>,
+        token: Option<&LeaseToken>,
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {

@@ -6,7 +6,7 @@ use super::*;
 impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
     /// that exec'd another binary under the same token picks up again.
-    pub fn runs_leased_by(&self, token: &str) -> Result<Vec<TaskRun>> {
+    pub fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
         Ok(self
             .conn
             .prepare(
@@ -32,7 +32,7 @@ impl SqliteQueue {
     /// run is leased only while its supervisor reviews it (ADR-0027), a
     /// `needs_session` one while it is resumed or waits to land (task 356). Runs in other statuses
     /// and runs without a lease are not adoptable, so they are not listed.
-    pub fn runs_leased_by_others(&self, token: &str) -> Result<Vec<LeasedRun>> {
+    pub fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {
         let mut statement = self.conn.prepare(
             "SELECT r.*, l.token, l.pid, l.heartbeat_at FROM task_runs r
              JOIN run_leases l ON l.run_id=r.id
@@ -85,8 +85,8 @@ impl SqliteQueue {
     pub fn adopt_run(
         &mut self,
         id: &RunId,
-        previous_token: &str,
-        token: &str,
+        previous_token: &LeaseToken,
+        token: &LeaseToken,
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
@@ -245,7 +245,7 @@ impl SqliteQueue {
     pub fn begin_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         main: &CommitSha,
         reason: Option<&str>,
         config: resume::ResumeConfig,
@@ -320,7 +320,7 @@ impl SqliteQueue {
     pub fn skip_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,
@@ -367,7 +367,7 @@ impl SqliteQueue {
     pub fn finish_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         status: Option<crate::domain::RunStatus>,
         reason: Option<&str>,
         keep_lease: bool,
@@ -459,7 +459,7 @@ impl SqliteQueue {
     pub fn begin_triage(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         request: Option<serde_json::Value>,
         launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
@@ -537,7 +537,7 @@ impl SqliteQueue {
     pub fn finish_triage(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         action: &TriageAction,
         mut payload: serde_json::Value,
         also: Vec<(&'static str, serde_json::Value)>,
@@ -856,10 +856,10 @@ impl SqliteQueue {
 /// The [`RunRecovery`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl RunRecovery for SqliteQueue {
-    fn runs_leased_by_others(&self, token: &str) -> Result<Vec<LeasedRun>> {
+    fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {
         SqliteQueue::runs_leased_by_others(self, token)
     }
-    fn runs_leased_by(&self, token: &str) -> Result<Vec<TaskRun>> {
+    fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
         SqliteQueue::runs_leased_by(self, token)
     }
     fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>> {
@@ -868,8 +868,8 @@ impl RunRecovery for SqliteQueue {
     fn adopt_run(
         &mut self,
         id: &RunId,
-        previous_token: &str,
-        token: &str,
+        previous_token: &LeaseToken,
+        token: &LeaseToken,
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
@@ -889,7 +889,7 @@ impl RunRecovery for SqliteQueue {
     fn begin_triage(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         request: Option<serde_json::Value>,
         launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
@@ -898,7 +898,7 @@ impl RunRecovery for SqliteQueue {
     fn finish_triage(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         action: &TriageAction,
         payload: serde_json::Value,
         also: Vec<(&'static str, serde_json::Value)>,
@@ -920,7 +920,7 @@ impl RunRecovery for SqliteQueue {
     fn begin_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         main: &CommitSha,
         reason: Option<&str>,
         config: resume::ResumeConfig,
@@ -930,7 +930,7 @@ impl RunRecovery for SqliteQueue {
     fn finish_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         status: Option<RunStatus>,
         reason: Option<&str>,
         keep_lease: bool,
@@ -941,7 +941,7 @@ impl RunRecovery for SqliteQueue {
     fn skip_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,

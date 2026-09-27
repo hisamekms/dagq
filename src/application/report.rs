@@ -7,6 +7,7 @@
 //! keeps. The supervisor writes the reports it owes once a day
 //! ([`write_due`]); a person writes any with `dagq report`. No LLM, no run
 //! slot, nothing sent outside the queue's directory.
+use crate::domain::LeaseToken;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -129,7 +130,7 @@ pub fn write_due(
     files: &dyn RunFiles,
     setup: &ReportSetup,
     now: i64,
-    supervisor: &str,
+    supervisor: &LeaseToken,
 ) -> Result<Vec<(Written, Report)>> {
     let written = queue.reports_written()?;
     let offset_ms = setup.host.utc_offset_secs * 1000;

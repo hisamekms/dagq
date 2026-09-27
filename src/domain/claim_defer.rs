@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{EventId, RunEvent, TaskId, scope::glob_matches, stats::timestamp_millis};
+use super::{EventId, LeaseToken, RunEvent, TaskId, scope::glob_matches, stats::timestamp_millis};
 
 /// Recorded on the task when its claim is first deferred (`reason`,
 /// `files`, `runs`, `max_secs`, `message`, `supervisor`).
@@ -178,7 +178,7 @@ pub fn decide(
     deferral: &mut Option<Deferral>,
     now: i64,
     max_secs: i64,
-    token: &str,
+    token: &LeaseToken,
 ) -> Decision {
     let ended = |why: &str, since: i64| {
         Some((
@@ -240,7 +240,7 @@ pub fn decide(
 
 /// The event that ends `deferral` of a task that left the candidates, if
 /// it was still open.
-pub fn left(deferral: Deferral, now: i64, token: &str) -> Option<(&'static str, Value)> {
+pub fn left(deferral: Deferral, now: i64, token: &LeaseToken) -> Option<(&'static str, Value)> {
     (!deferral.expired).then(|| {
         (
             CLAIM_DEFERRAL_ENDED,
@@ -470,7 +470,7 @@ mod tests {
         let mut deferral = None;
         let Decision::Defer {
             event: Some((kind, payload)),
-        } = decide(false, hot(), &mut deferral, 100, 60, "s")
+        } = decide(false, hot(), &mut deferral, 100, 60, &LeaseToken::new("s"))
         else {
             panic!("deferred with its event")
         };
@@ -489,13 +489,13 @@ mod tests {
         );
         // Still meeting: deferred again, not recorded again.
         assert_eq!(
-            decide(false, hot(), &mut deferral, 130, 60, "s"),
+            decide(false, hot(), &mut deferral, 130, 60, &LeaseToken::new("s")),
             Decision::Defer { event: None }
         );
         // The files no longer meet: claimed, and the deferral ends.
         let Decision::Claim {
             event: Some((kind, payload)),
-        } = decide(false, None, &mut deferral, 150, 60, "s")
+        } = decide(false, None, &mut deferral, 150, 60, &LeaseToken::new("s"))
         else {
             panic!("claimed with the end")
         };
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(payload["deferred_secs"], 50);
         assert_eq!(deferral, None);
         assert_eq!(
-            decide(false, None, &mut deferral, 160, 60, "s"),
+            decide(false, None, &mut deferral, 160, 60, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
     }
@@ -513,7 +513,7 @@ mod tests {
     fn an_interrupt_is_never_deferred_and_ends_a_deferral() {
         let mut deferral = None;
         assert_eq!(
-            decide(true, hot(), &mut deferral, 100, 60, "s"),
+            decide(true, hot(), &mut deferral, 100, 60, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
         let mut deferral = Some(Deferral {
@@ -522,7 +522,7 @@ mod tests {
         });
         let Decision::Claim {
             event: Some((_, payload)),
-        } = decide(true, hot(), &mut deferral, 110, 60, "s")
+        } = decide(true, hot(), &mut deferral, 110, 60, &LeaseToken::new("s"))
         else {
             panic!("an interrupt is claimed")
         };
@@ -537,7 +537,7 @@ mod tests {
         });
         let Decision::Claim {
             event: Some((kind, payload)),
-        } = decide(false, hot(), &mut deferral, 160, 60, "s")
+        } = decide(false, hot(), &mut deferral, 160, 60, &LeaseToken::new("s"))
         else {
             panic!("expired")
         };
@@ -548,24 +548,24 @@ mod tests {
         // Not claimed in that pass (no slot): the next one claims it, and
         // records nothing more.
         assert_eq!(
-            decide(false, hot(), &mut deferral, 170, 60, "s"),
+            decide(false, hot(), &mut deferral, 170, 60, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
         // The files stop meeting and meet again: still expired, not
         // deferred anew until the task is claimed.
         assert_eq!(
-            decide(false, None, &mut deferral, 180, 60, "s"),
+            decide(false, None, &mut deferral, 180, 60, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
         assert!(deferral.unwrap().expired);
         assert_eq!(
-            decide(false, hot(), &mut deferral, 190, 60, "s"),
+            decide(false, hot(), &mut deferral, 190, 60, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
         // A limit of 0 defers nothing.
         let mut none = None;
         assert_eq!(
-            decide(false, hot(), &mut none, 100, 0, "s"),
+            decide(false, hot(), &mut none, 100, 0, &LeaseToken::new("s")),
             Decision::Claim { event: None }
         );
         assert_eq!(none, None);
@@ -577,7 +577,7 @@ mod tests {
             since: 100,
             expired: false,
         };
-        let (kind, payload) = left(open, 130, "s").unwrap();
+        let (kind, payload) = left(open, 130, &LeaseToken::new("s")).unwrap();
         assert_eq!(kind, CLAIM_DEFERRAL_ENDED);
         assert_eq!(payload["why"], "not_candidate");
         assert_eq!(payload["deferred_secs"], 30);
@@ -588,7 +588,7 @@ mod tests {
                     ..open
                 },
                 130,
-                "s"
+                &LeaseToken::new("s")
             ),
             None
         );

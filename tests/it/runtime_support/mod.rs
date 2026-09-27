@@ -5,6 +5,7 @@
 use crate::common;
 pub use crate::common::Bounded;
 pub use anyhow::{Result, bail, ensure};
+use dagq::domain::LeaseToken;
 pub use dagq::{
     VERSION,
     application::{
@@ -712,7 +713,7 @@ impl WorkspaceBackend for TestWorkspace {
                 db: db.clone(),
             };
             let spawner = StubSpawner { db: db.clone() };
-            runtime::session_with_provider(&db, &id, &token, &provider, &spawner)
+            runtime::session_with_provider(&db, &id, &LeaseToken::new(&token), &provider, &spawner)
         });
         sessions.push((
             workspace.clone(),
@@ -790,7 +791,13 @@ impl WorkspaceBackend for TestWorkspace {
                 db: db.clone(),
             };
             let spawner = StubSpawner { db: db.clone() };
-            runtime::resume_session_with_provider(&db, &id, &token, &provider, &spawner)
+            runtime::resume_session_with_provider(
+                &db,
+                &id,
+                &LeaseToken::new(&token),
+                &provider,
+                &spawner,
+            )
         });
         sessions.push((
             workspace.clone(),
@@ -1376,7 +1383,7 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
         .bind_repository(&path_text(&repository.common_dir).unwrap())
         .unwrap();
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&repository.main_head().unwrap(), token)
+        .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new(token))
         .unwrap()
     else {
         panic!()
@@ -1386,7 +1393,7 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
     queue
         .plan_run(
             run.id(),
-            token,
+            &LeaseToken::new(token),
             &RunPlan {
                 repo_path: path_text(&repository.root).unwrap(),
                 run_dir: path_text(&run_dir).unwrap(),
@@ -1400,9 +1407,15 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
     let run = queue.run(run.id()).unwrap();
     repository.create_worktree(&run).unwrap();
     queue
-        .workspace_created(run.id(), token, &format!("ws-{}", run.task_id()))
+        .workspace_created(
+            run.id(),
+            &LeaseToken::new(token),
+            &format!("ws-{}", run.task_id()),
+        )
         .unwrap();
-    queue.register_wrapper(run.id(), token, wrapper).unwrap();
+    queue
+        .register_wrapper(run.id(), &LeaseToken::new(token), wrapper)
+        .unwrap();
     queue.register_agent(run.id(), wrapper, agent).unwrap();
     let run = queue.run(run.id()).unwrap();
     assert_eq!(run.status(), RunStatus::Running);
@@ -1628,7 +1641,7 @@ pub fn start_run_under_dead_supervisor(
         .bind_repository(&path_text(&repository.common_dir).unwrap())
         .unwrap();
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&repository.main_head().unwrap(), token)
+        .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new(token))
         .unwrap()
     else {
         panic!("no candidate to claim")
@@ -1637,7 +1650,7 @@ pub fn start_run_under_dead_supervisor(
     queue
         .plan_run(
             run.id(),
-            token,
+            &LeaseToken::new(token),
             &RunPlan {
                 repo_path: path_text(&repository.root).unwrap(),
                 run_dir: path_text(&run_dir).unwrap(),
@@ -1667,7 +1680,7 @@ pub fn start_run_under_dead_supervisor(
         .create(&task, &run, &command, &WorkspaceTags::default())
         .unwrap();
     queue
-        .workspace_created(run.id(), token, &workspace)
+        .workspace_created(run.id(), &LeaseToken::new(token), &workspace)
         .unwrap();
     wait_until(db, Duration::from_secs(10), |queue| {
         queue.run(run.id()).unwrap().status() == RunStatus::Running

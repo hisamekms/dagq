@@ -1,6 +1,7 @@
 //! Runtime tests: Concurrent runs and the adoption of runs from a dead supervisor.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -528,15 +529,16 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
     // `starting` with a stale lease: register_wrapper needs the claimer's token.
     use dagq::{domain::ClaimOutcome, infrastructure::runtime_store::RunPlan};
     let base = queue.run(fresh.id()).unwrap().base_commit().clone();
-    let ClaimOutcome::Claimed { run: starting } =
-        queue.claim_for_supervisor(&base, "gone-early").unwrap()
+    let ClaimOutcome::Claimed { run: starting } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("gone-early"))
+        .unwrap()
     else {
         panic!()
     };
     queue
         .plan_run(
             starting.id(),
-            "gone-early",
+            &LeaseToken::new("gone-early"),
             &RunPlan {
                 repo_path: "/test".into(),
                 run_dir: "/run".into(),
@@ -551,10 +553,10 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
     // which only `recover` handles (task 236).
     let early_wrapper = dead_pid();
     queue
-        .workspace_created(starting.id(), "gone-early", "ws-starting")
+        .workspace_created(starting.id(), &LeaseToken::new("gone-early"), "ws-starting")
         .unwrap();
     queue
-        .register_wrapper(starting.id(), "gone-early", early_wrapper)
+        .register_wrapper(starting.id(), &LeaseToken::new("gone-early"), early_wrapper)
         .unwrap();
     queue
         .wrapper_exited(starting.id(), early_wrapper, 1)
@@ -566,7 +568,7 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
     queue
         .abandon_run(
             leaseless.id(),
-            "abandoned",
+            &LeaseToken::new("abandoned"),
             "exit request timed out",
             &ReasonCode::Other.into(),
             None,
@@ -574,8 +576,9 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
         .unwrap();
     assert!(queue.run_lease(leaseless.id()).unwrap().is_none());
     // `claimed` with a stale lease.
-    let ClaimOutcome::Claimed { run: claimed } =
-        queue.claim_for_supervisor(&base, "gone-early").unwrap()
+    let ClaimOutcome::Claimed { run: claimed } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("gone-early"))
+        .unwrap()
     else {
         panic!()
     };
@@ -676,7 +679,7 @@ fn integrating_run_with_a_stale_lease_is_not_adopted() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let main = git_out(&repo, &["rev-parse", "main"]);
     queue
-        .begin_integration(run.id(), "crashed", &sha(&main))
+        .begin_integration(run.id(), &LeaseToken::new("crashed"), &sha(&main))
         .unwrap();
     Connection::open(&db)
         .unwrap()
@@ -1200,7 +1203,9 @@ fn exited_wrapper_and_validating_runs_are_adopted_and_validated() {
         assert!(event_kinds(&queue.show(run.task_id()).unwrap()).contains(&"session_exited"));
         assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
     }
-    queue.finish_supervision(validating.id(), "dead-b").unwrap();
+    queue
+        .finish_supervision(validating.id(), &LeaseToken::new("dead-b"))
+        .unwrap();
     assert_eq!(
         queue.run(validating.id()).unwrap().status(),
         RunStatus::Validating
@@ -1305,7 +1310,13 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     let second = orphan_run(&repo, &db, "fresh", std::process::id(), std::process::id());
     assert!(
         queue
-            .adopt_run(second.id(), "fresh", "eager", 1, json!({}))
+            .adopt_run(
+                second.id(),
+                &LeaseToken::new("fresh"),
+                &LeaseToken::new("eager"),
+                1,
+                json!({})
+            )
             .unwrap()
             .is_none()
     );
@@ -1315,13 +1326,25 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     );
     age_lease(&db, &second, 31);
     let taken = queue
-        .adopt_run(second.id(), "fresh", "first", 1, json!({"pid": 1}))
+        .adopt_run(
+            second.id(),
+            &LeaseToken::new("fresh"),
+            &LeaseToken::new("first"),
+            1,
+            json!({"pid": 1}),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(taken.status(), RunStatus::Running);
     assert!(
         queue
-            .adopt_run(second.id(), "fresh", "second", 2, json!({}))
+            .adopt_run(
+                second.id(),
+                &LeaseToken::new("fresh"),
+                &LeaseToken::new("second"),
+                2,
+                json!({})
+            )
             .unwrap()
             .is_none()
     );
@@ -1329,8 +1352,16 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     assert_eq!((lease.token.as_str(), lease.pid), ("first", 1));
     assert!(SystemClock.now() - lease.heartbeat_at <= 5);
     assert_eq!(supervisor_token_of(&db, &second), "first");
-    assert!(queue.holds_lease(second.id(), "first").unwrap());
-    assert!(!queue.holds_lease(second.id(), "fresh").unwrap());
+    assert!(
+        queue
+            .holds_lease(second.id(), &LeaseToken::new("first"))
+            .unwrap()
+    );
+    assert!(
+        !queue
+            .holds_lease(second.id(), &LeaseToken::new("fresh"))
+            .unwrap()
+    );
     assert!(queue.has_run_event(second.id(), "run_adopted").unwrap());
     assert!(
         !queue
@@ -1344,7 +1375,7 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     // A `starting` run is refused by the method too, stale or not.
     use dagq::domain::ClaimOutcome;
     let ClaimOutcome::Claimed { run: early } = queue
-        .claim_for_supervisor(second.base_commit(), "early")
+        .claim_for_supervisor(second.base_commit(), &LeaseToken::new("early"))
         .unwrap()
     else {
         panic!()
@@ -1352,7 +1383,13 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
     age_lease(&db, &early, 31);
     assert!(
         queue
-            .adopt_run(early.id(), "early", "eager", 1, json!({}))
+            .adopt_run(
+                early.id(),
+                &LeaseToken::new("early"),
+                &LeaseToken::new("eager"),
+                1,
+                json!({})
+            )
             .unwrap()
             .is_none()
     );

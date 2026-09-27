@@ -5,7 +5,7 @@
 //! in one transaction. Events go to the first task of the proposal, since
 //! an event needs a task or a goal.
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
-use crate::domain::event_kind;
+use crate::domain::{LeaseToken, event_kind};
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -79,7 +79,7 @@ fn await_delivery(
 }
 
 /// The job's row, while it is unfinished and still `token`'s.
-fn running(conn: &Connection, job: &PlanReviewJob, token: &str) -> Result<bool> {
+fn running(conn: &Connection, job: &PlanReviewJob, token: &LeaseToken) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM plan_reviews WHERE id=?1 AND supervisor_token=?2
          AND finished_at IS NULL)",
@@ -445,7 +445,7 @@ impl PlanReviewStore for SqliteQueue {
     fn begin_plan_review(
         &mut self,
         proposal_id: ProposalId,
-        token: &str,
+        token: &LeaseToken,
         plan_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
@@ -465,7 +465,7 @@ impl PlanReviewStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let unfinished: Vec<(i64, String, Option<i64>)> = tx
+        let unfinished: Vec<(i64, LeaseToken, Option<i64>)> = tx
             .prepare(
                 "SELECT r.id, r.supervisor_token, s.heartbeat_at FROM plan_reviews r
                  LEFT JOIN supervisors s ON s.token = r.supervisor_token
@@ -475,7 +475,7 @@ impl PlanReviewStore for SqliteQueue {
             .collect::<rusqlite::Result<_>>()?;
         for (id, owner, heartbeat) in unfinished {
             let live =
-                owner != token && heartbeat.is_some_and(|at| now - at <= HEARTBEAT_TIMEOUT_SECS);
+                owner != *token && heartbeat.is_some_and(|at| now - at <= HEARTBEAT_TIMEOUT_SECS);
             if live {
                 return Ok(None);
             }
@@ -538,7 +538,7 @@ impl PlanReviewStore for SqliteQueue {
     fn finish_plan_review(
         &mut self,
         job: &PlanReviewJob,
-        token: &str,
+        token: &LeaseToken,
         apply: &PlanReviewApply,
     ) -> Result<PlanReviewApplied> {
         let now = self.generators.clock.now();
@@ -725,7 +725,7 @@ impl PlanReviewStore for SqliteQueue {
     fn fail_plan_review(
         &mut self,
         job: &PlanReviewJob,
-        token: &str,
+        token: &LeaseToken,
         error: &str,
         duration_secs: u64,
     ) -> Result<()> {
@@ -1269,7 +1269,7 @@ mod tests {
         let job = queue
             .begin_plan_review(
                 proposal_id,
-                "token",
+                &LeaseToken::new("token"),
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
                 &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
@@ -1356,7 +1356,7 @@ mod tests {
         queue
             .begin_plan_review(
                 proposal_id,
-                "token",
+                &LeaseToken::new("token"),
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
                 &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),

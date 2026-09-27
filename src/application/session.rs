@@ -5,6 +5,7 @@
 //! records its exit (ADR-0007). `resume` reopens the session of a
 //! `needs_session` run instead (ADR-0019).
 
+use crate::domain::LeaseToken;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -43,7 +44,12 @@ pub struct Session<'a> {
 /// Wrap the agent of run `id` under the lease `token` until it exits; the
 /// agent's exit code. A failure is recorded as the run's runtime error,
 /// and the wrapper's exit too unless the agent may still be running.
-pub fn run_session(ctx: Session<'_>, id: &RunId, token: &str, resume: bool) -> Result<Value> {
+pub fn run_session(
+    ctx: Session<'_>,
+    id: &RunId,
+    token: &LeaseToken,
+    resume: bool,
+) -> Result<Value> {
     let Session {
         queue,
         provider,

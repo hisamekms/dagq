@@ -143,7 +143,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             "--run".into(),
             run.id().to_string(),
             "--lease".into(),
-            self.token.clone(),
+            self.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
         ]);

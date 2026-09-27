@@ -945,6 +945,7 @@ mod tests {
     use super::*;
     use crate::application::health;
     use crate::domain::AttentionNext;
+    use crate::domain::LeaseToken;
     use crate::infrastructure::adapters::SystemProcesses;
 
     /// Open an `update_failed` ask, answer it `text`, and return whether
@@ -990,12 +991,14 @@ mod tests {
 
         // A live supervisor without auto-update applies nothing.
         queue
-            .register_supervisor("live", std::process::id(), 1, "0.0.1")
+            .register_supervisor(&LeaseToken::new("live"), std::process::id(), 1, "0.0.1")
             .unwrap();
         assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
 
         // With auto-update it applies an option, and leaves a free answer.
-        queue.set_auto_update("live", true).unwrap();
+        queue
+            .set_auto_update(&LeaseToken::new("live"), true)
+            .unwrap();
         assert_eq!(answer_update_failed(&mut queue, "skip"), (true, true));
         assert_eq!(answer_update_failed(&mut queue, "later"), (false, false));
 
@@ -1008,14 +1011,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
-        queue.deregister_supervisor("live").unwrap();
+        queue
+            .deregister_supervisor(&LeaseToken::new("live"))
+            .unwrap();
 
         // A dead auto-update supervisor whose row is left behind.
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let dead = child.id();
         child.wait().unwrap();
-        queue.register_supervisor("dead", dead, 1, "0.0.1").unwrap();
-        queue.set_auto_update("dead", true).unwrap();
+        queue
+            .register_supervisor(&LeaseToken::new("dead"), dead, 1, "0.0.1")
+            .unwrap();
+        queue
+            .set_auto_update(&LeaseToken::new("dead"), true)
+            .unwrap();
         assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
     }
 }

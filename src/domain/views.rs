@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, PushReport, RunId, SupervisorMode,
-    Task, TaskId, TaskRun, TaskStatus,
+    CommitSha, EventId, Goal, GoalId, GoalStatus, GoalVerdict, LeaseToken, PushReport, RunId,
+    SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
 };
 
 /// Number of a goal's tasks in each status; progress is derived from these.
@@ -159,7 +159,7 @@ pub struct RunProcess {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunLease {
     pub run_id: RunId,
-    pub token: String,
+    pub token: LeaseToken,
     pub pid: u32,
     pub heartbeat_at: i64,
 }
@@ -172,7 +172,7 @@ pub struct RunLease {
 /// lifetime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorRegistration {
-    pub token: String,
+    pub token: LeaseToken,
     pub pid: u32,
     pub parallel: u32,
     pub started_at: i64,

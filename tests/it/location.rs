@@ -2,6 +2,7 @@
 //! the user data directory, shared by all of its worktrees.
 
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::Bounded;
 
@@ -463,7 +464,7 @@ fn move_the_queue_directory_then_rebind() {
 
     let supervisor = SqliteQueue::open(&new_db)
         .unwrap()
-        .register_supervisor("live", std::process::id(), 1, "0.0.1")
+        .register_supervisor(&LeaseToken::new("live"), std::process::id(), 1, "0.0.1")
         .unwrap();
     let message = error(&moved, &env, &["rebind"]);
     assert!(message.contains("supervisor is running"), "{message}");

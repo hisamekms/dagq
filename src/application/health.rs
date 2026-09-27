@@ -5,6 +5,7 @@
 //! queue through [`Queue`]; liveness comes through [`ProcessControl`] and
 //! the files through [`RunFiles`].
 
+use crate::domain::LeaseToken;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -592,18 +593,15 @@ pub fn supervisors(
             run_ids: Vec::new(),
         }
     };
-    let mut entries: Vec<(&str, SupervisorHealth)> = registrations
+    let mut entries: Vec<(&LeaseToken, SupervisorHealth)> = registrations
         .iter()
-        .map(|r| (r.token.as_str(), health(r.pid, r.heartbeat_at, Some(r))))
+        .map(|r| (&r.token, health(r.pid, r.heartbeat_at, Some(r))))
         .collect();
     for lease in leases {
-        let index = match entries.iter().position(|(token, _)| *token == lease.token) {
+        let index = match entries.iter().position(|(token, _)| **token == lease.token) {
             Some(index) => index,
             None => {
-                entries.push((
-                    lease.token.as_str(),
-                    health(lease.pid, lease.heartbeat_at, None),
-                ));
+                entries.push((&lease.token, health(lease.pid, lease.heartbeat_at, None)));
                 entries.len() - 1
             }
         };
@@ -1130,7 +1128,7 @@ mod tests {
 
     fn registration(token: &str, pid: u32, heartbeat_at: i64) -> SupervisorRegistration {
         SupervisorRegistration {
-            token: token.into(),
+            token: LeaseToken::new(token),
             pid,
             parallel: 2,
             started_at: 0,
@@ -1150,7 +1148,7 @@ mod tests {
     fn lease(run: &str, token: &str, pid: u32, heartbeat_at: i64) -> RunLease {
         RunLease {
             run_id: RunId::new(run).unwrap(),
-            token: token.into(),
+            token: LeaseToken::new(token),
             pid,
             heartbeat_at,
         }

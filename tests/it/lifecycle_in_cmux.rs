@@ -3,6 +3,7 @@
 //! and the workspace it refuses to open twice or forgets once closed.
 
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
@@ -170,7 +171,7 @@ fn up_in_cmux_does_not_mistake_a_silent_supervisor_for_the_one_it_started() {
     // Registered before `up`, alive, last heartbeat far in the past, and
     // first in `started_at` order.
     queue
-        .register_supervisor("silent", std::process::id(), 4, VERSION)
+        .register_supervisor(&LeaseToken::new("silent"), std::process::id(), 4, VERSION)
         .unwrap();
     Connection::open(&fixture.location.db)
         .unwrap()

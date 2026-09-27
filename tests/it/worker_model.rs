@@ -3,6 +3,7 @@
 //! `[worker.trial]` on, alternated between the control and the treatment
 //! for the mechanical tasks of the lower third.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use dagq::domain::{ClaimOutcome, worker_model::WorkerTrial};
 use runtime_support::*;
@@ -142,7 +143,13 @@ fn claims_choose_the_session_in_their_transaction() {
     };
     let claim = |queue: &mut SqliteQueue, task: i64, trial: &WorkerTrial| {
         let outcome = queue
-            .claim_for_supervisor_in_order(&base, "t", &[TaskId::new(task)], None, trial)
+            .claim_for_supervisor_in_order(
+                &base,
+                &LeaseToken::new("t"),
+                &[TaskId::new(task)],
+                None,
+                trial,
+            )
             .unwrap();
         let ClaimOutcome::Claimed { run } = outcome else {
             panic!("nothing to claim");
@@ -187,7 +194,13 @@ fn stats_compare_the_groups() {
     };
     for task in 1..=3 {
         let ClaimOutcome::Claimed { run } = queue
-            .claim_for_supervisor_in_order(&base, "t", &[TaskId::new(task)], None, &on)
+            .claim_for_supervisor_in_order(
+                &base,
+                &LeaseToken::new("t"),
+                &[TaskId::new(task)],
+                None,
+                &on,
+            )
             .unwrap()
         else {
             panic!("nothing to claim");

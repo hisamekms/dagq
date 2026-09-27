@@ -1,4 +1,5 @@
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::cli::*;
 
@@ -381,7 +382,7 @@ fn ready_tasks_of_a_draft_goal_do_not_raise_idle_slots() {
     let (_dir, db) = queue();
     SqliteQueue::open(&db)
         .unwrap()
-        .register_supervisor("live", std::process::id(), 2, "0.0.1")
+        .register_supervisor(&LeaseToken::new("live"), std::process::id(), 2, "0.0.1")
         .unwrap();
     let idle = |db: &Path| {
         ok(db, &["stats"])["alerts"]

@@ -26,6 +26,7 @@ use crate::application::{
     AskStore, Generators, QueueRecords, RunCoordination, RunLog, RunRecovery, RunTransitions,
     SessionRegistry, timestamp, unix_seconds,
 };
+use crate::domain::LeaseToken;
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker_model::{WorkerSession, WorkerTrial};
 use crate::domain::{
@@ -81,7 +82,7 @@ fn stored_run(conn: &Connection, id: &RunId) -> Result<Option<TaskRun>> {
 }
 
 /// The run as stored if `token` is its supervisor.
-fn supervised_run(conn: &Connection, id: &RunId, token: &str) -> Result<Option<TaskRun>> {
+fn supervised_run(conn: &Connection, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
     Ok(conn
         .query_row(
             "SELECT * FROM task_runs WHERE id=?1 AND supervisor_token=?2",
@@ -99,7 +100,7 @@ fn save_run(
     conn: &Connection,
     run: &TaskRun,
     from: RunStatus,
-    token: Option<&str>,
+    token: Option<&LeaseToken>,
 ) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE task_runs SET status=?3,repo_path=?4,run_dir=?5,branch=?6,worktree_path=?7,
@@ -135,7 +136,7 @@ fn apply(
     conn: &Connection,
     refusals: Refusals<'_>,
     id: &RunId,
-    token: Option<&str>,
+    token: Option<&LeaseToken>,
     refusal: impl Fn() -> String,
     command: impl FnOnce(TaskRun) -> Result<TaskRun, DomainError>,
 ) -> Result<TaskRun> {
@@ -157,7 +158,7 @@ fn apply_recorded(
     conn: &Connection,
     refusals: Refusals<'_>,
     id: &RunId,
-    token: Option<&str>,
+    token: Option<&LeaseToken>,
     refusal: impl Fn() -> String,
     command: impl FnOnce(TaskRun) -> Result<run::Recorded, DomainError>,
 ) -> Result<TaskRun> {
@@ -237,7 +238,7 @@ fn not_at_rest() -> String {
 /// `HEARTBEAT_TIMEOUT_SECS` is no reason to refuse: after a host sleep the
 /// row is still this supervisor's until an adopter swaps the token or
 /// `recover` removes it, and SQLite serializes that write with this one.
-fn renew_lease(conn: &Connection, id: &RunId, token: &str, now: i64) -> Result<()> {
+fn renew_lease(conn: &Connection, id: &RunId, token: &LeaseToken, now: i64) -> Result<()> {
     let renewed = conn.execute(
         "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
         params![id, token, now],
@@ -321,10 +322,10 @@ fn run_event(conn: &Connection, id: &RunId, kind: &str, payload: serde_json::Val
 fn lease_parked_run(
     tx: &Connection,
     id: &RunId,
-    token: &str,
+    token: &LeaseToken,
     now: i64,
     clear_processes: bool,
-) -> Result<Option<Option<String>>> {
+) -> Result<Option<Option<LeaseToken>>> {
     let parked: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM task_runs WHERE id=?1 AND status='needs_session')",
         [id],

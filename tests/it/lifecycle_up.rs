@@ -5,6 +5,7 @@
 //! and its look. The real launchd and cmux path is `tests/e2e.rs`.
 
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
@@ -565,13 +566,13 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let dead = [dead_pid(), dead_pid()];
     queue
-        .register_supervisor("dead-1", dead[0], 4, VERSION)
+        .register_supervisor(&LeaseToken::new("dead-1"), dead[0], 4, VERSION)
         .unwrap();
     queue
-        .register_supervisor("dead-2", dead[1], 1, VERSION)
+        .register_supervisor(&LeaseToken::new("dead-2"), dead[1], 1, VERSION)
         .unwrap();
     queue
-        .register_supervisor("live", std::process::id(), 3, VERSION)
+        .register_supervisor(&LeaseToken::new("live"), std::process::id(), 3, VERSION)
         .unwrap();
     let task = queue
         .add(NewTask {
@@ -594,7 +595,7 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
         .unwrap();
     let repository = GitRepository::inspect(&fixture.repo).unwrap();
     queue
-        .claim_for_supervisor(&repository.main_head().unwrap(), "live")
+        .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new("live"))
         .unwrap();
     let leases_before = queue.run_leases().unwrap();
     assert_eq!(leases_before.len(), 1);
@@ -669,7 +670,7 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
             .transition(task.id(), TaskAction::BypassReview)
             .unwrap();
         let dagq::domain::ClaimOutcome::Claimed { run } = queue
-            .claim_for_supervisor(&repository.main_head().unwrap(), "gone")
+            .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new("gone"))
             .unwrap()
         else {
             panic!()

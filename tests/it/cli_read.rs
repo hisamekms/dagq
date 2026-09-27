@@ -1,4 +1,5 @@
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::cli::*;
 
@@ -17,7 +18,10 @@ fn run_with_events(db: &Path, events: &[(&str, serde_json::Value, &str)]) -> Str
     ok(db, &["ready", "1", "--bypass-review"]);
     let mut queue = SqliteQueue::open(db).unwrap();
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
-    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("t"))
+        .unwrap()
+    else {
         panic!("nothing to claim");
     };
     let conn = rusqlite::Connection::open(db).unwrap();

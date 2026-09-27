@@ -726,7 +726,9 @@ pub use finding::{
 };
 pub use follow_up::{DraftOrigin, DraftTarget, MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS};
 pub use goal::Goal;
-pub use ids::{AskId, CommitSha, EventId, FindingId, GoalId, PlannerId, ProposalId, RunId, TaskId};
+pub use ids::{
+    AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RunId, TaskId,
+};
 pub use input::{GoalEdit, GoalRecord, NewGoal, NewTask, RunPlan, RunRecord, TaskEdit, TaskRecord};
 pub use lint::{LintCode, LintInput, LintNode, LintViolation};
 pub use plan_review::{
@@ -1861,7 +1863,7 @@ pub fn heartbeat_stale(alive: bool, heartbeat_age_secs: i64) -> bool {
 /// in the set of tokens, a PID, `alive` or `stale` wakes the inbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SupervisorPulse {
-    pub token: String,
+    pub token: LeaseToken,
     pub pid: u32,
     pub alive: bool,
     pub stale: bool,
@@ -2790,7 +2792,7 @@ mod attention_tests {
     #[test]
     fn supervisor_attention_reports_stale_registrations_or_a_stopped_queue() {
         let registration = |token: &str, heartbeat_at| SupervisorRegistration {
-            token: token.into(),
+            token: LeaseToken::new(token),
             pid: 7,
             parallel: 1,
             started_at: 0,

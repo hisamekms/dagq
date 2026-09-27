@@ -211,13 +211,13 @@ mod tests {
 #[cfg(test)]
 mod registration_tests {
     use super::SettingSource;
-    use crate::domain::SupervisorRegistration;
+    use crate::domain::{LeaseToken, SupervisorRegistration};
 
     #[test]
     fn only_values_from_flags_are_passed_to_a_restart() {
         let registration =
             |parallel_source, max_waiting, max_waiting_source| SupervisorRegistration {
-                token: "t".into(),
+                token: LeaseToken::new("t"),
                 pid: 1,
                 parallel: 3,
                 started_at: 0,

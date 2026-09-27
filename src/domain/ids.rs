@@ -209,6 +209,39 @@ impl fmt::Display for EventId {
     }
 }
 
+/// The token a supervisor or an `integrate` process holds leases and the
+/// integration slot under: an opaque UUID the [`IdGenerator`] makes once per
+/// process, or the one a handoff carries over. It has no constraint of its
+/// own; the type only keeps it apart from the other text (a message, a
+/// workspace ID) passed next to it.
+///
+/// [`IdGenerator`]: crate::application::ports::IdGenerator
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LeaseToken(String);
+
+impl LeaseToken {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+eq_text!(LeaseToken);
+
+impl fmt::Display for LeaseToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The ID of a run: a UUID the runtime generates at claim time, also the
 /// name of the run's directory and of its branch `dagq/<run id>`. It is never
 /// blank.
@@ -421,5 +454,20 @@ mod tests {
             serde_json::to_string(&(AskId::new(4), EventId::new(9))).unwrap(),
             "[4,9]"
         );
+    }
+
+    #[test]
+    fn a_lease_token_prints_serializes_and_compares_as_its_text() {
+        let token = LeaseToken::new("5b0e");
+        assert_eq!(token.as_str(), "5b0e");
+        assert_eq!(token.to_string(), "5b0e");
+        assert_eq!(serde_json::to_string(&token).unwrap(), "\"5b0e\"");
+        assert_eq!(
+            serde_json::from_str::<LeaseToken>("\"5b0e\"").unwrap(),
+            token
+        );
+        assert!(token == "5b0e" && "5b0e" == token);
+        assert_ne!(token, LeaseToken::new("other"));
+        assert_eq!(token.into_string(), "5b0e");
     }
 }

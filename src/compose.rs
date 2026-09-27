@@ -8,6 +8,7 @@
 //! return; `runtime` and `lifecycle` re-export them under the names the
 //! tests use.
 
+use crate::domain::LeaseToken;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -80,7 +81,7 @@ pub const PLANNER_TIMEOUT: Duration = Duration::from_secs(3600);
 pub struct AutoUpdateJob {
     pub commit: String,
     /// The supervisor that started it.
-    pub token: String,
+    pub token: LeaseToken,
     /// The fixed binary to replace.
     pub target: PathBuf,
     /// A checkout of the repository.
@@ -146,7 +147,7 @@ pub struct SuperviseOptions {
     /// The token of the supervisor this process takes over after it exec'd
     /// this binary (ADR-0045 decision 10): its registration and leases are
     /// kept, not registered anew. `None` registers a new supervisor.
-    pub handoff_token: Option<String>,
+    pub handoff_token: Option<LeaseToken>,
     /// How `up` started this process (`supervise --mode`), for its start
     /// mark; `None` for a supervisor started by hand.
     pub mode: Option<SupervisorMode>,
@@ -521,7 +522,7 @@ pub fn supervise_with_reviewer(
 /// tests use: failures are recorded in the queue at `db`, and `token` is
 /// the supervisor whose slots are reported (`None` reports all of them).
 impl<'a> RecordingBackend<'a> {
-    pub fn new(inner: &'a dyn WorkspaceBackend, db: PathBuf, token: Option<String>) -> Self {
+    pub fn new(inner: &'a dyn WorkspaceBackend, db: PathBuf, token: Option<LeaseToken>) -> Self {
         Self::over(
             inner,
             Arc::new(SqliteOpener {
@@ -1650,7 +1651,13 @@ pub fn ended_run_material(
 /// Run from cmux, not from a pipe; stdout must remain a terminal for Claude.
 /// `resume` reopens the session of a `needs_session` run the supervisor is
 /// resuming (ADR-0019) instead of starting the worker.
-pub fn session(db: &Path, id: &RunId, token: &str, claude: &Path, resume: bool) -> Result<Value> {
+pub fn session(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    claude: &Path,
+    resume: bool,
+) -> Result<Value> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "interactive Claude wrapper requires a terminal"
@@ -1665,7 +1672,7 @@ pub fn session(db: &Path, id: &RunId, token: &str, claude: &Path, resume: bool) 
 pub fn session_with_provider(
     db: &Path,
     id: &RunId,
-    token: &str,
+    token: &LeaseToken,
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
@@ -1676,7 +1683,7 @@ pub fn session_with_provider(
 pub fn resume_session_with_provider(
     db: &Path,
     id: &RunId,
-    token: &str,
+    token: &LeaseToken,
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
@@ -1686,7 +1693,7 @@ pub fn resume_session_with_provider(
 fn run_session(
     db: &Path,
     id: &RunId,
-    token: &str,
+    token: &LeaseToken,
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
     resume: bool,

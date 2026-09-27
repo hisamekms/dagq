@@ -1,6 +1,7 @@
 //! `dagq forecast` (ADR-0070 decisions 1 and 2) on a real queue: the open
 //! tasks and goals with their p50 and p90, what it assumed, the narrowing
 //! by task and goal, and that it records nothing.
+use dagq::domain::LeaseToken;
 use std::{path::Path, process::Command};
 
 use dagq::{
@@ -38,7 +39,10 @@ fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Valu
 
 fn claim(queue: &mut SqliteQueue) -> TaskRun {
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
-    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("t"))
+        .unwrap()
+    else {
         panic!("nothing to claim");
     };
     *run

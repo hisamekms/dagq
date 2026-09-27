@@ -5,6 +5,7 @@ use anyhow::Result;
 use rusqlite::{TransactionBehavior, params};
 
 use super::sqlite::SqliteQueue;
+use crate::domain::LeaseToken;
 use crate::{
     application::{HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::HEARTBEAT_TIMEOUT_SECS,
@@ -47,7 +48,11 @@ impl HeadlessJobStore for SqliteQueue {
         Ok(ended == 1)
     }
 
-    fn orphaned_headless_jobs(&self, token: &str, own: bool) -> Result<Vec<HeadlessJobRecord>> {
+    fn orphaned_headless_jobs(
+        &self,
+        token: &LeaseToken,
+        own: bool,
+    ) -> Result<Vec<HeadlessJobRecord>> {
         let now = self.generators.clock.now();
         Ok(self
             .conn
@@ -86,7 +91,7 @@ mod tests {
     use super::*;
     use crate::domain::{RunId, headless_job};
 
-    fn job(token: &str, pid: u32) -> NewHeadlessJob {
+    fn job(token: &LeaseToken, pid: u32) -> NewHeadlessJob {
         NewHeadlessJob {
             kind: headless_job::REVIEW,
             label: None,
@@ -96,7 +101,7 @@ mod tests {
             attempt: 2,
             pid,
             process_start: Some("Sun Sep 27 10:00:00 2026".into()),
-            supervisor_token: token.into(),
+            supervisor_token: token.clone(),
         }
     }
 
@@ -112,11 +117,21 @@ mod tests {
                 [],
             )
             .unwrap();
-        let live = queue.record_headless_job(&job("live", 10)).unwrap();
-        let stale = queue.record_headless_job(&job("stale", 11)).unwrap();
-        let gone = queue.record_headless_job(&job("gone", 12)).unwrap();
-        let ended = queue.record_headless_job(&job("gone", 13)).unwrap();
-        let mine = queue.record_headless_job(&job("me", 14)).unwrap();
+        let live = queue
+            .record_headless_job(&job(&LeaseToken::new("live"), 10))
+            .unwrap();
+        let stale = queue
+            .record_headless_job(&job(&LeaseToken::new("stale"), 11))
+            .unwrap();
+        let gone = queue
+            .record_headless_job(&job(&LeaseToken::new("gone"), 12))
+            .unwrap();
+        let ended = queue
+            .record_headless_job(&job(&LeaseToken::new("gone"), 13))
+            .unwrap();
+        let mine = queue
+            .record_headless_job(&job(&LeaseToken::new("me"), 14))
+            .unwrap();
         assert!(queue.end_headless_job(ended, headless_job::ENDED).unwrap());
         // A second end keeps the first outcome.
         assert!(
@@ -126,7 +141,7 @@ mod tests {
         );
         let ids = |own| {
             queue
-                .orphaned_headless_jobs("me", own)
+                .orphaned_headless_jobs(&LeaseToken::new("me"), own)
                 .unwrap()
                 .into_iter()
                 .map(|j| j.id)
@@ -135,14 +150,18 @@ mod tests {
         assert_eq!(ids(false), [stale, gone]);
         assert_eq!(ids(true), [stale, gone, mine]);
         let _ = live;
-        let record = &queue.orphaned_headless_jobs("me", false).unwrap()[0];
+        let record = &queue
+            .orphaned_headless_jobs(&LeaseToken::new("me"), false)
+            .unwrap()[0];
         assert_eq!(record.kind, "review");
         assert_eq!(record.run_id.as_ref().unwrap().as_str(), "run-1");
         assert_eq!(record.attempt, 2);
         assert_eq!(record.pid, 11);
         assert_eq!(record.supervisor_token, "stale");
         assert_eq!(record.supervisor_pid, Some(1));
-        let unregistered = &queue.orphaned_headless_jobs("me", false).unwrap()[1];
+        let unregistered = &queue
+            .orphaned_headless_jobs(&LeaseToken::new("me"), false)
+            .unwrap()[1];
         assert_eq!(unregistered.supervisor_pid, None);
         let outcome: String = queue
             .conn

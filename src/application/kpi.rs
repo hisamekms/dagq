@@ -28,7 +28,7 @@ pub fn kpi(
     let heartbeats = queue
         .supervisors()?
         .into_iter()
-        .map(|registration| (registration.token, registration.heartbeat_at))
+        .map(|registration| (registration.token.into_string(), registration.heartbeat_at))
         .collect();
     derive(
         &KpiInput {

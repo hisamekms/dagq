@@ -2,7 +2,7 @@
 //! headless job (one unfinished at a time, queue-wide), the goals it may
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
-use crate::domain::event_kind;
+use crate::domain::{LeaseToken, event_kind};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -121,7 +121,7 @@ fn finish_row(
 }
 
 /// The job's row, while it is unfinished and still `token`'s.
-fn running(conn: &Connection, job: &GoalReviewJob, token: &str) -> Result<bool> {
+fn running(conn: &Connection, job: &GoalReviewJob, token: &LeaseToken) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM goal_reviews WHERE id=?1 AND supervisor_token=?2
          AND finished_at IS NULL)",
@@ -275,14 +275,14 @@ impl GoalReviewStore for SqliteQueue {
     fn begin_goal_review(
         &mut self,
         goal: GoalId,
-        token: &str,
+        token: &LeaseToken,
         goal_reviews_dir: &Path,
     ) -> Result<Option<GoalReviewJob>> {
         let now = self.generators.clock.now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let unfinished: Vec<(i64, String, Option<i64>)> = tx
+        let unfinished: Vec<(i64, LeaseToken, Option<i64>)> = tx
             .prepare(
                 "SELECT r.id, r.supervisor_token, s.heartbeat_at FROM goal_reviews r
                  LEFT JOIN supervisors s ON s.token = r.supervisor_token
@@ -292,7 +292,7 @@ impl GoalReviewStore for SqliteQueue {
             .collect::<rusqlite::Result<_>>()?;
         for (id, owner, heartbeat) in unfinished {
             let live =
-                owner != token && heartbeat.is_some_and(|at| now - at <= HEARTBEAT_TIMEOUT_SECS);
+                owner != *token && heartbeat.is_some_and(|at| now - at <= HEARTBEAT_TIMEOUT_SECS);
             if live {
                 return Ok(None);
             }
@@ -370,7 +370,7 @@ impl GoalReviewStore for SqliteQueue {
     fn finish_goal_review(
         &mut self,
         job: &GoalReviewJob,
-        token: &str,
+        token: &LeaseToken,
         apply: &GoalReviewApply,
     ) -> Result<GoalReviewApplied> {
         let now = self.generators.clock.now();
@@ -483,7 +483,7 @@ impl GoalReviewStore for SqliteQueue {
     fn fail_goal_review(
         &mut self,
         job: &GoalReviewJob,
-        token: &str,
+        token: &LeaseToken,
         error: &str,
         duration_secs: u64,
     ) -> Result<()> {

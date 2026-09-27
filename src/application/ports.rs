@@ -17,12 +17,12 @@ use super::{GraphInput, TaskPage, TaskQuery, timestamp, unix_seconds};
 use crate::domain::{
     Ask, AskId, AskKind, AskOutcome, ClaimOutcome, CommitSha, DraftOrigin, DraftTarget, EventId,
     Finding, FindingId, FindingStatus, FindingView, Goal, GoalDetail, GoalEdit, GoalId,
-    GoalPredecessor, GoalSummary, GoalVerdict, LintInput, NewAsk, NewGoal, NewNote, NewTask,
-    NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict, PlannerId,
-    PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason, RunEvent,
-    RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission, SupervisorMode,
-    SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRun,
-    TaskStatus,
+    GoalPredecessor, GoalSummary, GoalVerdict, LeaseToken, LintInput, NewAsk, NewGoal, NewNote,
+    NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
+    PlannerId, PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason,
+    RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission,
+    SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId,
+    TaskKind, TaskRun, TaskStatus,
     goal_review::{GoalReviewDecision, GoalReviewVerdict},
     related::RelatedPage,
     search::{SearchPage, SearchQuery},
@@ -872,6 +872,11 @@ pub trait Clock: Send + Sync {
 /// a UUID string.
 pub trait IdGenerator: Send + Sync {
     fn uuid(&self) -> String;
+
+    /// A new supervisor or integrate token.
+    fn lease_token(&self) -> LeaseToken {
+        LeaseToken::new(self.uuid())
+    }
 }
 
 /// The clock and the ID generator a use case is given.
@@ -998,25 +1003,30 @@ pub trait RunTransitions {
     fn claim_for_supervisor(
         &mut self,
         base_commit: &CommitSha,
-        token: &str,
+        token: &LeaseToken,
     ) -> Result<ClaimOutcome>;
     /// Record a runtime error and give the lease up, leaving the status;
     /// `session` is what became of the run's live session, if it had one.
     fn abandon_run(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         message: &str,
         reason: &Reason,
         session: Option<&serde_json::Value>,
     ) -> Result<TaskRun>;
     /// Take the single integration slot for `id` under `token`.
-    fn begin_integration(&mut self, id: &RunId, token: &str, main: &CommitSha) -> Result<TaskRun>;
+    fn begin_integration(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        main: &CommitSha,
+    ) -> Result<TaskRun>;
     /// Leave the integrating run to a session (`needs_session`).
     fn defer_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun>;
@@ -1026,7 +1036,7 @@ pub trait RunTransitions {
     fn hold_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun>;
@@ -1034,7 +1044,7 @@ pub trait RunTransitions {
     fn fail_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         receipt: serde_json::Value,
     ) -> Result<TaskRun>;
@@ -1042,7 +1052,7 @@ pub trait RunTransitions {
     fn abort_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         revert_to: &str,
         message: &str,
         reason: &Reason,
@@ -1051,16 +1061,16 @@ pub trait RunTransitions {
     fn finish_integration(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         landing: &Landing,
         common_dir: &str,
     ) -> Result<(Task, TaskRun)>;
     fn record_cleanup_failure(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()>;
-    fn workspace_closed(&mut self, id: &RunId, token: &str) -> Result<TaskRun>;
+    fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     fn cleanup_failed(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun>;
@@ -1071,7 +1081,7 @@ pub trait RunTransitions {
     fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
-        token: &str,
+        token: &LeaseToken,
         order: &[TaskId],
         attributes: Option<&serde_json::Value>,
         trial: &crate::domain::worker_model::WorkerTrial,
@@ -1079,20 +1089,20 @@ pub trait RunTransitions {
     /// Record a runtime error on the run without changing its status.
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()>;
     /// Save the paths a claimed run is provisioned at.
-    fn plan_run(&mut self, id: &RunId, token: &str, plan: &RunPlan) -> Result<()>;
-    fn workspace_created(&mut self, id: &RunId, token: &str, workspace: &str) -> Result<()>;
+    fn plan_run(&mut self, id: &RunId, token: &LeaseToken, plan: &RunPlan) -> Result<()>;
+    fn workspace_created(&mut self, id: &RunId, token: &LeaseToken, workspace: &str) -> Result<()>;
     /// The session's wrapper exited: the run moves on by its exit code.
-    fn finish_supervision(&mut self, id: &RunId, token: &str) -> Result<TaskRun>;
+    fn finish_supervision(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     /// The session went idle after its receipt and stays open: validating.
-    fn finish_supervision_live(&mut self, id: &RunId, token: &str) -> Result<TaskRun>;
+    fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     fn finish_validation(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun>;
     /// Validate a rewritten receipt again.
-    fn restart_validation(&mut self, id: &RunId, token: &str) -> Result<TaskRun>;
+    fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     /// Apply a person's answer to an `approve_landing` ask.
     fn decide_landing(
         &mut self,
@@ -1109,7 +1119,7 @@ pub trait RunTransitions {
     fn park_live(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
@@ -1119,7 +1129,7 @@ pub trait RunTransitions {
     fn park_rechecked(
         &mut self,
         id: &RunId,
-        token: Option<&str>,
+        token: Option<&LeaseToken>,
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>>;
@@ -1138,9 +1148,9 @@ pub trait RunTransitions {
 /// supervisor leased. The same lease rule as [`RunTransitions`] applies.
 pub trait RunRecovery {
     /// Adoptable runs whose lease carries a token other than `token`.
-    fn runs_leased_by_others(&self, token: &str) -> Result<Vec<LeasedRun>>;
+    fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>>;
     /// Every run whose lease carries `token`, oldest first.
-    fn runs_leased_by(&self, token: &str) -> Result<Vec<TaskRun>>;
+    fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>>;
     /// The unclosed asks of the run, answered or not, oldest first.
     fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>>;
     /// Take over the stale lease `previous_token` holds on `id`; `None`
@@ -1148,8 +1158,8 @@ pub trait RunRecovery {
     fn adopt_run(
         &mut self,
         id: &RunId,
-        previous_token: &str,
-        token: &str,
+        previous_token: &LeaseToken,
+        token: &LeaseToken,
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>>;
@@ -1171,7 +1181,7 @@ pub trait RunRecovery {
     fn begin_triage(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         request: Option<serde_json::Value>,
         launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>>;
@@ -1180,7 +1190,7 @@ pub trait RunRecovery {
     fn finish_triage(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         action: &TriageAction,
         payload: serde_json::Value,
         also: Vec<(&'static str, serde_json::Value)>,
@@ -1198,7 +1208,7 @@ pub trait RunRecovery {
     fn begin_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         main: &CommitSha,
         reason: Option<&str>,
         config: crate::domain::resume::ResumeConfig,
@@ -1206,7 +1216,7 @@ pub trait RunRecovery {
     fn finish_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         status: Option<RunStatus>,
         reason: Option<&str>,
         keep_lease: bool,
@@ -1216,7 +1226,7 @@ pub trait RunRecovery {
     fn skip_resume(
         &mut self,
         id: &RunId,
-        token: &str,
+        token: &LeaseToken,
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,
@@ -1238,56 +1248,56 @@ pub trait RunRecovery {
 /// repository the queue is bound to.
 pub trait RunCoordination {
     /// Refresh every lease `token` holds; how many there were.
-    fn heartbeat_leases(&self, token: &str) -> Result<usize>;
+    fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize>;
     fn register_supervisor(
         &mut self,
-        token: &str,
+        token: &LeaseToken,
         pid: u32,
         parallel: u32,
         binary_version: &str,
     ) -> Result<SupervisorRegistration>;
     /// Whether a registration under `token` was removed.
-    fn deregister_supervisor(&self, token: &str) -> Result<bool>;
+    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool>;
     /// Remove the registration under `token` and record the queue event of
     /// `kind` with the payload `stopped` builds from the removed row, in one
     /// transaction; `false`, recording nothing, when there was no row.
     fn prune_supervisor(
         &self,
-        token: &str,
+        token: &LeaseToken,
         kind: &str,
         stopped: &dyn Fn(&SupervisorRegistration) -> serde_json::Value,
     ) -> Result<bool>;
     /// Every registered supervisor, oldest first, alive or not.
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
-    fn release_lease(&mut self, id: &RunId, token: &str) -> Result<()>;
+    fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()>;
     /// Mark `token`'s registration as one that takes a handoff.
-    fn accept_handoff(&self, token: &str) -> Result<()>;
+    fn accept_handoff(&self, token: &LeaseToken) -> Result<()>;
     /// Ask the supervisor `token` to exec `binary`; `false` when it is not
     /// registered or does not take a handoff (ADR-0045 decision 10).
-    fn request_handoff(&self, token: &str, binary: &str) -> Result<bool>;
+    fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
     /// The binary the supervisor `token` was asked to exec, if any.
-    fn handoff_request(&self, token: &str) -> Result<Option<String>>;
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>>;
     /// Withdraw a request to exec `binary` not taken yet.
-    fn cancel_handoff(&self, token: &str, binary: &str) -> Result<bool>;
+    fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
     /// Take `token`'s registration back under `binary_version` after an
     /// exec, clearing the request.
     fn resume_registration(
         &mut self,
-        token: &str,
+        token: &LeaseToken,
         pid: u32,
         binary_version: &str,
     ) -> Result<SupervisorRegistration>;
     /// Turn the automatic update of the supervisor `token` on or off
     /// (ADR-0045 decision 17).
-    fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()>;
+    fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()>;
     /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
     /// (ADR-0062 decision 7) and where each comes from (task 698).
     fn set_slot_limits(
         &self,
-        token: &str,
+        token: &LeaseToken,
         limits: crate::domain::slot_limits::SlotLimits,
     ) -> Result<()>;
-    fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool>;
+    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool>;
     fn run_leases(&self) -> Result<Vec<RunLease>>;
     fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;
     /// Point the queue at `common_dir` whatever it was bound to, and return
@@ -1299,18 +1309,18 @@ pub trait RunCoordination {
     fn assert_repository(&self, common_dir: &str) -> Result<()>;
     /// One heartbeat of the process `token`: its registration and every
     /// lease it holds; how many leases there were.
-    fn heartbeat(&mut self, token: &str) -> Result<usize>;
+    fn heartbeat(&mut self, token: &LeaseToken) -> Result<usize>;
     /// The processes registered for the run (its wrapper and agent).
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
     /// Record how `up` started the supervisor `token`.
     fn set_supervisor_mode(
         &self,
-        token: &str,
+        token: &LeaseToken,
         mode: SupervisorMode,
         workspace_id: Option<&str>,
     ) -> Result<()>;
-    fn register_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()>;
-    fn register_resume_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()>;
+    fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
+    fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
     fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
     fn register_resume_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32)
     -> Result<()>;
@@ -1318,7 +1328,7 @@ pub trait RunCoordination {
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()>;
     /// The leases `token` holds (every lease with `None`) and the
     /// `parallel` it registered (null without a supervisor).
-    fn backend_slots(&self, token: Option<&str>) -> Result<(i64, Option<i64>)>;
+    fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)>;
 }
 
 /// The sessions around runs: the workspaces `up` opened, the planner
@@ -1834,7 +1844,7 @@ pub trait PlanReviewStore {
     fn begin_plan_review(
         &mut self,
         proposal: ProposalId,
-        token: &str,
+        token: &LeaseToken,
         plan_reviews_dir: &Path,
         cwd: &Path,
         launch: &crate::domain::actor_model::ActorLaunch,
@@ -1845,7 +1855,7 @@ pub trait PlanReviewStore {
     fn finish_plan_review(
         &mut self,
         job: &PlanReviewJob,
-        token: &str,
+        token: &LeaseToken,
         apply: &PlanReviewApply,
     ) -> Result<PlanReviewApplied>;
     /// Record the job's failure (`plan_review_failed`, the inbox's) and
@@ -1853,7 +1863,7 @@ pub trait PlanReviewStore {
     fn fail_plan_review(
         &mut self,
         job: &PlanReviewJob,
-        token: &str,
+        token: &LeaseToken,
         error: &str,
         duration_secs: u64,
     ) -> Result<()>;
@@ -1995,7 +2005,7 @@ pub trait GoalReviewStore {
     fn begin_goal_review(
         &mut self,
         goal: GoalId,
-        token: &str,
+        token: &LeaseToken,
         goal_reviews_dir: &Path,
     ) -> Result<Option<GoalReviewJob>>;
     /// The finished reviews of `goal`, oldest first.
@@ -2004,7 +2014,7 @@ pub trait GoalReviewStore {
     fn finish_goal_review(
         &mut self,
         job: &GoalReviewJob,
-        token: &str,
+        token: &LeaseToken,
         apply: &GoalReviewApply,
     ) -> Result<GoalReviewApplied>;
     /// Record the job's failure (`goal_review_failed`, the inbox's); the
@@ -2013,7 +2023,7 @@ pub trait GoalReviewStore {
     fn fail_goal_review(
         &mut self,
         job: &GoalReviewJob,
-        token: &str,
+        token: &LeaseToken,
         error: &str,
         duration_secs: u64,
     ) -> Result<()>;
@@ -2049,7 +2059,7 @@ pub struct NewHeadlessJob {
     pub pid: u32,
     /// [`ProcessControl::start_identity`] of `pid` just after the start.
     pub process_start: Option<String>,
-    pub supervisor_token: String,
+    pub supervisor_token: LeaseToken,
 }
 
 /// An unfinished `headless_jobs` row of a supervisor that is gone.
@@ -2064,7 +2074,7 @@ pub struct HeadlessJobRecord {
     pub attempt: usize,
     pub pid: u32,
     pub process_start: Option<String>,
-    pub supervisor_token: String,
+    pub supervisor_token: LeaseToken,
     /// The pid of that supervisor's registration, when it has one left.
     pub supervisor_pid: Option<u32>,
     pub started_at: i64,
@@ -2082,7 +2092,11 @@ pub trait HeadlessJobStore {
     /// [`crate::domain::HEARTBEAT_TIMEOUT_SECS`]), oldest first; with
     /// `own`, `token`'s unfinished rows too (a process after its exec,
     /// which knows none of them).
-    fn orphaned_headless_jobs(&self, token: &str, own: bool) -> Result<Vec<HeadlessJobRecord>>;
+    fn orphaned_headless_jobs(
+        &self,
+        token: &LeaseToken,
+        own: bool,
+    ) -> Result<Vec<HeadlessJobRecord>>;
 }
 
 /// The queue a use case works on: its tasks and goals, its runs and its

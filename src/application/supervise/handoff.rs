@@ -10,6 +10,7 @@
 //! `handoff.json` in the run directory.
 
 use super::*;
+use crate::domain::LeaseToken;
 use serde::Deserialize;
 
 /// The run event of each run the process that took a registration over
@@ -38,7 +39,7 @@ impl Phase {
 /// process reads it; a file another process left behind is ignored.
 #[derive(Debug, Serialize, Deserialize)]
 struct Stamped {
-    token: String,
+    token: LeaseToken,
     #[serde(flatten)]
     snapshot: Snapshot,
 }

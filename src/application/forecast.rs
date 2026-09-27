@@ -4,6 +4,7 @@
 //! records a snapshot of it at its triggers (ADR-0070 decision 3,
 //! [`pending`] and [`record_snapshot`]).
 
+use crate::domain::LeaseToken;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -238,7 +239,7 @@ pub enum SnapshotOutcome {
 pub fn record_snapshot(
     queue: &dyn Queue,
     processes: &dyn ProcessControl,
-    supervisor: &str,
+    supervisor: &LeaseToken,
     now: i64,
     min_samples: usize,
     pending: &Pending,
@@ -258,7 +259,7 @@ pub fn record_snapshot(
         return Ok(SnapshotOutcome::Unmoved);
     };
     let payload = serde_json::to_value(Snapshot {
-        supervisor,
+        supervisor: supervisor.as_str(),
         at_secs: now,
         triggers: &triggers,
         triggers_through: pending.through,

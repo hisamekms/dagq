@@ -1,5 +1,6 @@
 //! Runtime tests: runs that wait for a person outside the slots (ADR-0062).
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -783,11 +784,11 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
         let (_dir, repo, db, run) = awaiting_run();
         let mut queue = SqliteQueue::open(&db).unwrap();
         queue
-            .register_supervisor("live", std::process::id(), 2, "0.0.1")
+            .register_supervisor(&LeaseToken::new("live"), std::process::id(), 2, "0.0.1")
             .unwrap();
         let main = git_out(&repo, &["rev-parse", "main"]);
         let landing = queue
-            .begin_integration(run.id(), token, &sha(&main))
+            .begin_integration(run.id(), &LeaseToken::new(token), &sha(&main))
             .unwrap();
         assert_eq!(landing.status(), RunStatus::Integrating);
         let status = runtime::status(&db).unwrap();
@@ -804,7 +805,7 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
         let back = queue
             .abort_integration(
                 run.id(),
-                token,
+                &LeaseToken::new(token),
                 "awaiting_integration",
                 "back to review",
                 &dagq::domain::Reason::new(ReasonCode::Other),

@@ -1,6 +1,7 @@
 //! Runtime tests: `integrate`: landing, rebasing, pushing, the review material, the prompt
 //! of a run and `rebind`.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -689,7 +690,11 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     // Integration is one-shot, at every layer.
     let error = format!("{:#}", integrate(&db, 1, &repo).unwrap_err());
     assert!(error.contains("no run awaiting integration"), "{error}");
-    assert!(queue.begin_integration(run.id(), "x", &sha(&seed)).is_err());
+    assert!(
+        queue
+            .begin_integration(run.id(), &LeaseToken::new("x"), &sha(&seed))
+            .is_err()
+    );
     let error = format!("{:#}", integrate(&db, 2, &repo).unwrap_err());
     assert!(error.contains("task 2 (ready) has no run"), "{error}");
     assert!(integrate(&db, 99, &repo).is_err());
@@ -1498,7 +1503,7 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
 
     // Take the slot by hand, as a crashed `integrate` would have.
     let taken = queue
-        .begin_integration(run.id(), "crashed", &sha(&seed))
+        .begin_integration(run.id(), &LeaseToken::new("crashed"), &sha(&seed))
         .unwrap();
     assert_eq!(taken.status(), RunStatus::Integrating);
     assert!(
@@ -1515,7 +1520,7 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
     assert!(error.contains("is already integrating"), "{error}");
     assert!(
         queue
-            .begin_integration(run.id(), "again", &sha(&seed))
+            .begin_integration(run.id(), &LeaseToken::new("again"), &sha(&seed))
             .is_err()
     );
     assert_eq!(
@@ -1613,7 +1618,7 @@ fn rebind_follows_a_moved_repository_and_the_awaiting_run_lands() {
 
     // A live supervisor, even one of another binary, blocks the rebind.
     queue
-        .register_supervisor("live", std::process::id(), 1, "0.0.1")
+        .register_supervisor(&LeaseToken::new("live"), std::process::id(), 1, "0.0.1")
         .unwrap();
     let refused = runtime::rebind(&db, &moved).unwrap_err().to_string();
     assert!(refused.contains("supervisor is running"), "{refused}");
@@ -1622,9 +1627,13 @@ fn rebind_follows_a_moved_repository_and_the_awaiting_run_lands() {
         Some(old_common_dir.as_str())
     );
     // A registration left behind by a dead one does not.
-    assert!(queue.deregister_supervisor("live").unwrap());
+    assert!(
+        queue
+            .deregister_supervisor(&LeaseToken::new("live"))
+            .unwrap()
+    );
     queue
-        .register_supervisor("dead", dead_pid(), 1, VERSION)
+        .register_supervisor(&LeaseToken::new("dead"), dead_pid(), 1, VERSION)
         .unwrap();
 
     let rebound = runtime::rebind(&db, &moved).unwrap();
@@ -1693,7 +1702,7 @@ fn rebind_is_refused_while_a_run_is_integrating() {
     let main = git_out(&repo, &["rev-parse", "main"]);
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
-        .begin_integration(run.id(), "integrator", &sha(&main))
+        .begin_integration(run.id(), &LeaseToken::new("integrator"), &sha(&main))
         .unwrap();
     let other = dir.path().join("other");
     fs::create_dir(&other).unwrap();

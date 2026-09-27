@@ -907,6 +907,7 @@ fn insert_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::LeaseToken;
 
     thread_local! {
         /// The transcripts read on this thread.
@@ -1486,7 +1487,13 @@ mod tests {
         };
         let resume = |queue: &mut SqliteQueue, attempt: usize| {
             let (_, started) = queue
-                .begin_resume(&run, "tok", &main, None, Default::default())
+                .begin_resume(
+                    &run,
+                    &LeaseToken::new("tok"),
+                    &main,
+                    None,
+                    Default::default(),
+                )
                 .unwrap()
                 .unwrap();
             assert_eq!(started, attempt);
@@ -1496,7 +1503,7 @@ mod tests {
             queue
                 .finish_resume(
                     &run,
-                    "tok",
+                    &LeaseToken::new("tok"),
                     None,
                     None,
                     false,
@@ -1631,7 +1638,13 @@ mod tests {
             )
             .unwrap();
         queue
-            .begin_resume(&run, "tok", &main, None, Default::default())
+            .begin_resume(
+                &run,
+                &LeaseToken::new("tok"),
+                &main,
+                None,
+                Default::default(),
+            )
             .unwrap()
             .unwrap();
         let before = latest(&queue.conn);
@@ -1656,7 +1669,7 @@ mod tests {
         queue
             .finish_resume(
                 &run,
-                "tok",
+                &LeaseToken::new("tok"),
                 None,
                 None,
                 false,
@@ -1675,7 +1688,13 @@ mod tests {
             .execute("UPDATE task_runs SET status='needs_session'", [])
             .unwrap();
         queue
-            .begin_resume(&run, "tok", &main, None, Default::default())
+            .begin_resume(
+                &run,
+                &LeaseToken::new("tok"),
+                &main,
+                None,
+                Default::default(),
+            )
             .unwrap()
             .unwrap();
         let before = latest(&queue.conn);

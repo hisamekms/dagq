@@ -1,5 +1,6 @@
 //! Queue tests: what each migration does to the rows of an older queue.
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use std::sync::Mutex;
 
@@ -279,9 +280,11 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
 
     // Registration: one row per token, a parallel limit of at least one,
     // heartbeat refreshed with the leases, removed only by deregistration.
-    let before = queue.heartbeat("tok").unwrap();
+    let before = queue.heartbeat(&LeaseToken::new("tok")).unwrap();
     assert_eq!(before, 1);
-    let registered = queue.register_supervisor("sv", 4243, 2, VERSION).unwrap();
+    let registered = queue
+        .register_supervisor(&LeaseToken::new("sv"), 4243, 2, VERSION)
+        .unwrap();
     assert_eq!(registered.token, "sv");
     assert_eq!(registered.pid, 4243);
     assert_eq!(registered.parallel, 2);
@@ -290,8 +293,16 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
     // The process records its own build; `up` reads it back to decide
     // whether that supervisor is one of its own (ADR-0014).
     assert_eq!(registered.binary_version.as_deref(), Some(VERSION));
-    assert!(queue.register_supervisor("sv", 4243, 2, VERSION).is_err());
-    assert!(queue.register_supervisor("zero", 4244, 0, VERSION).is_err());
+    assert!(
+        queue
+            .register_supervisor(&LeaseToken::new("sv"), 4243, 2, VERSION)
+            .is_err()
+    );
+    assert!(
+        queue
+            .register_supervisor(&LeaseToken::new("zero"), 4244, 0, VERSION)
+            .is_err()
+    );
     let raw = Connection::open(&path).unwrap();
     raw.execute("UPDATE supervisors SET heartbeat_at=0 WHERE token='sv'", [])
         .unwrap();
@@ -303,32 +314,32 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
         .is_err()
     );
     drop(raw);
-    assert_eq!(queue.heartbeat("sv").unwrap(), 0); // No lease, still refreshed.
+    assert_eq!(queue.heartbeat(&LeaseToken::new("sv")).unwrap(), 0); // No lease, still refreshed.
     let listed = queue.supervisors().unwrap();
     assert_eq!(listed.len(), 1);
     assert!(listed[0].heartbeat_at >= registered.started_at);
     assert_eq!(listed[0].binary_version.as_deref(), Some(VERSION));
-    assert_eq!(queue.heartbeat("nobody").unwrap(), 0);
+    assert_eq!(queue.heartbeat(&LeaseToken::new("nobody")).unwrap(), 0);
 
     // The mode is `up`'s to record once the process has registered; a
     // supervisor started by hand keeps none, and only the two modes fit.
     assert_eq!(listed[0].mode, None);
     assert_eq!(listed[0].workspace_id, None);
     queue
-        .set_supervisor_mode("sv", SupervisorMode::InCmux, Some("ws-1"))
+        .set_supervisor_mode(&LeaseToken::new("sv"), SupervisorMode::InCmux, Some("ws-1"))
         .unwrap();
     let listed = queue.supervisors().unwrap();
     assert_eq!(listed[0].mode, Some(SupervisorMode::InCmux));
     assert_eq!(listed[0].workspace_id.as_deref(), Some("ws-1"));
     queue
-        .set_supervisor_mode("sv", SupervisorMode::Launchd, None)
+        .set_supervisor_mode(&LeaseToken::new("sv"), SupervisorMode::Launchd, None)
         .unwrap();
     let listed = queue.supervisors().unwrap();
     assert_eq!(listed[0].mode, Some(SupervisorMode::Launchd));
     assert_eq!(listed[0].workspace_id, None);
     assert!(
         queue
-            .set_supervisor_mode("nobody", SupervisorMode::Launchd, None)
+            .set_supervisor_mode(&LeaseToken::new("nobody"), SupervisorMode::Launchd, None)
             .is_err()
     );
     let raw = Connection::open(&path).unwrap();
@@ -355,10 +366,14 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
         .find(|registration| registration.token == "old")
         .unwrap();
     assert_eq!(old.binary_version, None);
-    assert!(queue.deregister_supervisor("old").unwrap());
+    assert!(
+        queue
+            .deregister_supervisor(&LeaseToken::new("old"))
+            .unwrap()
+    );
 
-    assert!(queue.deregister_supervisor("sv").unwrap());
-    assert!(!queue.deregister_supervisor("sv").unwrap());
+    assert!(queue.deregister_supervisor(&LeaseToken::new("sv")).unwrap());
+    assert!(!queue.deregister_supervisor(&LeaseToken::new("sv")).unwrap());
     assert!(queue.supervisors().unwrap().is_empty());
     assert_eq!(queue.run_leases().unwrap().len(), 1);
 }

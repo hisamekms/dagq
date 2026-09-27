@@ -1,6 +1,7 @@
 //! `dagq kpi` (ADR-0051 decisions 1–9 and 14–19) on a real queue: the
 //! periods, the kinds, the host's `[kpi]` settings and targets, and a
 //! comparison across a mark.
+use dagq::domain::LeaseToken;
 use std::{path::Path, process::Command};
 
 use dagq::{
@@ -66,7 +67,10 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
     for _ in 0..2 {
-        let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor(&base, &LeaseToken::new("t"))
+            .unwrap()
+        else {
             panic!("nothing to claim");
         };
         for (kind, payload) in [
@@ -192,7 +196,10 @@ fn kpi_counts_the_drafts_registered_per_landing() {
         .record_draft_origin(TaskId::new(gap), DraftOrigin::GoalGap, &json!({}))
         .unwrap();
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
-    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("t"))
+        .unwrap()
+    else {
         panic!("nothing to claim");
     };
     queue
@@ -337,7 +344,10 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
     for _ in 0..3 {
-        let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor(&base, &LeaseToken::new("t"))
+            .unwrap()
+        else {
             panic!("nothing to claim");
         };
         for (kind, payload) in [

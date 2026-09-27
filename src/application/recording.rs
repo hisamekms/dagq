@@ -3,6 +3,7 @@
 //! the call failed under. A call that timed out is made again after a
 //! backoff when making it again is safe (task 326).
 
+use crate::domain::LeaseToken;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread, time::Duration};
@@ -190,7 +191,7 @@ fn timed_out(error: &anyhow::Error) -> bool {
 pub struct RecordingBackend<'a> {
     inner: &'a dyn WorkspaceBackend,
     queues: Arc<dyn QueueOpener>,
-    token: Option<String>,
+    token: Option<LeaseToken>,
     /// The 1-minute load average, `None` where it cannot be read.
     load_average: fn() -> Option<f64>,
 }
@@ -201,7 +202,7 @@ impl<'a> RecordingBackend<'a> {
     pub fn over(
         inner: &'a dyn WorkspaceBackend,
         queues: Arc<dyn QueueOpener>,
-        token: Option<String>,
+        token: Option<LeaseToken>,
         load_average: fn() -> Option<f64>,
     ) -> Self {
         Self {
@@ -290,7 +291,7 @@ impl<'a> RecordingBackend<'a> {
             (None, Some(workspace_id)) => queue.run_in_workspace(workspace_id)?,
             (None, None) => None,
         };
-        let (slots, parallel) = queue.backend_slots(self.token.as_deref())?;
+        let (slots, parallel) = queue.backend_slots(self.token.as_ref())?;
         queue.record_backend_failure(
             run_id.as_ref(),
             backend_failure_payload(

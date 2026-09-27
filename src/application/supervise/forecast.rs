@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::application::forecast::{self, Pending, SnapshotOutcome};
+use crate::domain::LeaseToken;
 
 /// How long after a failed look or job the triggers are looked for again.
 const RETRY: Duration = Duration::from_secs(600);
@@ -136,7 +137,7 @@ fn snapshot(
     queues: &dyn QueueOpener,
     processes: &dyn ProcessControl,
     port: &ForecastPort,
-    token: &str,
+    token: &LeaseToken,
     now: i64,
     pending: &Pending,
 ) -> Result<(i64, SnapshotOutcome)> {

@@ -4,6 +4,7 @@
 //! watch, restore and asks.
 
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
@@ -152,7 +153,7 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
     let fixture = fixture();
     let queue = handoff_supervisor(&fixture, "new", SupervisorMode::InCmux);
     let mut old = SqliteQueue::open(&fixture.location.db).unwrap();
-    old.register_supervisor("older", 424_243, 1, "0.0.1")
+    old.register_supervisor(&LeaseToken::new("older"), 424_243, 1, "0.0.1")
         .unwrap();
     let binaries = FakeBinaries::new(&[(27, true)], false);
     let processes = FakeProcesses::default();
@@ -161,10 +162,13 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
         scope.spawn(|| {
             let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
             wait_until(&processes, std::process::id(), || {
-                queue.handoff_request("new").unwrap().is_some()
+                queue
+                    .handoff_request(&LeaseToken::new("new"))
+                    .unwrap()
+                    .is_some()
             });
             queue
-                .resume_registration("new", std::process::id(), VERSION)
+                .resume_registration(&LeaseToken::new("new"), std::process::id(), VERSION)
                 .unwrap();
         });
         install_with(
@@ -201,7 +205,10 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
     );
     assert!(error.contains("the handoff to"), "{error}");
     assert!(error.contains("is back at /opt/bin/dagq"), "{error}");
-    assert_eq!(queue.handoff_request("new").unwrap(), None);
+    assert_eq!(
+        queue.handoff_request(&LeaseToken::new("new")).unwrap(),
+        None
+    );
 
     // A binary that predates the handoff would end the supervisor it is
     // exec'd in: nothing is replaced.
@@ -294,9 +301,14 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
 
     // A drained supervisor with the automatic update and a wait limit gets
     // both back from the `up`, once each even when the restart names them.
-    queue.set_auto_update("live", true).unwrap();
     queue
-        .set_slot_limits("live", slot_limits(SettingSource::Flag, 2))
+        .set_auto_update(&LeaseToken::new("live"), true)
+        .unwrap();
+    queue
+        .set_slot_limits(
+            &LeaseToken::new("live"),
+            slot_limits(SettingSource::Flag, 2),
+        )
         .unwrap();
     let binaries = FakeBinaries::new(&[(28, false)], false);
     install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
@@ -337,7 +349,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     // again (task 698).
     for source in [SettingSource::File, SettingSource::Default] {
         queue
-            .set_slot_limits("live", slot_limits(source, 2))
+            .set_slot_limits(&LeaseToken::new("live"), slot_limits(source, 2))
             .unwrap();
         let binaries = FakeBinaries::new(&[(28, false)], false);
         options.restart = vec![];
@@ -493,7 +505,10 @@ fn run_update_job(
         })
     };
     let restart = |registration: &dagq::domain::SupervisorRegistration| -> Result<Value> {
-        restarted.lock().unwrap().push(registration.token.clone());
+        restarted
+            .lock()
+            .unwrap()
+            .push(registration.token.to_string());
         Ok(json!({"by": "test"}))
     };
     let dir = fixture._dir.path();
@@ -509,7 +524,7 @@ fn run_update_job(
         &fixture.location.db,
         &update::JobOptions {
             commit: "c0ffee".repeat(6) + "c0ff",
-            token: "auto".into(),
+            token: LeaseToken::new("auto"),
             target: dir.join("bin").join("dagq"),
             repository: fixture.repo.clone(),
             paths: update::UpdatePaths::under(&dir.join("queue-dir")),
@@ -528,12 +543,18 @@ fn run_update_job(
 fn auto_supervisor(fixture: &Fixture) -> SqliteQueue {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     queue
-        .register_supervisor("auto", UPDATED_PID, 2, "0.0.1")
+        .register_supervisor(&LeaseToken::new("auto"), UPDATED_PID, 2, "0.0.1")
         .unwrap();
-    queue.accept_handoff("auto").unwrap();
-    queue.set_auto_update("auto", true).unwrap();
+    queue.accept_handoff(&LeaseToken::new("auto")).unwrap();
     queue
-        .set_supervisor_mode("auto", SupervisorMode::InCmux, Some("ws-auto"))
+        .set_auto_update(&LeaseToken::new("auto"), true)
+        .unwrap();
+    queue
+        .set_supervisor_mode(
+            &LeaseToken::new("auto"),
+            SupervisorMode::InCmux,
+            Some("ws-auto"),
+        )
         .unwrap();
     queue
 }
@@ -543,14 +564,17 @@ fn auto_supervisor(fixture: &Fixture) -> SqliteQueue {
 fn take_and_heartbeat(fixture: &Fixture, processes: &FakeProcesses, alive: bool) {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     wait_until(processes, UPDATED_PID, || {
-        queue.handoff_request("auto").unwrap().is_some()
+        queue
+            .handoff_request(&LeaseToken::new("auto"))
+            .unwrap()
+            .is_some()
     });
     queue
-        .resume_registration("auto", UPDATED_PID, VERSION)
+        .resume_registration(&LeaseToken::new("auto"), UPDATED_PID, VERSION)
         .unwrap();
     thread::sleep(Duration::from_millis(1100));
     if alive {
-        queue.heartbeat("auto").unwrap();
+        queue.heartbeat(&LeaseToken::new("auto")).unwrap();
     } else {
         processes.dead.lock().unwrap().insert(UPDATED_PID);
     }
@@ -706,18 +730,27 @@ enum Afterwards {
 fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, then: Afterwards) {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     wait_until(processes, pid, || {
-        queue.handoff_request(token).unwrap().is_some()
+        queue
+            .handoff_request(&LeaseToken::new(token))
+            .unwrap()
+            .is_some()
     });
     let version = match then {
         Afterwards::ExecFails => "0.0.1",
         _ => VERSION,
     };
-    queue.resume_registration(token, pid, version).unwrap();
+    queue
+        .resume_registration(&LeaseToken::new(token), pid, version)
+        .unwrap();
     let serving = match then {
         Afterwards::Reregister | Afterwards::ReregisterAndDie => {
             let again = format!("{token}-again");
-            queue.register_supervisor(&again, pid, 2, VERSION).unwrap();
-            queue.deregister_supervisor(token).unwrap();
+            queue
+                .register_supervisor(&LeaseToken::new(&again), pid, 2, VERSION)
+                .unwrap();
+            queue
+                .deregister_supervisor(&LeaseToken::new(token))
+                .unwrap();
             again
         }
         _ => token.to_owned(),
@@ -728,7 +761,7 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
             processes.dead.lock().unwrap().insert(pid);
         }
         _ => {
-            queue.heartbeat(&serving).unwrap();
+            queue.heartbeat(&LeaseToken::new(&serving)).unwrap();
         }
     }
 }
@@ -740,9 +773,9 @@ fn update_two(auto: Afterwards, other: Afterwards) -> (Value, Vec<String>, Vec<S
     let fixture = fixture();
     let mut queue = auto_supervisor(&fixture);
     queue
-        .register_supervisor("other", OTHER_PID, 2, "0.0.1")
+        .register_supervisor(&LeaseToken::new("other"), OTHER_PID, 2, "0.0.1")
         .unwrap();
-    queue.accept_handoff("other").unwrap();
+    queue.accept_handoff(&LeaseToken::new("other")).unwrap();
     let processes = FakeProcesses::default();
     let restarted = Mutex::new(Vec::new());
     let dir = fixture._dir.path();
@@ -893,9 +926,9 @@ fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
         let fixture = fixture();
         let mut queue = handoff_supervisor(&fixture, "first", SupervisorMode::InCmux);
         queue
-            .register_supervisor("second", SECOND, 4, "0.0.1")
+            .register_supervisor(&LeaseToken::new("second"), SECOND, 4, "0.0.1")
             .unwrap();
-        queue.accept_handoff("second").unwrap();
+        queue.accept_handoff(&LeaseToken::new("second")).unwrap();
         let binaries = FakeBinaries::new(&[], true);
         let processes = FakeProcesses::default();
         let no_down = || -> Result<Value> { panic!("no drain") };
@@ -903,21 +936,31 @@ fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
             scope.spawn(|| {
                 let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
                 wait_until(&processes, std::process::id(), || {
-                    queue.handoff_request("first").unwrap().is_some()
+                    queue
+                        .handoff_request(&LeaseToken::new("first"))
+                        .unwrap()
+                        .is_some()
                 });
                 queue
-                    .resume_registration("first", std::process::id(), first_version)
+                    .resume_registration(
+                        &LeaseToken::new("first"),
+                        std::process::id(),
+                        first_version,
+                    )
                     .unwrap();
             });
             scope.spawn(|| {
                 let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
                 wait_until(&processes, SECOND, || {
-                    queue.handoff_request("second").unwrap().is_some()
+                    queue
+                        .handoff_request(&LeaseToken::new("second"))
+                        .unwrap()
+                        .is_some()
                 });
                 // The first one's outcome is seen before this one takes it.
                 thread::sleep(Duration::from_millis(300));
                 queue
-                    .resume_registration("second", SECOND, second_version)
+                    .resume_registration(&LeaseToken::new("second"), SECOND, second_version)
                     .unwrap();
             });
             install_with(
@@ -929,8 +972,8 @@ fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
             )
         });
         let requests = [
-            queue.handoff_request("first").unwrap(),
-            queue.handoff_request("second").unwrap(),
+            queue.handoff_request(&LeaseToken::new("first")).unwrap(),
+            queue.handoff_request(&LeaseToken::new("second")).unwrap(),
         ];
         (result, binaries.calls(), requests)
     };

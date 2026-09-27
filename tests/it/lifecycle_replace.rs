@@ -4,6 +4,7 @@
 //! the handoff without a drain, and the migrations `up` applies or refuses.
 
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
@@ -54,7 +55,7 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
         .unwrap();
     let repository = GitRepository::inspect(&fixture.repo).unwrap();
     match queue
-        .claim_for_supervisor(&repository.main_head().unwrap(), token)
+        .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new(token))
         .unwrap()
     {
         dagq::domain::ClaimOutcome::Claimed { run } => run.id().to_string(),
@@ -77,9 +78,11 @@ fn up_drains_and_replaces_a_launchd_supervisor_of_another_version() {
         let fixture = fixture();
         let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
         let pid = std::process::id();
-        queue.register_supervisor("old", pid, 4, VERSION).unwrap();
         queue
-            .set_supervisor_mode("old", SupervisorMode::Launchd, None)
+            .register_supervisor(&LeaseToken::new("old"), pid, 4, VERSION)
+            .unwrap();
+        queue
+            .set_supervisor_mode(&LeaseToken::new("old"), SupervisorMode::Launchd, None)
             .unwrap();
         set_binary_version(&fixture.location.db, "old", previous);
         let cmux = FakeCmux::default();
@@ -99,7 +102,7 @@ fn up_drains_and_replaces_a_launchd_supervisor_of_another_version() {
                 });
                 SqliteQueue::open(&fixture.location.db)
                     .unwrap()
-                    .deregister_supervisor("old")
+                    .deregister_supervisor(&LeaseToken::new("old"))
                     .unwrap();
             });
             up(&fixture, &cmux, &launchd, &processes)
@@ -139,7 +142,7 @@ fn up_drains_and_replaces_a_launchd_supervisor_of_another_version() {
         assert_eq!(registrations.len(), 1, "{registrations:?}");
         assert_eq!(registrations[0].binary_version.as_deref(), Some(VERSION));
         assert_eq!(registrations[0].mode, Some(SupervisorMode::Launchd));
-        assert_eq!(registrations[0].token, supervisor["token"]);
+        assert_eq!(registrations[0].token.as_str(), supervisor["token"]);
     }
 }
 
@@ -152,7 +155,7 @@ fn up_terminates_a_replaced_supervisor_that_launchd_did_not_signal() {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
     queue
-        .register_supervisor("by-hand", pid, 1, VERSION)
+        .register_supervisor(&LeaseToken::new("by-hand"), pid, 1, VERSION)
         .unwrap();
     set_binary_version(&fixture.location.db, "by-hand", Some("0.0.1"));
     let cmux = FakeCmux::default();
@@ -166,7 +169,7 @@ fn up_terminates_a_replaced_supervisor_that_launchd_did_not_signal() {
             });
             SqliteQueue::open(&fixture.location.db)
                 .unwrap()
-                .deregister_supervisor("by-hand")
+                .deregister_supervisor(&LeaseToken::new("by-hand"))
                 .unwrap();
         });
         up(&fixture, &cmux, &launchd, &processes)
@@ -200,9 +203,15 @@ fn up_in_cmux_replaces_an_in_cmux_supervisor_of_another_version() {
     queue
         .register_session_workspace(SessionRole::Supervisor, &workspace)
         .unwrap();
-    queue.register_supervisor("old", pid, 2, VERSION).unwrap();
     queue
-        .set_supervisor_mode("old", SupervisorMode::InCmux, Some(&workspace))
+        .register_supervisor(&LeaseToken::new("old"), pid, 2, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(
+            &LeaseToken::new("old"),
+            SupervisorMode::InCmux,
+            Some(&workspace),
+        )
         .unwrap();
     set_binary_version(&fixture.location.db, "old", Some("0.0.1"));
     let launchd = FakeLaunchd::new(&fixture.location.db);
@@ -216,7 +225,7 @@ fn up_in_cmux_replaces_an_in_cmux_supervisor_of_another_version() {
             });
             SqliteQueue::open(&fixture.location.db)
                 .unwrap()
-                .deregister_supervisor("old")
+                .deregister_supervisor(&LeaseToken::new("old"))
                 .unwrap();
         });
         up(&fixture, &cmux, &launchd, &processes)
@@ -270,9 +279,11 @@ fn up_no_wait_refuses_to_replace_while_runs_are_in_flight() {
     fixture.options.no_wait = true;
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
-    queue.register_supervisor("old", pid, 4, VERSION).unwrap();
     queue
-        .set_supervisor_mode("old", SupervisorMode::Launchd, None)
+        .register_supervisor(&LeaseToken::new("old"), pid, 4, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(&LeaseToken::new("old"), SupervisorMode::Launchd, None)
         .unwrap();
     set_binary_version(&fixture.location.db, "old", Some("0.0.1"));
     let run_id = claim_a_run(&fixture, &mut queue, "old");
@@ -317,7 +328,7 @@ fn up_no_wait_refuses_to_replace_while_runs_are_in_flight() {
             });
             SqliteQueue::open(&fixture.location.db)
                 .unwrap()
-                .deregister_supervisor("old")
+                .deregister_supervisor(&LeaseToken::new("old"))
                 .unwrap();
         });
         up(&fixture, &cmux, &launchd, &processes)
@@ -333,9 +344,11 @@ fn up_reuses_a_supervisor_of_this_binary_version() {
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
-    queue.register_supervisor("live", pid, 4, VERSION).unwrap();
     queue
-        .set_supervisor_mode("live", SupervisorMode::Launchd, None)
+        .register_supervisor(&LeaseToken::new("live"), pid, 4, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(&LeaseToken::new("live"), SupervisorMode::Launchd, None)
         .unwrap();
     let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
@@ -368,9 +381,11 @@ fn up_proves_the_detached_connection_before_draining_the_old_supervisor() {
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
-    queue.register_supervisor("old", pid, 4, VERSION).unwrap();
     queue
-        .set_supervisor_mode("old", SupervisorMode::Launchd, None)
+        .register_supervisor(&LeaseToken::new("old"), pid, 4, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(&LeaseToken::new("old"), SupervisorMode::Launchd, None)
         .unwrap();
     set_binary_version(&fixture.location.db, "old", Some("0.0.1"));
     let cmux = FakeCmux {
@@ -416,9 +431,11 @@ fn up_in_cmux_refuses_a_leftover_supervisor_workspace_before_draining() {
         .unwrap();
     // The supervisor being replaced runs under launchd, so the drain would
     // close nothing and the name would still be taken.
-    queue.register_supervisor("old", pid, 4, VERSION).unwrap();
     queue
-        .set_supervisor_mode("old", SupervisorMode::Launchd, None)
+        .register_supervisor(&LeaseToken::new("old"), pid, 4, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(&LeaseToken::new("old"), SupervisorMode::Launchd, None)
         .unwrap();
     set_binary_version(&fixture.location.db, "old", Some("0.0.1"));
     let launchd = FakeLaunchd::new(&fixture.location.db);
@@ -453,10 +470,10 @@ fn up_no_wait_gives_up_on_a_supervisor_that_does_not_stop() {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
     queue
-        .register_supervisor("wedged", pid, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("wedged"), pid, 4, VERSION)
         .unwrap();
     queue
-        .set_supervisor_mode("wedged", SupervisorMode::Launchd, None)
+        .set_supervisor_mode(&LeaseToken::new("wedged"), SupervisorMode::Launchd, None)
         .unwrap();
     set_binary_version(&fixture.location.db, "wedged", Some("0.0.1"));
     let cmux = FakeCmux::default();
@@ -500,10 +517,14 @@ fn up_drops_the_row_of_a_replaced_supervisor_that_died_without_deregistering() {
     let workspace = "01234567-89ab-4def-8123-0000000000bb".to_owned();
     cmux.open("[my repo]supervisor", &fixture.repo, &workspace);
     queue
-        .register_supervisor("killed", pid, 2, VERSION)
+        .register_supervisor(&LeaseToken::new("killed"), pid, 2, VERSION)
         .unwrap();
     queue
-        .set_supervisor_mode("killed", SupervisorMode::InCmux, Some(&workspace))
+        .set_supervisor_mode(
+            &LeaseToken::new("killed"),
+            SupervisorMode::InCmux,
+            Some(&workspace),
+        )
         .unwrap();
     set_binary_version(&fixture.location.db, "killed", Some("0.0.1"));
     let launchd = FakeLaunchd::new(&fixture.location.db);
@@ -542,14 +563,20 @@ fn up_drops_the_row_of_a_replaced_supervisor_that_died_without_deregistering() {
 fn take_the_handoff(fixture: &Fixture, processes: &FakeProcesses, token: &str, version: &str) {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     wait_until(processes, std::process::id(), || {
-        queue.handoff_request(token).unwrap().is_some()
+        queue
+            .handoff_request(&LeaseToken::new(token))
+            .unwrap()
+            .is_some()
     });
     assert_eq!(
-        queue.handoff_request(token).unwrap().as_deref(),
+        queue
+            .handoff_request(&LeaseToken::new(token))
+            .unwrap()
+            .as_deref(),
         Some("/opt/bin/dagq")
     );
     queue
-        .resume_registration(token, std::process::id(), version)
+        .resume_registration(&LeaseToken::new(token), std::process::id(), version)
         .unwrap();
 }
 
@@ -640,7 +667,10 @@ fn up_reports_a_handoff_that_did_not_happen() {
     );
     assert!(error.contains("did not take the handoff"), "{error}");
     // The request is withdrawn, so the supervisor does not exec that path later.
-    assert_eq!(queue.handoff_request("old").unwrap(), None);
+    assert_eq!(
+        queue.handoff_request(&LeaseToken::new("old")).unwrap(),
+        None
+    );
     Connection::open(&fixture.location.db)
         .unwrap()
         .execute(
@@ -648,7 +678,9 @@ fn up_reports_a_handoff_that_did_not_happen() {
             [],
         )
         .unwrap();
-    queue.request_handoff("old", "/opt/bin/dagq").unwrap();
+    queue
+        .request_handoff(&LeaseToken::new("old"), "/opt/bin/dagq")
+        .unwrap();
     let registration = queue.supervisors().unwrap().remove(0);
     let handed = lifecycle::hand_off(
         &queue,
@@ -663,7 +695,9 @@ fn up_reports_a_handoff_that_did_not_happen() {
     .unwrap();
     let error = handed[0].error.as_deref().unwrap();
     assert!(error.contains("stopped heartbeating"), "{error}");
-    queue.deregister_supervisor("old").unwrap();
+    queue
+        .deregister_supervisor(&LeaseToken::new("old"))
+        .unwrap();
     let handed = lifecycle::hand_off(
         &queue,
         &processes,
@@ -694,12 +728,17 @@ fn a_handoff_follows_a_pid_that_registered_again_under_the_new_build() {
         scope.spawn(|| {
             let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
             wait_until(&processes, registration.pid, || {
-                queue.handoff_request("old").unwrap().is_some()
+                queue
+                    .handoff_request(&LeaseToken::new("old"))
+                    .unwrap()
+                    .is_some()
             });
             queue
-                .register_supervisor("again", registration.pid, 4, VERSION)
+                .register_supervisor(&LeaseToken::new("again"), registration.pid, 4, VERSION)
                 .unwrap();
-            queue.deregister_supervisor("old").unwrap();
+            queue
+                .deregister_supervisor(&LeaseToken::new("old"))
+                .unwrap();
         });
         lifecycle::hand_off(
             &queue,
@@ -714,7 +753,10 @@ fn a_handoff_follows_a_pid_that_registered_again_under_the_new_build() {
         .unwrap()
     });
     assert_eq!(handed.len(), 1);
-    assert_eq!(handed[0].now.as_deref(), Some("again"));
+    assert_eq!(
+        handed[0].now.as_ref().map(LeaseToken::as_str),
+        Some("again")
+    );
     let report = handed[0].report();
     assert_eq!(report["token"], "again");
     assert_eq!(report["previous_token"], "old");
@@ -727,11 +769,11 @@ fn a_handoff_follows_a_pid_that_registered_again_under_the_new_build() {
 fn two_handoff_supervisors(fixture: &Fixture) -> SqliteQueue {
     let mut queue = handoff_supervisor(fixture, "first", SupervisorMode::InCmux);
     queue
-        .register_supervisor("second", SECOND_PID, 4, "0.0.1")
+        .register_supervisor(&LeaseToken::new("second"), SECOND_PID, 4, "0.0.1")
         .unwrap();
-    queue.accept_handoff("second").unwrap();
+    queue.accept_handoff(&LeaseToken::new("second")).unwrap();
     queue
-        .set_supervisor_mode("second", SupervisorMode::InCmux, None)
+        .set_supervisor_mode(&LeaseToken::new("second"), SupervisorMode::InCmux, None)
         .unwrap();
     queue
 }
@@ -755,7 +797,10 @@ fn a_handoff_waits_for_every_supervisor_past_a_failure() {
         scope.spawn(|| {
             let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
             wait_until(&processes, SECOND_PID, || {
-                queue.handoff_request("second").unwrap().is_some()
+                queue
+                    .handoff_request(&LeaseToken::new("second"))
+                    .unwrap()
+                    .is_some()
             });
             // Long past the first one's failure, the request still stands.
             wait_until(&processes, SECOND_PID, || {
@@ -767,13 +812,18 @@ fn a_handoff_waits_for_every_supervisor_past_a_failure() {
             });
             thread::sleep(Duration::from_millis(300));
             assert_eq!(
-                queue.handoff_request("second").unwrap().as_deref(),
+                queue
+                    .handoff_request(&LeaseToken::new("second"))
+                    .unwrap()
+                    .as_deref(),
                 Some("/opt/bin/dagq")
             );
             queue
-                .register_supervisor("second-again", SECOND_PID, 4, VERSION)
+                .register_supervisor(&LeaseToken::new("second-again"), SECOND_PID, 4, VERSION)
                 .unwrap();
-            queue.deregister_supervisor("second").unwrap();
+            queue
+                .deregister_supervisor(&LeaseToken::new("second"))
+                .unwrap();
         });
         lifecycle::hand_off(
             &queue,
@@ -805,7 +855,10 @@ fn a_handoff_waits_for_every_supervisor_past_a_failure() {
         .find(|h| h.registration.token == "second")
         .unwrap();
     assert_eq!(second.error, None, "{second:?}");
-    assert_eq!(second.now.as_deref(), Some("second-again"));
+    assert_eq!(
+        second.now.as_ref().map(LeaseToken::as_str),
+        Some("second-again")
+    );
     let error = format!("{:#}", lifecycle::handoff_failures(&handed).unwrap());
     assert!(error.contains("supervisor first"), "{error}");
     assert!(!error.contains("supervisor second"), "{error}");
@@ -827,11 +880,14 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
         scope.spawn(|| {
             let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
             wait_until(&processes, SECOND_PID, || {
-                queue.handoff_request("second").unwrap().is_some()
+                queue
+                    .handoff_request(&LeaseToken::new("second"))
+                    .unwrap()
+                    .is_some()
             });
             thread::sleep(Duration::from_millis(300));
             queue
-                .resume_registration("second", SECOND_PID, VERSION)
+                .resume_registration(&LeaseToken::new("second"), SECOND_PID, VERSION)
                 .unwrap();
         });
         format!(
@@ -856,7 +912,7 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
 
 fn gone_registration() -> dagq::domain::SupervisorRegistration {
     dagq::domain::SupervisorRegistration {
-        token: "gone".into(),
+        token: LeaseToken::new("gone"),
         pid: 1,
         parallel: 1,
         started_at: 0,
@@ -896,14 +952,17 @@ fn up_drains_a_supervisor_whose_agent_starts_another_binary() {
             });
             SqliteQueue::open(&fixture.location.db)
                 .unwrap()
-                .deregister_supervisor("old")
+                .deregister_supervisor(&LeaseToken::new("old"))
                 .unwrap();
         });
         up(&fixture, &cmux, &launchd, &processes)
     });
     assert_eq!(report["supervisor"]["outcome"], "restarted", "{report}");
     assert_eq!(report["supervisor"].get("handoff"), None, "{report}");
-    assert_eq!(queue.handoff_request("old").unwrap(), None);
+    assert_eq!(
+        queue.handoff_request(&LeaseToken::new("old")).unwrap(),
+        None
+    );
 }
 
 /// `up` applies the queue's pending migrations first only when every one

@@ -378,7 +378,7 @@ impl Supervisor<'_> {
             "--run".into(),
             run.id().to_string(),
             "--lease".into(),
-            self.token.clone(),
+            self.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
             "--resume".into(),

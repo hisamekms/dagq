@@ -20,9 +20,9 @@ use dagq::{
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Authorizer,
         Capability, EventId, FindingId, FindingQuery, FindingStatus, FindingTarget, GoalEdit,
-        GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget,
-        PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole,
-        StaticPolicy, Submission, TaskEdit, TaskId, TaskKind, TaskStatus,
+        GoalId, GoalVerdict, LeaseToken, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery,
+        NoteTarget, PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId,
+        SessionRole, StaticPolicy, Submission, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
@@ -2239,7 +2239,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 runtime_planners: usize::from(runtime_planners),
                 planner_timeout: Duration::from_secs(planner_timeout),
                 plugin_dir,
-                handoff_token,
+                handoff_token: handoff_token.map(LeaseToken::new),
                 mode: mode.map(|mode| mode.parse()).transpose()?,
                 update: dagq::application::supervise::UpdateSettings {
                     register: auto_update,
@@ -2340,7 +2340,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 &location,
                 &dagq::compose::AutoUpdateJob {
                     commit,
-                    token,
+                    token: LeaseToken::new(token),
                     target: to,
                     repository: repo,
                     log,
@@ -2564,7 +2564,13 @@ fn execute(cli: Cli) -> Result<Value> {
             lease,
             claude,
             resume,
-        } => dagq::compose::session(&db, &RunId::new(run)?, &lease, &claude, resume)?,
+        } => dagq::compose::session(
+            &db,
+            &RunId::new(run)?,
+            &LeaseToken::new(lease),
+            &claude,
+            resume,
+        )?,
         Command::SessionEvent { event } => {
             use dagq::{application::SessionRegistry, domain::sessions::SessionHook};
             let mut input = String::new();

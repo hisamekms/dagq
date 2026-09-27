@@ -3,6 +3,7 @@
 //! running), and the workspace of an in-cmux supervisor it closes.
 
 use crate::common;
+use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
 
@@ -40,10 +41,14 @@ fn down_interrupts_an_in_cmux_supervisor_and_closes_its_workspace_once_it_is_gon
         )
         .unwrap();
     queue
-        .register_supervisor("in-cmux", pid, 2, VERSION)
+        .register_supervisor(&LeaseToken::new("in-cmux"), pid, 2, VERSION)
         .unwrap();
     queue
-        .set_supervisor_mode("in-cmux", SupervisorMode::InCmux, Some(&workspace))
+        .set_supervisor_mode(
+            &LeaseToken::new("in-cmux"),
+            SupervisorMode::InCmux,
+            Some(&workspace),
+        )
         .unwrap();
     queue
         .register_session_workspace(SessionRole::Supervisor, &workspace)
@@ -82,7 +87,7 @@ fn down_interrupts_an_in_cmux_supervisor_and_closes_its_workspace_once_it_is_gon
             thread::sleep(Duration::from_millis(200));
             SqliteQueue::open(&db)
                 .unwrap()
-                .deregister_supervisor("in-cmux")
+                .deregister_supervisor(&LeaseToken::new("in-cmux"))
                 .unwrap();
         });
         down(&fixture, &cmux, &launchd, &processes, true, false)
@@ -127,10 +132,14 @@ fn down_force_kills_an_in_cmux_supervisor_and_closes_or_reports_its_workspace() 
         )
         .unwrap();
     queue
-        .register_supervisor("in-cmux", pid, 2, VERSION)
+        .register_supervisor(&LeaseToken::new("in-cmux"), pid, 2, VERSION)
         .unwrap();
     queue
-        .set_supervisor_mode("in-cmux", SupervisorMode::InCmux, Some(&workspace))
+        .set_supervisor_mode(
+            &LeaseToken::new("in-cmux"),
+            SupervisorMode::InCmux,
+            Some(&workspace),
+        )
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
@@ -146,9 +155,15 @@ fn down_force_kills_an_in_cmux_supervisor_and_closes_or_reports_its_workspace() 
 
     // cmux refusing the close (the workspace is already gone) leaves the
     // reason in the report; the supervisor is stopped either way.
-    queue.register_supervisor("again", pid, 2, VERSION).unwrap();
     queue
-        .set_supervisor_mode("again", SupervisorMode::InCmux, Some(&workspace))
+        .register_supervisor(&LeaseToken::new("again"), pid, 2, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(
+            &LeaseToken::new("again"),
+            SupervisorMode::InCmux,
+            Some(&workspace),
+        )
         .unwrap();
     let processes = FakeProcesses::default();
     let report = down(&fixture, &cmux, &launchd, &processes, false, true);
@@ -190,7 +205,9 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
     // agent with no registered process (a crash loop) is unloaded.
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let dead = dead_pid();
-    queue.register_supervisor("dead", dead, 1, VERSION).unwrap();
+    queue
+        .register_supervisor(&LeaseToken::new("dead"), dead, 1, VERSION)
+        .unwrap();
     processes.dead.lock().unwrap().insert(dead);
     launchd.load(None);
     let report = down(&fixture, &cmux, &launchd, &processes, true, false);
@@ -258,16 +275,20 @@ fn down_stops_a_launchd_and_an_in_cmux_supervisor_in_one_call() {
         )
         .unwrap();
     queue
-        .register_supervisor("agent", agent_pid, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("agent"), agent_pid, 4, VERSION)
         .unwrap();
     queue
-        .set_supervisor_mode("agent", SupervisorMode::Launchd, None)
+        .set_supervisor_mode(&LeaseToken::new("agent"), SupervisorMode::Launchd, None)
         .unwrap();
     queue
-        .register_supervisor("in-cmux", in_cmux_pid, 2, VERSION)
+        .register_supervisor(&LeaseToken::new("in-cmux"), in_cmux_pid, 2, VERSION)
         .unwrap();
     queue
-        .set_supervisor_mode("in-cmux", SupervisorMode::InCmux, Some(&workspace))
+        .set_supervisor_mode(
+            &LeaseToken::new("in-cmux"),
+            SupervisorMode::InCmux,
+            Some(&workspace),
+        )
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     launchd.load(Some(agent_pid));
@@ -297,7 +318,7 @@ fn down_unloads_the_agent_and_returns_while_the_supervisor_drains() {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
     queue
-        .register_supervisor("resident", pid, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("resident"), pid, 4, VERSION)
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let cmux = FakeCmux::default();
@@ -331,7 +352,7 @@ fn down_unloads_the_agent_and_returns_while_the_supervisor_drains() {
     // (a second one would end its drain), the hand-started one is signalled.
     let by_hand = dead_pid(); // any pid the fake treats as alive
     queue
-        .register_supervisor("by-hand", by_hand, 1, VERSION)
+        .register_supervisor(&LeaseToken::new("by-hand"), by_hand, 1, VERSION)
         .unwrap();
     launchd.load(Some(pid));
     let processes = FakeProcesses::default();
@@ -352,7 +373,7 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
     queue
-        .register_supervisor("resident", pid, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("resident"), pid, 4, VERSION)
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let cmux = FakeCmux::default();
@@ -364,7 +385,7 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
         thread::sleep(Duration::from_millis(200));
         SqliteQueue::open(&db)
             .unwrap()
-            .deregister_supervisor("resident")
+            .deregister_supervisor(&LeaseToken::new("resident"))
             .unwrap();
     });
     let report = down(&fixture, &cmux, &launchd, &processes, true, false);
@@ -382,7 +403,7 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
     // A supervisor killed by launchd's ExitTimeOut leaves its row; the dead
     // PID ends the wait just the same (and `up` prunes the row later).
     queue
-        .register_supervisor("second", pid, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("second"), pid, 4, VERSION)
         .unwrap();
     launchd.load(Some(pid));
     struct DiesLater {
@@ -431,7 +452,7 @@ fn down_force_kills_after_the_unload_and_drops_the_registration() {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
     queue
-        .register_supervisor("resident", pid, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("resident"), pid, 4, VERSION)
         .unwrap();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let cmux = FakeCmux::default();

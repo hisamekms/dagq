@@ -1,6 +1,7 @@
 //! Runtime tests: The recovery job of failed runs, dead runs and silent
 //! wrappers.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -636,7 +637,7 @@ fn triage_answers_resume_the_run_or_ready_the_task() {
         queue
             .finish_triage(
                 run.id(),
-                "other",
+                &LeaseToken::new("other"),
                 &dagq::application::TriageAction::Retry,
                 json!({}),
                 Vec::new(),

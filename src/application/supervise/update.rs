@@ -243,7 +243,7 @@ to wait for the next landing that changes the runtime.",
             .arg("--db")
             .arg(&layout.db)
             .arg("auto-update")
-            .args(["--commit", head, "--token", &self.token])
+            .args(["--commit", head, "--token", self.token.as_str()])
             .envs(layout.supervisor_actor().env())
             .arg("--to")
             .arg(&layout.runner)

@@ -6,7 +6,7 @@ use super::*;
 impl SqliteQueue {
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
     /// an idle supervisor owns nothing.
-    pub fn heartbeat_leases(&self, token: &str) -> Result<usize> {
+    pub fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
         Ok(self.conn.execute(
             "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
             params![token, self.generators.clock.now()],
@@ -17,7 +17,7 @@ impl SqliteQueue {
     /// (if it is a resident supervisor) and every run lease it holds, in one
     /// transaction so `status` never sees them disagree. Returns the number
     /// of leases refreshed.
-    pub fn heartbeat(&mut self, token: &str) -> Result<usize> {
+    pub fn heartbeat(&mut self, token: &LeaseToken) -> Result<usize> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -41,7 +41,7 @@ impl SqliteQueue {
     /// to decide whether a live supervisor is of its own build (ADR-0045).
     pub fn register_supervisor(
         &mut self,
-        token: &str,
+        token: &LeaseToken,
         pid: u32,
         parallel: u32,
         binary_version: &str,
@@ -72,7 +72,7 @@ impl SqliteQueue {
     /// by hand keeps `mode` unset. The workspace belongs to `in_cmux` mode.
     pub fn set_supervisor_mode(
         &self,
-        token: &str,
+        token: &LeaseToken,
         mode: SupervisorMode,
         workspace_id: Option<&str>,
     ) -> Result<()> {
@@ -90,7 +90,7 @@ impl SqliteQueue {
     /// missing row (already removed, or never written) is not an error, so a
     /// crashed supervisor's row is only ever removed by `up`, `down --force`
     /// or a person.
-    pub fn deregister_supervisor(&self, token: &str) -> Result<bool> {
+    pub fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
         Ok(self
             .conn
             .execute("DELETE FROM supervisors WHERE token=?1", [token])?
@@ -105,7 +105,7 @@ impl SqliteQueue {
     /// already gone.
     pub fn prune_supervisor(
         &self,
-        token: &str,
+        token: &LeaseToken,
         kind: &str,
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
@@ -131,7 +131,7 @@ impl SqliteQueue {
 
     /// Mark the registration of `token` as one that takes a handoff
     /// (ADR-0045 decision 10): its process execs another binary when asked.
-    pub fn accept_handoff(&self, token: &str) -> Result<()> {
+    pub fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
         ensure!(
             self.conn.execute(
                 "UPDATE supervisors SET handoff_accepted=1 WHERE token=?1",
@@ -145,7 +145,7 @@ impl SqliteQueue {
     /// Ask the supervisor `token` to exec `binary` at its next pause between
     /// short steps. `false` when it is not registered or does not take a
     /// handoff.
-    pub fn request_handoff(&self, token: &str, binary: &str) -> Result<bool> {
+    pub fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         Ok(self.conn.execute(
             "UPDATE supervisors SET handoff_binary=?2, handoff_requested_at=?3
              WHERE token=?1 AND handoff_accepted=1",
@@ -155,7 +155,7 @@ impl SqliteQueue {
 
     /// Withdraw the request that the supervisor `token` exec `binary`, if
     /// it has not taken it yet; `false` when there was none.
-    pub fn cancel_handoff(&self, token: &str, binary: &str) -> Result<bool> {
+    pub fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         Ok(self.conn.execute(
             "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL
              WHERE token=?1 AND handoff_binary=?2",
@@ -164,7 +164,7 @@ impl SqliteQueue {
     }
 
     /// The binary the supervisor `token` was asked to exec, if any.
-    pub fn handoff_request(&self, token: &str) -> Result<Option<String>> {
+    pub fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
         Ok(self
             .conn
             .query_row(
@@ -182,7 +182,7 @@ impl SqliteQueue {
     /// leaves `mode`, `workspace_id`, `started_at` and every lease alone.
     pub fn resume_registration(
         &mut self,
-        token: &str,
+        token: &LeaseToken,
         pid: u32,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
@@ -209,7 +209,7 @@ impl SqliteQueue {
 
     /// Turn the automatic update of the supervisor `token` on or off
     /// (ADR-0045 decision 17).
-    pub fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()> {
+    pub fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         ensure!(
             self.conn.execute(
                 "UPDATE supervisors SET auto_update=?2 WHERE token=?1",
@@ -222,7 +222,7 @@ impl SqliteQueue {
 
     /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
     /// (ADR-0062 decision 7) and where each comes from (task 698).
-    pub fn set_slot_limits(&self, token: &str, limits: SlotLimits) -> Result<()> {
+    pub fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         let parallel = u32::try_from(limits.parallel.value)?;
         ensure!(parallel >= 1, "parallel must be at least 1");
         let max_waiting = u32::try_from(limits.max_waiting.value)?;
@@ -250,7 +250,7 @@ impl SqliteQueue {
 
     /// Give up ownership of a run that came to rest (`awaiting_integration`
     /// or `failed`). The run's `supervisor_token` stays as a record.
-    pub fn release_lease(&mut self, id: &RunId, token: &str) -> Result<()> {
+    pub fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -273,7 +273,7 @@ impl SqliteQueue {
 
     /// Whether this process still holds the run's lease. An adopted-away or
     /// recovered run answers `false`, and its former owner must not touch it.
-    pub fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool> {
+    pub fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND token=?2)",
             params![id, token],
@@ -378,7 +378,7 @@ impl SqliteQueue {
     /// without one (`up`, `down`), every lease and the sum over every
     /// registered supervisor. `parallel` is `None` when no supervisor is
     /// registered (under `token`).
-    pub fn backend_slots(&self, token: Option<&str>) -> Result<(i64, Option<i64>)> {
+    pub fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
         let slots = self.conn.query_row(
             "SELECT count(*) FROM run_leases WHERE ?1 IS NULL OR token=?1",
             [token],
@@ -395,7 +395,12 @@ impl SqliteQueue {
     /// Register the wrapper of a resumed session (ADR-0019): the run is
     /// `needs_session` and leased to `token`, and `begin_resume` cleared the
     /// previous session's process rows.
-    pub fn register_resume_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()> {
+    pub fn register_resume_wrapper(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        pid: u32,
+    ) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -440,7 +445,7 @@ impl SqliteQueue {
         Ok(())
     }
 
-    pub fn register_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()> {
+    pub fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -531,24 +536,24 @@ impl SqliteQueue {
 /// The [`RunCoordination`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl RunCoordination for SqliteQueue {
-    fn heartbeat_leases(&self, token: &str) -> Result<usize> {
+    fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
         SqliteQueue::heartbeat_leases(self, token)
     }
     fn register_supervisor(
         &mut self,
-        token: &str,
+        token: &LeaseToken,
         pid: u32,
         parallel: u32,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         SqliteQueue::register_supervisor(self, token, pid, parallel, binary_version)
     }
-    fn deregister_supervisor(&self, token: &str) -> Result<bool> {
+    fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
         SqliteQueue::deregister_supervisor(self, token)
     }
     fn prune_supervisor(
         &self,
-        token: &str,
+        token: &LeaseToken,
         kind: &str,
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
@@ -557,36 +562,36 @@ impl RunCoordination for SqliteQueue {
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
         SqliteQueue::supervisors(self)
     }
-    fn release_lease(&mut self, id: &RunId, token: &str) -> Result<()> {
+    fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         SqliteQueue::release_lease(self, id, token)
     }
-    fn accept_handoff(&self, token: &str) -> Result<()> {
+    fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
         SqliteQueue::accept_handoff(self, token)
     }
-    fn request_handoff(&self, token: &str, binary: &str) -> Result<bool> {
+    fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         SqliteQueue::request_handoff(self, token, binary)
     }
-    fn handoff_request(&self, token: &str) -> Result<Option<String>> {
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
         SqliteQueue::handoff_request(self, token)
     }
-    fn cancel_handoff(&self, token: &str, binary: &str) -> Result<bool> {
+    fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         SqliteQueue::cancel_handoff(self, token, binary)
     }
     fn resume_registration(
         &mut self,
-        token: &str,
+        token: &LeaseToken,
         pid: u32,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         SqliteQueue::resume_registration(self, token, pid, binary_version)
     }
-    fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()> {
+    fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         SqliteQueue::set_auto_update(self, token, enabled)
     }
-    fn set_slot_limits(&self, token: &str, limits: SlotLimits) -> Result<()> {
+    fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         SqliteQueue::set_slot_limits(self, token, limits)
     }
-    fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool> {
+    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
         SqliteQueue::holds_lease(self, id, token)
     }
     fn run_leases(&self) -> Result<Vec<RunLease>> {
@@ -607,7 +612,7 @@ impl RunCoordination for SqliteQueue {
     fn assert_repository(&self, common_dir: &str) -> Result<()> {
         SqliteQueue::assert_repository(self, common_dir)
     }
-    fn heartbeat(&mut self, token: &str) -> Result<usize> {
+    fn heartbeat(&mut self, token: &LeaseToken) -> Result<usize> {
         SqliteQueue::heartbeat(self, token)
     }
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
@@ -615,16 +620,16 @@ impl RunCoordination for SqliteQueue {
     }
     fn set_supervisor_mode(
         &self,
-        token: &str,
+        token: &LeaseToken,
         mode: SupervisorMode,
         workspace_id: Option<&str>,
     ) -> Result<()> {
         SqliteQueue::set_supervisor_mode(self, token, mode, workspace_id)
     }
-    fn register_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()> {
+    fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         SqliteQueue::register_wrapper(self, id, token, pid)
     }
-    fn register_resume_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()> {
+    fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         SqliteQueue::register_resume_wrapper(self, id, token, pid)
     }
     fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
@@ -644,7 +649,7 @@ impl RunCoordination for SqliteQueue {
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         SqliteQueue::wrapper_exited(self, id, pid, exit_code)
     }
-    fn backend_slots(&self, token: Option<&str>) -> Result<(i64, Option<i64>)> {
+    fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
         SqliteQueue::backend_slots(self, token)
     }
 }
@@ -675,7 +680,7 @@ mod tests {
             .supervisors()
             .unwrap()
             .into_iter()
-            .map(|registration| registration.token)
+            .map(|registration| registration.token.into_string())
             .collect()
     }
 
@@ -683,12 +688,18 @@ mod tests {
     fn pruning_removes_the_row_and_records_its_stop_from_the_row() {
         let dir = tempfile::tempdir().unwrap();
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let registration = queue.register_supervisor("dead", 1, 1, "0.0.1").unwrap();
+        let registration = queue
+            .register_supervisor(&LeaseToken::new("dead"), 1, 1, "0.0.1")
+            .unwrap();
         queue
-            .register_supervisor("live", std::process::id(), 1, "0.0.1")
+            .register_supervisor(&LeaseToken::new("live"), std::process::id(), 1, "0.0.1")
             .unwrap();
 
-        assert!(queue.prune_supervisor("dead", STOPPED, &stopped).unwrap());
+        assert!(
+            queue
+                .prune_supervisor(&LeaseToken::new("dead"), STOPPED, &stopped)
+                .unwrap()
+        );
 
         assert_eq!(registered(&queue), ["live"]);
         assert_eq!(
@@ -702,7 +713,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
 
-        assert!(!queue.prune_supervisor("gone", STOPPED, &stopped).unwrap());
+        assert!(
+            !queue
+                .prune_supervisor(&LeaseToken::new("gone"), STOPPED, &stopped)
+                .unwrap()
+        );
 
         assert!(stops(&queue).is_empty());
     }
@@ -711,7 +726,9 @@ mod tests {
     fn a_failed_record_keeps_the_row_for_the_next_prune() {
         let dir = tempfile::tempdir().unwrap();
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        queue.register_supervisor("dead", 1, 1, "0.0.1").unwrap();
+        queue
+            .register_supervisor(&LeaseToken::new("dead"), 1, 1, "0.0.1")
+            .unwrap();
         // Fail every insert of an event, after the row's delete in the
         // same transaction.
         queue
@@ -723,7 +740,7 @@ mod tests {
             .unwrap();
 
         let error = queue
-            .prune_supervisor("dead", STOPPED, &stopped)
+            .prune_supervisor(&LeaseToken::new("dead"), STOPPED, &stopped)
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("record failed"), "{error:#}");
@@ -733,7 +750,11 @@ mod tests {
             .conn
             .execute_batch("DROP TRIGGER fail_events")
             .unwrap();
-        assert!(queue.prune_supervisor("dead", STOPPED, &stopped).unwrap());
+        assert!(
+            queue
+                .prune_supervisor(&LeaseToken::new("dead"), STOPPED, &stopped)
+                .unwrap()
+        );
         assert!(registered(&queue).is_empty());
         assert_eq!(stops(&queue).len(), 1);
     }

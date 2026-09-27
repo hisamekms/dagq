@@ -2,6 +2,7 @@
 //! failures, stats and `recover`, the injected clock and IDs, migrations and
 //! the adapters.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -406,20 +407,30 @@ fn claim_creates_a_lease_that_only_its_owner_can_use_or_release() {
     queue.bind_repository("/repo/one/.git").unwrap();
     assert!(queue.bind_repository("/repo/two/.git").is_err());
     let base = "0123456789abcdef0123456789abcdef01234567";
-    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&sha(base), "first").unwrap()
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&sha(base), &LeaseToken::new("first"))
+        .unwrap()
     else {
         panic!()
     };
     assert!(matches!(
-        queue.claim_for_supervisor(&sha(base), "first").unwrap(),
+        queue
+            .claim_for_supervisor(&sha(base), &LeaseToken::new("first"))
+            .unwrap(),
         ClaimOutcome::NoReadyTask
     ));
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_eq!(lease.pid, std::process::id());
     assert_eq!(queue.run_leases().unwrap().len(), 1);
     // An idle supervisor heartbeats nothing; the owner heartbeats its runs.
-    assert_eq!(queue.heartbeat_leases("second").unwrap(), 0);
-    assert_eq!(queue.heartbeat_leases("first").unwrap(), 1);
+    assert_eq!(
+        queue.heartbeat_leases(&LeaseToken::new("second")).unwrap(),
+        0
+    );
+    assert_eq!(
+        queue.heartbeat_leases(&LeaseToken::new("first")).unwrap(),
+        1
+    );
     let plan = RunPlan {
         repo_path: "/test".into(),
         run_dir: "/run".into(),
@@ -428,19 +439,35 @@ fn claim_creates_a_lease_that_only_its_owner_can_use_or_release() {
         receipt_path: "/run/receipt.json".into(),
         log_path: "/run/log".into(),
     };
-    assert!(queue.plan_run(run.id(), "second", &plan).is_err());
+    assert!(
+        queue
+            .plan_run(run.id(), &LeaseToken::new("second"), &plan)
+            .is_err()
+    );
     let raw = Connection::open(&db).unwrap();
     raw.execute("UPDATE run_leases SET heartbeat_at=0", [])
         .unwrap();
-    assert!(queue.release_lease(run.id(), "second").is_err());
+    assert!(
+        queue
+            .release_lease(run.id(), &LeaseToken::new("second"))
+            .is_err()
+    );
     assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().heartbeat_at, 0);
     // A stale lease of the writer's own token is renewed, not refused
     // (ADR-0039 decision 7).
-    queue.plan_run(run.id(), "first", &plan).unwrap();
+    queue
+        .plan_run(run.id(), &LeaseToken::new("first"), &plan)
+        .unwrap();
     assert!(queue.run_lease(run.id()).unwrap().unwrap().heartbeat_at > 0);
-    queue.release_lease(run.id(), "first").unwrap();
+    queue
+        .release_lease(run.id(), &LeaseToken::new("first"))
+        .unwrap();
     assert!(queue.run_lease(run.id()).unwrap().is_none());
-    assert!(queue.release_lease(run.id(), "first").is_err());
+    assert!(
+        queue
+            .release_lease(run.id(), &LeaseToken::new("first"))
+            .is_err()
+    );
     // The token stays on the run as a record of who executed it.
     let raw_token: String = raw
         .query_row(
@@ -495,10 +522,15 @@ fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
         clock: Arc::new(clock.clone()),
         ids: Arc::new(FixedIds(Mutex::new(vec![RUN]))),
     });
-    let registration = queue.register_supervisor("first", 1, 1, VERSION).unwrap();
+    let registration = queue
+        .register_supervisor(&LeaseToken::new("first"), 1, 1, VERSION)
+        .unwrap();
     assert_eq!((registration.started_at, registration.heartbeat_at), (T, T));
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&sha("0123456789abcdef0123456789abcdef01234567"), "first")
+        .claim_for_supervisor(
+            &sha("0123456789abcdef0123456789abcdef01234567"),
+            &LeaseToken::new("first"),
+        )
         .unwrap()
     else {
         panic!()
@@ -524,7 +556,7 @@ fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
     // The store stamps heartbeats by the same clock, both the process
     // heartbeat and the renewal of a lease-guarded write.
     clock.set(T + HEARTBEAT_TIMEOUT_SECS + 1);
-    assert_eq!(queue.heartbeat("first").unwrap(), 1);
+    assert_eq!(queue.heartbeat(&LeaseToken::new("first")).unwrap(), 1);
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_eq!(lease.heartbeat_at, T + HEARTBEAT_TIMEOUT_SECS + 1);
     assert_eq!(
@@ -532,7 +564,9 @@ fn an_injected_clock_decides_lease_staleness_and_injected_ids_name_the_run() {
         T + HEARTBEAT_TIMEOUT_SECS + 1
     );
     clock.set(T + HEARTBEAT_TIMEOUT_SECS + 5);
-    queue.plan_run(run.id(), "first", &plan).unwrap();
+    queue
+        .plan_run(run.id(), &LeaseToken::new("first"), &plan)
+        .unwrap();
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_eq!(lease.heartbeat_at, T + HEARTBEAT_TIMEOUT_SECS + 5);
 }
@@ -571,11 +605,15 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
     };
     let base = sha("0123456789abcdef0123456789abcdef01234567");
     let start = |queue: &mut SqliteQueue, token: &str| {
-        let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, token).unwrap()
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor(&base, &LeaseToken::new(token))
+            .unwrap()
         else {
             panic!()
         };
-        queue.plan_run(run.id(), token, &plan(&run)).unwrap();
+        queue
+            .plan_run(run.id(), &LeaseToken::new(token), &plan(&run))
+            .unwrap();
         run
     };
 
@@ -586,7 +624,7 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
     assert!(lease_is_stale(&lease, T + SLEEP));
     // Woken up, it goes on with the run: every write renews the lease.
     queue
-        .workspace_created(run.id(), "sleeper", "ws-1")
+        .workspace_created(run.id(), &LeaseToken::new("sleeper"), "ws-1")
         .unwrap();
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_eq!(
@@ -594,7 +632,7 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
         ("sleeper", T + SLEEP)
     );
     queue
-        .register_wrapper(run.id(), "sleeper", std::process::id())
+        .register_wrapper(run.id(), &LeaseToken::new("sleeper"), std::process::id())
         .unwrap();
     queue
         .register_agent(run.id(), std::process::id(), std::process::id())
@@ -603,33 +641,53 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
     // The renewed lease is fresh, so another supervisor does not adopt it.
     assert!(
         queue
-            .adopt_run(run.id(), "sleeper", "other", 2, json!({}))
+            .adopt_run(
+                run.id(),
+                &LeaseToken::new("sleeper"),
+                &LeaseToken::new("other"),
+                2,
+                json!({})
+            )
             .unwrap()
             .is_none()
     );
-    assert!(queue.holds_lease(run.id(), "sleeper").unwrap());
+    assert!(
+        queue
+            .holds_lease(run.id(), &LeaseToken::new("sleeper"))
+            .unwrap()
+    );
     assert_eq!(supervisor_token_of(&db, &run), "sleeper");
     assert!(!queue.has_run_event(run.id(), "run_adopted").unwrap());
 
     // A second run whose supervisor sleeps until another one adopts it.
     let taken = start(&mut queue, "late");
-    queue.workspace_created(taken.id(), "late", "ws-2").unwrap();
     queue
-        .register_wrapper(taken.id(), "late", std::process::id())
+        .workspace_created(taken.id(), &LeaseToken::new("late"), "ws-2")
+        .unwrap();
+    queue
+        .register_wrapper(taken.id(), &LeaseToken::new("late"), std::process::id())
         .unwrap();
     queue
         .register_agent(taken.id(), std::process::id(), std::process::id())
         .unwrap();
     clock.set(T + 2 * SLEEP);
     let adopted = queue
-        .adopt_run(taken.id(), "late", "adopter", 3, json!({}))
+        .adopt_run(
+            taken.id(),
+            &LeaseToken::new("late"),
+            &LeaseToken::new("adopter"),
+            3,
+            json!({}),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(adopted.status(), RunStatus::Running);
     let events = queue.show(taken.task_id()).unwrap().events.len();
     // Woken up after the adoption, the late supervisor is refused and
     // writes nothing: the lease, the run and its events stay the adopter's.
-    let error = queue.finish_supervision(taken.id(), "late").unwrap_err();
+    let error = queue
+        .finish_supervision(taken.id(), &LeaseToken::new("late"))
+        .unwrap_err();
     assert_eq!(
         error.to_string(),
         "run lease is missing or held by another supervisor"
@@ -641,9 +699,13 @@ fn a_lease_of_its_own_token_is_renewed_after_a_host_sleep_until_another_supervis
     assert_eq!(queue.show(taken.task_id()).unwrap().events.len(), events);
     // The adopter's own writes go on.
     queue
-        .finish_supervision_live(taken.id(), "adopter")
+        .finish_supervision_live(taken.id(), &LeaseToken::new("adopter"))
         .unwrap();
-    assert!(!queue.holds_lease(taken.id(), "late").unwrap());
+    assert!(
+        !queue
+            .holds_lease(taken.id(), &LeaseToken::new("late"))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -692,7 +754,10 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&sha("0123456789abcdef0123456789abcdef01234567"), "owner")
+        .claim_for_supervisor(
+            &sha("0123456789abcdef0123456789abcdef01234567"),
+            &LeaseToken::new("owner"),
+        )
         .unwrap()
     else {
         panic!()
@@ -700,7 +765,7 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
     queue
         .plan_run(
             run.id(),
-            "owner",
+            &LeaseToken::new("owner"),
             &RunPlan {
                 repo_path: "/test".into(),
                 run_dir: "/run".into(),
@@ -711,27 +776,45 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
             },
         )
         .unwrap();
-    assert!(queue.register_wrapper(run.id(), "owner", 10).is_err()); // Workspace not attached yet.
+    assert!(
+        queue
+            .register_wrapper(run.id(), &LeaseToken::new("owner"), 10)
+            .is_err()
+    ); // Workspace not attached yet.
     queue
-        .workspace_created(run.id(), "owner", "workspace")
+        .workspace_created(run.id(), &LeaseToken::new("owner"), "workspace")
         .unwrap();
-    assert!(queue.register_wrapper(run.id(), "other-owner", 10).is_err());
+    assert!(
+        queue
+            .register_wrapper(run.id(), &LeaseToken::new("other-owner"), 10)
+            .is_err()
+    );
     let raw = Connection::open(&db).unwrap();
     raw.execute("UPDATE run_leases SET heartbeat_at=0", [])
         .unwrap();
     // A stale lease of the owner's token is renewed, not refused (ADR-0039
     // decision 7).
-    queue.register_wrapper(run.id(), "owner", 10).unwrap();
+    queue
+        .register_wrapper(run.id(), &LeaseToken::new("owner"), 10)
+        .unwrap();
     assert!(queue.run_lease(run.id()).unwrap().unwrap().heartbeat_at > 0);
-    assert!(queue.register_wrapper(run.id(), "owner", 11).is_err());
+    assert!(
+        queue
+            .register_wrapper(run.id(), &LeaseToken::new("owner"), 11)
+            .is_err()
+    );
     assert!(queue.register_agent(run.id(), 11, 12).is_err());
     queue.register_agent(run.id(), 10, 12).unwrap();
-    assert!(queue.finish_supervision(run.id(), "owner").is_err()); // Still live.
+    assert!(
+        queue
+            .finish_supervision(run.id(), &LeaseToken::new("owner"))
+            .is_err()
+    ); // Still live.
     queue.wrapper_exited(run.id(), 10, 0).unwrap();
     assert!(queue.heartbeat_wrapper(run.id(), 10).is_err());
     assert_eq!(
         queue
-            .finish_supervision(run.id(), "owner")
+            .finish_supervision(run.id(), &LeaseToken::new("owner"))
             .unwrap()
             .status(),
         RunStatus::Validating
@@ -749,24 +832,33 @@ fn wrapper_registration_is_one_shot_and_rejects_other_owners() {
     };
     assert!(
         queue
-            .finish_validation(run.id(), "other-owner", &validation)
+            .finish_validation(run.id(), &LeaseToken::new("other-owner"), &validation)
             .is_err()
     );
     let failed = queue
-        .finish_validation(run.id(), "owner", &validation)
+        .finish_validation(run.id(), &LeaseToken::new("owner"), &validation)
         .unwrap();
     assert_eq!(failed.status(), RunStatus::Failed);
     assert_eq!(failed.last_error(), Some("receipt was not submitted"));
     assert!(
         queue
-            .finish_validation(run.id(), "owner", &validation)
+            .finish_validation(run.id(), &LeaseToken::new("owner"), &validation)
             .is_err()
     ); // Terminal.
     // A failed run never records a workspace close or cleanup failure.
-    assert!(queue.workspace_closed(run.id(), "owner").is_err());
     assert!(
         queue
-            .cleanup_failed(run.id(), "owner", "late", &ReasonCode::BackendFailed.into())
+            .workspace_closed(run.id(), &LeaseToken::new("owner"))
+            .is_err()
+    );
+    assert!(
+        queue
+            .cleanup_failed(
+                run.id(),
+                &LeaseToken::new("owner"),
+                "late",
+                &ReasonCode::BackendFailed.into()
+            )
             .is_err()
     );
 }
@@ -780,7 +872,10 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&sha("0123456789abcdef0123456789abcdef01234567"), "owner")
+        .claim_for_supervisor(
+            &sha("0123456789abcdef0123456789abcdef01234567"),
+            &LeaseToken::new("owner"),
+        )
         .unwrap()
     else {
         panic!()
@@ -788,7 +883,7 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
     queue
         .plan_run(
             run.id(),
-            "owner",
+            &LeaseToken::new("owner"),
             &RunPlan {
                 repo_path: "/test".into(),
                 run_dir: "/run".into(),
@@ -800,28 +895,36 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
         )
         .unwrap();
     queue
-        .workspace_created(run.id(), "owner", WORKSPACE_ID)
+        .workspace_created(run.id(), &LeaseToken::new("owner"), WORKSPACE_ID)
         .unwrap();
-    queue.register_wrapper(run.id(), "owner", 10).unwrap();
+    queue
+        .register_wrapper(run.id(), &LeaseToken::new("owner"), 10)
+        .unwrap();
     queue.register_agent(run.id(), 10, 12).unwrap();
     // Still running: neither close nor cleanup failure may be recorded.
-    assert!(queue.workspace_closed(run.id(), "owner").is_err());
+    assert!(
+        queue
+            .workspace_closed(run.id(), &LeaseToken::new("owner"))
+            .is_err()
+    );
     assert!(
         queue
             .cleanup_failed(
                 run.id(),
-                "owner",
+                &LeaseToken::new("owner"),
                 "early",
                 &ReasonCode::BackendFailed.into()
             )
             .is_err()
     );
     queue.wrapper_exited(run.id(), 10, 0).unwrap();
-    queue.finish_supervision(run.id(), "owner").unwrap();
+    queue
+        .finish_supervision(run.id(), &LeaseToken::new("owner"))
+        .unwrap();
     let accepted = queue
         .finish_validation(
             run.id(),
-            "owner",
+            &LeaseToken::new("owner"),
             &Validation {
                 accepted: true,
                 result_commit: Some(sha("89abcdef0123456789abcdef0123456789abcdef")),
@@ -837,11 +940,15 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
         .unwrap();
     assert_eq!(accepted.status(), RunStatus::AwaitingIntegration);
     assert!(accepted.workspace_closed_at().is_none());
-    assert!(queue.workspace_closed(run.id(), "other-owner").is_err());
+    assert!(
+        queue
+            .workspace_closed(run.id(), &LeaseToken::new("other-owner"))
+            .is_err()
+    );
     let failed = queue
         .cleanup_failed(
             run.id(),
-            "owner",
+            &LeaseToken::new("owner"),
             "cmux down",
             &ReasonCode::BackendFailed.into(),
         )
@@ -850,13 +957,24 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
     assert_eq!(failed.last_error(), Some("cmux down"));
     assert!(failed.workspace_closed_at().is_none());
     // A later successful close clears nothing but records the close once.
-    let closed = queue.workspace_closed(run.id(), "owner").unwrap();
+    let closed = queue
+        .workspace_closed(run.id(), &LeaseToken::new("owner"))
+        .unwrap();
     assert!(closed.workspace_closed_at().is_some());
     assert_eq!(closed.status(), RunStatus::AwaitingIntegration);
-    assert!(queue.workspace_closed(run.id(), "owner").is_err());
     assert!(
         queue
-            .cleanup_failed(run.id(), "owner", "late", &ReasonCode::BackendFailed.into())
+            .workspace_closed(run.id(), &LeaseToken::new("owner"))
+            .is_err()
+    );
+    assert!(
+        queue
+            .cleanup_failed(
+                run.id(),
+                &LeaseToken::new("owner"),
+                "late",
+                &ReasonCode::BackendFailed.into()
+            )
             .is_err()
     );
     let kinds: Vec<String> = queue
@@ -1081,7 +1199,7 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let dead = dead_pid();
     let killed = queue
-        .register_supervisor("killed", dead, 4, VERSION)
+        .register_supervisor(&LeaseToken::new("killed"), dead, 4, VERSION)
         .unwrap();
     // Killed a moment ago: the heartbeat is fresh, the pid is gone.
     let status = runtime::status(&db).unwrap();
@@ -1098,7 +1216,7 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
     assert!(entry["heartbeat_age_secs"].as_i64().unwrap() <= 5);
     // Alive but silent: stale by heartbeat age alone.
     queue
-        .register_supervisor("hung", std::process::id(), 1, VERSION)
+        .register_supervisor(&LeaseToken::new("hung"), std::process::id(), 1, VERSION)
         .unwrap();
     let raw = Connection::open(&db).unwrap();
     raw.execute(
@@ -1159,7 +1277,7 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
     assert_eq!(status["runs"][0]["lease"]["pid"], json!(std::process::id()));
     // A registered supervisor's leases join it by token rather than by pid.
     queue
-        .register_supervisor("owner", std::process::id(), 2, VERSION)
+        .register_supervisor(&LeaseToken::new("owner"), std::process::id(), 2, VERSION)
         .unwrap();
     let status = runtime::status(&db).unwrap();
     let supervisors = status["supervisors"].as_array().unwrap();
@@ -1190,7 +1308,7 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
         .supervisors()
         .unwrap()
         .into_iter()
-        .map(|s| s.token)
+        .map(|s| s.token.into_string())
         .collect();
     assert_eq!(tokens, ["killed", "hung", "owner"]);
     assert_eq!(
@@ -1593,7 +1711,9 @@ fn a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error() {
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let base = "0123456789abcdef0123456789abcdef01234567";
-    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&sha(base), "owner").unwrap()
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&sha(base), &LeaseToken::new("owner"))
+        .unwrap()
     else {
         panic!()
     };
@@ -1602,7 +1722,9 @@ fn a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error() {
     fs::create_dir_all(&run_dir).unwrap();
     // A claimed run is not awaiting integration: the error keeps the
     // store's message, and the domain's reason goes to the run's log.
-    let error = queue.restart_validation(run.id(), "owner").unwrap_err();
+    let error = queue
+        .restart_validation(run.id(), &LeaseToken::new("owner"))
+        .unwrap_err();
     assert_eq!(
         format!("{error:#}"),
         "run is not awaiting integration under this supervisor"
@@ -1620,7 +1742,9 @@ fn a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error() {
     );
     // A refusal whose run directory is gone still fails the same way.
     fs::remove_dir_all(&run_dir).unwrap();
-    let error = queue.restart_validation(run.id(), "owner").unwrap_err();
+    let error = queue
+        .restart_validation(run.id(), &LeaseToken::new("owner"))
+        .unwrap_err();
     assert_eq!(
         error.to_string(),
         "run is not awaiting integration under this supervisor"

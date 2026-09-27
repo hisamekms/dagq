@@ -5,6 +5,7 @@
 //! The queue, Git, the verification commands, the push, time, IDs and
 //! process liveness come in through the ports.
 
+use crate::domain::LeaseToken;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -192,7 +193,7 @@ pub struct Begun {
     pub run: TaskRun,
     pub previous: RunStatus,
     pub main: CommitSha,
-    pub token: String,
+    pub token: LeaseToken,
 }
 
 /// The first half of `integrate`: pick the run of `target`, record the
@@ -278,7 +279,7 @@ pub fn begin(
         )?;
     }
     let previous = run.status();
-    let token = ctx.ids.uuid();
+    let token = ctx.ids.lease_token();
     let main = ctx.repository.main_head()?;
     let run = queue.begin_integration(run.id(), &token, &main)?;
     Ok(Some(Begun {
@@ -366,7 +367,7 @@ pub fn land_integrating(
     run: &TaskRun,
     previous: RunStatus,
     main: &CommitSha,
-    token: &str,
+    token: &LeaseToken,
 ) -> Result<IntegrationOutcome> {
     let queue = &mut *ctx.queue;
     let repository = ctx.repository;
