@@ -81,6 +81,7 @@ use crate::domain::{
     run_env::RUN_ENV_PROGRAM_KINDS,
     stall::{BackgroundTask, STALL_CONFIG_LOADED, StallConfig},
     triage_state,
+    worker_model::{WorkerSession, WorkerTrial},
 };
 
 mod adopt;
@@ -969,6 +970,13 @@ impl Supervisor<'_> {
             return Ok(());
         }
         let mut host: Option<HostVersions> = None;
+        // Read once per pass, so turning the trial on or off takes effect
+        // without a restart; a file that cannot be read claims outside it
+        // (provisioning reports the file's error).
+        let trial = self.verifier.worker_trial().unwrap_or_else(|error| {
+            warn!(error = %format_args!("{error:#}"), "[worker.trial] could not be read; claiming without the trial: {error:#}");
+            WorkerTrial::default()
+        });
         while self.used_slots() < parallel {
             // Highest effective priority, then most-releasing, then lowest
             // ID (ADR-0040 decision 4); `candidates` and `graph` show the
@@ -990,6 +998,7 @@ impl Supervisor<'_> {
                 &self.token,
                 &order,
                 Some(&serde_json::to_value(&attributes)?),
+                &trial,
             )? {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => break,

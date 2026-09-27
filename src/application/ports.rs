@@ -377,6 +377,14 @@ pub trait AgentProvider {
     /// idle marker. The runtime wires stdin, stdout and stderr, waits at
     /// most [`AgentProvider::review_timeout`] and reads stdout.
     fn review_command(&self, run: &crate::domain::TaskRun, prompt: &str) -> Result<CommandSpec>;
+    /// Start the worker session `command` (from [`AgentProvider::command`]
+    /// or [`AgentProvider::resume_command`]) with `model` at `effort`
+    /// (ADR-0079 decision 3): given explicitly, so neither the provider's
+    /// default nor the user's settings decide them. A provider without
+    /// models leaves it as it is.
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        let _ = (command, model, effort);
+    }
     /// Start the session of a headless job (`command`, from
     /// [`AgentProvider::review_command`] or
     /// [`AgentProvider::headless_command`]) with `session_id`, so that its
@@ -1152,13 +1160,15 @@ pub trait RunStore {
     fn assert_repository(&self, common_dir: &str) -> Result<()>;
     /// [`RunStore::claim_for_supervisor`], taking the first task of `order`
     /// that is still claimable, with `attributes` (an object) in its
-    /// `run_claimed`.
+    /// `run_claimed`, and the worker session `trial` chooses for the task
+    /// there (ADR-0079 decisions 3 and 4).
     fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
         token: &str,
         order: &[TaskId],
         attributes: Option<&serde_json::Value>,
+        trial: &crate::domain::worker_model::WorkerTrial,
     ) -> Result<ClaimOutcome>;
     /// One heartbeat of the process `token`: its registration and every
     /// lease it holds; how many leases there were.
@@ -2095,6 +2105,11 @@ pub trait Verifier {
     /// 2); `None` checks the merge only.
     fn recheck_command(&self) -> Result<Option<String>> {
         Ok(None)
+    }
+    /// The limited trial of the worker's model (`[worker.trial]` of
+    /// `dagq.toml`, ADR-0079 decision 4); off by default.
+    fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {
+        Ok(crate::domain::worker_model::WorkerTrial::default())
     }
     /// Run `command` in a shell in `cwd` with `env`, its output in `log`.
     fn run_to_log(

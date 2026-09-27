@@ -678,6 +678,7 @@ pub mod validation;
 pub mod verify_failure;
 mod views;
 pub mod waiting;
+pub mod worker_model;
 pub mod worktime;
 
 pub use error::DomainError;

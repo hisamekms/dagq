@@ -2330,6 +2330,11 @@ impl AgentProvider for ClaudeCode {
             .arg(prompt);
         Ok(command)
     }
+    /// `--model <model> --effort <effort>` among the options, before the
+    /// prompt.
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        command.option_args(["--model", model, "--effort", effort]);
+    }
     /// `--session-id <id>` among the options, before the prompt.
     fn assign_session_id(&self, command: &mut CommandSpec, session_id: &str) {
         command.option_args(["--session-id", session_id]);

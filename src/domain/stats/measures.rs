@@ -66,6 +66,12 @@ pub struct RunMeasures {
     pub claim_parallel: Option<i64>,
     pub claim_slots: Option<i64>,
     pub claim_load_avg: Option<f64>,
+    /// The model and effort its worker session was claimed with, and its
+    /// group in the trial (ADR-0079 decisions 3 and 4); null when claimed
+    /// before they were recorded, or outside the trial for the group.
+    pub worker_model: Option<String>,
+    pub worker_effort: Option<String>,
+    pub trial_group: Option<String>,
     pub load: RunLoad,
     pub load_band: Option<&'static str>,
     /// The verification commands of its `integrate` attempts that failed,
@@ -133,6 +139,9 @@ impl MeasureTrack {
                 measures.claim_parallel = payload.get("parallel").and_then(Value::as_i64);
                 measures.claim_slots = payload.get("slots").and_then(Value::as_i64);
                 measures.claim_load_avg = payload.get("load_avg").and_then(Value::as_f64);
+                measures.worker_model = text("model");
+                measures.worker_effort = text("effort");
+                measures.trial_group = text("group");
             }
             "receipt_observed" if !self.receipt_seen => {
                 self.receipt_seen = true;

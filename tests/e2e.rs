@@ -50,7 +50,7 @@ if [ "${1:-}" = "--version" ]; then
   printf 'claude-stub 0.0.0\n'
   exit 0
 fi
-session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir=
+session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir= model= effort=
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) headless=1; shift ;;
@@ -62,6 +62,8 @@ while [ $# -gt 0 ]; do
     --add-dir) add_dir=$2; shift 2 ;;
     --settings) settings=$2; shift 2 ;;
     --plugin-dir) plugin_dir=$2; shift 2 ;;
+    --model) model=$2; shift 2 ;;
+    --effort) effort=$2; shift 2 ;;
     --) shift; prompt=$1; shift; break ;;
     *) printf 'stub: unexpected argument %s\n' "$1" >&2; exit 64 ;;
   esac
@@ -121,7 +123,8 @@ if [ -n "$resume" ]; then
   [ -z "$session_id" ] && [ -z "$prompt" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] \
     || { printf 'stub: bad resume arguments\n' >&2; exit 64; }
   grep -q '"Stop"' "$settings" || { printf 'stub: settings lack a Stop hook\n' >&2; exit 64; }
-  printf 'argv: --resume %s --debug-file %s --add-dir %s --settings %s\n' "$resume" "$debug_file" "$add_dir" "$settings" > "$debug_file"
+  [ -n "$model" ] && [ -n "$effort" ] || { printf 'stub: the resume names no model\n' >&2; exit 64; }
+  printf 'argv: --resume %s --debug-file %s --add-dir %s --settings %s --model %s --effort %s\n' "$resume" "$debug_file" "$add_dir" "$settings" "$model" "$effort" > "$debug_file"
   printf 'resumed %s; waiting for the resolution request\n' "$resume"
   # Claude Code's input box: the supervisor types the request only once it
   # is drawn (task 285).
@@ -157,10 +160,12 @@ if [ -n "$resume" ]; then
   exit 0
 fi
 [ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
+  && [ -n "$model" ] && [ -n "$effort" ] \
   || { printf 'stub: missing arguments\n' >&2; exit 64; }
 grep -q '"Stop"' "$settings" || { printf 'stub: settings lack a Stop hook\n' >&2; exit 64; }
 {
   printf 'argv: --session-id %s --debug-file %s --add-dir %s --settings %s\n' "$session_id" "$debug_file" "$add_dir" "$settings"
+  printf 'model: %s effort: %s\n' "$model" "$effort"
   printf 'cwd: %s\n' "$(pwd)"
   printf 'env: DAGQ_ROLE=%s DAGQ_QUEUE=%s\n' "${DAGQ_ROLE:-}" "${DAGQ_QUEUE:-}"
   printf 'run env: E2E_SHARED=%s E2E_RUN_DIR=%s\n' "${E2E_SHARED:-}" "${E2E_RUN_DIR:-}"
@@ -774,6 +779,11 @@ fn happy_path_runs_a_stub_agent_through_cmux_and_lands_on_main() {
             run["log_path"].as_str().unwrap(),
             run_dir = run["run_dir"].as_str().unwrap()
         )),
+        "{log}"
+    );
+    // The model and effort were given explicitly (ADR-0079 decision 3).
+    assert!(
+        log.contains("model: claude-opus-5-5 effort: medium"),
         "{log}"
     );
     // The run workspace's `--env` reached the agent through its shell.

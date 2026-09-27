@@ -18,6 +18,7 @@ related:
   - adr-0049
   - adr-0048
   - design-provider-lifecycle
+  - design-supervisor-lifecycle-worker-model
   - adr-0063
   - adr-0044
   - design-domain-model
@@ -44,6 +45,7 @@ related:
   - `title`: taskのtitle。`kind`: taskの変更の種類（goal 21。repositoryが名付けるlabelのまま（[ADR-t624-1](../../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)）。無いtaskはnull）。`claimed_at` / `validated_at` / `landed_at`: 最初の`run_claimed`・最初の`validation_finished`・`run_integrated`の記録時刻（queueの`created_at`のまま。無ければnull）
   - `integrate_attempts` / `deferrals` / `conflict_files` / `broken_by` / `broke_runs` / `resume_attempts`: 着地の延期の中身と、崩した着地、resumeの効き目（下の[着地の延期とresume](#着地の延期とresume)）
   - `dagq_version` / `claude_version` / `rustc_release` / `rustc_host` / `claim_parallel` / `claim_slots` / `claim_load_avg`: 最初の`run_claimed`が記録したclaimの属性（goal 21、task 197。[`supervise`](supervise.md)の5）の`dagq_version` / `claude_version` / `rustc_release` / `rustc_host` / `parallel` / `slots` / `load_avg`。記録の無いrun（手の`claim`、task 197より前）はnull
+  - `worker_model` / `worker_effort` / `trial_group`: 最初の`run_claimed`の`model` / `effort` / `group`（workerのsessionを起動したmodelとeffortと試しの群。[Worker model](worker-model.md)、ADR-0079の決定3・4）。記録の無いrun（task 576より前）はnull、試しの外のrunの`trial_group`はnull
   - `load`: 区間ごとの`{mean, max, band}`（`band`は`mean`の帯）。`work`は最初の`receipt_observed`、`validate`は最初の`validation_finished`の`load_avg_mean` / `load_avg_max`、`verify`は`integrate`の`verification_command`（`phase: integration`、全試行）の`load_avg_mean`を`duration_secs`で重み付けした平均（`duration_secs`の無いものは1秒）と`load_avg_max`の最大。記録の無い区間はnull
   - `prediction` / `actual`: そのtaskの重さの予測と、runの実績を並べたもの（ADR-0079の決定2。下の[重さの予測と実績](#重さの予測と実績)）。予測の無いrunは`prediction`がnull
   - `load_band`: `load.work.band`、無ければ`claim_load_avg`の帯（どちらも無ければnull）。帯は`0-4` / `4-8` / `8-16` / `16-32` / `32-64` / `64+`（下限を含む。`domain::measure::load_band`）。集計は`domain::stats::measures`
@@ -179,6 +181,13 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 - **`runs`の`prediction`**: `{size, nature, uncertainty, expected_output_tokens, rework_probability, reason, proposal_id, plan_review_id, model, effort, percentile, percentile_of}`。そのrunの最初のイベントより前に記録された、そのtaskの最後の`task_weight_predicted`（出し直しや`reopen`で予測が追記されていれば最後のもの。runの後に記録された予測は次のrunのもの）。`model` / `effort`は予測したplan reviewのsessionのもの（transcriptから読めなければnull）。予測の無いrun（`ready --bypass-review`、予測の失敗、task 575より前）はnull
 - **`percentile` / `percentile_of`**: `expected_output_tokens`が、そのrunの最初のイベントより前に記録された予測のうち、他のtaskの最後の予測を新しい順に最大60件（`domain::prediction::PREDICTION_WINDOW`、ADR-0079の決定4のN）並べた中のどこに入るか（0〜100。下にあるものの割合で、同じ値は半分に数え、小数1桁。`domain::prediction::percentile`）と、比べた件数。比べるものが無ければ`percentile`はnull。予測の値は2〜3倍に偏るので、値ではなくこの百分位で読む（下位3分の1は33.3以下）。試しの対象の判定（ADR-0079の決定4）も同じ関数を使う
 - **`runs`の`actual`**: `{output_tokens, model_secs, resumes, resume_reasons, review_verdict, task_rework}`。`output_tokens`はrunのsession（`worker` / `resume` / `revise`。reviewとtriageのjobは除く）の`tokens.output`の合計（記録が無ければnull）、`model_secs`は`work_breakdown`の`model`の秒（内訳が無ければnull）、`resume_reasons`は`resume_attempts`の`reason`ごとの回数、`task_rework`はtaskに由来する手戻り（ADR-0079の決定1: `integration_deferred`の`verification_failed`、`review_finished`の`concern`、`revise_requested`のどれかがrunにある。衝突とkillは数えない。`domain::plan_quality::rework`）
+
+## workerのmodelと試しの群
+
+[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4・6（task 576）。**`trial_groups`**は、`runs`と同じページのrunのうち試しの群（`trial_group`）を持つものを群ごとに（名前の昇順。群の無いrunは出さない）並べる。集計は`domain::stats::trial`。
+
+- 各群は`{group, sessions, runs, tasks, lead_time, work, model_secs, output_tokens, task_rework, task_rework_rate}`。`sessions`はrunの`worker_model/worker_effort`ごとの件数、`runs` / `tasks`は件数、`lead_time`はclaim→着地（`claimed_at`→`landed_at`）の秒、`work`は`work`、`model_secs`と`output_tokens`は`actual`の同名の値で、どれも`{count, total, median}`（値の無いrunは数えない）。`task_rework`は`actual.task_rework`（ADR-0079の決定1の数え方）がtrueのrunの数、`task_rework_rate`はその`runs`に対する百分率（小数1桁）
+- 判定（1群45件前後、`task_rework_rate`の差（treatment − control）が+5ポイント以内か）は人とplannerが`stats --full`（か`--since`で試しを有効にした時点から）で読む。`kpi`の層（`group=`など）はまだ無い
 
 ## draftの流入と流出
 

@@ -258,10 +258,16 @@ impl Supervisor<'_> {
                 // Recorded before it is typed: a supervisor that stops in
                 // between leaves an adopter that waits for the session
                 // rather than sending the request a second time.
+                // The live session goes on with the model and effort it was
+                // started with (ADR-0079 decision 3).
+                let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": unix_seconds(sent_at)});
+                if let Some(requested) = requested.as_object_mut() {
+                    requested.extend(WorkerSession::of_run(&events).fields());
+                }
                 self.queue.record_runtime_event(
                     run.id(),
                     event_kind::REVISE_REQUESTED,
-                    json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": unix_seconds(sent_at)}),
+                    requested,
                 )?;
                 let submission = match submit(
                     self,

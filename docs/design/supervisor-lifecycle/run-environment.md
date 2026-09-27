@@ -14,13 +14,15 @@ related:
   - adr-0040
   - adr-0076
   - adr-0049
+  - adr-0079
+  - design-supervisor-lifecycle-worker-model
 ---
 
 # Run environment
 
 repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
 
-- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[repository]`は[Landing branch](landing-branch.md)が足す予定で、今は未知の表としてエラーになる。`[language]`も[Language](language.md)が足す予定で、今は未知の表としてエラーになる）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
+- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[worker.trial]`・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[repository]`は[Landing branch](landing-branch.md)が足す予定で、今は未知の表としてエラーになる。`[language]`も[Language](language.md)が足す予定で、今は未知の表としてエラーになる）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
 - 値の`${DAGQ_QUEUE_DIR}`はqueue directory（DBのある directory）、`${DAGQ_RUN_DIR}`はそのrunのrun directoryに展開する。ほかの`$`は書いたまま残す（shellの展開はしない）。`${DAGQ_RUN_DIR}`はtask 91で加えた（ADR-0040の決定3、ADR-0049の決定3が引き継ぐ）。
 - 読むのはrepositoryのmain checkout（Git common directoryが`.git`ならその親、bareなら`supervise` / `integrate`を実行したcheckout）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む（common directoryが`.git`という名前でない構成だけは、実行したcheckoutのものを読む）。検証コマンドが1件も無ければ読まない。
 - 渡し先: (a) `provision`がworkerのworkspaceを作るとき、`DAGQ_ROLE` / `DAGQ_QUEUE`の後ろに`--env KEY=VALUE`で並べる（ADR-0026の仕組み）。worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、workspaceは開かずsupervisorはclaimを止める。(b) `integrate`の`verification_commands`を`Command`のenvに足す（validatingは検証コマンドを実行しない）。読めないファイルは着地処理のエラーで、runは元の状態に戻る。(c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。needs_sessionのresumeが開くworkspaceには今は渡していない。
@@ -34,6 +36,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[disk]`はclaimと着地の検証の前に確かめる空き容量の閾値で、`sample_runs`（正の整数、既定20）、`claim_factor`（正の数、既定2）、`integrate_factor`（正の数、既定1.5）、`min_free_bytes`（正の整数、既定なし）を持つ（[空き容量を確かめる](disk-space.md)、ADR-0047の決定44、task 377。`load_disk_config`）。supervisorが起動時に読み、読めなければ既定値で動く。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[disk]`を知るものに入れ替えてから足す
 
 - `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、`dagq kpi`だけが読む（[kpi](kpi.md#目標targets)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。`load_kpi_settings`、解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[kpi]`を知るものに入れ替えてから足す（先に足すとqueue全体が止まる）。
+
+- `[worker.trial]`はworkerのmodelの限定の試しの設定で、`enabled`（`true` / `false`、既定`false`）と`window`（正の整数、既定60。対象の判定で比べる直近の予測の件数）を持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4。`load_worker_trial`、`Verifier::worker_trial`）。supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。既定は無効で、有効にするのは人の判断。この repositoryの`dagq.toml`には置かない。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
 
 - `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)。未実装）。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
 

@@ -274,7 +274,9 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
     assert_eq!(started.len(), 2, "{:?}", event_kinds(&detail));
     assert_eq!(
         started[0],
-        &json!({"attempt": 1, "counted": false, "reason": reason, "main": first_landed})
+        &json!({"attempt": 1, "counted": false, "reason": reason, "main": first_landed,
+                // The claim's session (ADR-0079 decision 3).
+                "model": "claude-opus-5-5", "effort": "medium", "group": null})
     );
     // Each conflict-only resume left out of the count is a repair.
     let uncounted: Vec<&Value> = payloads(&detail, "auto_repaired")

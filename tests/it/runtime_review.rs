@@ -451,6 +451,12 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
     assert_eq!(requested.len(), 1);
     assert_eq!(requested[0]["attempt"], 1);
     assert_eq!(requested[0]["reasons"], json!(["add a line to change.txt"]));
+    // The live session goes on with the claim's model and effort (ADR-0079
+    // decision 3).
+    assert_eq!(
+        (&requested[0]["model"], &requested[0]["effort"]),
+        (&json!("claude-opus-5-5"), &json!("medium"))
+    );
     let revised = payloads(&detail, "revise_finished");
     assert_eq!(revised.len(), 1);
     let head = git_out(

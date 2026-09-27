@@ -14,7 +14,7 @@ use std::{
 };
 
 use super::{AgentProvider, Queue, RunFiles, Spawner, Streams};
-use crate::domain::{ReasonCode, RunId, TaskRun};
+use crate::domain::{ReasonCode, RunId, TaskRun, worker_model::WorkerSession};
 
 /// How long the wrapper waits for the supervisor to record the workspace
 /// cmux started it in.
@@ -101,13 +101,17 @@ fn drive_agent(
     resume: bool,
     child_may_be_alive: &mut bool,
 ) -> Result<i32> {
-    let command = if resume {
+    let mut command = if resume {
         provider.resume_command(run)?
     } else {
         let prompt_path =
             Path::new(run.run_dir().context("missing run directory")?).join("prompt.txt");
         provider.command(run, &files.read_to_string(&prompt_path)?)?
     };
+    // The model and effort the claim chose (ADR-0079 decision 3); a resume
+    // keeps them.
+    let session = WorkerSession::of_run(&queue.run_events(run.id())?);
+    provider.select_model(&mut command, &session.model, &session.effort);
     let mut child = spawner
         .spawn(&command, Streams::Inherit)
         .context("launch agent")?;

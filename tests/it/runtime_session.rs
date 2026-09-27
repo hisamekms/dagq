@@ -1606,14 +1606,40 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         serde_json::from_str(&stop_hook_settings(&run.idle_marker_path().unwrap()).unwrap())
             .unwrap();
     assert_eq!(hooks_only, expected);
+    // The model and effort go among the options (ADR-0079 decision 3).
+    let claude = ClaudeCode {
+        executable: "claude".into(),
+    };
+    let mut chosen = claude.command(&run, "prompt").unwrap();
+    claude.select_model(&mut chosen, "claude-sonnet-5", "medium");
+    let chosen: Vec<String> = chosen
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        chosen[chosen.len() - 6..],
+        [
+            "--model",
+            "claude-sonnet-5",
+            "--effort",
+            "medium",
+            "--",
+            "prompt"
+        ]
+    );
     // The resumed session writes the same settings.
     fs::remove_file(&settings).unwrap();
-    ClaudeCode {
-        executable: "claude".into(),
-    }
-    .resume_command(&run)
-    .unwrap();
+    let mut resumed = claude.resume_command(&run).unwrap();
     assert_eq!(fs::read_to_string(&settings).unwrap(), text);
+    claude.select_model(&mut resumed, "claude-opus-5-5", "medium");
+    let resumed: Vec<String> = resumed
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        resumed[resumed.len() - 4..],
+        ["--model", "claude-opus-5-5", "--effort", "medium"]
+    );
     // A non-empty auto mode environment from flag settings keeps the
     // "Teach auto mode" dialog away; `$defaults` keeps the built-in entries.
     assert_eq!(parsed["autoMode"]["environment"], json!(["$defaults"]));

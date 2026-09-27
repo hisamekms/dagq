@@ -383,8 +383,17 @@ mod stats {
         let ids = runs.iter().map(|r| r["run_id"].clone()).collect::<Vec<_>>();
         // Finished runs in the order they finished; `d` is still in flight.
         assert_eq!(ids, [json!("a"), json!("b"), json!("c1"), json!("c2")]);
+        // Task 576: nothing recorded the worker's model, effort and trial
+        // group at the claim.
+        let mut first = runs[0].clone();
+        for key in ["worker_model", "worker_effort", "trial_group"] {
+            assert_eq!(
+                first.as_object_mut().unwrap().remove(key),
+                Some(Value::Null)
+            );
+        }
         assert_eq!(
-            runs[0],
+            first,
             json!({
                 "run_id": "a", "task_id": 1, "goal_id": 7, "status": "integrated",
                 "finished_event_id": 9, "work": 600, "validate": 120,

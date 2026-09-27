@@ -180,6 +180,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### Run environment
 
 - [Run environment](supervisor-lifecycle/run-environment.md)
+- [Worker model](supervisor-lifecycle/worker-model.md)（workerのmodel / effortの明示と記録、`[worker.trial]`の限定の試し）
 
 ### Stall thresholds
 

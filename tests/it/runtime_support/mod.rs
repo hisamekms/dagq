@@ -353,6 +353,26 @@ impl AgentProvider for TestProvider {
     fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
         unreachable!("sessions do not review")
     }
+    /// Kept in [`session_models`] rather than passed on: `/bin/sh` takes
+    /// no model.
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        use std::io::Write as _;
+        let run_id = command
+            .get_envs()
+            .find(|(key, _)| *key == "RUN_ID")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        let resume = command
+            .get_args()
+            .any(|arg| arg.to_string_lossy().starts_with(RESUME_PRELUDE));
+        let line = json!({"run_id": run_id, "resume": resume, "model": model, "effort": effort});
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(session_models_path(&self.db))
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
     // `headless_command` keeps the default refusal: a run's provider has no
     // headless job, which the observer test relies on.
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
@@ -390,6 +410,21 @@ impl AgentProvider for TestProvider {
             .arg(format!("{AGENT_PRELUDE}\n{}", self.script));
         Ok(command)
     }
+}
+
+fn session_models_path(db: &Path) -> PathBuf {
+    db.with_file_name("session-models.jsonl")
+}
+
+/// The model and effort each session of [`TestProvider`] was started with
+/// (ADR-0079 decision 3), in the order they started: `run_id`, `resume`,
+/// `model`, `effort`.
+pub fn session_models(db: &Path) -> Vec<Value> {
+    fs::read_to_string(session_models_path(db))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
 }
 
 /// Claude Code's empty input box, the screen `capture` returns unless a

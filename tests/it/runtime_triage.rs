@@ -251,6 +251,20 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
         payloads(&detail, "resume_started")[0]["reason"],
         "write the receipt for your commit"
     );
+    // The resumed session keeps the claim's model and effort (ADR-0079
+    // decision 3), and the wrapper starts it with them.
+    let started = payloads(&detail, "resume_started")[0];
+    assert_eq!(
+        (&started["model"], &started["effort"], &started["group"]),
+        (&json!("claude-opus-5-5"), &json!("medium"), &Value::Null)
+    );
+    assert_eq!(
+        session_models(&db),
+        [
+            json!({"run_id": detail.runs[0].id(), "resume": false, "model": "claude-opus-5-5", "effort": "medium"}),
+            json!({"run_id": detail.runs[0].id(), "resume": true, "model": "claude-opus-5-5", "effort": "medium"}),
+        ]
+    );
     assert_eq!(backend.closed()[0], WORKSPACE_ID);
     let text = &backend.texts()[0].1;
     for expected in [

@@ -7,8 +7,9 @@
 //! `conflict_hotspot` alert of `stats` (goal 31). `[recheck]` holds the
 //! `command` the landing recheck runs on main's tree with a waiting run
 //! merged in (ADR-0068 decision 2). `[disk]` holds how much free disk
-//! space a claim and a landing need (ADR-0047 decision 44, task 377). The
-//! file is parsed by
+//! space a claim and a landing need (ADR-0047 decision 44, task 377).
+//! `[worker.trial]` turns on the limited trial of the worker's model
+//! (ADR-0079 decision 4). The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
 use anyhow::{Context, Result, bail, ensure};
@@ -28,6 +29,7 @@ use crate::{
         run_env::{RunEnvCheck, RunEnvProgram},
         stall::StallConfig,
         stats::ConflictConfig,
+        worker_model::WorkerTrial,
     },
     infrastructure::kpi_config::KpiTables,
 };
@@ -48,13 +50,17 @@ const REPOSITORY_REMOTE: &str = "remote";
 const REPOSITORY_PUSH: &str = "push";
 /// `[kpi]` and its targets (ADR-0051), read by [`KpiTables`].
 const KPI_TABLE: &str = "kpi";
-const TABLES: [&str; 6] = [
+/// `[worker.trial]`: the limited trial of the worker's model (ADR-0079
+/// decision 4).
+const WORKER_TRIAL_TABLE: &str = "worker.trial";
+const TABLES: [&str; 7] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
     RECHECK_TABLE,
     DISK_TABLE,
     REPOSITORY_TABLE,
+    WORKER_TRIAL_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -102,6 +108,9 @@ pub struct Config {
     /// `[repository]`: the landing branch, the push remote and whether
     /// to push (ADR-t615-1).
     pub repository: RepositoryConfig,
+    /// `[worker.trial]`, off unless it says `enabled = true` (ADR-0079
+    /// decision 4).
+    pub worker_trial: WorkerTrial,
 }
 
 /// Parse the whole file.
@@ -112,6 +121,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut stall_keys: Vec<String> = Vec::new();
     let mut conflict_keys: Vec<String> = Vec::new();
     let mut disk_keys: Vec<String> = Vec::new();
+    let mut trial_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
@@ -134,7 +144,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -224,6 +234,26 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 );
                 repository.branch = Some(value);
             }
+            Some(WORKER_TRIAL_TABLE) => {
+                ensure!(
+                    WorkerTrial::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{WORKER_TRIAL_TABLE}]; the keys are {}",
+                    WorkerTrial::KEYS.join(", ")
+                );
+                ensure!(
+                    !trial_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let value = rest.trim();
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                if key == "enabled" {
+                    config.worker_trial.enabled = parse_bool(value).with_context(with)?;
+                } else {
+                    let window = parse_positive(value, "number").with_context(with)?;
+                    config.worker_trial.window = usize::try_from(window).with_context(with)?;
+                }
+                trial_keys.push(key.to_owned());
+            }
             Some(DISK_TABLE) => {
                 ensure!(
                     DiskConfig::KEYS.contains(&key),
@@ -276,7 +306,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -400,6 +430,18 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .repository)
+}
+
+/// `[worker.trial]` of the `dagq.toml` in `root` (ADR-0079 decision 4);
+/// no file, no table or no key is the default, which is off.
+pub fn load_worker_trial(root: &Path) -> Result<WorkerTrial> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(WorkerTrial::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .worker_trial)
 }
 
 fn read_config(path: &Path) -> Result<Option<String>> {
@@ -671,6 +713,10 @@ impl Verifier for ShellVerifier {
         load_recheck_command(&self.checkout)
     }
 
+    fn worker_trial(&self) -> Result<WorkerTrial> {
+        load_worker_trial(&self.checkout)
+    }
+
     fn run_to_log(
         &self,
         command: &str,
@@ -728,6 +774,59 @@ LITERAL = 'no \n escapes # here'
                 ("LITERAL", "no \\n escapes # here"),
             ])
         );
+    }
+
+    #[test]
+    fn parses_the_worker_trial_table() {
+        // Off unless it says so (ADR-0079 decision 4).
+        assert_eq!(
+            parse_config("").unwrap().worker_trial,
+            WorkerTrial::default()
+        );
+        let config = parse_config("[worker.trial]\nenabled = true # on\nwindow = 30\n").unwrap();
+        assert_eq!(
+            config.worker_trial,
+            WorkerTrial {
+                enabled: true,
+                window: 30
+            }
+        );
+        let off = parse_config("[worker.trial]\nenabled = false\n").unwrap();
+        assert_eq!(off.worker_trial, WorkerTrial::default());
+        for (text, error) in [
+            (
+                "[worker.trial]\nother = 1",
+                "unknown key other in [worker.trial]",
+            ),
+            ("[worker.trial]\nenabled = 1", "expected true or false"),
+            ("[worker.trial]\nwindow = 0", "positive number"),
+            (
+                "[worker.trial]\nwindow = 1\nwindow = 2",
+                "window is defined twice",
+            ),
+            ("[worker.trial]\n[worker.trial]", "is defined twice"),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_worker_trial(dir.path()).unwrap(),
+            WorkerTrial::default()
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[worker.trial]\nenabled = true\n",
+        )
+        .unwrap();
+        assert!(load_worker_trial(dir.path()).unwrap().enabled);
+        let verifier = ShellVerifier {
+            checkout: dir.path().to_owned(),
+            db: dir.path().join("q.db"),
+        };
+        assert!(verifier.worker_trial().unwrap().enabled);
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[worker.trial]\nx = 1\n").unwrap();
+        assert!(load_worker_trial(dir.path()).is_err());
     }
 
     #[test]

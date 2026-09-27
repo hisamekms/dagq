@@ -26,6 +26,7 @@ pub mod retries;
 pub mod sessions;
 pub mod thresholds;
 pub mod tokens;
+pub mod trial;
 pub mod updates;
 pub mod work;
 
@@ -433,6 +434,10 @@ pub struct Stats {
     pub versions: Versions,
     /// Those runs per `load_band` (task 197).
     pub load_bands: Vec<LoadBandStats>,
+    /// Those runs per group of the trial of the worker's model (ADR-0079
+    /// decisions 4 and 6): how fast, and how often their task caused
+    /// rework. Runs outside the trial are not listed.
+    pub trial_groups: Vec<trial::TrialGroupStats>,
     /// The time each verification command of `integrate` took, in the same
     /// window as `backend_failures` (task 197).
     pub verification_commands: Vec<CommandStats>,
@@ -759,6 +764,7 @@ pub fn stats(
     let overall = intervals(&page);
     let versions = measures::versions(&page);
     let load_bands = measures::load_bands(&page);
+    let trial_groups = trial::trial_groups(&page);
 
     let mut alerts = Vec::new();
     let considered = finished.iter().chain(open.iter()).collect::<Vec<_>>();
@@ -989,6 +995,7 @@ pub fn stats(
         landing_rechecks,
         versions,
         load_bands,
+        trial_groups,
         verification_commands,
         verification_failures,
         failed_tests,

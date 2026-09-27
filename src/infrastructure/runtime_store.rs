@@ -17,6 +17,7 @@ use super::{
     },
 };
 use crate::application::{AskStore, Generators, RunStore, timestamp, unix_seconds};
+use crate::domain::worker_model::{WorkerSession, WorkerTrial};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
     PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunHistory, RunId,
@@ -62,18 +63,20 @@ impl SqliteQueue {
         base_commit: &CommitSha,
         token: &str,
     ) -> Result<ClaimOutcome> {
-        self.claim_for_supervisor_in_order(base_commit, token, &[], None)
+        self.claim_for_supervisor_in_order(base_commit, token, &[], None, &WorkerTrial::default())
     }
 
     /// [`Self::claim_for_supervisor`], taking the first task of `order` that
     /// is still claimable (the lowest-ID candidate when none is), with
-    /// `attributes` in its `run_claimed`.
+    /// `attributes` in its `run_claimed` and the worker session `trial`
+    /// chooses for the task.
     pub fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
         token: &str,
         order: &[TaskId],
         attributes: Option<&Value>,
+        trial: &WorkerTrial,
     ) -> Result<ClaimOutcome> {
         let tx = self
             .conn
@@ -88,6 +91,7 @@ impl SqliteQueue {
             base_commit,
             order,
             attributes,
+            trial,
         )?;
         if let ClaimOutcome::Claimed { run } = &outcome {
             tx.execute(
@@ -1889,12 +1893,13 @@ impl SqliteQueue {
             event_kind::LEASE_ACQUIRED,
             json!({"pid": std::process::id(), "reason": "resume", "previous_token": previous}),
         )?;
-        run_event(
-            &tx,
-            id,
-            event_kind::RESUME_STARTED,
-            json!({"attempt": attempt, "counted": counted, "reason": reason.or(run.last_error()), "main": main}),
-        )?;
+        // The resumed session keeps the model and effort of the claim
+        // (ADR-0079 decision 3).
+        let mut started = json!({"attempt": attempt, "counted": counted, "reason": reason.or(run.last_error()), "main": main});
+        if let Some(started) = started.as_object_mut() {
+            started.extend(WorkerSession::of_run(&events).fields());
+        }
+        run_event(&tx, id, event_kind::RESUME_STARTED, started)?;
         if let Some(basis) = basis {
             run_event(
                 &tx,
@@ -3433,8 +3438,16 @@ impl RunStore for SqliteQueue {
         token: &str,
         order: &[TaskId],
         attributes: Option<&Value>,
+        trial: &WorkerTrial,
     ) -> Result<ClaimOutcome> {
-        SqliteQueue::claim_for_supervisor_in_order(self, base_commit, token, order, attributes)
+        SqliteQueue::claim_for_supervisor_in_order(
+            self,
+            base_commit,
+            token,
+            order,
+            attributes,
+            trial,
+        )
     }
     fn heartbeat(&mut self, token: &str) -> Result<usize> {
         SqliteQueue::heartbeat(self, token)

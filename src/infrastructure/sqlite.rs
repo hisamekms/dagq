@@ -25,7 +25,10 @@ use crate::{
         NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND, Predecessor,
         Priority, Proposal, ProposalId, Provider, RunEvent, RunId, RunRecord, Submission, Task,
         TaskAction, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun, TaskStatus,
-        TaskStatusCounts, goal, scope::validate_path_globs, task,
+        TaskStatusCounts, goal,
+        scope::validate_path_globs,
+        task,
+        worker_model::{self, WorkerTrial},
     },
     infrastructure::{
         clock,
@@ -837,6 +840,7 @@ impl TaskStore for SqliteQueue {
             base_commit,
             &[],
             None,
+            &WorkerTrial::default(),
         )?;
         tx.commit()?;
         Ok(outcome)
@@ -1667,7 +1671,10 @@ fn claim_order(conn: &Connection) -> Result<Vec<TaskId>> {
 /// only limit, so concurrent claims take different tasks. The run is
 /// created at `at` with an ID from `ids`. `attributes` (an object: what a
 /// supervisor measured at the claim, task 197) go into `run_claimed`
-/// beside its transition.
+/// beside its transition, and so does the worker session `trial` chooses
+/// for the task (ADR-0079 decisions 3 and 4): chosen here, in the claim's
+/// transaction, so two claims never take the same turn of the trial.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn claim_task(
     tx: &Connection,
     runs_dir: &Path,
@@ -1676,6 +1683,7 @@ pub(super) fn claim_task(
     base_commit: &CommitSha,
     order: &[TaskId],
     attributes: Option<&serde_json::Value>,
+    trial: &WorkerTrial,
 ) -> Result<ClaimOutcome> {
     let mut ready = ready_tasks(tx)?;
     if ready.is_empty() {
@@ -1690,6 +1698,7 @@ pub(super) fn claim_task(
         None => position(&claim_order(tx)?).unwrap_or(0),
     };
     let task = task::claim(ready.swap_remove(preferred))?;
+    let choice = worker_model::choose(trial, task.id(), &trial_events(tx, trial)?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
     let run = TaskRun::new(run_id, &task, base_commit, Provider::Claude, now.clone())?;
@@ -1723,10 +1732,33 @@ pub(super) fn claim_task(
         {
             payload.extend(attributes.clone());
         }
+        if let Some(payload) = payload.as_object_mut() {
+            payload.extend(choice.session.fields());
+            if let Some(percentile) = choice.percentile {
+                payload.insert("trial_percentile".to_owned(), json!(percentile));
+            }
+        }
         payload
     })?;
     let run = run.relocated(runs_dir);
     Ok(ClaimOutcome::Claimed { run: Box::new(run) })
+}
+
+/// What the trial chooses a claim's worker session from: every
+/// `task_weight_predicted` and `run_claimed`, oldest first; none while it
+/// is off.
+fn trial_events(conn: &Connection, trial: &WorkerTrial) -> Result<Vec<RunEvent>> {
+    if !trial.enabled {
+        return Ok(Vec::new());
+    }
+    Ok(conn
+        .prepare(&format!(
+            "SELECT * FROM run_events WHERE kind IN ('{}','{}') ORDER BY id",
+            event_kind::TASK_WEIGHT_PREDICTED,
+            event_kind::RUN_CLAIMED
+        ))?
+        .query_map([], event_row)?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// Executing, awaiting or undergoing integration, or waiting for a session;
