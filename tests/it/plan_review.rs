@@ -1882,6 +1882,95 @@ fn edits_before_a_review_or_to_another_proposal_leave_its_verdict_applied() {
     }
 }
 
+#[test]
+fn a_job_failing_after_an_edit_of_its_task_is_not_held_and_the_review_runs_again() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let blocker = TaskId::new(1);
+    let two = add(&mut queue, "two", &[blocker], Priority::Normal);
+    let three = add(&mut queue, "three", &[blocker], Priority::Normal);
+    let proposal = submit(&mut queue, &[two, three], None);
+    // The first job edits `three` and exits non-zero.
+    let reviewer = StubReviewer::failing().editing(&fx.db, three);
+    reviewer.verdicts.lock().unwrap().push(
+        json!({"verdict": "pass", "reasons": [], "summary": "fine now", "actions": []}).to_string(),
+    );
+    let backend = PlanWorkspace::default();
+    let outcome = supervise(&fx, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let prompts = reviewer.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts[1].contains("edited while its review ran"),
+        "{}",
+        prompts[1]
+    );
+    assert!(events(&mut queue, two, "plan_review_failed").is_empty());
+    let discarded = events(&mut queue, two, "plan_review_discarded");
+    assert_eq!(discarded.len(), 1);
+    assert_eq!(discarded[0]["verdict"], Value::Null);
+    assert_eq!(discarded[0]["edited"], json!([three]));
+    assert_eq!(discarded[0]["attempt"], 1);
+    let error = discarded[0]["error"].as_str().unwrap();
+    assert!(error.contains("model unavailable"), "{error}");
+    assert!(error.contains(&format!("task {three}")), "{error}");
+    let finished = events(&mut queue, two, "plan_review_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["attempt"], 1);
+    assert_eq!(
+        proposal_column(&fx.db, proposal, "review_hold"),
+        Value::Null
+    );
+    assert_eq!(status(&mut queue, three), TaskStatus::Ready);
+    assert_eq!(
+        queue.show_proposal(proposal).unwrap().status(),
+        ProposalStatus::Accepted
+    );
+    let (outcome, error): (String, String) = Connection::open(&fx.db)
+        .unwrap()
+        .query_row(
+            "SELECT outcome, error FROM plan_reviews ORDER BY id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(outcome, "interrupted");
+    assert!(error.contains("model unavailable"), "{error}");
+    assert!(error.contains(&format!("task {three}")), "{error}");
+}
+
+#[test]
+fn a_job_failing_after_edits_before_it_or_to_another_proposal_is_held() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let blocker = TaskId::new(1);
+    let early = add(&mut queue, "early", &[blocker], Priority::Normal);
+    let other = add(&mut queue, "other", &[blocker], Priority::Normal);
+    let reviewed = submit(&mut queue, &[early], None);
+    let later = submit(&mut queue, &[other], None);
+    queue
+        .edit_task(
+            early,
+            TaskEdit {
+                description: Some("edited before its review".into()),
+                ..TaskEdit::default()
+            },
+        )
+        .unwrap();
+    // The first job (of `reviewed`) edits the task of `later`; every job
+    // fails.
+    let reviewer = StubReviewer::failing().editing(&fx.db, other);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(reviewer.prompts().len(), 2);
+    for (task, proposal) in [(early, reviewed), (other, later)] {
+        assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
+        assert_eq!(proposal_column(&fx.db, proposal, "review_hold"), "failed");
+        assert_eq!(events(&mut queue, task, "plan_review_failed").len(), 1);
+        assert!(events(&mut queue, task, "plan_review_discarded").is_empty());
+    }
+}
+
 /// A task of `title`, `description` and `acceptance`, waiting for the
 /// blocker.
 fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance: &str) -> TaskId {

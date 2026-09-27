@@ -130,6 +130,18 @@ fn edited_during(conn: &Connection, job: &PlanReviewJob) -> Result<Vec<TaskId>> 
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// The error a job interrupted by edits of its tasks closes with.
+fn edited_error(edited: &[TaskId]) -> String {
+    format!(
+        "task {} of the proposal was edited during its review",
+        edited
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// Check an action against the proposal before anything is applied: it
 /// changes a submitted task of the proposal, a dependency names another
 /// task, a priority only goes down, and a duplicate is of another task
@@ -564,14 +576,7 @@ impl PlanReviewStore for SqliteQueue {
         if !edited.is_empty() {
             // The proposal stays submitted and unheld: the next pass
             // reviews the edited tasks.
-            let error = format!(
-                "task {} of the proposal was edited during its review",
-                edited
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            let error = edited_error(&edited);
             finish_row(
                 &tx,
                 job.id,
@@ -737,6 +742,31 @@ impl PlanReviewStore for SqliteQueue {
         if !reviewable(&tx, job.proposal_id)? {
             finish_row(&tx, job.id, now, "interrupted", None, Some(error))?;
             sessions::close_plan_review(&tx, job.id, false)?;
+            tx.commit()?;
+            return Ok(());
+        }
+        let edited = edited_during(&tx, job)?;
+        if !edited.is_empty() {
+            // As with a verdict (ADR-0041 decision 9): the edited tasks are
+            // unreviewed, so the next pass reviews them instead of holding
+            // the proposal for a person.
+            let error = format!("{error}; {}", edited_error(&edited));
+            finish_row(&tx, job.id, now, "interrupted", None, Some(&error))?;
+            sessions::close_plan_review(&tx, job.id, false)?;
+            event(
+                &tx,
+                job.anchor,
+                None,
+                event_kind::PLAN_REVIEW_DISCARDED,
+                json!({
+                    "proposal_id": job.proposal_id,
+                    "plan_review_id": job.id,
+                    "attempt": job.attempt,
+                    "verdict": Value::Null,
+                    "edited": edited,
+                    "error": error,
+                }),
+            )?;
             tx.commit()?;
             return Ok(());
         }
