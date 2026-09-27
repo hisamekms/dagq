@@ -3,6 +3,8 @@
 //! answer is checked against it (`git merge-tree`, then the `[recheck]
 //! command` of `dagq.toml`), and one that no longer lands is resumed
 //! without waiting for the answer, which its ask then tells the person.
+//! A run the supervisor holds in a slot to land is parked when it would
+//! land instead.
 use crate::runtime_support;
 
 use dagq::domain::stats::StatsQuery;
@@ -295,5 +297,133 @@ fn a_waiting_run_that_still_lands_is_left_waiting() {
     assert_eq!(
         queue.show(TaskId::new(1)).unwrap().task.status(),
         TaskStatus::Completed
+    );
+}
+
+/// A run this supervisor holds in its slot to land (its session holds the
+/// `/exit` back after the review passed) conflicts with the run that lands
+/// meanwhile: the recheck after that landing records `landing_recheck_failed`
+/// with `action: held` and leaves it in the slot. Once its session exits,
+/// the run is parked instead of landing (`repeat: true`, `needs_session`,
+/// no integration tried) and resumed with the recheck's request.
+#[test]
+fn a_run_held_in_its_slot_that_a_landing_conflicts_with_is_parked_before_it_lands() {
+    let (_dir, repo, db) = fixture();
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
+    backend.script_for(2, PROMPTED_AGENT);
+    backend.resume_script_for(1, RESOLVING_RESUME);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict(
+        "pass",
+        &[],
+        "meets the acceptance",
+    )]));
+    let run_of = |task: i64| {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(task))
+            .unwrap()
+            .runs
+            .first()
+            .cloned()
+    };
+    let has_event = |task: i64, kind: &str| {
+        run_of(task).is_some_and(|run| !events_of(&db, run.id(), kind).is_empty())
+    };
+    let supervisor = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &supervise_options(4, true),
+            )
+        })
+    };
+    // Task 1 is reviewed and waits in its slot for its session's exit
+    // before task 2's session commits anything.
+    wait_until(&db, Duration::from_secs(60), |_| {
+        has_event(1, "exit_requested") && run_of(2).is_some()
+    });
+    let second = run_of(2).unwrap();
+    fs::write(
+        exit_request_path(second.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    wait_until(&db, Duration::from_secs(60), |_| {
+        has_event(1, "landing_recheck_failed")
+    });
+    release_held_session(run_of(1).unwrap().run_dir().unwrap());
+    let outcome = joined(supervisor, "the supervisor to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let second = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+    assert_eq!(second.status(), RunStatus::Integrated);
+    let landed = events_of(&db, second.id(), "run_integrated");
+    let main = landed[0]["commit"].as_str().unwrap();
+
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    let head = payloads(&detail, "validation_finished")[0]["receipt"]["commit"].clone();
+    let found = payloads(&detail, "landing_recheck_failed");
+    assert_eq!(found.len(), 2, "{:?}", event_kinds(&detail));
+    let (held, parked) = (found[0], found[1]);
+    assert_eq!(held["action"], "held");
+    assert_eq!(held["code"], "rebase_conflict");
+    assert_eq!(held["conflicts"], json!(["change.txt"]));
+    assert_eq!(held["main"], main);
+    assert_eq!(held["head"], head);
+    assert_eq!(held["landed_task_id"], 2);
+    assert_eq!(held["landed_run_id"], json!(second.id()));
+    assert!(held.get("status").is_none(), "{held}");
+    assert!(held.get("repeat").is_none(), "{held}");
+    // Parked when it would land, against the same main and head.
+    assert_eq!(parked["action"], "resumed");
+    assert_eq!(parked["repeat"], true);
+    assert_eq!(parked["status"], "needs_session");
+    assert_eq!(parked["code"], "rebase_conflict");
+    assert_eq!(parked["main"], main);
+    assert_eq!(parked["head"], head);
+    assert_eq!(parked["reason"], held["reason"]);
+    let kinds = event_kinds(&detail);
+    let first = |kind: &str| position(&kinds, kind);
+    let at = |from: usize, kind: &str| from + position(&kinds[from..], kind);
+    let recorded = first("landing_recheck_failed");
+    let parked_at = at(recorded + 1, "landing_recheck_failed");
+    assert!(first("exit_requested") < recorded, "{kinds:?}");
+    // Held in its slot until its session exited, then parked, not landed.
+    let exited = at(recorded, "session_exited");
+    let released = at(exited, "lease_released");
+    assert!(released < parked_at, "{kinds:?}");
+    assert_eq!(
+        payloads(&detail, "lease_released")[0],
+        &json!({"reason": "landing_recheck_failed"})
+    );
+    let resumed = at(parked_at, "resume_started");
+    assert!(first("integration_started") > resumed, "{kinds:?}");
+    assert_eq!(payloads(&detail, "resume_started")[0]["counted"], false);
+    let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
+    assert_eq!(recheck["main"], main, "{recheck}");
+    assert_eq!(recheck["checked"], 1);
+    assert_eq!(recheck["conflicts"], 1);
+    assert_eq!(recheck["held"], 1);
+    assert_eq!(recheck["resumed"], 0);
+    assert_eq!(
+        recheck["failed_runs"],
+        json!([{"run_id": run.id(), "code": "rebase_conflict", "action": "held"}])
+    );
+    // The resumed session brought it onto main, and it landed from there.
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        "resolved by the resumed session\n"
     );
 }
