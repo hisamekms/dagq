@@ -36,7 +36,8 @@ pub fn invoke_as(role: Option<&str>, db: &Path, args: &[&str]) -> Output {
 }
 
 /// [`invoke_as`] with the actor's variables (`DAGQ_ROLE`, `DAGQ_ACTOR_ID`,
-/// `DAGQ_RUN_ID`, `DAGQ_TASK_ID`) that `env` sets, and no other.
+/// `DAGQ_RUN_ID`, `DAGQ_TASK_ID`, and a session's `DAGQ_SESSION_KIND`,
+/// `DAGQ_PLANNER_ID`, `DAGQ_PLANNER_ORIGIN`) that `env` sets, and no other.
 pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     let bin = db.parent().unwrap().join("bin");
     if !bin.join("cmux").exists() {
@@ -63,7 +64,10 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
         .env_remove("DAGQ_ROLE")
         .env_remove("DAGQ_ACTOR_ID")
         .env_remove("DAGQ_RUN_ID")
-        .env_remove("DAGQ_TASK_ID");
+        .env_remove("DAGQ_TASK_ID")
+        .env_remove("DAGQ_SESSION_KIND")
+        .env_remove("DAGQ_PLANNER_ID")
+        .env_remove("DAGQ_PLANNER_ORIGIN");
     command.envs(env.iter().copied());
     command
         .arg("--db")

@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
+use dagq::application::commands::operations::{HookSession, Operation};
 use dagq::{
     application::{StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph},
     domain::{
@@ -999,6 +1000,11 @@ enum Command {
     SessionEvent {
         #[arg(value_parser = ["open", "close"])]
         event: String,
+        /// The run whose session reports, when it is no inbox or planner
+        /// session: what the caller is authorized on (task 734). Without
+        /// it, the caller's `DAGQ_RUN_ID`. A run's session records no span.
+        #[arg(long)]
+        run: Option<String>,
     },
     #[command(hide = true)]
     PlannerSession {
@@ -1245,12 +1251,26 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Observe { history: true, .. } => queue(C::QueueRead),
         Command::Watch { .. } => queue(C::QueueWatch),
         Command::Graph { out: Some(_), .. } | Command::Report { .. } => queue(C::ExportFile),
-        Command::Init | Command::Migrate { .. } | Command::Rebind { .. } => queue(C::QueueAdmin),
-        Command::Install { .. } | Command::AutoUpdate { .. } => queue(C::BinaryInstall),
-        Command::Up { .. } | Command::Down { .. } => queue(C::ServiceLifecycle),
-        Command::Plan { .. } => queue(C::PlannerOpen),
-        Command::Supervise { .. } => queue(C::Supervise),
-        Command::Observe { history: false, .. } => queue(C::ObserveRun),
+        // The runtime operations, as the application names them (task 734).
+        Command::Init
+        | Command::Migrate { .. }
+        | Command::Rebind { .. }
+        | Command::Install { .. }
+        | Command::AutoUpdate { .. }
+        | Command::Up { .. }
+        | Command::Down { .. }
+        | Command::Plan { .. }
+        | Command::Supervise { .. }
+        | Command::Observe { history: false, .. }
+        | Command::Integrate { .. }
+        | Command::Review { .. }
+        | Command::Recover { .. }
+        | Command::Session { .. }
+        | Command::PlannerSession { .. }
+        | Command::SessionEvent { .. } => operation(command, |name| env::var(name).ok())
+            .map(|operation| operation.request())
+            .into_iter()
+            .collect(),
         Command::Add { goal_id, .. } => one(
             C::TaskWrite,
             goal_id.map_or(Resource::Queue, |goal| Resource::Goal(GoalId::new(goal))),
@@ -1330,12 +1350,6 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
                 one(C::FindingDismiss, Resource::Finding(FindingId::new(*id)))
             }
         },
-        Command::Integrate { id, .. } => one(
-            C::IntegrationRequest,
-            id.map_or(Resource::Queue, task_resource),
-        ),
-        Command::Review { id } => one(C::PrepareReview, task_resource(*id)),
-        Command::Recover { run } => one(C::RunRecover, run_resource(run)),
         // The threshold crossings the observer raises to the inbox, each on
         // its finding (ADR-0044 decision 23).
         Command::Ask {
@@ -1383,12 +1397,65 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
                 run: None,
             },
         ),
-        Command::Session { run, .. } => one(C::SessionRun, run_resource(run)),
-        Command::PlannerSession { planner, .. } => {
-            one(C::SessionRun, Resource::Planner(PlannerId::new(*planner)))
-        }
-        Command::SessionEvent { .. } => queue(C::SessionRecord),
     }
+}
+
+/// The runtime operation `command` is (task 734), with what it acts on as
+/// far as the command and `env`, the caller's environment, name it; `None`
+/// for the commands the application authorizes elsewhere or that only read.
+fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<Operation> {
+    let run = |run: &str| RunId::new(run).ok();
+    Some(match command {
+        Command::Init => Operation::Init,
+        Command::Migrate { .. } => Operation::Migrate,
+        Command::Rebind { .. } => Operation::Rebind,
+        Command::Install { .. } => Operation::Install,
+        Command::AutoUpdate { .. } => Operation::AutoUpdate,
+        Command::Up { .. } => Operation::Up,
+        Command::Down { .. } => Operation::Down,
+        Command::Plan { .. } => Operation::Plan,
+        Command::Supervise { .. } => Operation::Supervise,
+        Command::Observe { history: false, .. } => Operation::Observe,
+        Command::Integrate { id, next, .. } => {
+            Operation::Integrate(id.filter(|_| !next).map(TaskId::new))
+        }
+        Command::Review { id } => Operation::Review(TaskId::new(*id)),
+        Command::Recover { run: id } => Operation::Recover(run(id)),
+        Command::Session { run: id, .. } => Operation::Session(run(id)),
+        Command::PlannerSession { planner, .. } => {
+            Operation::PlannerSession(PlannerId::new(*planner))
+        }
+        // The span the hook would record decides; a session with none is
+        // a run's.
+        Command::SessionEvent { run: named, .. } => Operation::SessionEvent(
+            match dagq::domain::sessions::hook_kind(
+                env(dagq::application::lifecycle::SESSION_KIND_ENV).as_deref(),
+                env(dagq::domain::actor::ROLE_ENV).as_deref(),
+                env(dagq::application::lifecycle::PLANNER_ORIGIN_ENV).as_deref(),
+            ) {
+                Some(dagq::domain::sessions::INBOX) => HookSession::Queue,
+                // A planner workspace opened before `DAGQ_ACTOR_ID` names
+                // no planner as its actor, so its span is the queue's.
+                Some(_) => env(dagq::application::lifecycle::PLANNER_ID_ENV)
+                    .filter(|_| {
+                        env(dagq::domain::actor::ACTOR_ID_ENV)
+                            .is_some_and(|id| !id.trim().is_empty())
+                    })
+                    .and_then(|id| id.trim().parse().ok())
+                    .map_or(HookSession::Queue, |id| {
+                        HookSession::Planner(PlannerId::new(id))
+                    }),
+                None => HookSession::Run(
+                    named
+                        .clone()
+                        .or_else(|| env(dagq::domain::actor::RUN_ID_ENV))
+                        .as_deref()
+                        .and_then(run),
+                ),
+            },
+        ),
+        _ => return None,
+    })
 }
 
 /// The commands that only read the queue. They open it on a read-only
@@ -1440,7 +1507,9 @@ fn authorized_in_application(command: &Command) -> bool {
         | Command::Note { .. }
         | Command::Mark { .. }
         | Command::Finding { .. } => true,
-        _ => false,
+        // The runtime operations, authorized in `execute` before they run
+        // (task 734).
+        _ => operation(command, |_| None).is_some(),
     }
 }
 
@@ -1519,6 +1588,19 @@ fn execute(cli: Cli) -> Result<Value> {
     let cwd = env::current_dir().context("working directory is unavailable")?;
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
     let db = location.db.clone();
+    // The runtime operations are authorized before they do anything; a
+    // refusal is recorded on the queue if there is one (task 734).
+    if let Some(operation) = operation(&cli.command, |name| env::var(name).ok()) {
+        dagq::application::commands::operations::authorize(
+            &actor,
+            &StaticPolicy,
+            &dagq::infrastructure::denials::QueueDenials {
+                db: &location.db,
+                actor: &actor,
+            },
+            &operation,
+        )?;
+    }
     install_telemetry(&cli.command, &location);
     // The clock and IDs of every queue and use case this command runs.
     let generators = dagq::infrastructure::clock::system();
@@ -2590,7 +2672,7 @@ fn execute(cli: Cli) -> Result<Value> {
             &claude,
             resume,
         )?,
-        Command::SessionEvent { event } => {
+        Command::SessionEvent { event, .. } => {
             use dagq::{application::SessionRegistry, domain::sessions::SessionHook};
             let mut input = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)

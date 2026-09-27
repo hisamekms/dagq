@@ -362,8 +362,16 @@ const PLANNER: &[Capability] = &[
     C::QueueAdmin,
 ];
 
-/// A worker reads, asks, notes and runs its session, on its own run.
-const WORKER: &[Capability] = &[C::QueueRead, C::AskOpen, C::NoteWrite, C::SessionRun];
+/// A worker reads, asks, notes, and runs and records its session, on its
+/// own run: the runtime's wrapper and hooks run in the worker's
+/// environment (task 734).
+const WORKER: &[Capability] = &[
+    C::QueueRead,
+    C::AskOpen,
+    C::NoteWrite,
+    C::SessionRun,
+    C::SessionRecord,
+];
 
 /// A review job reads; its verdict comes back as data on its own run.
 const REVIEW_JOB: &[Capability] = &[C::QueueRead, C::ReviewSubmit];
@@ -383,7 +391,9 @@ const OBSERVER: &[Capability] = &[
 ];
 
 /// The supervisor's transitions. It asks the integrator to land
-/// (ADR-t728-2) and applies answers without writing them.
+/// (ADR-t728-2) and applies answers without writing them. Its automatic
+/// update checks, migrates and probes queues with the new binary as
+/// `install` does (task 734).
 const SUPERVISOR: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
@@ -405,6 +415,7 @@ const SUPERVISOR: &[Capability] = &[
     C::RunRecover,
     C::ServiceLifecycle,
     C::BinaryInstall,
+    C::QueueAdmin,
     C::IntegrationRequest,
 ];
 
@@ -626,6 +637,11 @@ mod tests {
         assert!(allowed(&worker, C::SessionRun, &Resource::run(own.clone())));
         assert!(allowed(
             &worker,
+            C::SessionRecord,
+            &Resource::run(own.clone())
+        ));
+        assert!(allowed(
+            &worker,
             C::NoteWrite,
             &Resource::task(TaskId::new(1))
         ));
@@ -636,7 +652,7 @@ mod tests {
         assert!(allowed(&worker, C::AskOpen, &ask_on_own));
 
         let other = Resource::run(run("r2"));
-        for capability in [C::AskOpen, C::SessionRun, C::NoteWrite] {
+        for capability in [C::AskOpen, C::SessionRun, C::SessionRecord, C::NoteWrite] {
             let error = StaticPolicy
                 .authorize(&worker, capability, &other)
                 .unwrap_err();
