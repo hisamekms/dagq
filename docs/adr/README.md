@@ -102,6 +102,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t813-1](2026-09-28-t813-1-headless-worker-path.md) | workerの非対話の経路を足し、1 turnを1回の非対話の呼び出しにして、answer・revise・resume・催促を同じsessionのresumeの呼び出しで送り、processをcmuxのworkspaceのsession wrapperの中で動かす。対話の経路はClaudeの既定に残し、非対話で起きる止まりはADR-0047の3層で扱い新しいactorは足さない（ADR-0027決定1・2・4、ADR-0071決定1・2・6・16、ADR-0047決定30・31・37・39・40をamends） | 2026-09-28 |
 | [ADR-t813-2](2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md) | workerのproviderをtaskごとに選び（claude / codex、既定claude）、使えないときだけ両方向に切り替えて同じworktreeで新しいsessionを始める。認証と利用上限の控えをproviderごとにし、workerのclaimを止めてaskを開くのは両方が使えないとき（Claudeだけの役割のためClaudeの控えはaskを開く）（ADR-0004決定1、ADR-0047決定42をamends） | 2026-09-28 |
 | [ADR-t813-3](2026-09-28-t813-3-codex-worker-permissions.md) | Codexのworkerをworkspace-writeのsandboxで動かし、書く場所をrunのworktreeのgitの管理dir・objects・run branchのref・runのdir・cargoのregistryに絞り、networkは開け、承認はnever、queueにはrunのdirを経てsupervisorが取り込み、pkill / killallはsandboxが拒みrulesが補う。設定は起動の引数で渡す | 2026-09-28 |
+| [ADR-t876-1](2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md) | スキーマが安定するまでSQLiteのCHECK制約を使わず、不変条件はdomainの型とapplication・書き込みのportで守り、壊れた値を読んだらkindの列だけ寛容に、それ以外はfail closedにする（ADR-0073決定6・8・19・22をamends） | 2026-09-28 |
 
 ## 置き換え・廃止されたADR
 

@@ -10,6 +10,7 @@ scope: persistence
 related:
   - adr-0067
   - adr-t614-2
+  - adr-t876-1
   - adr-0062
   - adr-0073
   - adr-0044
@@ -173,11 +174,21 @@ runtimeやjobが作ったdraftに立てるplanner（[ADR-0044](../adr/0044-findi
 - 部分UNIQUE index `one_unfinished_run_per_task`で、Taskごとの未完了run（`awaiting_integration`、`integrating`、`needs_session`を含む）を1件に制限する。
 - 部分UNIQUE index `one_integrated_run_per_task`で、Taskごとの`integrated` runを1件に制限する。
 - 部分UNIQUE index `one_integrating_run_per_queue`で、queue全体の`integrating` runを1件に制限する（統合スロット）。
-- foreign key、statusのCHECK制約、依存の複合主キーを設ける。自己依存はDBとapplicationの両方で拒否し、循環はトランザクション内の再帰CTEで検証する。
+- foreign key、依存の複合主キーを設ける（statusなどのCHECK制約は下の[CHECK制約を使わない](#check制約を使わない)のとおり外していく）。自己依存はapplicationで拒否し（DBの`task_dependencies`のCHECKでも拒むが、CHECKを外すmigrationまで）、循環はトランザクション内の再帰CTEで検証する。
 - Task詳細は一つのread transactionで読むため、Task・run・イベント間のスナップショットが揃う。
 - `list`は`TaskQuery`（application層。`StatusFilter`は`Open`（既定、`completed` / `canceled`以外）/ `Any`（`--all`）/ `Only`（`--status a,b`、どれか）、`goal_id`、`limit`（既定20）、`before`、`full`）を受け、`SqliteQueue::list`がWHERE（status・goal・`id <= before`をAND）を組み立ててID降順に`limit + 1`件引く。余った1件があればそのIDを`next`にしてページから落とし、なければ`next`はnull。`total`は`before`とlimitを除いたフィルタだけの`count(*)`で、ページ・依存・最新runと同じread transactionで数える。各要素（`TaskListItem`）はid/status/priority（名前）/kind（名前かnull）/title/goal_id、`dependencies`（先行task IDの昇順）、`latest_run`（rowidが最大のrunの`id`と`status`、なければnull）で、`full`のときだけdescription/acceptance/verification_commands/context/created_at/updated_atを同じ階層に足す。
 
 SQLiteの書き込みトランザクションとIMMEDIATEの挙動は[公式仕様](https://www.sqlite.org/lang_transaction.html)に従う。
+
+### CHECK制約を使わない
+
+[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)（ADR-0073決定6・8・19・22をamends）。schemaが安定したと人が判断するまで、SQLiteのCHECK制約を使わない。
+
+- **対象**: CHECKだけ。NOT NULL・UNIQUE（`one_unfinished_run_per_task`などの部分UNIQUE indexを含む）・主キー・外部キー・DEFAULTはDBに残す。新しいmigrationにはCHECKを書かない（列の定義の`CHECK (…)`も表の`CHECK (…)`も）。
+- **規則の置き場所**: CHECKが持っていた規則（値の一覧、`json_valid` / `json_type`の形、`(answer IS NULL) = (answered_at IS NULL)`のようなNULLの組、`priority BETWEEN 0 AND 4`や`attempt >= 1`のような範囲、`length(trim(…)) > 0`の空文字の禁止、singletonなど）は、domainの型（値の一覧は`string_enum!`などの列挙）が表せないものを作れないようにし、型で表せないものはapplicationか書き込みのport（queueのportと`SqliteQueue`の実装）が書く前に検査して、破れていれば書かずにerrorにする。askとeventのkindに結び付いた規則（ADR-0073決定22）と同じ置き方である。規則ごとに違反を拒むtestを置く。
+- **読むとき**: askとeventの`kind`は知らない値を`AskKind::Other`などとして読み、errorにしない（ADR-0073決定21、[domain-model](domain-model.md)）。repositoryが名付けるlabelの`tasks.kind`（ADR-t624-1）も同じく寛容な側で、labelの形に合わない値はnullとして読む。それ以外の列で規則の外の値（知らない`status`、壊れたjson、NULLの組の食い違い、範囲外など）を読むと、その読み込みは`DomainError`（値の一覧なら`UnknownValue`）などのerrorで止まり、既定値や近い値に読み替えない。DBの行はその場で直さない。
+- **値を足すとき**: CHECKが無い列に値を足すのに表の作り直しは要らない。kindの列（`asks.kind`、`run_events.kind`）への追加はmigrationを要さない。それ以外の列（読む側がfail closedの列）への追加は、古いバイナリがその値を読めないので、今までどおり`-- dagq-schema: breaking`のmigrationで下限を上げる。表を作り直さず、宣言だけで下限を上げるmigrationでよい（[Database setup and migrations](#database-setup-and-migrations)の互換の宣言）。
+- **今の姿（2026-09-28）**: 移行はgoal 60の途中で、既存の表にはまだ約60のCHECKが残っている（`tasks`・`task_runs`・`asks`・`run_events`・`goals`・`proposals`・`plan_reviews`・`findings`・`headless_jobs`・`goal_reviews`・`supervisors`・`planners`・`draft_origins`・`draft_reopens`・`binary_updates`・`schema_floor`・`queue_repository`・`run_processes`・`task_dependencies`など）。この文書の各表の説明に残る「CHECK」は、その規則が今はDBにもあることを示す。goal 60の後続のtaskが、(1) 全てのCHECKの規則がdomainかportにあることを違反を拒むtestで固定し、(2) 1本の非互換のmigrationで全ての表からCHECKを外し（0039・0029・0036と同じ作り直しで、id・index・trigger・viewを保つ。`sqlite_master`の`sql`にCHECKが無いことをtestで確かめる）、(3) 新しいmigrationにCHECKがあればファイルの名前つきで落とす検査を`scripts/check-migration-numbers.sh`に足す（CIも実行する）。migrationの番号と検査の文言は、それらが着地したときにこの節に書く。
 
 ## Queue location
 
