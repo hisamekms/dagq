@@ -505,6 +505,8 @@ mod tests {
         exit_times_out: bool,
         /// Every `/exit` is typed but its Enter fails, not by a timeout.
         exit_enter_fails: bool,
+        /// Every text is typed but its Enter fails, not by a timeout.
+        text_enter_fails: bool,
     }
 
     impl Backend {
@@ -516,6 +518,7 @@ mod tests {
                 capture_timeouts: AtomicUsize::new(0),
                 exit_times_out: false,
                 exit_enter_fails: false,
+                text_enter_fails: false,
             }
         }
 
@@ -545,7 +548,9 @@ mod tests {
         }
         fn send_text(&self, _: &str, text: &str) -> Result<()> {
             self.sent.lock().unwrap().push(text.to_owned());
-            timeout(&self.send_timeouts, "cmux send failed")
+            timeout(&self.send_timeouts, "cmux send failed")?;
+            ensure!(!self.text_enter_fails, "cmux send-key failed: broken pipe");
+            Ok(())
         }
         fn send_enter(&self, _: &str) -> Result<()> {
             self.sent.lock().unwrap().push("<enter>".to_owned());
@@ -627,7 +632,8 @@ mod tests {
 
     /// Screens as words: `ready`, `pending:<text>` (in the box), `dialog`,
     /// `working`, `boot`, each maybe followed by `|<status line>` under
-    /// the input box, which is not transcript.
+    /// the input box, which is not transcript. A `|dialog` status line is a
+    /// dialog drawn over a box that still holds its input.
     struct Signals;
 
     /// The screen word of `screen`, its status line cut off.
@@ -637,7 +643,10 @@ mod tests {
 
     impl AgentSignals for Signals {
         fn detect_prompt(&self, screen: &str) -> Option<&'static str> {
-            (word(screen) == "dialog").then_some("choice")
+            screen
+                .split('|')
+                .any(|part| part == "dialog")
+                .then_some("choice")
         }
         fn transcript(&self, screen: &str) -> String {
             word(screen).to_owned()
@@ -968,6 +977,45 @@ mod tests {
             );
             assert_eq!(backend.sent(), ["/exit"]);
         }
+    }
+
+    #[test]
+    fn a_text_whose_enter_failed_in_the_box_gets_enter_again() {
+        let pending = format!("pending:{TEXT}");
+        let mut backend = Backend::new(&[&pending, &pending, "working"]);
+        backend.text_enter_fails = true;
+        let (submission, retries) = submitted_through(&backend, Input::Text(TEXT)).unwrap();
+        assert_eq!(submission, Submission::Submitted(Some("working".into())));
+        // The text is typed once; only Enter goes again.
+        assert_eq!(
+            (retries, backend.sent()),
+            (1, vec![TEXT.into(), "<enter>".into()])
+        );
+        // Without the text in the box, or over a dialog, the failure
+        // stands and nothing more is sent.
+        let pending_under_dialog = format!("{pending}|dialog");
+        for screen in [
+            "ready",
+            "working",
+            "dialog",
+            &pending_under_dialog,
+            "pending:other text",
+        ] {
+            let mut backend = Backend::new(&[screen]);
+            backend.text_enter_fails = true;
+            let error = submitted_through(&backend, Input::Text(TEXT)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("send-key failed"),
+                "{screen}: {error:#}"
+            );
+            assert!(!timed_out_maybe_sent(&error), "{screen}: {error:#}");
+            assert_eq!(backend.sent(), [TEXT], "{screen}");
+        }
+        // Nor on a screen that cannot be read.
+        let mut backend = Backend::new(&[]);
+        backend.text_enter_fails = true;
+        submitted_through(&backend, Input::Text(TEXT)).unwrap_err();
+        assert_eq!(backend.sent(), [TEXT]);
     }
 
     /// Every `/exit` of the supervisor, whatever the path (a finished
