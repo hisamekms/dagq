@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\""
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh\" open"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh close"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh\" close"
           }
         ]
       }

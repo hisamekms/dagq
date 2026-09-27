@@ -320,20 +320,20 @@ fn hooks_json_runs_the_status_on_compact_and_clear_and_records_every_start_and_e
     assert_eq!(sources, ["clear", "compact"]);
     assert_eq!(
         command(&groups[0]),
-        "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"
+        "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\""
     );
     // The span: every source (no matcher), and every end.
     assert!(groups[1].get("matcher").is_none(), "{}", groups[1]);
     assert_eq!(
         command(&groups[1]),
-        "${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open"
+        "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh\" open"
     );
     let ends = events["SessionEnd"].as_array().unwrap();
     assert_eq!(ends.len(), 1);
     assert!(ends[0].get("matcher").is_none(), "{}", ends[0]);
     assert_eq!(
         command(&ends[0]),
-        "${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh close"
+        "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh\" close"
     );
     for script in ["session-start.sh", "session-event.sh"] {
         let mode = fs::metadata(plugin_root().join("hooks").join(script))
@@ -342,6 +342,78 @@ fn hooks_json_runs_the_status_on_compact_and_clear_and_records_every_start_and_e
             .mode();
         assert_ne!(mode & 0o111, 0, "{script} must be executable");
     }
+}
+
+/// Claude Code runs a hook's `command` with `sh -c` after putting the plugin's
+/// path in place of `${CLAUDE_PLUGIN_ROOT}`, so every command quotes it: a
+/// plugin directory with a space still runs the script with its arguments.
+#[test]
+fn hook_commands_run_from_a_plugin_directory_with_a_space() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugin root");
+    fs::create_dir_all(root.join("hooks")).unwrap();
+    fs::create_dir_all(root.join("bin")).unwrap();
+    for script in ["session-start.sh", "session-event.sh"] {
+        fs::copy(
+            plugin_root().join("hooks").join(script),
+            root.join("hooks").join(script),
+        )
+        .unwrap();
+    }
+    // A stand-in launcher that records its arguments.
+    let log = root.join("calls.log");
+    let stub = root.join("bin/dagq");
+    fs::write(
+        &stub,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let hooks = hooks_manifest();
+    let mut commands = Vec::new();
+    for groups in hooks["hooks"].as_object().unwrap().values() {
+        for group in groups.as_array().unwrap() {
+            for hook in group["hooks"].as_array().unwrap() {
+                commands.push(hook["command"].as_str().unwrap().to_owned());
+            }
+        }
+    }
+    assert_eq!(commands.len(), 3);
+    for command in &commands {
+        let expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", root.to_str().unwrap());
+        let output = Command::new("sh")
+            .args(["-c", &expanded])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CLAUDE_PLUGIN_ROOT", &root)
+            .env("DAGQ_ROLE", "inbox")
+            .env("DAGQ_QUEUE", dir.path().join("queue.db"))
+            .env("DAGQ_BIN", &stub)
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::null())
+            .bounded_output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stderr, b"", "{command}");
+    }
+    let mut calls: Vec<String> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    calls.sort();
+    assert_eq!(
+        calls,
+        [
+            "session-event close",
+            "session-event open",
+            "status --role inbox"
+        ]
+    );
 }
 
 /// Runs the span hook for `event` with a clean environment plus `env`, the
