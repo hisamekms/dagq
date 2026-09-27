@@ -4,16 +4,18 @@ type: design
 title: "`recover RUN_ID`"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
+  - adr-0054
+  - adr-0047
 ---
 
 # `recover RUN_ID`
 
-ユースケースは`application::health::recover`（`doctor`と同じport）。
+ユースケースは`application::health::recover`（`doctor`と同じport）。runごとの判定と、processの止まったrunをsupervisorが自分でrecoverする規則は[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定10・11、recoverしたrunを復旧jobに回すのは[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定3。
 
 1. runが`claimed`/`starting`/`running`/`validating`/`integrating`でも、leaseの残った`awaiting_integration`（reviewの途中でsupervisorが死んだrun。task 236）でもなければ拒否する。
 2. `doctor`と同じ確認を行い、未終了として登録されたプロセスのPIDが生きている、そのrunのleaseのheartbeatが30秒以内、leaseのPIDが生きている、のいずれかなら拒否する。heartbeatが止まったまま生きているsupervisorのleaseを`recover`は奪わず、ユーザーが止める（wrapperが生きていれば[adopt](supervise.md#supervise)が引き継ぐ）。supervisorがabandonしたrunはleaseがないので、processが止まれば復旧できる。`recover`が扱うのは、引き継ぎの条件を満たさないrun: wrapperが死んだか30秒以上黙っている、`claimed` / `starting`、`integrating`、leaseのないrun、それとsupervisorが居ないときの`awaiting_integration`のstaleなlease。
