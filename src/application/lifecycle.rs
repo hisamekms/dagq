@@ -192,6 +192,10 @@ pub struct UpOptions {
     pub parallel: u16,
     /// The supervisor's `--max-waiting` (ADR-0062 decision 7).
     pub max_waiting: u16,
+    /// The supervisor's `--max-load` (task 327): no new run is claimed
+    /// while the 1-minute load average is above it; 0 or below disables
+    /// the hold.
+    pub max_load: f64,
     /// Start the supervisor inside the cmux workspace `[<repo>]supervisor`
     /// instead of as a LaunchAgent: no launchd, no automatic restart, and no
     /// out-of-cmux preflight to pass.
@@ -1192,6 +1196,12 @@ fn supervise_arguments(
     if usize::from(options.max_waiting) != crate::domain::waiting::DEFAULT_MAX_WAITING {
         arguments.push("--max-waiting".into());
         arguments.push(options.max_waiting.to_string());
+    }
+    // 0 or below disables the hold; it is passed as 0, since a negative
+    // value would read as a flag.
+    if options.max_load != crate::domain::claim_hold::DEFAULT_MAX_LOAD {
+        arguments.push("--max-load".into());
+        arguments.push(options.max_load.max(0.0).to_string());
     }
     if options.auto_update {
         arguments.push("--auto-update".into());

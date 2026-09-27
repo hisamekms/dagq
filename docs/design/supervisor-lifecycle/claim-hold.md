@@ -30,7 +30,7 @@ related:
 
 後続のtask（437）は`HoldReason`と`HoldInputs`に理由を足し、同じ判定・同じイベント・同じ`status` / `stats`の出し方を使う。task 377は理由`disk_space`を足し、着地の検証の控えにも同じ判定と同じ形の記録（`HoldKinds`の`LANDINGS`、`transition_of` / `holds_of`）を使う。task 463の衝突の多いファイルの控えはqueue全体ではなく1つのtaskを飛ばすもので、taskのevent（`claim_deferred` / `claim_deferral_ended`）で記録し、`status`の`claim_deferrals`と`stats`の`claim_deferrals`に同じ形で出す（[claimを控える（衝突の多いファイル）](claim-defer.md)）。
 
-`--max-load`の既定値16.0の根拠: この queue の host は8コアで、2026-09-26の`stats --full`の`backend_failures.by_load_band`（load帯ごとの`backend_call_failed`）は`0-4`が1件、`8-16`が1件、`16-32`が56件、`32-64`が257件、`64+`が116件だった。cmuxの時間切れはloadがコア数の2倍（16）を超えたところから出始める。`--max-load 0`（0以下）で控えを無効にする。libraryの`SuperviseOptions::new`の既定は無効（`max_load: None`）で、CLIの`supervise`だけが既定16.0を渡す。`up`はまだ`--max-load`を渡さないので、`up`が起動するsupervisorは既定値で動く。
+`--max-load`の既定値16.0の根拠: この queue の host は8コアで、2026-09-26の`stats --full`の`backend_failures.by_load_band`（load帯ごとの`backend_call_failed`）は`0-4`が1件、`8-16`が1件、`16-32`が56件、`32-64`が257件、`64+`が116件だった。cmuxの時間切れはloadがコア数の2倍（16）を超えたところから出始める。`--max-load 0`（0以下）で控えを無効にする。libraryの`SuperviseOptions::new`の既定は無効（`max_load: None`）で、CLIの`supervise`だけが既定16.0を渡す。`up`も`--max-load N`（既定16.0、0以下で無効）を受け、既定と違うとき（0を含む）だけ起動するsupervisorの引数に`--max-load N`を足す（launchd modeとin-cmux modeの両方。0未満は`0`として渡す。[up / down](up-down.md)）。
 
 ## 判定する場所
 

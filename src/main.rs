@@ -620,6 +620,11 @@ enum Command {
         /// every run in its slot.
         #[arg(long, default_value_t = 4)]
         max_waiting: u16,
+        /// The supervisor claims no new run while the host's 1-minute load
+        /// average is above this; the runs in flight go on. 0 disables the
+        /// hold.
+        #[arg(long, default_value_t = dagq::domain::claim_hold::DEFAULT_MAX_LOAD)]
+        max_load: f64,
         /// Run the supervisor in the cmux workspace `[<repo>]supervisor`
         /// instead of under launchd: no socket password needed, and nothing
         /// restarts it if it stops.
@@ -2025,6 +2030,7 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Up {
             parallel,
             max_waiting,
+            max_load,
             in_cmux,
             no_wait,
             handoff_timeout,
@@ -2056,6 +2062,7 @@ fn execute(cli: Cli) -> Result<Value> {
             let options = UpOptions {
                 parallel,
                 max_waiting,
+                max_load,
                 in_cmux,
                 no_wait,
                 plugin_dir,

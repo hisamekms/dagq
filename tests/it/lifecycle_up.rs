@@ -1085,3 +1085,51 @@ fn up_requires_cmux_claude_and_an_initialized_queue() {
     assert!(format!("{error:#}").contains("queue must already be initialized"));
     assert!(launchd.installs.lock().unwrap().is_empty());
 }
+
+/// `up --max-load` reaches the supervisor it starts, in both modes (task
+/// 577): a value off the default, 0 (the hold off) included, is passed as
+/// `supervise --max-load`, and the default is left out.
+#[test]
+fn up_passes_max_load_to_the_supervisor_only_off_the_default() {
+    // launchd mode: the agent definition's arguments.
+    let launchd_arguments = |max_load: f64| {
+        let mut fixture = fixture();
+        fixture.options.max_load = max_load;
+        let cmux = FakeCmux::default();
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        let installs = launchd.installs.lock().unwrap();
+        installs[0].2.clone()
+    };
+    let contents = launchd_arguments(0.0);
+    assert!(
+        contents.contains("\t\t<string>--max-load</string>\n\t\t<string>0</string>\n"),
+        "{contents}"
+    );
+    let contents = launchd_arguments(dagq::domain::claim_hold::DEFAULT_MAX_LOAD);
+    assert!(!contents.contains("--max-load"), "{contents}");
+
+    // in-cmux mode: the supervisor workspace's command.
+    let in_cmux_command = |max_load: f64| {
+        let mut fixture = fixture();
+        fixture.options.in_cmux = true;
+        fixture.options.max_load = max_load;
+        let cmux = FakeCmux {
+            registers_supervisor_in: Some(fixture.location.db.clone()),
+            ..FakeCmux::default()
+        };
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        let workspaces = cmux.workspaces.lock().unwrap();
+        workspaces[0].3.clone()
+    };
+    let command = in_cmux_command(8.5);
+    assert!(command.contains("'--max-load' '8.5'"), "{command}");
+    let command = in_cmux_command(0.0);
+    assert!(command.contains("'--max-load' '0'"), "{command}");
+    // Below 0 is the hold off too, passed as 0 so it does not read as a flag.
+    let command = in_cmux_command(-1.0);
+    assert!(command.contains("'--max-load' '0'"), "{command}");
+    let command = in_cmux_command(dagq::domain::claim_hold::DEFAULT_MAX_LOAD);
+    assert!(!command.contains("--max-load"), "{command}");
+}
