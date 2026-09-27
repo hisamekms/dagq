@@ -8,6 +8,7 @@ use crate::common;
 use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
+use dagq::domain::recovery::ProcessInfo;
 
 use anyhow::{Result, bail};
 use dagq::{
@@ -642,6 +643,108 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
     assert_eq!(report["pruned_supervisors"], json!([]));
     assert_eq!(queue.supervisors().unwrap().len(), 2);
+}
+
+/// Task 330: the rows of supervisors whose process is gone do not outlive
+/// `up`, whatever wrote them. A dead pid goes whether or not its row has a
+/// `binary_version` (one registered before the column existed has none,
+/// as the row a `down --wait` of 2026-09-25 left had). A pid alive again
+/// after the row stopped heartbeating goes too when it is not the process
+/// that registered: one of another user (not among this user's
+/// processes) or one that started after the registration. A silent
+/// process that started before its registration is kept, and so is every
+/// row when the processes cannot be listed.
+#[test]
+fn up_prunes_rows_whose_pid_is_dead_or_taken_by_another_process() {
+    let fixture = fixture();
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let dead = dead_pid();
+    let (foreign, younger, silent) = (4_000_001, 4_000_002, 4_000_003);
+    for (token, pid) in [
+        ("dead-unversioned", dead),
+        ("foreign", foreign),
+        ("younger", younger),
+        ("silent", silent),
+    ] {
+        queue
+            .register_supervisor(&LeaseToken::new(token), pid, 1, VERSION)
+            .unwrap();
+    }
+    let registered_at = 1_700_000_000;
+    let db = Connection::open(&fixture.location.db).unwrap();
+    db.execute(
+        "UPDATE supervisors SET started_at=?1, heartbeat_at=?1",
+        [registered_at],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE supervisors SET binary_version=NULL WHERE token='dead-unversioned'",
+        [],
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let listed = |pid, elapsed_secs| ProcessInfo {
+        pid,
+        ppid: 1,
+        elapsed_secs,
+        command: "dagq supervise".into(),
+        cwd: None,
+        cpu_ms: None,
+    };
+
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    processes.dead.lock().unwrap().insert(dead);
+    // The listing fails: only the dead pid goes.
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(
+        report["pruned_supervisors"],
+        json!([{"token": "dead-unversioned", "pid": dead}]),
+        "{report}"
+    );
+    let tokens = |queue: &SqliteQueue| -> Vec<String> {
+        let mut tokens: Vec<String> = queue
+            .supervisors()
+            .unwrap()
+            .into_iter()
+            .map(|registration| registration.token.into_string())
+            .filter(|token| ["foreign", "younger", "silent"].contains(&token.as_str()))
+            .collect();
+        tokens.sort();
+        tokens
+    };
+    assert_eq!(tokens(&queue), ["foreign", "silent", "younger"]);
+
+    // `younger` started a minute ago, long after its row; `silent` before.
+    *processes.listed.lock().unwrap() = Some(vec![
+        listed(younger, 60),
+        listed(silent, now - registered_at as u64 + 60),
+    ]);
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(
+        report["pruned_supervisors"],
+        json!([
+            {"token": "foreign", "pid": foreign, "reason": "pid_reused"},
+            {"token": "younger", "pid": younger, "reason": "pid_reused"},
+        ]),
+        "{report}"
+    );
+    assert_eq!(tokens(&queue), ["silent"]);
+    let stops: Vec<Value> = db
+        .prepare("SELECT payload FROM run_events WHERE kind='supervisor_stopped' ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+        .collect();
+    assert_eq!(stops.len(), 3, "{stops:?}");
+    assert!(stops.iter().all(|stop| stop["outcome"] == "pruned"));
+    assert_eq!(stops[0]["supervisor"], "dead-unversioned");
+    assert_eq!(stops[0]["dagq_version"], Value::Null);
 }
 
 #[test]

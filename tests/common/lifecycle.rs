@@ -11,7 +11,7 @@ use dagq::{
         AgentState, DetachedRefusal, LaunchAgent, ProcessControl, SupervisorEnvironment,
         WorkspaceBackend, WorkspaceTags,
     },
-    domain::{SupervisorMode, Task, TaskRun},
+    domain::{SupervisorMode, Task, TaskRun, recovery::ProcessInfo},
     infrastructure::{location::QueueLocation, sqlite::SqliteQueue},
     lifecycle::{self, DownOptions, UpEnvironment, UpOptions},
 };
@@ -185,6 +185,9 @@ pub struct FakeProcesses {
     pub terminated: Mutex<Vec<u32>>,
     pub interrupted: Mutex<Vec<u32>>,
     pub killed: Mutex<Vec<u32>>,
+    /// This user's processes as `list` gives them; `None` fails the
+    /// listing, the way a process control that cannot list does.
+    pub listed: Mutex<Option<Vec<ProcessInfo>>>,
 }
 
 impl ProcessControl for FakeProcesses {
@@ -204,6 +207,12 @@ impl ProcessControl for FakeProcesses {
     fn kill(&self, pid: u32) -> Result<()> {
         self.killed.lock().unwrap().push(pid);
         Ok(())
+    }
+    fn list(&self) -> Result<Vec<ProcessInfo>> {
+        match &*self.listed.lock().unwrap() {
+            Some(listed) => Ok(listed.clone()),
+            None => bail!("the fake lists no processes"),
+        }
     }
 }
 
