@@ -263,17 +263,7 @@ impl Drop for WorkspaceGuard {
 /// The queue's workspace group in `cmux --json workspace-group list`,
 /// found by its external ID (the queue hash).
 pub(crate) fn listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
-    let list = cmux_query(
-        cmux,
-        &["--json", "--id-format", "uuids", "workspace-group", "list"],
-    )
-    .unwrap_or_else(|error| panic!("{error:#}"));
-    list["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|group| group["external_id"] == external_id)
-        .cloned()
+    try_listed_group(cmux, external_id).unwrap_or_else(|error| panic!("{error:#}"))
 }
 
 /// Deletes the queue's workspace group and closes what is left in it (the
@@ -292,7 +282,9 @@ impl GroupGuard {
             common::on_timeout(
                 CLEANUP_LIMIT,
                 format!("delete the workspace group of queue {external_id}"),
-                move || delete_group(&cmux, &external_id, ""),
+                move || {
+                    delete_group(&cmux, &external_id, "");
+                },
             )
         };
         Self {
@@ -307,7 +299,7 @@ impl Drop for GroupGuard {
     fn drop(&mut self) {
         // Never panic here: a panic while the test is already unwinding
         // aborts the whole test binary. A group left behind is swept by the
-        // next fixture.
+        // next fixture. `delete_group` says on stderr when it gave up.
         delete_group(&self.cmux, &self.external_id, "");
     }
 }
@@ -341,7 +333,10 @@ pub(crate) fn claim_fixture_dir(dir: &Path) -> fs::File {
 /// - For a fixture directory that is still there but abandoned: the
 ///   processes running from or on it, the workspace groups named after its
 ///   queue hashes, the cmux workspaces whose `DAGQ_QUEUE` or `E2E_SHARED`
-///   points into it, and the directory itself. A directory counts as
+///   points into it, and the directory itself, unless one of those groups
+///   could not be deleted (cmux did not list the groups, or the delete
+///   failed): then the directory stays, with the queue hashes that name
+///   the groups, and the next sweep tries again. A directory counts as
 ///   abandoned only when its owner lock is free (the owner process is gone),
 ///   or, without an owner file, when it has the fixture's shape and is older
 ///   than [`UNMARKED_SWEEP_AGE`]. The sweep holds that lock while it works,
@@ -395,9 +390,12 @@ pub(crate) fn sweep_abandoned_fixtures(cmux: &Path) {
     if !abandoned.is_empty() {
         kill_processes_inside(&inside);
     }
+    let mut groups_left = Vec::new();
     for (dir, _) in &abandoned {
         for hash in queue_hashes(dir) {
-            delete_group(cmux, &hash, "e2e sweep: ");
+            if !delete_group(cmux, &hash, "e2e sweep: ") && !groups_left.contains(dir) {
+                groups_left.push(dir.clone());
+            }
         }
     }
     let left_behind = |value: &str| inside(value) || in_vanished_temp_dir(value, &temp_roots);
@@ -405,6 +403,14 @@ pub(crate) fn sweep_abandoned_fixtures(cmux: &Path) {
         delete_group(cmux, &hash, "e2e sweep: ");
     }
     for (dir, lock) in abandoned {
+        if groups_left.contains(&dir) {
+            eprintln!(
+                "e2e sweep: kept {}: a workspace group of its queues is still there, \
+                 and its queue hashes are what the next sweep finds it by",
+                dir.display()
+            );
+            continue;
+        }
         match fs::remove_dir_all(&dir) {
             Ok(()) => eprintln!("e2e sweep: removed {}", dir.display()),
             Err(error) => eprintln!("e2e sweep: removing {} failed: {error}", dir.display()),
@@ -540,9 +546,19 @@ fn kill_processes_inside(inside: &dyn Fn(&str) -> bool) {
 
 /// Delete the workspace group of queue `external_id` with what is left in
 /// it, if cmux lists it, reporting the outcome on stderr under `who`.
-fn delete_group(cmux: &Path, external_id: &str, who: &str) {
-    let Some(group) = try_listed_group(cmux, external_id) else {
-        return;
+/// Whether the group is gone: `false` when the groups could not be listed or
+/// the delete failed, so the group may still be there.
+fn delete_group(cmux: &Path, external_id: &str, who: &str) -> bool {
+    let group = match try_listed_group(cmux, external_id) {
+        Ok(Some(group)) => group,
+        Ok(None) => return true,
+        Err(error) => {
+            eprintln!(
+                "{who}listing workspace groups failed ({error:#}); \
+                 left the group of queue {external_id} alone"
+            );
+            return false;
+        }
     };
     let id = group["id"].as_str().unwrap_or_default().to_owned();
     let name = group["name"].as_str().unwrap_or_default().to_owned();
@@ -551,13 +567,20 @@ fn delete_group(cmux: &Path, external_id: &str, who: &str) {
         .bounded_output()
     {
         Ok(output) if output.status.success() => {
-            eprintln!("{who}deleted workspace group {id} {name} (queue {external_id})")
+            eprintln!("{who}deleted workspace group {id} {name} (queue {external_id})");
+            true
         }
-        Ok(output) => eprintln!(
-            "{who}deleting workspace group {id} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-        Err(error) => eprintln!("{who}deleting workspace group {id} failed: {error}"),
+        Ok(output) => {
+            eprintln!(
+                "{who}deleting workspace group {id} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("{who}deleting workspace group {id} failed: {error}");
+            false
+        }
     }
 }
 
@@ -607,17 +630,21 @@ fn close_workspaces_left_behind(cmux: &Path, left_behind: &dyn Fn(&str) -> bool)
     hashes
 }
 
-pub(crate) fn try_listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
+/// The queue's workspace group in `cmux --json workspace-group list`,
+/// `Ok(None)` when cmux does not list it, and an error when the groups
+/// could not be listed.
+fn try_listed_group(cmux: &Path, external_id: &str) -> anyhow::Result<Option<Value>> {
     let list = cmux_query(
         cmux,
         &["--json", "--id-format", "uuids", "workspace-group", "list"],
-    )
-    .ok()?;
-    list["groups"]
-        .as_array()?
+    )?;
+    let groups = list["groups"]
+        .as_array()
+        .with_context(|| format!("cmux workspace-group list has no groups: {list}"))?;
+    Ok(groups
         .iter()
         .find(|group| group["external_id"] == external_id)
-        .cloned()
+        .cloned())
 }
 
 fn cmux_json(cmux: &Path, args: &[&str]) -> Option<Value> {

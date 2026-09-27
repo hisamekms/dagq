@@ -449,6 +449,13 @@ fn reader(mut source: impl Read + Send + 'static) -> thread::JoinHandle<String> 
     })
 }
 
+/// The directory name of every fixture's disposable repository. The runtime
+/// names a queue's workspace group and titles after the repository's
+/// directory (`[dagq-e2e]`, `[dagq-e2e]worker#…`), so a group an e2e leaves
+/// in cmux says where it came from (task 710; the manual smoke's
+/// repositories are named in docs/design/manual-smoke.md).
+const E2E_REPO_NAME: &str = "dagq-e2e";
+
 /// Disposable repository, queue and stub agent, all outside this repository.
 struct Fixture {
     group: GroupGuard,
@@ -473,7 +480,7 @@ fn fixture() -> Fixture {
     sweep_abandoned_fixtures(&cmux);
     let dir = tempfile::tempdir().unwrap();
     let owner = claim_fixture_dir(dir.path());
-    let repo = dir.path().join("repo");
+    let repo = dir.path().join(E2E_REPO_NAME);
     fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-b", "main"]);
     git(&repo, &["config", "user.name", "e2e"]);
@@ -1794,6 +1801,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     assert_eq!(first["supervisor"]["mode"], "in_cmux");
     assert_eq!(first["supervisor"]["plist"], Value::Null);
     let repo_name = repo.file_name().unwrap().to_str().unwrap();
+    assert_eq!(repo_name, E2E_REPO_NAME);
     assert_eq!(
         first["supervisor"]["name"],
         format!("[{repo_name}]supervisor")
@@ -1820,7 +1828,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         assert_eq!(env["DAGQ_QUEUE"], db.to_str().unwrap(), "{env}");
     }
     let group = fixture.group().expect("the queue's workspace group exists");
-    assert_eq!(group["name"], format!("[{repo_name}]"), "{group}");
+    assert_eq!(group["name"], "[dagq-e2e]", "{group}");
     let members: Vec<String> = group["member_workspace_ids"]
         .as_array()
         .unwrap()
@@ -2773,7 +2781,7 @@ fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gon
             "workspace-group",
             "create",
             "--name",
-            "[e2e-sweep]",
+            "[dagq-e2e-sweep]",
             "--external-id",
             &hash,
         ],

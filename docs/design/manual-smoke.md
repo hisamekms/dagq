@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude
 status: current
 created: 2026-09-25
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: operations
 related:
   - adr-0036
@@ -29,7 +29,7 @@ related:
 本番 queue と固定バイナリ `~/.local/bin/dagq` を汚さないため、すべてを scratch directory に閉じる。
 
 - **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う。`target/` のバイナリで本番 queue を開かない（開いただけでは migrate しなくなった（ADR-0045 決定 5）が、状態を変えるコマンドで未着地の遷移を本番に持ち込まない。緩める範囲は ADR-0045 決定 18）。
-- **repository**: `git init` した使い捨て repository。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
+- **repository**: `git init` した使い捨て repository。ディレクトリ名は、worker（dagq の run の session）が作るものは `dagq-worker-t<task ID>-<run ID の先頭 8 文字>`（例 `dagq-worker-t566-8d29f958`）、人が手で作るものは `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-worker-t566-8d29f958]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
 - **queue**: 全コマンドを `XDG_DATA_HOME=<scratch>/xdg` で、repository を cwd にして打つ（queue は `<scratch>/xdg/dagq/<hash>/queue.db` に解決される）。これを 1 行の wrapper script（例 `tq`）にしておく。
 - **supervisor**: 専用の cmux workspace で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。`up` は使わない（inbox / planner の workspace と launchd agent を作るため）。`--once` は付けない。
 - **folder trust**: 実 Claude を使う前に、使い捨て repository の root で一度 `claude` を起動して trust dialog を承認する。worktree で dialog が出るかは親 repository の root が信頼済みかで決まる（[provider-lifecycle](provider-lifecycle.md#trust-prompt)）。承認しないと、最初の承認より前に起動した run session がすべて dialog で止まる。
@@ -59,6 +59,7 @@ related:
 - 成果が失われていない（commit した run の branch か `refs/dagq/runs/<run-id>` が残る）。
 - `doctor` の `unfinished_runs` と `run_leases` が空になり、`pgrep` で Claude・stub・wrapper が残っていない。
 - 作った cmux workspace（supervisor と、閉じられずに残った run のもの）を `cmux workspace close <uuid>` で閉じる。
+- 使い捨て queue の workspace group を `cmux workspace-group delete <group> --close-workspaces` で消す（`<group>` は `cmux --json workspace-group list` で name が `[<repository のディレクトリ名>]`、external ID が queue hash（queue の DB のあるディレクトリの名前）の group の id）。cmux は group を作るときに anchor の workspace を一緒に作るので、worker や supervisor の workspace を閉じるだけでは anchor が残って group が消えない。
 
 ### 観測済みの環境依存
 
