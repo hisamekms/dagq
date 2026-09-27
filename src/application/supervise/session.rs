@@ -353,6 +353,31 @@ impl SessionWatch {
         }
     }
 
+    /// The session's idle marker once it has its receipt, or, without a
+    /// marker newer than the receipt, the last text typed into it and its
+    /// input marker, the idle its screen shows (ADR-t803-1).
+    fn idle_after_receipt_or_screen(
+        &self,
+        sv: &Supervisor<'_>,
+        run: &TaskRun,
+    ) -> Result<Option<IdleMarker>> {
+        let after = [
+            sv.files.modified(&self.receipt_path).ok(),
+            self.input_at,
+            self.stale.map(|nudge| nudge.at),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(UNIX_EPOCH, SystemTime::max);
+        sv.session_idle(
+            run,
+            &self.workspace,
+            &self.idle_marker,
+            after,
+            SESSION_PHASE,
+        )
+    }
+
     /// One observation. `Some` once supervision finished (`validating` or
     /// `failed`): the wrapper exited, or the session went idle after its
     /// receipt and stays open for the review; an error means the run must
@@ -410,24 +435,23 @@ impl SessionWatch {
         if self.receipt_seen
             && self.exit_requested.is_none()
             && !session_ended
-            && let Some(evidence) =
-                match IdleMarker::read(&*sv.files, sv.signals, &self.idle_marker)? {
-                    // The session has not answered the request to rewrite
-                    // its receipt yet: waited for up to the resume timeout,
-                    // like background work after the receipt.
-                    Some(idle)
-                        if self.stale.is_some_and(|n| {
-                            idle.modified() <= n.at && !n.waited_out(&*sv.files, sv.cmux)
-                        }) =>
-                    {
-                        None
-                    }
-                    Some(idle) if waited_out => {
-                        idle.stopped_after_receipt(&*sv.files, &self.receipt_path)?
-                    }
-                    Some(idle) => idle.idle_after_receipt(&*sv.files, &self.receipt_path)?,
-                    None => None,
+            && let Some(evidence) = match self.idle_after_receipt_or_screen(sv, run)? {
+                // The session has not answered the request to rewrite
+                // its receipt yet: waited for up to the resume timeout,
+                // like background work after the receipt.
+                Some(idle)
+                    if self.stale.is_some_and(|n| {
+                        idle.modified() <= n.at && !n.waited_out(&*sv.files, sv.cmux)
+                    }) =>
+                {
+                    None
                 }
+                Some(idle) if waited_out => {
+                    idle.stopped_after_receipt(&*sv.files, &self.receipt_path)?
+                }
+                Some(idle) => idle.idle_after_receipt(&*sv.files, &self.receipt_path)?,
+                None => None,
+            }
         {
             if self.stale_receipt(sv, run)? {
                 return Ok(None);

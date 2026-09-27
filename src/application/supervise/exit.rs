@@ -139,7 +139,7 @@ impl ExitWatch {
         }
         match self.requested {
             None if self.since.elapsed() < sv.cmux.resume_timeout()
-                && self.background_waits(sv, run)? =>
+                && self.background_waits(sv, run, &session.workspace)? =>
             {
                 // A /exit now would stop at the "Background work is
                 // running" dialog; Claude Code takes the turn up again when
@@ -208,8 +208,23 @@ impl ExitWatch {
     /// supervision waited the resume timeout for it before validating). A
     /// session that took a turn since (a revise, a resume) wrote a marker of
     /// its own and is waited for again.
-    fn background_waits(&self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<bool> {
-        let Some(idle) = IdleMarker::read(&*sv.files, sv.signals, &run.idle_marker_path()?)? else {
+    fn background_waits(
+        &self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+    ) -> Result<bool> {
+        // A marker older than the session's last input is not its latest
+        // stop: the screen that shows it idle knows no background work
+        // (ADR-t803-1), and the /exit goes.
+        let Some(idle) = sv.session_idle(
+            run,
+            workspace,
+            &run.idle_marker_path()?,
+            UNIX_EPOCH,
+            EXIT_WAIT_PHASE,
+        )?
+        else {
             return Ok(false);
         };
         if !idle.background_running() {

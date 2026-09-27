@@ -797,7 +797,15 @@ impl StallWatch {
     ) -> Result<Option<StartCheck>> {
         self.followed = false;
         let now = sv.files.now();
-        let idle = IdleMarker::read(&*sv.files, sv.signals, idle_marker)?;
+        // Without a marker newer than its last input, the session's screen
+        // stands in for it (ADR-t803-1).
+        let idle = sv.session_idle(
+            run,
+            workspace,
+            idle_marker,
+            self.last_input.unwrap_or(UNIX_EPOCH),
+            PHASE,
+        )?;
         let marker = idle.as_ref().map(IdleMarker::modified);
         match InputMarker::read(&*sv.files, sv.signals, idle_marker)? {
             Some(input) => {
@@ -953,7 +961,7 @@ impl StallWatch {
             "threshold": IDLE_THRESHOLD,
             "threshold_secs": sv.stall.idle_without_receipt_secs,
             "nudged_secs_ago": secs_between(nudge.at, now),
-            "background_running": idle.background_running(),
+            "background_running": idle.background_running_evidence(),
             "background_tasks": idle.background_tasks(),
             "evidence": evidence,
         });
@@ -1048,7 +1056,7 @@ impl StallWatch {
                 "phase": PHASE,
                 "idle_secs": idle_secs,
                 "threshold_secs": sv.stall.idle_without_receipt_secs,
-                "background_running": idle.background_running(),
+                "background_running": idle.background_running_evidence(),
                 "background_tasks": background,
                 "workspace_id": workspace,
             }),

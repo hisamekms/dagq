@@ -1342,8 +1342,18 @@ impl ResumeWatch {
             .map_or_else(Instant::now, |(sent, _)| sent);
         // The idle marker is read before the receipt and the
         // worktree: a receipt rewritten after this read is judged
-        // at the next poll, never as idle without it.
-        let idle = IdleMarker::read(&*sv.files, sv.signals, &self.idle_marker)?;
+        // at the next poll, never as idle without it. Without a marker
+        // newer than the last input (or the receipt it rewrote), the
+        // screen stands in for it (ADR-t803-1).
+        let after = [
+            Some(input_at),
+            self.stale.map(|nudge| nudge.at),
+            sv.files.modified(&self.receipt_path).ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(UNIX_EPOCH, SystemTime::max);
+        let idle = sv.session_idle(run, &self.workspace, &self.idle_marker, after, RESUME_PHASE)?;
         let head = sv.repository.head(worktree)?;
         let clean = sv.repository.status(worktree)?.trim().is_empty();
         // Resolved (or failed) and idle after the receipt; or idle

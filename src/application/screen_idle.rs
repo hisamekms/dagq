@@ -12,8 +12,8 @@
 //! [`ScreenIdle::Record`]) and copies them to [`SCREEN_IDLE_FILE`] next to
 //! the idle marker as it can; a read-only command judges from that copy
 //! without writing ([`ScreenIdle::Peek`]). Nothing
-//! here knows the provider or the kind of session: planners use it now,
-//! and the worker, resume and revise sessions may as they are.
+//! here knows the provider or the kind of session: planners and the worker's
+//! sessions (its first, resumed and revised ones) use it.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,6 +30,9 @@ pub const SCREEN_IDLE_FILE: &str = "screen-idle.json";
 /// types a text into the session: an input the agent's own hook may have
 /// failed to record.
 pub const SUPERVISOR_INPUT_FILE: &str = "supervisor-input.json";
+/// The debug log of a run's resumed session, next to its idle marker
+/// (the first session's is the run's log path).
+pub const RESUME_DEBUG_LOG: &str = "claude-resume.log";
 /// How much of the end of the agent's debug log is read for a failed hook.
 const DEBUG_LOG_TAIL_BYTES: usize = 64 * 1024;
 /// How much of a failed hook's log line an event carries.

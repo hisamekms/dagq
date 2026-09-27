@@ -549,6 +549,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         jobs_swept: false,
         planner_exits: Vec::new(),
         screen_spans: Default::default(),
+        screen_probes: Default::default(),
         handoff: None,
         exec: None,
         run_env_missing: false,
@@ -690,6 +691,10 @@ struct Supervisor<'a> {
     /// The screen's idle spans of the sessions without a fresh idle marker
     /// (ADR-t803-1), kept here so a disk that takes no file loses none.
     screen_spans: crate::application::screen_idle::Spans,
+    /// The last capture of each worker session judged by its screen, and
+    /// what it inferred, so a session is captured at most once per
+    /// [`idle::probe_interval`] ([`Supervisor::session_idle`]).
+    screen_probes: idle::ScreenProbes,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
     /// 10): no new work starts, and the loop ends once every slot rests at
     /// a point the next process rebuilds it from.

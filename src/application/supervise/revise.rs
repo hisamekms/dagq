@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// The phase an idle the screen showed during a revise or a conflict
+/// request is recorded with (`idle_inferred`).
+const REVISE_PHASE: &str = "revise";
+
 /// A `revise` verdict, or a conflict the precheck found, sent to the live
 /// session: it is waited for until the session rewrites its receipt and
 /// goes idle.
@@ -214,8 +218,21 @@ impl ReviseWatch {
         // The idle marker is read before the receipt: a receipt rewritten
         // after this read is judged at the next poll, never as idle without
         // it. A marker from before the last input typed is not this turn's.
+        // Without such a marker (or one newer than the receipt it
+        // rewrote), the screen stands in for it (ADR-t803-1).
         let input_at = self.live.input_at.unwrap_or(self.sent_at);
-        let idle = IdleMarker::read(&*sv.files, sv.signals, &run.idle_marker_path()?)?
+        let after = sv
+            .files
+            .modified(receipt)
+            .map_or(input_at, |modified| modified.max(input_at));
+        let idle = sv
+            .session_idle(
+                run,
+                &self.session.workspace,
+                &run.idle_marker_path()?,
+                after,
+                REVISE_PHASE,
+            )?
             .filter(|idle| idle.modified() > input_at);
         let rewritten = sv
             .files

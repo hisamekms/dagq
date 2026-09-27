@@ -2407,7 +2407,7 @@ impl AgentProvider for ClaudeCode {
             .arg("--resume")
             .arg(run.id().as_str())
             .arg("--debug-file")
-            .arg(run_dir.join("claude-resume.log"))
+            .arg(run_dir.join(crate::application::screen_idle::RESUME_DEBUG_LOG))
             .arg("--add-dir")
             .arg(run_dir)
             .arg("--settings")

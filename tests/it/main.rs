@@ -77,6 +77,7 @@ mod runtime_review;
 mod runtime_review_adopt;
 mod runtime_review_questions;
 mod runtime_run_env;
+mod runtime_screen_idle;
 mod runtime_session;
 mod runtime_slot_limits;
 mod runtime_stale_receipt;

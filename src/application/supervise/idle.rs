@@ -2,15 +2,24 @@
 //! it was written, and what the agent's adapter read of it
 //! ([`AgentSignals::idle_hook`]). The agent is idle when it finished a
 //! response and left no background work running (task 147); a `/exit` sent
-//! while background work runs stops at the agent's own dialog. The screen is
-//! not read.
+//! while background work runs stops at the agent's own dialog.
+//!
+//! Only while the marker is missing, or older than the session's last
+//! input, does the screen stand in for it ([`Supervisor::session_idle`],
+//! ADR-t803-1): an idle inferred there knows no background work, and is
+//! taken for an idle without any.
 
 use super::*;
+use crate::application::screen_idle::{
+    self, Inference, MarkerState, RESUME_DEBUG_LOG, ScreenIdle, ScreenProbe,
+};
 
 pub(super) struct IdleMarker {
     path: PathBuf,
     modified: SystemTime,
     hook: IdleHook,
+    /// Inferred from the screen rather than written by the agent's hook.
+    inferred: Option<Inference>,
 }
 
 impl IdleMarker {
@@ -29,7 +38,29 @@ impl IdleMarker {
             path: path.to_owned(),
             modified,
             hook: signals.idle_hook(&bytes),
+            inferred: None,
         }))
+    }
+
+    /// The idle the screen showed for the marker at `path` (ADR-t803-1):
+    /// written, as it were, when the screen's span began, with no
+    /// background work known, and the inference in its evidence.
+    fn inferred(path: &Path, inference: Inference) -> Self {
+        Self {
+            path: path.to_owned(),
+            modified: UNIX_EPOCH + Duration::from_secs(u64::try_from(inference.since).unwrap_or(0)),
+            hook: IdleHook {
+                background_running: false,
+                background_tasks: Vec::new(),
+                evidence: vec![
+                    ("source", json!(inference.source)),
+                    ("marker", json!(inference.marker.as_str())),
+                    ("observed_secs", json!(inference.observed_secs)),
+                    ("captures", json!(inference.captures)),
+                ],
+            },
+            inferred: Some(inference),
+        }
     }
 
     /// When the agent wrote it.
@@ -45,6 +76,15 @@ impl IdleMarker {
     /// Background work the agent left running when it stopped.
     pub(super) fn background_running(&self) -> bool {
         self.hook.background_running
+    }
+
+    /// Background work left running, as evidence: `null` for an idle the
+    /// screen showed, which does not tell.
+    pub(super) fn background_running_evidence(&self) -> Value {
+        match self.inferred {
+            Some(_) => Value::Null,
+            None => json!(self.background_running()),
+        }
     }
 
     /// Idle, by a marker written after `since`.
@@ -87,11 +127,147 @@ impl IdleMarker {
         for (name, value) in &self.hook.evidence {
             evidence.insert((*name).into(), value.clone());
         }
+        // The screen does not show background work: unknown, not none.
         evidence.insert(
             "background_running".into(),
-            json!(self.background_running()),
+            self.background_running_evidence(),
         );
         Ok(Some(Value::Object(evidence)))
+    }
+}
+
+/// How long a worker session's screen is not captured again for the
+/// inference ([`Supervisor::session_idle`]): half of
+/// `[stall].screen_idle_secs`, and a minute at most, so a span reaches the
+/// threshold within one more capture and a session that works is not
+/// captured on every tick.
+pub(super) fn probe_interval(screen_idle_secs: i64) -> Duration {
+    Duration::from_secs(u64::try_from((screen_idle_secs / 2).clamp(0, 60)).unwrap_or(0))
+}
+
+/// The last capture of each session judged by its screen, by idle marker,
+/// and what it inferred.
+#[derive(Default)]
+pub(super) struct ScreenProbes(std::sync::Mutex<HashMap<PathBuf, (SystemTime, Option<Inference>)>>);
+
+impl ScreenProbes {
+    fn get(&self, idle_marker: &Path) -> Option<(SystemTime, Option<Inference>)> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(idle_marker)
+            .copied()
+    }
+
+    fn set(&self, idle_marker: &Path, at: SystemTime, inference: Option<Inference>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(idle_marker.to_owned(), (at, inference));
+    }
+}
+
+impl Supervisor<'_> {
+    /// The idle marker of the session of `run` in `workspace`, or, while
+    /// it is missing or older than the session's last input (its input
+    /// marker, the supervisor's stamp, or `after`, the latest input the
+    /// caller knows of), the idle its screen shows (ADR-t803-1). The span
+    /// the screen was first inferred idle over is recorded as
+    /// `idle_inferred` once, with `phase`. Without an inference the marker
+    /// is returned as it was read, however old.
+    pub(super) fn session_idle(
+        &self,
+        run: &TaskRun,
+        workspace: &str,
+        idle_marker: &Path,
+        after: SystemTime,
+        phase: &str,
+    ) -> Result<Option<IdleMarker>> {
+        let marker = IdleMarker::read(&*self.files, self.signals, idle_marker)?;
+        let last_input = screen_idle::last_input(&*self.files, idle_marker, after);
+        let state = match &marker {
+            None => MarkerState::Missing,
+            Some(idle) if idle.modified() < last_input => MarkerState::Stale,
+            Some(_) => return Ok(marker),
+        };
+        let now = self.files.now();
+        let floor = unix_seconds(last_input);
+        let inference = match self.screen_probes.get(idle_marker) {
+            Some((at, inference)) if now < at + probe_interval(self.stall.screen_idle_secs) => {
+                inference.filter(|inference| inference.since > floor)
+            }
+            _ => {
+                let inference = ScreenProbe {
+                    cmux: self.cmux,
+                    signals: self.signals,
+                    files: &*self.files,
+                    mode: ScreenIdle::Record(&self.screen_spans),
+                    threshold: self.stall.screen_idle_secs,
+                }
+                .infer(workspace, idle_marker, state, unix_seconds(now), floor)
+                .map(|inference| {
+                    self.record_idle_inferred(run, workspace, idle_marker, phase, inference)
+                });
+                self.screen_probes.set(idle_marker, now, inference);
+                inference
+            }
+        };
+        Ok(match inference {
+            Some(inference) => Some(IdleMarker::inferred(idle_marker, inference)),
+            None => marker,
+        })
+    }
+
+    /// Record `idle_inferred` for the session of `run` once per span, with
+    /// the line of its agent's debug log that says its idle hook failed, if
+    /// there is one; the inference noted recorded. An event the queue does
+    /// not take is recorded on a later capture.
+    fn record_idle_inferred(
+        &self,
+        run: &TaskRun,
+        workspace: &str,
+        idle_marker: &Path,
+        phase: &str,
+        inference: Inference,
+    ) -> Inference {
+        if !inference.unrecorded {
+            return inference;
+        }
+        let mut payload = json!({
+            "phase": phase,
+            "workspace_id": workspace,
+            "source": inference.source,
+            "marker": inference.marker.as_str(),
+            "since": inference.since,
+            "observed_secs": inference.observed_secs,
+            "captures": inference.captures,
+        });
+        // A resumed session writes its own debug log.
+        let logs = [
+            run.run_dir()
+                .map(|dir| Path::new(dir).join(RESUME_DEBUG_LOG)),
+            run.log_path().map(PathBuf::from),
+        ];
+        if let Some(line) = logs
+            .into_iter()
+            .flatten()
+            .find_map(|log| screen_idle::hook_failure(&*self.files, self.signals, &log))
+        {
+            payload["hook_error"] = json!(line);
+        }
+        if let Err(error) =
+            self.queue
+                .record_runtime_event(run.id(), event_kind::IDLE_INFERRED, payload)
+        {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: idle_inferred could not be recorded: {error:#}", run.id());
+            return inference;
+        }
+        info!(run_id = %run.id(), "session of {} has no fresh idle marker ({}); its screen looks idle since {}", run.id(), inference.marker.as_str(), inference.since);
+        self.screen_spans.mark_recorded(&*self.files, idle_marker);
+        Inference {
+            unrecorded: false,
+            ..inference
+        }
     }
 }
 
@@ -251,5 +427,42 @@ mod tests {
             idle.stopped_after_receipt(&files, Path::new("/run/none"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn an_idle_the_screen_showed_counts_from_its_span_without_background_known() {
+        let files = MemoryFiles::default();
+        let receipt = Path::new("/run/receipt.json");
+        files.write(receipt, b"{}").unwrap();
+        let since = unix_seconds(files.now()) + 1;
+        let idle = IdleMarker::inferred(
+            Path::new("/run/idle.json"),
+            Inference {
+                source: "screen",
+                marker: MarkerState::Stale,
+                since,
+                observed_secs: 130,
+                captures: 3,
+                unrecorded: false,
+            },
+        );
+        assert_eq!(unix_seconds(idle.modified()), since);
+        assert!(!idle.background_running());
+        assert_eq!(idle.background_running_evidence(), Value::Null);
+        let evidence = idle.idle_after_receipt(&files, receipt).unwrap().unwrap();
+        assert_eq!(evidence["source"], "screen");
+        assert_eq!(evidence["marker"], "stale");
+        assert_eq!(evidence["observed_secs"], 130);
+        assert_eq!(evidence["captures"], 3);
+        assert_eq!(evidence["background_running"], Value::Null);
+        assert_eq!(evidence["marker_modified"], since);
+    }
+
+    #[test]
+    fn the_screen_is_captured_again_after_half_the_threshold_and_a_minute_at_most() {
+        assert_eq!(probe_interval(120), Duration::from_secs(60));
+        assert_eq!(probe_interval(600), Duration::from_secs(60));
+        assert_eq!(probe_interval(10), Duration::from_secs(5));
+        assert_eq!(probe_interval(1), Duration::ZERO);
     }
 }
