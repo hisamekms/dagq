@@ -500,8 +500,8 @@ pub fn observer_prompt(
            `{dagq} observe --history` gives what each earlier observation read and wrote.\n\
          \n\
          Reading the stalled-session thresholds:\n\
-         - stats' `stall_thresholds` has one entry per `[stall]` setting (`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`), each with \
-           `threshold_secs` (the value now), `detections`, `by_detection` (nudge, ask, enter_retry, resend, with their outcomes), `outcomes`, `detected_after_secs` / `resolved_after_secs` (count, median, max), \
+         - stats' `stall_thresholds` has one entry per `[stall]` setting (`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`, `idle_process_secs`), each with \
+           `threshold_secs` (the value now), `detections`, `by_detection` (nudge, recovery, ask, enter_retry, resend, left_to_phase, with their outcomes), `outcomes`, `detected_after_secs` / `resolved_after_secs` (count, median, max), \
            `preempted` (a person stepped in by input or recover before any detection), `by_threshold_secs` (the outcomes per value the detections were made with) and `running_alerts`.\n\
          - Many `answered_wait` outcomes (the answer to the ask was to wait) suggest the threshold is too early; many `preempted` suggest it is too late. \
            `resolved_by_nudge` / `resolved_by_enter` / `resolved_by_resend` show the detection works; `pending` has no outcome yet, so do not judge on it. \
@@ -621,7 +621,7 @@ mod tests {
             observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
         for text in [
             "`stall_thresholds`",
-            "`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`",
+            "`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`, `idle_process_secs`",
             "`detections`, `by_detection`",
             "`detected_after_secs` / `resolved_after_secs`",
             "`by_threshold_secs`",

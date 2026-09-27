@@ -22,6 +22,13 @@
 //!   recovery job raised (ADR-0047 decision 40), whose `stall_resolved`
 //!   names this threshold; a repair it applied is `auto_repaired`, not a
 //!   detection here. The running alerts judged now are counted too.
+//! - `idle_process_secs` (`idle_process`, task 469), the same way: the
+//!   `stalled` asks the recovery job raised before the receipt (`ask`),
+//!   whose `stall_resolved` names this threshold (while it has none, the
+//!   `recovery_finished` naming the ask tells the alert), and the
+//!   escalations left to the phase's own timeout after the receipt, in the
+//!   `/exit` wait or in a resume (`left_to_phase`, a `recovery_finished`
+//!   of outcome `left_to_phase`, which is its own end).
 //!
 //! A detection with no end recorded yet is `pending`.
 use std::collections::BTreeMap;
@@ -38,6 +45,8 @@ pub const IDLE: &str = "idle_without_receipt_secs";
 pub const SEND: &str = "send_confirm_secs";
 /// The setting of the `long_background` alert.
 pub const BACKGROUND: &str = "background_alert_secs";
+/// The setting of the `idle_process` alert (task 469).
+pub const IDLE_PROCESS: &str = "idle_process_secs";
 
 /// The outcome of a detection whose end is not recorded yet.
 pub const PENDING: &str = "pending";
@@ -51,7 +60,8 @@ pub struct Detection {
     pub run_id: RunId,
     /// The setting it is judged by.
     pub threshold: &'static str,
-    /// `nudge`, `recovery`, `ask`, `enter_retry` or `resend`.
+    /// `nudge`, `recovery`, `ask`, `enter_retry`, `resend` or
+    /// `left_to_phase`.
     pub detection: &'static str,
     /// The value of the setting it was made with, when recorded.
     pub threshold_secs: Option<i64>,
@@ -135,7 +145,7 @@ pub struct ThresholdStats {
     /// outcomes before and after a change can be told apart.
     pub by_threshold_secs: BTreeMap<String, Outcomes>,
     /// The running alerts judged by it now (`idle_without_receipt`,
-    /// `long_background`).
+    /// `long_background`, `idle_process`).
     pub running_alerts: i64,
 }
 
@@ -160,6 +170,7 @@ fn threshold_named(name: Option<&str>) -> &'static str {
     match name {
         Some(SEND) => SEND,
         Some(BACKGROUND) => BACKGROUND,
+        Some(IDLE_PROCESS) => IDLE_PROCESS,
         _ => IDLE,
     }
 }
@@ -253,14 +264,41 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                             && text(e, "detection") == Some("ask")
                             && e.payload.get("ask_id") == id
                     });
-                    let mut ask = detection(
-                        threshold_named(end.and_then(|e| text(e, "threshold"))),
-                        "ask",
-                    );
+                    // An `idle_process` job's ask not ended yet is told by
+                    // the `recovery_finished` that names it.
+                    let idle_job = end
+                        .is_none()
+                        .then(|| {
+                            later.iter().find(|e| {
+                                e.kind == "recovery_finished"
+                                    && e.payload.get("ask_id") == id
+                                    && text(e, "alert") == Some("idle_process")
+                            })
+                        })
+                        .flatten();
+                    let threshold = if idle_job.is_some() {
+                        IDLE_PROCESS
+                    } else {
+                        threshold_named(end.and_then(|e| text(e, "threshold")))
+                    };
+                    let mut ask = detection(threshold, "ask");
                     if let Some(end) = end {
                         resolved_by(&mut ask, end);
+                    } else if let Some(finished) = idle_job {
+                        idle_job_detected(&mut ask, &run[..i], finished);
                     }
                     found.push(ask);
+                }
+                "recovery_finished"
+                    if text(event, "alert") == Some("idle_process")
+                        && text(event, "outcome") == Some("left_to_phase") =>
+                {
+                    // Left to the phase's own timeout: no ask, so this is
+                    // its end too.
+                    let mut left = detection(IDLE_PROCESS, "left_to_phase");
+                    left.outcome = "left_to_phase".to_owned();
+                    idle_job_detected(&mut left, &run[..i], event);
+                    found.push(left);
                 }
                 "submit_retried" if text(event, "input") != Some("exit") => {
                     let mut retry = detection(SEND, "enter_retry");
@@ -377,6 +415,36 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
     found
 }
 
+/// Take the value and the idle time an `idle_process` job was started
+/// with from its `recovery_requested` (the same `attempt`, among
+/// `before`) for the detection its `finished` escalated to. None when
+/// that job had finished already: an escalation after the jobs were used
+/// up starts no job and names the last one's attempt.
+fn idle_job_detected(detection: &mut Detection, before: &[&RunEvent], finished: &RunEvent) {
+    let Some(requested) = before
+        .iter()
+        .rev()
+        .find(|e| {
+            matches!(e.kind.as_str(), "recovery_requested" | "recovery_finished")
+                && text(e, "alert") == Some("idle_process")
+                && e.payload.get("attempt") == finished.payload.get("attempt")
+        })
+        .filter(|e| e.kind == "recovery_requested")
+    else {
+        return;
+    };
+    detection.threshold_secs = int(requested, "threshold_secs");
+    detection.detected_after_secs = requested
+        .payload
+        .get("idle_processes")
+        .and_then(Value::as_array)
+        .and_then(|idle| {
+            idle.iter()
+                .filter_map(|p| p.get("idle_secs").and_then(Value::as_i64))
+                .max()
+        });
+}
+
 /// Take the end the supervisor recorded in `stall_resolved`.
 fn resolved_by(detection: &mut Detection, end: &RunEvent) {
     if let Some(outcome) = text(end, "outcome") {
@@ -484,6 +552,7 @@ pub fn thresholds(
         (IDLE, config.idle_without_receipt_secs),
         (SEND, config.send_confirm_secs),
         (BACKGROUND, config.background_alert_secs),
+        (IDLE_PROCESS, config.idle_process_secs),
     ]
     .into_iter()
     .map(|(name, secs)| {
@@ -532,6 +601,7 @@ pub fn thresholds(
         let alert = match *name {
             IDLE => "idle_without_receipt",
             BACKGROUND => "long_background",
+            IDLE_PROCESS => "idle_process",
             _ => "",
         };
         entry.running_alerts =
@@ -1125,7 +1195,7 @@ mod tests {
         );
         assert_eq!(
             stats.keys().copied().collect::<Vec<_>>(),
-            [BACKGROUND, IDLE, SEND]
+            [BACKGROUND, IDLE_PROCESS, IDLE, SEND]
         );
         let idle = &stats[IDLE];
         assert_eq!((idle.threshold_secs, idle.detections), (1200, 3));
@@ -1167,5 +1237,164 @@ mod tests {
         assert_eq!(send.running_alerts, 0);
         let background = &stats[BACKGROUND];
         assert_eq!((background.detections, background.running_alerts), (0, 2));
+        let idle_process = &stats[IDLE_PROCESS];
+        assert_eq!(
+            (idle_process.threshold_secs, idle_process.detections),
+            (StallConfig::default().idle_process_secs, 0)
+        );
+        assert_eq!(idle_process.running_alerts, 0);
+    }
+
+    fn idle_requested(attempt: i64, phase: &str) -> Value {
+        json!({
+            "alert": "idle_process",
+            "attempt": attempt,
+            "threshold": IDLE_PROCESS,
+            "threshold_secs": 900,
+            "phase": phase,
+            "idle_processes": [{"pid": 7, "idle_secs": 950}, {"pid": 8, "idle_secs": 1000}],
+        })
+    }
+
+    /// Task 469's events: an `idle_process` job's ask before the receipt,
+    /// ended or not yet, and an escalation left to the phase.
+    #[test]
+    fn idle_process_asks_and_escalations_left_to_the_phase_are_its_detections() {
+        let finished = |attempt: i64, extra: Value| {
+            let mut payload =
+                json!({"alert": "idle_process", "attempt": attempt, "escalated": false});
+            for (key, value) in extra.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            payload
+        };
+        let events = numbered(vec![
+            (R1, "recovery_requested", idle_requested(1, "session"), T),
+            (
+                R1,
+                "ask_opened",
+                json!({"ask_id": 4, "kind": "stalled"}),
+                T + 60,
+            ),
+            (
+                R1,
+                "recovery_finished",
+                finished(1, json!({"ask_id": 4, "escalated": true})),
+                T + 60,
+            ),
+            (
+                R1,
+                "stall_resolved",
+                json!({"phase": "session", "detection": "ask", "ask_id": 4, "threshold": IDLE_PROCESS, "threshold_secs": 900, "detected_after_secs": 0, "outcome": "answered_intervene", "resolved_after_secs": 120}),
+                T + 180,
+            ),
+            (
+                R1,
+                "recovery_requested",
+                idle_requested(2, "session"),
+                T + 400,
+            ),
+            (
+                R1,
+                "ask_opened",
+                json!({"ask_id": 5, "kind": "stalled"}),
+                T + 460,
+            ),
+            (
+                R1,
+                "recovery_finished",
+                finished(2, json!({"ask_id": 5, "escalated": true})),
+                T + 460,
+            ),
+            (
+                R2,
+                "recovery_requested",
+                idle_requested(1, "exit_wait"),
+                T + 500,
+            ),
+            (
+                R2,
+                "recovery_finished",
+                finished(1, json!({"outcome": "left_to_phase", "phase": "exit_wait"})),
+                T + 560,
+            ),
+            // A job that repaired is not a detection here.
+            (
+                R2,
+                "recovery_requested",
+                idle_requested(2, "resume"),
+                T + 600,
+            ),
+            (
+                R2,
+                "recovery_finished",
+                finished(
+                    2,
+                    json!({"verdict": "repair", "applied": ["stop_processes"]}),
+                ),
+                T + 660,
+            ),
+            // With the jobs used up no job starts: the escalation names
+            // the last attempt, whose values are not this detection's.
+            (
+                R2,
+                "recovery_finished",
+                finished(2, json!({"outcome": "left_to_phase", "phase": "resume"})),
+                T + 680,
+            ),
+        ]);
+        assert_eq!(
+            outcomes(&events, T + 700),
+            [
+                (IDLE_PROCESS, "ask", "answered_intervene".to_owned()),
+                (IDLE_PROCESS, "ask", PENDING.to_owned()),
+                (IDLE_PROCESS, "left_to_phase", "left_to_phase".to_owned()),
+                (IDLE_PROCESS, "left_to_phase", "left_to_phase".to_owned()),
+            ]
+        );
+        let mut found = detections(&events, (T + 700) * 1000);
+        let used_up = found.pop().unwrap();
+        assert_eq!(
+            (used_up.threshold_secs, used_up.detected_after_secs),
+            (None, None)
+        );
+        // The pending ask and the one left to the phase take their value
+        // and idle time from their job's `recovery_requested`.
+        for detection in &found[1..] {
+            assert_eq!(detection.threshold_secs, Some(900));
+            assert_eq!(detection.detected_after_secs, Some(1000));
+            assert_eq!(detection.resolved_after_secs, None);
+        }
+        let alert = |kind| RunningAlert::new(kind, None, None);
+        let running = [alert("idle_process"), alert("long_background")];
+        let config = StallConfig {
+            idle_process_secs: 900,
+            ..StallConfig::default()
+        };
+        let stats = thresholds(&found, &[], |_, _| true, &running, &config);
+        let idle_process = &stats[IDLE_PROCESS];
+        assert_eq!(
+            (idle_process.threshold_secs, idle_process.detections),
+            (900, 3)
+        );
+        assert_eq!(idle_process.by_detection["ask"].count, 2);
+        assert_eq!(
+            idle_process.by_detection["left_to_phase"].outcomes["left_to_phase"],
+            1
+        );
+        assert_eq!(
+            idle_process.outcomes,
+            BTreeMap::from([
+                ("answered_intervene".to_owned(), 1),
+                ("left_to_phase".to_owned(), 1),
+                (PENDING.to_owned(), 1),
+            ])
+        );
+        assert_eq!(idle_process.by_threshold_secs["900"].count, 3);
+        assert_eq!(idle_process.running_alerts, 1);
+        // The other settings count none of them.
+        assert_eq!(stats[BACKGROUND].detections, 0);
+        assert_eq!(stats[BACKGROUND].running_alerts, 1);
+        assert_eq!(stats[IDLE].detections, 0);
     }
 }
