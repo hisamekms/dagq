@@ -204,14 +204,17 @@ pub fn seed(now: i64, latest_event: i64) -> u64 {
 /// The forecast of `input` (ADR-0070 decision 1).
 pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
     let history = input.history;
-    let kind_name = |kind: Option<TaskKind>| kind.map_or(UNKNOWN, TaskKind::as_str).to_owned();
+    let kind_name = |kind: Option<&TaskKind>| kind.map_or(UNKNOWN, TaskKind::as_str).to_owned();
     let all: Vec<&Sample> = history.runs.iter().map(|(_, sample)| sample).collect();
     let mut by_kind: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
     for (kind, sample) in &history.runs {
-        by_kind.entry(kind_name(*kind)).or_default().push(sample);
+        by_kind
+            .entry(kind_name(kind.as_ref()))
+            .or_default()
+            .push(sample);
     }
     for task in input.tasks {
-        by_kind.entry(kind_name(task.kind)).or_default();
+        by_kind.entry(kind_name(task.kind.as_ref())).or_default();
     }
     let own = |runs: &[&Sample]| !runs.is_empty() && runs.len() >= input.min_samples;
     let kinds: BTreeMap<String, KindSamples> = by_kind
@@ -231,7 +234,8 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
             )
         })
         .collect();
-    let distribution_of = |task: &ForecastTask| kinds[&kind_name(task.kind)].distribution.clone();
+    let distribution_of =
+        |task: &ForecastTask| kinds[&kind_name(task.kind.as_ref())].distribution.clone();
     let pools: Vec<&[&Sample]> = input
         .tasks
         .iter()
@@ -247,7 +251,7 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
     let mut substituted: Vec<String> = input
         .tasks
         .iter()
-        .map(|task| kind_name(task.kind))
+        .map(|task| kind_name(task.kind.as_ref()))
         .filter(|kind| kinds[kind].distribution == ALL)
         .collect();
     substituted.sort();
@@ -286,7 +290,7 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
         .map(|((task, ends), &blocked)| TaskForecast {
             id: task.id,
             goal_id: task.goal_id,
-            kind: task.kind,
+            kind: task.kind.clone(),
             phase: task.running.map(|running| running.phase),
             waiting: task.running.is_some_and(|r| r.waiting.is_some()),
             distribution: distribution_of(task),

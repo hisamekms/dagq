@@ -1474,17 +1474,17 @@ fn summary(values: impl Iterator<Item = Option<i64>>) -> Summary {
 /// how long, and where the landings wait.
 pub fn with_kinds(stats: &mut Stats, kinds: &HashMap<TaskId, Option<TaskKind>>) {
     for run in &mut stats.runs {
-        run.kind = kinds.get(&run.task_id).copied().flatten();
+        run.kind = kinds.get(&run.task_id).cloned().flatten();
     }
     let mut by_kind: BTreeMap<(bool, Option<&str>), Vec<&RunStats>> = BTreeMap::new();
     for run in &stats.runs {
-        let kind = run.kind.map(TaskKind::as_str);
+        let kind = run.kind.as_ref().map(TaskKind::as_str);
         by_kind.entry((kind.is_none(), kind)).or_default().push(run);
     }
     stats.kinds = by_kind
         .values()
         .map(|runs| KindStats {
-            kind: runs[0].kind,
+            kind: runs[0].kind.clone(),
             intervals: intervals(runs),
         })
         .collect();

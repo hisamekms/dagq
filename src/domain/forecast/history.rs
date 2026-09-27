@@ -90,7 +90,7 @@ pub fn history(
                 validate: run.validate?,
                 wait_to_land: run.wait_to_land?,
             };
-            Some((kinds.get(&run.task_id).copied().flatten(), sample))
+            Some((kinds.get(&run.task_id).cloned().flatten(), sample))
         })
         .collect();
     let mut last_landings: HashMap<GoalId, i64> = HashMap::new();

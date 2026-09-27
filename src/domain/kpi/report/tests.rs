@@ -68,7 +68,10 @@ fn events() -> Events {
         let task = day + 1;
         let claimed = MONDAY + day * DAY + 10 * HOUR;
         let run = format!("{task:08x}-0000-4000-8000-{claimed:012x}");
-        kinds.insert(TaskId::new(task), Some(TaskKind::Runtime));
+        kinds.insert(
+            TaskId::new(task),
+            Some("runtime".parse::<TaskKind>().unwrap()),
+        );
         goals.insert(TaskId::new(task), None);
         for (offset, kind, payload) in [
             (

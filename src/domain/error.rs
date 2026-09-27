@@ -163,6 +163,10 @@ pub enum DomainError {
     InvalidFindingKind {
         kind: String,
     },
+    /// A task's kind is not a lowercase slug, or is `unknown` or `all`.
+    InvalidTaskKind {
+        kind: String,
+    },
     /// A finding status change its status does not allow.
     FindingNotInStatus {
         finding_id: FindingId,
@@ -424,6 +428,10 @@ impl fmt::Display for DomainError {
             Self::InvalidFindingKind { kind } => write!(
                 f,
                 "finding kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_'"
+            ),
+            Self::InvalidTaskKind { kind } => write!(
+                f,
+                "task kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes, other than \"unknown\" and \"all\""
             ),
             Self::FindingNotInStatus {
                 finding_id,

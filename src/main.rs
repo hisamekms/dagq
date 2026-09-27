@@ -21,7 +21,7 @@ use dagq::{
         AskId, AskKind, AskReason, EventId, FindingId, FindingQuery, FindingStatus, FindingTarget,
         GoalEdit, GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery,
         NoteTarget, PlannerOrigin, PlannerOwner, ProposalId, RunId, SessionRole, Submission,
-        TaskAction, TaskEdit, TaskId, TaskStatus,
+        TaskAction, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
@@ -124,10 +124,10 @@ enum Command {
         /// soon), normal, or low (later). A ready task it waits for inherits it.
         #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
         priority: String,
-        /// What the task changes: docs (documents, ADRs included), plugin (the plugin's
-        /// skills and documents), runtime (src/, tests/, migrations/) or ci (scripts and
-        /// CI). Omitted: none.
-        #[arg(long, value_parser = KINDS)]
+        /// What the task changes, as a label of the repository's own (a lowercase slug of
+        /// letters, digits, '-' and '_', not `unknown` or `all`); `stats` and `kpi` group the runs by
+        /// it. Omitted: none.
+        #[arg(long)]
         kind: Option<String>,
     },
     /// List one page of tasks, newest first: unfinished ones unless --status or --all says otherwise.
@@ -300,8 +300,8 @@ enum Command {
         /// Declare no paths: runs may change anything.
         #[arg(long, group = "field")]
         no_paths: bool,
-        /// What the task changes (`add --kind`): docs, plugin, runtime or ci.
-        #[arg(long, group = "field", value_parser = KINDS)]
+        /// What the task changes (`add --kind`): a lowercase label.
+        #[arg(long, group = "field")]
         kind: Option<String>,
     },
     /// Give a draft or ready task another priority (`add --priority`); it takes effect at the
@@ -879,9 +879,9 @@ enum Command {
         /// One window up to this cursor instead of the periods.
         #[arg(long)]
         until: Option<dagq::domain::stats::Cursor>,
-        /// List only these kinds' strata; a comparison's summary is made for them (runtime
-        /// without).
-        #[arg(long = "kind", value_parser = ["docs", "plugin", "runtime", "ci", "unknown"])]
+        /// List only these kinds' strata (`unknown`: the tasks without a kind); a comparison's
+        /// summary is made for them (every kind it saw without).
+        #[arg(long = "kind", value_parser = parse_kpi_kind)]
         kinds: Vec<String>,
         /// Also split the runs by these attributes of the claim.
         #[arg(long, value_parser = ["kind", "build", "parallel", "slot", "load", "toolchain", "claude"])]
@@ -990,7 +990,17 @@ enum Command {
 const ROLES: [&str; 2] = ["inbox", "planner"];
 /// The names of the task priorities (ADR-0040 decision 4), highest first.
 const PRIORITIES: [&str; 5] = ["interrupt", "urgent", "high", "normal", "low"];
-const KINDS: [&str; 4] = ["docs", "plugin", "runtime", "ci"];
+
+/// A `kpi --kind`: a task kind, or `unknown` for the tasks without one.
+fn parse_kpi_kind(value: &str) -> Result<String, String> {
+    if value == TaskKind::NONE {
+        return Ok(value.to_owned());
+    }
+    value
+        .parse::<TaskKind>()
+        .map(String::from)
+        .map_err(|error| error.to_string())
+}
 
 fn parse_role(value: Option<String>) -> Result<Option<SessionRole>> {
     Ok(value.map(|value| value.parse()).transpose()?)

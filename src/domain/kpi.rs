@@ -242,7 +242,8 @@ pub struct KpiQuery {
     pub since: Option<Cursor>,
     pub until: Option<Cursor>,
     /// The kinds whose strata are listed (every kind when empty), and the
-    /// kinds a comparison's summary is made for (`runtime` when empty).
+    /// kinds a comparison's summary is made for (every kind seen when
+    /// empty).
     pub kinds: Vec<String>,
     /// The axes the periods are split by besides the kind.
     pub by: Vec<Axis>,

@@ -1612,8 +1612,8 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The kind of every task, for `stats`; a kind this binary does not
-    /// know is read as none, as `task_row` reads it.
+    /// The kind of every task, for `stats`; a value that is not a label
+    /// is read as none, as `task_row` reads it.
     pub fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>> {
         Ok(self
             .conn

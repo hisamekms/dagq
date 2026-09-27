@@ -85,7 +85,7 @@ impl Queue {
     fn run(&mut self, run: &Run) -> i64 {
         let id = format!("{:08x}-0000-4000-8000-{:012x}", run.task, run.claimed);
         let (task, id) = (Some(run.task), Some(id.as_str()));
-        self.kinds.insert(TaskId::new(run.task), run.kind);
+        self.kinds.insert(TaskId::new(run.task), run.kind.clone());
         self.goals.insert(TaskId::new(run.task), None);
         self.push(
             task,
@@ -267,9 +267,9 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     let tuesday = MONDAY + DAY;
     let mut runs = Vec::new();
     for (index, kind) in [
-        Some(TaskKind::Runtime),
-        Some(TaskKind::Runtime),
-        Some(TaskKind::Docs),
+        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("docs".parse::<TaskKind>().unwrap()),
         None,
     ]
     .into_iter()
@@ -291,8 +291,18 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
         queue.run(run);
     }
     // Monday: one runtime run, and one that failed.
-    queue.run(&Run::new(1, Some(TaskKind::Runtime), MONDAY + HOUR, 300));
-    let mut failed = Run::new(2, Some(TaskKind::Runtime), MONDAY + 2 * HOUR, 300);
+    queue.run(&Run::new(
+        1,
+        Some("runtime".parse::<TaskKind>().unwrap()),
+        MONDAY + HOUR,
+        300,
+    ));
+    let mut failed = Run::new(
+        2,
+        Some("runtime".parse::<TaskKind>().unwrap()),
+        MONDAY + 2 * HOUR,
+        300,
+    );
     failed.failed = true;
     queue.run(&failed);
     let query = KpiQuery {
@@ -584,7 +594,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     for index in 0..6 {
         let mut run = Run::new(
             100 + index,
-            Some(TaskKind::Runtime),
+            Some("runtime".parse::<TaskKind>().unwrap()),
             MONDAY + index * HOUR,
             1000,
         );
@@ -607,7 +617,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     for index in 0..6 {
         let mut run = Run::new(
             200 + index,
-            Some(TaskKind::Runtime),
+            Some("runtime".parse::<TaskKind>().unwrap()),
             MONDAY + (10 + index) * HOUR,
             600,
         );
@@ -618,7 +628,12 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
         }
         queue.run(&run);
     }
-    let mut docs = Run::new(300, Some(TaskKind::Docs), MONDAY + 17 * HOUR, 100);
+    let mut docs = Run::new(
+        300,
+        Some("docs".parse::<TaskKind>().unwrap()),
+        MONDAY + 17 * HOUR,
+        100,
+    );
     docs.build = "b2";
     queue.run(&docs);
     // A later mark inside the window after, and a retracted one that is none.
@@ -888,7 +903,7 @@ fn derives_the_queue_kpis_of_a_window() {
     // Two hours of one run in four hours of two slots.
     queue.run(&Run::new(
         1,
-        Some(TaskKind::Runtime),
+        Some("runtime".parse::<TaskKind>().unwrap()),
         MONDAY + HOUR,
         2 * HOUR - 100,
     ));
@@ -989,7 +1004,7 @@ fn monday_slot_usage(alive: impl FnOnce(&mut Queue)) -> Option<f64> {
     start(&mut queue, 2, MONDAY);
     queue.run(&Run::new(
         1,
-        Some(TaskKind::Runtime),
+        Some("runtime".parse::<TaskKind>().unwrap()),
         MONDAY + HOUR,
         2 * HOUR - 100,
     ));
@@ -1199,12 +1214,17 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
         json!({"from": "draft", "to": "submitted"}),
         tuesday - HOUR,
     );
-    let mut revised = Run::new(11, Some(TaskKind::Runtime), tuesday + 3 * HOUR, 600);
+    let mut revised = Run::new(
+        11,
+        Some("runtime".parse::<TaskKind>().unwrap()),
+        tuesday + 3 * HOUR,
+        600,
+    );
     revised.revise = true;
     queue.run(&revised);
     queue.run(&Run::new(
         10,
-        Some(TaskKind::Runtime),
+        Some("runtime".parse::<TaskKind>().unwrap()),
         tuesday + 3 * HOUR,
         300,
     ));

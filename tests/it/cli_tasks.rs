@@ -317,11 +317,29 @@ fn kind_is_added_shown_listed_and_edited_before_ready() {
         .filter(|e| e["kind"] == "task_edited")
         .count();
     assert_eq!(edits, 1);
+    // Any lowercase label is a kind (ADR-t624-1); `unknown` names the
+    // tasks without one, so it is not a label.
+    let labeled = ok(&db, &["add", "web change", "--kind", "front-end_2"]);
+    assert_eq!(labeled["kind"], "front-end_2");
+    let labeled_id = labeled["id"].to_string();
+    assert_eq!(
+        ok(&db, &["edit", &labeled_id, "--kind", "src"])["kind"],
+        "src"
+    );
+    let long = "k".repeat(65);
     for args in [
-        &["add", "bad", "--kind", "src"][..],
-        &["edit", &id, "--kind", "tests"][..],
+        &["add", "bad", "--kind", "Src"][..],
+        &["add", "bad", "--kind", "unknown"][..],
+        &["add", "bad", "--kind", ""][..],
+        &["add", "bad", "--kind", &long][..],
+        &["edit", &id, "--kind", "two words"][..],
     ] {
-        assert!(!invoke(&db, args).status.success(), "{args:?}");
+        let output = invoke(&db, args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("must be a slug"),
+            "{args:?}"
+        );
     }
     ok(&db, &["ready", &id, "--bypass-review"]);
     assert_eq!(
@@ -329,6 +347,13 @@ fn kind_is_added_shown_listed_and_edited_before_ready() {
         format!("task {id} is ready; only a draft or submitted task can be edited")
     );
     assert_eq!(ok(&db, &["show", &id])["task"]["kind"], "plugin");
+    // The help names no repository's kinds.
+    let help = invoke(&db, &["add", "--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--kind"), "{help}");
+    for dagq_layout in ["migrations/", "plugin's skills", "docs, plugin, runtime"] {
+        assert!(!help.contains(dagq_layout), "{dagq_layout}: {help}");
+    }
 }
 
 /// `add --priority` and `set-priority` take the level names only; `show`,

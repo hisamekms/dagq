@@ -17,10 +17,6 @@ use crate::domain::{
     stats::{Cursor, timestamp_millis},
 };
 
-/// The kind a comparison's summary is made for without `--kind`: work
-/// differs by an order of magnitude between kinds (decision 15).
-pub const SUMMARY_KIND: &str = "runtime";
-
 /// One side of a comparison.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WindowSpan {
@@ -243,8 +239,18 @@ pub(super) fn compare(
             );
         }
     }
-    let kinds = if query.kinds.is_empty() {
-        vec![SUMMARY_KIND.to_owned()]
+    // Work differs by an order of magnitude between kinds (decision 15), so
+    // the summary is made per kind: the ones asked for, or every kind the
+    // comparison saw (ADR-t624-1: no kind is built in).
+    let kinds: Vec<String> = if query.kinds.is_empty() {
+        strata
+            .values()
+            .flat_map(|sides| sides.keys())
+            .filter_map(|stratum| stratum.strip_prefix("kind="))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     } else {
         query.kinds.clone()
     };

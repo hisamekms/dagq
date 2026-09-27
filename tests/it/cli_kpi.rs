@@ -312,3 +312,91 @@ fn report_writes_the_html_and_json_and_returns_their_paths() {
     .unwrap();
     assert!(!report(None, &db, &config, &[]).status.success());
 }
+
+/// Any label is a kind (ADR-t624-1): `stats` and `kpi` group the runs by
+/// the label as written, `--kind` and a target's `kind` take it, and a
+/// comparison without `--kind` summarises every kind it saw, a kind of
+/// the four this repository uses included.
+#[test]
+fn kpi_and_stats_group_the_runs_by_any_label() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        dir.path().join("host.toml"),
+        "[kpi]\nmin_samples = 1\n[kpi.targets.landings]\nkind = \"frontend\"\nmin = 1\n",
+    )
+    .unwrap();
+    ok(&db, &["add", "web", "--kind", "frontend"]);
+    ok(&db, &["add", "crate", "--kind", "runtime"]);
+    ok(&db, &["add", "plain"]);
+    for id in ["1", "2", "3"] {
+        ok(&db, &["ready", id, "--bypass-review"]);
+    }
+    let mark = ok(&db, &["mark", "split"])["id"].as_i64().unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    for _ in 0..3 {
+        let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, "t").unwrap() else {
+            panic!("nothing to claim");
+        };
+        for (kind, payload) in [
+            ("receipt_observed", json!({})),
+            (
+                "validation_finished",
+                json!({"status": "awaiting_integration"}),
+            ),
+            ("run_integrated", json!({"status": "integrated"})),
+        ] {
+            queue.record_runtime_event(run.id(), kind, payload).unwrap();
+        }
+    }
+
+    let stats = ok(&db, &["stats"]);
+    let kinds: Vec<&str> = stats["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kind| kind["kind"].as_str().unwrap_or("none"))
+        .collect();
+    assert_eq!(kinds, ["frontend", "runtime", "none"]);
+
+    let report = kpi_ok(&db, &config, &["--last", "1"]);
+    let landings = &report["periods"][0]["kpis"]["landings"];
+    assert_eq!(landings["all"]["value"], 3.0);
+    for stratum in ["kind=frontend", "kind=runtime", "kind=unknown"] {
+        assert_eq!(landings[stratum]["value"], 1.0, "{stratum}");
+    }
+    let target = &report["targets"][0];
+    assert_eq!(target["stratum"], "kind=frontend");
+
+    let only = kpi_ok(&db, &config, &["--last", "1", "--kind", "frontend"]);
+    let strata = only["periods"][0]["kpis"]["landings"].as_object().unwrap();
+    assert!(strata.contains_key("kind=frontend") && !strata.contains_key("kind=runtime"));
+    let refused = kpi(None, &db, &config, &["--kind", "Front End"]);
+    assert!(!refused.status.success());
+
+    let compared = kpi_ok(
+        &db,
+        &config,
+        &["--last", "1", "--compare", &mark.to_string()],
+    );
+    let summary = compared["compare"]["summary"].as_object().unwrap();
+    let summarised: Vec<&String> = summary.keys().collect();
+    assert_eq!(summarised, ["frontend", "runtime", "unknown"]);
+    assert_eq!(summary["frontend"]["phase.work"]["after"]["n"], 1);
+    let asked = kpi_ok(
+        &db,
+        &config,
+        &[
+            "--last",
+            "1",
+            "--compare",
+            &mark.to_string(),
+            "--kind",
+            "frontend",
+        ],
+    );
+    let summary = asked["compare"]["summary"].as_object().unwrap();
+    assert_eq!(summary.keys().collect::<Vec<_>>(), ["frontend"]);
+}

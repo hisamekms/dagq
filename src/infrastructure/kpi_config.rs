@@ -116,10 +116,9 @@ impl KpiTables {
             Some(target) => match key {
                 "kind" => {
                     let kind = parse_string(rest).context("value of kind")?;
-                    ensure!(
-                        kind == UNKNOWN || kind.parse::<TaskKind>().is_ok(),
-                        "kind {kind:?} is not docs, plugin, runtime, ci or unknown"
-                    );
+                    if kind != UNKNOWN {
+                        kind.parse::<TaskKind>().map_err(anyhow::Error::msg)?;
+                    }
                     target.kind = Some(kind);
                 }
                 "stat" => {
@@ -304,7 +303,7 @@ mod tests {
         assert!(error("[kpi]\nmin_samples = 1\nmin_samples = 2\n").contains("twice"));
         assert!(error("[kpi]\n[kpi]\n").contains("defined twice"));
         assert!(error("[kpi.targets.x]\nkind = \"docs\"\n").contains("neither min nor max"));
-        assert!(error("[kpi.targets.x]\nmax = 1\nkind = \"web\"\n").contains("is not docs"));
+        assert!(error("[kpi.targets.x]\nmax = 1\nkind = \"Web\"\n").contains("must be a slug"));
         assert!(error("[kpi.targets.x]\nmax = 1\nstat = \"mean\"\n").contains("not a stat"));
         assert!(error("[kpi.targets.x]\nmax = one\n").contains("expected a number"));
         assert!(error("[kpi.targets.x]\nmax = 1\nwho = 1\n").contains("unknown key who"));

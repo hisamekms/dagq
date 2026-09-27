@@ -937,9 +937,9 @@ fn migration_adding_the_task_kind_keeps_older_tasks_without_one() {
     let mut queue = SqliteQueue::open(&path).unwrap();
     assert_eq!(queue.show(TaskId::new(1)).unwrap().task.kind(), None);
     let mut kinded = new_task("docs");
-    kinded.kind = Some(TaskKind::Docs);
+    kinded.kind = Some("docs".parse::<TaskKind>().unwrap());
     let added = queue.add(kinded).unwrap();
-    assert_eq!(added.kind(), Some(TaskKind::Docs));
+    assert_eq!(added.kind().map(TaskKind::as_str), Some("docs"));
     Connection::open(&path)
         .unwrap()
         .execute(
@@ -949,10 +949,24 @@ fn migration_adding_the_task_kind_keeps_older_tasks_without_one() {
         )
         .unwrap();
     assert_eq!(queue.show(TaskId::new(3)).unwrap().task.kind(), None);
-    // A kind a newer binary added reads as none; the task still restores.
+    // Any label reads back as written (ADR-t624-1); a value that is not a
+    // label reads as none, and the task still restores.
     Connection::open(&path)
         .unwrap()
         .execute("UPDATE tasks SET kind='later' WHERE id=3", [])
+        .unwrap();
+    assert_eq!(
+        queue
+            .show(TaskId::new(3))
+            .unwrap()
+            .task
+            .kind()
+            .map(TaskKind::as_str),
+        Some("later")
+    );
+    Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE tasks SET kind='Not a label' WHERE id=3", [])
         .unwrap();
     assert_eq!(queue.show(TaskId::new(3)).unwrap().task.kind(), None);
     assert_eq!(queue.list(&Default::default()).unwrap().total, 3);

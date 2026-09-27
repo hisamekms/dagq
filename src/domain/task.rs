@@ -197,8 +197,8 @@ impl Task {
         self.priority
     }
 
-    pub fn kind(&self) -> Option<TaskKind> {
-        self.kind
+    pub fn kind(&self) -> Option<&TaskKind> {
+        self.kind.as_ref()
     }
 
     pub fn status(&self) -> TaskStatus {
@@ -706,7 +706,7 @@ mod tests {
         let edited = edit(
             draft,
             TaskEdit {
-                kind: Some(TaskKind::Runtime),
+                kind: Some("runtime".parse::<TaskKind>().unwrap()),
                 title: Some("t2".into()),
                 description: Some("d2".into()),
                 acceptance: Some("a2".into()),
@@ -732,7 +732,7 @@ mod tests {
         );
         assert_eq!(edited.paths(), ["src/**"]);
         assert_eq!(edited.context(), "c2");
-        assert_eq!(edited.kind(), Some(TaskKind::Runtime));
+        assert_eq!(edited.kind().map(TaskKind::as_str), Some("runtime"));
         assert_eq!(edited.status(), TaskStatus::Draft);
 
         let invalid = [

@@ -20,7 +20,12 @@ fn history(kind: Option<TaskKind>, secs: &[i64]) -> History {
     History {
         runs: secs
             .iter()
-            .map(|&s| (kind, sample(s * 6 / 10, s / 10, s - s * 6 / 10 - s / 10)))
+            .map(|&s| {
+                (
+                    kind.clone(),
+                    sample(s * 6 / 10, s / 10, s - s * 6 / 10 - s / 10),
+                )
+            })
             .collect(),
         ..History::default()
     }
@@ -151,12 +156,15 @@ fn the_same_seed_gives_the_same_forecast_and_percentiles_spread() {
 
 #[test]
 fn a_kind_with_too_few_samples_draws_from_the_whole_distribution() {
-    let mut h = history(Some(TaskKind::Docs), &[100, 100, 100]);
-    h.runs.push((Some(TaskKind::Runtime), sample(5000, 0, 0)));
+    let mut h = history(Some("docs".parse::<TaskKind>().unwrap()), &[100, 100, 100]);
+    h.runs.push((
+        Some("runtime".parse::<TaskKind>().unwrap()),
+        sample(5000, 0, 0),
+    ));
     let mut docs = task(1, Priority::Normal, &[]);
-    docs.kind = Some(TaskKind::Docs);
+    docs.kind = Some("docs".parse::<TaskKind>().unwrap());
     let mut runtime = task(2, Priority::Normal, &[]);
-    runtime.kind = Some(TaskKind::Runtime);
+    runtime.kind = Some("runtime".parse::<TaskKind>().unwrap());
     let forecast = forecast(&ForecastInput {
         now: NOW,
         tasks: &[docs, runtime],
@@ -405,9 +413,15 @@ fn history_holds_landed_runs_close_delays_and_answers() {
         ),
     ];
     let goals = HashMap::from([(TaskId::new(5), Some(GoalId::new(3)))]);
-    let kinds = HashMap::from([(TaskId::new(5), Some(TaskKind::Docs))]);
+    let kinds = HashMap::from([(TaskId::new(5), Some("docs".parse::<TaskKind>().unwrap()))]);
     let h = super::history(&events, &goals, &kinds, NOW);
-    assert_eq!(h.runs, [(Some(TaskKind::Docs), sample(600, 60, 540))]);
+    assert_eq!(
+        h.runs,
+        [(
+            Some("docs".parse::<TaskKind>().unwrap()),
+            sample(600, 60, 540)
+        )]
+    );
     assert_eq!(h.close_delays, [3000]);
     assert_eq!(h.ask_waits, [300]);
     assert!(h.last_landings.contains_key(&GoalId::new(3)));

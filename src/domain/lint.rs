@@ -464,7 +464,7 @@ mod tests {
             required_evidence: task.required_evidence().to_vec(),
             paths: task.paths().to_vec(),
             priority: task.priority(),
-            kind: task.kind(),
+            kind: task.kind().cloned(),
             status: task.status(),
             goal_id: task.goal_id(),
             context: task.context().into(),

@@ -289,9 +289,10 @@ impl<'a> Context<'a> {
         })
     }
 
-    fn kind_of(&self, task_id: Option<TaskId>) -> &'static str {
+    fn kind_of(&self, task_id: Option<TaskId>) -> &'a str {
+        let kinds: &'a HashMap<TaskId, Option<TaskKind>> = self.kinds;
         task_id
-            .and_then(|task| self.kinds.get(&task).copied().flatten())
+            .and_then(|task| kinds.get(&task)?.as_ref())
             .map_or(UNKNOWN, TaskKind::as_str)
     }
 
@@ -320,7 +321,11 @@ impl<'a> Context<'a> {
         let measures = &run.measures;
         let text = |value: &Option<String>| value.clone().unwrap_or_else(|| UNKNOWN.to_owned());
         match axis {
-            Axis::Kind => run.kind.map_or(UNKNOWN, TaskKind::as_str).to_owned(),
+            Axis::Kind => run
+                .kind
+                .as_ref()
+                .map_or(UNKNOWN, TaskKind::as_str)
+                .to_owned(),
             Axis::Build => text(&measures.dagq_version),
             Axis::Claude => text(&measures.claude_version),
             Axis::Parallel => measures

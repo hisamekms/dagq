@@ -78,7 +78,7 @@ pub fn forecast(
         tasks.push(ForecastTask {
             id: node.id,
             goal_id: node.goal_id,
-            kind: kinds.get(&node.id).copied().flatten(),
+            kind: kinds.get(&node.id).cloned().flatten(),
             rank: ClaimRank::new(node.effective_priority, node.unblocks, node.id),
             depends_on,
             goal_dependencies,

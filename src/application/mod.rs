@@ -158,7 +158,7 @@ impl TaskListItem {
             id: task.id(),
             status: task.status(),
             priority: task.priority(),
-            kind: task.kind(),
+            kind: task.kind().cloned(),
             title: task.title().to_owned(),
             goal_id: task.goal_id(),
             dependencies,

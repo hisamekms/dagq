@@ -2021,8 +2021,9 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         required_evidence: json_col(row, "required_evidence")?,
         paths: json_col(row, "paths")?,
         priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
-        // A kind a newer binary added reads as none, so the task still
-        // restores and the queue keeps claiming (the column is compatible).
+        // Any label reads as written (ADR-t624-1); a value that is not a
+        // label reads as none, so the task still restores and the queue
+        // keeps claiming.
         kind: row
             .get::<_, Option<String>>("kind")?
             .and_then(|kind| kind.parse().ok()),

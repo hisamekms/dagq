@@ -14,6 +14,7 @@ related:
   - design-supervisor-lifecycle-marks
   - design-supervisor-lifecycle-run-environment
   - adr-0051
+  - adr-t624-1
   - adr-0049
   - adr-0048
 ---
@@ -31,11 +32,11 @@ related:
 - 既定は日で、`--at`（無ければ今）を含む期間を最後に`--last`（既定7）期間を古い順に並べる（`periods`）。各期間は`label`（`YYYY-MM-DD`か`YYYY-Www`）、`start` / `end`（UTC）、`partial`（まだ終わっていない。値は途中までで、目標の判定に使わない）、`runs`（その期間に終わったrun）、`kpis`、`details`、`unavailable`、`marks`（その期間に効いた印。[変更の印](marks.md)の`marks`と同じ形）、`comparison`を持つ。
 - `comparison`はKPIと層ごとに、前の同じ長さの期間の値（`previous`）、差（`delta`）、比（`ratio`。前が0ならnull）、日なら直前7日の日ごとの値の中央値（`baseline_7d`）、判定できたか（`judged`）とその理由（`reason`: `no_value` / `small_sample` / `partial`。まだ終わっていない期間は値と差を出すが判定しない）、良い向きのあるKPIの`verdict`（`improved` / `worsened` / `unchanged`）。比べる値は、値（`value`）を持つKPIはその値、分布だけのKPIは中央値。どちらかの`n`が`min_samples`に満たなければ判定しない（数えるKPI（`landings`など）は`n`によらず判定する）。
 - `--since` / `--until`は1つの窓（`label: window`、`period: window`）を出し、同じ長さの直前の窓と比べる。`--at`とは併用できない。
-- `--kind`は`kind=`の層をその種類だけに絞って出す（`all`と他の軸は残る）。比較の`summary`の種類にもなる。
+- `--kind`は`kind=`の層をその種類だけに絞って出す（`all`と他の軸は残る）。比較の`summary`の種類にもなる。値はtaskのkindのlabel（[domain-model](../domain-model.md)の`TaskKind`の形）か、kindの無いtaskの`unknown`で、それ以外の形はclapの`parse_kpi_kind`が拒む。
 
 ## KPIと層
 
-`kpis`はKPIの名前→層→値。層は`all`、`kind=<docs|plugin|runtime|ci|unknown>`（`kind`がnullのtaskは推さずに`unknown`）と、`--by`の軸`build=`（build識別子）・`parallel=`・`slot=`（claim時の使用中のslot ÷ `parallel`が`low` <0.5 / `mid` <1 / `full`）・`load=`（claim時のload average ÷ hostの論理コア数が`low` <1 / `mid` <2 / `high` <4 / `extreme`。コア数はclaim時に記録されていないので計算時のhostの値）・`toolchain=`（`rustc`のreleaseとhost）・`claude=`。記録の無い属性は`unknown`。値は`n`（標本数）と、値のKPIは`value`、分布のKPIは`median`・`p90`・`min`・`max`（中央値とp90は`stats`と同じ規則）。記録の無い値はnullで、0と区別する。
+`kpis`はKPIの名前→層→値。層は`all`、`kind=<label>`（taskの`kind`のlabelをそのまま。runtimeは値の集合を持たない（[ADR-t624-1](../../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)）。`kind`がnullのtaskは推さずに`unknown`）と、`--by`の軸`build=`（build識別子）・`parallel=`・`slot=`（claim時の使用中のslot ÷ `parallel`が`low` <0.5 / `mid` <1 / `full`）・`load=`（claim時のload average ÷ hostの論理コア数が`low` <1 / `mid` <2 / `high` <4 / `extreme`。コア数はclaim時に記録されていないので計算時のhostの値）・`toolchain=`（`rustc`のreleaseとhost）・`claude=`。記録の無い属性は`unknown`。値は`n`（標本数）と、値のKPIは`value`、分布のKPIは`median`・`p90`・`min`・`max`（中央値とp90は`stats`と同じ規則）。記録の無い値はnullで、0と区別する。
 
 | KPI | 規則 | 層 |
 | --- | --- | --- |
@@ -86,7 +87,7 @@ related:
 
 ## 目標（`targets`）
 
-- 設定は`[kpi]`（`min_samples` 既定5、`breach_periods` 既定3、`breach_weeks` 既定2、`max_improvement_proposals` 既定2）と`[kpi.targets."<KPI>"]`（`kind`（省略で`all`）、`stat`（`median` / `p90` / `value`。省略で値のKPIは`value`、分布のKPIは`median`）、`min` / `max`の少なくとも一方）。同じKPIの別の種類の目標は`[kpi.targets."<KPI>".<label>]`に書く。解析は`infrastructure::kpi_config`。
+- 設定は`[kpi]`（`min_samples` 既定5、`breach_periods` 既定3、`breach_weeks` 既定2、`max_improvement_proposals` 既定2）と`[kpi.targets."<KPI>"]`（`kind`（taskのkindのlabelか`unknown`。形が合わなければ設定のerror。省略で`all`）、`stat`（`median` / `p90` / `value`。省略で値のKPIは`value`、分布のKPIは`median`）、`min` / `max`の少なくとも一方）。同じKPIの別の種類の目標は`[kpi.targets."<KPI>".<label>]`に書く。解析は`infrastructure::kpi_config`。
 - 置き場所はmain checkoutの`dagq.toml`（repositoryの方針。`load_kpi_settings`）と、host.toml（`<queue dir>/host.toml`と`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。queueのファイルがキーごと・目標ごとに優先。`load_host_kpi`。host.tomlの他の表（`[push]`・`[report]`）はここでは読み飛ばす。`[report]`は[レポート](report.md)が、`[push]`は[push](push.md)が読む）。host.tomlの値がdagq.tomlより優先し、`max_improvement_proposals`だけはdagq.tomlの値。どこから来たかは`config.sources`と各目標の`source`（`repository` / `host`）。既定の目標値は持たない。
 - 判定は`--last`の期間と、その前の日なら7日・週なら2週（`breach_periods` / `breach_weeks`の2倍の方が長ければその数）も含めて古い順に行う。完結した期間で、値があり`n`が`min_samples`以上（数えるKPIは`n`によらない）のものだけを判定し、目標を外れた判定が`breach_periods`（週は`breach_weeks`）回続けば`breach`、続きが足りなければ`missed`、最後の判定が目標内なら`ok`、1つも判定できなければ`not_judged`。判定できない期間は連続を切らず数えもしない。`streak`・`breach_since`と、並べた期間ごとの`value`・`n`・`judged`・`reason`（`partial` / `no_value` / `small_sample`）・`met`を出す。目標割れの始まりと解消のevent（`kpi_breach_started` / `kpi_breach_resolved`）とpushは[push](push.md)（task 432）、observerのfindingと改善の上限は[Observer](observer.md#kpiの目標割れと改善の上限)（task 433）。日次のHTMLとJSONのレポートは[レポート](report.md)（task 431）。
 
@@ -94,6 +95,6 @@ related:
 
 - `--compare <event id>`はその印（`dagq mark`の`--at`の印は効いた時刻。導く印はそれを読んだclaimの`run_claimed`のevent ID（`marks`の`detail.claim_event`）で指す）、`--compare <時刻のcursor>`はその時刻を境に、前後に`--window`日（既定7）の窓を作る。`--compare A..B,C..D`は2つの窓を明示する（前の窓が後の窓より前で、どちらも始まりが終わりより前）。
 - 印の並び（取り消された印と取り消しの印を除く、記録する印と導く印）を時刻の順にたどり、前の印からその印までに終わったrunが`min_samples`に満たなければ同じ「重なった変更」にまとめる（3つ以上も1つに。`domain::kpi::compare::overlapping_groups`）。境の印がまとまった変更に入っていれば、その最初の印の前と最後の印の後で比べ、`split.separable: false`で「含まれる印を分けられない」ことを示す。
-- 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`）、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`parallel=`・`load=`・`build=`。後の窓が今を越えていれば`partial`で判定しない）、`summary`（`--kind`の種類、既定`runtime`の`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`）。区間は自動では縮めない。
+- 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`）、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`parallel=`・`load=`・`build=`。後の窓が今を越えていれば`partial`で判定しない）、`summary`（kind→`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`。kindは`--kind`で選んだもの、無ければ`strata`に`kind=`の層として現れたkindすべて（`unknown`を含む、名前の順）。runtimeは`runtime`などの特定のkindを既定に持たない（ADR-t624-1の決定3）。選び方は`domain::kpi::compare`）。区間は自動では縮めない。
 
 `toolchain=`の層（hostの`rustc`）は、queueのrepositoryがdagqのソースのときだけ出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。
