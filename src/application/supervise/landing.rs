@@ -47,7 +47,6 @@ impl Supervisor<'_> {
         let processes = self.processes.clone();
         let files = self.files.clone();
         let pid = self.layout.pid;
-        let token = self.token.clone();
         let common_dir = path_text(&self.layout.common_dir)?;
         let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
@@ -55,12 +54,21 @@ impl Supervisor<'_> {
         let (disk_config, free_space) = (self.disk_config, self.free_space);
         let runs_dir = self.layout.runs_dir.clone();
         let db = self.layout.db.clone();
+        // The supervisor asks; the Integrator checks and lands (ADR-t728-2).
+        let request = IntegrationRequest {
+            requester: self.layout.supervisor_actor(),
+            run,
+            previous,
+            main,
+            token: self.token.clone(),
+        };
+        let integrator = Integrator::of_process(pid);
         Ok(spawn_traced(move || {
             let mut queue = queues.open()?;
             // As `check_disk` reads it, for the retry of a command that
             // failed on a full disk (task 639).
             let free = || free_space(&runs_dir).or_else(|| db.parent().and_then(free_space));
-            integration::land_integrating(
+            integrator.land(
                 &mut Integration {
                     queue: &mut *queue,
                     repository: &*repository,
@@ -79,10 +87,7 @@ impl Supervisor<'_> {
                         free: &free,
                     }),
                 },
-                &run,
-                previous,
-                &main,
-                &token,
+                &request,
             )
         }))
     }

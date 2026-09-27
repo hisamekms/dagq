@@ -19,6 +19,8 @@ related:
 
 [ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定18（目標割れの始まりと解消のevent）・22・23の実装（task 432）。supervisorが日次の[レポート](report.md)を書いた後に、目標割れの始まりと解消をqueueのeventに記録し、ホストの設定に書いたコマンドがあれば、日次・週次のまとめと目標割れの即時通知をそのコマンドのstdinに渡す。runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookのURLやtoken）はrepositoryにもeventにも入らない。
 
+ここのpushはホストのコマンドへの通知で、着地したbranchのGitのpushではない。着地したbranchのpushは`Integrator`だけが行う（[`integrate`](integrate.md)の9、[Authorization](../authorization.md#着地とpushintegrator)、ADR-t728-2）。
+
 ## 設定（host.tomlの`[push]`）
 
 - 置き場所は`<queue dir>/host.toml`と、hostの全queueに効く`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。どちらもrepositoryの外で、commitされる`dagq.toml`には置かない。両方に`[push]`があれば、queueのファイルの`[push]`が表ごと優先する（キーごとには混ぜない）。queueのファイルの`command = []`は、host全体の`[push]`をそのqueueだけ切る。

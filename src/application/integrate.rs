@@ -4,6 +4,13 @@
 //! follow-ups; and the receipt check the supervisor's validation shares.
 //! The queue, Git, the verification commands, the push, time, IDs and
 //! process liveness come in through the ports.
+//!
+//! The landing and the push are the [`Integrator`]'s alone (ADR-t728-2):
+//! the supervisor and a person's `integrate` hand it an
+//! [`IntegrationRequest`], and it checks the requester, the lease and the
+//! approval (a review's pass or an `integrate`) itself before it lands,
+//! writing the landing's events as itself at the requester's request. Only
+//! it holds the [`PushGrant`] [`MainRemote::push_main`] takes.
 
 use crate::domain::LeaseToken;
 use anyhow::{Context, Result, bail, ensure};
@@ -19,6 +26,9 @@ use tracing::{info, warn};
 use super::{
     AskStore, Clock, IdGenerator, Landing, MainRemote, ProcessControl, Queue, Repository, RunFiles,
     RunLog, Verifier, path_text, reason_of_error, tail,
+};
+use crate::domain::{
+    ActorContext, ActorRole, AuthorizationError, Authorizer, Capability, Resource, StaticPolicy,
 };
 use crate::domain::{
     CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
@@ -186,27 +196,180 @@ pub struct DiskRoom {
     pub free: Option<u64>,
 }
 
-/// A run that holds the integration slot under `token`: `previous` is the
-/// status it returns to when the landing stops before `main` moves, and
-/// `main` the head it lands on.
-pub struct Begun {
+/// A request to the [`Integrator`] to land a run that holds the
+/// integration slot under `token` (ADR-t728-2): `requester` is who asks
+/// (the supervisor, or the person or the inbox behind `integrate`),
+/// `previous` the status the run returns to when the landing stops before
+/// `main` moves, and `main` the head it lands on.
+#[derive(Debug, Clone)]
+pub struct IntegrationRequest {
+    pub requester: ActorContext,
     pub run: TaskRun,
     pub previous: RunStatus,
     pub main: CommitSha,
     pub token: LeaseToken,
 }
 
-/// The first half of `integrate`: pick the run of `target`, record the
-/// call as the approval to land it and take the integration slot. `repo`
-/// is the checkout the caller named, for the error when it belongs to
-/// another repository than the queue's. `None` means no run awaits
-/// integration. The caller keeps the lease alive while
-/// [`land_integrating`] lands the run.
-pub fn begin(
+/// Proof that a push of the landing branch is the [`Integrator`]'s
+/// (ADR-t728-2): [`MainRemote::push_main`] takes one, and only the
+/// Integrator, once the policy grants it [`Capability::Push`], makes one.
+pub struct PushGrant(());
+
+/// The trusted control plane's landing (ADR-t728-2 decision 1): the only
+/// code that rebases, verifies, squashes, moves `main` and pushes. It acts
+/// as an actor of role [`ActorRole::Integrator`], the only role the policy
+/// grants [`Capability::Land`] and [`Capability::Push`]. On a host it runs
+/// in the requester's process; the boundary is logical (decision 4).
+#[derive(Debug, Clone)]
+pub struct Integrator {
+    actor: ActorContext,
+}
+
+impl Integrator {
+    /// The integrator of the process `pid` (`integrator:<pid>`).
+    pub fn of_process(pid: u32) -> Self {
+        Self {
+            actor: ActorContext::instance(ActorRole::Integrator, pid),
+        }
+    }
+
+    /// An integrator acting as `actor`, which the policy must grant the
+    /// landing and the push: any other actor is refused.
+    pub fn acting_as(actor: ActorContext) -> std::result::Result<Self, AuthorizationError> {
+        for capability in [Capability::Land, Capability::Push] {
+            StaticPolicy.authorize(&actor, capability, &Resource::Queue)?;
+        }
+        Ok(Self { actor })
+    }
+
+    pub fn actor(&self) -> &ActorContext {
+        &self.actor
+    }
+
+    /// The first half of a person's `integrate`, at `requester`'s request:
+    /// pick the run of `target`, check the requester may ask to land it,
+    /// record the call as the approval to land it (as the requester) and
+    /// take the integration slot. `repo` is the checkout the caller named,
+    /// for the error when it belongs to another repository than the
+    /// queue's. `None` means no run awaits integration. The caller keeps
+    /// the lease alive while [`Self::land`] lands the run.
+    pub fn approve(
+        &self,
+        ctx: &mut Integration<'_>,
+        requester: &ActorContext,
+        target: IntegrateTarget,
+        repo: &Path,
+    ) -> Result<Option<IntegrationRequest>> {
+        begin(ctx, requester, target, repo)
+    }
+
+    /// Land the run of `request` (ADR-t728-2 decisions 2 and 3), after
+    /// checking itself that the requester may ask it, that the run holds
+    /// the integration slot under the request's token, and that the run
+    /// was approved (an `integrate` or an `approve_landing` answer of
+    /// `land`) or passed its latest review. A refused request gives the
+    /// slot back and fails; nothing reaches `main`. The landing's events
+    /// are written as the Integrator at the requester's request.
+    pub fn land(
+        &self,
+        ctx: &mut Integration<'_>,
+        request: &IntegrationRequest,
+    ) -> Result<IntegrationOutcome> {
+        let grant = self.push_grant()?;
+        let previous = ctx.queue.act_as(self.actor.clone());
+        ctx.queue.request_as(Some(&request.requester));
+        let landed = self
+            .check(&mut *ctx.queue, request)
+            .and_then(|()| land_integrating(ctx, &grant, request));
+        ctx.queue.request_as(None);
+        if let Some(previous) = previous {
+            ctx.queue.act_as(previous);
+        }
+        landed
+    }
+
+    fn push_grant(&self) -> Result<PushGrant> {
+        StaticPolicy.authorize(&self.actor, Capability::Land, &Resource::Queue)?;
+        StaticPolicy.authorize(&self.actor, Capability::Push, &Resource::Queue)?;
+        Ok(PushGrant(()))
+    }
+
+    /// Refuse `request` unless [`landing_refusal`] finds nothing wrong,
+    /// giving its slot back (when the request still holds it).
+    fn check(&self, queue: &mut dyn Queue, request: &IntegrationRequest) -> Result<()> {
+        let run = queue.run(request.run.id())?;
+        let holds = queue.holds_lease(run.id(), &request.token)?;
+        let events = queue.run_events(run.id())?;
+        let Some(refusal) = landing_refusal(&request.requester, &run, holds, &events) else {
+            return Ok(());
+        };
+        let message = format!(
+            "the integrator refused to land run {} at the request of {}: {refusal}",
+            run.id(),
+            request.requester.actor_id()
+        );
+        warn!(op = "integrate", run_id = %run.id(), "{message}");
+        if holds
+            && let Err(record) = queue.abort_integration(
+                run.id(),
+                &request.token,
+                request.previous.as_str(),
+                &message,
+                &Reason::new(ReasonCode::Other),
+            )
+        {
+            warn!(op = "integrate", run_id = %run.id(), error = %format_args!("{record:#}"), "run {}: could not give the slot back: {record:#}", run.id());
+        }
+        bail!("{message}")
+    }
+}
+
+/// Why the [`Integrator`] refuses to land `run` at `requester`'s request,
+/// `None` when it lands it: the policy does not grant the requester
+/// [`Capability::IntegrationRequest`] on the run, the run is not
+/// `integrating` under the request's lease (`holds`), or `events` record
+/// neither an approval to land (`integration_approved`) nor a pass as the
+/// latest review verdict. A review's pass is data the request carries;
+/// the landing's own checks still decide (ADR-t728-2 decision 3).
+pub fn landing_refusal(
+    requester: &ActorContext,
+    run: &TaskRun,
+    holds: bool,
+    events: &[crate::domain::RunEvent],
+) -> Option<String> {
+    let resource = Resource::Run {
+        id: run.id().clone(),
+        task: Some(run.task_id()),
+    };
+    if let Err(error) = StaticPolicy.authorize(requester, Capability::IntegrationRequest, &resource)
+    {
+        return Some(error.to_string());
+    }
+    if run.status() != RunStatus::Integrating || !holds {
+        return Some(format!(
+            "the run is {} and the request does not hold its integration slot",
+            run.status().as_str()
+        ));
+    }
+    let history = RunHistory::from_events(events);
+    let passed = history
+        .last(event_kind::REVIEW_FINISHED)
+        .is_some_and(|review| review.payload["verdict"] == "pass");
+    if !history.approved() && !passed {
+        return Some("the run was neither approved to land nor passed its latest review".into());
+    }
+    None
+}
+
+/// The first half of `integrate` ([`Integrator::approve`]). The requester
+/// is refused before anything is recorded when the policy does not grant
+/// it [`Capability::IntegrationRequest`] on the run.
+fn begin(
     ctx: &mut Integration<'_>,
+    requester: &ActorContext,
     target: IntegrateTarget,
     repo: &Path,
-) -> Result<Option<Begun>> {
+) -> Result<Option<IntegrationRequest>> {
     let queue = &mut *ctx.queue;
     let common_dir = ctx.common_dir;
     let bound = queue
@@ -265,6 +428,14 @@ pub fn begin(
             run.id()
         );
     }
+    StaticPolicy.authorize(
+        requester,
+        Capability::IntegrationRequest,
+        &Resource::Run {
+            id: run.id().clone(),
+            task: Some(run.task_id()),
+        },
+    )?;
     if let Some(room) = ctx.disk {
         check_disk_room(&*queue, &room, run.id())?;
     }
@@ -282,7 +453,8 @@ pub fn begin(
     let token = ctx.ids.lease_token();
     let main = ctx.repository.main_head()?;
     let run = queue.begin_integration(run.id(), &token, &main)?;
-    Ok(Some(Begun {
+    Ok(Some(IntegrationRequest {
+        requester: requester.clone(),
         run,
         previous,
         main,
@@ -358,17 +530,23 @@ fn disk_short(
     })
 }
 
-/// Land a run that holds the integration slot under `token` (see
-/// [`begin`]) and record the outcome; shared by `integrate` and by the
-/// supervisor landing an approved run it resumed. An error before `main`
-/// moved gives the slot back and returns the run to `previous`.
-pub fn land_integrating(
+/// Land a run that holds the integration slot under `token` and record
+/// the outcome: the [`Integrator`]'s landing, whichever requester asked
+/// for it. An error before `main` moved gives the slot back and returns
+/// the run to `previous`.
+fn land_integrating(
     ctx: &mut Integration<'_>,
-    run: &TaskRun,
-    previous: RunStatus,
-    main: &CommitSha,
-    token: &LeaseToken,
+    grant: &PushGrant,
+    request: &IntegrationRequest,
 ) -> Result<IntegrationOutcome> {
+    let IntegrationRequest {
+        run,
+        previous,
+        main,
+        token,
+        ..
+    } = request;
+    let previous = *previous;
     let queue = &mut *ctx.queue;
     let repository = ctx.repository;
     let task = queue.show(run.task_id())?.task;
@@ -447,7 +625,7 @@ pub fn land_integrating(
             );
             close_landing_asks(queue, &run);
             remove_landed_worktree(queue, repository, &run);
-            let push = push_main(queue, &onto, ctx.remote, run.id(), &landing.commit);
+            let push = push_main(queue, grant, &onto, ctx.remote, run.id(), &landing.commit);
             let follow_ups = register_follow_ups(queue, &task, run.id(), proposed.as_ref());
             IntegrationOutcome::Integrated {
                 task: Box::new(task),
@@ -514,6 +692,7 @@ pub fn land_integrating(
 /// the landing stands either way.
 fn push_main(
     queue: &dyn Queue,
+    grant: &PushGrant,
     onto: &LandingBranch,
     remote: Option<&dyn MainRemote>,
     run_id: &RunId,
@@ -550,7 +729,7 @@ fn push_main(
                         Some(&format!("the repository has no remote {name}")),
                     ),
                     Ok(false) => report(PushResult::Failed, name, Some(missing_remote(name)), None),
-                    Ok(true) => match main_remote.push_main(name, onto) {
+                    Ok(true) => match main_remote.push_main(grant, name, onto) {
                         Ok(()) => report(PushResult::Pushed, name, None, None),
                         Err(error) => failed(name, &error),
                     },
@@ -1942,10 +2121,14 @@ mod tests {
     }
 
     fn run(dir: &Path) -> TaskRun {
+        run_in(dir, RunStatus::Validating)
+    }
+
+    fn run_in(dir: &Path, status: RunStatus) -> TaskRun {
         TaskRun::restore(RunRecord {
             id: RunId::new(RUN).unwrap(),
             task_id: TaskId::new(7),
-            status: RunStatus::Validating,
+            status,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
             base_commit: sha(BASE),
@@ -2207,5 +2390,88 @@ mod tests {
             RunHistory::from_events(&[]).resumes().left()
         );
         assert_eq!(resumes_left(&EventsOnly { events: None }, &run), 0);
+    }
+
+    fn integrating() -> TaskRun {
+        run_in(Path::new("/tmp/run"), RunStatus::Integrating)
+    }
+
+    fn landing_event(kind: &str, payload: Value) -> crate::domain::RunEvent {
+        crate::domain::RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    #[test]
+    fn only_the_integrator_role_may_act_as_the_integrator() {
+        for role in ActorRole::ALL {
+            let acting = Integrator::acting_as(ActorContext::instance(role, 1));
+            if role == ActorRole::Integrator {
+                assert_eq!(acting.unwrap().actor().actor_id(), "integrator:1");
+            } else {
+                let error = acting.unwrap_err();
+                assert_eq!(error.role, role);
+                assert_eq!(error.capability, Capability::Land, "{role:?}");
+            }
+        }
+        assert_eq!(Integrator::of_process(9).actor().actor_id(), "integrator:9");
+        assert!(Integrator::of_process(9).push_grant().is_ok());
+    }
+
+    #[test]
+    fn the_integrator_lands_at_the_request_of_the_user_the_inbox_and_the_supervisor_only() {
+        let run = integrating();
+        let approved = [landing_event(event_kind::INTEGRATION_APPROVED, json!({}))];
+        for role in ActorRole::ALL {
+            let requester = ActorContext::instance(role, 1);
+            let refusal = landing_refusal(&requester, &run, true, &approved);
+            match role {
+                ActorRole::User | ActorRole::Inbox | ActorRole::Supervisor => {
+                    assert_eq!(refusal, None, "{role:?}");
+                }
+                _ => {
+                    let refusal = refusal.unwrap_or_else(|| panic!("{role:?} may request"));
+                    assert!(refusal.contains("may not landing.request"), "{refusal}");
+                }
+            }
+        }
+        // A worker is refused even for its own run.
+        let worker = ActorContext::worker(run.id(), run.task_id());
+        assert!(landing_refusal(&worker, &run, true, &approved).is_some());
+    }
+
+    #[test]
+    fn the_integrator_lands_only_a_leased_approved_or_passed_run() {
+        let supervisor = ActorContext::instance(ActorRole::Supervisor, 1);
+        let landing = integrating();
+        let pass = landing_event(event_kind::REVIEW_FINISHED, json!({"verdict": "pass"}));
+        let concern = landing_event(event_kind::REVIEW_FINISHED, json!({"verdict": "concern"}));
+        let approved = landing_event(event_kind::INTEGRATION_APPROVED, json!({}));
+        assert_eq!(
+            landing_refusal(&supervisor, &landing, true, std::slice::from_ref(&pass)),
+            None
+        );
+        assert_eq!(
+            landing_refusal(&supervisor, &landing, true, &[concern.clone(), approved]),
+            None
+        );
+        // Neither approved nor passed, or passed and then not.
+        for events in [vec![], vec![concern.clone()], vec![pass.clone(), concern]] {
+            let refusal = landing_refusal(&supervisor, &landing, true, &events).unwrap();
+            assert!(refusal.contains("neither approved"), "{refusal}");
+        }
+        // The slot is not the request's, or the run does not hold it.
+        let refusal =
+            landing_refusal(&supervisor, &landing, false, std::slice::from_ref(&pass)).unwrap();
+        assert!(refusal.contains("integration slot"), "{refusal}");
+        let awaiting = run(Path::new("/tmp/run"));
+        assert!(landing_refusal(&supervisor, &awaiting, true, &[pass]).is_some());
     }
 }

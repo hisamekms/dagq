@@ -23,7 +23,7 @@ use crate::{
         AgentProvider, Generators, LaunchAgent, MainRemote, ProcessControl, QueueOpener,
         Repository, RunFiles, Spawner, Verifier, WorkspaceBackend, health,
         install::{self as installation, Binaries, InstallOptions},
-        integrate::{self as integration, IntegrateTarget, Integration},
+        integrate::{self as integration, IntegrateTarget, Integration, Integrator},
         lifecycle::{
             self, DownOptions, Ports as LifecyclePorts, QueuePaths, ROLE_ENV, RepositoryPaths,
             UpEnvironment, UpOptions,
@@ -598,9 +598,10 @@ impl OneShot {
     /// result. The landed receipt's `follow_ups` become draft tasks
     /// (ADR-0019 decision 4), listed as the result's `follow_ups`.
     ///
-    /// The use case is [`integration::begin`] and
-    /// [`integration::land_integrating`]; this entry point opens the queue and
-    /// the repository and keeps the lease alive in between. The slot's token
+    /// The use case is [`Integrator::approve`] and [`Integrator::land`], at
+    /// the request of this process's actor (ADR-t728-2); this entry point
+    /// opens the queue and the repository and keeps the lease alive in
+    /// between. The slot's token
     /// is one of these generators' IDs.
     pub fn integrate(
         &self,
@@ -613,6 +614,9 @@ impl OneShot {
             .canonicalize()
             .context("queue must already be initialized")?;
         let mut queue = self.open(&db)?;
+        // The requester is who this process acts as (ADR-t728-2 decision 2):
+        // a person, or the inbox at a person's word.
+        let requester = queue.actor();
         let repository = GitRepository::inspect(repo)?;
         let common_dir = path_text(&repository.common_dir)?;
         let verifier = ShellVerifier {
@@ -653,7 +657,8 @@ impl OneShot {
                 free: &read_free,
             }),
         };
-        let Some(begun) = integration::begin(&mut integration, target, repo)? else {
+        let integrator = Integrator::of_process(std::process::id());
+        let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {
             return Ok(serde_json::to_value(IntegrationOutcome::NoRunAwaiting)?);
         };
         let heartbeat = Heartbeat::start(
@@ -662,15 +667,9 @@ impl OneShot {
                 generators: self.generators.clone(),
                 actor: None,
             }),
-            begun.token.clone(),
+            request.token.clone(),
         );
-        let outcome = integration::land_integrating(
-            &mut integration,
-            &begun.run,
-            begun.previous,
-            &begun.main,
-            &begun.token,
-        )?;
+        let outcome = integrator.land(&mut integration, &request)?;
         drop(heartbeat); // Stops the lease heartbeat before this process reports.
         Ok(serde_json::to_value(outcome)?)
     }

@@ -63,7 +63,7 @@ fn the_review_and_the_recovery_job_run_as_their_own_actors() {
     drop(tags);
 
     // The events record their actor (task 730): the supervisor's own
-    // transitions and its landing as the supervisor, the verdicts it
+    // transitions as the supervisor, the verdicts it
     // applied with the job that returned them as the requester.
     let supervisor = format!("supervisor:{}", std::process::id());
     let actor = |kind: &str, run: &TaskRun| {
@@ -75,17 +75,23 @@ fn the_review_and_the_recovery_job_run_as_their_own_actors() {
         let actor = event.actor.clone().expect("an actor");
         (actor.role, actor.id, actor.requested_by)
     };
-    for (kind, run) in [
-        ("run_claimed", failed),
-        ("run_claimed", landed),
-        ("run_integrated", landed),
-    ] {
+    for (kind, run) in [("run_claimed", failed), ("run_claimed", landed)] {
         assert_eq!(
             actor(kind, run),
             ("supervisor".to_owned(), supervisor.clone(), None),
             "{kind}"
         );
     }
+    // The landing is the Integrator's at the supervisor's request
+    // (ADR-t728-2).
+    assert_eq!(
+        actor("run_integrated", landed),
+        (
+            "integrator".to_owned(),
+            format!("integrator:{}", std::process::id()),
+            Some(supervisor.clone())
+        )
+    );
     assert_eq!(
         actor("recovery_finished", failed),
         (

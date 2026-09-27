@@ -1699,7 +1699,14 @@ impl MainRemote for GitRepository {
         Ok(remotes.lines().any(|line| line.trim() == remote))
     }
 
-    fn push_main(&self, remote: &str, branch: &LandingBranch) -> Result<()> {
+    /// The one push of the landing branch; the grant is the Integrator's
+    /// (ADR-t728-2), so nothing else in the runtime reaches it.
+    fn push_main(
+        &self,
+        _: &crate::application::integrate::PushGrant,
+        remote: &str,
+        branch: &LandingBranch,
+    ) -> Result<()> {
         let reference = branch.reference();
         let (status, stdout, stderr) = capture(
             Command::new(&self.git)

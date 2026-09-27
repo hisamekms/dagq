@@ -715,6 +715,14 @@ impl RunLog for SqliteQueue {
     fn request_as(&self, requester: Option<&crate::domain::actor::ActorContext>) {
         self.actors.request(requester);
     }
+    fn act_as(
+        &self,
+        actor: crate::domain::actor::ActorContext,
+    ) -> Option<crate::domain::actor::ActorContext> {
+        let previous = self.actors.get();
+        self.actors.set(actor);
+        Some(previous)
+    }
 }
 
 /// Insert an event of the queue itself in the open transaction `tx`, with

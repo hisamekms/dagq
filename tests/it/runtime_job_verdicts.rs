@@ -37,7 +37,8 @@ fn actor_of(
 /// A review that passes does not land the run: the landing runs the
 /// verification itself after it, and a verification that fails parks the
 /// run for a session instead. The pass is recorded at the review job's
-/// request; the landing is the supervisor's own, requested by no job.
+/// request; the supervisor asks the Integrator to land it, and the
+/// landing is the Integrator's at the supervisor's request.
 #[test]
 fn a_passing_review_does_not_land_a_run_its_landing_does_not_verify() {
     let (_dir, repo, db) = fixture();
@@ -74,10 +75,20 @@ fn a_passing_review_does_not_land_a_run_its_landing_does_not_verify() {
             Some(format!("review-job:{}:1", run.id()))
         )
     );
-    for kind in ["integration_started", "verification_command"] {
+    // The supervisor takes the slot and asks; the Integrator lands, at the
+    // supervisor's request (ADR-t728-2).
+    assert_eq!(
+        actor_of(&detail, run, "integration_started"),
+        ("supervisor".to_owned(), supervisor.clone(), None)
+    );
+    for kind in ["verification_command", "integration_deferred"] {
         assert_eq!(
             actor_of(&detail, run, kind),
-            ("supervisor".to_owned(), supervisor.clone(), None),
+            (
+                "integrator".to_owned(),
+                format!("integrator:{}", std::process::id()),
+                Some(supervisor.clone())
+            ),
             "{kind}"
         );
     }

@@ -30,6 +30,7 @@ impl MainRemote for TestRemote {
 
     fn push_main(
         &self,
+        _: &dagq::application::integrate::PushGrant,
         remote: &str,
         _: &dagq::domain::landing_branch::LandingBranch,
     ) -> Result<()> {
@@ -197,23 +198,21 @@ fn git_adapter_pushes_main_to_a_bare_origin() {
     assert_eq!(events_of(&db, run.id(), "push_finished").len(), 1);
 
     // An origin that is not a repository fails the push with Git's message.
-    let adapter = GitRepository::inspect(&repo).unwrap();
+    // Only the Integrator pushes (ADR-t728-2), so the failure is a landing's.
+    let (_dir, repo, db, run) = awaiting_run();
     git(
         &repo,
-        &["remote", "set-url", "origin", "/nonexistent/origin.git"],
+        &["remote", "add", "origin", "/nonexistent/origin.git"],
     );
+    let adapter = GitRepository::inspect(&repo).unwrap();
     assert!(adapter.has_remote("origin").unwrap());
     assert!(!adapter.has_remote("upstream").unwrap());
-    let error = format!(
-        "{:#}",
-        adapter
-            .push_main(
-                "origin",
-                &dagq::domain::landing_branch::LandingBranch::main()
-            )
-            .unwrap_err()
-    );
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(outcome["push"]["outcome"], "failed", "{outcome}");
+    let error = outcome["push"]["error"].as_str().unwrap();
     assert!(error.contains("git push origin main failed"), "{error}");
+    assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
 }
 
 /// `[repository]` of dagq.toml steers the real adapter's push
@@ -2591,4 +2590,46 @@ fn assert_load(payload: &Value) {
         mean.zip(max).is_some_and(|(mean, max)| mean <= max),
         "{payload}"
     );
+}
+
+/// A person's `integrate` asks the Integrator to land (ADR-t728-2): the
+/// approval is the person's, and the landing and the push are the
+/// Integrator's at the person's request.
+#[test]
+fn integrate_records_the_requester_and_the_integrator() {
+    let (_dir, repo, db, run) = awaiting_run();
+    let remote = TestRemote::default();
+    let outcome = integrate_with(&db, &repo, Some(&remote));
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let actor_of = |kind: &str| {
+        let actor = detail
+            .events
+            .iter()
+            .find(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+            .unwrap_or_else(|| panic!("no {kind}"))
+            .actor
+            .clone()
+            .expect("an actor");
+        (actor.role, actor.id, actor.requested_by)
+    };
+    assert_eq!(
+        actor_of("integration_approved"),
+        ("user".to_owned(), "user".to_owned(), None)
+    );
+    let integrator = format!("integrator:{}", std::process::id());
+    for kind in ["verification_command", "run_integrated", "push_finished"] {
+        assert_eq!(
+            actor_of(kind),
+            (
+                "integrator".to_owned(),
+                integrator.clone(),
+                Some("user".to_owned())
+            ),
+            "{kind}"
+        );
+    }
 }

@@ -611,9 +611,11 @@ pub trait MainRemote {
     fn has_remote(&self, remote: &str) -> Result<bool>;
     /// Push `branch`, the landing branch resolved when the landing began,
     /// to the same branch of `remote`. An error is the failed push, with
-    /// Git's message.
+    /// Git's message. Only the [`super::integrate::Integrator`] holds the
+    /// [`super::integrate::PushGrant`] it takes (ADR-t728-2).
     fn push_main(
         &self,
+        grant: &super::integrate::PushGrant,
         remote: &str,
         branch: &crate::domain::landing_branch::LandingBranch,
     ) -> Result<()>;
@@ -1468,6 +1470,16 @@ pub trait RunLog {
     /// cleared with `None` (ADR-t728-1 decision 1, task 730). A store that
     /// records no actors ignores it.
     fn request_as(&self, _requester: Option<&crate::domain::actor::ActorContext>) {}
+    /// Record `actor` as the actor of the events written from now on and
+    /// return the one it replaces, for the [`super::integrate::Integrator`]
+    /// to write the landing as itself (ADR-t728-2). A store that records no
+    /// actors ignores it and returns `None`.
+    fn act_as(
+        &self,
+        _actor: crate::domain::actor::ActorContext,
+    ) -> Option<crate::domain::actor::ActorContext> {
+        None
+    }
 }
 
 /// What reports read and record of the queue as a whole: the written

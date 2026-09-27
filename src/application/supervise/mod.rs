@@ -55,7 +55,7 @@ use super::{
     },
     ask, dependency_graph,
     health::{lease_health, run_health},
-    integrate::{self as integration, Integration, check_receipt},
+    integrate::{self as integration, Integration, IntegrationRequest, Integrator, check_receipt},
     naming::{
         resume_workspace_description, shell_join, workspace_description, workspace_group_name,
     },

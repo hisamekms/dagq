@@ -137,7 +137,7 @@ askの行には`answer_authority`と`answer_approval`（`0047_answer_authority.s
 
 ### runtimeの操作系のコマンド（application）
 
-runtimeの操作系のコマンドは、`src/application/commands/operations.rs`の`Operation`が名指すcapabilityとresourceで、全てのroleについてコマンドが何かをする前に判定する（task 734）。CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queueを開く・作る・移す前、ログを開く前に`operations::authorize`を呼び、`requests`もこれらのコマンドの写しを`Operation::request`から取る。操作そのもの（`integrate`・`up`・`install`など）は今の場所のままで、ここはその入口の判定だけ（着地のIntegratorへの移し替えは別のtask）。
+runtimeの操作系のコマンドは、`src/application/commands/operations.rs`の`Operation`が名指すcapabilityとresourceで、全てのroleについてコマンドが何かをする前に判定する（task 734）。CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queueを開く・作る・移す前、ログを開く前に`operations::authorize`を呼び、`requests`もこれらのコマンドの写しを`Operation::request`から取る。操作そのもの（`up`・`install`など）は今の場所のままで、ここはその入口の判定だけ。着地はこの入口の後で[Integrator](#着地とpushintegrator)がもう一度判定する（task 736）。
 
 | コマンド | capability | resource |
 | --- | --- | --- |
@@ -169,6 +169,17 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 - `auto-update`は`install`と同じ`service.install`で、supervisorが自分の環境（`supervisor:<pid>`）で起動する。`install`と`auto-update`は新しいバイナリで`migrate --check`・`migrate`・使い捨てのqueueの`init`と`list`・`up`を子プロセスとして同じ環境のまま打つので、それを打つroleは`queue.admin`と`service.lifecycle`も持つ（supervisorに`queue.admin`を足したのはこのため）。人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。`observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
 host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserになる（ADR-t728-1の決定6）。wrapperとhookをworkerの環境から分けて、信頼する制御側のwrapperのactor（`ActorRole::Wrapper`）として判定することは、queue service / brokerのgoal 38の後続にする。
+
+### 着地とpush（Integrator）
+
+着地（rebase・再検証・squash・mainの更新）とpushは`src/application/integrate.rs`の`Integrator`だけが行う（[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)、task 736）。Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.land`と`landing.push`を持つのはこのroleだけ。`Integrator::acting_as(actor)`は`StaticPolicy`がこの2つを許すactorでなければ拒み（integrator以外の全てのroleが拒まれることをunit testが確かめる）、着地の関数（`begin`・`land_integrating`・`push_main`）はmoduleの外から呼べない。
+
+- **依頼**: supervisorの着地のthreadと、人（とinboxの代行）の`integrate`は`IntegrationRequest`（`requester`＝依頼者のactor、run、戻り先のstatus、着地先のmain、integrationのslotのtoken）を作り、`Integrator::land`に渡す。`integrate`は`Integrator::approve`がrunを選び、依頼者が`landing.request`を持つことを確かめてから（持たなければ何も記録せずに拒む）`integration_approved`を依頼者として記録し、slotを取って依頼を返す。supervisorはslotを自分で取り（`integration_started`はsupervisorの記録）、依頼者は`supervisor:<pid>`
+- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと（user・inbox・supervisor）、runが`integrating`で依頼のtokenがleaseを持つこと、runが着地を承認されている（`integration_approved`。人の`integrate`か`approve_landing`の`land`）か最新のreviewのverdictが`pass`であること。どれかが欠ければ着地せず、slotを持っていれば`abort_integration`で返して（`integration_error`、`code: other`）errorにする。reviewの`pass`は着地の必要条件で、この後のreceiptの再検査・rebase・検証コマンド・scopeの判定が落ちれば着地しない（ADR-t728-2の決定3）
+- **記録**: `Integrator::land`の間、queueのeventのactorはIntegrator（role `integrator`、id `integrator:<pid>`）で、`requested_by`は依頼者のactor id（人は`user`、inboxは`inbox`、supervisorは`supervisor:<pid>`）。`verification_command`・`integration_rebased`・`integration_deferred`・`run_integrated`・`push_finished` / `push_skipped` / `push_failed`などがこれにあたる。依頼と記録を切り替えるのはport `RunLog::act_as`と`RunLog::request_as`
+- **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れない（fieldがmoduleの外から見えない）ので、`GitRepository`のpushはIntegratorの外から呼べない
+
+host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
 
 ### ほかのコマンド（CLIの入口）
 
