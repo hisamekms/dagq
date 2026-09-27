@@ -103,6 +103,10 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t813-2](2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md) | workerのproviderをtaskごとに選び（claude / codex、既定claude）、使えないときだけ両方向に切り替えて同じworktreeで新しいsessionを始める。認証と利用上限の控えをproviderごとにし、workerのclaimを止めてaskを開くのは両方が使えないとき（Claudeだけの役割のためClaudeの控えはaskを開く）（ADR-0004決定1、ADR-0047決定42をamends） | 2026-09-28 |
 | [ADR-t813-3](2026-09-28-t813-3-codex-worker-permissions.md) | Codexのworkerをworkspace-writeのsandboxで動かし、書く場所をrunのworktreeのgitの管理dir・objects・run branchのref・runのdir・cargoのregistryに絞り、networkは開け、承認はnever、queueにはrunのdirを経てsupervisorが取り込み、pkill / killallはsandboxが拒みrulesが補う。設定は起動の引数で渡す | 2026-09-28 |
 | [ADR-t876-1](2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md) | スキーマが安定するまでSQLiteのCHECK制約を使わず、不変条件はdomainの型とapplication・書き込みのportで守り、壊れた値を読んだらkindの列だけ寛容に、それ以外はfail closedにする（ADR-0073決定6・8・19・22をamends） | 2026-09-28 |
+| [ADR-t827-1](2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md) | resource brokerをroot package（dagq）はそのままにcrates/の3つのcrate（protocol・server・client）に分け、dagqはprotocolだけに依存し、clientはdagqの隣に同じbuildで置き、brokerのimageはdagqと同じsourceからbuildして、版が食い違えばbrokerを使わない | 2026-09-28 |
+| [ADR-t827-2](2026-09-28-t827-2-broker-transport-run-token-and-workspace-confinement.md) | brokerは127.0.0.1だけのHTTP+JSONで話し、supervisorがclaimのときにqueueの鍵で署名したrunごとのtokenを発行して、runの終わりに失効させ、long-livedのcontainerにはqueueのrunsとgitの共通dirを同じ絶対パスでmountしてrunごとの閉じ込めはtokenのworkspaceでbrokerが行い、gitはpushを持たない | 2026-09-28 |
+| [ADR-t827-3](2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md) | brokerのcontainerはqueueごとに1つで、supervisorが起動・health・停止の責任を持ち、dagq専用の最小のPodman machineを必要なときにruntimeが冪等にinit・startして、使われなくなれば止め、人の既定のmachineには触らない | 2026-09-28 |
+| [ADR-t827-4](2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md) | workerはbrokerをclientのMCPの道具で使い（preferredでは組み込みの道具も残す）、brokerの全ての操作をqueue dirのauditにtokenと秘密なしで残し、modeはdisabled・preferred・requiredでrepositoryの方針はdagq.toml・hostの資源はhost.tomlに置き、resource brokerはADR-t728-1の助言的なhostとgoal 38のqueue serviceとは別の層にする | 2026-09-28 |
 
 ## 置き換え・廃止されたADR
 

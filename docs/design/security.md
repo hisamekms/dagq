@@ -15,6 +15,7 @@ related:
   - adr-t728-3
   - design-authorization
   - design-supervisor-lifecycle-roles
+  - design-broker
 ---
 
 # Security
@@ -127,5 +128,7 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
 2. **queue service / broker（goal 38）**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookをworkerの環境から分けてwrapperのactorとして判定する
 3. **Integratorの分離**: pushの資格情報をIntegratorのプロセスだけに持たせ、supervisorとAI actorから外す
 4. **人しか出せない承認（I6）**: 承認の経路（別のterminal、署名、人の端末からの確認など）を決めてから、`answer_approval`のaskのanswerを人だけに限る
+
+goal 38の「broker」とは別に、fs・process・gitを仲介するresource broker（`dagq-broker`、goal 58）がある。workerはhostのまま`preferred`でrunごとのtokenを使ってPodmanのcontainerのbrokerを通すもので、host実行が助言的であることと`actors`の`enforcement: advisory`は変えない（[Resource broker](broker.md)、[ADR-t827-4](../adr/2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md)）。
 
 どの段でも、境界がその段の大きさで守れないときは境界を弱めず、follow-upのtaskにする。
