@@ -225,13 +225,13 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
 /// A build with a breaking migration is refused without `--allow-breaking`
 /// and replaces nothing; with it, the supervisor is drained, the queue
 /// migrated, the binary replaced and `up` run with the drained supervisor's
-/// mode and parallelism. A rollback past a breaking migration is refused,
-/// and so is one without a previous binary.
+/// mode, parallelism, automatic update and wait limit. A rollback past a
+/// breaking migration is refused, and so is one without a previous binary.
 #[test]
 fn install_drains_only_for_a_breaking_migration_when_allowed() {
     use dagq::application::install::Source;
     let fixture = fixture();
-    let _queue = handoff_supervisor(&fixture, "live", SupervisorMode::InCmux);
+    let queue = handoff_supervisor(&fixture, "live", SupervisorMode::InCmux);
     let processes = FakeProcesses::default();
     let binaries = FakeBinaries::new(&[(27, true), (28, false)], false);
     let drained = Mutex::new(0);
@@ -281,6 +281,44 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
             "--in-cmux",
             "--cmux",
             "/opt/cmux"
+        ]
+    );
+
+    // A drained supervisor with the automatic update and a wait limit gets
+    // both back from the `up`, once each even when the restart names them.
+    queue.set_auto_update("live", true).unwrap();
+    queue.set_max_waiting("live", 2).unwrap();
+    let binaries = FakeBinaries::new(&[(28, false)], false);
+    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    options.restart = vec!["--auto-update".into(), "--max-waiting".into(), "6".into()];
+    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    assert_eq!(
+        *binaries.up.lock().unwrap(),
+        [
+            vec![
+                "--db",
+                db,
+                "up",
+                "--parallel",
+                "4",
+                "--in-cmux",
+                "--auto-update",
+                "--max-waiting",
+                "2",
+                "--cmux",
+                "/opt/cmux"
+            ],
+            vec![
+                "--db",
+                db,
+                "up",
+                "--parallel",
+                "4",
+                "--in-cmux",
+                "--auto-update",
+                "--max-waiting",
+                "6"
+            ]
         ]
     );
 

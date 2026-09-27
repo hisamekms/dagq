@@ -396,6 +396,21 @@ replaced, and `up` starts the old binary again"
             {
                 arguments.push("--in-cmux".to_owned());
             }
+            // The drained supervisor's automatic update and wait limit carry
+            // over, so no second `up` is needed to put them back.
+            let restarts = |flag: &str| options.restart.iter().any(|argument| argument == flag);
+            if live.iter().any(|registration| registration.auto_update)
+                && !restarts("--auto-update")
+            {
+                arguments.push("--auto-update".to_owned());
+            }
+            if let Some(max_waiting) = live
+                .iter()
+                .find_map(|registration| registration.max_waiting)
+                && !restarts("--max-waiting")
+            {
+                arguments.extend(["--max-waiting".to_owned(), max_waiting.to_string()]);
+            }
             arguments.extend(options.restart.iter().cloned());
             binaries.run(&options.target, &arguments).with_context(|| {
                 format!(
