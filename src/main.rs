@@ -2296,7 +2296,9 @@ fn execute(cli: Cli) -> Result<Value> {
             format,
             out,
         } => {
-            let graph = dependency_graph(queue.graph_input()?, goal_id.map(GoalId::new));
+            let input = queue.graph_input()?;
+            let goal_id = goal_id.map(GoalId::new);
+            let graph = dependency_graph(input.clone(), goal_id);
             if format == "json" {
                 anyhow::ensure!(out.is_none(), "--out needs --format d2 or svg");
                 serde_json::to_value(graph)?
@@ -2306,7 +2308,17 @@ fn execute(cli: Cli) -> Result<Value> {
                     .into_iter()
                     .map(|goal| (goal.id, goal.title))
                     .collect();
-                let diagram = dagq::application::diagram::near_term(&graph, &titles);
+                let diagram = match goal_id {
+                    // The goal's prerequisites and critical steps outside it
+                    // are drawn too (ADR-0077 decision 1).
+                    Some(goal) => dagq::application::diagram::near_term_in_goal(
+                        &dependency_graph(input, None),
+                        &graph,
+                        goal,
+                        &titles,
+                    ),
+                    None => dagq::application::diagram::near_term(&graph, &titles),
+                };
                 let source = diagram.to_d2();
                 let text = if format == "svg" {
                     dagq::infrastructure::d2::render_svg(

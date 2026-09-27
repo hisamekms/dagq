@@ -21,11 +21,13 @@ related:
 
 ## コマンド
 
-`dagq graph [--goal ID] [--format json|d2|svg] [--out PATH]`。既定の`json`は今までの`DependencyGraph`のJSONで変わらない。`d2`はd2のソースを、`svg`はSVGを標準出力にそのまま書く（JSONで包まない。`main.rs`の`RAW_STDOUT`）。`--out`があればそのファイルに書き、`{"format", "out", "tasks"}`（`tasks`は描いたtaskのID）のJSONを返す。`--format json`に`--out`は付けられない。`--goal`は`graph`と同じく`tasks`・`candidates`・`critical`の起点を絞ってから選ぶ。queueの状態を変えず、queueはread-onlyで開く。observerとheadlessのjob（`DAGQ_ROLE=observer` / `review-job`などのjobのrole）は`--out`の無い`graph`だけを打てる（`--out`はファイルを書くので許可の一覧から外す）。
+`dagq graph [--goal ID] [--format json|d2|svg] [--out PATH]`。既定の`json`は今までの`DependencyGraph`のJSONで変わらない。`d2`はd2のソースを、`svg`はSVGを標準出力にそのまま書く（JSONで包まない。`main.rs`の`RAW_STDOUT`）。`--out`があればそのファイルに書き、`{"format", "out", "tasks"}`（`tasks`は描いたtaskのID）のJSONを返す。`--format json`に`--out`は付けられない。`--goal`は、`json`では`graph`と同じく`tasks`・`candidates`・`critical`の起点を絞る。`d2` / `svg`では選ぶ起点だけをgoalに絞り、goalの外の前提と`critical`の鎖も描く（下の選び方。task 764）。queueの状態を変えず、queueはread-onlyで開く。observerとheadlessのjob（`DAGQ_ROLE=observer` / `review-job`などのjobのrole）は`--out`の無い`graph`だけを打てる（`--out`はファイルを書くので許可の一覧から外す）。
 
 ## 選び方（`application::diagram::select`）
 
 `DependencyGraph`の`tasks`のうち、(i) `in_progress`、(ii) `effective_priority`が`high`以上、(iii) `critical`の鎖に載る、のどれかに当たるtaskと、それらの`ready_after`（1段だけ）: 未完了のtask、と`{"goal": ID}`のgoalの未完了のtask全部。前提の前提は辿らない。理由（`in_progress` / `priority` / `critical` / `prerequisite`）はこの順で最初に当たったもの。
+
+`--goal G`の`d2` / `svg`（`near_term_in_goal`、`select_in`）: (i)・(ii)はGのtaskに絞り、(iii)は`graph --goal G`の`critical`の鎖（Gのtaskから始まり、Gの外へ続きうる）の全部のtask、(iv)の前提は絞らない`graph`（`dependency_graph(..., None)`）の全部のtaskから引く。Gの外のtaskは自分のgoalの帯・枠に置く（goalの無いtaskは`goal なし`の帯）。`critical`の鎖をGの外まで描くのは、ADR-0077の決定1の(iii)が「`graph`の`critical`の鎖に載るtask」で、`--goal`の`graph`の`critical`がGの外まで続く鎖だから。鎖の外に出たtaskの前提も(iv)として1段だけ描く。Gの外のtaskは`in_progress`や`high`でも(i)・(ii)の起点にしない（鎖か前提として入ったときだけ描き、理由は`critical` / `prerequisite`、色は`Tone`のまま）。着手可の印は絞らない`graph`の`candidates`で付ける。`--goal`の無いときは`select`と同じ。
 
 ## 配置（`application::diagram::layout`）
 
@@ -54,4 +56,4 @@ related:
 
 ## test
 
-配置・選び方・d2の生成は`application::diagram`のunit test、描画の失敗の経路は`infrastructure::d2`のunit test（stubの`d2`）、CLIは`tests/it/cli_graph.rs`（PATHをstubの`d2` / `d2plugin-tala`の入ったディレクトリとsystemのものだけにして、d2・svg・`--out`・ツールの無いとき・失敗・`doctor`を確かめる）。本物のTALAを使う描画は自動化しない。
+配置・選び方（`--goal`の`select_in` / `near_term_in_goal`を含む）・d2の生成は`application::diagram`のunit test、描画の失敗の経路は`infrastructure::d2`のunit test（stubの`d2`）、CLIは`tests/it/cli_graph.rs`（PATHをstubの`d2` / `d2plugin-tala`の入ったディレクトリとsystemのものだけにして、d2・svg・`--out`・ツールの無いとき・失敗・`doctor`と、goalをまたぐ前提を持つqueueでの`--goal`のd2を確かめる）。本物のTALAを使う描画は自動化しない。

@@ -251,3 +251,78 @@ fn report_carries_the_near_term_diagram_or_why_not() {
         serde_json::json!({"tasks": [first, second], "d2_source": true})
     );
 }
+
+#[test]
+fn graph_of_a_goal_draws_the_prerequisites_outside_it() {
+    let (dir, db) = queue();
+    let add = |args: &[&str]| ok(&db, args)["id"].to_string();
+    let before = add(&["goal", "add", "groundwork goal"]);
+    let gate = add(&["goal", "add", "gate goal"]);
+    let focus = add(&["goal", "add", "focus goal"]);
+    let base = add(&["add", "base", "--goal", &before]);
+    let aside = add(&["add", "aside", "--goal", &before]);
+    let gated = add(&["add", "gated", "--goal", &gate]);
+    let top = add(&[
+        "add",
+        "top",
+        "--goal",
+        &focus,
+        "--depends-on",
+        &base,
+        "--depends-on-goal",
+        &gate,
+        "--priority",
+        "high",
+    ]);
+    for id in [&base, &aside, &gated, &top] {
+        ok(&db, &["ready", id, "--bypass-review"]);
+    }
+    // The JSON stays narrowed to the goal.
+    let json = ok(&db, &["graph", "--goal", &focus]);
+    let listed: Vec<String> = json["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["id"].to_string())
+        .collect();
+    assert_eq!(listed, std::slice::from_ref(&top));
+
+    let bin = dir.path().join("tools");
+    std::fs::create_dir(&bin).unwrap();
+    let args = ["graph", "--goal", &focus, "--format", "d2"];
+    let d2 = invoke_with_bin(&db, &bin, &args);
+    assert!(
+        d2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&d2.stderr)
+    );
+    let source = String::from_utf8(d2.stdout).unwrap();
+    for id in [&base, &gated, &top] {
+        assert!(source.contains(&format!("t{id}: {{")), "{id}: {source}");
+    }
+    assert!(!source.contains(&format!("t{aside}: {{")), "{source}");
+    for goal in [&before, &gate, &focus] {
+        assert!(source.contains(&format!("goal_{goal}: {{")), "{goal}");
+    }
+    assert!(source.contains(&format!("label: \"goal {before}: groundwork goal\"")));
+    assert!(source.contains(&format!("t{base} -> t{top}:")));
+    assert!(source.contains(&format!("goal_{gate} -> t{top}:")));
+    assert_eq!(invoke_with_bin(&db, &bin, &args).stdout, source.as_bytes());
+
+    let out = dir.path().join("goal.d2");
+    let written = ok(
+        &db,
+        &[
+            "graph",
+            "--goal",
+            &focus,
+            "--format",
+            "d2",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let mut drawn = [&base, &gated, &top].map(|id| id.parse::<i64>().unwrap());
+    drawn.sort_unstable();
+    assert_eq!(written["tasks"], serde_json::json!(drawn));
+}

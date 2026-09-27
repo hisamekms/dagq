@@ -101,14 +101,23 @@ pub const STARTABLE_MARK: &str = "▶ ";
 /// those still wait for, one level only: an unfinished predecessor, or the
 /// unfinished tasks of a goal not closed as achieved.
 pub fn select(graph: &DependencyGraph) -> BTreeMap<TaskId, Reason> {
+    select_in(graph, None)
+}
+
+/// [`select`] with (i) and (ii) narrowed to the tasks of `goal`; (iii)
+/// is every task of `graph.critical` and (iv) comes from all of
+/// `graph.tasks`, so a prerequisite or a critical step outside the goal is
+/// still drawn. `None` narrows nothing.
+pub fn select_in(graph: &DependencyGraph, goal: Option<GoalId>) -> BTreeMap<TaskId, Reason> {
     let critical: BTreeSet<TaskId> = graph.critical.iter().copied().collect();
+    let in_goal = |node: &GraphNode| goal.is_none() || node.goal_id == goal;
     let mut chosen: BTreeMap<TaskId, Reason> = graph
         .tasks
         .iter()
         .filter_map(|node| {
-            let reason = if node.status == TaskStatus::InProgress {
+            let reason = if in_goal(node) && node.status == TaskStatus::InProgress {
                 Reason::InProgress
-            } else if node.effective_priority >= Priority::High {
+            } else if in_goal(node) && node.effective_priority >= Priority::High {
                 Reason::Priority
             } else if critical.contains(&node.id) {
                 Reason::Critical
@@ -215,6 +224,25 @@ impl Diagram {
 /// decision 2). `goal_titles` names the goals' frames.
 pub fn near_term(graph: &DependencyGraph, goal_titles: &BTreeMap<GoalId, String>) -> Diagram {
     layout(graph, &select(graph), goal_titles)
+}
+
+/// The near-term diagram of `graph --goal`: `whole` is the graph over
+/// every unfinished task and `narrowed` the one for the goal. The tasks
+/// drawn for (i) and (ii) are the goal's, the critical chain is
+/// `narrowed`'s (it starts in the goal and may leave it), and the
+/// prerequisites (iv) come from `whole`, each in its own goal's frame.
+pub fn near_term_in_goal(
+    whole: &DependencyGraph,
+    narrowed: &DependencyGraph,
+    goal: GoalId,
+    goal_titles: &BTreeMap<GoalId, String>,
+) -> Diagram {
+    let graph = DependencyGraph {
+        tasks: whole.tasks.clone(),
+        candidates: whole.candidates.clone(),
+        critical: narrowed.critical.clone(),
+    };
+    layout(&graph, &select_in(&graph, Some(goal)), goal_titles)
 }
 
 /// Place `chosen` tasks of `graph`: the column is the longest chain of
@@ -660,6 +688,81 @@ mod tests {
         graph.critical.clear();
         let chosen = select(&graph);
         assert_eq!(chosen.keys().copied().collect::<Vec<_>>(), ids(&[2, 3]));
+    }
+
+    #[test]
+    fn a_goal_draws_its_prerequisites_and_critical_steps_outside_it() {
+        let titles = BTreeMap::new();
+        // Goal 20: 4 is in progress, 9 before it waits for 1 of goal 10;
+        // the high 3, the urgent 5 and the chain 8 → 7 are other goals'.
+        let narrowed = DependencyGraph {
+            critical: ids(&[9, 4]),
+            ..graph()
+        };
+        let chosen = select_in(&narrowed, Some(GoalId::new(20)));
+        let expected: BTreeMap<TaskId, Reason> = [
+            (1, Reason::Prerequisite),
+            (4, Reason::InProgress),
+            (9, Reason::Critical),
+        ]
+        .into_iter()
+        .map(|(id, reason)| (TaskId::new(id), reason))
+        .collect();
+        assert_eq!(chosen, expected);
+        let diagram = near_term_in_goal(&graph(), &narrowed, GoalId::new(20), &titles);
+        assert_eq!(diagram.task_ids(), ids(&[1, 4, 9]));
+        let goals: Vec<Option<i64>> = diagram
+            .frames
+            .iter()
+            .map(|frame| frame.goal_id.map(GoalId::as_i64))
+            .collect();
+        assert_eq!(goals, [Some(10), Some(20)]);
+        assert!(diagram.edges.iter().any(|edge| {
+            edge.from == EdgeEnd::Task(TaskId::new(1)) && edge.to == TaskId::new(9)
+        }));
+
+        // Goal 10's chain 1 → 9 → 4 leaves it: every step is drawn, with
+        // one level of prerequisites; 4 is drawn for the chain, not for
+        // being in progress outside the goal.
+        let narrowed = DependencyGraph {
+            critical: ids(&[1, 9, 4]),
+            ..graph()
+        };
+        let diagram = near_term_in_goal(&graph(), &narrowed, GoalId::new(10), &titles);
+        let reasons: Vec<(i64, Reason)> = diagram
+            .tasks
+            .iter()
+            .map(|task| (task.id.as_i64(), task.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (1, Reason::Critical),
+                (2, Reason::Prerequisite),
+                (3, Reason::Priority),
+                (4, Reason::Critical),
+                (9, Reason::Critical),
+            ]
+        );
+        let critical: Vec<(EdgeEnd, TaskId)> = diagram
+            .edges
+            .iter()
+            .filter(|edge| edge.critical)
+            .map(|edge| (edge.from, edge.to))
+            .collect();
+        assert_eq!(
+            critical,
+            [
+                (EdgeEnd::Task(TaskId::new(9)), TaskId::new(4)),
+                (EdgeEnd::Task(TaskId::new(1)), TaskId::new(9)),
+            ]
+        );
+        assert_eq!(
+            diagram.to_d2(),
+            near_term_in_goal(&graph(), &narrowed, GoalId::new(10), &titles).to_d2()
+        );
+        // Without a goal nothing is narrowed.
+        assert_eq!(select_in(&graph(), None), select(&graph()));
     }
 
     #[test]
