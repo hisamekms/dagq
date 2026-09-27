@@ -1332,6 +1332,16 @@ pub fn supervise_with(
     options: &SuperviseOptions,
 ) -> Result<Value> {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    // A supervise past its limit shows what the queue recorded up to then,
+    // so that where it waited can be read from the failure (task 770).
+    let _dump = common::on_timeout(
+        Duration::from_secs(10),
+        format!("print the events of the queue {}", db.display()),
+        {
+            let db = db.to_owned();
+            move || print_queue_events(&db)
+        },
+    );
     runtime::supervise(
         db,
         repo,
@@ -1340,6 +1350,66 @@ pub fn supervise_with(
         Path::new(env!("CARGO_BIN_EXE_dagq")),
         options,
     )
+}
+
+/// How many of the latest events [`print_queue_events`] prints.
+const EVENTS_PRINTED: i64 = 200;
+
+/// Write the queue's latest events and its unclosed asks to the process's
+/// stderr, oldest first, for a supervise that timed out. It runs on the
+/// timeout monitor's cleanup thread while the supervisor may still write,
+/// so it only reads; what cannot be read is said instead.
+fn print_queue_events(db: &Path) {
+    use std::io::Write as _;
+    let read = || -> rusqlite::Result<Vec<String>> {
+        let connection =
+            Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        let mut lines: Vec<String> = connection
+            .prepare(
+                "SELECT id, created_at, task_id, run_id, kind, substr(payload, 1, 300)
+                 FROM run_events ORDER BY id DESC LIMIT ?1",
+            )?
+            .query_map([EVENTS_PRINTED], |r| {
+                Ok(format!(
+                    "  event {} {} task {:?} run {:?} {} {}",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        lines.reverse();
+        lines.extend(
+            connection
+                .prepare("SELECT id, kind, run_id FROM asks WHERE closed_at IS NULL ORDER BY id")?
+                .query_map([], |r| {
+                    Ok(format!(
+                        "  unclosed ask {} {} run {:?}",
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+        Ok(lines)
+    };
+    let text = match read() {
+        Ok(lines) => format!(
+            "the latest events of the queue {} (oldest first):\n{}\n",
+            db.display(),
+            lines.join("\n")
+        ),
+        Err(error) => format!(
+            "the events of the queue {} could not be read: {error}\n",
+            db.display()
+        ),
+    };
+    let _ = std::io::stderr().lock().write_all(text.as_bytes());
 }
 
 /// The asks other than `approve_landing`: those the supervisor opens for a

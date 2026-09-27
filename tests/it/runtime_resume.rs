@@ -1703,9 +1703,14 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
 fn a_resumed_session_that_ignores_exit_is_let_go() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     let mut queue = SqliteQueue::open(&db).unwrap();
+    // The short exit timeout is for the session that holds its /exit back
+    // only. A session that exits at its /exit, as the next resume's does,
+    // may take longer than a second to do so under load: with this timeout
+    // it would be let go as stuck too (task 770).
+    let exit_timeout = backend.exit_timeout;
+    backend.exit_timeout = Duration::from_secs(1);
     backend.resume_script_for(2, &format!("await_message; idle; {HOLD}"));
     let outcome = supervise(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -1752,6 +1757,7 @@ fn a_resumed_session_that_ignores_exit_is_let_go() {
         run_attention_of(&runtime::status(&db).unwrap(), run.id()).unwrap()["next"],
         "resuming (runtime)"
     );
+    backend.exit_timeout = exit_timeout;
     backend.resume_script_for(
         2,
         "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
