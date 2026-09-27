@@ -1435,7 +1435,9 @@ pub enum AttentionNext {
     GoalReviewByHand,
     /// The planner a revise went to did not submit its proposal again
     /// within the planner timeout (`planner_unresponsive`, ADR-0041
-    /// decision 13): a person looks at its workspace.
+    /// decision 13), or a planner of the runtime's showed nothing (no
+    /// input, no idle marker, no idle screen) within it (task 805): a
+    /// person looks at its workspace.
     CheckPlanner,
     /// The runtime opened its planners for a draft the runtime or a job
     /// registered, and none decided it (`draft_planner_exhausted`,
@@ -1626,6 +1628,9 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     // A planner's screen inferred idle without its idle marker
     // (ADR-t803-1).
     event_kind::IDLE_INFERRED,
+    // A planner of the runtime's nothing was seen of within the planner
+    // timeout (task 805); the revise's is on its proposal's task.
+    event_kind::PLANNER_UNRESPONSIVE,
     "session_turns",
     "supervisor_started",
     "supervisor_stopped",

@@ -53,6 +53,58 @@ impl SqliteQueue {
     }
 }
 
+impl SqliteQueue {
+    /// Record `planner_unresponsive` about planner `id` of the runtime's
+    /// (task 805) with `payload`, which names it by `planner_id` with
+    /// `subject: "planner"`: once per planner, `false` when it was recorded
+    /// before.
+    pub fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let seen: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+                 AND json_extract(payload,'$.subject')='planner'
+                 AND json_extract(payload,'$.planner_id')=?2)",
+            params![event_kind::PLANNER_UNRESPONSIVE, id],
+            |r| r.get(0),
+        )?;
+        if seen {
+            return Ok(false);
+        }
+        super::run_log::queue_event(&tx, event_kind::PLANNER_UNRESPONSIVE, &payload)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The planners not closed that a `planner_unresponsive` names
+    /// ([`Self::planner_silent`]), each with that event, oldest first. A
+    /// planner a revise went to since is left out: the revise's own
+    /// `planner_unresponsive` times it.
+    pub fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
+        let events: Vec<RunEvent> = self
+            .conn
+            .prepare(
+                "SELECT e.* FROM run_events e JOIN planners p
+                   ON p.id = json_extract(e.payload,'$.planner_id')
+                 WHERE e.kind=?1 AND json_extract(e.payload,'$.subject')='planner'
+                   AND p.closed_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM proposals r WHERE r.status='revising'
+                                   AND r.revise_planner_id = p.id)
+                 ORDER BY p.id",
+            )?
+            .query_map([event_kind::PLANNER_UNRESPONSIVE], event_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        events
+            .into_iter()
+            .map(|event| {
+                let id = event.payload["planner_id"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow!("event {} names no planner", event.id))?;
+                Ok((self.planner(PlannerId::new(id))?, event))
+            })
+            .collect()
+    }
+}
+
 /// The [`SessionRegistry`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl SessionRegistry for SqliteQueue {
@@ -98,6 +150,12 @@ impl SessionRegistry for SqliteQueue {
     }
     fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()> {
         SqliteQueue::planner_exited(self, id, wrapper_pid, exit_code)
+    }
+    fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
+        SqliteQueue::planner_silent(self, id, payload)
+    }
+    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
+        SqliteQueue::silent_planners(self)
     }
     fn record_session_turns(&self) -> Result<usize> {
         crate::infrastructure::sessions::record_open_turns(&self.conn)

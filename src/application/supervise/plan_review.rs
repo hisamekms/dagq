@@ -16,7 +16,7 @@ use crate::{
         PlanReviewApply, PlanReviewJob, StatusFilter, TaskListItem, TaskQuery,
         planner::{
             PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
-            planner_view,
+            planner_last_activity, planner_view,
         },
         planner_idle_marker,
         prompt::{
@@ -657,7 +657,56 @@ impl Supervisor<'_> {
         // settled.
         self.settle_findings()?;
         self.open_finding_planners(options, &mut runtime_open)?;
+        self.tell_of_silent_planners(timeout, &views)?;
         self.end_runtime_planners(&views)
+    }
+
+    /// Tell the inbox, once per planner, of a planner of the runtime's
+    /// (for a draft, a finding or a revise) nothing was seen of within
+    /// `timeout` seconds (task 805): at work by what the runtime can tell,
+    /// with no input, no idle marker and no idle screen since. It is the
+    /// backstop for an idle marker its hook could not write on a screen
+    /// cmux cannot read, or reads in a state it does not know. It is not
+    /// closed: a person looks at it. A planner a revise went to is timed by
+    /// its revise, and one that waits on its `planner_question` waits on a
+    /// person; a person's planner is never timed.
+    fn tell_of_silent_planners(&mut self, timeout: i64, views: &[PlannerView]) -> Result<()> {
+        let now = self.generators.clock.now();
+        let revising = self.queue.revising_proposals()?;
+        for view in views.iter().filter(|view| {
+            view.planner.origin == PlannerOrigin::Runtime
+                && view.alive
+                && view.state != PlannerState::Idle
+        }) {
+            let id = view.planner.id;
+            if revising.iter().any(|revise| revise.planner_id == Some(id)) {
+                continue;
+            }
+            let last = planner_last_activity(&*self.files, &view.dir, view.planner.created_at)?;
+            let waited = now - last;
+            if waited <= timeout || self.waits_on_question(view)? {
+                continue;
+            }
+            let reason = format!(
+                "planner {id} of the runtime showed nothing (no input, no idle marker, no idle screen) for {waited} seconds; it is left open for a person to look at"
+            );
+            let payload = json!({
+                "subject": "planner",
+                "planner_id": id,
+                "origin": view.planner.origin.as_str(),
+                "workspace_id": view.planner.workspace_id,
+                "draft_task_id": view.planner.draft_task_id,
+                "finding_id": view.planner.finding_id,
+                "state": view.state.as_str(),
+                "last_activity": last,
+                "waited_secs": waited,
+                "reason": reason,
+            });
+            if self.queue.planner_silent(id, payload)? {
+                warn!("{reason}; the inbox is told");
+            }
+        }
+        Ok(())
     }
 
     /// Whether a planner's session is over: it exited, its wrapper stopped

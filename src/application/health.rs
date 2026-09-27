@@ -899,6 +899,27 @@ pub fn attention(
             next: AttentionNext::DecideWaiting,
         });
     }
+    // A planner of the runtime's nothing was seen of within the planner
+    // timeout waits for a person to look at it until its row closes (task
+    // 805); it is shown on its draft's task, if it has one.
+    for (planner, event) in queue.silent_planners()? {
+        attention.push(Attention {
+            run_id: None,
+            task_id: planner.draft_task_id,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "working".into(),
+            kind: event_kind::PLANNER_UNRESPONSIVE.into(),
+            last_error: event
+                .payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::CheckPlanner,
+        });
+    }
     for hold in queue.plan_review_holds()? {
         let (status, next) = match hold.kind {
             event_kind::PLAN_REVIEW_FAILED => ("submitted", AttentionNext::PlanReviewByHand),

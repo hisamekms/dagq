@@ -1394,6 +1394,14 @@ pub trait SessionRegistry {
     fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()>;
     fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()>;
     fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()>;
+    /// Record `planner_unresponsive` about a planner of the runtime's
+    /// nothing was seen of within the planner timeout (task 805), once per
+    /// planner: `payload` names it by `planner_id` with `subject:
+    /// "planner"`. `false` when it was recorded before.
+    fn planner_silent(&self, id: PlannerId, payload: serde_json::Value) -> Result<bool>;
+    /// The planners not closed that such a `planner_unresponsive` names,
+    /// each with that event: the inbox's attention.
+    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>>;
     /// Record the finished transcript turns of the Claude session spans
     /// still open (ADR-0048 decision 8); returns how many spans got turns.
     fn record_session_turns(&self) -> Result<usize>;

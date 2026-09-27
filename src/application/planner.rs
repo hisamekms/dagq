@@ -573,6 +573,20 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
     })
 }
 
+/// When anything was last seen of the planner whose directory is `dir`,
+/// opened at `created_at` (Unix seconds): the latest of its last input
+/// ([`screen_idle::last_input`]) and its idle marker, fresh or stale. The
+/// runtime's planner timeout counts from it (task 805).
+pub fn planner_last_activity(files: &dyn RunFiles, dir: &Path, created_at: i64) -> Result<i64> {
+    let marker = planner_idle_marker(dir);
+    let opened = UNIX_EPOCH + Duration::from_secs(u64::try_from(created_at)?);
+    let last = screen_idle::last_input(files, &marker, opened);
+    let last = files
+        .modified(&marker)
+        .map_or(last, |modified| last.max(modified));
+    Ok(super::unix_seconds(last))
+}
+
 /// Every planner not closed (with `all`, every planner), each judged by
 /// [`planner_view`]. Nothing is written: a planner that only looks
 /// `closed` here is not given up in the queue on that evidence.
