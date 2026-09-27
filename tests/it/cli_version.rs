@@ -675,8 +675,10 @@ exec '{bin}' \"$@\"\n"
         .find(|u| u.kind == "update_failed")
         .unwrap();
     assert_eq!(failed.payload["stage"], "install", "{failed:?}");
+    // Every supervisor failed the handoff: each is brought back (task 716).
+    assert_eq!(failed.payload["kept"], false, "{failed:?}");
     assert_eq!(
-        failed.payload["supervisor"]["state"], "stopped",
+        failed.payload["supervisors"][0]["supervisor"]["state"], "stopped",
         "{failed:?}"
     );
     assert_eq!(

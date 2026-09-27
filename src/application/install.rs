@@ -291,36 +291,31 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
             &version,
             options.handoff_timeout,
             options.poll,
-        )
-        .and_then(|handed| match handoff_failures(&handed) {
+        );
+        let undo = |error, supervisors| {
+            Undo {
+                binaries,
+                target,
+                previous: &previous,
+                version: &version,
+                replaced_version: replaced_version.as_deref(),
+                in_place,
+            }
+            .error(error, supervisors)
+        };
+        match handed {
             // The binary is one file for every supervisor: it goes back
             // only when none of them took it (ADR-t632-1).
-            Some(error) if handed.iter().all(|h| h.error.is_some()) => Err(error),
-            _ => Ok(handed),
-        });
-        match handed {
+            Ok(handed) if handed.iter().all(|h| h.error.is_some()) => {
+                let error = handoff_failures(&handed)
+                    .unwrap_or_else(|| anyhow::anyhow!("no supervisor took the handoff"));
+                return Err(undo(
+                    error,
+                    Some(handed.iter().map(Handed::report).collect()),
+                ));
+            }
             Ok(handed) => handed,
-            Err(error) if in_place => {
-                return Err(error.context(format!(
-                    "the handoff to {version} failed; {} was {version} already and stays",
-                    target.display()
-                )));
-            }
-            Err(error) => {
-                let restored = binaries.restore(target);
-                return Err(match restored {
-                    Ok(()) => error.context(format!(
-                        "the handoff to {version} failed; the binary it replaced is back at {}",
-                        target.display()
-                    )),
-                    Err(restore) => error.context(format!(
-                        "the handoff to {version} failed, and the binary it replaced could not be \
-put back at {} ({restore:#}); it is at {}",
-                        target.display(),
-                        previous.display()
-                    )),
-                });
-            }
+            Err(error) => return Err(undo(error, None)),
         }
     };
     let failure = handoff_failures(&handed);
@@ -389,6 +384,98 @@ impl std::error::Error for KeptBinary {}
 
 impl KeptBinary {
     /// The [`KeptBinary`] `error` is or wraps.
+    pub fn of(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+/// What an install undoes when its handoff failed for every supervisor.
+struct Undo<'a> {
+    binaries: &'a dyn Binaries,
+    target: &'a Path,
+    previous: &'a Path,
+    version: &'a str,
+    replaced_version: Option<&'a str>,
+    in_place: bool,
+}
+
+impl Undo<'_> {
+    /// Put the binary it replaced back (unless it was this build already)
+    /// and say so around `error`; with each supervisor's outcome, as a
+    /// [`HandoffFailed`].
+    fn error(&self, error: anyhow::Error, supervisors: Option<Vec<Value>>) -> anyhow::Error {
+        let Self {
+            target,
+            previous,
+            version,
+            ..
+        } = *self;
+        let (error, restored) = if self.in_place {
+            let context = format!(
+                "the handoff to {version} failed; {} was {version} already and stays",
+                target.display()
+            );
+            (
+                error.context(context.clone()),
+                json!({"restored": false, "reason": context}),
+            )
+        } else {
+            match self.binaries.restore(target) {
+                Ok(()) => (
+                    error.context(format!(
+                        "the handoff to {version} failed; the binary it replaced is back at {}",
+                        target.display()
+                    )),
+                    json!({"restored": true, "version": self.replaced_version}),
+                ),
+                Err(restore) => {
+                    let reason = format!("{restore:#}");
+                    (
+                        error.context(format!(
+                            "the handoff to {version} failed, and the binary it replaced could \
+not be put back at {} ({reason}); it is at {}",
+                            target.display(),
+                            previous.display()
+                        )),
+                        json!({"restored": false, "reason": reason}),
+                    )
+                }
+            }
+        };
+        match supervisors {
+            Some(supervisors) => HandoffFailed {
+                message: format!("{error:#}"),
+                supervisors,
+                restored,
+            }
+            .into(),
+            None => error,
+        }
+    }
+}
+
+/// The error of an install whose handoff every supervisor failed: the
+/// binary it replaced went back (or `restored` says why not), and
+/// `supervisors` is each one's outcome as [`Handed::report`] gives it, for
+/// the automatic update to bring each of them back.
+#[derive(Debug)]
+pub struct HandoffFailed {
+    pub message: String,
+    pub supervisors: Vec<Value>,
+    /// `restored` and `version`, or `reason` when the binary did not go back.
+    pub restored: Value,
+}
+
+impl std::fmt::Display for HandoffFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HandoffFailed {}
+
+impl HandoffFailed {
+    /// The [`HandoffFailed`] `error` is or wraps.
     pub fn of(error: &anyhow::Error) -> Option<&Self> {
         error.chain().find_map(|cause| cause.downcast_ref::<Self>())
     }

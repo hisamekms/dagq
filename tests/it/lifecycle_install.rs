@@ -401,6 +401,7 @@ struct UpdateBinaries {
     old: PathBuf,
     built: PathBuf,
     build_fails: bool,
+    replace_fails: std::sync::atomic::AtomicBool,
     pending: Vec<(i64, bool)>,
     calls: Mutex<Vec<String>>,
 }
@@ -414,6 +415,7 @@ impl UpdateBinaries {
             old: dir.join("bin"),
             built,
             build_fails,
+            replace_fails: Default::default(),
             pending: pending.to_vec(),
             calls: Mutex::default(),
         }
@@ -464,6 +466,9 @@ impl dagq::application::install::Binaries for UpdateBinaries {
     }
     fn replace(&self, _: &Path, target: &Path) -> Result<()> {
         self.note(format!("replace {}", target.display()));
+        if self.replace_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("replace failed");
+        }
         Ok(())
     }
     fn restore(&self, target: &Path) -> Result<()> {
@@ -734,6 +739,11 @@ enum Afterwards {
     /// Take the handoff under its own token, then deregister without
     /// heartbeating, leaving only a stale row of the same pid and build.
     TakeThenDeregisterOverStale,
+    /// Stop heartbeating while asked, the process living on (hung in the
+    /// exec of the new binary); it dies once terminated.
+    Hang,
+    /// Die while asked, before taking the handoff.
+    DieBeforeTaking,
 }
 
 /// A row of `pid` under the new build that an earlier process of a reused
@@ -765,11 +775,28 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
             .unwrap()
             .is_some()
     });
-    if let Afterwards::DeregisterOverStale = then {
-        queue
-            .deregister_supervisor(&LeaseToken::new(token))
-            .unwrap();
-        return;
+    match then {
+        Afterwards::DeregisterOverStale => {
+            queue
+                .deregister_supervisor(&LeaseToken::new(token))
+                .unwrap();
+            return;
+        }
+        Afterwards::Hang => {
+            rusqlite::Connection::open(&fixture.location.db)
+                .unwrap()
+                .execute(
+                    "UPDATE supervisors SET heartbeat_at = unixepoch() - 3600 WHERE token = ?1",
+                    [token],
+                )
+                .unwrap();
+            return;
+        }
+        Afterwards::DieBeforeTaking => {
+            processes.dead.lock().unwrap().insert(pid);
+            return;
+        }
+        _ => {}
     }
     let version = match then {
         Afterwards::ExecFails => "0.0.1",
@@ -824,9 +851,26 @@ fn update_two(auto: Afterwards, other: Afterwards) -> (Value, Vec<String>, Vec<S
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, "old build").unwrap();
     let binaries = UpdateBinaries::new(dir, false, &[]);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    /// Ends the helper below however the job ends, a panic included.
+    struct Done<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     let report = thread::scope(|scope| {
         scope.spawn(|| take_as(&fixture, &processes, "auto", UPDATED_PID, auto));
         scope.spawn(|| take_as(&fixture, &processes, "other", OTHER_PID, other));
+        // A supervisor the job terminates dies at once.
+        scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let terminated = processes.terminated.lock().unwrap().clone();
+                processes.dead.lock().unwrap().extend(terminated);
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let _done = Done(&done);
         run_update_job(&fixture, &binaries, &processes, &restarted)
     });
     let restarted = restarted.lock().unwrap().clone();
@@ -1007,15 +1051,104 @@ fn the_update_job_keeps_the_binary_when_only_some_take_the_handoff() {
     assert_eq!(other["supervisor"]["state"], "running", "{report}");
     assert!(report["ask_id"].as_i64().is_some(), "{report}");
 
-    let (report, calls, _, target) = update_two(Afterwards::ExecFails, Afterwards::ExecFails);
+    let (report, calls, restarted, target) =
+        update_two(Afterwards::ExecFails, Afterwards::ExecFails);
     assert_eq!(report["outcome"], "failed", "{report}");
     assert_eq!(report["stage"], "install", "{report}");
-    assert_eq!(report["kept"], Value::Null, "{report}");
+    assert_eq!(report["kept"], false, "{report}");
+    assert_eq!(report["restored"]["restored"], true, "{report}");
     assert!(
         calls.contains(&format!("restore {}", target.display())),
         "{calls:?}"
     );
-    assert_eq!(report["supervisor"]["state"], "running", "{report}");
+    assert!(restarted.is_empty(), "{restarted:?}");
+    let supervisors = report["supervisors"].as_array().unwrap();
+    assert_eq!(supervisors.len(), 2, "{report}");
+    for supervisor in supervisors {
+        assert_eq!(supervisor["supervisor"]["state"], "running", "{report}");
+    }
+}
+
+/// A handoff every supervisor failed puts the binary back in `install`,
+/// and the job brings back each of them (task 716), not only its own: one
+/// hung with the new binary is stopped and started again, one gone is
+/// started again, and each one's outcome is in the `update_failed` ask.
+#[test]
+fn the_update_job_brings_back_every_supervisor_when_none_takes_the_handoff() {
+    let (report, calls, mut restarted, target) =
+        update_two(Afterwards::Hang, Afterwards::DieBeforeTaking);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "install", "{report}");
+    assert_eq!(report["kept"], false, "{report}");
+    assert_eq!(report["restored"]["restored"], true, "{report}");
+    assert_eq!(report["restored"]["version"], "0.0.1", "{report}");
+    assert!(
+        calls.contains(&format!("restore {}", target.display())),
+        "{calls:?}"
+    );
+    restarted.sort();
+    assert_eq!(restarted, ["auto", "other"]);
+    let supervisors = report["supervisors"].as_array().unwrap();
+    assert_eq!(supervisors.len(), 2, "{report}");
+    let auto = supervisors.iter().find(|s| s["token"] == "auto").unwrap();
+    assert_eq!(auto["pid"], UPDATED_PID, "{report}");
+    assert!(
+        auto["error"]
+            .as_str()
+            .unwrap()
+            .contains("stopped heartbeating"),
+        "{report}"
+    );
+    assert_eq!(auto["supervisor"]["state"], "restarted", "{report}");
+    assert_eq!(auto["supervisor"]["stopped"], true, "{report}");
+    let other = supervisors.iter().find(|s| s["token"] == "other").unwrap();
+    assert_eq!(other["pid"], OTHER_PID, "{report}");
+    assert!(other["error"].as_str().is_some(), "{report}");
+    assert_eq!(other["supervisor"]["state"], "restarted", "{report}");
+    assert_eq!(other["supervisor"]["stopped"], false, "{report}");
+    assert!(report["ask_id"].as_i64().is_some(), "{report}");
+}
+
+/// An install that fails before any handoff (here its replace) brings back
+/// only the job's own supervisor, as before task 716.
+#[test]
+fn the_update_job_brings_back_only_its_supervisor_when_the_install_fails_before_the_handoff() {
+    let fixture = fixture();
+    let mut queue = auto_supervisor(&fixture);
+    queue
+        .register_supervisor(&LeaseToken::new("other"), OTHER_PID, 2, "0.0.1")
+        .unwrap();
+    queue.accept_handoff(&LeaseToken::new("other")).unwrap();
+    let processes = FakeProcesses::default();
+    processes
+        .dead
+        .lock()
+        .unwrap()
+        .extend([UPDATED_PID, OTHER_PID]);
+    let restarted = Mutex::new(Vec::new());
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    binaries
+        .replace_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "install", "{report}");
+    assert!(
+        report["error"].as_str().unwrap().contains("replace failed"),
+        "{report}"
+    );
+    assert_eq!(report["supervisors"], Value::Null, "{report}");
+    assert_eq!(report["supervisor"]["state"], "restarted", "{report}");
+    assert_eq!(*restarted.lock().unwrap(), ["auto"]);
+    assert!(
+        binaries.calls().iter().all(|c| !c.starts_with("restore")),
+        "{:?}",
+        binaries.calls()
+    );
 }
 
 /// `install` with two supervisors (ADR-t632-1): both taking the handoff is
@@ -1116,6 +1249,13 @@ fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
     let (result, calls, _) = two("0.0.1", "0.0.1");
     let error = result.unwrap_err();
     assert!(KeptBinary::of(&error).is_none());
+    let failed = dagq::application::install::HandoffFailed::of(&error).unwrap();
+    assert_eq!(failed.restored["restored"], true, "{:?}", failed.restored);
+    assert_eq!(failed.supervisors.len(), 2, "{:?}", failed.supervisors);
+    for supervisor in &failed.supervisors {
+        assert!(supervisor["error"].as_str().is_some(), "{supervisor}");
+        assert!(supervisor["pid"].as_u64().is_some(), "{supervisor}");
+    }
     let message = format!("{error:#}");
     assert!(message.contains("is back at /opt/bin/dagq"), "{message}");
     assert!(message.contains("supervisor first"), "{message}");

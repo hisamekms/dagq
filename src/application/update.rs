@@ -546,7 +546,48 @@ fn put_in_place(
             Some(kept) => (kept.report.clone(), refused(&kept.report)),
             None => {
                 // `install` put the old binary back itself if it had
-                // replaced it; the supervisor may be gone with the new one.
+                // replaced it; the supervisors it handed over may be gone
+                // or stuck with the new one, each brought back as after a
+                // failed watch.
+                if let Some(handoff) = install::HandoffFailed::of(&error) {
+                    let mut supervisors = Vec::new();
+                    for failed in &handoff.supervisors {
+                        let (Some(token), Some(pid)) = (
+                            failed["token"].as_str().map(LeaseToken::new),
+                            failed["pid"]
+                                .as_u64()
+                                .and_then(|pid| u32::try_from(pid).ok()),
+                        ) else {
+                            continue;
+                        };
+                        let before = registered_before(&registered, &token, pid);
+                        supervisors.push(json!({
+                            "token": token,
+                            "pid": pid,
+                            "error": failed["error"],
+                            "supervisor": bring_back(ports, &*queue, before, Some(&token))?,
+                        }));
+                    }
+                    let mut details = json!({
+                        "restored": handoff.restored.clone(),
+                        "kept": false,
+                        "supervisors": supervisors,
+                    });
+                    // The job's own supervisor is brought back even when it
+                    // was not handed over (not live when the install looked).
+                    if let Some(before) = before.as_ref().filter(|before| {
+                        !handoff
+                            .supervisors
+                            .iter()
+                            .any(|s| s["token"] == before.token.as_str() || s["pid"] == before.pid)
+                    }) {
+                        details["supervisor"] =
+                            bring_back(ports, &*queue, Some(before), Some(&before.token))?;
+                    }
+                    return failed(queue, job, "install", &error, details);
+                }
+                // It failed before any handoff: only the job's own
+                // supervisor can be in doubt.
                 let serving = before.as_ref().map(|before| before.token.clone());
                 let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_ref())?;
                 return failed(
@@ -595,12 +636,7 @@ fn put_in_place(
                 "error": watched.error,
             });
             if watched.error.is_some() {
-                // The registration it had before the install: by its token,
-                // or by its pid when the handoff reported a new token.
-                let before = registered
-                    .iter()
-                    .find(|r| r.token == watched.token)
-                    .or_else(|| registered.iter().find(|r| r.pid == watched.pid));
+                let before = registered_before(&registered, &watched.token, watched.pid);
                 entry["supervisor"] = bring_back(ports, &*queue, before, Some(&watched.now))?;
             }
             supervisors.push(entry);
@@ -664,6 +700,19 @@ fn registration(
         .supervisors()?
         .into_iter()
         .find(|registration| registration.token == *token))
+}
+
+/// The registration a supervisor the install handed over had before it:
+/// by its token, or by its pid when the handoff reported a new token.
+fn registered_before<'a>(
+    registered: &'a [SupervisorRegistration],
+    token: &LeaseToken,
+    pid: u32,
+) -> Option<&'a SupervisorRegistration> {
+    registered
+        .iter()
+        .find(|r| r.token == *token)
+        .or_else(|| registered.iter().find(|r| r.pid == pid))
 }
 
 /// Check a build that waits for a person as `install` would (its version
