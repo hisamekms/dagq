@@ -124,7 +124,11 @@ impl Supervisor<'_> {
     /// `resume_parked_runs` and its next attempt; one whose workspace was
     /// never recorded has nothing to watch it through, and blocks the next
     /// attempt until it ends.
-    fn resume_adoptable(&self, run: &TaskRun, wrapper: Option<&RunProcess>) -> Result<bool> {
+    pub(super) fn resume_adoptable(
+        &self,
+        run: &TaskRun,
+        wrapper: Option<&RunProcess>,
+    ) -> Result<bool> {
         Ok(
             wrapper.is_some_and(|w| w.exited_at.is_none() && self.processes.alive(w.pid))
                 && resume_in_progress(&self.queue.run_events(run.id())?).is_some(),

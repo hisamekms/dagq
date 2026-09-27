@@ -176,7 +176,9 @@ impl Supervisor<'_> {
 
     /// The first step after the exec: a slot for every run whose lease
     /// carries this process's token, rebuilt the way an adopted run's is
-    /// (ADR-0039) or from its `handoff.json`. A run that cannot be rebuilt
+    /// (ADR-0039) or from its `handoff.json`. A `needs_session` run without
+    /// one whose resumed session lives on is rebuilt from its events like an
+    /// adopted one (task 640). A run that cannot be rebuilt
     /// gives its lease back, so the supervisor's resume or triage (or
     /// `recover`) picks it up; one whose rebuild fails is abandoned like
     /// any other runtime error.
@@ -198,9 +200,29 @@ impl Supervisor<'_> {
                     }),
                 }),
             )?;
-            let resumed = matches!(snapshot, Some(Snapshot::Resume { .. }));
+            // A resume whose `handoff.json` could not be written (or is
+            // gone) is rebuilt from its events while its session lives on,
+            // as an adopter does (task 640).
+            // A lookup that fails gives this run's lease back rather than
+            // stopping the takeover of the others.
+            let adopted_resume = snapshot.is_none()
+                && run.status() == RunStatus::NeedsSession
+                && {
+                    let adoptable = self.queue.processes(run.id()).and_then(|processes| {
+                        let wrapper = processes.into_iter().find(|p| p.role == "wrapper");
+                        self.resume_adoptable(&run, wrapper.as_ref())
+                    });
+                    adoptable.unwrap_or_else(|error| {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether its resumed session lives could not be read; its lease is given back: {error:#}", run.id());
+                    false
+                })
+                };
+            let resumed = adopted_resume || matches!(snapshot, Some(Snapshot::Resume { .. }));
             let phase = match (run.status(), snapshot) {
                 (_, Some(snapshot)) => self.rebuild_from(&run, snapshot),
+                (RunStatus::NeedsSession, None) if adopted_resume => {
+                    self.adopt_resume(&run).map(Phase::Resume)
+                }
                 (
                     RunStatus::Claimed
                     | RunStatus::Starting

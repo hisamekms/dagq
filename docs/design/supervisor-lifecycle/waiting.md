@@ -4,8 +4,8 @@ type: design
 title: "人の答えを待つrun（slotの外の待ち）"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -53,7 +53,7 @@ ADR-0071の決定15〜18。
 - **`worker_question`のidle**（決定16）: `ReviseWatch`（task 238）と同じく、`ResumeWatch`もcloseされていない`worker_question`があるあいだは、idleでも段を終えず、`resume_timeout`も数えず、古いreceiptの書き直しも頼まない（`has_unclosed_worker_question`の判定がそれらより前にある）。上限でslotに居るとき（`run_waiting_deferred`）と`--max-waiting 0`でも同じ。答えを送ったときはその時刻を、手で配送されてaskがcloseされたとき（closeの秒が最後の入力の秒より後）はcloseの時刻を最後の入力（`live.input_at`）にし、段の計時をそこから数え直す。以後のidleはそれより新しいmarkerだけを数える。
 - **`Resume`の配送とダイアログ**（決定17）: `ResumeWatch`は`live: Box<SessionWatch>`（`SessionWatch::fixing`。`ReviseWatch`と同じ構成）を持ち、解消依頼を送った後、`/exit`を送るまでの毎回のpollで`deliver_answers`と、agentが生きていれば`watch_prompt`を回す。`/exit`を送るとき（解消の判定、idle、時間切れ、wrapperの沈黙、入力欄が準備できないままの時間切れのどれでも）は`request_exit`が`exit_requested`（`workspace_id`、`timeout_secs`、`resume_attempt`）を送る前に記録し、`live`の記録したダイアログを`prompt_cleared`にして復旧jobを止める。`domain::session_takes_answers`は、最新の`resume_started`の後に`resume_finished`も`exit_requested`も無い`needs_session`のrun（`domain::resume_in_progress`）も答えの配送先にするので、leaseがあれば`worker_question`の`ask_answered`の`runtime_delivers`が`true`になり、`status`は`delivering the answer of ask <id> (runtime)`を出す。
 - **phase**: `run_waiting_started`の`phase`と`status`の`waiting[].phase`は`revise` / `resume`。`status`はrunの今のstatus（`awaiting_integration` / `needs_session`）。`stats`の`waiting`は`ask_kind`ごとに数え、phaseでは分けない（決定18）。
-- **引き継ぎとadopt**: `Revise`はadoptと引き継ぎのどちらでもイベント（`review_anchor`）から組み立て、`Resume`は引き継ぎの`handoff.json`から組み立てる（`Resume`はadoptの対象外のまま）。どちらも組み立てた後の`restore_waiting`で待ちを戻す。
+- **引き継ぎとadopt**: `Revise`はadoptと引き継ぎのどちらでもイベント（`review_anchor`）から組み立て、`Resume`は引き継ぎの`handoff.json`から、それが無ければadoptと同じくイベントから組み立てる（task 356・640）。どちらも組み立てた後の`restore_waiting`で待ちを戻す。
 
 ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`でwrapperが黙った。slotで`/exit`を送る）と`phase_changed`（引き継ぎやadoptで待てないphaseに組み立て直した、またはadoptで上限を超えた）を足している。`lease_lost`と`run_ended`は書かない（leaseを失ったプロセスは書かない。adoptした側がイベントから同じ待ちを続けるので、書くとその待ちを消してしまう）。代わりに`WaitState::of`は、`run_waiting_started`の後に`lease_acquired` / `lease_released` / `run_recovered` / `runtime_error`があれば待ちは無いとみなす（待ちを持っていたsupervisorがrunを失った。adoptと引き継ぎはこれらを書かない）。
 

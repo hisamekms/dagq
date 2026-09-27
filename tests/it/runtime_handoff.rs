@@ -271,6 +271,134 @@ fn a_handoff_during_a_resume_goes_on_watching_the_resumed_session() {
     );
 }
 
+/// Task 640: a handoff during a resume whose `handoff.json` could not be
+/// written (here: is gone) still goes on watching the resumed session: the
+/// next process finds the `needs_session` run under its token with a live
+/// session, keeps the lease and rebuilds the resume from the run's events
+/// instead of giving the lease back, and records `auto_repaired`
+/// (`repair: resume_adopted`, `handoff: true`, with the previous version).
+#[test]
+fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    backend.resume_script_for(
+        2,
+        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
+    });
+    fs::remove_file(Path::new(run.run_dir().unwrap()).join("handoff.json")).unwrap();
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "auto_repaired")
+            .iter()
+            .any(|p| p["repair"] == "resume_adopted")
+    });
+    // The lease stayed with the token: nothing was given back.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, token);
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 1);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| **k == "resume_request_sent")
+            .count(),
+        1
+    );
+    assert!(!kinds.contains(&"run_adopted"), "{kinds:?}");
+    let handed = payloads(&detail, "supervisor_handed_off");
+    assert_eq!(handed.len(), 1, "{kinds:?}");
+    assert_eq!(handed[0]["status"], "needs_session");
+    assert_eq!(handed[0]["state"], Value::Null);
+    let repaired: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "resume_adopted")
+        .collect();
+    assert_eq!(repaired.len(), 1, "{kinds:?}");
+    assert_eq!(repaired[0]["conditions"]["handoff"], true);
+    assert_eq!(repaired[0]["conditions"]["attempt"], 1);
+    assert_eq!(repaired[0]["conditions"]["request_sent"], true);
+    assert!(
+        repaired[0]["detail"]
+            .as_object()
+            .unwrap()
+            .contains_key("previous_version"),
+        "{:?}",
+        repaired[0]
+    );
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["outcome"], "resolved");
+}
+
+/// Task 640: a `needs_session` run found after a handoff without its
+/// `handoff.json` whose resumed session has ended has nothing to watch: its
+/// lease is given back as before, no `resume_adopted` is recorded, and the
+/// supervisor resumes it again.
+#[test]
+fn a_handoff_without_its_state_after_the_resumed_session_ended_gives_the_lease_back() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    // The first resumed session ends without resolving anything.
+    backend.resume_script_for(
+        2,
+        "await_message; while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done",
+    );
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
+    });
+    fs::remove_file(Path::new(run.run_dir().unwrap()).join("handoff.json")).unwrap();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    backend.join();
+    // The next resume resolves the conflict.
+    backend.resume_script_for(
+        2,
+        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+
+    let outcome = supervise_after_handoff(&db, &repo, &backend, &token).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "resume_started").count(), 2);
+    let handed = payloads(&detail, "supervisor_handed_off");
+    assert_eq!(handed.len(), 1, "{kinds:?}");
+    assert_eq!(handed[0]["state"], Value::Null);
+    assert!(
+        !payloads(&detail, "auto_repaired")
+            .iter()
+            .any(|p| p["repair"] == "resume_adopted"),
+        "{kinds:?}"
+    );
+}
+
 /// Task 356: a supervisor that stops during a resume (its lease goes
 /// stale while the resumed session lives on, and it leaves no
 /// `handoff.json`) is replaced by one with another token, which adopts the
