@@ -290,11 +290,19 @@ pub struct Ports<'a> {
     /// `[kpi]`'s `max_improvement_proposals` of the main checkout's
     /// `dagq.toml` (ADR-0051 decision 25), read again each time.
     pub max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
+    /// `[conflicts]` of the main checkout's `dagq.toml` (`None` for no
+    /// file), read again each pass (ADR-0080); `None` when the options
+    /// set the thresholds, which are then never read again.
+    pub conflicts_file: Option<ConflictsFile>,
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
     pub layout: Layout,
 }
+
+/// Reads `[conflicts]` of the main checkout's `dagq.toml` (ADR-0080).
+pub type ConflictsFile =
+    Arc<dyn Fn() -> Result<Option<crate::domain::stats::ConflictConfig>> + Send + Sync>;
 
 /// Spawn a thread that reports its `tracing` events to the subscriber of
 /// the spawning thread, so a supervisor run under a scoped subscriber (the
@@ -498,6 +506,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         generators: ports.generators.clone(),
         stall: settings.stall,
         conflicts: settings.conflicts,
+        conflicts_file: ports.conflicts_file.clone(),
+        conflicts_error: None,
         plan_review: None,
         goal_review: None,
         job_ends: JobEnds::default(),
@@ -607,8 +617,15 @@ struct Supervisor<'a> {
     generators: Generators,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4).
     stall: StallConfig,
-    /// The `[conflicts]` thresholds the plan review's hotspots are judged by.
+    /// The `[conflicts]` thresholds the plan review's hotspots and the
+    /// claims deferred on them are judged by, as last read (ADR-0080).
     conflicts: crate::domain::stats::ConflictConfigReport,
+    /// Reads `[conflicts]` again each pass (ADR-0080); `None` keeps
+    /// `conflicts` as the options set it.
+    conflicts_file: Option<ConflictsFile>,
+    /// The error the last read of `[conflicts]` failed with, warned of
+    /// once until it changes or a read succeeds.
+    conflicts_error: Option<String>,
     /// The plan review job running now (ADR-0041 decision 11): one at a
     /// time, queue-wide, outside the run slots.
     plan_review: Option<plan_review::PlanReviewWatch>,
@@ -862,6 +879,9 @@ impl Supervisor<'_> {
             self.check_run_env_programs()?;
             self.check_landing_branch();
             self.mark_run_env_change()?;
+            // Every pass, before any claim: a change of `[conflicts]` takes
+            // effect without a restart (ADR-0080).
+            self.reread_conflicts()?;
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             self.check_disk()?;

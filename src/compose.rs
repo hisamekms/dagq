@@ -308,8 +308,9 @@ pub fn supervise_with_reviewer(
         None => load_stall_config(&main_checkout(&repository))?.unwrap_or_default(),
     };
     // For the plan review's hotspots and the claims deferred on them
-    // (ADR-0069): a `[conflicts]` that cannot be read leaves the defaults
-    // rather than stopping the supervisor.
+    // (ADR-0069): a `[conflicts]` that cannot be read at the start leaves
+    // the defaults rather than stopping the supervisor; later reads keep
+    // the values in use (ADR-0080).
     let conflicts = statistics::conflict_config(options.conflicts.or_else(|| {
         load_conflict_config(&main_checkout(&repository)).unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "[conflicts] of dagq.toml not read: {error:#}; using the defaults");
@@ -401,6 +402,13 @@ pub fn supervise_with_reviewer(
             push_target,
         }
     });
+    // Read again each pass (ADR-0080), unless the options set the
+    // thresholds.
+    let conflicts_file = options.conflicts.is_none().then(|| {
+        let checkout = main_checkout(&repository);
+        Arc::new(move || load_conflict_config(&checkout))
+            as crate::application::supervise::ConflictsFile
+    });
     let limit_checkout = main_checkout(&repository);
     let max_improvement_proposals = Arc::new(move || max_improvement_proposals(&limit_checkout));
     let forecasts = options.forecast_snapshots.then(|| {
@@ -448,6 +456,7 @@ pub fn supervise_with_reviewer(
         host_versions,
         reports,
         max_improvement_proposals,
+        conflicts_file,
         forecasts,
         layout,
     };

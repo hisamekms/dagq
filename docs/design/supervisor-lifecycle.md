@@ -156,7 +156,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 ### claimを控える（衝突の多いファイル）
 
-- [claimを控える（衝突の多いファイル）](supervisor-lifecycle/claim-defer.md)（[ADR-0069](../adr/0069-do-not-claim-tasks-overlapping-hot-files.md)）
+- [claimを控える（衝突の多いファイル）](supervisor-lifecycle/claim-defer.md)（[ADR-0080](../adr/0080-supervisor-rereads-conflicts-config.md)）
 
 ### 空き容量を確かめる（claimと着地の検証の前）
 

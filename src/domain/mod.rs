@@ -1527,6 +1527,8 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     kpi::push::KPI_PUSH_ABANDONED,
     claim_hold::CLAIM_HELD,
     claim_hold::CLAIM_RESUMED,
+    // The `[conflicts]` a supervisor read again changed (ADR-0080).
+    stats::conflicts::CONFLICTS_CONFIG_CHANGED,
     claim_hold::LANDING_HELD,
     claim_hold::LANDING_RESUMED,
     // The answer of an authentication or usage-limit ask applied (task

@@ -4,6 +4,7 @@ use crate::runtime_support;
 
 use dagq::{application::DraftPlannerStore, domain::stats::ConflictConfig};
 use runtime_support::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const HOT: &str = "docs/hot.md";
 
@@ -65,6 +66,45 @@ fn options(defer_max_secs: i64) -> SuperviseOptions {
     }
 }
 
+/// The fixture with the hot file committed and three conflicts on it,
+/// which make it an alert of `conflict_hotspots` with the default
+/// thresholds; a draft task carries them.
+fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
+    let (dir, repo, db) = fixture();
+    fs::create_dir(repo.join("docs")).unwrap();
+    fs::write(repo.join(HOT), "hot\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "hot file"]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let old = queue
+        .add(NewTask {
+            title: "landed long ago".into(),
+            description: "d".into(),
+            acceptance: "a".into(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Priority::Normal,
+            kind: None,
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            goal_id: None,
+            context: String::new(),
+        })
+        .unwrap()
+        .id();
+    for main in ["m1", "m2", "m3"] {
+        queue
+            .record_task_event(
+                old,
+                "integration_deferred",
+                json!({"conflicts": [HOT], "main": main}),
+            )
+            .unwrap();
+    }
+    (dir, repo, db)
+}
+
 /// A task whose declared paths meet a run in flight on a hotspot is not
 /// claimed, and the next candidate that does not meet is; the deferral is
 /// recorded once with the files and the run in the way, and `status` and
@@ -73,11 +113,7 @@ fn options(defer_max_secs: i64) -> SuperviseOptions {
 /// `defer_max_secs`, which holds across supervisors.
 #[test]
 fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
-    let (_dir, repo, db) = fixture();
-    fs::create_dir(repo.join("docs")).unwrap();
-    fs::write(repo.join(HOT), "hot\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "hot file"]);
+    let (_dir, repo, db) = hot_fixture();
     let (hot, near, apart) = {
         let mut queue = SqliteQueue::open(&db).unwrap();
         // Task 1 (the fixture's) declares no paths and has no related
@@ -90,34 +126,6 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
             &["other.txt"],
             Priority::Normal,
         );
-        // Three conflicts on the hot file make it an alert of
-        // `conflict_hotspots`; a draft task carries them.
-        let old = queue
-            .add(NewTask {
-                title: "landed long ago".into(),
-                description: "d".into(),
-                acceptance: "a".into(),
-                verification_commands: Vec::new(),
-                required_evidence: Vec::new(),
-                paths: Vec::new(),
-                priority: Priority::Normal,
-                kind: None,
-                dependencies: Vec::new(),
-                goal_dependencies: Vec::new(),
-                goal_id: None,
-                context: String::new(),
-            })
-            .unwrap()
-            .id();
-        for main in ["m1", "m2", "m3"] {
-            queue
-                .record_task_event(
-                    old,
-                    "integration_deferred",
-                    json!({"conflicts": [HOT], "main": main}),
-                )
-                .unwrap();
-        }
         (hot, near, apart)
     };
     let stats = runtime::stats(&db, &Default::default()).unwrap();
@@ -190,4 +198,117 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert_eq!(stats["claim_deferrals"]["by_end"]["expired"]["count"], 1);
     assert_eq!(stats["claim_deferrals"]["deferred"], json!([]));
+}
+
+/// A supervisor reads `[conflicts]` of the main checkout's `dagq.toml`
+/// again every pass (ADR-0080): a lower `hotspot_conflicts` makes the hot
+/// file a hotspot and a task over it waits, with the file's limit; an
+/// invalid table keeps the values in use; a shorter `defer_max_secs` ends
+/// the deferrals in place. Each change is recorded once.
+#[test]
+fn a_changed_conflicts_table_is_read_again_without_a_restart() {
+    let (_dir, repo, db) = hot_fixture();
+    let config = repo.join("dagq.toml");
+    // Written whole by a rename: the supervisor reads it every pass, and a
+    // file caught half written would read as the defaults.
+    let conflicts = |table: &str| {
+        let staged = repo.join("dagq.toml.new");
+        fs::write(&staged, format!("[conflicts]\n{table}")).unwrap();
+        fs::rename(&staged, &config).unwrap();
+    };
+    // Four conflicts needed: the hot file is no hotspot.
+    conflicts("hotspot_conflicts = 4\ndefer_max_secs = 7200\n");
+    let add = |title: &str, paths: &[&str]| {
+        add_task(
+            &mut SqliteQueue::open(&db).unwrap(),
+            title,
+            paths,
+            Priority::Normal,
+        )
+    };
+    let hot = add("edits the hot file", &[HOT]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        ..supervise_options(8, false)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    let limit = Duration::from_secs(60);
+    wait_until(&db, limit, |_| runs_of(&db, hot) == 1);
+    let near = add("edits the docs", &["docs/**"]);
+    wait_until(&db, limit, |_| runs_of(&db, near) == 1);
+    assert!(events(&db, "claim_deferred").is_empty());
+    assert!(events(&db, "conflicts_config_changed").is_empty());
+
+    // Three conflicts make it a hotspot: the next task over it waits.
+    conflicts("hotspot_conflicts = 3\ndefer_max_secs = 7200\n");
+    wait_until(&db, limit, |_| {
+        events(&db, "conflicts_config_changed").len() == 1
+    });
+    let later = add("edits the docs later", &["docs/**"]);
+    wait_until(&db, limit, |_| events(&db, "claim_deferred").len() == 1);
+    let deferred = events(&db, "claim_deferred");
+    assert_eq!(deferred[0].0, Some(later));
+    assert_eq!(deferred[0].1["max_secs"], 7200, "{deferred:?}");
+
+    // An invalid table keeps the values in use, not the defaults (claims
+    // wait meanwhile: the landing branch is read from the same file, so
+    // the runs in flight rest first, their reviews and landings done).
+    wait_until(&db, limit, |queue| {
+        [TaskId::new(1), hot, near].iter().all(|&task| {
+            queue
+                .show(task)
+                .unwrap()
+                .runs
+                .first()
+                .is_some_and(|run| queue.run_lease(run.id()).unwrap().is_none())
+        })
+    });
+    conflicts("hotspot_conflicts = 3\ndefer_max_secs = 0\n");
+    let last = add("edits the docs last", &["docs/**"]);
+    wait_until(&db, limit, |_| {
+        events(&db, "candidates_sampled")
+            .iter()
+            .any(|(_, sample)| sample["candidates"] == 2)
+    });
+    thread::sleep(TEST_TICK * 10);
+    assert_eq!(runs_of(&db, last), 0);
+    assert_eq!(events(&db, "conflicts_config_changed").len(), 1);
+    // Valid again with the values in use: no change, and the task waits
+    // with the limit kept.
+    conflicts("hotspot_conflicts = 3\ndefer_max_secs = 7200\n");
+    wait_until(&db, limit, |_| events(&db, "claim_deferred").len() == 2);
+    let deferred = events(&db, "claim_deferred");
+    assert_eq!(deferred[1].0, Some(last));
+    assert_eq!(deferred[1].1["max_secs"], 7200, "{deferred:?}");
+    assert_eq!(runs_of(&db, later), 0);
+    assert_eq!(events(&db, "conflicts_config_changed").len(), 1);
+
+    // A shorter limit ends the deferrals in place, counted from their
+    // start.
+    conflicts("hotspot_conflicts = 3\ndefer_max_secs = 1\n");
+    wait_until(&db, limit, |_| {
+        runs_of(&db, later) == 1 && runs_of(&db, last) == 1
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let changed = events(&db, "conflicts_config_changed");
+    assert_eq!(changed.len(), 2, "{changed:?}");
+    let (task, first) = &changed[0];
+    assert_eq!(*task, None);
+    assert_eq!(first["from"]["hotspot_conflicts"], 4, "{first}");
+    assert_eq!(first["to"]["hotspot_conflicts"], 3);
+    assert_eq!(first["source"], "file");
+    assert!(first["supervisor"].is_string());
+    assert_eq!(changed[1].1["from"]["defer_max_secs"], 7200);
+    assert_eq!(changed[1].1["to"]["defer_max_secs"], 1);
+    let ended = events(&db, "claim_deferral_ended");
+    assert_eq!(ended.len(), 2, "{ended:?}");
+    assert!(ended.iter().all(|(_, payload)| payload["why"] == "expired"));
 }

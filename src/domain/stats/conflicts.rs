@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::timestamp_millis;
 use crate::domain::{EventId, RunEvent, TaskId};
@@ -83,6 +83,27 @@ impl Default for ConflictConfigReport {
             source: "default",
         }
     }
+}
+
+/// The queue event a supervisor records when the `[conflicts]` it reads
+/// again from the main checkout's `dagq.toml` differs from the values it
+/// was using (ADR-0080): `from`, `to`, `source` and `supervisor`.
+pub const CONFLICTS_CONFIG_CHANGED: &str = "conflicts_config_changed";
+
+/// The payload of [`CONFLICTS_CONFIG_CHANGED`] for the values read again,
+/// `to`, over `from`, the ones in use; `None` when they are the same, or
+/// when `last`, the payload of the latest such event on the queue, already
+/// moved to `to` (another supervisor of the queue recorded the change).
+/// The `supervisor` is the caller's to add.
+pub fn conflicts_change(
+    from: ConflictConfig,
+    to: ConflictConfig,
+    last: Option<&Value>,
+) -> Option<Value> {
+    if from == to || last.is_some_and(|last| last["to"] == json!(to)) {
+        return None;
+    }
+    Some(json!({"from": from, "to": to, "source": "file"}))
 }
 
 /// One path a commit on main touched.
@@ -595,5 +616,25 @@ mod tests {
                 defer_max_secs: 900,
             }
         );
+    }
+
+    #[test]
+    fn a_change_of_the_conflicts_is_recorded_once() {
+        let from = ConflictConfig::default();
+        let to = ConflictConfig {
+            defer_max_secs: 60,
+            ..from
+        };
+        assert_eq!(conflicts_change(from, from, None), None);
+        let payload = conflicts_change(from, to, None).unwrap();
+        assert_eq!(payload["from"]["defer_max_secs"], 3600);
+        assert_eq!(payload["to"]["defer_max_secs"], 60);
+        assert_eq!(payload["to"]["hotspot_conflicts"], 3);
+        assert_eq!(payload["source"], "file");
+        // Another supervisor recorded the same change already.
+        assert_eq!(conflicts_change(from, to, Some(&payload)), None);
+        // Back to the old values: a change again.
+        let back = conflicts_change(to, from, Some(&payload)).unwrap();
+        assert_eq!(back["to"]["defer_max_secs"], 3600);
     }
 }

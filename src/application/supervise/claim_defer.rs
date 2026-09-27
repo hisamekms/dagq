@@ -3,7 +3,9 @@
 //! [`crate::domain::claim_defer`]. What the judgement reads is cached: the
 //! hotspots for [`HOT_REFRESH_SECS`], with the files each task is expected
 //! to touch, and the files of the runs in flight for
-//! [`IN_FLIGHT_REFRESH_SECS`] or until the next claim.
+//! [`IN_FLIGHT_REFRESH_SECS`] or until the next claim. The `[conflicts]`
+//! they are judged by is read again every pass (ADR-0080): a change drops
+//! the cached hotspots.
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
@@ -16,6 +18,10 @@ use crate::domain::{
     claim_defer::{
         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
         expected_files,
+    },
+    stats::{
+        ConflictConfigReport,
+        conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_change},
     },
 };
 
@@ -47,6 +53,57 @@ impl DeferWatch {
 }
 
 impl Supervisor<'_> {
+    /// Read `[conflicts]` of the main checkout's `dagq.toml` again
+    /// (ADR-0080). Values that differ from those in use replace them, drop
+    /// the cached hotspots and are recorded as `conflicts_config_changed`,
+    /// once for the queue. A file that cannot be read or holds invalid
+    /// values keeps those in use, warned of once per error; so does a
+    /// missing file, which may only be a checkout rewriting it.
+    pub(super) fn reread_conflicts(&mut self) -> Result<()> {
+        let Some(read) = self.conflicts_file.clone() else {
+            return Ok(());
+        };
+        let config = match read() {
+            Ok(config) => {
+                self.conflicts_error = None;
+                match config {
+                    Some(config) => config,
+                    None => return Ok(()),
+                }
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if self.conflicts_error.as_ref() != Some(&message) {
+                    warn!(error = %message, "[conflicts] of dagq.toml not read: {message}; keeping the values in use");
+                    self.conflicts_error = Some(message);
+                }
+                return Ok(());
+            }
+        };
+        let from = self.conflicts.config;
+        self.conflicts = ConflictConfigReport {
+            config,
+            source: "file",
+        };
+        if from == config {
+            return Ok(());
+        }
+        self.defer.hot = None;
+        let last = self.queue.latest_queue_event(&[CONFLICTS_CONFIG_CHANGED])?;
+        if let Some(mut payload) =
+            conflicts_change(from, config, last.as_ref().map(|event| &event.payload))
+        {
+            info!(
+                "[conflicts] of dagq.toml changed ({} -> {}): the hotspots and the deferred claims are judged by the new values",
+                payload["from"], payload["to"]
+            );
+            payload["supervisor"] = serde_json::json!(self.token);
+            self.queue
+                .record_queue_event(CONFLICTS_CONFIG_CHANGED, payload)?;
+        }
+        Ok(())
+    }
+
     /// The candidates of `graph` this pass may claim, in its order: those
     /// whose files meet a run in flight on a hotspot are passed over
     /// (ADR-0069), and the start and end of each deferral are recorded on

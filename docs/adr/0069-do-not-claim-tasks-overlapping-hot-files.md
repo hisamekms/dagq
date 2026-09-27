@@ -2,10 +2,12 @@
 id: adr-0069
 type: adr
 title: 衝突の多いファイルで進行中のrunと重なるtaskはそのpassでclaimせずに次の候補へ進み、控えた理由と時間をstatusとstatsに出す
-status: accepted
+status: superseded
 created: 2026-09-26
 updated: 2026-09-26
 accepted_on: 2026-09-26
+superseded_by: adr-0080
+superseded_on: 2026-09-27
 owners:
   - hisamekms
 tags:
@@ -22,6 +24,8 @@ related:
 ---
 
 # ADR-0069: 衝突の多いファイルで進行中のrunと重なるtaskはそのpassでclaimせずに次の候補へ進み、控えた理由と時間をstatusとstatsに出す
+
+> **置き換え済み（2026-09-27）**: このADRの決定は現在有効ではない。現行の決定は[ADR-0080](0080-supervisor-rereads-conflicts-config.md)を読む。
 
 ## Context
 

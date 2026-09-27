@@ -68,7 +68,6 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0054](0054-run-lease-ownership-parallel-supervisors-and-recover.md) | supervisorがrun単位のleaseでrunのlifecycleを所有して並列に実行し、死んだsupervisorのrunを引き継ぎ、手放したrunをrecoverに回す（ADR-0003・ADR-0007・ADR-0025を統合） | 2026-09-26 |
 | [ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md) | taskの全文検索（search）と、task番号の言及と検索の一致の強さを含む決まった規則の関連（related）と、重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する（ADR-0046を統合） | 2026-09-27 |
 | [ADR-0068](0068-recheck-waiting-runs-after-each-landing.md) | 着地のたびに着地待ちのrunをmerge-treeと軽い検査で先回りして確かめ、着地しなくなったrunは人の回答や着地の順番を待たずにresumeする | 2026-09-26 |
-| [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | 衝突の多いファイルで進行中のrunと重なるtaskはそのpassでclaimせずに次の候補へ進み、控えた理由と時間をstatusとstatsに出す | 2026-09-26 |
 | [ADR-0070](0070-forecast-snapshots-and-scoring.md) | open なtaskとgoalの完了見込み（forecast）をsimulationで出し、supervisorが決まったきっかけでsnapshotをeventに記録し、完了の時点で答え合わせをしてobserverが誤差を読む | 2026-09-27 |
 | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 人の答えを待つrunを、最初のsessionと/exitに加えて差し戻しと解消依頼の段でもslotから外し、待ちのあいだ段の計時を止め、leaseを持ったまま軽く見張り、戻り待ちも含めて待ちの数に上限を付け、待ちが終わったrunを新しいclaimより先にslotへ戻す（ADR-0062を統合） | 2026-09-26 |
 | [ADR-0073](0073-kind-additions-are-compatible.md) | 固定バイナリをbuild識別子で見分け、queueを開いただけではmigrateせず、互換の範囲のschemaを受け入れ、askとeventのkindの追加を互換として扱い、supervisorを待たずに引き継ぎで入れ替え、up --auto-updateで着地のたびに自動で更新する（ADR-0045を統合） | 2026-09-26 |
@@ -76,6 +75,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0077](0077-near-term-dependency-graph-with-d2-tala.md) | 当面のtaskの依存図を、dagqが組み立てたd2のソースからhostのd2（TALA）で描き、dagq graphと日次・週次レポートで出す | 2026-09-27 |
 | [ADR-0078](0078-one-integration-test-binary.md) | e2eとplugin以外のintegration testを1つのtest binary（tests/it）にまとめ、testファイルの行数の制約はファイル単位のまま残す | 2026-09-26 |
 | [ADR-0079](0079-record-task-weight-predictions-and-trial-model-effort-selection.md) | plan reviewでtaskの重さの予測を記録し、限定の試しでworkerのmodel / effortを選び、taskに由来する失敗で段上げする | 2026-09-26 |
+| [ADR-0080](0080-supervisor-rereads-conflicts-config.md) | 衝突の多いファイルで進行中のrunと重なるtaskはそのpassでclaimせずに次の候補へ進み、控えた理由と時間をstatusとstatsに出し、supervisorは[conflicts]の変更を止まらずに読み直す（ADR-0069を統合） | 2026-09-27 |
 | [ADR-t598-1](2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md) | ADRのIDを書くtaskのIDにし、1 ADR 1決定・記載の粒度・今の姿はdesign・大きなADRはamendsで直すと決める（ADR-0042を置き換え） | 2026-09-26 |
 | [ADR-t609-1](2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md) | 生きているrunのalertで復旧jobが失敗したら、recover by handのattentionではなく、そのalertのaskを開く（ADR-0047決定40をamends） | 2026-09-27 |
 | [ADR-t610-1](2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md) | statusのslots.usedとstatsのidle_slotsを、supervisorがclaimと戻りの判定に使うslotと同じ集合で数え、着地中のrunも埋まったslotに数える（ADR-0071決定12・13をamends） | 2026-09-27 |
@@ -126,3 +126,4 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0045](0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md) | superseded | [ADR-0073](0073-kind-additions-are-compatible.md) | 2026-09-26 |
 | [ADR-0046](0046-full-text-search-related-and-duplicate-of.md) | superseded | [ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md) | 2026-09-27 |
 | [ADR-0062](0062-runs-waiting-for-a-person-leave-the-slot.md) | superseded | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 2026-09-26 |
+| [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | superseded | [ADR-0080](0080-supervisor-rereads-conflicts-config.md) | 2026-09-27 |
