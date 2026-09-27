@@ -1353,15 +1353,29 @@ fn stats_raise_running_alerts_for_a_worker_idle_without_a_receipt() {
     .unwrap();
     let run = orphan_run(&repo, &db, "owner", dead_pid(), dead_pid());
     let run_dir = PathBuf::from(run.run_dir().unwrap());
-    fs::write(
-        run_dir.join("idle.json"),
-        r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test --locked"}]}"#,
-    )
-    .unwrap();
+    // The session's markers count only when written after its
+    // `agent_started` event, which the queue stamps with the wall clock to
+    // the millisecond. A marker written right after it can share that
+    // millisecond, so the markers are stamped at `now`, the next whole
+    // second of the wall clock, past the event whatever the timing.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_secs() as i64
+        + 1;
+    let written_at_now = |path: PathBuf, text: &str| {
+        fs::write(&path, text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(now as u64))
+            .unwrap();
+    };
+    written_at_now(
+        run_dir.join("idle.json"),
+        r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test","command":"cargo test --locked"}]}"#,
+    );
     let one_shot = |late: i64| {
         runtime::OneShot::new(Generators {
             clock: Arc::new(ManualClock::at(now + late)),
@@ -1393,8 +1407,10 @@ fn stats_raise_running_alerts_for_a_worker_idle_without_a_receipt() {
         json!({"status": "checked", "workspaces": 2})
     );
     let alerts = stats["running_alerts"].as_array().unwrap();
-    let idle = &alerts[0];
-    assert_eq!(idle["kind"], "idle_without_receipt", "{stats}");
+    let idle = alerts
+        .iter()
+        .find(|alert| alert["kind"] == "idle_without_receipt")
+        .unwrap_or_else(|| panic!("no idle_without_receipt alert: {stats}"));
     assert_eq!(idle["run_id"], run.id().as_str());
     assert_eq!(idle["phase"], "session");
     assert_eq!(idle["threshold"], 600);
@@ -1451,7 +1467,7 @@ fn stats_raise_running_alerts_for_a_worker_idle_without_a_receipt() {
 
     // A receipt of the session ends the idle alert; without cmux nothing
     // is said about the workspaces.
-    fs::write(run_dir.join("receipt.json"), "{}").unwrap();
+    written_at_now(run_dir.join("receipt.json"), "{}");
     let stats = one_shot(700).stats(&db, &Default::default(), None).unwrap();
     assert_eq!(stats["running_alerts"], json!([]), "{stats}");
     assert_eq!(stats["workspace_check"]["status"], "unavailable");
