@@ -10,10 +10,10 @@ use super::adapters::process_alive;
 use super::sqlite::{SqliteQueue, enum_col, json_col};
 use crate::domain::Ask;
 use crate::domain::{
-    AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason, HOLD_AFFECTED_HEADING,
-    HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
-    answer_approves, check_ask_kind, check_event_target, finding, option_index,
-    session_takes_answers,
+    APPROVE_RELEASE_OPTIONS, AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason,
+    HOLD_AFFECTED_HEADING, HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId,
+    UPDATE_FAILED_OPTIONS, answer_approves, check_ask_kind, check_event_target, finding,
+    option_index, session_takes_answers,
 };
 
 pub use crate::application::AskQuery;
@@ -192,6 +192,8 @@ impl SqliteQueue {
     /// carrying them.
     pub fn answer_as(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
         ensure!(!text.trim().is_empty(), "answer must not be blank");
+        // Read before the transaction: the host's `[update]` is a file.
+        let releases = self.release_updates_on();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -330,14 +332,46 @@ impl SqliteQueue {
         }
         if ask.kind == AskKind::UpdateFailed {
             // The live supervisor that updates the binary retries or leaves
-            // the update as answered (ADR-0045 decision 17), by the rule
-            // `status` reports it with; any other answer, or one nobody
-            // updates for, is a person's to read.
+            // the update as answered (ADR-0045 decision 17, ADR-t618-1), by
+            // the rule `status` reports it with; any other answer, or one
+            // nobody updates for, is a person's to read.
             let now = self.generators.clock.now();
+            // The failure of a release's job is a release supervisor's to
+            // apply, a build's one with the automatic update.
+            let source: Option<String> = tx
+                .query_row(
+                    "SELECT json_extract(payload,'$.source') FROM run_events
+                     WHERE kind=?1 AND json_extract(payload,'$.ask_id')=?2
+                     ORDER BY id DESC LIMIT 1",
+                    params![crate::domain::UPDATE_FAILED, id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let release = source.as_deref() == Some(crate::application::update::RELEASE_SOURCE);
             let applied = UPDATE_FAILED_OPTIONS.contains(&text.trim())
                 && super::runtime_store::supervisors_of(&tx)?
                     .iter()
-                    .any(|registration| registration.applies_updates(now, process_alive));
+                    .any(|registration| {
+                        if release {
+                            registration.applies_releases(now, process_alive, releases)
+                        } else {
+                            registration.applies_updates(now, process_alive)
+                        }
+                    });
+            payload["runtime_delivers"] = json!(applied);
+        }
+        if ask.kind == AskKind::ApproveRelease {
+            // A live supervisor of a release build installs or skips the
+            // release as answered (ADR-t618-1 decision 4); without one, a
+            // person reads it and runs `install --release`.
+            let now = self.generators.clock.now();
+            let applied = APPROVE_RELEASE_OPTIONS.contains(&text.trim())
+                && super::runtime_store::supervisors_of(&tx)?
+                    .iter()
+                    .any(|registration| {
+                        registration.applies_releases(now, process_alive, releases)
+                    });
             payload["runtime_delivers"] = json!(applied);
         }
         ask_event(
@@ -350,6 +384,15 @@ impl SqliteQueue {
         let answered = read_ask(&tx, id)?;
         tx.commit()?;
         Ok(answered)
+    }
+
+    /// Whether the host's `[update]` of this queue looks for releases
+    /// (ADR-t618-1): read from `host.toml` next to the database and the
+    /// host-wide one.
+    pub fn release_updates_on(&self) -> bool {
+        self.runs_dir
+            .parent()
+            .is_some_and(super::release_update::releases_on)
     }
 
     /// Mark an answered ask read (by the inbox, once the person acted on it,
@@ -412,6 +455,7 @@ impl SqliteQueue {
         question: &str,
         options: &[&str],
         asked_by: &str,
+        subject: Option<&str>,
     ) -> Result<Ask> {
         ensure!(!question.trim().is_empty(), "question must not be blank");
         ensure!(
@@ -448,14 +492,15 @@ impl SqliteQueue {
             ask_event(&tx, None, None, event_kind::ASK_ANSWERED, payload)?;
         }
         tx.execute(
-            "INSERT INTO asks(kind,question,options,asked_by,reason_category)
-             VALUES (?5,?1,?2,?3,?4)",
+            "INSERT INTO asks(kind,question,options,asked_by,reason_category,subject)
+             VALUES (?5,?1,?2,?3,?4,?6)",
             params![
                 question,
                 serde_json::to_string(options)?,
                 asked_by,
                 reason.as_str(),
-                kind.as_str()
+                kind.as_str(),
+                subject
             ],
         )?;
         let id = AskId::new(tx.last_insert_rowid());
@@ -1026,14 +1071,38 @@ mod tests {
     /// the answer was recorded as the runtime's and whether `status`
     /// reports it as the runtime applying it.
     fn answer_update_failed(queue: &mut SqliteQueue, text: &str) -> (bool, bool) {
+        answer_update(queue, AskKind::UpdateFailed, UPDATE_FAILED_OPTIONS, text)
+    }
+
+    fn answer_update(
+        queue: &mut SqliteQueue,
+        kind: AskKind,
+        options: &[&str],
+        text: &str,
+    ) -> (bool, bool) {
+        answer_update_of(queue, kind, options, text, None)
+    }
+
+    /// [`answer_update`] of an ask whose `update_failed` step names
+    /// `source` (`release` for a release's job).
+    fn answer_update_of(
+        queue: &mut SqliteQueue,
+        kind: AskKind,
+        options: &[&str],
+        text: &str,
+        source: Option<&str>,
+    ) -> (bool, bool) {
         let ask = queue
-            .open_update_ask(
-                AskKind::UpdateFailed,
-                "retry?",
-                UPDATE_FAILED_OPTIONS,
-                "runtime",
-            )
+            .open_update_ask(kind, "retry?", options, "runtime", Some("0.4.0"))
             .unwrap();
+        if let Some(source) = source {
+            queue
+                .record_queue_event(
+                    crate::domain::UPDATE_FAILED,
+                    json!({"ask_id": ask.id, "source": source, "release": "0.4.0"}),
+                )
+                .unwrap();
+        }
         queue.answer(ask.id, text).unwrap();
         let payload: String = queue
             .conn
@@ -1063,9 +1132,15 @@ mod tests {
         // Nobody supervises: the answer is a person's.
         assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
 
-        // A live supervisor without auto-update applies nothing.
+        // A live supervisor of a development build without auto-update
+        // applies nothing.
         queue
-            .register_supervisor(&LeaseToken::new("live"), std::process::id(), 1, "0.0.1")
+            .register_supervisor(
+                &LeaseToken::new("live"),
+                std::process::id(),
+                1,
+                "0.0.1-dev+abc",
+            )
             .unwrap();
         assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
 
@@ -1100,5 +1175,79 @@ mod tests {
             .set_auto_update(&LeaseToken::new("dead"), true)
             .unwrap();
         assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
+    }
+
+    /// A supervisor of a release build applies the answers of the release
+    /// update's asks (ADR-t618-1 decision 4) unless the host's `release`
+    /// is `off`; a development build never applies `approve_release`.
+    #[test]
+    fn a_release_answer_is_the_runtimes_only_with_a_live_release_supervisor() {
+        use crate::domain::APPROVE_RELEASE_OPTIONS;
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let release = |queue: &mut SqliteQueue, text: &str| {
+            answer_update(
+                queue,
+                AskKind::ApproveRelease,
+                APPROVE_RELEASE_OPTIONS,
+                text,
+            )
+        };
+        assert_eq!(release(&mut queue, "install"), (false, false));
+
+        let token = LeaseToken::new("dev");
+        queue
+            .register_supervisor(&token, std::process::id(), 1, "0.4.0-dev+abc")
+            .unwrap();
+        queue.set_auto_update(&token, true).unwrap();
+        assert_eq!(release(&mut queue, "install"), (false, false));
+        // A build's updater applies no failure of a release's job.
+        assert_eq!(
+            answer_update_of(
+                &mut queue,
+                AskKind::UpdateFailed,
+                UPDATE_FAILED_OPTIONS,
+                "retry",
+                Some("release"),
+            ),
+            (false, false)
+        );
+        queue.deregister_supervisor(&token).unwrap();
+
+        // The queue's host.toml wins over the host-wide one.
+        std::fs::write(
+            dir.path().join("host.toml"),
+            "[update]\nrelease = \"ask\"\n",
+        )
+        .unwrap();
+        let token = LeaseToken::new("release");
+        queue
+            .register_supervisor(&token, std::process::id(), 1, "0.3.0")
+            .unwrap();
+        assert!(queue.release_updates_on());
+        assert_eq!(release(&mut queue, "install"), (true, true));
+        assert_eq!(release(&mut queue, "skip"), (true, true));
+        assert_eq!(release(&mut queue, "later"), (false, false));
+        // It applies the failure of a release's job, not of a build.
+        let release_failed = |queue: &mut SqliteQueue, text: &str| {
+            answer_update_of(
+                queue,
+                AskKind::UpdateFailed,
+                UPDATE_FAILED_OPTIONS,
+                text,
+                Some("release"),
+            )
+        };
+        assert_eq!(release_failed(&mut queue, "retry"), (true, true));
+        assert_eq!(answer_update_failed(&mut queue, "retry"), (false, false));
+
+        std::fs::write(
+            dir.path().join("host.toml"),
+            "[update]\nrelease = \"off\"\n",
+        )
+        .unwrap();
+        assert!(!queue.release_updates_on());
+        assert_eq!(release(&mut queue, "install"), (false, false));
+        assert_eq!(release_failed(&mut queue, "retry"), (false, false));
     }
 }

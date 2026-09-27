@@ -3,17 +3,20 @@
 //! says, at most once per `check_interval_secs` for the whole queue, and
 //! writes what it found as `release_checked` or `release_check_failed`.
 //! Neither is an attention. The index is read through [`ReleaseIndex`]
-//! (`curl` on the host, a stub in tests).
+//! (`curl` on the host, a stub in tests). What the supervisor does about a
+//! new release (decisions 4 and 5: ask, or install without asking) is
+//! [`next_action`].
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::Queue;
-use crate::domain::LeaseToken;
+use super::update::{UPDATE_ANSWERED, UPDATE_RETRY, UPDATE_STARTED, step_release};
 use crate::domain::release_update::{
     RELEASE_CHECK_FAILED, RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig,
-    check_due, is_release_build, latest_release,
+    check_due, is_newer, is_release_build, latest_release,
 };
+use crate::domain::{LeaseToken, RunEvent};
 
 /// What one read of the index gave.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,4 +134,303 @@ pub fn status(
         last_checked.as_ref(),
         last.as_ref(),
     ))
+}
+
+/// What a supervisor of a release build does about the releases on a pass
+/// (ADR-t618-1 decisions 4 and 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseAction {
+    /// Start the job that installs this release.
+    Start(String),
+    /// Open the `approve_release` ask about this release.
+    Ask(String),
+    Nothing,
+}
+
+/// The next step of the release update: `mode` is the host's `release`,
+/// `current` the supervisor's build, `latest` the release the last look
+/// found, `updates` the queue's `update_*` newest first and `open` the
+/// releases of the `approve_release` asks nobody closed. A request (an
+/// `install` answer or a `retry`) that no job of its release followed
+/// starts its release (the newest, when several wait); otherwise a release newer than `current` that no job
+/// tried and no answer skipped is installed (`auto`) or asked about (`ask`,
+/// unless its ask is open).
+pub fn next_action(
+    mode: ReleaseMode,
+    current: &str,
+    latest: Option<&str>,
+    updates: &[RunEvent],
+    open: &[String],
+) -> ReleaseAction {
+    if mode == ReleaseMode::Off || !is_release_build(current) {
+        return ReleaseAction::Nothing;
+    }
+    fn answer(update: &RunEvent) -> Option<&str> {
+        update.payload["answer"].as_str().map(str::trim)
+    }
+    // Each request no job of its release (or a newer one) started after;
+    // of those, the newest release, so an answer about another release in the same pass
+    // does not hide it.
+    let pending = updates
+        .iter()
+        .enumerate()
+        .filter(|(_, update)| {
+            update.kind == UPDATE_RETRY
+                || (update.kind == UPDATE_ANSWERED && answer(update) == Some("install"))
+        })
+        .filter_map(|(at, update)| {
+            let version = step_release(update)?;
+            // A job of it, or of a newer release, answered it.
+            let started = updates[..at].iter().any(|later| {
+                later.kind == UPDATE_STARTED
+                    && step_release(later)
+                        .is_some_and(|started| started == version || is_newer(started, version))
+            });
+            (!started && is_newer(version, current)).then_some(version)
+        })
+        .reduce(|best, version| {
+            if is_newer(version, best) {
+                version
+            } else {
+                best
+            }
+        });
+    if let Some(version) = pending {
+        return ReleaseAction::Start(version.to_owned());
+    }
+    let Some(latest) = latest.filter(|latest| is_newer(latest, current)) else {
+        return ReleaseAction::Nothing;
+    };
+    // A job tried it (its failure asks on its own), or an answer decided.
+    let decided = updates.iter().any(|update| {
+        step_release(update) == Some(latest)
+            && matches!(update.kind.as_str(), UPDATE_STARTED | UPDATE_ANSWERED)
+    });
+    if decided {
+        return ReleaseAction::Nothing;
+    }
+    match mode {
+        ReleaseMode::Auto => ReleaseAction::Start(latest.to_owned()),
+        _ if open.iter().any(|version| version == latest) => ReleaseAction::Nothing,
+        _ => ReleaseAction::Ask(latest.to_owned()),
+    }
+}
+
+/// The release `install --release` puts in place: `requested`, or the
+/// newest one `index` lists.
+pub fn resolve_version(index: &dyn ReleaseIndex, requested: Option<&str>) -> Result<String> {
+    if let Some(version) = requested {
+        anyhow::ensure!(
+            is_release_build(version),
+            "{version} is not a release version (X.Y.Z)"
+        );
+        return Ok(version.to_owned());
+    }
+    let body = match index.fetch(None)? {
+        IndexFetch::Fetched { body, .. } => body,
+        IndexFetch::NotModified => anyhow::bail!("the index answered 304 Not Modified to no ETag"),
+    };
+    latest_release(&body)
+        .map_err(anyhow::Error::msg)?
+        .ok_or_else(|| anyhow::anyhow!("crates.io lists no release of dagq"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::EventId;
+
+    fn update(kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    fn release(kind: &str, version: &str, answer: Option<&str>) -> RunEvent {
+        update(
+            kind,
+            json!({"source": "release", "release": version, "answer": answer}),
+        )
+    }
+
+    #[test]
+    fn a_new_release_is_asked_about_once_and_installed_without_asking_in_auto() {
+        use ReleaseAction::*;
+        let ask = ReleaseMode::Ask;
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &[], &[]),
+            Ask("0.4.0".into())
+        );
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &[], &["0.4.0".into()]),
+            Nothing
+        );
+        // An open ask of an older release gives way to the new one.
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.5.0"), &[], &["0.4.0".into()]),
+            Ask("0.5.0".into())
+        );
+        assert_eq!(
+            next_action(ReleaseMode::Auto, "0.3.0", Some("0.4.0"), &[], &[]),
+            Start("0.4.0".into())
+        );
+        for mode in [ask, ReleaseMode::Auto, ReleaseMode::Off] {
+            assert_eq!(next_action(mode, "0.4.0", Some("0.4.0"), &[], &[]), Nothing);
+            assert_eq!(next_action(mode, "0.3.0", None, &[], &[]), Nothing);
+            // A development build never acts on a release.
+            assert_eq!(
+                next_action(mode, "0.3.0-dev+abc", Some("0.4.0"), &[], &[]),
+                Nothing
+            );
+        }
+        assert_eq!(
+            next_action(ReleaseMode::Off, "0.3.0", Some("0.4.0"), &[], &[]),
+            Nothing
+        );
+    }
+
+    #[test]
+    fn answers_start_skip_and_retry_a_release() {
+        use ReleaseAction::*;
+        let ask = ReleaseMode::Ask;
+        let install = [release(UPDATE_ANSWERED, "0.4.0", Some("install"))];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &install, &[]),
+            Start("0.4.0".into())
+        );
+        // Started: not again, whatever became of it.
+        let started = [
+            release(UPDATE_STARTED, "0.4.0", None),
+            release(UPDATE_ANSWERED, "0.4.0", Some("install")),
+        ];
+        for mode in [ask, ReleaseMode::Auto] {
+            assert_eq!(
+                next_action(mode, "0.3.0", Some("0.4.0"), &started, &[]),
+                Nothing
+            );
+        }
+        // Skipped: not asked again, but the next release is.
+        let skipped = [release(UPDATE_ANSWERED, "0.4.0", Some("skip"))];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &skipped, &[]),
+            Nothing
+        );
+        assert_eq!(
+            next_action(ReleaseMode::Auto, "0.3.0", Some("0.4.0"), &skipped, &[]),
+            Nothing
+        );
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.5.0"), &skipped, &[]),
+            Ask("0.5.0".into())
+        );
+        // A retry after a failed job starts it again, once.
+        let retry = [
+            release(UPDATE_RETRY, "0.4.0", Some("retry")),
+            release(UPDATE_STARTED, "0.4.0", None),
+        ];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &retry, &[]),
+            Start("0.4.0".into())
+        );
+        // An install answer for a release this build is already.
+        assert_eq!(
+            next_action(ask, "0.4.0", Some("0.4.0"), &install, &[]),
+            Nothing
+        );
+        // An install answer and a skip of another release's failure in
+        // the same pass: the install still starts.
+        let both = [
+            release(UPDATE_ANSWERED, "0.4.0", Some("skip")),
+            release(UPDATE_ANSWERED, "0.5.0", Some("install")),
+            release(UPDATE_STARTED, "0.4.0", None),
+        ];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.5.0"), &both, &[]),
+            Start("0.5.0".into())
+        );
+        // A retry of an older release and an install of a newer one: the
+        // newer is installed, and then neither starts again.
+        let retry_and_install = [
+            release(UPDATE_RETRY, "0.4.0", Some("retry")),
+            release(UPDATE_ANSWERED, "0.5.0", Some("install")),
+            release(UPDATE_STARTED, "0.4.0", None),
+        ];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.5.0"), &retry_and_install, &[]),
+            Start("0.5.0".into())
+        );
+        let mut after = vec![release(UPDATE_STARTED, "0.5.0", None)];
+        after.extend(retry_and_install);
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.5.0"), &after, &[]),
+            Nothing
+        );
+        assert_eq!(
+            next_action(ask, "0.5.0", Some("0.5.0"), &after, &[]),
+            Nothing
+        );
+        // The automatic update's steps are not the release update's.
+        let source = [update(UPDATE_RETRY, json!({"commit": "abc"}))];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &source, &[]),
+            Ask("0.4.0".into())
+        );
+    }
+
+    struct Index(Result<IndexFetch, String>);
+
+    impl ReleaseIndex for Index {
+        fn fetch(&self, etag: Option<&str>) -> Result<IndexFetch> {
+            assert_eq!(etag, None);
+            self.0.clone().map_err(anyhow::Error::msg)
+        }
+    }
+
+    #[test]
+    fn install_release_takes_the_version_given_or_the_newest_listed() {
+        let listed = Index(Ok(IndexFetch::Fetched {
+            body:
+                "{\"vers\":\"0.3.0\"}\n{\"vers\":\"0.4.0\"}\n{\"vers\":\"0.5.0\",\"yanked\":true}\n"
+                    .into(),
+            etag: None,
+        }));
+        assert_eq!(resolve_version(&listed, None).unwrap(), "0.4.0");
+        assert_eq!(resolve_version(&listed, Some("0.3.0")).unwrap(), "0.3.0");
+        let error = resolve_version(&listed, Some("0.4.0-dev")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a release version"),
+            "{error}"
+        );
+        let down = Index(Err("offline".into()));
+        assert!(
+            resolve_version(&down, None)
+                .unwrap_err()
+                .to_string()
+                .contains("offline")
+        );
+        let odd = Index(Ok(IndexFetch::NotModified));
+        assert!(resolve_version(&odd, None).is_err());
+        let none = Index(Ok(IndexFetch::Fetched {
+            body: "{\"vers\":\"0.1.0\",\"yanked\":true}\n".into(),
+            etag: None,
+        }));
+        assert!(
+            resolve_version(&none, None)
+                .unwrap_err()
+                .to_string()
+                .contains("no release")
+        );
+        let junk = Index(Ok(IndexFetch::Fetched {
+            body: "<html>".into(),
+            etag: None,
+        }));
+        assert!(resolve_version(&junk, None).is_err());
+    }
 }

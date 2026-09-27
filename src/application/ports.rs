@@ -1580,16 +1580,22 @@ pub trait QueueRecords {
 
 /// The questions the runtime and its sessions put to a person (ADR-0022).
 pub trait AskStore {
-    /// Open the ask of the automatic update of `kind` (`update_failed` or
-    /// `approve_update`), closing an older open one of it (ADR-0073
-    /// decision 17).
+    /// Open the ask of the automatic update of `kind` (`update_failed`,
+    /// `approve_update` or `approve_release`), closing an older open one of
+    /// it (ADR-0073 decision 17); `subject` is the release an
+    /// `approve_release` is about.
     fn open_update_ask(
         &mut self,
         kind: crate::domain::AskKind,
         question: &str,
         options: &[&str],
         asked_by: &str,
+        subject: Option<&str>,
     ) -> Result<crate::domain::Ask>;
+    /// Whether the host's `[update]` of this queue looks for releases
+    /// (`release` other than `off`, ADR-t618-1): whether a supervisor of a
+    /// release build applies the release update's answers.
+    fn release_updates_on(&self) -> bool;
     /// The answered, unclosed asks of the automatic update of `kind`,
     /// oldest first.
     fn update_answers(&self, kind: &crate::domain::AskKind) -> Result<Vec<crate::domain::Ask>>;

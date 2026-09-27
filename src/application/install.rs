@@ -90,6 +90,34 @@ pub trait Binaries {
     }
 }
 
+/// Installs a dagq release from crates.io (ADR-t618-1 decision 5): `cargo
+/// install --locked dagq@<version> --root <root> --target-dir
+/// <target_dir>`, what it prints appended to `log`; the binary installed,
+/// `<root>/bin/dagq`.
+pub trait ReleaseInstaller {
+    fn install(&self, version: &str, root: &Path, target_dir: &Path, log: &Path)
+    -> Result<PathBuf>;
+}
+
+/// The binary of release `version` to put in place of `target` (ADR-t618-1
+/// decision 5): `target` itself when it names that version already (the
+/// answer of another queue of the host replaced it), else what `installer`
+/// installs under `root`.
+pub fn release_binary(
+    binaries: &dyn Binaries,
+    installer: &dyn ReleaseInstaller,
+    version: &str,
+    target: &Path,
+    root: &Path,
+    target_dir: &Path,
+    log: &Path,
+) -> Result<PathBuf> {
+    if binaries.version(target).ok().as_deref() == Some(version) {
+        return Ok(target.to_path_buf());
+    }
+    installer.install(version, root, target_dir, log)
+}
+
 /// Where the binary `install` puts in place comes from.
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -188,9 +216,15 @@ pub fn install(ports: &Ports, db: Option<&Path>, options: &InstallOptions) -> Re
     } else {
         None
     };
+    // The binary in place already (a release another queue's answer
+    // installed): only the handoff is left, and `.previous` stays the
+    // build it replaced.
+    let in_place = source == *target;
     let db = db.filter(|db| files.is_file(db));
     let Some(db) = db else {
-        binaries.replace(&source, target)?;
+        if !in_place {
+            binaries.replace(&source, target)?;
+        }
         return Ok(json!({
             "outcome": "installed",
             "target": target,
@@ -242,7 +276,9 @@ backups/ directory next to it"
 running supervisor cannot be handed over to it; nothing was replaced. Stop the supervisor \
 (`down --wait`), put the binary in place and run `up`"
     );
-    binaries.replace(&source, target)?;
+    if !in_place {
+        binaries.replace(&source, target)?;
+    }
     let handed = if takes.is_empty() {
         Vec::new()
     } else {
@@ -264,6 +300,12 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
         });
         match handed {
             Ok(handed) => handed,
+            Err(error) if in_place => {
+                return Err(error.context(format!(
+                    "the handoff to {version} failed; {} was {version} already and stays",
+                    target.display()
+                )));
+            }
             Err(error) => {
                 let restored = binaries.restore(target);
                 return Err(match restored {

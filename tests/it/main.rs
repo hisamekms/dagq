@@ -16,6 +16,7 @@ mod cli_dialogue;
 mod cli_forecast;
 mod cli_goals;
 mod cli_graph;
+mod cli_install_release;
 mod cli_kpi;
 mod cli_operations;
 mod cli_proposals;

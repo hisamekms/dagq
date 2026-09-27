@@ -63,8 +63,16 @@ enum Command {
     Install {
         /// A checkout to build (`cargo build --release --locked`), or a built binary. Default:
         /// build the main checkout of the repository of the working directory.
-        #[arg(long, conflicts_with = "rollback")]
+        #[arg(long, conflicts_with_all = ["rollback", "release"])]
         from: Option<PathBuf>,
+        /// Install a release of crates.io instead (ADR-t618-1): `cargo install --locked
+        /// dagq@<VERSION>` under the queue's update/release directory, then the same check, swap
+        /// and handoff. Without VERSION, the newest release.
+        #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "rollback", value_name = "VERSION")]
+        release: Option<String>,
+        /// The cargo that installs a release (tests give a stub).
+        #[arg(long, hide = true, default_value = "cargo")]
+        cargo: PathBuf,
         /// The binary to replace. Default: this one.
         #[arg(long)]
         to: Option<PathBuf>,
@@ -562,6 +570,9 @@ enum Command {
         /// (tests); it must leave the binary at $CARGO_TARGET_DIR/release/dagq.
         #[arg(long, hide = true)]
         update_build_command: Option<String>,
+        /// The cargo the release update's job installs a release with (tests give a stub).
+        #[arg(long, hide = true)]
+        update_cargo: Option<PathBuf>,
     },
     /// The automatic update's job (ADR-0045 decision 17), which the supervisor starts: build
     /// main's COMMIT in the queue's update checkout, check it, put it in place of --to like
@@ -585,6 +596,38 @@ enum Command {
         log: PathBuf,
         #[arg(long)]
         build_command: Option<String>,
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+        #[arg(long, default_value = "claude")]
+        claude: PathBuf,
+        #[arg(long)]
+        plugin_dir: Option<PathBuf>,
+        /// Seconds the supervisor may take to exec the new binary.
+        #[arg(long, default_value_t = 1800)]
+        handoff_timeout: u64,
+        /// Seconds the new supervisor may take to heartbeat on.
+        #[arg(long, default_value_t = 60)]
+        watch_timeout: u64,
+    },
+    /// The release update's job (ADR-t618-1 decision 5), which a supervisor of a release build
+    /// starts: `cargo install` RELEASE under the queue's update directory, check it, put it in
+    /// place of --to like `install` and watch the supervisor take it; on a failure put the old
+    /// binary back, start the supervisor again when it is gone, and open the `update_failed` ask.
+    #[command(hide = true)]
+    ReleaseUpdate {
+        #[arg(long)]
+        release: String,
+        /// The supervisor that started the job.
+        #[arg(long)]
+        token: String,
+        /// The binary to replace.
+        #[arg(long)]
+        to: PathBuf,
+        /// Where cargo's output is appended.
+        #[arg(long)]
+        log: PathBuf,
+        #[arg(long, default_value = "cargo")]
+        cargo: PathBuf,
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         #[arg(long, default_value = "claude")]
@@ -1266,6 +1309,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Rebind { .. }
         | Command::Install { .. }
         | Command::AutoUpdate { .. }
+        | Command::ReleaseUpdate { .. }
         | Command::Up { .. }
         | Command::Down { .. }
         | Command::Plan { .. }
@@ -1419,7 +1463,7 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::Migrate { .. } => Operation::Migrate,
         Command::Rebind { .. } => Operation::Rebind,
         Command::Install { .. } => Operation::Install,
-        Command::AutoUpdate { .. } => Operation::AutoUpdate,
+        Command::AutoUpdate { .. } | Command::ReleaseUpdate { .. } => Operation::AutoUpdate,
         Command::Up { .. } => Operation::Up,
         Command::Down { .. } => Operation::Down,
         Command::Plan { .. } => Operation::Plan,
@@ -1669,6 +1713,8 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     if let Command::Install {
         from,
+        release,
+        cargo,
         to,
         rollback,
         allow_breaking,
@@ -1685,6 +1731,8 @@ fn execute(cli: Cli) -> Result<Value> {
         };
         let source = match (rollback, from) {
             (true, _) => Source::Rollback,
+            // Replaced by the release's binary below.
+            (false, _) if release.is_some() => Source::Rollback,
             (false, Some(from)) if from.is_file() => Source::Binary(from),
             (false, Some(from)) => Source::Checkout(from),
             (false, None) => {
@@ -1705,21 +1753,33 @@ fn execute(cli: Cli) -> Result<Value> {
         if let Some(plugin_dir) = plugin_dir {
             restart.extend(["--plugin-dir".to_owned(), path_text(&plugin_dir)?]);
         }
+        let options = InstallOptions {
+            source,
+            target: match to {
+                Some(to) => cwd.join(to),
+                None => env::current_exe()?,
+            },
+            allow_breaking,
+            restart,
+            handoff_timeout: Duration::from_secs(handoff_timeout),
+            poll: Duration::from_millis(500),
+        };
+        if let Some(release) = release {
+            return one_shot.install_release(
+                &location,
+                &Cmux { executable: cmux },
+                &Launchctl { uid: current_uid() },
+                &dagq::infrastructure::release_update::CurlIndex::default(),
+                &executable(&cargo).unwrap_or(cargo),
+                Some(release.as_str()).filter(|version| !version.is_empty()),
+                &options,
+            );
+        }
         return one_shot.install(
             &location,
             &Cmux { executable: cmux },
             &Launchctl { uid: current_uid() },
-            &InstallOptions {
-                source,
-                target: match to {
-                    Some(to) => cwd.join(to),
-                    None => env::current_exe()?,
-                },
-                allow_breaking,
-                restart,
-                handoff_timeout: Duration::from_secs(handoff_timeout),
-                poll: Duration::from_millis(500),
-            },
+            &options,
         );
     }
     // A repository queue already resolved the working directory; `--repo`
@@ -2326,6 +2386,7 @@ fn execute(cli: Cli) -> Result<Value> {
             auto_update,
             update_interval,
             update_build_command,
+            update_cargo,
         } => {
             use dagq::compose::SuperviseOptions;
             use dagq::infrastructure::adapters::{Cmux, executable};
@@ -2352,6 +2413,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     interval: Duration::from_secs(update_interval),
                     build_command: update_build_command,
                     cmux: Some(cmux.clone()),
+                    cargo: update_cargo,
                 },
                 parallel: parallel.map(usize::from),
                 max_waiting: max_waiting.map(usize::from),
@@ -2452,6 +2514,36 @@ fn execute(cli: Cli) -> Result<Value> {
                     repository: repo,
                     log,
                     build_command,
+                    cmux: executable(&cmux).unwrap_or(cmux),
+                    claude: executable(&claude).unwrap_or(claude),
+                    plugin_dir,
+                    handoff_timeout: Duration::from_secs(handoff_timeout),
+                    watch_timeout: Duration::from_secs(watch_timeout),
+                },
+            )?
+        }
+        Command::ReleaseUpdate {
+            release,
+            token,
+            to,
+            log,
+            cargo,
+            cmux,
+            claude,
+            plugin_dir,
+            handoff_timeout,
+            watch_timeout,
+        } => {
+            use dagq::infrastructure::adapters::executable;
+            drop(queue);
+            one_shot.release_update(
+                &location,
+                &dagq::compose::ReleaseUpdateJob {
+                    version: release,
+                    token: LeaseToken::new(token),
+                    target: to,
+                    log,
+                    cargo: executable(&cargo).unwrap_or(cargo),
                     cmux: executable(&cmux).unwrap_or(cmux),
                     claude: executable(&claude).unwrap_or(claude),
                     plugin_dir,
@@ -2729,6 +2821,7 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
         Command::Session { .. } => Some(("session", location.log_dir.clone())),
         Command::PlannerSession { .. } => Some(("planner-session", location.log_dir.clone())),
         Command::AutoUpdate { .. } => Some(("auto-update", location.log_dir.clone())),
+        Command::ReleaseUpdate { .. } => Some(("release-update", location.log_dir.clone())),
         // Only on a queue that exists: a `logs/` made for one that does not
         // would leave a directory where the queue is to be moved or made.
         Command::Up { .. } | Command::Down { .. } | Command::Rebind { .. }

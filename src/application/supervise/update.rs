@@ -10,9 +10,9 @@
 
 use super::*;
 use crate::application::update::{
-    JOB_STEPS, UPDATE_ANSWERED, UPDATE_ASKER, UPDATE_FAILED, UPDATE_RETRY, UPDATE_STARTED,
-    base_commit, changes_runtime, in_progress, job_pid, latest_job_step, record, retry_requested,
-    step_commit,
+    JOB_STEPS, UPDATE_ANSWERED, UPDATE_ASKER, UPDATE_FAILED, UPDATE_HISTORY, UPDATE_RETRY,
+    UPDATE_STARTED, base_commit, changes_runtime, failed_release, in_progress, job_pid,
+    latest_job_step, latest_job_step_of, record, retry_requested, step_commit,
 };
 use crate::domain::{AskKind, RunEvent, UPDATE_FAILED_OPTIONS};
 
@@ -34,6 +34,9 @@ pub struct UpdateSettings {
     /// The cmux the job's `up` uses when it starts an in-cmux supervisor
     /// again.
     pub cmux: Option<PathBuf>,
+    /// The cargo the release update's job installs a release with
+    /// (ADR-t618-1 decision 5); `None` is `cargo`. Tests give a stub.
+    pub cargo: Option<PathBuf>,
 }
 
 impl Default for UpdateSettings {
@@ -43,6 +46,7 @@ impl Default for UpdateSettings {
             interval: UPDATE_INTERVAL,
             build_command: None,
             cmux: None,
+            cargo: None,
         }
     }
 }
@@ -121,7 +125,16 @@ impl Supervisor<'_> {
             if in_progress(step, &*self.processes) {
                 return Ok(());
             }
-            if JOB_STEPS.contains(&step.kind.as_str()) {
+        }
+        // Of the automatic update's jobs only: the release update's is the
+        // release pass's to report.
+        if let Some(step) = latest_job_step_of(&updates, false)
+            && JOB_STEPS.contains(&step.kind.as_str())
+        {
+            if let Some(pid) = job_pid(step) {
+                self.processes.reap(pid);
+            }
+            if !in_progress(step, &*self.processes) {
                 return self.job_interrupted(step);
             }
         }
@@ -177,6 +190,7 @@ to wait for the next landing that changes the runtime.",
             &question,
             UPDATE_FAILED_OPTIONS,
             UPDATE_ASKER,
+            None,
         )?;
         record(
             &*self.queue,
@@ -195,7 +209,12 @@ to wait for the next landing that changes the runtime.",
     /// to build main's head again, `skip` waits for the next landing. Any
     /// other answer is left for the inbox to read.
     fn apply_update_answers(&mut self) -> Result<()> {
+        let updates = self.queue.update_events(UPDATE_HISTORY)?;
         for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
+            // The failure of a release's job is the release pass's.
+            if failed_release(&updates, ask.id).is_some() {
+                continue;
+            }
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
             let kind = match answer {
                 "retry" => UPDATE_RETRY,

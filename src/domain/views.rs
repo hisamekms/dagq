@@ -243,12 +243,38 @@ impl SupervisorRegistration {
     /// Whether this is a live supervisor that updates its binary (ADR-0045
     /// decision 17): `auto_update`, its pid `alive` and its heartbeat no
     /// older than [`super::HEARTBEAT_TIMEOUT_SECS`]. The one rule by which
-    /// an answer to an `update_failed` ask is the runtime's to apply, both
-    /// when it is recorded and when `status` reports it.
+    /// an answer to an `update_failed` ask of a build is the runtime's to
+    /// apply, both when it is recorded and when `status` reports it; that of
+    /// a release's job is [`Self::applies_releases`]'.
     pub fn applies_updates(&self, now: i64, alive: impl Fn(u32) -> bool) -> bool {
         self.auto_update
             && alive(self.pid)
             && now - self.heartbeat_at <= super::HEARTBEAT_TIMEOUT_SECS
+    }
+
+    /// Whether this is a live supervisor that installs dagq's releases
+    /// (ADR-t618-1 decision 4): it runs a release build (`X.Y.Z`), the
+    /// host's `release` is not `off` (`releases_on`), its pid `alive` and
+    /// its heartbeat no older than [`super::HEARTBEAT_TIMEOUT_SECS`]. The
+    /// rule by which an answer to an `approve_release` ask, or to the
+    /// `update_failed` ask of a release's job, is the runtime's to apply; a
+    /// development build never applies one.
+    pub fn applies_releases(
+        &self,
+        now: i64,
+        alive: impl Fn(u32) -> bool,
+        releases_on: bool,
+    ) -> bool {
+        releases_on
+            && self.runs_release()
+            && alive(self.pid)
+            && now - self.heartbeat_at <= super::HEARTBEAT_TIMEOUT_SECS
+    }
+
+    fn runs_release(&self) -> bool {
+        self.binary_version
+            .as_deref()
+            .is_some_and(super::release_update::is_release_build)
     }
 }
 

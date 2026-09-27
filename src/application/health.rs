@@ -14,10 +14,10 @@ use std::{collections::HashMap, path::Path};
 use super::execution::{ActorExecution, actor_executions};
 use super::{AskQuery, Clock, PlannerAnswerRoute, ProcessControl, Queue, RunFiles, TRIAGE_ASKER};
 use crate::domain::{
-    AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS, LANDING_OPTIONS, ReasonCode,
-    RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus, SessionRole, SupervisorMode,
-    SupervisorPulse, SupervisorRegistration, TaskId, TaskRun, UPDATE_FAILED_OPTIONS,
-    event_attention, event_kind, heartbeat_stale,
+    APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
+    LANDING_OPTIONS, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
+    SessionRole, SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun,
+    UPDATE_FAILED_OPTIONS, event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
     reason, recheck, run_attention, run_attention_of,
     run_env::{RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING, RunEnvCheck},
@@ -727,6 +727,32 @@ pub fn compact_event(event: &RunEvent) -> Value {
 /// through the inbox (ADR-0022, ADR-0024 decision 6).
 /// `kind` is the event that brought the run there (for a run without
 /// a lease, its latest `runtime_error`).
+/// Whether a live supervisor applies the answer of the `update_failed` ask
+/// `ask`: one with the automatic update for a build's failure, one of a
+/// release build for a release's job's (ADR-t618-1).
+fn update_failure_applied(
+    queue: &dyn Queue,
+    registrations: &[SupervisorRegistration],
+    ask: &crate::domain::Ask,
+    now: i64,
+    control: &dyn ProcessControl,
+) -> Result<bool> {
+    let updates = queue.update_events(super::update::UPDATE_HISTORY)?;
+    let alive = |pid| control.alive(pid);
+    Ok(
+        if super::update::failed_release(&updates, ask.id).is_some() {
+            let releases = queue.release_updates_on();
+            registrations
+                .iter()
+                .any(|registration| registration.applies_releases(now, alive, releases))
+        } else {
+            registrations
+                .iter()
+                .any(|registration| registration.applies_updates(now, alive))
+        },
+    )
+}
+
 pub fn attention(
     queue: &dyn Queue,
     registrations: &[SupervisorRegistration],
@@ -1041,12 +1067,30 @@ pub fn attention(
                 .answer
                 .as_deref()
                 .is_some_and(|answer| UPDATE_FAILED_OPTIONS.contains(&answer.trim()))
-            && registrations
-                .iter()
-                .any(|registration| registration.applies_updates(now, |pid| control.alive(pid)))
+            && update_failure_applied(queue, registrations, &ask, now, control)?
         {
             // The supervisor that updates its binary retries or leaves the
             // update (ADR-0045 decision 17).
+            (
+                "answered",
+                event_kind::ASK_ANSWERED,
+                AttentionNext::ApplyingAnswer { ask_id: ask.id },
+            )
+        } else if ask.kind == AskKind::ApproveRelease
+            && ask
+                .answer
+                .as_deref()
+                .is_some_and(|answer| APPROVE_RELEASE_OPTIONS.contains(&answer.trim()))
+            && registrations.iter().any(|registration| {
+                registration.applies_releases(
+                    now,
+                    |pid| control.alive(pid),
+                    queue.release_updates_on(),
+                )
+            })
+        {
+            // A supervisor of a release build installs or skips the
+            // release (ADR-t618-1 decision 4).
             (
                 "answered",
                 event_kind::ASK_ANSWERED,

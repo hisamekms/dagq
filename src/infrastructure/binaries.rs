@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::application::install::{
-    Binaries, PendingMigration, SchemaCheck, parse_version, previous_path,
+    Binaries, PendingMigration, ReleaseInstaller, SchemaCheck, parse_version, previous_path,
 };
 
 pub struct LocalBinaries;
@@ -268,6 +268,79 @@ impl Binaries for LocalBinaries {
         ensure!(
             binary.is_file(),
             "the build left no binary at {}",
+            binary.display()
+        );
+        Ok(binary)
+    }
+}
+
+/// [`ReleaseInstaller`] on this machine: `program` (`cargo` unless a test
+/// gives a stub) runs `install --locked dagq@<version> --root <root>
+/// --target-dir <target_dir>` (ADR-t618-1 decision 5).
+#[derive(Debug, Clone)]
+pub struct CargoInstaller {
+    pub program: PathBuf,
+}
+
+impl Default for CargoInstaller {
+    fn default() -> Self {
+        Self {
+            program: PathBuf::from("cargo"),
+        }
+    }
+}
+
+impl ReleaseInstaller for CargoInstaller {
+    fn install(
+        &self,
+        version: &str,
+        root: &Path,
+        target_dir: &Path,
+        log: &Path,
+    ) -> Result<PathBuf> {
+        if let Some(dir) = log.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .with_context(|| format!("open {}", log.display()))?;
+        let status = Command::new(&self.program)
+            .args(["install", "--locked"])
+            .arg(format!(
+                "{}@{version}",
+                crate::domain::source_repository::PACKAGE
+            ))
+            .arg("--root")
+            .arg(root)
+            .arg("--target-dir")
+            .arg(target_dir)
+            .stdin(Stdio::null())
+            .stdout(file.try_clone()?)
+            .stderr(file)
+            .status();
+        let status = match status {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!(
+                "{} was not found: installing a release needs cargo (and a Rust toolchain that \
+builds dagq {version})",
+                self.program.display()
+            ),
+            Err(error) => {
+                return Err(error).with_context(|| format!("run {}", self.program.display()));
+            }
+        };
+        ensure!(
+            status.success(),
+            "`{} install --locked dagq@{version}` exited with {status}; see {}",
+            self.program.display(),
+            log.display()
+        );
+        let binary = root.join("bin").join("dagq");
+        ensure!(
+            binary.is_file(),
+            "cargo install left no binary at {}",
             binary.display()
         );
         Ok(binary)

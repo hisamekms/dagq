@@ -98,6 +98,88 @@ pub struct AutoUpdateJob {
     pub watch_timeout: Duration,
 }
 
+/// The arguments of the `up` that starts an in-cmux supervisor again after
+/// an update's job, beside `--db`, `--in-cmux` and its own flags.
+fn restart_arguments(cmux: &Path, claude: &Path, plugin_dir: Option<&Path>) -> Result<Vec<String>> {
+    let mut arguments = vec![
+        "--cmux".to_owned(),
+        path_text(cmux)?,
+        "--claude".to_owned(),
+        path_text(claude)?,
+    ];
+    if let Some(dir) = plugin_dir {
+        arguments.extend(["--plugin-dir".to_owned(), path_text(dir)?]);
+    }
+    Ok(arguments)
+}
+
+/// Starts a supervisor an update's job found gone with the binary in
+/// place: launchd does for its own; an in-cmux one by `up --in-cmux`, with
+/// `--auto-update` only when it had it (a supervisor of a release has not,
+/// and outside dagq's source `up` refuses it, ADR-t614-1).
+fn restarter<'a>(
+    db: &'a Path,
+    cmux: &'a Path,
+    binary: &'a Path,
+    arguments: &'a [String],
+) -> impl Fn(&SupervisorRegistration) -> Result<Value> + 'a {
+    move |registration: &SupervisorRegistration| -> Result<Value> {
+        match registration.mode {
+            Some(SupervisorMode::Launchd) => Ok(json!({
+                "by": "launchd",
+                "note": "its LaunchAgent starts the binary in place again",
+            })),
+            Some(SupervisorMode::InCmux) => {
+                if let Some(id) = &registration.workspace_id {
+                    let _ = Cmux {
+                        executable: cmux.to_path_buf(),
+                    }
+                    .close(id);
+                }
+                let mut up = vec![
+                    "--db".to_owned(),
+                    path_text(db)?,
+                    "up".to_owned(),
+                    "--in-cmux".to_owned(),
+                ];
+                if registration.auto_update {
+                    up.push("--auto-update".to_owned());
+                }
+                // Only the values it took from flags (task 698).
+                up.extend(registration.flag_arguments());
+                up.extend(arguments.iter().cloned());
+                let started = LocalBinaries.run(binary, &up)?;
+                Ok(json!({"by": "up --in-cmux", "up": started["supervisor"]}))
+            }
+            None => bail!(
+                "it was started by hand rather than by `up`, so it is not started again; start it the same way"
+            ),
+        }
+    }
+}
+
+/// The release update's job as the supervisor starts it (`release-update`,
+/// ADR-t618-1 decision 5).
+#[derive(Debug, Clone)]
+pub struct ReleaseUpdateJob {
+    /// The release to install.
+    pub version: String,
+    /// The supervisor that started it.
+    pub token: LeaseToken,
+    /// The binary to replace.
+    pub target: PathBuf,
+    /// Where cargo's output is appended.
+    pub log: PathBuf,
+    /// The cargo that installs the release.
+    pub cargo: PathBuf,
+    /// What an in-cmux supervisor started again uses.
+    pub cmux: PathBuf,
+    pub claude: PathBuf,
+    pub plugin_dir: Option<PathBuf>,
+    pub handoff_timeout: Duration,
+    pub watch_timeout: Duration,
+}
+
 /// How the supervisor loop is driven. `stop` is the graceful drain switch
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
 #[derive(Debug, Clone)]
@@ -1231,46 +1313,9 @@ same in one step",
             .canonicalize()
             .context("queue must already be initialized")?;
         let queues = |db: &Path| self.queues(db);
-        let mut restart_arguments = vec![
-            "--cmux".to_owned(),
-            path_text(&job.cmux)?,
-            "--claude".to_owned(),
-            path_text(&job.claude)?,
-        ];
-        if let Some(dir) = &job.plugin_dir {
-            restart_arguments.extend(["--plugin-dir".to_owned(), path_text(dir)?]);
-        }
-        let cmux = Cmux {
-            executable: job.cmux.clone(),
-        };
-        let restart = |registration: &SupervisorRegistration| -> Result<Value> {
-            match registration.mode {
-                Some(SupervisorMode::Launchd) => Ok(json!({
-                    "by": "launchd",
-                    "note": "its LaunchAgent starts the binary in place again",
-                })),
-                Some(SupervisorMode::InCmux) => {
-                    if let Some(id) = &registration.workspace_id {
-                        let _ = cmux.close(id);
-                    }
-                    let mut arguments = vec![
-                        "--db".to_owned(),
-                        path_text(&db)?,
-                        "up".to_owned(),
-                        "--in-cmux".to_owned(),
-                        "--auto-update".to_owned(),
-                    ];
-                    // Only the values it took from flags (task 698).
-                    arguments.extend(registration.flag_arguments());
-                    arguments.extend(restart_arguments.iter().cloned());
-                    let started = LocalBinaries.run(&job.target, &arguments)?;
-                    Ok(json!({"by": "up --in-cmux", "up": started["supervisor"]}))
-                }
-                None => bail!(
-                    "it was started by hand rather than by `up`, so it is not started again; start it the same way"
-                ),
-            }
-        };
+        let restart_arguments =
+            restart_arguments(&job.cmux, &job.claude, job.plugin_dir.as_deref())?;
+        let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
         update::run(
             &update::JobPorts {
                 binaries: &LocalBinaries,
@@ -1296,6 +1341,99 @@ same in one step",
                 pid: std::process::id(),
             },
         )
+    }
+
+    /// The release update's job (see [`update::run_release`]): install
+    /// release `job.version` with cargo under the queue's update directory
+    /// and put it in place of `job.target`, handing the supervisor
+    /// `job.token` over to it; a supervisor gone afterwards is started
+    /// again as [`Self::auto_update`] does.
+    pub fn release_update(
+        &self,
+        location: &QueueLocation,
+        job: &ReleaseUpdateJob,
+    ) -> Result<Value> {
+        let db = location
+            .db
+            .canonicalize()
+            .context("queue must already be initialized")?;
+        let queues = |db: &Path| self.queues(db);
+        let restart_arguments =
+            restart_arguments(&job.cmux, &job.claude, job.plugin_dir.as_deref())?;
+        let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
+        update::run_release(
+            &update::JobPorts {
+                binaries: &LocalBinaries,
+                files: &LocalRunFiles,
+                processes: &SystemProcesses,
+                clock: &*self.generators.clock,
+                queues: &queues,
+                restart: &restart,
+            },
+            &crate::infrastructure::binaries::CargoInstaller {
+                program: job.cargo.clone(),
+            },
+            &db,
+            &update::ReleaseJobOptions {
+                version: job.version.clone(),
+                token: job.token.clone(),
+                target: job.target.clone(),
+                paths: update::UpdatePaths::under(&location.queue_dir),
+                log: job.log.clone(),
+                restart: restart_arguments.clone(),
+                handoff_timeout: job.handoff_timeout,
+                watch_timeout: job.watch_timeout,
+                poll: Duration::from_millis(500),
+                pid: std::process::id(),
+            },
+        )
+    }
+
+    /// `install --release [<version>]` (ADR-t618-1 decision 6): the
+    /// release (`requested`, else the newest crates.io lists), installed
+    /// with `cargo` under the queue's `update/release` unless `options.target`
+    /// is that release already, then [`Self::install`] from it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_release(
+        &self,
+        location: &QueueLocation,
+        cmux: &dyn WorkspaceBackend,
+        launchd: &dyn LaunchAgent,
+        index: &dyn crate::application::release_update::ReleaseIndex,
+        cargo: &Path,
+        requested: Option<&str>,
+        options: &InstallOptions,
+    ) -> Result<Value> {
+        let version = crate::application::release_update::resolve_version(index, requested)?;
+        let paths = update::UpdatePaths::under(&location.queue_dir);
+        let log = location
+            .queue_dir
+            .join("logs")
+            .join(format!("install-release-{version}.log"));
+        let binary = installation::release_binary(
+            &LocalBinaries,
+            &crate::infrastructure::binaries::CargoInstaller {
+                program: cargo.to_path_buf(),
+            },
+            &version,
+            &options.target,
+            &paths.release,
+            &paths.target,
+            &log,
+        )
+        .with_context(|| format!("install release {version}"))?;
+        let mut report = self.install(
+            location,
+            cmux,
+            launchd,
+            &InstallOptions {
+                source: installation::Source::Binary(binary),
+                ..options.clone()
+            },
+        )?;
+        report["release"] = json!(version);
+        report["log"] = json!(log);
+        Ok(report)
     }
 
     /// Open a planner a person talks with (`dagq plan`, ADR-0041 decision

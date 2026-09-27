@@ -143,6 +143,17 @@ pub fn load_host_update(queue_dir: &Path, host_wide: Option<&Path>) -> HostUpdat
     }
 }
 
+/// Whether the host's `[update]` for the queue at `queue_dir` looks for
+/// releases (`release` other than `off`), with the host-wide file of the
+/// environment: whether a supervisor of a release build applies the
+/// answers of the release update's asks (ADR-t618-1 decision 4).
+pub fn releases_on(queue_dir: &Path) -> bool {
+    load_host_update(queue_dir, super::kpi_config::host_wide_file().as_deref())
+        .config
+        .release
+        != ReleaseMode::Off
+}
+
 /// Reads the index with `curl -fsS --max-time 10`, the response's headers
 /// on stdout before its body (`-D -`).
 #[derive(Debug, Clone)]

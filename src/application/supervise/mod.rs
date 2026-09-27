@@ -1036,6 +1036,7 @@ impl Supervisor<'_> {
                     self.start_observer_when_due(options);
                 }
                 self.auto_update_pass(options);
+                self.release_update_pass(options);
             }
             // A plan review that just readied tasks is followed by one more
             // pass, which claims them.

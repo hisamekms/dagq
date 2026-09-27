@@ -1348,3 +1348,209 @@ fn the_update_job_installs_past_a_supervisor_that_took_the_handoff_as_the_wait_r
     );
     assert!(restarted.lock().unwrap().is_empty());
 }
+
+/// A `cargo install` that leaves `binary` (or fails), noting each call.
+struct FakeCargo {
+    binary: PathBuf,
+    fails: bool,
+    calls: Mutex<Vec<String>>,
+}
+
+impl dagq::application::install::ReleaseInstaller for FakeCargo {
+    fn install(&self, version: &str, root: &Path, target_dir: &Path, _: &Path) -> Result<PathBuf> {
+        self.calls.lock().unwrap().push(format!(
+            "cargo install dagq@{version} --root {} --target-dir {}",
+            root.display(),
+            target_dir.display()
+        ));
+        if self.fails {
+            bail!("cargo was not found");
+        }
+        Ok(self.binary.clone())
+    }
+}
+
+fn run_release_job(
+    fixture: &Fixture,
+    binaries: &UpdateBinaries,
+    cargo: &FakeCargo,
+    processes: &FakeProcesses,
+    version: &str,
+) -> Value {
+    use dagq::application::update;
+    let queues = |db: &Path| -> std::sync::Arc<dyn dagq::application::QueueOpener> {
+        std::sync::Arc::new(dagq::infrastructure::runtime_store::SqliteOpener {
+            db: db.to_owned(),
+            generators: dagq::infrastructure::clock::system(),
+            actor: None,
+        })
+    };
+    let restart =
+        |_: &dagq::domain::SupervisorRegistration| -> Result<Value> { Ok(json!({"by": "test"})) };
+    let dir = fixture._dir.path();
+    update::run_release(
+        &update::JobPorts {
+            binaries,
+            files: &dagq::infrastructure::run_files::LocalRunFiles,
+            processes,
+            clock: &dagq::infrastructure::clock::SystemClock,
+            queues: &queues,
+            restart: &restart,
+        },
+        cargo,
+        &fixture.location.db,
+        &update::ReleaseJobOptions {
+            version: version.to_owned(),
+            token: LeaseToken::new("auto"),
+            target: dir.join("bin").join("dagq"),
+            paths: update::UpdatePaths::under(&dir.join("queue-dir")),
+            log: dir.join("cargo.log"),
+            restart: vec!["--cmux".into(), "/opt/cmux".into()],
+            handoff_timeout: Duration::from_secs(5),
+            watch_timeout: Duration::from_secs(5),
+            poll: Duration::from_millis(20),
+            pid: 7,
+        },
+    )
+    .unwrap()
+}
+
+/// The release update's job (ADR-t618-1 decisions 5 and 7): the release
+/// `cargo install`ed under the queue's `update/release` goes through the
+/// same check, swap, handoff and watch as a build and ends in
+/// `update_installed` with `source: release`; a failed `cargo install`
+/// replaces nothing and asks; a breaking migration is left to
+/// `approve_update`, whose command starts no `up --auto-update`.
+#[test]
+fn the_release_job_installs_a_release_like_a_build_and_asks_on_a_failure() {
+    let fixture = fixture();
+    let queue = auto_supervisor(&fixture);
+    let processes = FakeProcesses::default();
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    let cargo = |fails: bool| FakeCargo {
+        binary: dir.join("built").join("dagq"),
+        fails,
+        calls: Mutex::default(),
+    };
+    let release_steps = |queue: &SqliteQueue| {
+        queue
+            .update_events(20)
+            .unwrap()
+            .into_iter()
+            .map(|u| {
+                assert_eq!(u.payload["source"], "release", "{u:?}");
+                assert_eq!(u.payload["release"], "9.9.9", "{u:?}");
+                assert!(u.payload.get("commit").is_none(), "{u:?}");
+                u.kind
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let binaries = UpdateBinaries::new(dir, false, &[(40, true)]);
+    let installer = cargo(false);
+    let report = thread::scope(|scope| {
+        scope.spawn(|| take_and_heartbeat(&fixture, &processes, true));
+        run_release_job(&fixture, &binaries, &installer, &processes, "9.9.9")
+    });
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["release"], "9.9.9", "{report}");
+    assert_eq!(report["previous_version"], "0.0.1", "{report}");
+    assert_eq!(
+        *installer.calls.lock().unwrap(),
+        [format!(
+            "cargo install dagq@9.9.9 --root {} --target-dir {}",
+            dir.join("queue-dir/update/release").display(),
+            dir.join("queue-dir/update/target").display()
+        )]
+    );
+    assert_eq!(
+        binaries.calls(),
+        [
+            "migrate".to_owned(),
+            format!("replace {}", target.display())
+        ]
+    );
+    assert_eq!(release_steps(&queue), ["update_installed", "update_built"]);
+    let installed = &queue.update_events(1).unwrap()[0];
+    assert_eq!(installed.payload["version"], VERSION);
+
+    // cargo fails: nothing replaced, the `update_failed` ask says how to
+    // go on by hand.
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    let report = run_release_job(&fixture, &binaries, &cargo(true), &processes, "9.9.9");
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "build", "{report}");
+    assert!(binaries.calls().is_empty(), "{:?}", binaries.calls());
+    let asks = queue.asks(dagq::application::AskQuery::default()).unwrap();
+    let failed = asks
+        .iter()
+        .find(|a| a.kind == dagq::domain::AskKind::UpdateFailed)
+        .unwrap();
+    assert!(
+        failed
+            .question
+            .contains("release 9.9.9 failed at its build")
+            && failed.question.contains("cargo was not found")
+            && failed.question.contains("dagq install --release 9.9.9"),
+        "{}",
+        failed.question
+    );
+    assert_eq!(release_steps(&queue)[0], "update_failed");
+
+    // A breaking migration, with the host set to install without asking
+    // or not: kept for a person, and the command drains without an `up`.
+    let binaries = UpdateBinaries::new(dir, false, &[(41, false)]);
+    let report = run_release_job(&fixture, &binaries, &cargo(false), &processes, "9.9.9");
+    assert_eq!(report["outcome"], "awaiting_approval", "{report}");
+    let command = report["command"].as_str().unwrap();
+    assert!(
+        command.contains("install --from") && command.contains("--allow-breaking"),
+        "{command}"
+    );
+    assert!(
+        !command.contains("--auto-update") && !command.contains(" up"),
+        "{command}"
+    );
+    assert!(binaries.calls().iter().all(|c| !c.starts_with("replace")));
+    let approve = queue
+        .asks(dagq::application::AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == dagq::domain::AskKind::ApproveUpdate)
+        .unwrap();
+    assert!(
+        approve.question.starts_with("release 9.9.9 (installed as"),
+        "{}",
+        approve.question
+    );
+    assert!(!approve.question.contains("--auto-update"));
+    assert_eq!(release_steps(&queue)[0], "update_awaiting_approval");
+}
+
+/// A binary that is the release already (another queue's answer put it in
+/// place) is not installed again nor replaced: only the handoff is left,
+/// and `.previous` stays what it was.
+#[test]
+fn the_release_job_skips_cargo_when_the_binary_is_that_release() {
+    let fixture = fixture();
+    let processes = FakeProcesses::default();
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "release in place").unwrap();
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    let installer = FakeCargo {
+        binary: dir.join("built").join("dagq"),
+        fails: true,
+        calls: Mutex::default(),
+    };
+    // Every binary under bin/ is 0.0.1 to the fake.
+    let report = run_release_job(&fixture, &binaries, &installer, &processes, "0.0.1");
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["version"], "0.0.1", "{report}");
+    assert!(installer.calls.lock().unwrap().is_empty());
+    assert!(binaries.calls().is_empty(), "{:?}", binaries.calls());
+}

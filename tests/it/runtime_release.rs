@@ -1,6 +1,8 @@
 //! Runtime tests: a supervisor of a release build looks for a new release
 //! in crates.io's sparse index as the host's `[update]` says (ADR-t618-1
-//! decisions 1 to 3), through a stub `curl`.
+//! decisions 1 to 3), through a stub `curl`, asks about it, and starts the
+//! job that installs it on the answer or without asking (decisions 4, 5),
+//! through a stub `cargo` that fails, so nothing is ever replaced.
 use std::os::unix::fs::PermissionsExt;
 
 use crate::runtime_support;
@@ -43,6 +45,7 @@ struct Setup {
     repo: PathBuf,
     db: PathBuf,
     calls: PathBuf,
+    cargo_calls: PathBuf,
     options: SuperviseOptions,
 }
 
@@ -76,20 +79,40 @@ fn setup(host: &str, current: &str, fail: bool) -> Setup {
     )
     .unwrap();
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    // A cargo that cannot install: it notes its arguments and fails.
+    let cargo_calls = queue_dir.join("cargo-calls");
+    fs::create_dir(&cargo_calls).unwrap();
+    let cargo = queue_dir.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\nn=$(ls '{calls}' | wc -l | tr -d ' ')\nprintf '%s\\n' \"$@\" > \"{calls}/$n\"\necho 'error: could not compile dagq' >&2\nexit 101\n",
+            calls = cargo_calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let base = supervise_options(1, true);
     let options = SuperviseOptions {
+        update: dagq::application::supervise::UpdateSettings {
+            interval: Duration::ZERO,
+            cargo: Some(cargo),
+            ..base.update.clone()
+        },
         host_config: Some(queue_dir.join("no host-wide file.toml")),
         release_index: Some(runtime::ReleaseIndexPort(Arc::new(CurlIndex {
             program: curl,
             url: "https://index.example/da/gq/dagq".to_owned(),
         }))),
         release_current: Some(current.to_owned()),
-        ..supervise_options(1, true)
+        ..base
     };
     Setup {
         _fixture: fixture,
         repo,
         db,
         calls,
+        cargo_calls,
         options,
     }
 }
@@ -120,6 +143,56 @@ impl Setup {
             .unwrap();
     }
 
+    fn asks(&self, all: bool) -> Vec<dagq::domain::Ask> {
+        SqliteQueue::open(&self.db)
+            .unwrap()
+            .asks(AskQuery {
+                all,
+                ..AskQuery::default()
+            })
+            .unwrap()
+    }
+
+    /// The `approve_release` asks nobody closed.
+    fn release_asks(&self) -> Vec<dagq::domain::Ask> {
+        self.asks(false)
+            .into_iter()
+            .filter(|ask| ask.kind == AskKind::ApproveRelease)
+            .collect()
+    }
+
+    fn answer(&self, ask: &dagq::domain::Ask, text: &str) {
+        SqliteQueue::open(&self.db)
+            .unwrap()
+            .answer(ask.id, text)
+            .unwrap();
+    }
+
+    /// The release update's steps of `kind` about `release`.
+    fn steps(&self, kind: &str, release: &str) -> Vec<Value> {
+        events_of(&self.db, kind)
+            .into_iter()
+            .filter(|p| p["source"] == "release" && p["release"] == release)
+            .collect()
+    }
+
+    /// Wait for the `times`th `update_failed` of `release`'s job.
+    fn wait_failed(&self, release: &str, times: usize) -> Value {
+        let started = Instant::now();
+        loop {
+            let failed = self.steps("update_failed", release);
+            if failed.len() >= times {
+                return failed[times - 1].clone();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the job for {release} did not fail: {:?}",
+                events_of(&self.db, "update_started")
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn no_asks(&self) {
         let asks = SqliteQueue::open(&self.db)
             .unwrap()
@@ -133,7 +206,7 @@ impl Setup {
 }
 
 #[test]
-fn a_release_build_records_the_latest_release_and_asks_nothing() {
+fn a_release_build_records_the_latest_release_and_asks_about_it() {
     let s = setup("", "0.3.0", false);
     s.supervise();
 
@@ -150,7 +223,8 @@ fn a_release_build_records_the_latest_release_and_asks_nothing() {
     assert_eq!(checked[0]["plugin"], Value::Null);
     assert_eq!(checked[0]["etag"], "\"e1\"");
     assert_eq!(checked[0]["not_modified"], false);
-    s.no_asks();
+    // The release is asked about; the look itself is no attention.
+    assert_eq!(s.release_asks().len(), 1);
 
     let status = runtime::status(&s.db).unwrap();
     let release = &status["release_update"];
@@ -164,8 +238,17 @@ fn a_release_build_records_the_latest_release_and_asks_nothing() {
         "update_available"
     };
     assert_eq!(release["state"], expected);
-    let attention = status["attention"].to_string();
-    assert!(!attention.contains("release"), "{attention}");
+    let attention = status["attention"].as_array().unwrap();
+    assert!(
+        attention
+            .iter()
+            .all(|a| a["kind"] != "release_checked" && a["kind"] != "release_check_failed"),
+        "{attention:?}"
+    );
+    assert!(
+        attention.iter().any(|a| a["kind"] == "ask_opened"),
+        "{attention:?}"
+    );
 }
 
 #[test]
@@ -272,4 +355,215 @@ fn doctor_warns_of_a_wrong_update_value_taken_as_its_default() {
     // The wrong values are the defaults: the supervisor still looks.
     s.supervise();
     assert_eq!(events_of(&s.db, "release_checked").len(), 1);
+}
+
+fn record_latest(s: &Setup, latest: &str) {
+    s.record(
+        "release_checked",
+        json!({"latest": latest, "current": "0.3.0", "checked_at": now_secs(), "etag": "\"e2\"", "supervisor": "another"}),
+    );
+}
+
+/// A new release opens one `approve_release` ask about it (ADR-t618-1
+/// decision 4), which a later look does not repeat; a newer release closes
+/// it as `superseded` and asks about itself.
+#[test]
+fn a_new_release_opens_one_approve_release_and_a_newer_one_supersedes_it() {
+    let s = setup("", "0.3.0", false);
+    s.supervise();
+    let asks = s.release_asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let first = &asks[0];
+    assert_eq!(first.subject.as_deref(), Some("0.4.0"));
+    assert_eq!(first.options, ["install", "skip"]);
+    assert_eq!(first.task_id, None);
+    assert_eq!(first.run_id, None);
+    assert_eq!(first.asked_by, "supervisor");
+    assert_eq!(first.reason_category.as_str(), "scope");
+    assert!(
+        first.question.contains("dagq 0.4.0 is released")
+            && first.question.contains("runs 0.3.0")
+            && first.question.contains("cargo install --locked dagq@0.4.0"),
+        "{}",
+        first.question
+    );
+    s.supervise();
+    assert_eq!(s.release_asks().len(), 1);
+
+    record_latest(&s, "0.5.0");
+    s.supervise();
+    let asks = s.release_asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].subject.as_deref(), Some("0.5.0"));
+    let older = s
+        .asks(true)
+        .into_iter()
+        .find(|ask| ask.id == first.id)
+        .unwrap();
+    assert_eq!(older.answer.as_deref(), Some("superseded"));
+    assert!(older.closed_at.is_some());
+    assert!(events_of(&s.db, "update_started").is_empty());
+}
+
+/// The `install` answer starts the job (ADR-t618-1 decision 5): it runs
+/// `cargo install` under the queue's `update/release` and, as cargo fails,
+/// replaces nothing and opens `update_failed`; `retry` starts it again and
+/// `skip` leaves the release, which is not asked about again.
+#[test]
+fn the_install_answer_starts_the_job_and_retry_and_skip_follow_its_failure() {
+    let s = setup("", "0.3.0", false);
+    s.supervise();
+    let ask = s.release_asks().remove(0);
+    s.answer(&ask, "install");
+    s.supervise();
+    let answered = s.steps("update_answered", "0.4.0");
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert_eq!(answered[0]["answer"], "install");
+    assert!(s.release_asks().is_empty());
+    let started = s.steps("update_started", "0.4.0");
+    assert_eq!(started.len(), 1, "{:?}", events_of(&s.db, "update_started"));
+    assert_eq!(started[0]["version"], "0.3.0");
+    let failed = s.wait_failed("0.4.0", 1);
+    assert_eq!(failed["stage"], "build", "{failed}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("install --locked dagq@0.4.0"),
+        "{failed}"
+    );
+    let queue_dir = s.db.canonicalize().unwrap().parent().unwrap().to_path_buf();
+    let args = fs::read_to_string(s.cargo_calls.join("0")).unwrap();
+    assert_eq!(
+        args,
+        format!(
+            "install\n--locked\ndagq@0.4.0\n--root\n{}\n--target-dir\n{}\n",
+            queue_dir.join("update/release").display(),
+            queue_dir.join("update/target").display()
+        )
+    );
+    assert!(events_of(&s.db, "update_installed").is_empty());
+
+    // `retry` starts it again, once.
+    let failed_ask = s
+        .asks(false)
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::UpdateFailed)
+        .unwrap();
+    assert!(
+        failed_ask.question.contains("release 0.4.0"),
+        "{}",
+        failed_ask.question
+    );
+    s.answer(&failed_ask, "retry");
+    s.supervise();
+    assert_eq!(s.steps("update_retry", "0.4.0").len(), 1);
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 2);
+    s.wait_failed("0.4.0", 2);
+
+    // `skip` leaves it: no job, no ask about it any more.
+    let failed_ask = s
+        .asks(false)
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::UpdateFailed)
+        .unwrap();
+    s.answer(&failed_ask, "skip");
+    s.supervise();
+    s.supervise();
+    let skipped: Vec<Value> = s
+        .steps("update_answered", "0.4.0")
+        .into_iter()
+        .filter(|p| p["answer"] == "skip")
+        .collect();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 2);
+    assert!(s.release_asks().is_empty());
+    assert!(s.asks(false).is_empty(), "{:?}", s.asks(false));
+}
+
+/// A skipped release is not asked about again; the next one is.
+#[test]
+fn a_skipped_release_is_not_asked_about_again() {
+    let s = setup("", "0.3.0", false);
+    s.supervise();
+    let ask = s.release_asks().remove(0);
+    s.answer(&ask, "skip");
+    s.supervise();
+    assert_eq!(s.steps("update_answered", "0.4.0").len(), 1);
+    s.supervise();
+    assert!(s.release_asks().is_empty());
+    assert!(events_of(&s.db, "update_started").is_empty());
+    record_latest(&s, "0.5.0");
+    s.supervise();
+    assert_eq!(s.release_asks()[0].subject.as_deref(), Some("0.5.0"));
+}
+
+/// `release = "auto"` starts the job without an ask, once per release.
+#[test]
+fn release_auto_installs_without_asking() {
+    let s = setup("[update]\nrelease = \"auto\"\n", "0.3.0", false);
+    s.supervise();
+    assert!(s.release_asks().is_empty());
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 1);
+    s.wait_failed("0.4.0", 1);
+    s.supervise();
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 1);
+    assert!(s.release_asks().is_empty());
+}
+
+/// A supervisor of a development build applies no `approve_release`
+/// answer (ADR-t618-1 decision 1): the ask stays for a release build or a
+/// person.
+#[test]
+fn a_development_build_applies_no_release_answer() {
+    let s = setup("", "0.4.0-dev+abc", false);
+    let mut queue = SqliteQueue::open(&s.db).unwrap();
+    let ask = queue
+        .open_update_ask(
+            AskKind::ApproveRelease,
+            "dagq 0.5.0 is released",
+            &["install", "skip"],
+            "supervisor",
+            Some("0.5.0"),
+        )
+        .unwrap();
+    queue.answer(ask.id, "install").unwrap();
+    s.supervise();
+    let ask = queue.read_ask(ask.id).unwrap();
+    assert!(ask.closed_at.is_none(), "{ask:?}");
+    assert!(events_of(&s.db, "update_answered").is_empty());
+    assert!(events_of(&s.db, "update_started").is_empty());
+}
+
+/// A job of a release that died without recording how it ended is
+/// reported through `update_failed` (stage `interrupted`) even when a
+/// step of the automatic update came after it, and not started again on
+/// its own.
+#[test]
+fn an_interrupted_release_job_is_reported_not_retried() {
+    let s = setup("", "0.3.0", false);
+    record_latest(&s, "0.4.0");
+    s.record(
+        "update_started",
+        json!({"pid": 999_999_999u32, "source": "release", "release": "0.4.0"}),
+    );
+    s.record(
+        "update_failed",
+        json!({"stage": "build", "commit": "abc", "ask_id": 0}),
+    );
+    s.supervise();
+    let failed = s.steps("update_failed", "0.4.0");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["stage"], "interrupted");
+    assert_eq!(failed[0]["after"], "update_started");
+    let ask = s
+        .asks(false)
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::UpdateFailed)
+        .unwrap();
+    assert!(ask.question.contains("release 0.4.0"), "{}", ask.question);
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 1);
+    assert!(s.release_asks().is_empty());
+    s.supervise();
+    assert_eq!(s.steps("update_failed", "0.4.0").len(), 1);
 }

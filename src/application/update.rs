@@ -43,6 +43,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How many of the latest `update_*` a look reads: enough to find the
+/// failure an answered ask is about and the answers a release had.
+pub const UPDATE_HISTORY: usize = 500;
+
 /// `asked_by` of the update's asks.
 pub const UPDATE_ASKER: &str = "supervisor";
 
@@ -89,6 +93,9 @@ pub struct UpdatePaths {
     /// `<queue dir>/update/staged/dagq`: a build with a breaking
     /// migration, kept for the `install` a person runs.
     pub staged: PathBuf,
+    /// `<queue dir>/update/release`: the `--root` of the release update's
+    /// `cargo install` (ADR-t618-1 decision 5).
+    pub release: PathBuf,
 }
 
 impl UpdatePaths {
@@ -98,6 +105,7 @@ impl UpdatePaths {
             checkout: root.join("checkout"),
             target: root.join("target"),
             staged: root.join("staged").join("dagq"),
+            release: root.join("release"),
         }
     }
 }
@@ -139,6 +147,30 @@ pub fn latest_job_step(updates: &[RunEvent]) -> Option<&RunEvent> {
     updates
         .iter()
         .find(|update| !matches!(update.kind.as_str(), UPDATE_ANSWERED | UPDATE_RETRY))
+}
+
+/// The release of the release update's job whose failure opened the
+/// `update_failed` ask `ask_id`; `None` when a build of the automatic
+/// update failed (or the step is not among `updates`).
+pub fn failed_release(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Option<&str> {
+    updates
+        .iter()
+        .find(|update| {
+            update.kind == UPDATE_FAILED
+                && update.payload.get("ask_id").and_then(Value::as_i64) == Some(ask_id.as_i64())
+        })
+        .and_then(step_release)
+}
+
+/// The newest step of the jobs of the release update (`release`) or of the
+/// automatic update (not `release`), as [`latest_job_step`] finds it: the
+/// one that tells whether a job of that kind was interrupted, even when a
+/// job of the other kind ran after it.
+pub fn latest_job_step_of(updates: &[RunEvent], release: bool) -> Option<&RunEvent> {
+    updates.iter().find(|update| {
+        step_release(update).is_some() == release
+            && !matches!(update.kind.as_str(), UPDATE_ANSWERED | UPDATE_RETRY)
+    })
 }
 
 /// The pid of the job that wrote `update`, if it recorded one.
@@ -216,7 +248,7 @@ pub enum Trigger {
 pub fn base_commit(updates: &[RunEvent], version: &str, fallback: Option<&str>) -> Option<String> {
     updates
         .iter()
-        .find(|update| update.kind == UPDATE_STARTED)
+        .find(|update| update.kind == UPDATE_STARTED && step_release(update).is_none())
         .and_then(step_commit)
         .map(str::to_owned)
         .or_else(|| build_commit(version).map(str::to_owned))
@@ -224,10 +256,12 @@ pub fn base_commit(updates: &[RunEvent], version: &str, fallback: Option<&str>) 
 }
 
 /// Whether the latest word in the log is a `retry` answer after the latest
-/// job: build main's head again whatever it changed.
+/// job: build main's head again whatever it changed. The release update's
+/// steps are not the automatic update's.
 pub fn retry_requested(updates: &[RunEvent]) -> bool {
     updates
         .iter()
+        .filter(|update| step_release(update).is_none())
         .find(|update| matches!(update.kind.as_str(), UPDATE_STARTED | UPDATE_RETRY))
         .is_some_and(|update| update.kind == UPDATE_RETRY)
 }
@@ -283,12 +317,22 @@ pub struct JobPorts<'a> {
 pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
     let mut queue = (ports.queues)(db).open()?;
     let queue: &mut dyn Queue = &mut *queue;
-    let commit = options.commit.as_str();
-    let pid = options.pid;
+    let job = Job {
+        subject: Subject::Commit(&options.commit),
+        token: &options.token,
+        target: &options.target,
+        staged: &options.paths.staged,
+        log: &options.log,
+        restart: &options.restart,
+        handoff_timeout: options.handoff_timeout,
+        watch_timeout: options.watch_timeout,
+        poll: options.poll,
+        pid: options.pid,
+    };
     let paths = &options.paths;
     let built = ports
         .binaries
-        .checkout(&options.repository, &paths.checkout, commit)
+        .checkout(&options.repository, &paths.checkout, &options.commit)
         .and_then(|()| {
             ports.binaries.build_into(
                 &paths.checkout,
@@ -299,17 +343,159 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         });
     let binary = match built {
         Ok(binary) => binary,
-        Err(error) => return failed(queue, options, "build", &error, json!({})),
+        Err(error) => return failed(queue, &job, "build", &error, json!({})),
     };
-    record(
+    put_in_place(ports, queue, db, &job, &binary)
+}
+
+/// The release update's job (ADR-t618-1 decision 5): the settings of one
+/// release to install.
+#[derive(Debug, Clone)]
+pub struct ReleaseJobOptions {
+    /// The release (`X.Y.Z`).
+    pub version: String,
+    /// The supervisor that started the job, whose handoff it watches.
+    pub token: LeaseToken,
+    /// The binary to replace: the supervisor's own.
+    pub target: PathBuf,
+    pub paths: UpdatePaths,
+    /// Where cargo's output is appended.
+    pub log: PathBuf,
+    /// The arguments the question of a breaking release hands a person,
+    /// beside `--db`: `--cmux`, `--claude`, `--plugin-dir`.
+    pub restart: Vec<String>,
+    pub handoff_timeout: Duration,
+    pub watch_timeout: Duration,
+    pub poll: Duration,
+    pub pid: u32,
+}
+
+/// Install release `options.version` with `installer` under the queue's
+/// `update/release` (unless the binary to replace is that release already)
+/// and put it in place of the supervisor's binary as [`run`] does a build:
+/// the check, a breaking migration left to the `approve_update` ask, the
+/// swap, the handoff, the watch and the restore. The steps carry `source:
+/// "release"` and the `release`.
+pub fn run_release(
+    ports: &JobPorts,
+    installer: &dyn install::ReleaseInstaller,
+    db: &Path,
+    options: &ReleaseJobOptions,
+) -> Result<Value> {
+    let mut queue = (ports.queues)(db).open()?;
+    let queue: &mut dyn Queue = &mut *queue;
+    let job = Job {
+        subject: Subject::Release(&options.version),
+        token: &options.token,
+        target: &options.target,
+        staged: &options.paths.staged,
+        log: &options.log,
+        restart: &options.restart,
+        handoff_timeout: options.handoff_timeout,
+        watch_timeout: options.watch_timeout,
+        poll: options.poll,
+        pid: options.pid,
+    };
+    let installed = install::release_binary(
+        ports.binaries,
+        installer,
+        &options.version,
+        &options.target,
+        &options.paths.release,
+        &options.paths.target,
+        &options.log,
+    );
+    let binary = match installed {
+        Ok(binary) => binary,
+        Err(error) => return failed(queue, &job, "build", &error, json!({})),
+    };
+    put_in_place(ports, queue, db, &job, &binary)
+}
+
+/// What a job puts in place: a build of main's commit (the automatic
+/// update) or a release of crates.io (the release update).
+#[derive(Debug, Clone, Copy)]
+enum Subject<'a> {
+    Commit(&'a str),
+    Release(&'a str),
+}
+
+impl Subject<'_> {
+    /// Record the step `kind` with what it is about in its payload.
+    fn record(self, queue: &dyn Queue, kind: &str, mut payload: Value) -> Result<EventId> {
+        match self {
+            Self::Commit(commit) => record(queue, kind, Some(commit), payload),
+            Self::Release(version) => {
+                payload["source"] = json!(RELEASE_SOURCE);
+                payload["release"] = json!(version);
+                record(queue, kind, None, payload)
+            }
+        }
+    }
+
+    /// What the job's value names it by.
+    fn tag(self, value: &mut Value) {
+        match self {
+            Self::Commit(commit) => value["commit"] = json!(commit),
+            Self::Release(version) => {
+                value["source"] = json!(RELEASE_SOURCE);
+                value["release"] = json!(version);
+            }
+        }
+    }
+
+    /// How a question names it.
+    fn describe(self) -> String {
+        match self {
+            Self::Commit(commit) => format!("main's {}", &commit[..commit.len().min(12)]),
+            Self::Release(version) => format!("release {version}"),
+        }
+    }
+}
+
+/// `source` of the steps of the release update.
+pub const RELEASE_SOURCE: &str = "release";
+
+/// The release a step of the release update is about, if it is one.
+pub fn step_release(update: &RunEvent) -> Option<&str> {
+    (update.payload.get("source").and_then(Value::as_str) == Some(RELEASE_SOURCE))
+        .then(|| update.payload.get("release").and_then(Value::as_str))
+        .flatten()
+}
+
+/// One job's settings, whatever it puts in place.
+struct Job<'a> {
+    subject: Subject<'a>,
+    token: &'a LeaseToken,
+    target: &'a Path,
+    staged: &'a Path,
+    log: &'a Path,
+    restart: &'a [String],
+    handoff_timeout: Duration,
+    watch_timeout: Duration,
+    poll: Duration,
+    pid: u32,
+}
+
+/// Check `binary`, leave it to a person when it brings a breaking
+/// migration, else install it as `install` does, watch the supervisors
+/// take it and put the old binary back when none does.
+fn put_in_place(
+    ports: &JobPorts,
+    queue: &mut dyn Queue,
+    db: &Path,
+    job: &Job,
+    binary: &Path,
+) -> Result<Value> {
+    let pid = job.pid;
+    job.subject.record(
         &*queue,
         UPDATE_BUILT,
-        Some(commit),
-        json!({"pid": pid, "binary": binary, "log": options.log}),
+        json!({"pid": pid, "binary": binary, "log": job.log}),
     )?;
-    let schema = match ports.binaries.schema(&binary, db) {
+    let schema = match ports.binaries.schema(binary, db) {
         Ok(schema) => schema,
-        Err(error) => return failed(queue, options, "check", &error, json!({})),
+        Err(error) => return failed(queue, job, "check", &error, json!({})),
     };
     let breaking: Vec<i64> = schema
         .pending
@@ -318,15 +504,15 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         .map(|migration| migration.version)
         .collect();
     if !breaking.is_empty() {
-        return match stage(ports, &binary, &paths.staged) {
-            Ok(version) => awaiting_approval(queue, db, options, &version, &breaking),
-            Err(error) => failed(queue, options, "check", &error, json!({})),
+        return match stage(ports, binary, job.staged) {
+            Ok(version) => awaiting_approval(queue, db, job, &version, &breaking),
+            Err(error) => failed(queue, job, "check", &error, json!({})),
         };
     }
     let registered = queue.supervisors()?;
     let before = registered
         .iter()
-        .find(|registration| registration.token == options.token)
+        .find(|registration| registration.token == *job.token)
         .cloned();
     // The handoff is asked for within the install: a registration made
     // before it is not a handed-over supervisor's successor.
@@ -343,12 +529,12 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         },
         Some(db),
         &InstallOptions {
-            source: Source::Binary(binary.clone()),
-            target: options.target.clone(),
+            source: Source::Binary(binary.to_path_buf()),
+            target: job.target.to_path_buf(),
             allow_breaking: false,
             restart: Vec::new(),
-            handoff_timeout: options.handoff_timeout,
-            poll: options.poll,
+            handoff_timeout: job.handoff_timeout,
+            poll: job.poll,
         },
     );
     // An install that handed some of the supervisors over but not all kept
@@ -365,7 +551,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
                 let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_ref())?;
                 return failed(
                     queue,
-                    options,
+                    job,
                     "install",
                     &error,
                     json!({"supervisor": supervisor}),
@@ -381,14 +567,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         "handoff"
     };
     let mut watched = refused;
-    watched.extend(watch(
-        ports,
-        &*queue,
-        &handed,
-        &version,
-        handoff_from,
-        options,
-    )?);
+    watched.extend(watch(ports, &*queue, &handed, &version, handoff_from, job)?);
     let failures: Vec<&Watched> = watched.iter().filter(|w| w.error.is_some()).collect();
     if !failures.is_empty() {
         // The binary is one file for every supervisor: it goes back only
@@ -396,7 +575,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         // keeps it.
         let everyone = failures.len() == watched.len();
         let restored = if everyone {
-            restore(ports, options, report["previous_version"].as_str())
+            restore(ports, job, report["previous_version"].as_str())
         } else {
             json!({
                 "restored": false,
@@ -430,10 +609,9 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
             // A step of the job still working (it goes on to its
             // `update_failed`); it must not keep the supervisor from
             // being brought back or the ask from opening.
-            let _ = record(
+            let _ = job.subject.record(
                 &*queue,
                 UPDATE_RESTORED,
-                Some(commit),
                 json!({
                     "pid": pid,
                     "version": version,
@@ -451,7 +629,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         );
         return failed(
             queue,
-            options,
+            job,
             stage,
             &error,
             json!({
@@ -468,12 +646,13 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         "previous_version": report["previous_version"],
         "migrated": report["migrated"],
         "supervisors": report["supervisors"],
-        "log": options.log,
+        "log": job.log,
     });
-    record(&*queue, UPDATE_INSTALLED, Some(commit), payload.clone())?;
+    job.subject
+        .record(&*queue, UPDATE_INSTALLED, payload.clone())?;
     let mut value = payload;
     value["outcome"] = json!("installed");
-    value["commit"] = json!(commit);
+    job.subject.tag(&mut value);
     Ok(value)
 }
 
@@ -578,9 +757,9 @@ fn watch(
     handed: &[(LeaseToken, u32)],
     version: &str,
     handoff_from: i64,
-    options: &JobOptions,
+    job: &Job,
 ) -> Result<Vec<Watched>> {
-    let deadline = Instant::now() + options.watch_timeout;
+    let deadline = Instant::now() + job.watch_timeout;
     let mut watched: Vec<Watched> = handed
         .iter()
         .map(|(token, pid)| Watched {
@@ -603,7 +782,7 @@ fn watch(
                 version,
                 handoff_from,
                 expired,
-                options,
+                job,
             ) {
                 watched.error = Some(format!("{error:#}"));
             }
@@ -611,7 +790,7 @@ fn watch(
         if watched.iter().all(|w| w.done || w.error.is_some()) {
             return Ok(watched);
         }
-        thread::sleep(options.poll);
+        thread::sleep(job.poll);
     }
 }
 
@@ -624,7 +803,7 @@ fn observe(
     version: &str,
     handoff_from: i64,
     expired: bool,
-    options: &JobOptions,
+    job: &Job,
 ) -> Result<()> {
     let token = watched.token.clone();
     let Some(current) = lifecycle::successor(
@@ -661,7 +840,7 @@ fn observe(
     ensure!(
         !expired,
         "supervisor {token} did not heartbeat within {}s of taking the handoff to {version}",
-        options.watch_timeout.as_secs()
+        job.watch_timeout.as_secs()
     );
     Ok(())
 }
@@ -669,8 +848,8 @@ fn observe(
 /// Put the replaced binary back at the target, only when `.previous` is the
 /// build the supervisor ran before (ADR-0045 decision 13): a `.previous`
 /// of another build was not put there by this update.
-fn restore(ports: &JobPorts, options: &JobOptions, previous_version: Option<&str>) -> Value {
-    let previous = previous_path(&options.target);
+fn restore(ports: &JobPorts, job: &Job, previous_version: Option<&str>) -> Value {
+    let previous = previous_path(job.target);
     let kept = ports.binaries.version(&previous).ok();
     if kept.is_none() || kept.as_deref() != previous_version {
         return json!({
@@ -683,7 +862,7 @@ fn restore(ports: &JobPorts, options: &JobOptions, previous_version: Option<&str
             ),
         });
     }
-    match ports.binaries.restore(&options.target) {
+    match ports.binaries.restore(job.target) {
         Ok(()) => json!({"restored": true, "version": kept}),
         Err(error) => json!({"restored": false, "reason": format!("{error:#}")}),
     }
@@ -747,13 +926,11 @@ fn bring_back(
 /// failed and what became of the binary and the supervisor.
 fn failed(
     queue: &mut dyn Queue,
-    options: &JobOptions,
+    job: &Job,
     stage: &str,
     error: &anyhow::Error,
     details: Value,
 ) -> Result<Value> {
-    let commit = &options.commit;
-    let short = &commit[..commit.len().min(12)];
     let error = format!("{error:#}");
     let mut situation = match stage {
         "build" => "Nothing was replaced.".to_owned(),
@@ -763,12 +940,12 @@ fn failed(
 brought back with it as said below; one still running the build it had is left as it is, and \
 `down --force` and `up` start it with the new binary (or `install --rollback` puts the old binary \
 back for every supervisor).",
-            options.target.display()
+            job.target.display()
         ),
         _ => format!(
             "If the new binary had been put in place, the one it replaced is back at {} unless \
 said otherwise below.",
-            options.target.display()
+            job.target.display()
         ),
     };
     if let Some(supervisor) = details.get("supervisor") {
@@ -780,55 +957,70 @@ said otherwise below.",
     if let Some(restored) = details.get("restored") {
         situation.push_str(&format!(" The binary: {restored}."));
     }
-    let question = format!(
-        "The automatic update to main's {short} failed at its {stage}: {error}\n\n{situation} \
-The job's log is {}.\n\nAnswer `retry` to build main's head again at the supervisor's next check \
-(after fixing what failed), or `skip` to wait for the next landing that changes the runtime. If \
-no supervisor serves the queue now, `up` starts one.",
-        options.log.display()
-    );
+    let question = match job.subject {
+        Subject::Commit(_) => format!(
+            "The automatic update to {} failed at its {stage}: {error}\n\n{situation} The job's \
+log is {}.\n\nAnswer `retry` to build main's head again at the supervisor's next check (after \
+fixing what failed), or `skip` to wait for the next landing that changes the runtime. If no \
+supervisor serves the queue now, `up` starts one.",
+            job.subject.describe(),
+            job.log.display()
+        ),
+        Subject::Release(version) => format!(
+            "The update to {} failed at its {stage}: {error}\n\n{situation} The job's log is \
+{}.\n\nAnswer `retry` to install release {version} again at the supervisor's next check (after \
+fixing what failed; it needs cargo), or `skip` to leave release {version} (the next release asks \
+again). By hand, `dagq install --release {version}` does the same, and `dagq install --from \
+<binary>` puts a dagq {version} installed another way in place. If no supervisor serves the queue \
+now, `up` starts one.",
+            job.subject.describe(),
+            job.log.display()
+        ),
+    };
     let ask = queue
         .open_update_ask(
             AskKind::UpdateFailed,
             &question,
             UPDATE_FAILED_OPTIONS,
             UPDATE_ASKER,
+            None,
         )?
         .id;
     let mut payload = json!({
-        "pid": options.pid,
+        "pid": job.pid,
         "stage": stage,
         "error": error,
-        "log": options.log,
+        "log": job.log,
         "ask_id": ask,
     });
     if let (Some(object), Value::Object(details)) = (payload.as_object_mut(), details) {
         object.extend(details);
     }
-    record(&*queue, UPDATE_FAILED, Some(commit), payload.clone())?;
+    job.subject
+        .record(&*queue, UPDATE_FAILED, payload.clone())?;
     payload["outcome"] = json!("failed");
-    payload["commit"] = json!(commit);
+    job.subject.tag(&mut payload);
     Ok(payload)
 }
 
 /// Open the `approve_update` ask for a build with a breaking migration,
-/// naming the command that drains and installs it.
+/// naming the command that drains and installs it. The command starts the
+/// supervisor again as the drained one ran, so no `up` follows it.
 fn awaiting_approval(
     queue: &mut dyn Queue,
     db: &Path,
-    options: &JobOptions,
+    job: &Job,
     version: &str,
     breaking: &[i64],
 ) -> Result<Value> {
-    let commit = &options.commit;
-    let staged = &options.paths.staged;
+    let staged = job.staged;
     let mut command = format!(
         "dagq --db {} install --from {} --to {} --allow-breaking",
         db.display(),
         staged.display(),
-        options.target.display()
+        job.target.display()
     );
-    for argument in &options.restart {
+    for argument in job.restart {
         command.push(' ');
         command.push_str(argument);
     }
@@ -837,13 +1029,15 @@ fn awaiting_approval(
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(", ");
+    let built = match job.subject {
+        Subject::Commit(_) => format!("{} built as {version}", job.subject.describe()),
+        Subject::Release(_) => format!("{} (installed as {version})", job.subject.describe()),
+    };
     let question = format!(
-        "main's {} built as {version}, and it brings breaking migration(s) {migrations}: the \
-running supervisor and its runs' wrappers could not open the queue after them, so it was not \
-installed. Answer `install` and run `{command}` from the inbox to drain the supervisor (it waits \
-for its runs), back the queue up, migrate and start it again with the new binary; or `skip` to \
-leave it. The build is kept at {}.",
-        &commit[..commit.len().min(12)],
+        "{built}, and it brings breaking migration(s) {migrations}: the running supervisor and its \
+runs' wrappers could not open the queue after them, so it was not installed. Answer `install` and \
+run `{command}` from the inbox to drain the supervisor (it waits for its runs), back the queue up, \
+migrate and start it again with the new binary; or `skip` to leave it. The build is kept at {}.",
         staged.display()
     );
     let ask = queue
@@ -852,25 +1046,22 @@ leave it. The build is kept at {}.",
             &question,
             APPROVE_UPDATE_OPTIONS,
             UPDATE_ASKER,
+            None,
         )?
         .id;
     let payload = json!({
-        "pid": options.pid,
+        "pid": job.pid,
         "version": version,
         "migrations": breaking,
         "binary": staged,
         "command": command,
         "ask_id": ask,
     });
-    record(
-        &*queue,
-        UPDATE_AWAITING_APPROVAL,
-        Some(commit),
-        payload.clone(),
-    )?;
+    job.subject
+        .record(&*queue, UPDATE_AWAITING_APPROVAL, payload.clone())?;
     let mut value = payload;
     value["outcome"] = json!("awaiting_approval");
-    value["commit"] = json!(commit);
+    job.subject.tag(&mut value);
     Ok(value)
 }
 

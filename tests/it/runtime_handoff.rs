@@ -440,6 +440,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
             interval: Duration::ZERO,
             build_command: Some("echo no build here >&2; exit 1".into()),
             cmux: None,
+            cargo: None,
         },
         ..supervise_options(1, true)
     };

@@ -9,8 +9,12 @@ impl AskStore for SqliteQueue {
         question: &str,
         options: &[&str],
         asked_by: &str,
+        subject: Option<&str>,
     ) -> Result<crate::domain::Ask> {
-        SqliteQueue::open_update_ask(self, kind, question, options, asked_by)
+        SqliteQueue::open_update_ask(self, kind, question, options, asked_by, subject)
+    }
+    fn release_updates_on(&self) -> bool {
+        SqliteQueue::release_updates_on(self)
     }
     fn update_answers(&self, kind: &crate::domain::AskKind) -> Result<Vec<crate::domain::Ask>> {
         SqliteQueue::update_answers(self, kind)

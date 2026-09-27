@@ -261,6 +261,11 @@ known_ask_kinds!(AskKind {
     // not installed (ADR-0073 decision 17): about no task or run, one open
     // at a time; a person installs it with the drain or leaves it.
     ApproveUpdate => "approve_update",
+    // A new dagq release on crates.io for a supervisor of a release build
+    // (ADR-t618-1 decision 4): about no task or run, its `subject` the
+    // version, one open at a time; the supervisor applies its answer, one
+    // of [`APPROVE_RELEASE_OPTIONS`].
+    ApproveRelease => "approve_release",
 });
 
 impl AskKind {
@@ -293,6 +298,7 @@ impl AskKind {
                 | Self::ApproveGoal
                 | Self::ApproveUpdate
                 | Self::UpdateFailed
+                | Self::ApproveRelease
         )
     }
 
@@ -302,10 +308,14 @@ impl AskKind {
         matches!(self, Self::Blocked | Self::Stalled)
     }
 
-    /// An ask of the automatic update (ADR-0073 decision 17): about the
-    /// queue's binary, never a task or a run.
+    /// An ask of the automatic update (ADR-0073 decision 17) or of the
+    /// release update (ADR-t618-1 decision 4): about the queue's binary,
+    /// never a task or a run.
     pub fn is_update(&self) -> bool {
-        matches!(self, Self::UpdateFailed | Self::ApproveUpdate)
+        matches!(
+            self,
+            Self::UpdateFailed | Self::ApproveUpdate | Self::ApproveRelease
+        )
     }
 }
 
@@ -1078,6 +1088,10 @@ pub const UPDATE_FAILED_OPTIONS: &[&str] = &["retry", "skip"];
 /// the build with the drain (`install`, by running the command the question
 /// names) or leaves it (`skip`).
 pub const APPROVE_UPDATE_OPTIONS: &[&str] = &["install", "skip"];
+/// The options of the [`AskKind::ApproveRelease`] ask (ADR-t618-1
+/// decision 4): the supervisor installs the release (`install`) or leaves
+/// it until the next one (`skip`).
+pub const APPROVE_RELEASE_OPTIONS: &[&str] = &["install", "skip"];
 
 /// What [`NewHold`] did: opened the ask (`created`), added the run to the
 /// open one (`joined`), or found the run already in it (neither).
@@ -1852,6 +1866,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
                     || kind == AskKind::ApprovePlan.as_str()
                     || kind == AskKind::ApproveGoal.as_str()
                     || kind == AskKind::UpdateFailed.as_str()
+                    || kind == AskKind::ApproveRelease.as_str()
                     || kind == AskKind::QueueHold.as_str()
             ) && payload.get("runtime_delivers") == Some(&serde_json::Value::Bool(true)) =>
         {
@@ -2078,6 +2093,7 @@ mod attention_tests {
             (AskKind::QueueHold, false, false),
             (AskKind::UpdateFailed, true, false),
             (AskKind::ApproveUpdate, true, false),
+            (AskKind::ApproveRelease, true, false),
             (AskKind::Other("later_kind".into()), false, false),
         ];
         let offered = [PROPOSE_OPTION, DISMISS_OPTION, "wait"];
@@ -2194,7 +2210,11 @@ mod attention_tests {
         assert!(check_ask_kind(&AskKind::QueueHold, None, None, AskReason::Cost).is_ok());
         // The asks of the automatic update are about the queue's binary
         // (ADR-0073 decision 17): no task, no run.
-        for kind in [AskKind::UpdateFailed, AskKind::ApproveUpdate] {
+        for kind in [
+            AskKind::UpdateFailed,
+            AskKind::ApproveUpdate,
+            AskKind::ApproveRelease,
+        ] {
             assert!(kind.is_update() && kind.is_known());
             assert_eq!(AskKind::read(kind.as_str()), kind);
             assert!(check_ask_kind(&kind, None, None, scope).is_ok());
