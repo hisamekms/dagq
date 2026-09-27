@@ -20,6 +20,7 @@
 //! `triage.rs`, with the same verdict.
 
 use super::*;
+use crate::domain::actor_model::{ActorLaunch, ActorRole};
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
 };
@@ -570,10 +571,15 @@ impl RecoveryWatch {
         if let (Value::Object(payload), Value::Object(facts)) = (&mut payload, facts) {
             payload.extend(facts);
         }
+        // What the job is started with (ADR-0079 decision 7): recorded,
+        // not shown to the job among the facts.
+        let launch = sv.actor_launch(ActorRole::Recovery);
+        let mut recorded = payload.clone();
+        recorded["launch"] = launch.to_value();
         sv.queue
-            .record_runtime_event(run.id(), event_kind::RECOVERY_REQUESTED, payload.clone())?;
+            .record_runtime_event(run.id(), event_kind::RECOVERY_REQUESTED, recorded)?;
         info!(run_id = %run.id(), "run {}: alert {}; recovery job {attempt} starts", run.id(), alert.as_str());
-        match spawn_live(sv, run, live, alert, attempt, &payload) {
+        match spawn_live(sv, run, live, alert, attempt, &payload, &launch) {
             Ok(job) => {
                 self.job = Some(Box::new(RecoveryJob {
                     alert,
@@ -905,6 +911,7 @@ fn spawn_live(
     alert: RecoveryAlert,
     attempt: usize,
     facts: &Value,
+    launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
     let task = sv.queue.show(run.task_id())?.task;
     let screen = match sv.cmux.capture(live.workspace) {
@@ -931,7 +938,16 @@ fn spawn_live(
         recovery_prompt(&task, run, attempt, &material)?,
         sv.verifier.language().as_ref(),
     );
-    start_job(sv, run.id(), live.run_dir, alert, attempt, &prompt, None)
+    start_job(
+        sv,
+        run.id(),
+        live.run_dir,
+        alert,
+        attempt,
+        &prompt,
+        None,
+        launch,
+    )
 }
 
 /// The worktree's `git status`, HEAD and the receipt's `commit`, for the
@@ -982,7 +998,9 @@ pub(super) fn repair_history(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<V
 /// Write `prompt` next to the run and start the headless job in `dir`,
 /// allowed to read only; the job's environment and CLI are the review's.
 /// `session_id` is the Claude session id the job runs as, when its start
-/// recorded one (ADR-0048 decision 4).
+/// recorded one (ADR-0048 decision 4); `launch` the model and effort it
+/// starts with (ADR-0079 decision 7).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_job(
     sv: &mut Supervisor<'_>,
     run: &RunId,
@@ -991,6 +1009,7 @@ pub(super) fn start_job(
     attempt: usize,
     prompt: &str,
     session_id: Option<&str>,
+    launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
     sv.files
         .create_dir_all(dir)
@@ -1005,6 +1024,7 @@ pub(super) fn start_job(
     if let Some(session_id) = session_id {
         sv.reviewer.assign_session_id(&mut command, session_id);
     }
+    sv.reviewer.apply_launch(&mut command, launch);
     command.envs(sv.layout.job_env.iter().cloned());
     let child = sv
         .spawner

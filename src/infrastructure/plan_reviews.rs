@@ -4,6 +4,7 @@
 //! and the verdicts and `approve_plan` answers the supervisor applies, each
 //! in one transaction. Events go to the first task of the proposal, since
 //! an event needs a task or a goal.
+use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::event_kind;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -435,6 +436,7 @@ impl PlanReviewStore for SqliteQueue {
         token: &str,
         plan_reviews_dir: &Path,
         cwd: &Path,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<PlanReviewJob>> {
         let now = self.generators.clock.now();
         // What the proposal is like, read before the write lock (task
@@ -508,7 +510,7 @@ impl PlanReviewStore for SqliteQueue {
             anchor,
             None,
             event_kind::PLAN_REVIEW_STARTED,
-            json!({"proposal_id": proposal_id, "plan_review_id": id, "attempt": attempt, "dir": dir_text, "session_id": session_id, "cwd": cwd, "features": features}),
+            json!({"proposal_id": proposal_id, "plan_review_id": id, "attempt": attempt, "dir": dir_text, "session_id": session_id, "cwd": cwd, "features": features, "launch": launch.to_value()}),
         )?;
         tx.commit()?;
         Ok(Some(PlanReviewJob {
@@ -810,7 +812,7 @@ impl PlanReviewStore for SqliteQueue {
         proposal_id: ProposalId,
         planner: PlannerId,
         workspace: &str,
-        opened: bool,
+        opened: Option<&crate::domain::actor_model::ActorLaunch>,
     ) -> Result<()> {
         let tx = self
             .conn
@@ -825,7 +827,17 @@ impl PlanReviewStore for SqliteQueue {
             anchor(&tx, proposal_id)?,
             None,
             event_kind::PLAN_REVISE_SENT,
-            json!({"proposal_id": proposal_id, "planner_id": planner, "workspace_id": workspace, "opened": opened}),
+            json!({
+                "proposal_id": proposal_id,
+                "planner_id": planner,
+                "workspace_id": workspace,
+                "opened": opened.is_some(),
+                "launch": opened.map(ActorLaunch::to_value),
+                "effort_raised": opened.is_some_and(|launch| {
+                    launch.escalated_from.is_some() && launch.escalated_from != launch.effort
+                }),
+                "effort_not_raised": opened.is_none().then_some(LIVE_PLANNER_NOT_RAISED),
+            }),
         )?;
         tx.commit()?;
         Ok(())
@@ -1230,6 +1242,7 @@ mod tests {
                 "token",
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
+                &ActorLaunch::default_of(crate::domain::actor_model::ActorRole::PlanReview),
             )
             .unwrap()
             .unwrap();
@@ -1316,6 +1329,7 @@ mod tests {
                 "token",
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
+                &ActorLaunch::default_of(crate::domain::actor_model::ActorRole::PlanReview),
             )
             .unwrap()
             .unwrap();

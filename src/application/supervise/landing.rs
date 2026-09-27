@@ -3,6 +3,7 @@
 //! landing itself (ADR-0023, ADR-0027).
 
 use super::*;
+use crate::domain::actor_model::{ActorLaunch, ActorRole};
 use crate::domain::language::with_instruction;
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
@@ -134,6 +135,7 @@ impl Supervisor<'_> {
         };
         // The job's Claude session id (ADR-0048 decision 4).
         let session_id = self.generators.ids.uuid();
+        let launch = self.actor_launch(ActorRole::Review);
         self.queue.record_runtime_event(
             run.id(),
             event_kind::REVIEW_STARTED,
@@ -142,49 +144,53 @@ impl Supervisor<'_> {
                 "workspace_id": session.as_ref().map(|s| s.workspace.clone()),
                 "session_live": live,
                 "session_id": session_id,
+                "launch": launch.to_value(),
             }),
         )?;
-        Ok(match self.spawn_review(run, attempt, &session_id) {
-            Ok((child, stdout, stderr)) => {
-                info!(run_id = %run.id(), "run {} review {attempt} started (session {})", run.id(), if live { "kept open" } else { "ended" });
-                let job = self.headless_job(
-                    "review",
-                    child,
-                    stdout,
-                    stderr,
-                    JobSubject::run(headless_job::REVIEW, run.id(), attempt),
-                );
-                Phase::Review(ReviewWatch {
-                    session,
-                    attempt,
-                    retried,
-                    job,
-                })
-            }
-            Err(error) => {
-                let error = format!("the headless review could not start: {error:#}");
-                warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
-                self.close_review_session(run);
-                Phase::Exiting(ExitWatch::new(
-                    session,
-                    AfterExit::ReviewFailed {
+        Ok(
+            match self.spawn_review(run, attempt, &session_id, &launch) {
+                Ok((child, stdout, stderr)) => {
+                    info!(run_id = %run.id(), "run {} review {attempt} started (session {})", run.id(), if live { "kept open" } else { "ended" });
+                    let job = self.headless_job(
+                        "review",
+                        child,
+                        stdout,
+                        stderr,
+                        JobSubject::run(headless_job::REVIEW, run.id(), attempt),
+                    );
+                    Phase::Review(ReviewWatch {
+                        session,
                         attempt,
-                        error,
-                        duration_secs: 0,
-                        // No job ran, so this attempt wrote no output; a
-                        // retry follows a job that ran and printed an
-                        // unreadable verdict (task 426).
-                        output: retried.then(|| attempt - 1),
-                    },
-                ))
-            }
-        })
+                        retried,
+                        job,
+                    })
+                }
+                Err(error) => {
+                    let error = format!("the headless review could not start: {error:#}");
+                    warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
+                    self.close_review_session(run);
+                    Phase::Exiting(ExitWatch::new(
+                        session,
+                        AfterExit::ReviewFailed {
+                            attempt,
+                            error,
+                            duration_secs: 0,
+                            // No job ran, so this attempt wrote no output; a
+                            // retry follows a job that ran and printed an
+                            // unreadable verdict (task 426).
+                            output: retried.then(|| attempt - 1),
+                        },
+                    ))
+                }
+            },
+        )
     }
     pub(super) fn spawn_review(
         &mut self,
         run: &TaskRun,
         attempt: usize,
         session_id: &str,
+        launch: &ActorLaunch,
     ) -> Result<(Box<dyn Spawned>, PathBuf, PathBuf)> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let material = (self.review_material)(run.task_id())?;
@@ -205,6 +211,7 @@ impl Supervisor<'_> {
         let stderr = run_dir.join(format!("review-{attempt}.err"));
         let mut command = self.reviewer.review_command(run, &prompt)?;
         self.reviewer.assign_session_id(&mut command, session_id);
+        self.reviewer.apply_launch(&mut command, launch);
         // The repository's [run.env] reaches the review too (ADR-0023
         // decision 3).
         command

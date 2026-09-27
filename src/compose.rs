@@ -1190,6 +1190,11 @@ same in one step",
             &*self.generators.clock,
             &planners_dir(&db),
         );
+        // `dagq plan` reads `[roles.planner]` of the main checkout's
+        // `dagq.toml` (ADR-0079 decision 7); a file it cannot read starts
+        // the planner as before, with a warning.
+        let roles = crate::infrastructure::run_env::load_role_models(&main_checkout(&repository))
+            .map_err(|error| format!("{error:#}"));
         let mut opened = planner::open_person_planner(&PlannerLaunch {
             queue: &queue,
             cmux: &recording,
@@ -1205,7 +1210,13 @@ same in one step",
                 Some(&main_checkout(&repository)),
                 options.user_config.as_deref(),
             ),
+            roles: roles.clone().unwrap_or_default(),
         })?;
+        if let Err(error) = &roles {
+            opened.warnings.push(format!(
+                "[roles.planner] could not be read; the planner starts as before: {error}"
+            ));
+        }
         for error in [swept.err(), runners.err()].into_iter().flatten() {
             opened.warnings.push(format!("{error:#}"));
         }
@@ -1624,6 +1635,7 @@ pub fn planner_session(
     id: PlannerId,
     claude: &Path,
     plugin_dir: Option<&Path>,
+    model: Option<(&str, &str)>,
 ) -> Result<Value> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -1632,7 +1644,7 @@ pub fn planner_session(
     let provider = ClaudeCode {
         executable: claude.into(),
     };
-    planner_session_with_provider(db, id, &provider, plugin_dir)
+    planner_session_with_provider(db, id, &provider, plugin_dir, model)
 }
 
 /// [`planner_session`] with any provider, in the working directory.
@@ -1641,6 +1653,7 @@ pub fn planner_session_with_provider(
     id: PlannerId,
     provider: &dyn AgentProvider,
     plugin_dir: Option<&Path>,
+    model: Option<(&str, &str)>,
 ) -> Result<Value> {
     let queue = SqliteQueue::open(db)?;
     let cwd = std::env::current_dir().context("working directory is unavailable")?;
@@ -1656,6 +1669,7 @@ pub fn planner_session_with_provider(
         &planner::planner_dir(&planners_dir(db), id),
         &cwd,
         plugin_dir,
+        model,
     )
 }
 

@@ -278,20 +278,31 @@ pub fn changes(
 }
 
 /// The span of a headless job, whose session id the runtime gave it
-/// (ADR-0048 decision 4) and recorded in the event that starts it.
+/// (ADR-0048 decision 4) and recorded in the event that starts it, with
+/// the model and effort it was started with and where they came from
+/// (`launch`, ADR-0079 decision 7) when that event recorded them.
 fn job(kind: &str, payload: &Value, cwd: Option<&str>) -> SpanChange {
-    SpanChange::Open(json!({
+    let mut opened = json!({
         "kind": kind,
         "session_id": payload.get("session_id").and_then(Value::as_str),
         "cwd": cwd,
         "transcript_path": null,
         "attempt": payload.get("attempt").and_then(Value::as_i64),
-    }))
+    });
+    if let Some(launch) = payload.get("launch").filter(|launch| !launch.is_null()) {
+        opened["launch"] = launch.clone();
+    }
+    SpanChange::Open(opened)
 }
 
 /// The kinds of span the plugin's hook records, on no run (ADR-0048
 /// decision 6): the sessions the runtime does not start headless.
 pub const HOOK_KINDS: [&str; 3] = [RUNTIME_PLANNER, INBOX, PLANNER];
+
+/// The workspace variable holding what the runtime started a planner's
+/// agent with (an [`super::actor_model::ActorLaunch`] as JSON), which the
+/// hook copies into the span's `launch`.
+pub const LAUNCH_ENV: &str = "DAGQ_LAUNCH";
 
 /// A `SessionStart` or `SessionEnd` of an inbox or planner session, as the
 /// plugin's hook reports it (ADR-0048 decision 6).
@@ -307,6 +318,9 @@ pub struct SessionHook {
     pub workspace_id: Option<String>,
     /// The planner session (`DAGQ_PLANNER_ID`) of a planner's.
     pub planner_id: Option<i64>,
+    /// What the runtime started the planner's agent with
+    /// (`DAGQ_LAUNCH`, ADR-0079 decision 7), as JSON.
+    pub launch: Option<Value>,
 }
 
 impl SessionHook {
@@ -351,6 +365,9 @@ impl SessionHook {
             cwd: text("cwd"),
             workspace_id: env("CMUX_WORKSPACE_ID").filter(|id| !id.trim().is_empty()),
             planner_id: env("DAGQ_PLANNER_ID").and_then(|id| id.trim().parse().ok()),
+            launch: env(LAUNCH_ENV)
+                .and_then(|launch| serde_json::from_str::<Value>(&launch).ok())
+                .filter(Value::is_object),
         }))
     }
 }
@@ -441,6 +458,9 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
             });
             if let Some(planner) = hook.planner_id {
                 payload["planner_id"] = json!(planner);
+            }
+            if let Some(launch) = &hook.launch {
+                payload["launch"] = launch.clone();
             }
             if let Some(context) = context.as_object() {
                 for (key, value) in context {
@@ -732,6 +752,10 @@ mod tests {
             ("DAGQ_SESSION_KIND", "runtime_planner"),
             ("CMUX_WORKSPACE_ID", "W"),
             ("DAGQ_PLANNER_ID", "7"),
+            (
+                "DAGQ_LAUNCH",
+                r#"{"role":"runtime_planner","model":"claude-opus-5-5","effort":"high","source":"revise_escalation"}"#,
+            ),
         ]);
         let hook = SessionHook::from_hook("open", &input, planner)
             .unwrap()
@@ -748,7 +772,24 @@ mod tests {
                 cwd: Some("/repo".into()),
                 workspace_id: Some("W".into()),
                 planner_id: Some(7),
+                launch: Some(
+                    json!({"role": "runtime_planner", "model": "claude-opus-5-5",
+                                    "effort": "high", "source": "revise_escalation"})
+                ),
             }
+        );
+        let opened = hook_changes(&hook, &[], &Value::Null);
+        let SpanChange::Open(payload) = &opened[0] else {
+            panic!("expected an open, got {opened:?}");
+        };
+        assert_eq!(payload["launch"]["effort"], "high");
+        let unreadable = env(&[("DAGQ_ROLE", "planner"), ("DAGQ_LAUNCH", "not json")]);
+        assert_eq!(
+            SessionHook::from_hook("open", &input, unreadable)
+                .unwrap()
+                .unwrap()
+                .launch,
+            None
         );
         let inbox = env(&[("DAGQ_ROLE", "inbox"), ("CMUX_WORKSPACE_ID", " ")]);
         let hook = SessionHook::from_hook("close", &input, inbox)
@@ -799,6 +840,7 @@ mod tests {
             cwd: None,
             workspace_id: workspace.map(str::to_owned),
             planner_id: Some(2),
+            launch: None,
         };
         let start = |session, workspace| {
             hook(

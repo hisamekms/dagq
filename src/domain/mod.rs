@@ -649,6 +649,7 @@ impl std::str::FromStr for Priority {
     }
 }
 
+pub mod actor_model;
 pub mod claim_defer;
 pub mod claim_hold;
 pub mod disk;

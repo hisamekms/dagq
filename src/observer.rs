@@ -22,7 +22,11 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{AgentProvider, TaskStore, dependency_graph},
-    domain::{EventId, FindingQuery, NoteQuery, RunEvent, stats::StatsQuery},
+    domain::{
+        EventId, FindingQuery, NoteQuery, RunEvent,
+        actor_model::{ActorLaunch, ActorRole},
+        stats::StatsQuery,
+    },
     infrastructure::{adapters::shell_join, asks::AskQuery, sqlite::SqliteQueue},
     lifecycle::{OBSERVER_ROLE, QUEUE_ENV, ROLE_ENV},
 };
@@ -153,8 +157,9 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "--db".into(),
         db.to_string_lossy().into_owned(),
     ]);
+    let checkout = crate::compose::bound_checkout(&queue)?;
     let language = crate::infrastructure::language::language_for_prompt(
-        crate::compose::bound_checkout(&queue)?.as_deref(),
+        checkout.as_deref(),
         options.user_config.as_deref(),
     );
     let prompt = crate::domain::language::with_instruction(
@@ -179,9 +184,10 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     let ask_mark = queue.ask_high_water()?;
     // The job's Claude session id (ADR-0048 decision 4).
     let session_id = uuid::Uuid::new_v4().to_string();
+    let launch = observer_launch(checkout.as_deref());
     let event_mark = queue.record_queue_event(
         event_kind::OBSERVE_STARTED,
-        json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id}),
+        json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()}),
     )?;
     tracing::info!(
         mode = options.mode.as_str(),
@@ -193,7 +199,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     // `failed`: the agent exited non-zero or by a signal; `error`: it could
     // not start or ran past the timeout.
     let (outcome, exit_code, error) =
-        match run_agent(provider, &db, &dir, &prompt, &session_id, options) {
+        match run_agent(provider, &db, &dir, &prompt, &session_id, &launch, options) {
             Ok(Some(0)) => ("succeeded", Some(0), None),
             Ok(code) => ("failed", code, None),
             Err(error) => ("error", None, Some(format!("{error:#}"))),
@@ -381,6 +387,22 @@ fn observation_dir(db: &Path, started: i64) -> Result<PathBuf> {
     unreachable!("the suffixes do not run out")
 }
 
+/// What the observer's agent starts with (ADR-0079 decision 7):
+/// `[roles.observer]` of the bound checkout's `dagq.toml`; none, no
+/// checkout, or a file that cannot be read starts it as before.
+fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
+    let Some(checkout) = checkout else {
+        return ActorLaunch::default_of(ActorRole::Observer);
+    };
+    match crate::infrastructure::run_env::load_role_models(checkout) {
+        Ok(models) => models.launch(ActorRole::Observer),
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "[roles.observer] could not be read; starting it as before: {error:#}");
+            ActorLaunch::default_of(ActorRole::Observer)
+        }
+    }
+}
+
 /// Start the agent in `dir` with its output in `output.log`, and wait for
 /// it up to the timeout (then kill it: an error). The exit code, or `None`
 /// when a signal ended it.
@@ -390,11 +412,13 @@ fn run_agent(
     dir: &Path,
     prompt: &str,
     session_id: &str,
+    launch: &ActorLaunch,
     options: &ObserveOptions,
 ) -> Result<Option<i32>> {
     let log = fs::File::create(dir.join("output.log"))?;
     let mut spec = provider.headless_command(dir, prompt, ALLOWED_TOOLS)?;
     provider.assign_session_id(&mut spec, session_id);
+    provider.apply_launch(&mut spec, launch);
     provider.without_mcp(&mut spec);
     let mut command = crate::infrastructure::process::command(&spec);
     let mut path = std::env::var_os("PATH").unwrap_or_default();

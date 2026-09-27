@@ -385,6 +385,19 @@ pub trait AgentProvider {
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
         let _ = (command, model, effort);
     }
+    /// Start the session of a role other than the worker (`command`) the
+    /// way `launch` says (ADR-0079 decision 7): with its model and effort
+    /// through [`AgentProvider::select_model`] when it gives them, else as
+    /// it is (the provider's default, as before).
+    fn apply_launch(
+        &self,
+        command: &mut CommandSpec,
+        launch: &crate::domain::actor_model::ActorLaunch,
+    ) {
+        if let Some((model, effort)) = launch.arguments() {
+            self.select_model(command, model, effort);
+        }
+    }
     /// Start the session of a headless job (`command`, from
     /// [`AgentProvider::review_command`] or
     /// [`AgentProvider::headless_command`]) with `session_id`, so that its
@@ -1143,11 +1156,14 @@ pub trait RunRecovery {
     /// Take the run's lease for a recovery round, recording `request` as
     /// its `recovery_requested` first when there is one; the round, or
     /// `None` when another process has it.
+    /// `launch` is what its job is started with (ADR-0079 decision 7),
+    /// recorded as the `launch` of `triage_started`.
     fn begin_triage(
         &mut self,
         id: &RunId,
         token: &str,
         request: Option<serde_json::Value>,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>>;
     /// Act on the round's outcome and record `triage_finished`, then each
     /// of `also` (kind, payload), in one transaction.
@@ -1781,13 +1797,15 @@ pub trait PlanReviewStore {
     /// (`plan_review_started`, with `cwd`, the checkout the job runs in, for
     /// its Claude session: ADR-0048). Rows of gone supervisors are finished
     /// as `interrupted` first. `None`: another supervisor's job runs, or the
-    /// proposal is no longer a candidate.
+    /// proposal is no longer a candidate. `launch` is what the job is
+    /// started with (ADR-0079 decision 7), recorded as the event's `launch`.
     fn begin_plan_review(
         &mut self,
         proposal: ProposalId,
         token: &str,
         plan_reviews_dir: &Path,
         cwd: &Path,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<PlanReviewJob>>;
     /// Apply what the runtime made of the verdict and finish the job
     /// (`plan_review_finished`); an action the job may not take is an
@@ -1813,14 +1831,16 @@ pub trait PlanReviewStore {
     /// `false` when another process claimed it, or it is no longer waiting.
     fn claim_revise(&mut self, proposal: ProposalId) -> Result<bool>;
     /// The claimed revise of `proposal` went to `planner`
-    /// (`plan_revise_sent`); `opened` when the runtime opened that planner
-    /// for it.
+    /// (`plan_revise_sent`); `opened` is what the planner's agent started
+    /// with when the runtime opened that planner for it (its effort raised
+    /// one step, ADR-0079 decision 7 (c)), `None` when it went to a live
+    /// planner, whose effort is not raised.
     fn revise_sent(
         &mut self,
         proposal: ProposalId,
         planner: PlannerId,
         workspace: &str,
-        opened: bool,
+        opened: Option<&crate::domain::actor_model::ActorLaunch>,
     ) -> Result<()>;
     /// Take the revise of `proposal` back for another delivery: the
     /// planner it went to is gone before it submitted again
@@ -2229,6 +2249,12 @@ pub trait Verifier {
     /// `dagq.toml`, ADR-0079 decision 4); off by default.
     fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {
         Ok(crate::domain::worker_model::WorkerTrial::default())
+    }
+    /// The model and effort of the roles other than the worker
+    /// (`[roles.<role>]` of `dagq.toml`, ADR-0079 decision 7); none by
+    /// default, which starts every role as before.
+    fn role_models(&self) -> Result<crate::domain::actor_model::RoleModels> {
+        Ok(crate::domain::actor_model::RoleModels::default())
     }
     /// The language AI writes in for people (`[language]` of `dagq.toml`
     /// over the user's `config.toml`, ADR-t616-2), resolved now; `None`

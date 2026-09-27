@@ -516,6 +516,7 @@ fn the_supervisor_closes_the_session_spans_of_gone_inbox_and_planner_workspaces(
                 cwd: None,
                 workspace_id: Some(workspace.into()),
                 planner_id: None,
+                launch: None,
             })
             .unwrap();
     }

@@ -788,6 +788,23 @@ enum Step {
     Disowned,
 }
 impl Supervisor<'_> {
+    /// What a session of `role` starts with (ADR-0079 decision 7):
+    /// `[roles.<role>]` of `dagq.toml`, read at each start so a change takes
+    /// effect without a restart; none, or a file that cannot be read, starts
+    /// it as before.
+    pub(super) fn actor_launch(
+        &self,
+        role: crate::domain::actor_model::ActorRole,
+    ) -> crate::domain::actor_model::ActorLaunch {
+        match self.verifier.role_models() {
+            Ok(models) => models.launch(role),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "[roles.{}] could not be read; starting it as before: {error:#}", role.as_str());
+                crate::domain::actor_model::ActorLaunch::default_of(role)
+            }
+        }
+    }
+
     /// Drive the loop, then remove this process's registration: it is about
     /// to exit, whether it drained its runs, ran out of work, or failed on
     /// a claim or provisioning. Only a heartbeat failure keeps the row (the

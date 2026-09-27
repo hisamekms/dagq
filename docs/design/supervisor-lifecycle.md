@@ -8,6 +8,7 @@ updated: 2026-09-27
 last_verified: 2026-09-27
 scope: runtime
 related:
+  - design-supervisor-lifecycle-actor-model
   - design-supervisor-lifecycle-goal-review
   - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-dependency-diagram
@@ -192,6 +193,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 - [Run environment](supervisor-lifecycle/run-environment.md)
 - [Worker model](supervisor-lifecycle/worker-model.md)（workerのmodel / effortの明示と記録、`[worker.trial]`の限定の試し）
+- [Actor model](supervisor-lifecycle/actor-model.md)（worker以外のアクターの`[roles.<role>]`、差し戻しで開き直すplannerの段上げ、`launch`の記録）
 
 ### Stall thresholds
 

@@ -132,6 +132,7 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
         assert_eq!(report["planner"]["proposal_id"], Value::Null);
         assert_eq!(report["name"], format!("[my repo]planner#{id}"));
         assert_eq!(report["warnings"], json!([]));
+        assert_eq!(report["launch"]["source"], "default");
         let dir = planners_dir(&fixture).join(id.to_string());
         assert_eq!(report["dir"], json!(dir));
         let prompt = fs::read_to_string(dir.join("prompt.txt")).unwrap();
@@ -176,6 +177,13 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
                     ("DAGQ_SESSION_KIND".into(), "planner".into()),
                     ("DAGQ_PLANNER_ORIGIN".into(), "person".into()),
                     ("DAGQ_PLANNER_ID".into(), id.to_string()),
+                    // Without `[roles.planner]`, started as before
+                    // (ADR-0079 decision 7).
+                    (
+                        "DAGQ_LAUNCH".into(),
+                        r#"{"effort":null,"model":null,"role":"planner","source":"default"}"#
+                            .into()
+                    ),
                 ],
                 description: Some(format!("dagq role=planner queue={hash} planner={id}")),
                 group: Some(format!("group-{hash}")),
@@ -220,6 +228,54 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
     assert_eq!(report.get("planner"), None, "{report}");
     assert_eq!(queue.planners(false).unwrap().len(), 3);
     assert_eq!(cmux.workspaces.lock().unwrap().len(), 3);
+}
+
+/// `dagq plan` reads `[roles.planner]` of the main checkout's `dagq.toml`
+/// (ADR-0079 decision 7): its wrapper is told the model and effort, and the
+/// workspace's environment carries them for the session's span. A file it
+/// cannot read starts the planner as before, with a warning.
+#[test]
+fn plan_gives_the_planner_the_model_and_effort_of_its_role() {
+    let fixture = fixture();
+    let cmux = FakeCmux::default();
+    let options = plan_options(&fixture);
+    fs::write(
+        fixture.repo.join("dagq.toml"),
+        "[roles.planner]\neffort = \"high\"\n",
+    )
+    .unwrap();
+    let report = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
+    let launch = json!({"role": "planner", "model": "claude-opus-5-5", "effort": "high",
+                        "source": "dagq.toml"});
+    assert_eq!(report["launch"], launch);
+    let command = cmux.workspaces.lock().unwrap()[0].3.clone();
+    assert!(
+        command.ends_with("'--model' 'claude-opus-5-5' '--effort' 'high'"),
+        "{command}"
+    );
+    let tags = cmux.tags.lock().unwrap();
+    let recorded = tags[0]
+        .env
+        .iter()
+        .find(|(key, _)| key == "DAGQ_LAUNCH")
+        .map(|(_, value)| serde_json::from_str::<Value>(value).unwrap());
+    assert_eq!(recorded, Some(launch));
+    drop(tags);
+    fs::write(
+        fixture.repo.join("dagq.toml"),
+        "[roles.planner]\neffort = \"huge\"\n",
+    )
+    .unwrap();
+    let broken = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
+    assert_eq!(broken["launch"]["source"], "default");
+    assert!(
+        broken["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("[roles.planner] could not be read"),
+        "{broken}"
+    );
+    assert!(!cmux.workspaces.lock().unwrap()[1].3.contains("--model"));
 }
 
 /// A planner workspace cmux does not open leaves a closed record with the
@@ -331,6 +387,7 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             tag: "ja".into(),
             source: dagq::domain::language::LanguageSource::User,
         }),
+        roles: Default::default(),
     };
     let reasons = vec!["the acceptance is not testable".to_owned()];
     let opened = open_runtime_planner(
@@ -391,8 +448,28 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             .env
             .contains(&("DAGQ_SESSION_KIND".into(), "planner".into()))
     );
+    // Opened for a revise: one effort step above the default, and why
+    // (ADR-0079 decision 7 (c)).
+    assert_eq!(opened.launch.effort.as_deref(), Some("high"));
+    assert_eq!(opened.launch.escalated_from.as_deref(), Some("medium"));
+    let recorded = tags[0]
+        .env
+        .iter()
+        .find(|(key, _)| key == "DAGQ_LAUNCH")
+        .map(|(_, value)| serde_json::from_str::<Value>(value).unwrap())
+        .unwrap();
+    assert_eq!(
+        recorded,
+        json!({"role": "runtime_planner", "model": "claude-opus-5-5", "effort": "high",
+               "source": "revise_escalation", "escalated_from": "medium",
+               "escalation_reason": "plan_review_revise"})
+    );
     let command = &cmux.workspaces.lock().unwrap()[0].3;
     assert!(!command.contains("--plugin-dir"), "{command}");
+    assert!(
+        command.ends_with("'--model' 'claude-opus-5-5' '--effort' 'high'"),
+        "{command}"
+    );
     drop(tags);
     assert_eq!(
         queue.planner(opened.planner.id).unwrap().proposal_id,
@@ -437,6 +514,14 @@ impl dagq::application::AgentProvider for PlannerAgent {
     fn wait_interval(&self) -> Duration {
         Duration::from_millis(20)
     }
+    fn select_model(
+        &self,
+        command: &mut dagq::application::CommandSpec,
+        model: &str,
+        effort: &str,
+    ) {
+        command.env("PLANNER_MODEL", format!("{model} {effort}"));
+    }
     fn planner_command(
         &self,
         planner: &dagq::application::PlannerCommand<'_>,
@@ -446,7 +531,8 @@ impl dagq::application::AgentProvider for PlannerAgent {
         let marker = planner.idle_marker();
         let mut command = dagq::application::CommandSpec::new("/bin/sh");
         command.current_dir(planner.cwd).arg("-c").arg(format!(
-            "sleep 0.2; printf '{{\"hook_event_name\":\"Stop\"}}' > {marker}; exit {code}",
+            "printf '%s' \"$PLANNER_MODEL\" > {model}; sleep 0.2; printf '{{\"hook_event_name\":\"Stop\"}}' > {marker}; exit {code}",
+            model = shell_quote(planner.dir.join("model.txt").to_str().unwrap()),
             marker = shell_quote(marker.to_str().unwrap()),
             code = self.code,
         ));
@@ -518,8 +604,14 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         id,
         &PlannerAgent { code: 3 },
         Some(Path::new("/plugins")),
+        Some(("claude-opus-5-5", "high")),
     )
     .unwrap();
+    // The wrapper gave its agent the model and effort (ADR-0079 decision 7).
+    assert_eq!(
+        fs::read_to_string(planners.join("1/model.txt")).unwrap(),
+        "claude-opus-5-5 high"
+    );
     assert_eq!(result, json!({"planner_id": 1, "exit_code": 3}));
     let planner = queue.planner(id).unwrap();
     assert_eq!(planner.wrapper_pid, Some(std::process::id()));
@@ -535,8 +627,8 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
     // An agent that cannot start is recorded as an exit of 127.
     let third = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
     let third_id = PlannerId::new(third["planner"]["id"].as_i64().unwrap());
-    let error =
-        dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None).unwrap_err();
+    let error = dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None, None)
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("no planner session"),
         "{error:#}"
@@ -546,8 +638,14 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
     queue.close_planner(third_id, None).unwrap();
     // One session per planner.
     assert!(
-        dagq::compose::planner_session_with_provider(&db, id, &PlannerAgent { code: 0 }, None)
-            .is_err()
+        dagq::compose::planner_session_with_provider(
+            &db,
+            id,
+            &PlannerAgent { code: 0 },
+            None,
+            None
+        )
+        .is_err()
     );
 
     // A live session: working until the Stop hook marks it idle.

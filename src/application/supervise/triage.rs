@@ -6,6 +6,7 @@
 //! (`triage_started`, `triage_finished`, `triage_failed`).
 
 use super::*;
+use crate::domain::actor_model::{ActorLaunch, ActorRole};
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
     ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, RecoveryAction, attempts,
@@ -202,7 +203,10 @@ impl Supervisor<'_> {
                 self.cleanup.deferred = true;
                 continue;
             }
-            let begun = self.queue.begin_triage(run.id(), &self.token, request)?;
+            let launch = self.actor_launch(ActorRole::Recovery);
+            let begun = self
+                .queue
+                .begin_triage(run.id(), &self.token, request, &launch)?;
             drop(guard);
             let Some((run, round)) = begun else {
                 continue;
@@ -264,7 +268,18 @@ impl Supervisor<'_> {
             .iter()
             .rev()
             .find(|e| e.kind == event_kind::RECOVERY_REQUESTED)
-            .map_or_else(|| json!({"alert": alert}), |e| e.payload.clone());
+            .map_or_else(
+                || json!({"alert": alert}),
+                |e| {
+                    // What a live recovery job was started with is not a
+                    // fact of the run (ADR-0079 decision 7).
+                    let mut facts = e.payload.clone();
+                    if let Some(facts) = facts.as_object_mut() {
+                        facts.remove("launch");
+                    }
+                    facts
+                },
+            );
         let processes = match run.worktree_path().map(Path::new) {
             Some(worktree) if self.files.is_dir(worktree) => self
                 .processes
@@ -298,13 +313,19 @@ impl Supervisor<'_> {
             recovery_prompt(&detail.task, run, attempt, &material)?,
             self.verifier.language().as_ref(),
         );
-        // The session id `triage_started` recorded (ADR-0048 decision 4).
-        let session_id = events
+        // The session id `triage_started` recorded (ADR-0048 decision 4),
+        // and the model and effort (ADR-0079 decision 7).
+        let started = events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::TRIAGE_STARTED)
+            .find(|e| e.kind == event_kind::TRIAGE_STARTED);
+        let session_id = started
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
+        let launch = started.map_or_else(
+            || ActorLaunch::default_of(ActorRole::Recovery),
+            |e| ActorLaunch::recorded(&e.payload, ActorRole::Recovery),
+        );
         let job = start_job(
             self,
             run.id(),
@@ -313,6 +334,7 @@ impl Supervisor<'_> {
             attempt,
             &prompt,
             session_id.as_deref(),
+            &launch,
         )?;
         Ok(EndedRecovery {
             round,

@@ -1708,6 +1708,9 @@ pub struct TestReviewer {
     pub triages: Mutex<Vec<String>>,
     /// The recovery job prompts and the directories they ran in.
     pub triage_prompts: Mutex<Vec<(String, PathBuf)>>,
+    /// The model and effort each job was given (ADR-0079 decision 7), in
+    /// order; a job started as before gives none.
+    pub models: Mutex<Vec<(String, String)>>,
 }
 
 impl TestReviewer {
@@ -1718,7 +1721,11 @@ impl TestReviewer {
             timeout: Duration::from_secs(60),
             triages: Mutex::new(Vec::new()),
             triage_prompts: Mutex::new(Vec::new()),
+            models: Mutex::new(Vec::new()),
         }
+    }
+    pub fn models(&self) -> Vec<(String, String)> {
+        self.models.lock().unwrap().clone()
     }
     pub fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
@@ -1791,6 +1798,12 @@ impl AgentProvider for TestReviewer {
     }
     fn review_timeout(&self) -> Duration {
         self.timeout
+    }
+    fn select_model(&self, _: &mut CommandSpec, model: &str, effort: &str) {
+        self.models
+            .lock()
+            .unwrap()
+            .push((model.into(), effort.into()));
     }
 }
 

@@ -1003,6 +1003,12 @@ enum Command {
         claude: PathBuf,
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
+        /// The model its agent starts with (ADR-0079 decision 7), given
+        /// with `--effort`.
+        #[arg(long, requires = "effort")]
+        model: Option<String>,
+        #[arg(long, requires = "model")]
+        effort: Option<String>,
     },
 }
 
@@ -2411,11 +2417,14 @@ fn execute(cli: Cli) -> Result<Value> {
             planner,
             claude,
             plugin_dir,
+            model,
+            effort,
         } => dagq::compose::planner_session(
             &db,
             dagq::domain::PlannerId::new(planner),
             &claude,
             plugin_dir.as_deref(),
+            model.as_deref().zip(effort.as_deref()),
         )?,
     })
 }

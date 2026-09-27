@@ -14,11 +14,12 @@ related:
   - design-supervisor-lifecycle-kpi
   - design-supervisor-lifecycle-plan-review
   - adr-0079
+  - design-supervisor-lifecycle-actor-model
 ---
 
 # Worker model
 
-workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4、task 576）。予測の記録は[plan review](plan-review.md)の6、読み方は[stats](stats.md#workerのmodelと試しの群)。段上げ（決定5）とworker以外のアクター（決定7）はまだ無い。
+workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4、task 576）。予測の記録は[plan review](plan-review.md)の6、読み方は[stats](stats.md#workerのmodelと試しの群)。段上げ（決定5）はまだ無い。worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md)。
 
 ## 既定: Opus 5.5・effort mediumを明示して渡す
 

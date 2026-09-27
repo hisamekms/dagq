@@ -22,6 +22,7 @@ use crate::{
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
         PlannerOrigin, PlannerState, Proposal, Task, TaskDetail,
+        actor_model::{ActorLaunch, ActorRole},
         claim_defer::expected_files,
         next_to_review,
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
@@ -102,17 +103,19 @@ impl Supervisor<'_> {
         let Some(proposal_id) = next_to_review(&self.queue.plan_review_candidates()?) else {
             return Ok(());
         };
+        let launch = self.actor_launch(ActorRole::PlanReview);
         let Some(job) = self.queue.begin_plan_review(
             proposal_id,
             &self.token,
             &self.layout.plan_reviews_dir,
             &self.layout.repo_root,
+            &launch,
         )?
         else {
             return Ok(());
         };
         let proposal = self.queue.show_proposal(proposal_id)?;
-        match self.spawn_plan_review(&job, &proposal) {
+        match self.spawn_plan_review(&job, &proposal, &launch) {
             Ok(headless) => {
                 info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started", job.attempt);
                 self.plan_review = Some(PlanReviewWatch {
@@ -135,6 +138,7 @@ impl Supervisor<'_> {
         &mut self,
         job: &PlanReviewJob,
         proposal: &Proposal,
+        launch: &ActorLaunch,
     ) -> Result<HeadlessJob> {
         self.files
             .create_dir_all(&job.dir)
@@ -149,6 +153,7 @@ impl Supervisor<'_> {
                 .headless_command(&self.layout.repo_root, &prompt, PLAN_REVIEW_TOOLS)?;
         self.reviewer
             .assign_session_id(&mut command, &job.session_id);
+        self.reviewer.apply_launch(&mut command, launch);
         command.envs(self.layout.job_env.iter().cloned());
         let child = self
             .spawner
@@ -584,7 +589,7 @@ impl Supervisor<'_> {
                         view.planner.id
                     );
                     self.queue
-                        .revise_sent(proposal.id(), view.planner.id, &workspace, false)?;
+                        .revise_sent(proposal.id(), view.planner.id, &workspace, None)?;
                 }
                 // Not listed, yet its session runs: it is not given up on
                 // that evidence; the timeout tells the inbox.
@@ -611,8 +616,12 @@ impl Supervisor<'_> {
                         proposal.id(),
                         opened.planner.id
                     );
-                    self.queue
-                        .revise_sent(proposal.id(), opened.planner.id, &workspace, true)?;
+                    self.queue.revise_sent(
+                        proposal.id(),
+                        opened.planner.id,
+                        &workspace,
+                        Some(&opened.launch),
+                    )?;
                     views = self.planner_views()?;
                 }
                 // At the limit: the revise waits for a runtime planner to end.
@@ -691,6 +700,10 @@ impl Supervisor<'_> {
             claude: &layout.claude,
             plugin_dir: layout.plugin_dir.as_deref(),
             language: self.verifier.language(),
+            roles: self.verifier.role_models().unwrap_or_else(|error| {
+                warn!(error = %format_args!("{error:#}"), "[roles] could not be read; the planner starts as before: {error:#}");
+                Default::default()
+            }),
         }
     }
 

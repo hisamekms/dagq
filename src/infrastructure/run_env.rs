@@ -10,7 +10,8 @@
 //! space a claim and a landing need (ADR-0047 decision 44, task 377).
 //! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
 //! decision 24). `[worker.trial]` turns on the limited trial of the worker's model
-//! (ADR-0079 decision 4). The file is parsed by
+//! (ADR-0079 decision 4). `[roles.<role>]` holds the model and effort of a
+//! session other than the worker's (ADR-0079 decision 7). The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
 use anyhow::{Context, Result, bail, ensure};
@@ -24,6 +25,7 @@ use std::{
 use crate::{
     application::{Exit, Verifier},
     domain::{
+        actor_model::{ActorRole, RoleModel, RoleModels, check_effort},
         disk::DiskConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
@@ -56,6 +58,11 @@ const KPI_TABLE: &str = "kpi";
 /// `[worker.trial]`: the limited trial of the worker's model (ADR-0079
 /// decision 4).
 const WORKER_TRIAL_TABLE: &str = "worker.trial";
+/// `[roles.<role>]`: the model and effort of a role other than the
+/// worker (ADR-0079 decision 7), one table per role.
+const ROLES_PREFIX: &str = "roles.";
+/// What [`parse_config`] calls the current table while in a `[roles.*]`.
+const ROLES_TABLE: &str = "roles";
 /// `[language]` (ADR-t616-2): accepted here without looking into it;
 /// [`super::language`] reads and checks it, so a mistake in it never stops
 /// a claim or a landing.
@@ -123,6 +130,8 @@ pub struct Config {
     /// `[worker.trial]`, off unless it says `enabled = true` (ADR-0079
     /// decision 4).
     pub worker_trial: WorkerTrial,
+    /// `[roles.<role>]`, none by default (ADR-0079 decision 7).
+    pub roles: RoleModels,
 }
 
 /// Parse the whole file.
@@ -135,6 +144,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut disk_keys: Vec<String> = Vec::new();
     let mut resume_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
+    let mut role: Option<ActorRole> = None;
+    let mut roles_seen: Vec<ActorRole> = Vec::new();
+    let mut role_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
@@ -155,9 +167,26 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(KPI_TABLE);
                 continue;
             }
+            if let Some(name) = name.strip_prefix(ROLES_PREFIX) {
+                let parsed: ActorRole = name.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown role [{ROLES_PREFIX}{name}]; the roles are {}",
+                        ActorRole::ALL.map(ActorRole::as_str).join(", ")
+                    )
+                })?;
+                ensure!(
+                    !roles_seen.contains(&parsed),
+                    "{CONFIG_FILE_NAME}:{number}: [{ROLES_PREFIX}{name}] is defined twice"
+                );
+                roles_seen.push(parsed);
+                role = Some(parsed);
+                role_keys.clear();
+                table = Some(ROLES_TABLE);
+                continue;
+            }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{LANGUAGE_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -250,6 +279,35 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 );
                 repository.branch = Some(value);
             }
+            Some(ROLES_TABLE) => {
+                let role = role.expect("a [roles.*] table names its role");
+                ensure!(
+                    RoleModel::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{ROLES_PREFIX}{}]; the keys are {}",
+                    role.as_str(),
+                    RoleModel::KEYS.join(", ")
+                );
+                ensure!(
+                    !role_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let value = parse_string(rest.trim()).with_context(with)?;
+                ensure!(
+                    !value.trim().is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is blank"
+                );
+                let table = config.roles.entry(role);
+                if key == "model" {
+                    table.model = Some(value);
+                } else {
+                    check_effort(&value)
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                        .with_context(with)?;
+                    table.effort = Some(value);
+                }
+                role_keys.push(key.to_owned());
+            }
             Some(WORKER_TRIAL_TABLE) => {
                 ensure!(
                     WorkerTrial::KEYS.contains(&key),
@@ -337,7 +395,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -475,6 +533,18 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .repository)
+}
+
+/// `[roles.<role>]` of the `dagq.toml` in `root` (ADR-0079 decision 7);
+/// no file is no role's.
+pub fn load_role_models(root: &Path) -> Result<RoleModels> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(RoleModels::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .roles)
 }
 
 /// `[worker.trial]` of the `dagq.toml` in `root` (ADR-0079 decision 4);
@@ -764,6 +834,9 @@ impl Verifier for ShellVerifier {
     fn worker_trial(&self) -> Result<WorkerTrial> {
         load_worker_trial(&self.checkout)
     }
+    fn role_models(&self) -> Result<RoleModels> {
+        load_role_models(&self.checkout)
+    }
 
     fn language(&self) -> Option<crate::domain::language::Language> {
         super::language::language_for_prompt(Some(&self.checkout), self.user_config.as_deref())
@@ -825,6 +898,64 @@ LITERAL = 'no \n escapes # here'
                 ("QUOTED", "a \"b\" \\ c\td\n"),
                 ("LITERAL", "no \\n escapes # here"),
             ])
+        );
+    }
+
+    #[test]
+    fn parses_the_role_tables() {
+        use crate::domain::actor_model::{ActorRole, RoleModel};
+        assert_eq!(parse_config("").unwrap().roles, RoleModels::default());
+        let config = parse_config(
+            "[roles.plan_review]\neffort = \"high\" # up\n\n[roles.observer]\nmodel = 'claude-sonnet-5'\n[roles.review]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.roles.get(ActorRole::PlanReview),
+            Some(&RoleModel {
+                model: None,
+                effort: Some("high".into())
+            })
+        );
+        assert_eq!(
+            config.roles.get(ActorRole::Observer),
+            Some(&RoleModel {
+                model: Some("claude-sonnet-5".into()),
+                effort: None
+            })
+        );
+        // A table without a key is none.
+        assert_eq!(config.roles.get(ActorRole::Review), None);
+        assert_eq!(config.roles.launch(ActorRole::Review).arguments(), None);
+        for (text, expected) in [
+            ("[roles.nobody]", "unknown role [roles.nobody]"),
+            (
+                "[roles.review]\nother = 'x'",
+                "unknown key other in [roles.review]",
+            ),
+            ("[roles.review]\neffort = 'huge'", "effort"),
+            ("[roles.review]\nmodel = ' '", "model is blank"),
+            (
+                "[roles.review]\nmodel = 'a'\nmodel = 'b'",
+                "is defined twice",
+            ),
+            ("[roles.review]\n[roles.review]", "is defined twice"),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_role_models(dir.path()).unwrap(), RoleModels::default());
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[roles.planner]\neffort = 'xhigh'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_role_models(dir.path())
+                .unwrap()
+                .launch(ActorRole::Planner)
+                .arguments(),
+            Some(("claude-opus-5-5", "xhigh"))
         );
     }
 

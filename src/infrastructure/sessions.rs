@@ -2017,6 +2017,7 @@ mod tests {
             cwd: Some("/repo".into()),
             workspace_id: Some(workspace.into()),
             planner_id: None,
+            launch: None,
         }
     }
 

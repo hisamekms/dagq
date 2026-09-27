@@ -30,6 +30,10 @@ impl AgentProvider for ObserverProvider {
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["no-mcp"]);
     }
+    /// `$MODEL`, which the script may write down (ADR-0079 decision 7).
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        command.env("MODEL", format!("{model} {effort}"));
+    }
     fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
         bail!("the observer reviews no run")
     }
@@ -55,6 +59,56 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .unwrap()
         .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
         .collect()
+}
+
+/// Without `[roles.observer]` the agent is given no model or effort; with
+/// it in the bound checkout's `dagq.toml`, it is given its model and
+/// effort. `observe_started` and the span record which (ADR-0079 decision
+/// 7).
+#[test]
+fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, repo, db) = fixture();
+    let provider = ObserverProvider {
+        script: r#"printf '%s' "${MODEL-none}" > model.txt"#.into(),
+    };
+    // A new task each time, so the observation is not skipped.
+    let run = |mode| {
+        add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "more", &[]);
+        let report = observe(&db, &provider, &observe_options(mode)).unwrap();
+        assert_eq!(report["outcome"], "succeeded", "{report}");
+        let dir = PathBuf::from(report["dir"].as_str().unwrap());
+        fs::read_to_string(dir.join("model.txt")).unwrap()
+    };
+    assert_eq!(run(ObserveMode::Hourly), "none");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let common = repo.join(".git").canonicalize().unwrap();
+    queue.bind_repository(common.to_str().unwrap()).unwrap();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.observer]\nmodel = \"claude-sonnet-5\"\neffort = \"low\"\n",
+    )
+    .unwrap();
+    assert_eq!(run(ObserveMode::Daily), "claude-sonnet-5 low");
+    let started: Vec<Value> = queue_events(&db, "observe_started")
+        .into_iter()
+        .map(|payload| payload["launch"].clone())
+        .collect();
+    let configured = json!({"role": "observer", "model": "claude-sonnet-5", "effort": "low",
+                            "source": "dagq.toml"});
+    assert_eq!(
+        started,
+        [
+            json!({"role": "observer", "model": null, "effort": null, "source": "default"}),
+            configured.clone(),
+        ]
+    );
+    let spans: Vec<Value> = queue_events(&db, "session_opened")
+        .into_iter()
+        .filter(|payload| payload["kind"] == "observer")
+        .map(|payload| payload["launch"].clone())
+        .collect();
+    assert_eq!(spans, started);
 }
 
 #[test]

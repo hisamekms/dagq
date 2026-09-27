@@ -140,6 +140,8 @@ pub(crate) struct StubReviewer {
     /// A task the first job's run edits through the queue at `.0`, as
     /// `dagq edit` would while the job runs.
     edit: Mutex<Option<(PathBuf, TaskId)>>,
+    /// The model and effort each job was given (ADR-0079 decision 7).
+    models: Mutex<Vec<(String, String)>>,
 }
 
 impl StubReviewer {
@@ -148,6 +150,7 @@ impl StubReviewer {
             verdicts: Mutex::new(verdicts.iter().map(Value::to_string).collect()),
             prompts: Mutex::new(Vec::new()),
             edit: Mutex::new(None),
+            models: Mutex::new(Vec::new()),
         }
     }
     /// The first job edits `task` of the queue at `db` while it runs.
@@ -161,10 +164,14 @@ impl StubReviewer {
             verdicts: Mutex::new(vec!["FAIL".into()]),
             prompts: Mutex::new(Vec::new()),
             edit: Mutex::new(None),
+            models: Mutex::new(Vec::new()),
         }
     }
     pub(crate) fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
+    }
+    fn models(&self) -> Vec<(String, String)> {
+        self.models.lock().unwrap().clone()
     }
 }
 
@@ -213,6 +220,12 @@ impl AgentProvider for StubReviewer {
     }
     fn review_timeout(&self) -> Duration {
         Duration::from_secs(30)
+    }
+    fn select_model(&self, _: &mut CommandSpec, model: &str, effort: &str) {
+        self.models
+            .lock()
+            .unwrap()
+            .push((model.into(), effort.into()));
     }
 }
 
@@ -573,6 +586,17 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
     let sent = events(&mut queue, task, "plan_revise_sent");
     assert_eq!(sent[0]["opened"], false);
     assert_eq!(sent[0]["workspace_id"], "PW");
+    // A live planner's effort is not switched (ADR-0079 decision 7 (c)).
+    assert_eq!(sent[0]["effort_raised"], false);
+    assert_eq!(sent[0]["launch"], Value::Null);
+    assert!(
+        sent[0]["effort_not_raised"]
+            .as_str()
+            .unwrap()
+            .contains("live"),
+        "{}",
+        sent[0]
+    );
 
     // Past the planner timeout without a resubmission, the inbox is told
     // once, and it shows as the planner's attention.
@@ -669,9 +693,21 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     )
     .unwrap();
     assert!(prompt.contains("- split it"), "{prompt}");
+    let sent = &events(&mut queue, first, "plan_revise_sent")[0];
+    assert_eq!(sent["opened"], true);
+    // Opened for the revise: one effort step above the default, and why
+    // (ADR-0079 decision 7 (c)); the plan review itself started as before.
+    assert_eq!(sent["effort_raised"], true);
     assert_eq!(
-        events(&mut queue, first, "plan_revise_sent")[0]["opened"],
-        true
+        sent["launch"],
+        json!({"role": "runtime_planner", "model": "claude-opus-5-5", "effort": "high",
+               "source": "revise_escalation", "escalated_from": "medium",
+               "escalation_reason": "plan_review_revise"})
+    );
+    assert_eq!(reviewer.models(), []);
+    assert_eq!(
+        events(&mut queue, first, "plan_review_started")[0]["launch"]["source"],
+        "default"
     );
     assert!(events(&mut queue, second, "plan_revise_sent").is_empty());
     assert_eq!(proposal_column(&fx.db, two, "revise_sent_at"), Value::Null);
@@ -701,6 +737,48 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     let waiting = events(&mut queue, second, "planner_unresponsive");
     assert_eq!(waiting.len(), 1, "{waiting:?}");
     assert_eq!(waiting[0]["planner_id"], Value::Null);
+}
+
+/// `[roles.plan_review]` and `[roles.runtime_planner]` of `dagq.toml`
+/// (ADR-0079 decision 7): the plan review is given its model and effort,
+/// and the planner opened for its revise starts one step above its role's
+/// effort, `xhigh` at most; its span records the same.
+#[test]
+fn role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them() {
+    let fx = fixture();
+    fs::write(
+        fx.repo.join("dagq.toml"),
+        "[roles.plan_review]\neffort = \"high\"\n\n[roles.runtime_planner]\nmodel = \"claude-sonnet-5\"\neffort = \"high\"\n",
+    )
+    .unwrap();
+    git(&fx.repo, &["add", "dagq.toml"]);
+    git(&fx.repo, &["commit", "-m", "roles"]);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
+    submit(&mut queue, &[task], None);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "revise", "reasons": ["split it"], "summary": "too big"
+    })]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(
+        reviewer.models(),
+        [("claude-opus-5-5".to_owned(), "high".to_owned())]
+    );
+    let started = &events(&mut queue, task, "plan_review_started")[0];
+    assert_eq!(
+        started["launch"],
+        json!({"role": "plan_review", "model": "claude-opus-5-5", "effort": "high",
+               "source": "dagq.toml"})
+    );
+    let span = &events(&mut queue, task, "session_opened")[0];
+    assert_eq!(span["kind"], "plan_review");
+    assert_eq!(span["launch"], started["launch"]);
+    let sent = &events(&mut queue, task, "plan_revise_sent")[0];
+    assert_eq!(sent["launch"]["model"], "claude-sonnet-5");
+    assert_eq!(sent["launch"]["effort"], "xhigh");
+    assert_eq!(sent["launch"]["escalated_from"], "high");
+    assert_eq!(backend.opened().len(), 1);
 }
 
 #[test]

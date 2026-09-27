@@ -461,6 +461,7 @@ impl SqliteQueue {
         id: &RunId,
         token: &str,
         request: Option<serde_json::Value>,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::TRIAGE_STARTED]))?;
@@ -521,7 +522,7 @@ impl SqliteQueue {
             id,
             event_kind::TRIAGE_STARTED,
             // The job's Claude session id (ADR-0048 decision 4).
-            json!({"attempt": attempt, "status": run.status().as_str(), "session_id": self.generators.ids.uuid()}),
+            json!({"attempt": attempt, "status": run.status().as_str(), "session_id": self.generators.ids.uuid(), "launch": launch.to_value()}),
         )?;
         tx.commit()?;
         Ok(Some((run, attempt)))
@@ -890,8 +891,9 @@ impl RunRecovery for SqliteQueue {
         id: &RunId,
         token: &str,
         request: Option<serde_json::Value>,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
-        SqliteQueue::begin_triage(self, id, token, request)
+        SqliteQueue::begin_triage(self, id, token, request, launch)
     }
     fn finish_triage(
         &mut self,

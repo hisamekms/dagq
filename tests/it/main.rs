@@ -9,6 +9,7 @@ mod common;
 #[macro_use]
 mod runtime_support;
 
+mod actor_model;
 mod cli_forecast;
 mod cli_goals;
 mod cli_graph;

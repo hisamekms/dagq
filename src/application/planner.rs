@@ -37,8 +37,9 @@ use super::{
 use crate::domain::{
     IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState, ProposalId,
     SessionRole, Task,
+    actor_model::{ActorLaunch, ActorRole, REVISE_ESCALATION, RoleModels},
     language::{Language, with_instruction},
-    sessions::RUNTIME_PLANNER,
+    sessions::{LAUNCH_ENV, RUNTIME_PLANNER},
 };
 
 /// The planner's first message, which its wrapper hands the agent.
@@ -70,6 +71,10 @@ pub struct PlannerLaunch<'a> {
     /// The language every planner's prompt names (ADR-t616-2), resolved
     /// when the launch is made; `None` names none.
     pub language: Option<Language>,
+    /// `[roles.<role>]` of `dagq.toml` (ADR-0079 decision 7), read when
+    /// the launch is made: the model and effort a planner's agent starts
+    /// with.
+    pub roles: RoleModels,
 }
 
 /// A planner whose workspace just opened: its record, the workspace's
@@ -80,6 +85,8 @@ pub struct OpenedPlanner {
     pub name: String,
     pub dir: PathBuf,
     pub warnings: Vec<String>,
+    /// What its agent starts with (ADR-0079 decision 7).
+    pub launch: ActorLaunch,
 }
 
 /// Open a planner a person talks with (`dagq plan`): a new workspace every
@@ -90,6 +97,7 @@ pub fn open_person_planner(launch: &PlannerLaunch<'_>) -> Result<OpenedPlanner> 
         PlannerOrigin::Person,
         None,
         &planner_prompt(launch.db)?,
+        &launch.roles.launch(ActorRole::Planner),
     )
 }
 
@@ -97,7 +105,9 @@ pub fn open_person_planner(launch: &PlannerLaunch<'_>) -> Result<OpenedPlanner> 
 /// its initial prompt carries the proposal, its `tasks` (as the caller read
 /// them) and the `reasons` plan review sent it back with. It submits as the
 /// runtime's planner (`DAGQ_PLANNER_ORIGIN=runtime`), which makes it the
-/// proposal's owner.
+/// proposal's owner. Being opened for a plan review's `revise`, its agent
+/// starts one effort step above `[roles.runtime_planner]` (or `medium`),
+/// up to `xhigh` (ADR-0079 decision 7 (c)).
 pub fn open_runtime_planner(
     launch: &PlannerLaunch<'_>,
     proposal: ProposalId,
@@ -107,7 +117,17 @@ pub fn open_runtime_planner(
     // The proposal must exist; its record is the one the planner opens for.
     launch.queue.show_proposal(proposal)?;
     let prompt = runtime_planner_prompt(launch.db, proposal, tasks, reasons)?;
-    open_planner(launch, PlannerOrigin::Runtime, Some(proposal), &prompt)
+    let actor = launch
+        .roles
+        .launch(ActorRole::RuntimePlanner)
+        .escalated(REVISE_ESCALATION);
+    open_planner(
+        launch,
+        PlannerOrigin::Runtime,
+        Some(proposal),
+        &prompt,
+        &actor,
+    )
 }
 
 /// Record a planner, write its directory and open its workspace running
@@ -115,32 +135,37 @@ pub fn open_runtime_planner(
 /// planner's ID in the workspace's environment and the queue's group
 /// (ADR-0026). A workspace cmux does not open closes the record with the
 /// error. The look (Blue, the `map` pill) is a warning when refused; a
-/// planner is not pinned, being on demand.
+/// planner is not pinned, being on demand. Its agent starts as `actor`
+/// says.
 pub fn open_planner(
     launch: &PlannerLaunch<'_>,
     origin: PlannerOrigin,
     proposal: Option<ProposalId>,
     prompt: &str,
+    actor: &ActorLaunch,
 ) -> Result<OpenedPlanner> {
     let planner = launch.queue.open_planner(origin, proposal)?;
-    launch_planner(launch, planner, prompt)
+    launch_planner(launch, planner, prompt, actor)
 }
 
 /// Open the workspace of a planner the runtime recorded for a draft
 /// (ADR-0041 decision 16, [`super::DraftPlannerStore::open_draft_planner`])
-/// with `prompt`, the way [`open_planner`] does.
+/// with `prompt`, the way [`open_planner`] does, its agent starting with
+/// `[roles.runtime_planner]`.
 pub fn open_draft_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
     prompt: &str,
 ) -> Result<OpenedPlanner> {
-    launch_planner(launch, planner, prompt)
+    let actor = launch.roles.launch(ActorRole::RuntimePlanner);
+    launch_planner(launch, planner, prompt, &actor)
 }
 
 fn launch_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
     prompt: &str,
+    actor: &ActorLaunch,
 ) -> Result<OpenedPlanner> {
     let queue = launch.queue;
     let proposal = planner.proposal_id;
@@ -159,7 +184,7 @@ fn launch_planner(
         name.push_str(&format!(" - finding {finding}"));
     }
     let prompt = with_instruction(prompt.to_owned(), launch.language.as_ref());
-    let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, &prompt);
+    let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, &prompt, actor);
     let workspace_id = match opened {
         Ok(id) => id,
         Err(error) => {
@@ -194,6 +219,7 @@ fn launch_planner(
         name,
         dir,
         warnings,
+        launch: actor.clone(),
     })
 }
 
@@ -204,6 +230,7 @@ fn create_workspace(
     dir: &Path,
     name: &str,
     prompt: &str,
+    actor: &ActorLaunch,
 ) -> Result<String> {
     let files = launch.files;
     files
@@ -228,6 +255,16 @@ fn create_workspace(
         argv.push("--plugin-dir".into());
         argv.push(path_text(plugin_dir)?);
     }
+    // The wrapper gives its agent the model and effort; the session's hook
+    // records what it was started with from the workspace's environment.
+    if let Some((model, effort)) = actor.arguments() {
+        argv.extend([
+            "--model".into(),
+            model.to_owned(),
+            "--effort".into(),
+            effort.to_owned(),
+        ]);
+    }
     let mut tags = workspaces.tags(SessionRole::Planner)?;
     if planner.origin == PlannerOrigin::Runtime {
         for (key, value) in &mut tags.env {
@@ -242,6 +279,8 @@ fn create_workspace(
     ));
     tags.env
         .push((PLANNER_ID_ENV.to_owned(), planner.id.to_string()));
+    tags.env
+        .push((LAUNCH_ENV.to_owned(), actor.to_value().to_string()));
     if let Some(description) = &mut tags.description {
         description.push_str(&format!(" planner={}", planner.id));
     }
@@ -260,14 +299,17 @@ pub struct PlannerWrapper<'a> {
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
-/// process, start the agent with the planner's prompt in `cwd`, register
-/// it, heartbeat until it exits, and record its exit code, which it returns.
+/// process, start the agent with the planner's prompt in `cwd` (with
+/// `model`, the model and effort its opener chose, when there are),
+/// register it, heartbeat until it exits, and record its exit code, which
+/// it returns.
 pub fn run_planner_session(
     ctx: PlannerWrapper<'_>,
     id: PlannerId,
     dir: &Path,
     cwd: &Path,
     plugin_dir: Option<&Path>,
+    model: Option<(&str, &str)>,
 ) -> Result<Value> {
     let PlannerWrapper {
         queue,
@@ -286,13 +328,17 @@ pub fn run_planner_session(
             Ok((planner.origin, prompt))
         })
         .and_then(|(origin, prompt)| {
-            provider.planner_command(&PlannerCommand {
+            let mut command = provider.planner_command(&PlannerCommand {
                 origin,
                 dir,
                 cwd,
                 prompt: &prompt,
                 plugin_dir,
-            })
+            })?;
+            if let Some((model, effort)) = model {
+                provider.select_model(&mut command, model, effort);
+            }
+            Ok(command)
         })
         .and_then(|command| {
             spawner
