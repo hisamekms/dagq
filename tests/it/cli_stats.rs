@@ -232,7 +232,7 @@ mod stats {
             runs[1]["verify_failures"],
             json!([{
                 "attempt": 1, "index": 3, "command": "cargo llvm-cov",
-                "class": "timeout", "evidence": "test x timed out",
+                "class": "timeout", "evidence": "test x timed out", "retry": false,
             }])
         );
         assert_eq!(runs[1]["load"]["work"], Value::Null);
@@ -296,7 +296,7 @@ mod stats {
         );
         assert_eq!(
             report["verification_failures"],
-            json!([{"class": "timeout", "count": 1, "runs": 1}])
+            json!([{"class": "timeout", "count": 1, "runs": 1, "retried": 0, "retry_passed": 0, "retry_failed": 0}])
         );
         // Task 515: "x" failed in two runs, at integrate and in the worker;
         // with one run's integrate only it is not a flaky candidate.

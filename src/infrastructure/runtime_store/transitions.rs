@@ -469,6 +469,27 @@ impl SqliteQueue {
         )
     }
 
+    /// Hold an integrating run whose verification command failed on the
+    /// host again after its retry (task 639): `awaiting_integration` with
+    /// the reason in `last_error` and `integration_held`; the slot and
+    /// lease are released, and no resume is used.
+    pub fn hold_integration(
+        &mut self,
+        id: &RunId,
+        token: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> Result<TaskRun> {
+        self.leave_integration(
+            id,
+            token,
+            |run| run::hold_integration(run, reason.to_owned()),
+            reason,
+            event_kind::INTEGRATION_HELD,
+            detail,
+        )
+    }
+
     /// End an integrating run whose rewritten receipt reports `failed`. The
     /// receipt's JSON goes into the `integration_failed` event, since the DB
     /// otherwise holds only the receipt seen at validation time.
@@ -757,6 +778,15 @@ impl RunTransitions for SqliteQueue {
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
         SqliteQueue::defer_integration(self, id, token, reason, detail)
+    }
+    fn hold_integration(
+        &mut self,
+        id: &RunId,
+        token: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> Result<TaskRun> {
+        SqliteQueue::hold_integration(self, id, token, reason, detail)
     }
     fn fail_integration(
         &mut self,

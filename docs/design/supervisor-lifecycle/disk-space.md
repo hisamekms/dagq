@@ -8,6 +8,7 @@ updated: 2026-09-27
 last_verified: 2026-09-27
 scope: runtime
 related:
+  - adr-t639-1
   - adr-0047
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-claim-hold
@@ -56,6 +57,14 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 - 閾値が決まらない（記録も`min_free_bytes`も無い）・空きが読めないときは確かめない（supervisorと同じ）
 
 supervisorの着地（`land_integrating`）は上の「判定と掃除」の控えを使い、この確かめはしない。
+
+## 検証がディスク満杯で落ちたとき
+
+事前の確かめをすり抜けて着地の検証コマンドが`disk_full`で落ちたら（supervisorの着地も人の`integrate`も）、integrateはやり直す前に空きを着地の閾値で確かめる（task 639。[`integrate`](integrate.md#integrate)の5の「hostの失敗のやり直し」）。閾値と空きの読み方は上と同じで、supervisorは起動時の`[disk]`と`free_space`、人の`integrate`は`OneShot`の`disk`と`free_space`を、そのときに読む（`Integration::retry_disk`）。
+
+- 足りれば同じ試行で1回やり直す
+- 足りなければやり直さず、runを`awaiting_integration`に戻して`integration_held`（`retried: false`、`disk`に`{free_bytes, needed_bytes, largest_build_bytes}`）を記録し、inboxの`review and integrate`になる。resumeはしない。supervisorの次のpassの`check_disk`は、上の「判定と掃除」のとおり掃除し、足りなければ`cost`のaskを開く。空けた後に人が`dagq integrate <task>`を打てば、上の「人が打つ`integrate`」の確かめを通って検証からやり直す
+- 閾値が決まらない・空きが読めないときは確かめずにやり直す
 
 ## inboxに知らせる
 

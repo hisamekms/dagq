@@ -58,6 +58,7 @@ pub const INTEGRATION_APPROVED: &str = "integration_approved";
 pub const INTEGRATION_DEFERRED: &str = "integration_deferred";
 pub const INTEGRATION_ERROR: &str = "integration_error";
 pub const INTEGRATION_FAILED: &str = "integration_failed";
+pub const INTEGRATION_HELD: &str = "integration_held";
 pub const INTEGRATION_REBASED: &str = "integration_rebased";
 pub const INTEGRATION_REBASE_ABORTED: &str = "integration_rebase_aborted";
 pub const INTEGRATION_RECEIPT: &str = "integration_receipt";

@@ -246,6 +246,14 @@ pub enum IntegrationOutcome {
         run: Box<TaskRun>,
         reason: String,
     },
+    /// A verification command failed on the host (a full disk, a kill, a
+    /// timeout) again after its retry (task 639): the run is back
+    /// awaiting integration for a person, and no resume is used.
+    Held {
+        run: Box<TaskRun>,
+        main: CommitSha,
+        reason: String,
+    },
     NoRunAwaiting,
 }
 

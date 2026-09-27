@@ -152,6 +152,7 @@ impl State {
             "run_integrated"
                 | "integration_deferred"
                 | "integration_error"
+                | "integration_held"
                 | "integration_failed"
                 | "runtime_error"
                 | "run_adopted"

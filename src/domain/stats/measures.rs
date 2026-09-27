@@ -5,7 +5,8 @@
 //! (`verification_command` of `integrate`); and the aggregates over them:
 //! the runs per version and per load band, and the time each verification
 //! command takes; and why the verification commands of `integrate` failed
-//! (their `failure`, task 467), per run and per class.
+//! (their `failure`, task 467), per run and per class, with the retries of
+//! the commands that failed on the host (task 639).
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -89,6 +90,9 @@ pub struct RunVerifyFailure {
     pub command: Option<String>,
     pub class: String,
     pub evidence: Option<String>,
+    /// Whether it failed on the retry of a command that failed on the host
+    /// first (task 639).
+    pub retry: bool,
 }
 
 impl RunVerifyFailure {
@@ -106,6 +110,7 @@ impl RunVerifyFailure {
             command: text(&payload["command"]),
             class: text(&failure["class"])?,
             evidence: text(&failure["evidence"]),
+            retry: payload["retry"] == true,
         })
     }
 }
@@ -375,10 +380,16 @@ pub(super) fn verification_commands(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailureClassStats {
     pub class: String,
-    /// The commands that failed so.
+    /// The commands that failed so, retries included.
     pub count: usize,
     /// The runs they belong to.
     pub runs: usize,
+    /// The retries of commands that failed so first (a class of the host,
+    /// task 639), and how they ended: `passed`, or `failed` again (on the
+    /// host or in the code). Zero for the classes of the code.
+    pub retried: usize,
+    pub retry_passed: usize,
+    pub retry_failed: usize,
 }
 
 /// The failed verification commands of `integrate` with `after < id <=
@@ -390,30 +401,59 @@ pub(super) fn verification_failures(
     upto: EventId,
     counts: impl Fn(Option<TaskId>) -> bool,
 ) -> Vec<FailureClassStats> {
-    let mut by_class: BTreeMap<String, (usize, BTreeSet<&str>)> = BTreeMap::new();
+    #[derive(Default)]
+    struct Tally<'a> {
+        count: usize,
+        runs: BTreeSet<&'a str>,
+        retried: usize,
+        retry_passed: usize,
+    }
+    let mut by_class: BTreeMap<String, Tally> = BTreeMap::new();
     for event in events
         .iter()
         .filter(|event| event.id > after && event.id <= upto && counts(event.task_id))
     {
+        // A retry counts under the class of the failure it retried.
+        if let Some(class) = retried_class(event) {
+            let entry = by_class.entry(class.to_owned()).or_default();
+            entry.retried += 1;
+            if event.payload["exit_code"].as_i64() == Some(0) {
+                entry.retry_passed += 1;
+            }
+        }
         let Some(failure) = RunVerifyFailure::of(event) else {
             continue;
         };
         let entry = by_class.entry(failure.class).or_default();
-        entry.0 += 1;
+        entry.count += 1;
         if let Some(run) = &event.run_id {
-            entry.1.insert(run.as_str());
+            entry.runs.insert(run.as_str());
         }
     }
     let mut classes: Vec<FailureClassStats> = by_class
         .into_iter()
-        .map(|(class, (count, runs))| FailureClassStats {
+        .map(|(class, tally)| FailureClassStats {
             class,
-            count,
-            runs: runs.len(),
+            count: tally.count,
+            runs: tally.runs.len(),
+            retried: tally.retried,
+            retry_passed: tally.retry_passed,
+            retry_failed: tally.retried - tally.retry_passed,
         })
         .collect();
     classes.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.class.cmp(&b.class)));
     classes
+}
+
+/// The class of the failure a `verification_command` of `integrate`
+/// retried (task 639), when it is a retry.
+fn retried_class(event: &RunEvent) -> Option<&str> {
+    let payload = &event.payload;
+    (event.kind == "verification_command"
+        && payload["phase"] == "integration"
+        && payload["retry"] == true)
+        .then(|| payload["retry_of"]["failure"]["class"].as_str())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -507,6 +547,7 @@ mod tests {
                     command: Some("cargo llvm-cov".to_owned()),
                     class: "disk_full".to_owned(),
                     evidence: Some("disk_full line".to_owned()),
+                    retry: false,
                 },
                 RunVerifyFailure {
                     attempt: Some(1),
@@ -514,6 +555,7 @@ mod tests {
                     command: Some("cargo llvm-cov".to_owned()),
                     class: "test_failure".to_owned(),
                     evidence: Some("test_failure line".to_owned()),
+                    retry: false,
                 },
             ]
         );
@@ -521,12 +563,51 @@ mod tests {
         assert_eq!(
             json!(classes),
             json!([
-                {"class": "test_failure", "count": 2, "runs": 2},
-                {"class": "disk_full", "count": 1, "runs": 1},
+                {"class": "test_failure", "count": 2, "runs": 2, "retried": 0, "retry_passed": 0, "retry_failed": 0},
+                {"class": "disk_full", "count": 1, "runs": 1, "retried": 0, "retry_passed": 0, "retry_failed": 0},
             ])
         );
         let none = verification_failures(&events, EventId::new(0), EventId::new(7), |_| false);
         assert!(none.is_empty());
+    }
+
+    /// A retry of a command that failed on the host (task 639) counts under
+    /// the class it retried, as passed or failed; a failed retry is also a
+    /// failure of its own class, marked `retry` on its run's row.
+    #[test]
+    fn retries_count_under_the_class_they_retried() {
+        let retry = |id: i64, retried: &str, class: Option<&str>| {
+            let mut event = event(
+                id,
+                "verification_command",
+                json!({
+                    "phase": "integration", "attempt": 1, "index": 1, "command": "c",
+                    "exit_code": if class.is_some() { 1 } else { 0 },
+                    "failure": class.map(|class| json!({"class": class, "evidence": "e"})),
+                    "retry": true,
+                    "retry_of": {"failure": {"class": retried, "evidence": "e"}, "log_path": "l"},
+                }),
+            );
+            event.run_id = Some(crate::domain::RunId::new("r").unwrap());
+            event
+        };
+        let events = [
+            retry(1, "timeout", None),
+            retry(2, "timeout", Some("timeout")),
+            retry(3, "killed", Some("test_failure")),
+        ];
+        let classes = verification_failures(&events, EventId::new(0), EventId::new(3), |_| true);
+        assert_eq!(
+            json!(classes),
+            json!([
+                {"class": "test_failure", "count": 1, "runs": 1, "retried": 0, "retry_passed": 0, "retry_failed": 0},
+                {"class": "timeout", "count": 1, "runs": 1, "retried": 2, "retry_passed": 1, "retry_failed": 1},
+                {"class": "killed", "count": 0, "runs": 0, "retried": 1, "retry_passed": 0, "retry_failed": 1},
+            ])
+        );
+        let mut track = MeasureTrack::default();
+        track.observe(&events[1]);
+        assert!(track.finish().verify_failures[0].retry);
     }
 
     #[test]

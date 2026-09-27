@@ -456,6 +456,18 @@ pub fn defer_integration(run: TaskRun, reason: String) -> Result<TaskRun, Domain
     )
 }
 
+/// A verification command failed on the host again after its retry (task
+/// 639): `integrating` → `awaiting_integration`, for a person rather than
+/// a resume.
+pub fn hold_integration(run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    leave_integration(
+        run,
+        RunStatus::AwaitingIntegration,
+        reason,
+        "hold the integration of",
+    )
+}
+
 /// The rewritten receipt reports `failed`: `integrating` → `failed`.
 pub fn fail_integration(run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
     leave_integration(run, RunStatus::Failed, reason, "fail the integration of")

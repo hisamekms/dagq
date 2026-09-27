@@ -161,6 +161,19 @@ pub struct Integration<'a> {
     /// (task 638); `None` checks nothing (the supervisor, which holds its
     /// landings for the disk itself).
     pub disk: Option<DiskRoom>,
+    /// What the retry of a verification command that failed on a full disk
+    /// checks first (task 639); `None` retries without a check.
+    pub retry_disk: Option<RetryDisk<'a>>,
+}
+
+/// The free disk space integrate checks before it retries a verification
+/// command that failed on a full disk (task 639): the `[disk]` of
+/// `dagq.toml` and a reading of the free bytes of the queue's directory
+/// now, `None` when it cannot be read.
+#[derive(Clone, Copy)]
+pub struct RetryDisk<'a> {
+    pub config: DiskConfig,
+    pub free: &'a dyn Fn() -> Option<u64>,
 }
 
 /// What a person's `integrate` checks the free disk space with (task
@@ -283,19 +296,14 @@ pub fn begin(
 /// build measured and no `min_free_bytes`) or unread free space checks
 /// nothing, as in the supervisor.
 fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()> {
-    let limit = usize::try_from(room.config.sample_runs).unwrap_or(0);
-    let builds: Vec<u64> = queue
-        .latest_events_of(BUILD_OUTPUTS_REMOVED, limit)?
-        .iter()
-        .filter_map(|event| event.payload.get("bytes").and_then(Value::as_u64))
-        .collect();
-    let needs = room.config.needs(&builds);
-    if let (Some(free), Some(need)) = (room.free, needs.landing)
-        && free < need
+    if let Some(DiskShort {
+        free,
+        need,
+        largest_build,
+    }) = disk_short(queue, &room.config, room.free)?
     {
-        let largest = needs
-            .largest_build
-            .map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
+        let largest =
+            largest_build.map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
         bail!(
             "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the largest build of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
             gib(free as f64),
@@ -303,6 +311,50 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
         );
     }
     Ok(())
+}
+
+/// The free disk space below a landing's threshold (task 377): what is
+/// free, what is needed, and the largest recent build it follows.
+#[derive(Debug, Clone, Copy)]
+struct DiskShort {
+    free: u64,
+    need: u64,
+    largest_build: Option<u64>,
+}
+
+impl DiskShort {
+    fn to_json(self) -> Value {
+        json!({
+            "free_bytes": self.free,
+            "needed_bytes": self.need,
+            "largest_build_bytes": self.largest_build,
+        })
+    }
+}
+
+/// Whether `free` is short of the landing threshold `config` sets over the
+/// latest `build_outputs_removed`: `None` with room, no threshold or no
+/// reading.
+fn disk_short(
+    queue: &dyn Queue,
+    config: &DiskConfig,
+    free: Option<u64>,
+) -> Result<Option<DiskShort>> {
+    let limit = usize::try_from(config.sample_runs).unwrap_or(0);
+    let builds: Vec<u64> = queue
+        .latest_events_of(BUILD_OUTPUTS_REMOVED, limit)?
+        .iter()
+        .filter_map(|event| event.payload.get("bytes").and_then(Value::as_u64))
+        .collect();
+    let needs = config.needs(&builds);
+    Ok(match (free, needs.landing) {
+        (Some(free), Some(need)) if free < need => Some(DiskShort {
+            free,
+            need,
+            largest_build: needs.largest_build,
+        }),
+        _ => None,
+    })
 }
 
 /// Land a run that holds the integration slot under `token` (see
@@ -339,6 +391,7 @@ pub fn land_integrating(
             ctx.verifier,
             ctx.load_average,
             ctx.files,
+            ctx.retry_disk.as_ref(),
             &task,
             run,
             &onto,
@@ -415,6 +468,20 @@ pub fn land_integrating(
             detail["resumes_left"] = json!(resumes_left(queue, run.id()));
             let run = queue.defer_integration(run.id(), token, &reason, detail)?;
             IntegrationOutcome::NeedsSession {
+                run: Box::new(run),
+                main: main.clone(),
+                reason,
+            }
+        }
+        Verdict::Held { reason, detail } => {
+            warn!(
+                op = "integrate",
+                reason = %reason,
+                "run {} waits for a person: {reason}",
+                run.id()
+            );
+            let run = queue.hold_integration(run.id(), token, &reason, detail)?;
+            IntegrationOutcome::Held {
                 run: Box::new(run),
                 main: main.clone(),
                 reason,
@@ -743,6 +810,10 @@ enum Verdict {
     /// The session's rewritten receipt reports `failed`; `receipt` is its
     /// JSON, kept with the `integration_failed` event.
     ReceiptFailed { reason: String, receipt: Value },
+    /// A verification command failed on the host again after its retry, or
+    /// on a full disk with no room to retry it (task 639): the run waits
+    /// for a person, awaiting integration, without a resume.
+    Held { reason: String, detail: Value },
 }
 
 /// Rebase, re-validate and land one run. `Ok(Deferred)` and
@@ -755,6 +826,7 @@ fn land(
     verifier: &dyn Verifier,
     load_average: fn() -> Option<f64>,
     files: &dyn RunFiles,
+    retry_disk: Option<&RetryDisk<'_>>,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
@@ -980,79 +1052,97 @@ fn land(
     // Each attempt keeps its own logs, so a second integrate of the run does
     // not overwrite why the first one failed.
     let attempt = next_integrate_attempt(files, run_dir);
+    let step = VerifyStep {
+        verifier,
+        load_average,
+        files,
+        run,
+        worktree,
+        run_env: &run_env,
+        attempt,
+    };
     for (index, command) in commands.iter().enumerate() {
-        let log = integrate_verify_log(run_dir, attempt, index + 1);
-        let started = Instant::now();
-        let (status, load) = sampled(load_average, LOAD_SAMPLE_INTERVAL, || {
-            verifier.run_to_log(command, worktree, &run_env, &log)
-        });
-        let duration_secs = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
-        let status = status?;
-        let exit_code = status.code.unwrap_or(128);
-        // Lossy: a log cut off by a kill or a full disk may end mid-character,
-        // and its marks still count.
-        let output = files
-            .read(&log)
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default();
-        // Why it failed, from its exit and its log (task 467).
-        let failure = (exit_code != 0)
-            .then(|| verify_failure::classify(command, status.code, status.signal, &output));
-        // The tests it names as failed, when tests failed or ran out of
-        // time (task 515).
-        let failed_tests = failure
-            .as_ref()
-            .filter(|failure| {
-                matches!(
-                    failure.class,
-                    verify_failure::FailureClass::TestFailure
-                        | verify_failure::FailureClass::Timeout
-                )
-            })
-            .map(|_| verify_failure::failed_tests(&output));
-        let tests_json = json!(failed_tests.as_ref().map(|tests| &tests.names));
-        let omitted_json = json!(failed_tests.as_ref().map(|tests| tests.omitted));
-        queue.record_runtime_event(
-            run.id(),
-            event_kind::VERIFICATION_COMMAND,
-            json!({
-                "phase": "integration",
-                "attempt": attempt,
-                "index": index + 1,
-                "command": command,
-                "exit_code": exit_code,
-                "signal": status.signal,
-                "failure": failure.as_ref().map(|failure| failure.to_json()),
-                "failed_tests": tests_json,
-                "failed_tests_omitted": omitted_json,
-                "duration_secs": duration_secs,
-                "load_avg_mean": load.load_avg_mean,
-                "load_avg_max": load.load_avg_max,
-                "log_path": path_text(&log)?,
-                "output_tail": tail(&output, 2000),
-            }),
+        let index = index + 1;
+        let first = step.run(
+            queue,
+            index,
+            command,
+            &integrate_verify_log(run_dir, attempt, index),
+            None,
         )?;
-        if let Some(failure) = failure {
-            return defer(
-                Reason::new(ReasonCode::VerificationFailed).with("index", index + 1),
-                format!(
-                    "verification command {command:?} exited with {exit_code} after the rebase onto {main} ({}: {}); see {}",
-                    failure.class.as_str(),
-                    failure.evidence,
-                    log.display()
-                ),
-                json!({
-                    "main": main,
-                    "head": rebased,
-                    "command": command,
-                    "exit_code": exit_code,
-                    "signal": status.signal,
-                    "failure": failure.to_json(),
-                    "failed_tests": tests_json,
-                    "failed_tests_omitted": omitted_json,
-                }),
-            );
+        let Some(first_failure) = first.failure.clone() else {
+            continue;
+        };
+        let mut last = first;
+        // A failure the host caused (a full disk, a kill, a timeout) is
+        // retried once in this attempt instead of resuming the worker, and
+        // is a person's when it fails so again (task 639, ADR-t639-1).
+        if first_failure.class.is_environmental() {
+            let short = match retry_disk {
+                Some(room) if first_failure.class == verify_failure::FailureClass::DiskFull => {
+                    disk_short(&*queue, &room.config, (room.free)())?
+                }
+                _ => None,
+            };
+            if let Some(short) = short {
+                return Ok(held(
+                    run,
+                    main,
+                    &rebased,
+                    command,
+                    index,
+                    &last,
+                    None,
+                    Some(short),
+                ));
+            }
+            let retried = step.run(
+                queue,
+                index,
+                command,
+                &integrate_retry_log(run_dir, attempt, index),
+                Some(&last),
+            )?;
+            match &retried.failure {
+                None => continue,
+                Some(failure) if failure.class.is_environmental() => {
+                    return Ok(held(
+                        run,
+                        main,
+                        &rebased,
+                        command,
+                        index,
+                        &retried,
+                        Some(&last),
+                        None,
+                    ));
+                }
+                // The code's own failure on the retry: the worker's, as
+                // any other.
+                Some(_) => last = retried,
+            }
         }
+        let failure = last.failure.as_ref().unwrap_or(&first_failure);
+        return defer(
+            Reason::new(ReasonCode::VerificationFailed).with("index", index),
+            format!(
+                "verification command {command:?} exited with {} after the rebase onto {main} ({}: {}); see {}",
+                last.exit_code,
+                failure.class.as_str(),
+                failure.evidence,
+                last.log.display()
+            ),
+            json!({
+                "main": main,
+                "head": rebased,
+                "command": command,
+                "exit_code": last.exit_code,
+                "signal": last.signal,
+                "failure": failure.to_json(),
+                "failed_tests": last.tests_json(),
+                "failed_tests_omitted": last.omitted_json(),
+            }),
+        );
     }
     // One commit on main with the rebased tree; the run's own history stays
     // reachable under refs/dagq/runs/<run-id>.
@@ -1073,6 +1163,187 @@ fn land(
         },
         receipt.into_follow_ups(),
     ))
+}
+
+/// How integrate runs one verification command of an attempt and records
+/// it as `verification_command`.
+struct VerifyStep<'a> {
+    verifier: &'a dyn Verifier,
+    load_average: fn() -> Option<f64>,
+    files: &'a dyn RunFiles,
+    run: &'a TaskRun,
+    worktree: &'a Path,
+    run_env: &'a [(String, String)],
+    attempt: u32,
+}
+
+/// One run of a verification command: its exit, why it failed (none when
+/// it passed), the tests it names as failed, and its log.
+#[derive(Clone)]
+struct Checked {
+    exit_code: i32,
+    signal: Option<i32>,
+    failure: Option<verify_failure::VerifyFailure>,
+    failed_tests: Option<verify_failure::FailedTests>,
+    log: PathBuf,
+}
+
+impl Checked {
+    fn tests_json(&self) -> Value {
+        json!(self.failed_tests.as_ref().map(|tests| &tests.names))
+    }
+
+    fn omitted_json(&self) -> Value {
+        json!(self.failed_tests.as_ref().map(|tests| tests.omitted))
+    }
+}
+
+impl VerifyStep<'_> {
+    /// Run `command`, the `index`th, with its output in `log`, and record
+    /// it; `retry_of` is the run it retries (task 639), whose failure and
+    /// log the event names. A command the verifier killed at its limit for
+    /// the whole command is a `timeout` failure, not an error.
+    fn run(
+        &self,
+        queue: &mut dyn Queue,
+        index: usize,
+        command: &str,
+        log: &Path,
+        retry_of: Option<&Checked>,
+    ) -> Result<Checked> {
+        let started = Instant::now();
+        let (status, load) = sampled(self.load_average, LOAD_SAMPLE_INTERVAL, || {
+            self.verifier
+                .run_to_log(command, self.worktree, self.run_env, log)
+        });
+        let duration_secs = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
+        let (code, signal, timed_out) = match status {
+            Ok(status) => (status.code, status.signal, None),
+            Err(error) => match error.downcast_ref::<verify_failure::CommandTimedOut>() {
+                // Killed at the limit (SIGKILL).
+                Some(timed_out) => (None, Some(9), Some(*timed_out)),
+                None => return Err(error),
+            },
+        };
+        let exit_code = code.unwrap_or(128);
+        // Lossy: a log cut off by a kill or a full disk may end mid-character,
+        // and its marks still count.
+        let output = self
+            .files
+            .read(log)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        // Why it failed, from its exit and its log (task 467), or its limit.
+        let failure = match timed_out {
+            Some(timed_out) => Some(timed_out.failure()),
+            None => {
+                (exit_code != 0).then(|| verify_failure::classify(command, code, signal, &output))
+            }
+        };
+        // The tests it names as failed, when tests failed or ran out of
+        // time (task 515).
+        let failed_tests = failure
+            .as_ref()
+            .filter(|failure| {
+                matches!(
+                    failure.class,
+                    verify_failure::FailureClass::TestFailure
+                        | verify_failure::FailureClass::Timeout
+                )
+            })
+            .map(|_| verify_failure::failed_tests(&output));
+        let checked = Checked {
+            exit_code,
+            signal,
+            failure,
+            failed_tests,
+            log: log.to_path_buf(),
+        };
+        let mut payload = json!({
+            "phase": "integration",
+            "attempt": self.attempt,
+            "index": index,
+            "command": command,
+            "exit_code": exit_code,
+            "signal": signal,
+            "failure": checked.failure.as_ref().map(|failure| failure.to_json()),
+            "failed_tests": checked.tests_json(),
+            "failed_tests_omitted": checked.omitted_json(),
+            "duration_secs": duration_secs,
+            "load_avg_mean": load.load_avg_mean,
+            "load_avg_max": load.load_avg_max,
+            "log_path": path_text(log)?,
+            "output_tail": tail(&output, 2000),
+        });
+        if let Some(first) = retry_of {
+            payload["retry"] = json!(true);
+            payload["retry_of"] = json!({
+                "failure": first.failure.as_ref().map(|failure| failure.to_json()),
+                "log_path": path_text(&first.log)?,
+            });
+        }
+        queue.record_runtime_event(self.run.id(), event_kind::VERIFICATION_COMMAND, payload)?;
+        Ok(checked)
+    }
+}
+
+/// The verdict on a verification command that failed on the host: `last`
+/// failed again when it retried `first`, or, with `first` `None`, failed on
+/// a full disk that is `short` of room to retry it (task 639). The run
+/// waits for a person, who lands it again once the host is fixed.
+#[allow(clippy::too_many_arguments)]
+fn held(
+    run: &TaskRun,
+    main: &CommitSha,
+    head: &CommitSha,
+    command: &str,
+    index: usize,
+    last: &Checked,
+    first: Option<&Checked>,
+    short: Option<DiskShort>,
+) -> Verdict {
+    let failure = last
+        .failure
+        .clone()
+        .unwrap_or(verify_failure::VerifyFailure {
+            class: verify_failure::FailureClass::Unknown,
+            evidence: String::new(),
+        });
+    let logs = first
+        .map(|first| format!("{} and {}", first.log.display(), last.log.display()))
+        .unwrap_or_else(|| last.log.display().to_string());
+    let why = match (first, short) {
+        (_, Some(short)) => format!(
+            "it was not retried: {} free, below the {} a landing's verification needs; free disk space (dagq doctor lists the runs and their worktrees)",
+            gib(short.free as f64),
+            gib(short.need as f64)
+        ),
+        _ => "it failed so again when retried once; fix the host (free disk space, a lighter load)"
+            .to_owned(),
+    };
+    Verdict::Held {
+        reason: format!(
+            "verification command {command:?} failed on the host after the rebase onto {main} ({}: {}); see {logs}. {why}, then land it with dagq integrate {}; no session is resumed",
+            failure.class.as_str(),
+            failure.evidence,
+            run.task_id()
+        ),
+        detail: Reason::new(ReasonCode::VerificationEnvironment)
+            .with("index", index)
+            .on(json!({
+                "main": main,
+                "head": head,
+                "command": command,
+                "exit_code": last.exit_code,
+                "signal": last.signal,
+                "failure": failure.to_json(),
+                "log_path": last.log.to_str(),
+                "retried": first.is_some(),
+                "first_failure": first.and_then(|first| first.failure.as_ref().map(|failure| failure.to_json())),
+                "first_log_path": first.and_then(|first| first.log.to_str()),
+                "disk": short.map(DiskShort::to_json),
+            })),
+    }
 }
 
 /// What [`renumber_migration`] did to a rebased run.
@@ -1293,17 +1564,28 @@ pub fn integrate_verify_log(run_dir: &Path, attempt: u32, index: usize) -> PathB
     run_dir.join(format!("integrate-{attempt}-verify-{index}.log"))
 }
 
-/// The attempt and command index of an integrate verification log's file
-/// name. The name used before attempts were counted,
-/// `integrate-verify-<index>.log`, is attempt 0: it came before any
-/// numbered one.
-fn integrate_log_key(name: &str) -> Option<(u32, usize)> {
+/// Where integrate's attempt `attempt` writes the log of the retry of its
+/// `index`th verification command (task 639), next to the first run's:
+/// `integrate-<attempt>-verify-<index>-retry.log`.
+pub fn integrate_retry_log(run_dir: &Path, attempt: u32, index: usize) -> PathBuf {
+    run_dir.join(format!("integrate-{attempt}-verify-{index}-retry.log"))
+}
+
+/// The attempt, command index and whether it is the retry's (task 639) of
+/// an integrate verification log's file name. The name used before
+/// attempts were counted, `integrate-verify-<index>.log`, is attempt 0: it
+/// came before any numbered one.
+fn integrate_log_key(name: &str) -> Option<(u32, usize, bool)> {
     let stem = name.strip_prefix("integrate-")?.strip_suffix(".log")?;
+    let (stem, retry) = match stem.strip_suffix("-retry") {
+        Some(stem) => (stem, true),
+        None => (stem, false),
+    };
     if let Some(index) = stem.strip_prefix("verify-") {
-        return Some((0, index.parse().ok()?));
+        return Some((0, index.parse().ok()?, retry));
     }
     let (attempt, index) = stem.split_once("-verify-")?;
-    Some((attempt.parse().ok()?, index.parse().ok()?))
+    Some((attempt.parse().ok()?, index.parse().ok()?, retry))
 }
 
 /// The files of `dir` with their names; none when it cannot be read.
@@ -1328,7 +1610,7 @@ pub fn next_integrate_attempt(files: &dyn RunFiles, run_dir: &Path) -> u32 {
     log_names(files, run_dir)
         .iter()
         .filter_map(|(name, _)| integrate_log_key(name))
-        .map(|(attempt, _)| attempt)
+        .map(|(attempt, _, _)| attempt)
         .max()
         .map_or(1, |attempt| attempt + 1)
 }
@@ -1336,17 +1618,17 @@ pub fn next_integrate_attempt(files: &dyn RunFiles, run_dir: &Path) -> u32 {
 /// Integrate's verification logs in `run_dir`: those of the latest attempt
 /// in command order, and those of the earlier attempts, oldest first.
 pub fn integrate_logs(files: &dyn RunFiles, run_dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let mut keyed: Vec<((u32, usize), PathBuf)> = log_names(files, run_dir)
+    let mut keyed: Vec<((u32, usize, bool), PathBuf)> = log_names(files, run_dir)
         .into_iter()
         .filter_map(|(name, path)| Some((integrate_log_key(&name)?, path)))
         .collect();
     keyed.sort();
-    let Some(&((latest, _), _)) = keyed.last() else {
+    let Some(&((latest, _, _), _)) = keyed.last() else {
         return (Vec::new(), Vec::new());
     };
     let (current, earlier): (Vec<_>, Vec<_>) = keyed
         .into_iter()
-        .partition(|((attempt, _), _)| *attempt == latest);
+        .partition(|((attempt, _, _), _)| *attempt == latest);
     (
         current.into_iter().map(|(_, path)| path).collect(),
         earlier.into_iter().map(|(_, path)| path).collect(),

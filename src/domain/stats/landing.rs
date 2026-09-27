@@ -246,7 +246,7 @@ impl LandClock {
                 "landing_queued" => Some(LANDING_QUEUE),
                 // The landing gave the lease back: the run waits for a
                 // person's `review and integrate`, not for the slot.
-                "integration_error" => Some(ASK),
+                "integration_error" | "integration_held" => Some(ASK),
                 "integration_started" => Some(REBASE),
                 "integration_rebased" => Some(VERIFY),
                 // The observer's `blocked` and a planner's question are

@@ -2008,19 +2008,20 @@ fn a_failed_verification_is_classified_in_its_events() {
     assert!(verifications[1]["duration_secs"].is_number());
     assert!(verifications[1].get("load_avg_mean").is_some());
 
-    // A shell killed by a signal has no exit code: the signal says why.
+    // A shell killed by a signal has no exit code: the signal says why. A
+    // kill is the host's, retried and then held for a person (task 639).
     set_commands(json!(["kill -TERM $$"]));
     let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    assert_eq!(outcome["outcome"], "held", "{outcome}");
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(1))
         .unwrap();
     let killed = json!({"class": "killed", "evidence": "killed by signal 15 (SIGTERM)"});
-    let deferred = payloads(&detail, "integration_deferred");
-    assert_eq!(deferred[1]["failure"], killed);
-    assert_eq!(deferred[1]["signal"], 15);
-    assert_eq!(deferred[1]["exit_code"], 128);
+    let held = payloads(&detail, "integration_held");
+    assert_eq!(held[0]["failure"], killed);
+    assert_eq!(held[0]["signal"], 15);
+    assert_eq!(held[0]["exit_code"], 128);
     let verifications = integration_verifications(&detail);
     assert_eq!(verifications[2]["failure"], killed);
     assert_eq!(verifications[2]["signal"], 15);

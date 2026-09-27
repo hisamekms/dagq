@@ -1421,6 +1421,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "integration_deferred",
     "integration_failed",
     "integration_error",
+    event_kind::INTEGRATION_HELD,
     "push_failed",
     "runtime_error",
     "resume_finished",
@@ -1659,6 +1660,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
         ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
         ("push_failed", _) => Some(AttentionNext::PushMain),
+        // A verification command failed on the host again after its retry
+        // (task 639): the run waits for a person, not a resume.
+        (event_kind::INTEGRATION_HELD, _) => Some(AttentionNext::ReviewAndIntegrate),
         (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
@@ -2274,6 +2278,11 @@ mod attention_tests {
                 "integration_error",
                 json!({"status": "awaiting_integration"}),
                 None,
+            ),
+            (
+                "integration_held",
+                json!({"status": "awaiting_integration", "code": "verification_environment"}),
+                Some(ReviewAndIntegrate),
             ),
             (
                 "exit_request_timed_out",

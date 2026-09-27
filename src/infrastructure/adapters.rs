@@ -475,16 +475,25 @@ const EXIT_POLL_FAST: Duration = Duration::from_millis(1);
 const EXIT_POLL_FAST_FOR: Duration = Duration::from_millis(100);
 
 fn wait_with_deadline(child: &mut Child, label: &str, timeout: Duration) -> Result<ExitStatus> {
+    match wait_until(child, timeout)? {
+        Some(status) => Ok(status),
+        None => bail!("{label} timed out; external resources may have been created"),
+    }
+}
+
+/// Wait for `child` to exit within `timeout`; `None` when it did not and
+/// was killed.
+fn wait_until(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>> {
     let started = Instant::now();
     let deadline = started + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(status);
+            return Ok(Some(status));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("{label} timed out; external resources may have been created");
+            return Ok(None);
         }
         thread::sleep(if started.elapsed() < EXIT_POLL_FAST_FOR {
             EXIT_POLL_FAST
@@ -498,11 +507,17 @@ fn wait_with_deadline(child: &mut Child, label: &str, timeout: Duration) -> Resu
 /// in the run directory, not in the event payload.
 pub const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Run `script` with `/bin/sh -c` in `cwd`, its output in `log`, killed
+/// once it runs past `timeout` (the whole command, [`VERIFICATION_TIMEOUT`]
+/// for the verifier). A kill at the limit is the error
+/// [`CommandTimedOut`](crate::domain::verify_failure::CommandTimedOut),
+/// which integrate records as a `timeout` failure of the command (task 639).
 pub fn run_shell_to_log(
     script: &str,
     cwd: &Path,
     env: &[(String, String)],
     log: &Path,
+    timeout: Duration,
 ) -> Result<ExitStatus> {
     let file = fs::File::create(log).with_context(|| format!("create {}", log.display()))?;
     let mut child = Command::new("/bin/sh")
@@ -515,11 +530,12 @@ pub fn run_shell_to_log(
         .stderr(Stdio::from(file))
         .spawn()
         .with_context(|| format!("start verification command {script:?}"))?;
-    wait_with_deadline(
-        &mut child,
-        &format!("verification command {script:?}"),
-        VERIFICATION_TIMEOUT,
-    )
+    wait_until(&mut child, timeout)?.ok_or_else(|| {
+        anyhow::Error::new(crate::domain::verify_failure::CommandTimedOut {
+            limit_secs: timeout.as_secs(),
+        })
+        .context(format!("verification command {script:?} timed out"))
+    })
 }
 
 /// Canonical Git common directory of the repository containing `path`. Every

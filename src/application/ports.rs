@@ -1020,6 +1020,16 @@ pub trait RunTransitions {
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun>;
+    /// Leave the integrating run awaiting integration for a person
+    /// (`integration_held`): a verification command failed on the host
+    /// again after its retry (task 639).
+    fn hold_integration(
+        &mut self,
+        id: &RunId,
+        token: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// End the integrating run as failed, as its rewritten receipt says.
     fn fail_integration(
         &mut self,

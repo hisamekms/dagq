@@ -316,6 +316,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | runtime error / provisioning error | 変えない | errorの文をそのまま。worktree・workspaceの作成失敗は`run <run-id> provisioning failed: <error>`、監視中は`wrapper heartbeat expired; session may still be alive`、検証処理そのもの（Git・DB）のerror文。supervisorはそのrunのleaseを消して手放す（abandon）。wrapper自身のerrorとsupervisor heartbeatの失敗も同じ列に書くがleaseは残す（wrapperは子が死んでいれば続けて終了コード127を報告し、runは`session exited with code 127`で`failed`になる） | `runtime_error` |
 | cleanup失敗 | 変えない | 受け入れたrunのworkspace closeの失敗は`workspace <workspace-id> could not be closed: <error>`、着地後のworktree/branch削除の失敗は`landed worktree <path> could not be removed: <error>` | `cleanup_failed` |
 | 着地の保留・中断・失敗 | `integrating` → `needs_session` / 元のstatus / `failed` | rebaseの衝突や再検証の失敗の理由（検証コマンドの失敗は`verification command "<cmd>" exited with <code> after the rebase onto <main>; see <run-dir>/integrate-<attempt>-verify-N.log`）、mainを進める前のGit/DB errorは`integration stopped before main moved: <error>`、セッションが書き直した`failed` receiptの理由（[supervisor-lifecycle](supervisor-lifecycle/integrate.md#integrate)） | `integration_deferred` / `integration_error` / `integration_failed` |
+| 検証のhostの失敗のhold（task 639） | `integrating` → `awaiting_integration` | hostの分類（`disk_full`・`killed`・`timeout`）の検証コマンドの失敗が1回のやり直しでも落ちた（`disk_full`で容量が足りずやり直さなかったときも）: `verification command "<cmd>" failed on the host after the rebase onto <main> (<class>: <evidence>); see <logs>. …, then land it with dagq integrate <task>; no session is resumed`（[supervisor-lifecycle](supervisor-lifecycle/integrate.md#integrate)） | `integration_held` |
 
 `last_error`はstatusと最後のイベントに合わせて読む。`failed`なら非0終了・検証拒否・着地時の`failed` receipt、`claimed`/`starting`/`running`/`validating`で`last_error`があればsupervisorが手放したrun（`doctor`にleaseなしで出る）、`awaiting_integration`で`last_error`があればclose失敗（`cleanup_failed`、`workspace_closed_at`はnull）かmainを進める前に止まった着地（`integration_error`）、`needs_session`なら着地の衝突である。`show`・`doctor`・superviseの結果の`errors`に出て、`list`には出ない。`recover`は`last_error`を上書きしない。
 
@@ -344,6 +345,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `rebase_in_progress` | worktreeに途中のrebaseが残っていたので中止した | |
 | `migration_number_taken` | runが足したmigrationの番号がmainで埋まっていて、機械的に振り直せない（runが足したmigrationが2つ以上か、番号をrunの他の変更が含むか、振り直しのcommitをGitが拒んだ。[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3） | `migrations`、`taken`、`next_number`、（番号を含むファイルがあれば）`referring`、（振り直しのcommitをGitが拒んだら）`commit_error` |
 | `verification_failed` | rebaseの後の検証コマンドが非0で終わった（landing recheckの`[recheck] command`がmainに載せた木で非0で終わったときも） | `index`（1始まり）、（`command` / `exit_code`は既存） |
+| `verification_environment` | 検証コマンドがhostの分類（`disk_full`・`killed`・`timeout`）で落ち、1回のやり直しでも落ちた（`disk_full`で空きが着地の閾値に足りずやり直さなかったときも）。resumeせず人に知らせる（task 639、ADR-t639-1） | `index`（1始まり） |
 | `backend_timeout` | cmuxの呼び出しがtimeoutした（adapterの`did not finish within`、cmuxの`Command timed out`） | `op`（`backend_call_failed`は既存の`op`） |
 | `backend_failed` | cmuxの呼び出しが失敗した | `op` |
 | `job_failed` | headlessのreviewかtriageのjobが失敗した | |
@@ -367,6 +369,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `integration_deferred` | 着地の保留（`needs_session`） | `commit_mismatch` / `receipt_missing` / `receipt_invalid` / `worker_failed` / `evidence_failed` / `evidence_missing` / `worktree_dirty` / `rebase_conflict` / `rebase_empty` / `migration_number_taken` / `scope_violation` / `verification_failed` |
 | `integration_failed` | 書き直したreceiptが`failed` | `worker_failed` |
 | `integration_error` | mainを進める前のerror（元のstatusに戻す） | `backend_*`、なければ`other` |
+| `integration_held` | 検証コマンドがhostの分類で落ち、1回のやり直しでも落ちた（`awaiting_integration`に戻し人に知らせる。task 639） | `verification_environment`（`index`） |
 | `integration_rebase_aborted` | 残っていたrebaseの中止 | `rebase_in_progress` |
 | `runtime_error` | supervisorのabandon（provisioning、監視、adoptやresumeの開始の失敗） | `backend_*`、なければ`other` |
 | `runtime_error` | 認証か利用上限のaskの`cancel_affected`の適用（leaseを返す。[queue hold](supervisor-lifecycle/queue-hold.md)） | `hold_canceled` |
@@ -395,4 +398,4 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 
 コードを持たないもの: `resume_finished`の`resolved` / `unresolved`（runは`needs_session`のまま前の理由を保つ）、`triage_finished`の`retry` / `retry_inherit`（復旧jobのもの）/ `wait` / `ask`、それ以外の`recovery_requested`、`prompt_waiting`（`answer_prompt`のaskが扱う）、`verification_command`（着地の結果は`integration_deferred`が持つ）。
 
-runの`last_error`のコードは列を持たず、`domain::reason::last_error_code`がrunのイベントから導く: `last_error`を書いたか中断したイベント（`supervision_finished`、`validation_finished`、`integration_deferred` / `integration_failed` / `integration_error`、`runtime_error`、`interrupted`にした`run_recovered`、`landing_decided`、triageのもの（`by: triage`、`last_error`を変えない）を除く`cleanup_failed`、コードを持つ`triage_finished` / `triage_decided` / `recovery_requested`、`status: failed`の`resume_finished`）のうち最新のもののコード。そのイベントがコード以前のものならnull。`domain::reason::run_error_code`は`last_error`のあるrunと`interrupted`のrunにだけそれを返す。`status`（attentionと`runs`）と`show`の`last_error_code`、`stats`の`reason_codes`がこれを読む（[supervisor-lifecycle](supervisor-lifecycle/status.md#status)）。
+runの`last_error`のコードは列を持たず、`domain::reason::last_error_code`がrunのイベントから導く: `last_error`を書いたか中断したイベント（`supervision_finished`、`validation_finished`、`integration_deferred` / `integration_failed` / `integration_error` / `integration_held`、`runtime_error`、`interrupted`にした`run_recovered`、`landing_decided`、triageのもの（`by: triage`、`last_error`を変えない）を除く`cleanup_failed`、コードを持つ`triage_finished` / `triage_decided` / `recovery_requested`、`status: failed`の`resume_finished`）のうち最新のもののコード。そのイベントがコード以前のものならnull。`domain::reason::run_error_code`は`last_error`のあるrunと`interrupted`のrunにだけそれを返す。`status`（attentionと`runs`）と`show`の`last_error_code`、`stats`の`reason_codes`がこれを読む（[supervisor-lifecycle](supervisor-lifecycle/status.md#status)）。

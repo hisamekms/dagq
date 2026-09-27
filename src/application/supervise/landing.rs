@@ -51,8 +51,14 @@ impl Supervisor<'_> {
         let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
         let load_average = self.load_average;
+        let (disk_config, free_space) = (self.disk_config, self.free_space);
+        let runs_dir = self.layout.runs_dir.clone();
+        let db = self.layout.db.clone();
         Ok(spawn_traced(move || {
             let mut queue = queues.open()?;
+            // As `check_disk` reads it, for the retry of a command that
+            // failed on a full disk (task 639).
+            let free = || free_space(&runs_dir).or_else(|| db.parent().and_then(free_space));
             integration::land_integrating(
                 &mut Integration {
                     queue: &mut *queue,
@@ -67,6 +73,10 @@ impl Supervisor<'_> {
                     pid,
                     load_average,
                     disk: None,
+                    retry_disk: Some(integration::RetryDisk {
+                        config: disk_config,
+                        free: &free,
+                    }),
                 },
                 &run,
                 previous,

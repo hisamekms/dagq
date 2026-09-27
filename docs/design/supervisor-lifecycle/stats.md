@@ -8,6 +8,7 @@ updated: 2026-09-27
 last_verified: 2026-09-27
 scope: runtime
 related:
+  - adr-t639-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
@@ -49,7 +50,7 @@ related:
   - `load`: 区間ごとの`{mean, max, band}`（`band`は`mean`の帯）。`work`は最初の`receipt_observed`、`validate`は最初の`validation_finished`の`load_avg_mean` / `load_avg_max`、`verify`は`integrate`の`verification_command`（`phase: integration`、全試行）の`load_avg_mean`を`duration_secs`で重み付けした平均（`duration_secs`の無いものは1秒）と`load_avg_max`の最大。記録の無い区間はnull
   - `prediction` / `actual`: そのtaskの重さの予測と、runの実績を並べたもの（ADR-0079の決定2。下の[重さの予測と実績](#重さの予測と実績)）。予測の無いrunは`prediction`がnull
   - `load_band`: `load.work.band`、無ければ`claim_load_avg`の帯（どちらも無ければnull）。帯は`0-4` / `4-8` / `8-16` / `16-32` / `32-64` / `64+`（下限を含む。`domain::measure::load_band`）。集計は`domain::stats::measures`
-  - `verify_failures`: そのrunの`integrate`の`verification_command`（`phase: integration`、全試行）のうち`failure`を持つもの（失敗したもの）を記録順に`{attempt, index, command, class, evidence}`（task 467。分類は[`integrate`](integrate.md)の5）。`failure`を記録する前の失敗は含めない。無ければ空の配列
+  - `verify_failures`: そのrunの`integrate`の`verification_command`（`phase: integration`、全試行）のうち`failure`を持つもの（失敗したもの）を記録順に`{attempt, index, command, class, evidence, retry}`（task 467。分類は[`integrate`](integrate.md)の5）。`retry`はhostの分類の失敗のやり直し（payloadの`retry: true`。task 639）の失敗ならtrue。`failure`を記録する前の失敗は含めない。無ければ空の配列
   - `sessions`: そのrunのClaude sessionの区間のkindごとの`{count, open, active}`（下の[Claude session](#claude-session)）
 - **`goals`と`overall`**の`land_phases`: 着地したrun（`land_phases`と`wait_to_land`のあるrun）についての`{runs, tail_threshold, tail_runs, <工程>..., push}`。`tail_threshold`はそれらのrunの`wait_to_land`の90パーセンタイル（nearest-rank: 昇順でceil(0.9×n)番目。runが無ければnull）、`tail_runs`は`wait_to_land`がそれ以上のrun（長い裾）の数。工程ごとと`push`は`{count, total, median, p90, max, tail_total}`で、`count` / `total` / `median`は他の区間と同じ規則（工程は着地したrun全部を0も含めて数え、`push`は記録のあるrunだけ）、`p90`は上と同じ規則、`tail_total`は長い裾のrunだけの合計。どの工程が裾を作ったかは工程ごとの`tail_total`を比べて読む
 - **`goals`と`overall`**の`resume_outcomes`: それらのrunの`resume_attempts`全部の`{attempts, resolved, unresolved, resolved_percent, secs}`と、理由ごとの同じ形の`by_reason`（下の[着地の延期とresume](#着地の延期とresume)）
@@ -112,7 +113,7 @@ related:
 | `review` | `review_started`、`review_retried` | headlessのreview |
 | `revise` | `revise_requested` | reviseを送ってから、書き直したreceiptのvalidationまで |
 | `conflict` | `requested: true`の`conflict_precheck` | merge-treeの事前判定が見つけた衝突を、生きているsessionが解消する間 |
-| `ask` | `ask_opened`（そのrunのask。observerの`blocked`と`planner_question`はrunを止めないので除く。timelineの`holds_the_run`と同じ）、`review_failed`、`integration_error` | 人の答えを待つ間（`approve_landing`、`worker_question`、`stalled`など）。`integration_error`の後のrunはleaseを外されて`awaiting_integration`に戻り、人の`review and integrate`を待つ |
+| `ask` | `ask_opened`（そのrunのask。observerの`blocked`と`planner_question`はrunを止めないので除く。timelineの`holds_the_run`と同じ）、`review_failed`、`integration_error`、`integration_held` | 人の答えを待つ間（`approve_landing`、`worker_question`、`stalled`など）。`integration_error`と`integration_held`（検証のhostの失敗がやり直しでも落ちた。task 639）の後のrunはleaseを外されて`awaiting_integration`に戻り、人の`review and integrate`を待つ |
 | `resume` | payloadの`status`が`needs_session`のイベント（`integration_deferred`、`landing_decided`の`send_back`、evidenceの不足など） | `needs_session`で待つ間とresumeしたsessionの作業 |
 | `landing_queue` | `landing_queued`、runtimeが適用する`approve_landing`の`ask_answered` | 着地slotの順番待ち（他のrunの`integrate`が終わるのを待つ） |
 | `rebase` | `integration_started` | `integrate`のreceiptの照合とrebase |
@@ -141,7 +142,7 @@ goal 21（task 197）で足した集計。runごとの値は上の`runs`の`dagq
 - **`versions`**: `{dagq, claude, rustc}`。対象のrunを`dagq_version`・`claude_version`・`rustc`（`<rustc_release> <rustc_host>`。片方だけ無ければ`unknown`）ごとに分け、それぞれ名前の昇順（記録の無いrunは`version: null`で最後）に`{version, runs, work, validate, wait_to_land, startup, land_phases, resume_outcomes}`（`goals`と同じ形）。バイナリの入替やtoolchainの変更の前後を比べるためのもの
 - **`load_bands`**: 対象のrunを`load_band`ごと（軽い帯から、帯の無いrunは`band: null`で最後）に分けた`{band, runs, ...}`（`goals`と同じ形）
 - **`verification_commands`**: `backend_failures`と同じwindowと`--goal`の絞り込みで、`integrate`の`verification_command`（`phase: integration`）のうち`duration_secs`を持つものをコマンドごと（コマンド文字列の昇順）に`{command, count, failed, total_secs, median_secs}`。`failed`は`exit_code`が0でないものの数、`median_secs`は偶数個なら中央2つの平均（小数3桁）
-- **`verification_failures`**: `verification_commands`と同じwindowと`--goal`の絞り込みで、`integrate`の`verification_command`（`phase: integration`）のうち`failure`を持つものを`failure.class`ごとに`{class, count, runs}`（task 467）。`count`はコマンドの数、`runs`はそれが属するrunの数。`count`の多い順、同数なら`class`の昇順。`duration_secs`の有無は問わない。集計は`domain::stats::measures::verification_failures`
+- **`verification_failures`**: `verification_commands`と同じwindowと`--goal`の絞り込みで、`integrate`の`verification_command`（`phase: integration`）のうち`failure`を持つものを`failure.class`ごとに`{class, count, runs, retried, retry_passed, retry_failed}`（task 467）。`count`はコマンドの数（やり直しの失敗も含む。`verification_commands`の`count` / `failed`もやり直しを1回の実行として数える）、`runs`はそれが属するrunの数。`retried`はhostの分類（`disk_full`・`killed`・`timeout`）で落ちてやり直した数（`retry: true`の`verification_command`を、`retry_of.failure.class`のclassに数える。task 639）、`retry_passed`はそのうち通った（`exit_code`が0）数、`retry_failed`はなお落ちた数（hostの分類でもコードの分類でも）。コードの分類とやり直しの無いclassは0。やり直しの無い既存のeventは`retried`に数えない。`count`の多い順、同数なら`class`の昇順。`duration_secs`の有無は問わない。集計は`domain::stats::measures::verification_failures`
 - **`failed_tests`**: `verification_commands`と同じwindowと`--goal`の絞り込みで、落ちたtestを名前ごとに数えたもの（task 515）。`{flaky_runs, tests, flaky_candidates}`。数えるのは`integrate`の`verification_command`（`phase: integration`）の`failed_tests`（[`integrate`](integrate.md)の5）と、runのsessionの`session_closed`の`work.failed_tests`（workerのコマンドの出力から。[provider-lifecycle](../provider-lifecycle.md#作業の内訳)）で、名前を出したeventごとに1回（`integrate`はコマンドごと、sessionは区間ごと。同じ中身の`session_exited` / `resume_finished`の`work_breakdown`は読まない）。`tests`はtestごとの`{name, failures, integrate, worker, runs, integrate_runs, last_failed_at, integrate_event_ids}`（`failures`は`integrate`と`worker`の合計、`runs`は落ちたrunの数、`integrate_runs`はそのうち`integrate`の検証で落ちたrunの数、`last_failed_at`は最後に名前を出したeventの時刻、`integrate_event_ids`はそのtestの名前を出した`integrate`の`verification_command`のevent IDを新しい順に最大10件（`MAX_INTEGRATE_EVENT_IDS`。workerの`session_closed`だけで落ちたtestは空。task 642）で、`integrate_runs`・`runs`・`failures`の多い順、名前の昇順。`flaky_candidates`は`tests`のうち`integrate_runs`が`flaky_runs`（2）以上のもの（別々のrunの`integrate`で落ちたtest。observerがkind `flaky_test`のfindingにする材料で、根拠は`integrate_event_ids`。[Observer](observer.md)のpromptの読み方）。workerの失敗は多くが作業中の（まだ通していない）testなので、数えて並べるが候補の判定には入れない。名前を記録する前の失敗は数えない。集計は`domain::stats::failed_tests`
 - job（review・triage・observer・plan review）の所要時間はここでは数えない（ADR-0048のsessionの記録が持つ）
 

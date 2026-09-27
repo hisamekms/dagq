@@ -68,6 +68,7 @@ reason_codes! {
     RebaseInProgress => "rebase_in_progress": "a rebase was left in progress in the worktree and was aborted",
     MigrationNumberTaken => "migration_number_taken": "the run adds a migration whose number main already has, and it cannot be renumbered mechanically",
     VerificationFailed => "verification_failed": "a verification command exited non-zero after the rebase (or the landing recheck's command on main with the run merged in)",
+    VerificationEnvironment => "verification_environment": "a verification command failed on the host (a full disk, a kill, a timeout) and again when retried once, so the run waits for a person instead of a resume",
     BackendTimeout => "backend_timeout": "a cmux call timed out",
     BackendFailed => "backend_failed": "a cmux call failed",
     JobFailed => "job_failed": "a headless review or triage job failed",
@@ -203,6 +204,7 @@ fn explains_last_error(event: &RunEvent) -> bool {
         | "integration_deferred"
         | "integration_failed"
         | "integration_error"
+        | "integration_held"
         | "runtime_error"
         | "landing_decided" => true,
         // Recovery only interrupts; one mid-integration goes back to

@@ -791,6 +791,11 @@ pub struct ShellVerifier {
     /// The user's `config.toml` its [`Verifier::language`] reads
     /// (ADR-t616-2); `None` reads none.
     pub user_config: Option<PathBuf>,
+    /// How long one verification command may run in all before it is
+    /// killed and recorded as a `timeout` failure (task 639):
+    /// [`VERIFICATION_TIMEOUT`](super::adapters::VERIFICATION_TIMEOUT)
+    /// but in tests.
+    pub verification_timeout: std::time::Duration,
 }
 
 impl Verifier for ShellVerifier {
@@ -849,7 +854,8 @@ impl Verifier for ShellVerifier {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit> {
-        super::adapters::run_shell_to_log(command, cwd, env, log).map(super::process::exit)
+        super::adapters::run_shell_to_log(command, cwd, env, log, self.verification_timeout)
+            .map(super::process::exit)
     }
 }
 
@@ -1007,6 +1013,7 @@ LITERAL = 'no \n escapes # here'
             checkout: dir.path().to_owned(),
             db: dir.path().join("q.db"),
             user_config: None,
+            verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
         };
         assert!(verifier.worker_trial().unwrap().enabled);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[worker.trial]\nx = 1\n").unwrap();
@@ -1244,6 +1251,7 @@ LITERAL = 'no \n escapes # here'
             checkout: dir.path().to_owned(),
             db: dir.path().join("queue.db"),
             user_config: None,
+            verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
         };
         assert_eq!(
             verifier.recheck_command().unwrap().as_deref(),
@@ -1542,6 +1550,7 @@ LITERAL = 'no \n escapes # here'
             checkout: root.path().to_path_buf(),
             db: queue.path().join("queue.sqlite3"),
             user_config: None,
+            verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
         };
         assert!(!verifier.run_env_programs(None).unwrap().config);
         fs::write(

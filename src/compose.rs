@@ -45,8 +45,8 @@ use crate::{
     },
     infrastructure::{
         adapters::{
-            ClaudeCode, Cmux, GitRepository, SystemProcesses, claude_trusts_repository,
-            free_disk_bytes, host_versions, load_average, path_text,
+            ClaudeCode, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT,
+            claude_trusts_repository, free_disk_bytes, host_versions, load_average, path_text,
         },
         binaries::LocalBinaries,
         clock,
@@ -427,6 +427,7 @@ pub fn supervise_with_reviewer(
             checkout: main_checkout(&repository),
             db: db.clone(),
             user_config: options.user_config.clone(),
+            verification_timeout: VERIFICATION_TIMEOUT,
         }),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
@@ -487,6 +488,9 @@ pub struct OneShot {
     pub disk: Option<crate::domain::disk::DiskConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// How long one verification command of `integrate` may run in all
+    /// ([`VERIFICATION_TIMEOUT`]; tests shorten it, task 639).
+    pub verification_timeout: std::time::Duration,
 }
 
 impl OneShot {
@@ -496,6 +500,7 @@ impl OneShot {
             user_config: None,
             disk: None,
             free_space: free_disk_bytes,
+            verification_timeout: VERIFICATION_TIMEOUT,
         }
     }
 
@@ -551,6 +556,7 @@ impl OneShot {
             checkout: main_checkout(&repository),
             db: db.clone(),
             user_config: None,
+            verification_timeout: self.verification_timeout,
         };
         // The free disk space a landing's verification needs, as the
         // supervisor reads it (task 638): a `[disk]` that cannot be read
@@ -563,8 +569,9 @@ impl OneShot {
                 })
                 .unwrap_or_default()
         });
-        let free =
-            (self.free_space)(&runs_dir(&db)).or_else(|| db.parent().and_then(self.free_space));
+        let read_free =
+            || (self.free_space)(&runs_dir(&db)).or_else(|| db.parent().and_then(self.free_space));
+        let free = read_free();
         let mut integration = Integration {
             queue: &mut queue,
             repository: &repository,
@@ -578,6 +585,10 @@ impl OneShot {
             pid: std::process::id(),
             load_average,
             disk: Some(integration::DiskRoom { config: disk, free }),
+            retry_disk: Some(integration::RetryDisk {
+                config: disk,
+                free: &read_free,
+            }),
         };
         let Some(begun) = integration::begin(&mut integration, target, repo)? else {
             return Ok(serde_json::to_value(IntegrationOutcome::NoRunAwaiting)?);
@@ -1420,6 +1431,7 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
         checkout,
         db: db.to_path_buf(),
         user_config: None,
+        verification_timeout: VERIFICATION_TIMEOUT,
     }
     .run_env_programs(None)
 }

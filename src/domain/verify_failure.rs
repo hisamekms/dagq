@@ -4,8 +4,9 @@
 //! format, the coverage) or the host did (the disk filled up, the command
 //! was killed, a test ran out of time under load) without opening the log.
 //! The marks follow cargo's, nextest's, rustfmt's and `tests/common`'s
-//! output. How a class is handled (a retry instead of a resume) is not
-//! decided here.
+//! output. How a class is handled is [`FailureClass::is_environmental`]'s:
+//! integrate retries a command that failed on the host once instead of
+//! resuming the worker (task 639).
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -49,7 +50,47 @@ impl FailureClass {
             Self::Unknown => "unknown",
         }
     }
+
+    /// Whether the class puts the failure down to the host rather than the
+    /// code (task 639, ADR-t639-1): a full disk, a kill, a test out of
+    /// time. Integrate retries such a command once instead of resuming the
+    /// worker, and reports it to a person when it fails so again. The set
+    /// is not widened without a person's decision.
+    pub fn is_environmental(self) -> bool {
+        matches!(self, Self::DiskFull | Self::Killed | Self::Timeout)
+    }
 }
+
+/// A verification command that ran past its limit for the whole command
+/// and was killed (task 639): the error the verifier returns for it, which
+/// integrate records as a `timeout` failure instead of a landing error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandTimedOut {
+    /// The limit, in seconds.
+    pub limit_secs: u64,
+}
+
+impl CommandTimedOut {
+    /// The failure integrate records for the command.
+    pub fn failure(self) -> VerifyFailure {
+        VerifyFailure {
+            class: FailureClass::Timeout,
+            evidence: self.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for CommandTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the command ran past its {} s limit and was killed",
+            self.limit_secs
+        )
+    }
+}
+
+impl std::error::Error for CommandTimedOut {}
 
 /// The class of a failure and the line (or exit) that shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +385,34 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_host_classes_are_environmental_and_the_code_classes_are_not() {
+        use FailureClass::*;
+        for class in [DiskFull, Killed, Timeout] {
+            assert!(class.is_environmental(), "{class:?}");
+        }
+        for class in [
+            BuildError,
+            Lint,
+            TestFailure,
+            Format,
+            CoverageBelow,
+            Unknown,
+        ] {
+            assert!(!class.is_environmental(), "{class:?}");
+        }
+        let timed_out = CommandTimedOut { limit_secs: 1800 };
+        assert_eq!(
+            timed_out.failure(),
+            VerifyFailure {
+                class: Timeout,
+                evidence: "the command ran past its 1800 s limit and was killed".to_owned(),
+            }
+        );
+        let error = anyhow::Error::new(timed_out).context("verification command \"x\"");
+        assert_eq!(error.downcast_ref::<CommandTimedOut>(), Some(&timed_out));
+    }
+
     use super::*;
 
     const LLVM_COV: &str = "cargo llvm-cov nextest --locked --fail-under-lines 80";
