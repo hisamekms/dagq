@@ -527,9 +527,10 @@ enum Command {
         #[arg(long)]
         max_waiting: Option<u16>,
         /// Claim no new run while the host's 1-minute load average is above
-        /// this; the runs in flight go on. 0 disables the hold.
-        #[arg(long, default_value_t = dagq::domain::claim_hold::DEFAULT_MAX_LOAD)]
-        max_load: f64,
+        /// this; the runs in flight go on. 0 disables the hold. Without it,
+        /// twice the host's logical CPUs (16 when they cannot be read).
+        #[arg(long)]
+        max_load: Option<f64>,
         /// Exit once no run is active and no task can be claimed, instead of
         /// waiting for new work.
         #[arg(long)]
@@ -715,9 +716,10 @@ enum Command {
         max_waiting: Option<u16>,
         /// The supervisor claims no new run while the host's 1-minute load
         /// average is above this; the runs in flight go on. 0 disables the
-        /// hold.
-        #[arg(long, default_value_t = dagq::domain::claim_hold::DEFAULT_MAX_LOAD)]
-        max_load: f64,
+        /// hold. Passed only when given; without it, the supervisor holds
+        /// at twice the host's logical CPUs.
+        #[arg(long)]
+        max_load: Option<f64>,
         /// Run the supervisor in the cmux workspace `[<repo>]supervisor`
         /// instead of under launchd: no socket password needed, and nothing
         /// restarts it if it stops.
@@ -2473,7 +2475,10 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
                 parallel: parallel.map(usize::from),
                 max_waiting: max_waiting.map(usize::from),
-                max_load: (max_load > 0.0).then_some(max_load),
+                max_load: dagq::domain::claim_hold::resolve_max_load(
+                    max_load,
+                    dagq::infrastructure::clock::logical_cores(),
+                ),
                 user_config: dagq::infrastructure::language::user_config_file(),
                 codex,
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)

@@ -70,12 +70,34 @@ pub const LANDINGS: HoldKinds = HoldKinds {
     own: true,
 };
 
-/// The default of `supervise --max-load`: the 1-minute load average above
-/// which no new run is claimed. On the 8-core host this queue runs on,
+/// The load average per logical core above which `supervise --max-load`
+/// holds claims by default. On the 8-core host this queue was tuned on,
 /// the `backend_call_failed` events by load band (`stats --full` of
 /// 2026-09-26) were 1 at 0-4, 1 at 8-16, 56 at 16-32, 257 at 32-64 and
-/// 116 above 64: cmux's timeouts start past twice the cores.
-pub const DEFAULT_MAX_LOAD: f64 = 16.0;
+/// 116 above 64: cmux's timeouts start past twice the cores (task 623).
+pub const DEFAULT_LOAD_PER_CORE: f64 = 2.0;
+
+/// The default of `supervise --max-load` when the host's logical cores
+/// cannot be read: twice the 8 cores of the host it was tuned on.
+pub const FALLBACK_MAX_LOAD: f64 = 16.0;
+
+/// The default of `supervise --max-load`: [`DEFAULT_LOAD_PER_CORE`] times
+/// the host's logical cores, or [`FALLBACK_MAX_LOAD`] when they are
+/// unknown.
+pub fn default_max_load(logical_cores: Option<usize>) -> f64 {
+    logical_cores
+        .filter(|&cores| cores > 0)
+        .map_or(FALLBACK_MAX_LOAD, |cores| {
+            DEFAULT_LOAD_PER_CORE * cores as f64
+        })
+}
+
+/// The load threshold `supervise` holds claims at: the given `--max-load`,
+/// else [`default_max_load`]; 0 or below disables the hold (`None`).
+pub fn resolve_max_load(given: Option<f64>, logical_cores: Option<usize>) -> Option<f64> {
+    let max_load = given.unwrap_or_else(|| default_max_load(logical_cores));
+    (max_load > 0.0).then_some(max_load)
+}
 
 /// Why new claims are held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -435,6 +457,22 @@ mod tests {
             needed_bytes: needed,
             queue_hold: None,
         })
+    }
+
+    /// Without `--max-load` the threshold is twice the logical cores (16
+    /// on the unknown host); a given value wins, and 0 or below turns the
+    /// hold off whatever the cores (task 623).
+    #[test]
+    fn the_default_max_load_is_twice_the_logical_cores() {
+        assert_eq!(resolve_max_load(None, Some(8)), Some(16.0));
+        assert_eq!(resolve_max_load(None, Some(4)), Some(8.0));
+        assert_eq!(resolve_max_load(None, Some(12)), Some(24.0));
+        assert_eq!(resolve_max_load(None, None), Some(FALLBACK_MAX_LOAD));
+        assert_eq!(resolve_max_load(None, Some(0)), Some(FALLBACK_MAX_LOAD));
+        assert_eq!(resolve_max_load(Some(8.5), Some(4)), Some(8.5));
+        assert_eq!(resolve_max_load(Some(16.0), Some(12)), Some(16.0));
+        assert_eq!(resolve_max_load(Some(0.0), Some(8)), None);
+        assert_eq!(resolve_max_load(Some(-1.0), None), None);
     }
 
     #[test]

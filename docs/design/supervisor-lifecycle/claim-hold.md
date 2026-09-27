@@ -4,8 +4,8 @@ type: design
 title: "claimを控える（load average）"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -28,11 +28,11 @@ related:
 
 - `authentication` / `usage_limit`: queueで1件の認証か利用上限の`queue_hold`のaskがopen（`HoldInputs.queue_hold`）。`value`はaskの`affected`の数、`threshold`は0で、`claim_held`に`ask_id`が付く。この控えはclaimに加えてheadless jobの起動も止める（[認証と利用上限のaskの待ちとanswer](queue-hold.md)、task 437）
 - `disk_space`: queueのdirectoryの空き（`value`、bytes）がclaimに要る空き（`threshold`、直近のrunのビルドの最大値 × `[disk] claim_factor`）を下回る。空きが読めないか閾値が無ければ控えない。掃除とinboxへの知らせと、着地の検証の控え（`landing_held` / `landing_resumed`）は[空き容量を確かめる](disk-space.md)（task 377）
-- `load_average`: hostの1分のload average（`getloadavg`）が`supervise --max-load`（既定16.0）を超えている。等しいときは控えない。load averageが読めないときは控えない
+- `load_average`: hostの1分のload average（`getloadavg`）が`supervise --max-load`（既定はhostの論理CPU数の2倍）を超えている。等しいときは控えない。load averageが読めないときは控えない
 
 task 437は`HoldReason`に`authentication` / `usage_limit`、`HoldInputs`に`queue_hold`を足し、同じ判定・同じイベント・同じ`status` / `stats`の出し方を使う。task 377は理由`disk_space`を足し、着地の検証の控えにも同じ判定と同じ形の記録（`HoldKinds`の`LANDINGS`、`transition_of` / `holds_of`）を使う。task 463の衝突の多いファイルの控えはqueue全体ではなく1つのtaskを飛ばすもので、taskのevent（`claim_deferred` / `claim_deferral_ended`）で記録し、`status`の`claim_deferrals`と`stats`の`claim_deferrals`に同じ形で出す（[claimを控える（衝突の多いファイル）](claim-defer.md)）。
 
-`--max-load`の既定値16.0の根拠: この queue の host は8コアで、2026-09-26の`stats --full`の`backend_failures.by_load_band`（load帯ごとの`backend_call_failed`）は`0-4`が1件、`8-16`が1件、`16-32`が56件、`32-64`が257件、`64+`が116件だった。cmuxの時間切れはloadがコア数の2倍（16）を超えたところから出始める。`--max-load 0`（0以下）で控えを無効にする。libraryの`SuperviseOptions::new`の既定は無効（`max_load: None`）で、CLIの`supervise`だけが既定16.0を渡す。`up`も`--max-load N`（既定16.0、0以下で無効）を受け、既定と違うとき（0を含む）だけ起動するsupervisorの引数に`--max-load N`を足す（launchd modeとin-cmux modeの両方。0未満は`0`として渡す。[up / down](up-down.md)）。
+`--max-load`の既定の決め方: 与えなければ、hostの論理CPU数（`std::thread::available_parallelism`、`infrastructure::clock::logical_cores`）の2倍（`domain::claim_hold::DEFAULT_LOAD_PER_CORE`）にする。論理CPU数が読めないときは16.0（`FALLBACK_MAX_LOAD`）。CLIの`supervise`が`domain::claim_hold::resolve_max_load`で起動時に1回解決し、解決した値が`claim_held`の`threshold`（`status`の`claim_hold`・`stats`の`claim_holds.held`）に出る。係数2の根拠: この repository の queue の host は8コアで、2026-09-26の`stats --full`の`backend_failures.by_load_band`（load帯ごとの`backend_call_failed`）は`0-4`が1件、`8-16`が1件、`16-32`が56件、`32-64`が257件、`64+`が116件だった。cmuxの時間切れはloadがコア数の2倍（16）を超えたところから出始める。以前の既定は16.0の固定で、コア数の違うhostでは控え方が合わなかったので、コア数に比例させた（task 623。8コアのhostでは16のまま）。明示の`--max-load N`はそのまま使い、`--max-load 0`（0以下）で控えを無効にする。libraryの`SuperviseOptions::new`の既定は無効（`max_load: None`）で、CLIの`supervise`だけが既定を解決して渡す。`up`も`--max-load N`（0以下で無効）を受け、与えたとき（0を含む）だけ起動するsupervisorの引数に`--max-load N`を足す。与えなければ足さず、supervisorが自分のhostで既定を解決する（launchd modeとin-cmux modeの両方。0未満は`0`として渡す。[up / down](up-down.md)）。
 
 ## 判定する場所
 

@@ -109,7 +109,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
         options: UpOptions {
             parallel: Some(2),
             max_waiting: None,
-            max_load: dagq::domain::claim_hold::DEFAULT_MAX_LOAD,
+            max_load: None,
             in_cmux: false,
             no_wait: false,
             plugin_dir: Some(dir.path().to_path_buf()),
