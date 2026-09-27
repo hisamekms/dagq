@@ -47,11 +47,13 @@ pub use crate::application::{
 pub use crate::domain::{HEARTBEAT_TIMEOUT_SECS, RunPlan};
 
 /// What one role wrote in a window ([`SqliteQueue::written_by`]): finding
-/// ids it recorded and updated, and its asks' ids.
+/// ids it recorded, updated and closed (resolved or dismissed), and its
+/// asks' ids.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WrittenBy {
     pub recorded: Vec<i64>,
     pub updated: Vec<i64>,
+    pub closed: Vec<i64>,
     pub asks: Vec<i64>,
 }
 

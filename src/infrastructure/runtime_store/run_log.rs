@@ -232,24 +232,42 @@ impl SqliteQueue {
     }
 
     /// What `role` wrote after the marks: the ids of the findings it
-    /// recorded and updated (`finding_recorded`, `finding_updated` after
+    /// recorded, updated and closed (`finding_recorded`, `finding_updated`,
+    /// and `finding_status_changed` to `resolved` or `dismissed`, after
     /// `event_id`, each id once, oldest first) and of its asks after
-    /// `ask_id`.
+    /// `ask_id`. A reopening by a record (`to: open`) is not a close.
     pub fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy> {
-        let findings = |kind: &str| -> Result<Vec<i64>> {
+        let findings = |kind: &str, to: &[&str]| -> Result<Vec<i64>> {
             Ok(self
                 .conn
                 .prepare(
                     "SELECT json_extract(payload,'$.finding_id') AS finding FROM run_events
                      WHERE id>?2 AND kind=?3 AND json_extract(payload,'$.by')=?1
+                       AND (?4 IS NULL OR json_extract(payload,'$.to')
+                            IN (SELECT value FROM json_each(?4)))
                      GROUP BY finding ORDER BY min(id)",
                 )?
-                .query_map(params![role, event_id, kind], |r| r.get(0))?
+                .query_map(
+                    params![
+                        role,
+                        event_id,
+                        kind,
+                        (!to.is_empty()).then(|| serde_json::json!(to).to_string())
+                    ],
+                    |r| r.get(0),
+                )?
                 .collect::<rusqlite::Result<_>>()?)
         };
         Ok(WrittenBy {
-            recorded: findings(event_kind::FINDING_RECORDED)?,
-            updated: findings(event_kind::FINDING_UPDATED)?,
+            recorded: findings(event_kind::FINDING_RECORDED, &[])?,
+            updated: findings(event_kind::FINDING_UPDATED, &[])?,
+            closed: findings(
+                event_kind::FINDING_STATUS_CHANGED,
+                &[
+                    crate::domain::FindingStatus::Resolved.as_str(),
+                    crate::domain::FindingStatus::Dismissed.as_str(),
+                ],
+            )?,
             asks: self
                 .conn
                 .prepare("SELECT id FROM asks WHERE id>?2 AND asked_by=?1 ORDER BY id")?

@@ -137,7 +137,7 @@ runtimeやjobが作ったdraftに立てるplanner（[ADR-0044](../adr/0044-findi
 - 部分UNIQUE index `findings_unsettled (kind, target, ifnull(task_id,0), ifnull(run_id,''), ifnull(goal_id,0), subject) WHERE status IN ('open','proposed')`が同じ問題の閉じていない行を1つに限る。`findings_by_status (status, id)`。
 - 記録（`record_finding`）は`BEGIN IMMEDIATE`で、対象の存在と根拠のeventの存在を確かめ、同じ`kind`・対象・`subject`の行を`open` / `proposed`を先に、次にIDの新しい順で1件読む。無ければ行を作って`finding_recorded`（`finding_id`、`kind`、`target`、`subject`、`impact`、`evidence`、`propose`、`by`）を書く。あれば`finding::merge`の結果を書き、`resolved`から`open`に戻ったときは`finding_status_changed`（`from`、`to`、`reason: "occurred again"`、`by`）を、続けて`finding_updated`（`finding_id`、`changed`、`added_evidence`、`occurrences`、`by`）を書く。`merge`が何も変えないなら何も書かない。
 - 状態の変更（`set_finding_status`）は`finding::check_transition`を通し、`status`・`status_reason`・`updated_at`と`finding_status_changed`（`from`、`to`、`reason`、`by`）を1トランザクションで書く。
-- findingのイベントは対象の`task_id` / `run_id` / `goal_id`を持ち、`queue`のfindingではどれも無い行になる（0030の`run_events`のCHECKがこの3つのkindを許す）。`by`はobserverが書いたものを数える（`written_by`が`observe_finished`の`findings_recorded` / `findings_updated`を数える）。
+- findingのイベントは対象の`task_id` / `run_id` / `goal_id`を持ち、`queue`のfindingではどれも無い行になる（0030の`run_events`のCHECKがこの3つのkindを許す）。`by`はobserverが書いたものを数える（`written_by`が`observe_finished`の`findings_recorded` / `findings_updated`と、`finding_status_changed`のうち`to`が`resolved` / `dismissed`のものを`findings_closed`として数える。`to: open`の開き直しは数えない）。
 - 一覧（`findings`）は全行を読み、`FindingQuery::admits`と対象で絞って`finding::by_impact`で並べ、各行に`proposals.status`、`finding_id`を持つopenなaskのID、`--full`なら根拠のevent（消えたものは除く）を付ける。件数が小さいのでSQLでは絞らない。
 
 ## Runtime ownership

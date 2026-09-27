@@ -199,9 +199,10 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
             Err(error) => ("error", None, Some(format!("{error:#}"))),
         };
     let written = queue.written_by(OBSERVER_ROLE, event_mark, ask_mark)?;
-    let (recorded, updated, asks) = (
+    let (recorded, updated, closed, asks) = (
         written.recorded.len(),
         written.updated.len(),
+        written.closed.len(),
         written.asks.len(),
     );
     let saved = outcome == "succeeded" && options.mode == ObserveMode::Hourly;
@@ -218,9 +219,11 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "cursor_saved": saved,
         "findings_recorded": recorded,
         "findings_updated": updated,
+        "findings_closed": closed,
         "asks": asks,
         "recorded_finding_ids": written.recorded,
         "updated_finding_ids": written.updated,
+        "closed_finding_ids": written.closed,
         "ask_ids": written.asks,
         "duration_secs": clock.elapsed().as_secs(),
         "dir": dir,
@@ -233,6 +236,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         error,
         findings_recorded = recorded,
         findings_updated = updated,
+        findings_closed = closed,
         asks,
         "observer ({}) finished: {outcome}",
         options.mode.as_str()
@@ -294,9 +298,11 @@ fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Resul
         "cursor_saved": false,
         "findings_recorded": 0,
         "findings_updated": 0,
+        "findings_closed": 0,
         "asks": 0,
         "recorded_finding_ids": [],
         "updated_finding_ids": [],
+        "closed_finding_ids": [],
         "ask_ids": [],
         "duration_secs": 0,
         "dir": null,
@@ -313,7 +319,8 @@ fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Resul
 
 /// `observe --history`: the newest `limit` observations, newest first, each
 /// with the events it read (after `since` through `cursor`), the findings
-/// and asks it wrote, how long it took and whether it was skipped.
+/// it recorded, updated and closed and the asks it wrote, how long it took
+/// and whether it was skipped.
 /// Observations recorded before the ids were kept give the counts only.
 pub fn history(queue: &SqliteQueue, limit: usize) -> Result<Value> {
     let observations = queue
@@ -341,8 +348,10 @@ fn history_entry(finished: &RunEvent, started: Option<&RunEvent>) -> Value {
         "findings": {
             "recorded": field("findings_recorded"),
             "updated": field("findings_updated"),
+            "closed": field("findings_closed"),
             "recorded_ids": field("recorded_finding_ids"),
             "updated_ids": field("updated_finding_ids"),
+            "closed_ids": field("closed_finding_ids"),
         },
         "asks": {"count": field("asks"), "ids": field("ask_ids")},
         "exit_code": field("exit_code"),

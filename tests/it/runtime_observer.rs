@@ -302,7 +302,14 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     );
     assert_eq!(
         first_entry["findings"],
-        json!({"recorded": 2, "updated": 1, "recorded_ids": [1, 2], "updated_ids": [1]})
+        json!({
+            "recorded": 2,
+            "updated": 1,
+            "closed": 0,
+            "recorded_ids": [1, 2],
+            "updated_ids": [1],
+            "closed_ids": [],
+        })
     );
     assert_eq!(
         first_entry["asks"],
@@ -593,4 +600,84 @@ q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead ti
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].finding.subject, "lead_time/all");
     assert_eq!(findings[0].finding.evidence.len(), 2);
+}
+
+#[test]
+fn observe_counts_the_findings_the_observer_closed_and_no_other_close() {
+    use dagq::domain::{FindingStatus, FindingTarget, NewFinding};
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, _repo, db) = fixture();
+    let record = |queue: &mut SqliteQueue, subject: &str| {
+        queue
+            .record_finding(NewFinding {
+                kind: "capacity".into(),
+                target: FindingTarget::Queue,
+                subject: subject.into(),
+                summary: format!("{subject} again"),
+                detail: None,
+                impact: None,
+                evidence: Vec::new(),
+                propose: None,
+                by: "observer".into(),
+            })
+            .unwrap()
+            .finding
+            .id
+    };
+    let (reopened, resolved) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let reopened = record(&mut queue, "reopened");
+        queue
+            .set_finding_status(reopened, FindingStatus::Resolved, "fixed", "human")
+            .unwrap();
+        (reopened, record(&mut queue, "resolved"))
+    };
+    // The observer resolves one finding and reopens another by recording
+    // it again (`to: open`); a person dismisses the one it records.
+    let provider = ObserverProvider {
+        script: format!(
+            r#"
+set -e
+q() {{ dagq --db "$DAGQ_QUEUE" "$@" > /dev/null; }}
+q finding resolve {resolved} --reason 'slots are busy again'
+q finding record --kind capacity --queue --subject reopened --summary 'reopened again' --evidence 1
+q finding record --kind capacity --queue --subject dismissed --summary 'dismissed later'
+env -u DAGQ_ROLE dagq --db "$DAGQ_QUEUE" finding dismiss {dismissed} --reason 'not a problem' > /dev/null
+"#,
+            dismissed = resolved.as_i64() + 1
+        ),
+    };
+    let finished = observe(&db, &provider, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(finished["outcome"], "succeeded", "{finished}");
+    assert_eq!(finished["findings_closed"], 1, "{finished}");
+    assert_eq!(finished["closed_finding_ids"], json!([resolved]));
+    assert_eq!(finished["updated_finding_ids"], json!([reopened]));
+    let changes = queue_events(&db, "finding_status_changed");
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["by"] == "observer" && c["to"] == "open"),
+        "{changes:?}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["by"] == "human" && c["to"] == "dismissed"),
+        "{changes:?}"
+    );
+
+    let output = {
+        use crate::common::Bounded;
+        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .args(["--db", db.to_str().unwrap(), "observe", "--history"])
+            .bounded_output()
+            .unwrap()
+    };
+    assert!(output.status.success(), "{output:?}");
+    let history: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let findings = &history["observations"][0]["findings"];
+    assert_eq!(
+        (&findings["closed"], &findings["closed_ids"]),
+        (&json!(1), &json!([resolved]))
+    );
 }
