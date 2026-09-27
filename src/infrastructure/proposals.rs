@@ -11,9 +11,9 @@ use serde_json::json;
 
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
-    ANSWERED_BY_RUNTIME, Ask, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId,
-    ProposalRecord, ProposalStatus, Submission, TaskAction, TaskId, TaskStatus,
-    follow_up::reopened_material, goal, proposal,
+    Ask, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId, ProposalRecord,
+    ProposalStatus, Submission, TaskAction, TaskId, TaskStatus, follow_up::reopened_material, goal,
+    proposal,
 };
 
 /// Submit `submission` inside the caller's write transaction: its tasks
@@ -329,7 +329,7 @@ fn close_plan_asks(conn: &Connection, task_id: TaskId, now: i64) -> Result<()> {
                 conn,
                 &ask,
                 "withdrawn",
-                ANSWERED_BY_RUNTIME,
+                crate::domain::Answerer::RUNTIME,
                 now,
                 &mut payload,
             )?;

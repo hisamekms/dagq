@@ -790,6 +790,15 @@ fn assert_closed_by_runtime(
             .collect();
         assert_eq!(answered.len(), 1, "{answered:?}");
         assert_eq!(answered[0]["runtime_closed"], true);
+        // The runtime's answer carries its own authority and approves
+        // nothing, whatever the ask's kind (task 733).
+        assert_eq!(answered[0]["authority"], "runtime");
+        assert_eq!(answered[0]["approval"], false);
+        assert_eq!(
+            closed.answer_authority,
+            Some(dagq::domain::AnswerAuthority::Runtime)
+        );
+        assert_eq!(closed.answer_approval, Some(false));
     } else {
         assert_eq!(closed.answer, stale.answer);
         assert!(

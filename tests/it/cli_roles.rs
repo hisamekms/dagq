@@ -865,7 +865,7 @@ fn findings_are_recorded_once_per_problem_and_listed_by_impact() {
     };
     assert_eq!(
         error(
-            "planner",
+            "inbox",
             &[
                 "ask",
                 "--kind",

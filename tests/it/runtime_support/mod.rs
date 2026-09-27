@@ -343,6 +343,7 @@ impl AgentProvider for TestProvider {
             .env("DB", &self.db)
             .arg("-c")
             .arg(format!("{RESUME_PRELUDE}\n{}", self.script));
+        worker_env(&mut command, run);
         Ok(command)
     }
     fn preflight(&self) -> Result<()> {
@@ -409,7 +410,17 @@ impl AgentProvider for TestProvider {
             .env("DB", &self.db)
             .arg("-c")
             .arg(format!("{AGENT_PRELUDE}\n{}", self.script));
+        worker_env(&mut command, run);
         Ok(command)
+    }
+}
+
+/// The fake agent runs as the run's worker, as a real session does, rather
+/// than as whatever actor runs the tests: its `$DAGQ ask --run` is its own
+/// run's (task 733).
+fn worker_env(command: &mut CommandSpec, run: &TaskRun) {
+    for (name, value) in dagq::domain::ActorContext::worker(run.id(), run.task_id()).env() {
+        command.env(name, value);
     }
 }
 

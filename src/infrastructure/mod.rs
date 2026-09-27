@@ -4,6 +4,7 @@ pub mod binaries;
 pub mod claude;
 pub mod clock;
 pub mod d2;
+pub mod dialogue;
 pub mod draft_planners;
 pub mod event_actor;
 mod finding_planners;

@@ -1547,9 +1547,14 @@ pub trait AskStore {
         answer: &str,
     ) -> Result<Vec<Ask>>;
     fn read_ask(&self, id: AskId) -> Result<Ask>;
-    /// Write the answer of an open ask, given by `answered_by` (a role,
-    /// `person` or `runtime`).
-    fn answer_as(&mut self, id: AskId, text: &str, answered_by: &str) -> Result<Ask>;
+    /// Write the answer of an open ask, given by `answerer` (its
+    /// `answered_by` and the authority it carries).
+    fn answer_as(
+        &mut self,
+        id: AskId,
+        text: &str,
+        answerer: crate::domain::Answerer,
+    ) -> Result<Ask>;
     fn close_ask(&mut self, id: AskId) -> Result<Ask>;
     /// Answered `approve_landing` asks nobody closed.
     fn landing_answers(&self) -> Result<Vec<Ask>>;

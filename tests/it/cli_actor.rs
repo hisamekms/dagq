@@ -112,23 +112,41 @@ fn every_headless_job_may_only_read_the_queue() {
 
 /// The writer of a note, mark, finding and ask, and the answerer of an
 /// answer, are the role's name as before, and `human` / `person` for the
-/// user.
+/// user, for each of them the role may write (task 733).
 #[test]
 fn the_records_keep_the_writer_they_had() {
     let (_dir, db) = queue();
     ok(&db, &["add", "first"]);
-    for (role, writer, answerer) in [
-        (None, "human", "person"),
-        (Some("inbox"), "inbox", "inbox"),
-        (Some("planner"), "planner", "planner"),
-        (Some("worker"), "worker", "worker"),
-        (Some("supervisor"), "supervisor", "supervisor"),
-    ] {
+    let worker = [
+        ("DAGQ_ROLE", "worker"),
+        ("DAGQ_RUN_ID", "r1"),
+        ("DAGQ_TASK_ID", "1"),
+    ];
+    let planner = [("DAGQ_ROLE", "planner")];
+    let inbox = [("DAGQ_ROLE", "inbox")];
+    let supervisor = [("DAGQ_ROLE", "supervisor")];
+    // (env, writer, its ask's kind, marks, records findings, answerer)
+    type Actor<'a> = (
+        &'a [(&'a str, &'a str)],
+        &'a str,
+        &'a str,
+        bool,
+        bool,
+        Option<&'a str>,
+    );
+    let actors: [Actor; 5] = [
+        (&[], "human", "decide", true, true, Some("person")),
+        (&inbox, "inbox", "decide", true, true, Some("inbox")),
+        (&planner, "planner", "planner_question", true, false, None),
+        (&worker, "worker", "worker_question", false, false, None),
+        (&supervisor, "supervisor", "decide", false, true, None),
+    ];
+    for (env, writer, kind, marks, finds, answerer) in actors {
         let run = |args: &[&str]| {
-            let output = invoke_as(role, &db, args);
+            let output = invoke_with(env, &db, args);
             assert!(
                 output.status.success(),
-                "{role:?} {args:?}: {}",
+                "{env:?} {args:?}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
             serde_json::from_slice::<Value>(&output.stdout).unwrap()
@@ -142,31 +160,44 @@ fn the_records_keep_the_writer_they_had() {
             .iter()
             .find(|note| note["payload"]["text"] == text.as_str())
             .unwrap();
-        assert_eq!(note["payload"]["by"], writer, "{role:?}");
+        assert_eq!(note["payload"]["by"], writer, "{env:?}");
 
-        let marked = run(&["mark", &format!("mark of {writer}")]);
-        assert_eq!(marked["detail"]["by"], writer, "{role:?}");
-
-        let finding = run(&[
-            "finding",
-            "record",
-            "--kind",
-            "failure",
-            "--task",
-            "1",
-            "--subject",
-            writer,
-            "--summary",
-            "fails",
-        ]);
-        assert_eq!(finding["recorded_by"], writer, "{role:?} {finding}");
+        if marks {
+            let marked = run(&["mark", &format!("mark of {writer}")]);
+            assert_eq!(marked["detail"]["by"], writer, "{env:?}");
+        }
+        if finds {
+            let finding = run(&[
+                "finding",
+                "record",
+                "--kind",
+                "failure",
+                "--task",
+                "1",
+                "--subject",
+                writer,
+                "--summary",
+                "fails",
+            ]);
+            assert_eq!(finding["recorded_by"], writer, "{env:?} {finding}");
+        }
 
         let question = format!("asked by {writer}");
-        let asked = run(&ask_args(&question));
-        assert_eq!(asked["asked_by"], writer, "{role:?}");
-        let answered = run(&["answer", &asked["id"].to_string(), "--text", "done"]);
-        assert_eq!(answered["answered_by"], answerer, "{role:?}");
-        ok(&db, &["ask", "close", &asked["id"].to_string()]);
+        let mut args = ask_args(&question);
+        args[2] = kind;
+        let asked = run(&args);
+        assert_eq!(asked["asked_by"], writer, "{env:?}");
+        let id = asked["id"].to_string();
+        let answered = match answerer {
+            Some(_) => run(&["answer", &id, "--text", "done"]),
+            None => ok(&db, &["answer", &id, "--text", "done"]),
+        };
+        assert_eq!(
+            answered["answered_by"],
+            answerer.unwrap_or("person"),
+            "{env:?}"
+        );
+        ok(&db, &["ask", "close", &id]);
     }
 }
 
@@ -192,7 +223,9 @@ fn every_event_records_its_actor() {
         ("DAGQ_RUN_ID", "r1"),
         ("DAGQ_TASK_ID", "1"),
     ];
-    run(&worker, &ask_args("which way?"));
+    let mut question = ask_args("which way?");
+    question[2] = "worker_question";
+    run(&worker, &question);
     let observer = [("DAGQ_ROLE", "observer"), ("DAGQ_ACTOR_ID", "observer:s1")];
     run(
         &observer,

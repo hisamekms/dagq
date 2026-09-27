@@ -48,9 +48,9 @@ impl AskStore for SqliteQueue {
         &mut self,
         id: AskId,
         text: &str,
-        answered_by: &str,
+        answerer: crate::domain::Answerer,
     ) -> Result<crate::domain::Ask> {
-        SqliteQueue::answer_as(self, id, text, answered_by)
+        SqliteQueue::answer_as(self, id, text, answerer)
     }
     fn close_ask(&mut self, id: AskId) -> Result<crate::domain::Ask> {
         SqliteQueue::close_ask(self, id)

@@ -19,10 +19,10 @@ use dagq::{
     application::{StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph},
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Authorizer,
-        Capability, EventId, FindingId, FindingQuery, FindingStatus, FindingTarget, GoalEdit,
-        GoalId, GoalVerdict, LeaseToken, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery,
-        NoteTarget, PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId,
-        SessionRole, StaticPolicy, Submission, TaskEdit, TaskId, TaskKind, TaskStatus,
+        Capability, EventId, FindingId, FindingQuery, FindingTarget, GoalEdit, GoalId, GoalVerdict,
+        LeaseToken, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget,
+        PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole,
+        StaticPolicy, Submission, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
@@ -1358,15 +1358,22 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         ),
         Command::Ask {
             command: None,
+            kind,
             task_id,
             run,
             ..
         } => one(
             C::AskOpen,
-            match (run, task_id) {
-                (Some(run), _) => run_resource(run),
-                (_, Some(task)) => task_resource(*task),
-                _ => Resource::Queue,
+            match (
+                kind.as_deref().unwrap_or_default().parse::<AskKind>(),
+                run.as_deref().map(RunId::new).transpose(),
+            ) {
+                (Ok(kind), Ok(run)) => Resource::NewAsk {
+                    kind,
+                    run,
+                    task: task_id.map(TaskId::new),
+                },
+                _ => Resource::Unresolved,
             },
         ),
         Command::Answer { id, .. } => one(
@@ -1427,6 +1434,12 @@ fn authorized_in_application(command: &Command) -> bool {
         Command::Goal { command } => {
             !matches!(command, GoalCommand::List | GoalCommand::Show { .. })
         }
+        // The asks, answers, notes, marks and findings (task 733).
+        Command::Ask { .. }
+        | Command::Answer { .. }
+        | Command::Note { .. }
+        | Command::Mark { .. }
+        | Command::Finding { .. } => true,
         _ => false,
     }
 }
@@ -1652,6 +1665,26 @@ fn execute(cli: Cli) -> Result<Value> {
         () => {
             dagq::application::commands::planning::Planning::new(&mut queue, &actor, &StaticPolicy)
         };
+    }
+    // The asks, answers, notes, marks and findings, likewise (task 733).
+    // Only `ask` notifies; the others never reach the backend.
+    let no_cmux = dagq::infrastructure::adapters::Cmux {
+        executable: PathBuf::from("cmux"),
+    };
+    let mut dialogue_store;
+    macro_rules! dialogue {
+        ($cmux:expr) => {{
+            dialogue_store = dagq::infrastructure::dialogue::DialogueQueue {
+                queue: &mut queue,
+                checkout: &cwd,
+                cmux: $cmux,
+            };
+            dagq::application::commands::dialogue::Dialogue::new(
+                &mut dialogue_store,
+                &actor,
+                &StaticPolicy,
+            )
+        }};
     }
     Ok(match cli.command {
         Command::Init
@@ -1914,7 +1947,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 (_, Some(run), _) => NoteTarget::Run(RunId::new(run)?),
                 (_, _, goal) => NoteTarget::Goal(GoalId::new(goal.context("note needs a target")?)),
             };
-            serde_json::to_value(queue.add_note(NewNote {
+            serde_json::to_value(dialogue!(&no_cmux).note(NewNote {
                 target,
                 text,
                 kind,
@@ -1937,19 +1970,16 @@ fn execute(cli: Cli) -> Result<Value> {
             note,
             at,
             retract,
-        } => {
-            let by = actor.written_by().to_owned();
-            match retract {
-                Some(id) => dagq::compose::retract_mark(&queue, EventId::new(id), &by)?,
-                None => dagq::compose::record_mark(
-                    &queue,
-                    label.as_deref().unwrap_or_default(),
-                    note.as_deref(),
-                    at,
-                    &by,
-                )?,
+        } => dialogue!(&no_cmux).mark(match retract {
+            Some(id) => {
+                dagq::application::commands::dialogue::MarkChange::Retract(EventId::new(id))
             }
-        }
+            None => dagq::application::commands::dialogue::MarkChange::Record {
+                label: label.unwrap_or_default(),
+                note,
+                at,
+            },
+        })?,
         Command::Marks { since, until } => dagq::compose::marks(&queue, since, until)?,
         Command::Finding {
             command:
@@ -1966,7 +1996,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     evidence,
                     propose,
                 },
-        } => serde_json::to_value(queue.record_finding(NewFinding {
+        } => serde_json::to_value(dialogue!(&no_cmux).record_finding(NewFinding {
             kind,
             target: finding_target(task, run, goal)?.unwrap_or(FindingTarget::Queue),
             subject,
@@ -1979,20 +2009,14 @@ fn execute(cli: Cli) -> Result<Value> {
         })?)?,
         Command::Finding {
             command: FindingCommand::Resolve { id, reason },
-        } => serde_json::to_value(queue.set_finding_status(
-            FindingId::new(id),
-            FindingStatus::Resolved,
-            &reason,
-            actor.written_by(),
-        )?)?,
+        } => {
+            serde_json::to_value(dialogue!(&no_cmux).resolve_finding(FindingId::new(id), &reason)?)?
+        }
         Command::Finding {
             command: FindingCommand::Dismiss { id, reason },
-        } => serde_json::to_value(queue.set_finding_status(
-            FindingId::new(id),
-            FindingStatus::Dismissed,
-            &reason,
-            actor.written_by(),
-        )?)?,
+        } => {
+            serde_json::to_value(dialogue!(&no_cmux).dismiss_finding(FindingId::new(id), &reason)?)?
+        }
         Command::Findings {
             id,
             all,
@@ -2108,7 +2132,7 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Ask {
             command: Some(AskCommand::Close { id }),
             ..
-        } => serde_json::to_value(queue.close_ask(AskId::new(id))?)?,
+        } => serde_json::to_value(dialogue!(&no_cmux).close(AskId::new(id))?)?,
         Command::Ask {
             command: None,
             kind,
@@ -2122,31 +2146,26 @@ fn execute(cli: Cli) -> Result<Value> {
         } => {
             use dagq::infrastructure::adapters::{Cmux, executable};
             // A missing cmux fails only the notification, not the ask.
-            dagq::compose::ask(
-                &db,
-                &cwd,
-                NewAsk {
-                    kind: kind.unwrap_or_default().parse::<AskKind>()?,
-                    task_id: task_id.map(TaskId::new),
-                    run_id: run.map(RunId::new).transpose()?,
-                    question: question.unwrap_or_default(),
-                    options,
-                    // The session's role; a person at a plain terminal has none.
-                    asked_by: actor.written_by().to_owned(),
-                    reason_category: because.unwrap_or_default().parse::<AskReason>()?,
-                    finding_id: finding.map(FindingId::new),
-                },
-                &Cmux {
-                    executable: executable(&cmux).unwrap_or(cmux),
-                },
-            )?
+            let cmux = Cmux {
+                executable: executable(&cmux).unwrap_or(cmux),
+            };
+            dialogue!(&cmux).ask(NewAsk {
+                kind: kind.unwrap_or_default().parse::<AskKind>()?,
+                task_id: task_id.map(TaskId::new),
+                run_id: run.map(RunId::new).transpose()?,
+                question: question.unwrap_or_default(),
+                options,
+                // The session's role; a person at a plain terminal has none.
+                asked_by: actor.written_by().to_owned(),
+                reason_category: because.unwrap_or_default().parse::<AskReason>()?,
+                finding_id: finding.map(FindingId::new),
+            })?
         }
-        Command::Answer { id, text } => serde_json::to_value(queue.answer_as(
-            AskId::new(id),
-            &text,
-            // The session's role; a person at a plain terminal has none.
-            actor.answered_by(),
-        )?)?,
+        // The user's own answer or the inbox's delegated one, which the
+        // application records from the actor (ADR-t728-3 decision 2).
+        Command::Answer { id, text } => {
+            serde_json::to_value(dialogue!(&no_cmux).answer(AskId::new(id), &text)?)?
+        }
         Command::Asks { open, role: r, all } => {
             json!({"asks": queue.asks(dagq::application::AskQuery {
             all,

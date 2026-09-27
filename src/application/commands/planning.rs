@@ -7,13 +7,13 @@
 //! [`crate::domain::StaticPolicy`]'s (`docs/design/authorization.md`).
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::warn;
 
 use crate::domain::{
     ActorContext, AuthorizationError, Authorizer, Capability, FindingId, Goal, GoalEdit, GoalId,
     GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId, Resource, Submission, Task,
-    TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus, authorization::DenyReason, event_kind,
+    TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus, authorization::DenyReason,
 };
 
 /// What the planning commands read and change of the queue.
@@ -238,21 +238,10 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     }
 
     fn record(&self, error: &AuthorizationError, resource: &Resource) {
-        if let Err(record) = self.store.record_denial(denial(error, resource)) {
+        if let Err(record) = self.store.record_denial(super::denial(error, resource)) {
             warn!("could not record the refusal ({error}): {record:#}");
         }
     }
-}
-
-/// The payload of `authorization_denied`.
-fn denial(error: &AuthorizationError, resource: &Resource) -> Value {
-    json!({
-        "event": event_kind::AUTHORIZATION_DENIED,
-        "role": error.role,
-        "capability": error.capability,
-        "reason": error.reason.as_str(),
-        "resource": resource.record(),
-    })
 }
 
 #[cfg(test)]
@@ -263,6 +252,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{ActorRole, PlannerOrigin, PlannerOwner, RunId, StaticPolicy};
+    use serde_json::json;
 
     /// A store that knows task statuses and proposal owners, records the
     /// refusals, and answers every change with the error `store: <what>`,

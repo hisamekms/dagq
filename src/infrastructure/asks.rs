@@ -10,9 +10,9 @@ use super::adapters::process_alive;
 use super::sqlite::{SqliteQueue, enum_col, json_col};
 use crate::domain::Ask;
 use crate::domain::{
-    ANSWERED_BY_PERSON, ANSWERED_BY_RUNTIME, AskId, AskKind, AskOutcome, AskReason,
-    HOLD_AFFECTED_HEADING, HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId,
-    UPDATE_FAILED_OPTIONS, check_ask_kind, check_event_target, finding, option_index,
+    AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason, HOLD_AFFECTED_HEADING,
+    HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
+    answer_approves, check_ask_kind, check_event_target, finding, option_index,
     session_takes_answers,
 };
 
@@ -183,13 +183,14 @@ impl SqliteQueue {
     /// A person's answer from a terminal with no `DAGQ_ROLE`: see
     /// [`Self::answer_as`].
     pub fn answer(&mut self, id: AskId, text: &str) -> Result<Ask> {
-        self.answer_as(id, text, ANSWERED_BY_PERSON)
+        self.answer_as(id, text, Answerer::PERSON)
     }
 
-    /// Write the answer of an open ask, who gave it (`answered_by`) and the
-    /// option it chose, and record `ask_answered` (with the run when the ask
-    /// has one) carrying both.
-    pub fn answer_as(&mut self, id: AskId, text: &str, answered_by: &str) -> Result<Ask> {
+    /// Write the answer of an open ask, who gave it (`answered_by`), the
+    /// authority it carries, whether it approves, and the option it chose,
+    /// and record `ask_answered` (with the run when the ask has one)
+    /// carrying them.
+    pub fn answer_as(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
         ensure!(!text.trim().is_empty(), "answer must not be blank");
         let tx = self
             .conn
@@ -199,13 +200,13 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let mut payload =
             json!({"ask_id": id, "kind": ask.kind, "reason_category": ask.reason_category});
-        write_answer(&tx, &ask, text, answered_by, now, &mut payload)?;
+        write_answer(&tx, &ask, text, answerer, now, &mut payload)?;
         // A `propose` or `dismiss` answer the ask offered is applied to its
         // finding here (ADR-0044 decision 19): nobody has to carry it. The
         // observer's `blocked` ask is done with it; a `stalled` ask stays
         // for the supervisor that watches its run.
         if let Some(applied) =
-            super::finding_planners::apply_answer(&tx, &ask, text, answered_by, now)?
+            super::finding_planners::apply_answer(&tx, &ask, text, answerer.by, now)?
         {
             payload["finding_id"] = json!(applied.finding);
             payload["finding_applied"] = json!(applied.action);
@@ -436,7 +437,7 @@ impl SqliteQueue {
                 &tx,
                 &ask,
                 "superseded",
-                ANSWERED_BY_RUNTIME,
+                Answerer::RUNTIME,
                 now,
                 &mut payload,
             )?;
@@ -691,7 +692,7 @@ impl SqliteQueue {
             if ask.is_open() {
                 let mut payload =
                     json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
-                write_answer(&tx, &ask, answer, ANSWERED_BY_RUNTIME, now, &mut payload)?;
+                write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
                 ask_event(&tx, None, None, event_kind::ASK_ANSWERED, payload)?;
             } else {
                 ask_event(
@@ -734,7 +735,7 @@ impl SqliteQueue {
             if ask.is_open() {
                 let mut payload =
                     json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
-                write_answer(&tx, &ask, answer, ANSWERED_BY_RUNTIME, now, &mut payload)?;
+                write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
                 ask_event(
                     &tx,
                     ask.task_id,
@@ -853,24 +854,38 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
 }
 
 /// Write `text` as the answer of the open `ask` at `now`, with who gave it
-/// and the option it chose (task 325), and add both to `payload`, the
-/// `ask_answered` the caller records: `answered_by`, and `option_index`
-/// with the option's text as `option` (a free answer has a null index and
-/// no `option`).
+/// and the option it chose (task 325), the authority it carries and
+/// whether it approves (task 733), and add them to `payload`, the
+/// `ask_answered` the caller records: `answered_by`, `authority`,
+/// `approval`, and `option_index` with the option's text as `option` (a
+/// free answer has a null index and no `option`).
 pub(super) fn write_answer(
     conn: &Connection,
     ask: &Ask,
     text: &str,
-    answered_by: &str,
+    answerer: Answerer,
     now: i64,
     payload: &mut serde_json::Value,
 ) -> Result<()> {
     let index = option_index(&ask.options, text);
+    // The runtime withdrawing or superseding an ask approves nothing.
+    let approval = answerer.authority != AnswerAuthority::Runtime && answer_approves(ask, text);
     conn.execute(
-        "UPDATE asks SET answer=?2, answered_at=?3, answered_by=?4, option_index=?5 WHERE id=?1",
-        params![ask.id, text, now, answered_by, index],
+        "UPDATE asks SET answer=?2, answered_at=?3, answered_by=?4, option_index=?5,
+           answer_authority=?6, answer_approval=?7 WHERE id=?1",
+        params![
+            ask.id,
+            text,
+            now,
+            answerer.by,
+            index,
+            answerer.authority.as_str(),
+            approval
+        ],
     )?;
-    payload["answered_by"] = json!(answered_by);
+    payload["answered_by"] = json!(answerer.by);
+    payload["authority"] = json!(answerer.authority);
+    payload["approval"] = json!(approval);
     payload["option_index"] = json!(index);
     if let Some(option) = index
         .and_then(|index| usize::try_from(index).ok())
@@ -937,6 +952,11 @@ pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
         finding_id: row.get("finding_id")?,
         answered_by: row.get("answered_by")?,
         option_index: row.get("option_index")?,
+        // A newer binary's authority this one does not know reads as none.
+        answer_authority: row
+            .get::<_, Option<String>>("answer_authority")?
+            .and_then(|value| value.parse().ok()),
+        answer_approval: row.get("answer_approval")?,
     })
 }
 

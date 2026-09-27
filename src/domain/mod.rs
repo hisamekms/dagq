@@ -280,6 +280,28 @@ impl AskKind {
         !matches!(self, Self::Other(_))
     }
 
+    /// An ask whose answer approves or refuses what a person decides
+    /// (ADR-t728-3 decision 3): a landing, a failed run's fate, a plan, a
+    /// goal, an update. A later goal may hold their answers to a person;
+    /// this stage records them ([`answer_approves`]).
+    pub fn is_approval(&self) -> bool {
+        matches!(
+            self,
+            Self::ApproveLanding
+                | Self::Decide
+                | Self::ApprovePlan
+                | Self::ApproveGoal
+                | Self::ApproveUpdate
+                | Self::UpdateFailed
+        )
+    }
+
+    /// An ask whose `propose` / `dismiss` answer the runtime applies to a
+    /// finding (ADR-0044 decision 19).
+    pub fn offers_finding_answers(&self) -> bool {
+        matches!(self, Self::Blocked | Self::Stalled)
+    }
+
     /// An ask of the automatic update (ADR-0073 decision 17): about the
     /// queue's binary, never a task or a run.
     pub fn is_update(&self) -> bool {
@@ -791,6 +813,16 @@ pub struct Ask {
     /// kept.
     #[serde(default)]
     pub option_index: Option<i64>,
+    /// Whose authority the answer carries (ADR-t728-3 decision 2): the
+    /// user's own, the inbox's at a person's word, or the runtime's.
+    /// `None` while open, and for an answer recorded before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_authority: Option<AnswerAuthority>,
+    /// Whether the answer is an approval ([`answer_approves`]), recorded
+    /// with it; `None` while open and for an answer recorded before it was
+    /// kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_approval: Option<bool>,
 }
 
 /// `answered_by` of an answer from a terminal with no `DAGQ_ROLE`.
@@ -798,6 +830,63 @@ pub const ANSWERED_BY_PERSON: &str = "person";
 /// `answered_by` of an answer the runtime wrote itself (a withdrawn,
 /// superseded or runtime-closed ask).
 pub const ANSWERED_BY_RUNTIME: &str = "runtime";
+
+// Whose authority an answer carries (ADR-t728-3 decision 2), from the
+// type of the actor that wrote it, never from its text: the user at a
+// plain terminal, the inbox answering at a person's word (`delegated`),
+// or the runtime closing an ask itself. On a host it is advisory, as the
+// actor is (ADR-t728-1 decision 6).
+string_enum!(AnswerAuthority {
+    User => "user",
+    Delegated => "delegated",
+    Runtime => "runtime",
+});
+
+/// Who writes an answer: `answered_by` as it always was, and the
+/// authority it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Answerer {
+    pub by: &'static str,
+    pub authority: AnswerAuthority,
+}
+
+impl Answerer {
+    /// A person at a plain terminal.
+    pub const PERSON: Self = Self {
+        by: ANSWERED_BY_PERSON,
+        authority: AnswerAuthority::User,
+    };
+    /// The runtime withdrawing, superseding or closing an ask itself.
+    pub const RUNTIME: Self = Self {
+        by: ANSWERED_BY_RUNTIME,
+        authority: AnswerAuthority::Runtime,
+    };
+    /// The inbox, answering at a person's word.
+    pub const INBOX: Self = Self {
+        by: "inbox",
+        authority: AnswerAuthority::Delegated,
+    };
+}
+
+/// Whether answering `ask` with `answer` approves or refuses something a
+/// person decides (ADR-t728-3 decision 3): the answer of an approval kind
+/// ([`AskKind::is_approval`]), or a `propose` / `dismiss` the runtime
+/// applies to a finding from a `blocked` or `stalled` ask that offered it.
+/// Recorded with the answer, so a later goal can hold these to a person.
+pub fn answer_approves(ask: &Ask, answer: &str) -> bool {
+    if ask.kind.is_approval() {
+        return true;
+    }
+    if !ask.kind.offers_finding_answers() {
+        return false;
+    }
+    let offered = |option: &str| ask.options.iter().any(|o| o.trim() == option);
+    match finding::FindingAnswer::parse(answer) {
+        Some(finding::FindingAnswer::Propose(_)) => offered(PROPOSE_OPTION),
+        Some(finding::FindingAnswer::Dismiss(_)) => offered(DISMISS_OPTION),
+        None => false,
+    }
+}
 
 /// The 0-based index of the option `answer` chooses: the first option
 /// equal to the trimmed answer. `None` for a free answer.
@@ -1924,6 +2013,83 @@ mod attention_tests {
         assert_eq!(option_index(&[], "land"), None);
     }
 
+    fn ask_of(kind: AskKind, options: &[&str]) -> Ask {
+        Ask {
+            id: AskId::new(1),
+            kind,
+            task_id: Some(TaskId::new(1)),
+            run_id: None,
+            question: "q".into(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
+            answer: None,
+            asked_by: "supervisor".into(),
+            reason_category: AskReason::RecoveryFailed,
+            subject: None,
+            affected: Vec::new(),
+            created_at: 0,
+            answered_at: None,
+            answered_by: None,
+            option_index: None,
+            answer_authority: None,
+            answer_approval: None,
+            closed_at: None,
+            finding_id: None,
+        }
+    }
+
+    /// Every kind is classified (ADR-t728-3 decision 3): the approval
+    /// kinds approve with any answer; `blocked` and `stalled` only with a
+    /// `propose` / `dismiss` they offered; the rest, and an unknown kind,
+    /// never.
+    #[test]
+    fn the_approval_kinds_and_the_finding_answers_are_approvals() {
+        let kinds = [
+            (AskKind::ApproveLanding, true, false),
+            (AskKind::AnswerPrompt, false, false),
+            (AskKind::Decide, true, false),
+            (AskKind::WorkerQuestion, false, false),
+            (AskKind::Blocked, false, true),
+            (AskKind::StuckExit, false, false),
+            (AskKind::FollowUp, false, false),
+            (AskKind::Stalled, false, true),
+            (AskKind::ApprovePlan, true, false),
+            (AskKind::ApproveGoal, true, false),
+            (AskKind::PlannerQuestion, false, false),
+            (AskKind::QueueHold, false, false),
+            (AskKind::UpdateFailed, true, false),
+            (AskKind::ApproveUpdate, true, false),
+            (AskKind::Other("later_kind".into()), false, false),
+        ];
+        let offered = [PROPOSE_OPTION, DISMISS_OPTION, "wait"];
+        for (kind, approval, finding_answers) in kinds {
+            assert_eq!(kind.is_approval(), approval, "{kind:?}");
+            assert_eq!(kind.offers_finding_answers(), finding_answers, "{kind:?}");
+            let ask = ask_of(kind.clone(), &offered);
+            for answer in ["yes", "wait", "land", ""] {
+                assert_eq!(answer_approves(&ask, answer), approval, "{kind:?} {answer}");
+            }
+            for answer in ["propose", "propose: fix it", " dismiss ", "dismiss: noise"] {
+                assert_eq!(
+                    answer_approves(&ask, answer),
+                    approval || finding_answers,
+                    "{kind:?} {answer}"
+                );
+            }
+        }
+        for kind in [AskKind::Blocked, AskKind::Stalled] {
+            // Only an option the ask offered.
+            let only_propose = ask_of(kind.clone(), &[PROPOSE_OPTION, "wait"]);
+            assert!(answer_approves(&only_propose, "propose"));
+            assert!(!answer_approves(&only_propose, "dismiss"));
+            let none = ask_of(kind.clone(), &["wait"]);
+            assert!(!answer_approves(&none, "propose"));
+            // Neither a word that only starts like one.
+            let ask = ask_of(kind, &offered);
+            assert!(!answer_approves(&ask, "proposed"));
+            assert!(!answer_approves(&ask, "dismissal"));
+        }
+    }
+
     #[test]
     fn asks_wait_for_the_inbox_until_closed() {
         let mut ask = Ask {
@@ -1942,6 +2108,8 @@ mod attention_tests {
             answered_at: None,
             answered_by: None,
             option_index: None,
+            answer_authority: None,
+            answer_approval: None,
             closed_at: None,
             finding_id: None,
         };

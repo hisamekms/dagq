@@ -992,6 +992,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
+             ALTER TABLE asks DROP COLUMN answer_authority;
+             ALTER TABLE asks DROP COLUMN answer_approval;
              DROP INDEX planners_by_finding;
              ALTER TABLE planners DROP COLUMN finding_id;
              ALTER TABLE proposals DROP COLUMN owner_actor_id;
@@ -1062,6 +1064,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
+             ALTER TABLE asks DROP COLUMN answer_authority;
+             ALTER TABLE asks DROP COLUMN answer_approval;
              DROP INDEX planners_by_finding;
              ALTER TABLE planners DROP COLUMN finding_id;
              ALTER TABLE proposals DROP COLUMN owner_actor_id;

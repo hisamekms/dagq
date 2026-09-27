@@ -264,10 +264,16 @@ impl ActorContext {
         self.role.env_value().unwrap_or(WRITTEN_BY_USER)
     }
 
-    /// Who an answer records as `answered_by`: the role, or
-    /// [`super::ANSWERED_BY_PERSON`] for the user.
-    pub fn answered_by(&self) -> &'static str {
-        self.role.env_value().unwrap_or(super::ANSWERED_BY_PERSON)
+    /// Who an answer of this actor records (ADR-t728-3 decision 2): the
+    /// user's own ([`super::Answerer::PERSON`]) or the inbox's at a
+    /// person's word ([`super::Answerer::INBOX`], delegated). No other
+    /// actor answers, so none has an answerer (fail closed).
+    pub fn answerer(&self) -> Option<super::Answerer> {
+        match self.role {
+            ActorRole::User => Some(super::Answerer::PERSON),
+            ActorRole::Inbox => Some(super::Answerer::INBOX),
+            _ => None,
+        }
     }
 }
 
@@ -338,7 +344,7 @@ mod tests {
             assert_eq!(actor, ActorContext::user());
             assert_eq!(actor.trust(), TrustLevel::Human);
             assert_eq!(actor.written_by(), "human");
-            assert_eq!(actor.answered_by(), "person");
+            assert_eq!(actor.answerer(), Some(crate::domain::Answerer::PERSON));
         }
         for value in ["inboxes", "user", "Worker", "reviewers", "person", "human"] {
             let error = parse(&[("DAGQ_ROLE", value)]).unwrap_err();
@@ -369,7 +375,7 @@ mod tests {
         assert_eq!(parsed.run_id(), Some(&run));
         assert_eq!(parsed.task_id(), Some(TaskId::new(7)));
         assert_eq!(parsed.written_by(), "worker");
-        assert_eq!(parsed.answered_by(), "worker");
+        assert_eq!(parsed.answerer(), None);
         assert_eq!(
             ActorContext::user().env(),
             [("DAGQ_ACTOR_ID".to_owned(), "user".to_owned())]
@@ -381,6 +387,16 @@ mod tests {
             (inbox.role(), inbox.actor_id()),
             (ActorRole::Inbox, "inbox")
         );
+        let answerer = inbox.answerer().unwrap();
+        assert_eq!(answerer.by, "inbox");
+        assert_eq!(
+            answerer.authority,
+            crate::domain::AnswerAuthority::Delegated
+        );
+        for role in ActorRole::ALL {
+            let expected = matches!(role, ActorRole::User | ActorRole::Inbox);
+            assert_eq!(ActorContext::new(role, "x").answerer().is_some(), expected);
+        }
         // The legacy reviewer reads as a review job.
         let reviewer = parse(&[("DAGQ_ROLE", "reviewer")]).unwrap();
         assert_eq!(reviewer.role(), ActorRole::ReviewJob);

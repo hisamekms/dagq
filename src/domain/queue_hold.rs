@@ -95,6 +95,8 @@ mod tests {
             finding_id: None,
             answered_by: None,
             option_index: None,
+            answer_authority: None,
+            answer_approval: None,
         }
     }
 

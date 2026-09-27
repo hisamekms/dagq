@@ -1051,9 +1051,16 @@ fn migration_adding_the_answerer_keeps_older_answers_unknown() {
         })
         .unwrap()
         .ask;
-    let answered = queue.answer_as(asked.id, " cancel ", "inbox").unwrap();
+    let answered = queue
+        .answer_as(asked.id, " cancel ", dagq::domain::Answerer::INBOX)
+        .unwrap();
     assert_eq!(answered.answered_by.as_deref(), Some("inbox"));
     assert_eq!(answered.option_index, Some(1));
+    assert_eq!(
+        answered.answer_authority,
+        Some(dagq::domain::AnswerAuthority::Delegated)
+    );
+    assert_eq!(answered.answer_approval, Some(true));
 }
 
 #[test]

@@ -12,7 +12,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ActorContext, ActorRole, AskId, FindingId, GoalId, PlannerId, ProposalId, RunId};
+use super::{
+    ActorContext, ActorRole, AskId, AskKind, FindingId, GoalId, PlannerId, ProposalId, RunId,
+};
 use super::{DomainError, TaskId, TaskStatus};
 
 string_enum!(Capability {
@@ -148,6 +150,13 @@ pub enum Resource {
         id: AskId,
         run: Option<RunId>,
     },
+    /// An ask to open: its kind, and the run or the task it is about as
+    /// the command names them.
+    NewAsk {
+        kind: AskKind,
+        run: Option<RunId>,
+        task: Option<TaskId>,
+    },
     /// A proposal and the actor id of the planner that submitted it.
     Proposal {
         id: ProposalId,
@@ -179,6 +188,9 @@ impl Resource {
             Self::Task { id, status } => json!({"kind": "task", "id": id, "status": status}),
             Self::Run { id, task } => json!({"kind": "run", "id": id, "task": task}),
             Self::Ask { id, run } => json!({"kind": "ask", "id": id, "run": run}),
+            Self::NewAsk { kind, run, task } => {
+                json!({"kind": "new_ask", "ask_kind": kind, "run": run, "task": task})
+            }
             Self::Proposal { id, owner } => json!({"kind": "proposal", "id": id, "owner": owner}),
             Self::Finding(id) => json!({"kind": "finding", "id": id}),
             Self::Planner(id) => json!({"kind": "planner", "id": id}),
@@ -196,6 +208,8 @@ pub enum DenyReason {
     Reserved,
     /// The resource is not the actor's, or its owner or state is unknown.
     Resource,
+    /// The role does not open asks of this kind.
+    AskKind,
 }
 
 impl DenyReason {
@@ -205,6 +219,7 @@ impl DenyReason {
             Self::NotGranted => "not granted",
             Self::Reserved => "reserved",
             Self::Resource => "not on this resource",
+            Self::AskKind => "not of this kind",
         }
     }
 }
@@ -265,6 +280,11 @@ impl Authorizer for StaticPolicy {
         }
         if !grants(actor.role()).contains(&capability) {
             return Err(deny(DenyReason::NotGranted));
+        }
+        if let Resource::NewAsk { kind, .. } = resource
+            && !opens_ask(actor.role(), kind)
+        {
+            return Err(deny(DenyReason::AskKind));
         }
         if resource_permits(actor, capability, resource) {
             Ok(())
@@ -411,6 +431,19 @@ pub const fn grants(role: ActorRole) -> &'static [Capability] {
     }
 }
 
+/// The kinds of ask a role opens (with [`C::AskOpen`]): a worker its
+/// `worker_question`, a planner its `planner_question`, and the user, the
+/// inbox and the supervisor any the command line opens. The observer's
+/// `blocked` ask on a finding is [`C::FindingAsk`], not an ask it opens.
+pub fn opens_ask(role: ActorRole, kind: &AskKind) -> bool {
+    match role {
+        ActorRole::User | ActorRole::Inbox | ActorRole::Supervisor => true,
+        ActorRole::Worker => *kind == AskKind::WorkerQuestion,
+        ActorRole::Planner => *kind == AskKind::PlannerQuestion,
+        _ => false,
+    }
+}
+
 /// The resource rules on top of the allowlist.
 fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Resource) -> bool {
     match actor.role() {
@@ -434,21 +467,36 @@ fn worker_owns(actor: &ActorContext, resource: &Resource) -> bool {
         return false;
     };
     match resource {
-        Resource::Run { id, .. } | Resource::Ask { run: Some(id), .. } => id == own,
-        Resource::Task { id, .. } => actor.task_id() == Some(*id),
+        Resource::Run { id, .. }
+        | Resource::Ask { run: Some(id), .. }
+        | Resource::NewAsk { run: Some(id), .. } => id == own,
+        Resource::Task { id, .. }
+        | Resource::NewAsk {
+            run: None,
+            task: Some(id),
+            ..
+        } => actor.task_id() == Some(*id),
         _ => false,
     }
 }
 
 fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Resource) -> bool {
     match resource {
-        // No run, and no ask on one.
-        Resource::Run { .. } | Resource::Ask { run: Some(_), .. } | Resource::Unresolved => false,
-        // Tasks before they start (draft, submitted, ready).
-        Resource::Task { status, .. } => matches!(
-            status,
-            Some(TaskStatus::Draft | TaskStatus::Submitted | TaskStatus::Ready)
-        ),
+        // A note on a run, as a person's free text (ADR-t728-1 decision 7).
+        Resource::Run { .. } if capability == C::NoteWrite => true,
+        // Nothing else on a run, and no ask on one.
+        Resource::Run { .. }
+        | Resource::Ask { run: Some(_), .. }
+        | Resource::NewAsk { run: Some(_), .. }
+        | Resource::Unresolved => false,
+        // Changes to tasks before they start (draft, submitted, ready); a
+        // note on any task.
+        Resource::Task { status, .. } if matches!(capability, C::TaskWrite | C::TaskCancel) => {
+            matches!(
+                status,
+                Some(TaskStatus::Draft | TaskStatus::Submitted | TaskStatus::Ready)
+            )
+        }
         Resource::Proposal { owner, .. } if capability == C::ProposalWithdraw => {
             owner.as_deref() == Some(actor.actor_id())
         }
@@ -679,9 +727,11 @@ mod tests {
     fn a_planner_may_not_touch_runs_land_ready_or_answer() {
         let planner = ActorContext::instance(ActorRole::Planner, 7);
         let own_run = Resource::run(run("r1"));
-        for capability in [C::AskOpen, C::NoteWrite, C::SessionRun] {
+        for capability in [C::AskOpen, C::SessionRun] {
             assert!(!allowed(&planner, capability, &own_run), "{capability:?}");
         }
+        // A note it keeps (ADR-t728-1 decision 7).
+        assert!(allowed(&planner, C::NoteWrite, &own_run));
         for capability in [
             C::RunRecover,
             C::IntegrationRequest,
@@ -854,5 +904,164 @@ mod tests {
         ] {
             assert!(grants(trusted).len() < Capability::ALL.len());
         }
+    }
+    fn new_ask(kind: AskKind, run: Option<&str>, task: Option<i64>) -> Resource {
+        Resource::NewAsk {
+            kind,
+            run: run.map(|id| RunId::new(id).unwrap()),
+            task: task.map(TaskId::new),
+        }
+    }
+
+    #[test]
+    fn a_worker_asks_its_question_on_its_own_run_or_task_only() {
+        let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
+        let question = AskKind::WorkerQuestion;
+        assert!(allowed(
+            &worker,
+            C::AskOpen,
+            &new_ask(question.clone(), Some("r1"), None)
+        ));
+        assert!(allowed(
+            &worker,
+            C::AskOpen,
+            &new_ask(question.clone(), None, Some(1))
+        ));
+        for other in [
+            new_ask(question.clone(), Some("r2"), None),
+            new_ask(question.clone(), None, Some(2)),
+            new_ask(question.clone(), None, None),
+        ] {
+            let error = StaticPolicy
+                .authorize(&worker, C::AskOpen, &other)
+                .unwrap_err();
+            assert_eq!(error.reason, DenyReason::Resource, "{other:?}");
+        }
+        for kind in [
+            AskKind::Decide,
+            AskKind::ApproveLanding,
+            AskKind::AnswerPrompt,
+            AskKind::PlannerQuestion,
+            AskKind::Blocked,
+        ] {
+            let error = StaticPolicy
+                .authorize(
+                    &worker,
+                    C::AskOpen,
+                    &new_ask(kind.clone(), Some("r1"), None),
+                )
+                .unwrap_err();
+            assert_eq!(error.reason, DenyReason::AskKind, "{kind:?}");
+            assert_eq!(
+                error.to_string(),
+                "worker may not ask.open (not of this kind)"
+            );
+        }
+    }
+
+    #[test]
+    fn each_role_opens_its_own_kinds_of_ask() {
+        let kinds = [
+            AskKind::ApproveLanding,
+            AskKind::AnswerPrompt,
+            AskKind::Decide,
+            AskKind::WorkerQuestion,
+            AskKind::PlannerQuestion,
+            AskKind::Blocked,
+        ];
+        for role_ in ActorRole::ALL {
+            for kind in &kinds {
+                let expected = match role_ {
+                    ActorRole::User | ActorRole::Inbox | ActorRole::Supervisor => true,
+                    ActorRole::Worker => *kind == AskKind::WorkerQuestion,
+                    ActorRole::Planner => *kind == AskKind::PlannerQuestion,
+                    _ => false,
+                };
+                assert_eq!(opens_ask(role_, kind), expected, "{role_:?} {kind:?}");
+            }
+        }
+        let planner = ActorContext::instance(ActorRole::Planner, 7);
+        let question = AskKind::PlannerQuestion;
+        assert!(allowed(
+            &planner,
+            C::AskOpen,
+            &new_ask(question.clone(), None, Some(3))
+        ));
+        assert!(allowed(
+            &planner,
+            C::AskOpen,
+            &new_ask(question.clone(), None, None)
+        ));
+        assert!(!allowed(
+            &planner,
+            C::AskOpen,
+            &new_ask(question, Some("r1"), None)
+        ));
+        assert!(!allowed(
+            &planner,
+            C::AskOpen,
+            &new_ask(AskKind::Decide, None, Some(3))
+        ));
+        for role_ in [ActorRole::User, ActorRole::Inbox, ActorRole::Supervisor] {
+            assert!(allowed(
+                &role(role_),
+                C::AskOpen,
+                &new_ask(AskKind::Decide, Some("r9"), None)
+            ));
+        }
+        for role_ in [
+            ActorRole::Observer,
+            ActorRole::ReviewJob,
+            ActorRole::RecoveryJob,
+            ActorRole::PlanReviewJob,
+            ActorRole::GoalReviewJob,
+            ActorRole::Wrapper,
+            ActorRole::Integrator,
+        ] {
+            let error = StaticPolicy
+                .authorize(
+                    &role(role_),
+                    C::AskOpen,
+                    &new_ask(AskKind::Blocked, None, None),
+                )
+                .unwrap_err();
+            assert_eq!(error.reason, DenyReason::NotGranted, "{role_:?}");
+        }
+        assert_eq!(
+            new_ask(AskKind::WorkerQuestion, Some("r1"), None).record(),
+            serde_json::json!({"kind": "new_ask", "ask_kind": "worker_question", "run": "r1", "task": null})
+        );
+    }
+
+    #[test]
+    fn only_the_user_and_the_inbox_answer_and_the_supervisor_also_closes() {
+        let ask = Resource::Ask {
+            id: AskId::new(1),
+            run: Some(run("r1")),
+        };
+        for role_ in ActorRole::ALL {
+            let mut actor = role(role_);
+            if role_ == ActorRole::Worker {
+                actor = ActorContext::worker(&run("r1"), TaskId::new(1));
+            }
+            let answers = matches!(role_, ActorRole::User | ActorRole::Inbox);
+            let closes = answers || role_ == ActorRole::Supervisor;
+            assert_eq!(allowed(&actor, C::AskAnswer, &ask), answers, "{role_:?}");
+            assert_eq!(allowed(&actor, C::AskClose, &ask), closes, "{role_:?}");
+        }
+    }
+
+    #[test]
+    fn a_planner_notes_on_any_task_but_changes_only_those_before_they_start() {
+        let planner = ActorContext::instance(ActorRole::Planner, 7);
+        for status in [TaskStatus::InProgress, TaskStatus::Completed] {
+            assert!(allowed(&planner, C::NoteWrite, &task_in(status)));
+            assert!(!allowed(&planner, C::TaskWrite, &task_in(status)));
+        }
+        assert!(allowed(
+            &planner,
+            C::NoteWrite,
+            &Resource::task(TaskId::new(1))
+        ));
     }
 }

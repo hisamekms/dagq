@@ -694,7 +694,7 @@ impl Supervisor<'_> {
                     self.queue.answer_as(
                         ask_id,
                         "withdrawn: the recovery round could not be recorded",
-                        crate::domain::ANSWERED_BY_RUNTIME,
+                        crate::domain::Answerer::RUNTIME,
                     )?;
                     self.queue.close_ask(ask_id)?;
                 }
