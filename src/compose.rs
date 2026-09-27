@@ -482,6 +482,11 @@ pub struct OneShot {
     /// language from (ADR-t616-2); `None` reads none. The CLI gives
     /// `$XDG_CONFIG_HOME/dagq/config.toml`.
     pub user_config: Option<PathBuf>,
+    /// How much free disk space `integrate` needs before it lands (task
+    /// 638); `None` reads `[disk]` of the main checkout's `dagq.toml`.
+    pub disk: Option<crate::domain::disk::DiskConfig>,
+    /// Reads the free bytes of the file system of a path; tests set it.
+    pub free_space: fn(&Path) -> Option<u64>,
 }
 
 impl OneShot {
@@ -489,6 +494,8 @@ impl OneShot {
         Self {
             generators,
             user_config: None,
+            disk: None,
+            free_space: free_disk_bytes,
         }
     }
 
@@ -545,6 +552,19 @@ impl OneShot {
             db: db.clone(),
             user_config: None,
         };
+        // The free disk space a landing's verification needs, as the
+        // supervisor reads it (task 638): a `[disk]` that cannot be read
+        // leaves the defaults.
+        let disk = self.disk.unwrap_or_else(|| {
+            load_disk_config(&main_checkout(&repository))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(error = %format_args!("{error:#}"), "[disk] of dagq.toml not read: {error:#}; using the defaults");
+                    None
+                })
+                .unwrap_or_default()
+        });
+        let free =
+            (self.free_space)(&runs_dir(&db)).or_else(|| db.parent().and_then(self.free_space));
         let mut integration = Integration {
             queue: &mut queue,
             repository: &repository,
@@ -557,6 +577,7 @@ impl OneShot {
             processes: &SystemProcesses,
             pid: std::process::id(),
             load_average,
+            disk: Some(integration::DiskRoom { config: disk, free }),
         };
         let Some(begun) = integration::begin(&mut integration, target, repo)? else {
             return Ok(serde_json::to_value(IntegrationOutcome::NoRunAwaiting)?);

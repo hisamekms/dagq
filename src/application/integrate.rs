@@ -22,7 +22,9 @@ use super::{
 use crate::domain::{
     CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
     Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus,
-    Task, TaskId, TaskRun, event_kind, evidence_missing_reason, heartbeat_stale,
+    Task, TaskId, TaskRun,
+    disk::{BUILD_OUTPUTS_REMOVED, DiskConfig, gib},
+    event_kind, evidence_missing_reason, heartbeat_stale,
     landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
     scope::{out_of_scope, scope_violation_reason},
@@ -155,6 +157,19 @@ pub struct Integration<'a> {
     /// The 1-minute load average, sampled while each verification command
     /// runs (task 197).
     pub load_average: fn() -> Option<f64>,
+    /// The free disk space [`begin`] checks before it approves a landing
+    /// (task 638); `None` checks nothing (the supervisor, which holds its
+    /// landings for the disk itself).
+    pub disk: Option<DiskRoom>,
+}
+
+/// What a person's `integrate` checks the free disk space with (task
+/// 638): the `[disk]` of `dagq.toml` and the free bytes of the queue's
+/// directory, `None` when they could not be read.
+#[derive(Debug, Clone, Copy)]
+pub struct DiskRoom {
+    pub config: DiskConfig,
+    pub free: Option<u64>,
 }
 
 /// A run that holds the integration slot under `token`: `previous` is the
@@ -236,6 +251,9 @@ pub fn begin(
             run.id()
         );
     }
+    if let Some(room) = ctx.disk {
+        check_disk_room(&*queue, &room, run.id())?;
+    }
     // The call is the approval to land (ADR-0016 decision 5): a run it
     // parks as `needs_session` is landed by the supervisor once a resumed
     // session resolved it (ADR-0019 decision 1).
@@ -256,6 +274,35 @@ pub fn begin(
         main,
         token,
     }))
+}
+
+/// Refuse to land `run` while the free disk space is below what a
+/// landing's verification needs (task 638, ADR-0047 decision 44): the same
+/// threshold the supervisor holds its landings at. A person is at hand, so
+/// the call fails instead of waiting; nothing is recorded. No threshold (no
+/// build measured and no `min_free_bytes`) or unread free space checks
+/// nothing, as in the supervisor.
+fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()> {
+    let limit = usize::try_from(room.config.sample_runs).unwrap_or(0);
+    let builds: Vec<u64> = queue
+        .latest_events_of(BUILD_OUTPUTS_REMOVED, limit)?
+        .iter()
+        .filter_map(|event| event.payload.get("bytes").and_then(Value::as_u64))
+        .collect();
+    let needs = room.config.needs(&builds);
+    if let (Some(free), Some(need)) = (room.free, needs.landing)
+        && free < need
+    {
+        let largest = needs
+            .largest_build
+            .map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
+        bail!(
+            "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the largest build of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+            gib(free as f64),
+            gib(need as f64),
+        );
+    }
+    Ok(())
 }
 
 /// Land a run that holds the integration slot under `token` (see

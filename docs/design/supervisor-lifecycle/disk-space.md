@@ -46,6 +46,17 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 
 走っているrun（session・validation・review・resume・triage）には触れない。
 
+## 人が打つ`integrate`
+
+人が打つ`dagq integrate`（`dagq-recover`の手順で打つものも）は、supervisorの着地と同じ着地の閾値で空きを確かめる（task 638）。`application::integrate::begin`が、runを選び、leaseを確かめた後、`integration_approved`を記録してintegrationのslotを取る前に確かめる。
+
+- 閾値: supervisorと同じ`DiskConfig::needs`の着地の側。`[disk]`はmain checkoutの`dagq.toml`をcommandのたびに読み（読めなければwarnを出して既定値）、直近のビルドの大きさはqueueの`build_outputs_removed`から読む。libraryの`OneShot::disk`で上書きできる（testが使う）
+- 空き: queueの`runs/`（無ければDBのあるdirectory）のファイルシステムの空き（`free_disk_bytes`。`OneShot::free_space`でtestが差し替える）
+- 足りなければ、人が目の前にいるので控えて待つのではなく断る: `integration_approved`を記録せず、runの状態もleaseも変えず、空き・必要量・直近のビルドの最大値と、掃除の手がかり（`dagq doctor`でrunとworktreeを見る、見なくなったrunのworktreeや他のファイルを消す）を含むエラーで非0終了する。eventもaskも記録しない
+- 閾値が決まらない（記録も`min_free_bytes`も無い）・空きが読めないときは確かめない（supervisorと同じ）
+
+supervisorの着地（`land_integrating`）は上の「判定と掃除」の控えを使い、この確かめはしない。
+
 ## inboxに知らせる
 
 掃除の後もclaimか着地の閾値を下回れば、queueで1件の`cost`のask（`kind: queue_hold`、`reason_category: cost`、`subject: disk`、optionsは`done` / `wait`）を開く（ADR-0047の決定42）。着地を待つrunは`affected`に足され（`ask_updated`）、questionの末尾の`Affected runs:`に並ぶ。ログインのaskと違い、sessionを止めるものではないので、`hold_of`（sessionの待ちと停滞の見張りがログインの控えを見る）には当たらない。claimだけが足りないときはrunを持たない（`NewHold::run_id`が`None`）。通知（`cmux notify`）は最初の1回だけ。

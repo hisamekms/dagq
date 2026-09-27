@@ -358,3 +358,81 @@ fn a_landing_waits_for_room_before_its_verification() {
             .all(|supervisor| supervisor.get("landing_hold").is_none())
     );
 }
+
+fn half_a_gibibyte(_: &Path) -> Option<u64> {
+    Some(GIB / 2)
+}
+
+fn two_gibibytes(_: &Path) -> Option<u64> {
+    Some(2 * GIB)
+}
+
+fn unreadable(_: &Path) -> Option<u64> {
+    None
+}
+
+/// A person's `integrate` with `disk` and the free space `free_space` reads.
+fn integrate_on(
+    db: &Path,
+    repo: &Path,
+    disk: Option<DiskConfig>,
+    free_space: fn(&Path) -> Option<u64>,
+) -> anyhow::Result<Value> {
+    runtime::OneShot {
+        disk,
+        free_space,
+        ..runtime::OneShot::system()
+    }
+    .integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None)
+}
+
+/// A person's `integrate` (task 638) checks the free space against the
+/// landing threshold of `[disk]` before it approves the run: short of it,
+/// it fails with the free and the needed space and leaves the run as it
+/// was, with no `integration_approved`. The threshold follows the latest
+/// `build_outputs_removed` as the supervisor's does; with room it lands.
+#[test]
+fn a_persons_integrate_refuses_to_land_while_the_disk_is_short() {
+    let (_dir, repo, db, run) = awaiting_run();
+    let refused = |disk: Option<DiskConfig>| {
+        let error = format!(
+            "{:#}",
+            integrate_on(&db, &repo, disk, half_a_gibibyte).unwrap_err()
+        );
+        assert!(error.contains("not enough free disk space"), "{error}");
+        assert!(error.contains("0.5 GiB free"), "{error}");
+        assert!(error.contains("dagq doctor"), "{error}");
+        assert!(events_of(&db, run.id(), "integration_approved").is_empty());
+        let now = SqliteQueue::open(&db).unwrap().run(run.id()).unwrap();
+        assert_eq!(now.status(), RunStatus::AwaitingIntegration);
+        error
+    };
+    // min_free_bytes with no build measured.
+    let error = refused(gibibyte_needed());
+    assert!(error.contains("below the 1.0 GiB"), "{error}");
+    assert!(error.contains("none measured"), "{error}");
+    // The largest recent build times integrate_factor (1.5).
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_runtime_event(run.id(), "build_outputs_removed", json!({"bytes": GIB}))
+        .unwrap();
+    let error = refused(Some(DiskConfig::default()));
+    assert!(error.contains("below the 1.5 GiB"), "{error}");
+    assert!(error.contains("1.0 GiB, times"), "{error}");
+    // With room the run lands.
+    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), two_gibibytes).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(events_of(&db, run.id(), "integration_approved").len(), 1);
+}
+
+/// With no threshold (no build measured, no `min_free_bytes`) or the free
+/// space unread, a person's `integrate` checks nothing and lands.
+#[test]
+fn a_persons_integrate_without_a_threshold_or_a_reading_lands() {
+    let (_dir, repo, db, _run) = awaiting_run();
+    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), half_a_gibibyte).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    let (_dir, repo, db, _run) = awaiting_run();
+    let outcome = integrate_on(&db, &repo, gibibyte_needed(), unreadable).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+}

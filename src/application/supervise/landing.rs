@@ -65,6 +65,7 @@ impl Supervisor<'_> {
                     processes: &*processes,
                     pid,
                     load_average,
+                    disk: None,
                 },
                 &run,
                 previous,
