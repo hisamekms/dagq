@@ -35,7 +35,9 @@ pub use asks::{
 };
 pub use auto_repairs::{AutoRepairStats, DayCounts, LayerRepairs};
 pub use conflicts::{ConflictConfig, ConflictConfigReport, ConflictHotspots, History};
-pub use landing::{LandBreakdown, LandClock, LandPhases, PhaseSummary};
+pub use landing::{
+    CommandSecs, CommandSummary, LandBreakdown, LandClock, LandPhases, PhaseSummary,
+};
 pub use measures::{
     BandCount, CommandStats, FailureClassStats, IntervalLoad, LoadBandStats, RunLoad, RunMeasures,
     RunVerifyFailure, VersionStats, Versions,

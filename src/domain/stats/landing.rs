@@ -5,7 +5,8 @@
 //! starts a phase closes the one before; an event that starts none leaves
 //! the time with the current phase. The push, which follows
 //! `run_integrated`, is measured on its own and is not part of the sum.
-use std::collections::HashMap;
+//! The `verify` phase is also split by verification command (task 509).
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 use serde::ser::SerializeMap;
@@ -60,6 +61,19 @@ const VERIFY: usize = 8;
 pub struct LandPhases {
     pub secs: [i64; PHASES.len()],
     pub push: Option<i64>,
+    /// The `verify` phase per verification command, by command (task 509):
+    /// all the run's `integrate` attempts, failed commands included. Their
+    /// sum does not exceed `verify`.
+    pub verify_commands: Vec<CommandSecs>,
+}
+
+/// One verification command's share of a run's `verify` phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CommandSecs {
+    pub command: String,
+    /// How many times it ran over the run's attempts.
+    pub count: usize,
+    pub secs: i64,
 }
 
 impl LandPhases {
@@ -81,6 +95,7 @@ impl Serialize for LandPhases {
             map.serialize_entry(name, &secs)?;
         }
         map.serialize_entry("push", &self.push)?;
+        map.serialize_entry("verify_commands", &self.verify_commands)?;
         map.end()
     }
 }
@@ -110,11 +125,22 @@ pub struct LandBreakdown {
     pub tail_runs: usize,
     pub phases: [PhaseSummary; PHASES.len()],
     pub push: PhaseSummary,
+    /// The `verify` phase per verification command, by command: each over
+    /// the runs that ran it, with a run's attempts added up.
+    pub verify_commands: Vec<CommandSummary>,
+}
+
+/// One verification command's share of `verify` over a set of runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CommandSummary {
+    pub command: String,
+    #[serde(flatten)]
+    pub phase: PhaseSummary,
 }
 
 impl Serialize for LandBreakdown {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(PHASES.len() + 4))?;
+        let mut map = serializer.serialize_map(Some(PHASES.len() + 5))?;
         map.serialize_entry("runs", &self.runs)?;
         map.serialize_entry("tail_threshold", &self.tail_threshold)?;
         map.serialize_entry("tail_runs", &self.tail_runs)?;
@@ -122,6 +148,7 @@ impl Serialize for LandBreakdown {
             map.serialize_entry(name, phase)?;
         }
         map.serialize_entry("push", &self.push)?;
+        map.serialize_entry("verify_commands", &self.verify_commands)?;
         map.end()
     }
 }
@@ -174,6 +201,24 @@ pub fn breakdown<'a>(runs: impl Iterator<Item = (&'a LandPhases, i64)>) -> LandB
                 .filter_map(|(phases, wait)| Some((phases.push?, tail(*wait))))
                 .collect::<Vec<_>>(),
         ),
+        verify_commands: {
+            let mut by_command: BTreeMap<&str, Vec<(i64, bool)>> = BTreeMap::new();
+            for (phases, wait) in &runs {
+                for command in &phases.verify_commands {
+                    by_command
+                        .entry(&command.command)
+                        .or_default()
+                        .push((command.secs, tail(*wait)));
+                }
+            }
+            by_command
+                .into_iter()
+                .map(|(command, values)| CommandSummary {
+                    command: command.to_owned(),
+                    phase: phase_summary(&values),
+                })
+                .collect()
+        },
     }
 }
 
@@ -190,6 +235,11 @@ pub struct LandClock {
     asks: HashMap<String, Option<String>>,
     integrated: Option<i64>,
     push: Option<i64>,
+    /// Per verification command: the times it ran and its milliseconds.
+    commands: BTreeMap<String, (usize, i64)>,
+    /// The last `verification_command` counted, where the next one's
+    /// interval starts when it is still in the same `verify`.
+    command_mark: i64,
 }
 
 fn ask_key(payload: &Value) -> Option<String> {
@@ -211,6 +261,8 @@ impl LandClock {
             asks: HashMap::new(),
             integrated: None,
             push: None,
+            commands: BTreeMap::new(),
+            command_mark: at,
         };
         clock.observe(event, at);
         clock
@@ -226,6 +278,9 @@ impl LandClock {
                 self.push = Some((at - integrated).max(0) / 1000);
             }
             return;
+        }
+        if kind == "verification_command" {
+            self.command(&event.payload, at);
         }
         let next = if kind == "run_integrated" {
             self.enter(self.phase, at);
@@ -307,6 +362,31 @@ impl LandClock {
         }
     }
 
+    /// Count a `verification_command` of `integrate` recorded at `at`
+    /// towards its command: its `duration_secs`, or without one (before
+    /// task 197) the time since the `verify` phase began or the last
+    /// command. Only commands in `verify` count, and none for more than
+    /// that time, so the commands never add up to more than the phase.
+    fn command(&mut self, payload: &Value, at: i64) {
+        let integration = payload["phase"]
+            .as_str()
+            .is_none_or(|phase| phase == "integration");
+        let Some(command) = payload["command"].as_str() else {
+            return;
+        };
+        if self.phase != VERIFY || !integration {
+            return;
+        }
+        let elapsed = (at - self.since.max(self.command_mark)).max(0);
+        let ms = payload["duration_secs"].as_f64().map_or(elapsed, |secs| {
+            ((secs * 1000.0).round() as i64).clamp(0, elapsed)
+        });
+        let entry = self.commands.entry(command.to_owned()).or_default();
+        entry.0 += 1;
+        entry.1 += ms;
+        self.command_mark = at;
+    }
+
     fn enter(&mut self, phase: usize, at: i64) {
         self.spent[self.phase] += (at - self.since).max(0);
         self.since = at.max(self.since);
@@ -328,6 +408,15 @@ impl LandClock {
         LandPhases {
             secs: spent.map(|ms| ms / 1000),
             push: self.push,
+            verify_commands: self
+                .commands
+                .iter()
+                .map(|(command, (count, ms))| CommandSecs {
+                    command: command.clone(),
+                    count: *count,
+                    secs: ms / 1000,
+                })
+                .collect(),
         }
     }
 }
@@ -669,6 +758,179 @@ mod tests {
         assert_eq!(LandPhases::default().longest(), None);
     }
 
+    /// The commands of `phases`' `verify_commands` as `(command, count,
+    /// secs)`.
+    fn commands(phases: &LandPhases) -> Vec<(&str, usize, i64)> {
+        phases
+            .verify_commands
+            .iter()
+            .map(|c| (c.command.as_str(), c.count, c.secs))
+            .collect()
+    }
+
+    fn verified(command: &str, secs: Option<f64>, exit_code: i64) -> Value {
+        json!({
+            "phase": "integration", "command": command, "exit_code": exit_code,
+            "duration_secs": secs,
+        })
+    }
+
+    #[test]
+    fn verify_splits_by_command_that_passed() {
+        let (spent, phases) = phases(
+            &[
+                ("landing_queued", json!({}), 0),
+                ("integration_started", json!({}), 10),
+                ("integration_rebased", json!({}), 12),
+                ("verification_command", verified("fmt", Some(3.2), 0), 15),
+                (
+                    "verification_command",
+                    verified("clippy", Some(60.4), 0),
+                    76,
+                ),
+                // Another phase's command is not the landing's.
+                (
+                    "verification_command",
+                    json!({"phase": "recheck", "command": "llvm-cov", "duration_secs": 5.0}),
+                    77,
+                ),
+                (
+                    "verification_command",
+                    verified("llvm-cov", Some(300.9), 0),
+                    377,
+                ),
+                ("run_integrated", json!({}), 380),
+            ],
+            9999,
+        );
+        assert_eq!(spent["verify"], 368);
+        assert_eq!(
+            commands(&phases),
+            [("clippy", 1, 60), ("fmt", 1, 3), ("llvm-cov", 1, 300)]
+        );
+        let json = serde_json::to_value(&phases).unwrap();
+        assert_eq!(
+            json["verify_commands"][0],
+            json!({"command": "clippy", "count": 1, "secs": 60})
+        );
+    }
+
+    #[test]
+    fn verify_adds_up_every_attempt_and_its_failed_commands() {
+        let (spent, phases) = phases(
+            &[
+                ("integration_started", json!({}), 0),
+                ("integration_rebased", json!({}), 5),
+                ("verification_command", verified("fmt", Some(2.0), 0), 7),
+                (
+                    "verification_command",
+                    verified("llvm-cov", Some(200.0), 101),
+                    208,
+                ),
+                (
+                    "integration_deferred",
+                    json!({"status": "needs_session", "code": "verification_failed"}),
+                    209,
+                ),
+                ("resume_started", json!({}), 210),
+                ("resume_finished", json!({"status": "validating"}), 600),
+                (
+                    "validation_finished",
+                    json!({"status": "awaiting_integration"}),
+                    605,
+                ),
+                ("integration_started", json!({}), 610),
+                ("integration_rebased", json!({}), 612),
+                ("verification_command", verified("fmt", Some(2.0), 0), 614),
+                (
+                    "verification_command",
+                    verified("llvm-cov", Some(250.0), 0),
+                    865,
+                ),
+                ("run_integrated", json!({}), 870),
+            ],
+            9999,
+        );
+        assert_eq!(spent["verify"], 204 + 258);
+        assert_eq!(commands(&phases), [("fmt", 2, 4), ("llvm-cov", 2, 450)]);
+        let sum: i64 = phases.verify_commands.iter().map(|c| c.secs).sum();
+        assert!(sum <= phases.secs[VERIFY]);
+    }
+
+    #[test]
+    fn verify_without_durations_takes_the_intervals_and_never_exceeds_the_phase() {
+        let (spent, land) = phases(
+            &[
+                ("integration_started", json!({}), 0),
+                ("integration_rebased", json!({}), 10),
+                // Before task 197: no duration, and no phase either.
+                (
+                    "verification_command",
+                    json!({"command": "fmt", "exit_code": 0}),
+                    14,
+                ),
+                ("verification_command", verified("clippy", None, 0), 74),
+                // A duration longer than the time since the last command is
+                // cut to it.
+                (
+                    "verification_command",
+                    verified("test", Some(9999.0), 0),
+                    374,
+                ),
+                // A command without its name is not counted.
+                ("verification_command", json!({"exit_code": 0}), 375),
+                ("run_integrated", json!({}), 380),
+            ],
+            9999,
+        );
+        assert_eq!(spent["verify"], 370);
+        assert_eq!(
+            commands(&land),
+            [("clippy", 1, 60), ("fmt", 1, 4), ("test", 1, 300)]
+        );
+        // A command outside `verify` (no rebase recorded) is not counted.
+        let (_, outside) = phases(
+            &[
+                ("verification_command", verified("fmt", Some(1.0), 0), 3),
+                ("run_integrated", json!({}), 10),
+            ],
+            9999,
+        );
+        assert!(outside.verify_commands.is_empty());
+    }
+
+    #[test]
+    fn breakdowns_split_verify_by_command_over_the_runs_that_ran_it() {
+        let run = |verify: i64, commands: &[(&str, i64)]| LandPhases {
+            secs: std::array::from_fn(|index| if index == VERIFY { verify } else { 0 }),
+            push: None,
+            verify_commands: commands
+                .iter()
+                .map(|(command, secs)| CommandSecs {
+                    command: (*command).to_owned(),
+                    count: 1,
+                    secs: *secs,
+                })
+                .collect(),
+        };
+        let runs = [
+            run(100, &[("fmt", 2), ("llvm-cov", 90)]),
+            run(200, &[("fmt", 3), ("llvm-cov", 190)]),
+            run(10, &[("fmt", 1)]),
+        ];
+        let result = breakdown(runs.iter().map(|phases| (phases, phases.secs[VERIFY])));
+        assert_eq!(result.tail_threshold, Some(200));
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["verify_commands"],
+            json!([
+                {"command": "fmt", "count": 3, "total": 6, "median": 2, "p90": 3, "max": 3, "tail_total": 3},
+                {"command": "llvm-cov", "count": 2, "total": 280, "median": 140, "p90": 190, "max": 190, "tail_total": 190},
+            ])
+        );
+        assert_eq!(json["verify"]["total"], 310);
+    }
+
     #[test]
     fn breakdowns_sum_and_mark_the_tail() {
         let run = |exit: i64, verify: i64, push: Option<i64>| LandPhases {
@@ -678,6 +940,7 @@ mod tests {
                 _ => 0,
             }),
             push,
+            verify_commands: Vec::new(),
         };
         let runs: Vec<LandPhases> = (1..=10)
             .map(|n| {

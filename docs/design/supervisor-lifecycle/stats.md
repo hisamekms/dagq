@@ -42,7 +42,7 @@ related:
   - `work_breakdown`: runのsession（`worker` / `resume` / `revise`）が何に時間を使ったか（task 514。下の[作業の内訳](#作業の内訳)）。記録した区間が無ければnull
   - `tokens`: runのsession（jobを含む）が使ったトークン数（task 199。下の[トークン数](#トークン数)）。記録した区間が無ければnull
   - `resumes`: `resume_started`（ADR-0019の自動resume。記録されるまでは0）の数、`review_verdict`: 最後の`review_finished`の`verdict`（goal 11のreview工程が記録するまではnull）、`needs_session` / `failed`: payloadの`status`がその値のイベントの数。`integration_error`は試行前のstatusに戻すだけなので`needs_session`に数えない
-  - `land_phases`: `wait_to_land`の工程別の内訳（下の[着地待ちの内訳](#着地待ちの内訳)）。`run_integrated`の無いrunはnull
+  - `land_phases`: `wait_to_land`の工程別の内訳（下の[着地待ちの内訳](#着地待ちの内訳)）。`run_integrated`の無いrunはnull。`verify_commands`に`verify`の検証コマンドごとの内訳（下の[verifyのコマンド別の内訳](#verifyのコマンド別の内訳)）
   - `title`: taskのtitle。`kind`: taskの変更の種類（goal 21。repositoryが名付けるlabelのまま（[ADR-t624-1](../../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)）。無いtaskはnull）。`claimed_at` / `validated_at` / `landed_at`: 最初の`run_claimed`・最初の`validation_finished`・`run_integrated`の記録時刻（queueの`created_at`のまま。無ければnull）
   - `integrate_attempts` / `deferrals` / `conflict_files` / `broken_by` / `broke_runs` / `resume_attempts`: 着地の延期の中身と、崩した着地、resumeの効き目（下の[着地の延期とresume](#着地の延期とresume)）
   - `dagq_version` / `claude_version` / `rustc_release` / `rustc_host` / `claim_parallel` / `claim_slots` / `claim_load_avg`: 最初の`run_claimed`が記録したclaimの属性（goal 21、task 197。[`supervise`](supervise.md)の5）の`dagq_version` / `claude_version` / `rustc_release` / `rustc_host` / `parallel` / `slots` / `load_avg`。記録の無いrun（手の`claim`、task 197より前）はnull
@@ -52,7 +52,7 @@ related:
   - `load_band`: `load.work.band`、無ければ`claim_load_avg`の帯（どちらも無ければnull）。帯は`0-4` / `4-8` / `8-16` / `16-32` / `32-64` / `64+`（下限を含む。`domain::measure::load_band`）。集計は`domain::stats::measures`
   - `verify_failures`: そのrunの`integrate`の`verification_command`（`phase: integration`、全試行）のうち`failure`を持つもの（失敗したもの）を記録順に`{attempt, index, command, class, evidence, retry}`（task 467。分類は[`integrate`](integrate.md)の5）。`retry`はhostの分類の失敗のやり直し（payloadの`retry: true`。task 639）の失敗ならtrue。`failure`を記録する前の失敗は含めない。無ければ空の配列
   - `sessions`: そのrunのClaude sessionの区間のkindごとの`{count, open, active}`（下の[Claude session](#claude-session)）
-- **`goals`と`overall`**の`land_phases`: 着地したrun（`land_phases`と`wait_to_land`のあるrun）についての`{runs, tail_threshold, tail_runs, <工程>..., push}`。`tail_threshold`はそれらのrunの`wait_to_land`の90パーセンタイル（nearest-rank: 昇順でceil(0.9×n)番目。runが無ければnull）、`tail_runs`は`wait_to_land`がそれ以上のrun（長い裾）の数。工程ごとと`push`は`{count, total, median, p90, max, tail_total}`で、`count` / `total` / `median`は他の区間と同じ規則（工程は着地したrun全部を0も含めて数え、`push`は記録のあるrunだけ）、`p90`は上と同じ規則、`tail_total`は長い裾のrunだけの合計。どの工程が裾を作ったかは工程ごとの`tail_total`を比べて読む
+- **`goals`と`overall`**の`land_phases`: 着地したrun（`land_phases`と`wait_to_land`のあるrun）についての`{runs, tail_threshold, tail_runs, <工程>..., push}`。`tail_threshold`はそれらのrunの`wait_to_land`の90パーセンタイル（nearest-rank: 昇順でceil(0.9×n)番目。runが無ければnull）、`tail_runs`は`wait_to_land`がそれ以上のrun（長い裾）の数。工程ごとと`push`は`{count, total, median, p90, max, tail_total}`で、`count` / `total` / `median`は他の区間と同じ規則（工程は着地したrun全部を0も含めて数え、`push`は記録のあるrunだけ）、`p90`は上と同じ規則、`tail_total`は長い裾のrunだけの合計。どの工程が裾を作ったかは工程ごとの`tail_total`を比べて読む。`verify_commands`は`verify`の検証コマンドごとの内訳（下の[verifyのコマンド別の内訳](#verifyのコマンド別の内訳)）
 - **`goals`と`overall`**の`resume_outcomes`: それらのrunの`resume_attempts`全部の`{attempts, resolved, unresolved, resolved_percent, secs}`と、理由ごとの同じ形の`by_reason`（下の[着地の延期とresume](#着地の延期とresume)）
 - **`kinds`**: taskの`kind`ごと（名前の昇順、kindの無いtaskのrunは`kind: null`で最後）に、`goals`と同じ形（`runs`と区間ごとの`{count, total, median}`、`land_phases`、`resume_outcomes`）。`runs`のkindで`domain::stats::with_kinds`が組み、observerの入力の`stats`にも出る
 - **`goals`と`overall`**: goalごと（goal昇順、goalの無いrunは`goal_id: null`で最後）と全体で、`runs`（件数）と区間ごとの`{count, total, median}`。区間の無いrunは数えない。中央値は偶数個なら中央2つの平均の切り捨て。
@@ -125,6 +125,16 @@ related:
 - **`landing_queued`**（`via`: `exit`か`resume`）は、supervisorが着地slotを待つ`Phase::AwaitingSlot`に入るときに記録する（[Review](review.md#review-supervisor)の5のpass、[`needs_session`](needs-session.md#needs_session)の5）。このイベントが入る前のrunでは、slotの待ちは`exit`に入る。人の`integrate`はslotが空いていなければ拒否されるので待ちが無い。
 - **`push`**: `run_integrated`から最初の`push_finished` / `push_failed` / `push_skipped`まで（`push_main`は着地の後に走るので`wait_to_land`の外）。記録が無ければnull。
 - 時計は`run_integrated`で止まる。まだ着地していないrunの内訳は`awaiting_integration`のalertの`phase`にだけ使い、今の時刻まで今の工程を伸ばして測る。
+
+### verifyのコマンド別の内訳
+
+`verify`のどの検証コマンド（fmt・clippy・llvm-covなど）が着地待ちを占めるかを見るため、`land_phases`の`verify_commands`に`verify`をコマンド文字列ごとに分けて載せる（task 509）。`LandClock`が`verify`の工程にいる間の`verification_command`（`phase`が`integration`か、`phase`の無い古いイベント）をコマンドごとに足す。
+
+- **1本の秒**: `duration_secs`（task 197）。無い古いイベントでは、`verify`に入ってから（`integration_rebased`）か、同じ`verify`の前の`verification_command`からの間隔。`duration_secs`もその間隔で頭打ちにするので、コマンドの合計は`verify`を超えない（ミリ秒で足してから秒に切り捨てる）。`verify`の外（`integration_rebased`の無い試行など）の`verification_command`と、`command`の無いものは数えない。
+- **試行**: runの`integrate`の試行（`attempt`）をすべて足し、失敗したコマンドも数える（延期された試行の`verify`も工程の`verify`に入るため）。
+- **runの行**: `verify_commands: [{command, count, secs}]`（コマンド文字列の昇順）。`count`はそのコマンドが流れた回数（試行と、hostの失敗の再試行（task 639）を含む）、`secs`はその合計。
+- **`goals` / `overall`（と`kinds` / `versions`）**: `verify_commands: [{command, count, total, median, p90, max, tail_total}]`（コマンド文字列の昇順）。工程と同じ形で、値はrunごとの`secs`、`count`はそのコマンドを流した着地したrunの数（流していないrunは0として数えない）、`tail_total`は`wait_to_land`の長い裾のrunだけの合計。
+- トップレベルの`verification_commands`（task 197）は着地待ちと切り離したwindowのコマンドごとの所要時間で、こちらは着地したrunの`verify`の内訳として同じ時間を位置づけたもの。
 
 ## 着地の延期とresume
 

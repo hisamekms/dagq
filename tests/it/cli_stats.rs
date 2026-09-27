@@ -317,6 +317,99 @@ mod stats {
         assert_eq!(failed_tests["flaky_candidates"], json!([]));
     }
 
+    /// Task 509: `land_phases` splits `verify` by verification command on
+    /// the run's row, per goal and overall; the other items stay.
+    #[test]
+    fn land_phases_split_verify_by_command() {
+        let mut events = Events::default();
+        let verify = |command: &str, secs: f64, exit_code: i64| {
+            json!({
+                "phase": "integration", "command": command, "exit_code": exit_code,
+                "duration_secs": secs,
+            })
+        };
+        // Run a: fmt then llvm-cov, landed in one attempt.
+        events.status(1, "a", "validation_finished", 0, "awaiting_integration");
+        events.run(1, "a", "integration_started", 1);
+        events.run(1, "a", "integration_rebased", 2);
+        events.push(
+            1,
+            Some("a"),
+            "verification_command",
+            3,
+            verify("fmt", 30.0, 0),
+        );
+        events.push(
+            1,
+            Some("a"),
+            "verification_command",
+            8,
+            verify("llvm-cov", 240.0, 0),
+        );
+        events.run(1, "a", "run_integrated", 9);
+        // Run b: llvm-cov failed, then passed on the second attempt.
+        events.status(2, "b", "validation_finished", 0, "awaiting_integration");
+        events.run(2, "b", "integration_started", 10);
+        events.run(2, "b", "integration_rebased", 11);
+        events.push(
+            2,
+            Some("b"),
+            "verification_command",
+            13,
+            verify("llvm-cov", 120.0, 101),
+        );
+        events.status(2, "b", "integration_deferred", 14, "needs_session");
+        events.run(2, "b", "integration_started", 20);
+        events.run(2, "b", "integration_rebased", 21);
+        events.push(
+            2,
+            Some("b"),
+            "verification_command",
+            24,
+            verify("llvm-cov", 180.0, 0),
+        );
+        events.run(2, "b", "run_integrated", 25);
+        let report = value(&stats(
+            &events.0,
+            &goals([(1, Some(7)), (2, Some(7))]),
+            at(60),
+            SlotSnapshot::default(),
+            &StatsQuery::default(),
+            &LiveSnapshot::default(),
+        ));
+        let runs = report["runs"].as_array().unwrap();
+        let a = &runs[0]["land_phases"];
+        assert_eq!(a["verify"], 420);
+        assert_eq!(
+            a["verify_commands"],
+            json!([
+                {"command": "fmt", "count": 1, "secs": 30},
+                {"command": "llvm-cov", "count": 1, "secs": 240},
+            ])
+        );
+        assert_eq!(a["rebase"], 60);
+        let b = &runs[1]["land_phases"];
+        assert_eq!(b["verify"], 420);
+        assert_eq!(
+            b["verify_commands"],
+            json!([{"command": "llvm-cov", "count": 2, "secs": 300}])
+        );
+        for breakdown in [
+            &report["goals"][0]["land_phases"],
+            &report["overall"]["land_phases"],
+        ] {
+            assert_eq!(breakdown["runs"], 2);
+            assert_eq!(breakdown["verify"]["total"], 840);
+            assert_eq!(
+                breakdown["verify_commands"],
+                json!([
+                    {"command": "fmt", "count": 1, "total": 30, "median": 30, "p90": 30, "max": 30, "tail_total": 0},
+                    {"command": "llvm-cov", "count": 2, "total": 540, "median": 270, "p90": 300, "max": 300, "tail_total": 300},
+                ])
+            );
+        }
+    }
+
     #[test]
     fn runs_goals_and_alerts_come_from_the_event_sequence() {
         let mut events = Events::default();
@@ -407,6 +500,8 @@ mod stats {
                     "exit": 1080, "review": 0, "revise": 0, "conflict": 0, "ask": 0,
                     "resume": 0, "landing_queue": 0, "rebase": 120, "verify": 0,
                     "push": null,
+                    // Task 509: no verification command was recorded.
+                    "verify_commands": [],
                 },
                 // Task 466: the times, the landings and the resumes. The
                 // title comes from the queue, not the events.
