@@ -4,6 +4,7 @@
 use std::{
     fs,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicI32, Ordering::SeqCst},
 };
 
 use anyhow::Result;
@@ -48,6 +49,53 @@ pub fn exit(status: ExitStatus) -> Exit {
     }
 }
 
+/// The process groups this process started in sessions of their own and
+/// has not reaped or killed yet, for [`stop_groups_on_exit_signals`]: a
+/// fixed table, so that the signal handler reads it without allocating. A
+/// group past its size is not tracked.
+static GROUPS: [AtomicI32; 16] = [const { AtomicI32::new(0) }; 16];
+
+fn track(group: i32) {
+    let _ = GROUPS
+        .iter()
+        .find(|slot| slot.compare_exchange(0, group, SeqCst, SeqCst).is_ok());
+}
+
+fn untrack(group: i32) {
+    for slot in &GROUPS {
+        let _ = slot.compare_exchange(group, 0, SeqCst, SeqCst);
+    }
+}
+
+extern "C" fn stop_groups(signal: libc::c_int) {
+    for slot in &GROUPS {
+        let group = slot.load(SeqCst);
+        if group > 0 {
+            // SAFETY: kill(2) is async-signal-safe and takes no pointer.
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+    }
+    // SAFETY: signal(2) and raise(3) are async-signal-safe; the default
+    // action ends this process as the signal would have.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+}
+
+/// Stop the groups this process started ([`CommandSpec::new_session`])
+/// when it is hung up, terminated or interrupted: a headless turn of the
+/// session wrapper leads a session of its own with no terminal, and would
+/// outlive a wrapper whose workspace was closed (ADR-t813-1 decision 3).
+/// Only the wrapper installs it.
+pub fn stop_groups_on_exit_signals() {
+    for signal in [libc::SIGHUP, libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: the handler only reads atomics and calls
+        // async-signal-safe functions.
+        unsafe { libc::signal(signal, stop_groups as *const () as libc::sighandler_t) };
+    }
+}
+
 /// Starts processes as children of this one.
 pub struct LocalSpawner;
 
@@ -76,24 +124,55 @@ impl Spawner for LocalSpawner {
                     .stderr(log);
             }
         }
-        Ok(Box::new(LocalChild(command.spawn()?)))
+        let child = command.spawn()?;
+        if spec.get_new_session() {
+            track(child.id() as i32);
+        }
+        Ok(Box::new(LocalChild(child, spec.get_new_session())))
     }
 }
 
-struct LocalChild(Child);
+/// A child, and whether it leads a session (and so a process group) of its
+/// own.
+struct LocalChild(Child, bool);
 
 impl Spawned for LocalChild {
     fn id(&self) -> u32 {
         self.0.id()
     }
     fn try_wait(&mut self) -> Result<Option<Exit>> {
-        Ok(self.0.try_wait()?.map(exit))
+        let status = self.0.try_wait()?;
+        if status.is_some() && self.1 {
+            untrack(self.0.id() as i32);
+        }
+        Ok(status.map(exit))
     }
     fn kill(&mut self) -> Result<()> {
         Ok(self.0.kill()?)
     }
     fn wait(&mut self) -> Result<Exit> {
-        Ok(exit(self.0.wait()?))
+        let status = self.0.wait()?;
+        if self.1 {
+            untrack(self.0.id() as i32);
+        }
+        Ok(exit(status))
+    }
+    fn kill_group(&mut self) -> Result<()> {
+        if !self.1 {
+            return self.kill();
+        }
+        untrack(self.0.id() as i32);
+        // SAFETY: kill(2) takes no pointer; a negative pid names the group
+        // the child leads.
+        let signaled = unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
+        if signaled == -1 {
+            let error = std::io::Error::last_os_error();
+            // A group that is gone has nothing left to stop.
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -170,6 +249,62 @@ mod tests {
         let fields = fs::read_to_string(&out).unwrap();
         let pgid = fields.split_whitespace().last().unwrap();
         assert_eq!(pgid, pid.to_string(), "{fields}");
+    }
+
+    #[test]
+    fn a_group_is_killed_with_what_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut spec = CommandSpec::new("/bin/sh");
+        spec.args([
+            "-c",
+            &format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+        ])
+        .new_session();
+        let mut child = LocalSpawner.spawn(&spec, Streams::Null).unwrap();
+        let tracked = |pid: u32| GROUPS.iter().any(|slot| slot.load(SeqCst) == pid as i32);
+        // Tracked for the exit signals of the process until it is killed.
+        assert!(tracked(child.id()));
+        let started = std::time::Instant::now();
+        let grandchild: libc::pid_t = loop {
+            if let Some(pid) = fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        child.kill_group().unwrap();
+        assert!(!tracked(child.id()));
+        assert!(!child.wait().unwrap().success);
+        // The sleep was in the group: gone too (reaped by init, or a zombie
+        // of nobody's for a moment).
+        let started = std::time::Instant::now();
+        // SAFETY: kill(2) with signal 0 only checks the pid.
+        while unsafe { libc::kill(grandchild, 0) } == 0 {
+            let stat = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &grandchild.to_string()])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&stat.stdout)
+                .trim()
+                .starts_with('Z')
+            {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Killing a group that is gone is no error.
+        child.kill_group().unwrap();
+        // A child that leads no group of its own is killed alone.
+        let mut alone = LocalSpawner
+            .spawn(CommandSpec::new("/bin/sleep").arg("30"), Streams::Null)
+            .unwrap();
+        alone.kill_group().unwrap();
+        assert!(!alone.wait().unwrap().success);
     }
 
     #[test]

@@ -18,7 +18,20 @@
 //! the `approve_landing` ask), and at the resume timeout otherwise.
 
 use super::*;
-use crate::domain::recovery::{IDLE_WITHOUT_RECEIPT, SEND_UNCONFIRMED};
+use crate::domain::recovery::{
+    IDLE_WITHOUT_RECEIPT, PERMISSION_DENIED, SEND_UNCONFIRMED, TURN_WITHOUT_RECEIPT,
+};
+use crate::domain::turn::HEADLESS_NUDGES;
+
+/// The reasons of the `stalled` alert of a session idle without a receipt:
+/// an interactive session's idle after its nudge, and a headless session's
+/// turn that ended so after its nudges, or refused too many permissions
+/// (ADR-t813-1 decision 9).
+pub(super) const IDLE_REASONS: [&str; 3] = [
+    IDLE_WITHOUT_RECEIPT,
+    TURN_WITHOUT_RECEIPT,
+    PERMISSION_DENIED,
+];
 
 /// The setting the idle detections are judged by.
 pub(super) const IDLE_THRESHOLD: &str = "idle_without_receipt_secs";
@@ -83,6 +96,8 @@ struct Nudge {
 #[derive(Debug, Clone, Copy)]
 struct Recovering {
     attempt: usize,
+    /// The alert's reason: one of [`IDLE_REASONS`].
+    reason: &'static str,
     /// When it was requested, on the files' wall clock.
     at: SystemTime,
     /// How long the session had been idle then.
@@ -112,6 +127,9 @@ struct Asked {
 #[derive(Debug, Clone, Default)]
 pub(super) struct StallWatch {
     nudge: Option<Nudge>,
+    /// How many nudges the phase sent: one for an interactive session, up
+    /// to [`HEADLESS_NUDGES`] for a headless one.
+    nudges: u8,
     /// The latest text the supervisor typed into the session: a marker no
     /// newer is not the end of a turn that answered it.
     last_input: Option<SystemTime>,
@@ -224,6 +242,12 @@ impl StallWatch {
             prime_input: true,
             ..Self::default()
         };
+        watch.nudges = events
+            .iter()
+            .filter(|e| e.kind == event_kind::STALL_NUDGED && e.payload["phase"] == PHASE)
+            .count()
+            .try_into()
+            .unwrap_or(u8::MAX);
         if let Some(event) = events
             .iter()
             .rev()
@@ -237,10 +261,11 @@ impl StallWatch {
             });
             watch.input_sent(at, None);
         }
-        // An answer the previous supervisor typed is an input too.
+        // An answer the previous supervisor typed is an input too, and so
+        // is every request it wrote for a headless session's next turn.
         for at in events
             .iter()
-            .filter(|e| e.kind == event_kind::ASK_DELIVERED)
+            .filter(|e| e.kind == event_kind::ASK_DELIVERED || e.kind == event_kind::TURN_REQUESTED)
             .filter_map(at_event)
         {
             watch.input_sent(at, None);
@@ -263,7 +288,9 @@ impl StallWatch {
         // repair restarted the count.
         let idle_job = |e: &&crate::domain::RunEvent| {
             e.payload["alert"] == RecoveryAlert::Stalled.as_str()
-                && e.payload["reason"] == IDLE_WITHOUT_RECEIPT
+                && IDLE_REASONS
+                    .iter()
+                    .any(|reason| e.payload["reason"] == *reason)
         };
         for at in events
             .iter()
@@ -307,8 +334,13 @@ impl StallWatch {
                             .as_array()
                             .is_some_and(|a| a.iter().any(|a| a != "wait"))
                 });
+                let reason = IDLE_REASONS
+                    .into_iter()
+                    .find(|reason| requested.payload["reason"] == *reason)
+                    .unwrap_or(IDLE_WITHOUT_RECEIPT);
                 watch.recovering = Some(Box::new(Recovering {
                     attempt,
+                    reason,
                     at: at_event(requested).unwrap_or(UNIX_EPOCH),
                     detected_after_secs: requested.payload["idle_secs"].as_i64().unwrap_or(0),
                     repaired_at: applied.and_then(at_event),
@@ -594,6 +626,7 @@ impl StallWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
         attempt: usize,
+        reason: &'static str,
         idle_secs: i64,
         now: SystemTime,
     ) -> Result<()> {
@@ -601,6 +634,7 @@ impl StallWatch {
         self.nudge_escalated(sv, run)?;
         self.recovering = Some(Box::new(Recovering {
             attempt,
+            reason,
             at: now,
             detected_after_secs: idle_secs,
             repaired_at: None,
@@ -648,6 +682,7 @@ impl StallWatch {
             outcome,
         );
         payload["attempt"] = json!(recovering.attempt);
+        payload["reason"] = json!(recovering.reason);
         Self::record_resolved(sv, run, payload, None, "recovery", outcome)
     }
 
@@ -831,7 +866,7 @@ impl StallWatch {
             }
         }
         if self.asked.is_some() {
-            self.watch_ask(sv, run, marker, now)?;
+            self.watch_ask(sv, run, marker, now, recovery.is_some())?;
             return Ok(None);
         }
         let Some(idle) = idle else {
@@ -856,7 +891,13 @@ impl StallWatch {
             .into_iter()
             .flatten()
             .fold(start, SystemTime::max);
-        let threshold = sv.stall.idle_without_receipt_secs;
+        // A headless turn that ended is done for good: nothing to wait out
+        // (ADR-t813-1 decision 9).
+        let threshold = if headless(run) {
+            0
+        } else {
+            sv.stall.idle_without_receipt_secs
+        };
         if secs_between(from, now) < threshold {
             return Ok(None);
         }
@@ -886,9 +927,26 @@ impl StallWatch {
             if open_input.is_some() || self.wait_from.is_none() {
                 return Ok(None);
             }
-            self.open_ask(sv, run, workspace, &idle, idle_secs, nudge, now, None)?;
+            // A headless session takes no turn by itself: after `wait` the
+            // ask follows its next turn.
+            if headless(run) && self.wait_from.is_some_and(|wait| idle.modified() <= wait) {
+                return Ok(None);
+            }
+            self.open_ask(sv, run, workspace, &idle, idle_secs, Some(nudge), now, None)?;
             return Ok(None);
         };
+        if headless(run) {
+            return self.observe_turn(
+                sv,
+                run,
+                workspace,
+                idle_marker,
+                &idle,
+                idle_secs,
+                now,
+                recovery,
+            );
+        }
         let screen = sv.cmux.capture(workspace);
         if open_input.is_some() && screen.as_ref().ok().is_none_or(|s| sv.signals.working(s)) {
             return Ok(None);
@@ -909,11 +967,79 @@ impl StallWatch {
             // A person answered `wait` to the ask the stall came to: asked
             // again, without another job (ADR-0047 decision 30).
             Some(nudge) if self.wait_from.is_some() => {
-                self.open_ask(sv, run, workspace, &idle, idle_secs, nudge, now, None)?;
+                self.open_ask(sv, run, workspace, &idle, idle_secs, Some(nudge), now, None)?;
                 Ok(None)
             }
-            Some(nudge) => self.recover(sv, run, workspace, &idle, idle_secs, nudge, now, recovery),
+            Some(nudge) => self.recover(
+                sv,
+                run,
+                workspace,
+                &idle,
+                idle_secs,
+                Some(nudge),
+                now,
+                recovery,
+                IDLE_WITHOUT_RECEIPT,
+            ),
         }
+    }
+
+    /// A headless session's turn ended with neither a receipt nor an open
+    /// question (ADR-t813-1 decision 9): a login or a usage limit of its
+    /// provider holds the queue for a person; a turn refused too many
+    /// permissions goes to its recovery job at once (`permission_denied`);
+    /// otherwise it is nudged, one resume per nudge, up to
+    /// [`HEADLESS_NUDGES`] times, and then goes to its recovery job
+    /// (`turn_without_receipt`). After a person's `wait` the ask follows.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_turn(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        idle_marker: &Path,
+        idle: &IdleMarker,
+        idle_secs: i64,
+        now: SystemTime,
+        recovery: StallRecovery<'_, '_>,
+    ) -> Result<Option<StartCheck>> {
+        let mark = last_turn(sv, idle_marker);
+        // A turn that failed or was stopped ends the session: its run goes
+        // to its recovery job once the wrapper exited, and nothing is sent.
+        if mark.is_some_and(|mark| !mark.outcome.goes_on(mark.failure)) {
+            return Ok(None);
+        }
+        if let Some(failure) = provider_failure(mark) {
+            raise_turn_failure(sv, run, workspace, failure)?;
+            return Ok(None);
+        }
+        // After a person's `wait` the ask follows the next turn: a headless
+        // session takes none by itself.
+        if let Some(wait) = self.wait_from {
+            if idle.modified() > wait {
+                self.open_ask(sv, run, workspace, idle, idle_secs, self.nudge, now, None)?;
+            }
+            return Ok(None);
+        }
+        if let Some(reason) = alert_at_once(mark) {
+            return self.recover(
+                sv, run, workspace, idle, idle_secs, self.nudge, now, recovery, reason,
+            );
+        }
+        if usize::from(self.nudges) < HEADLESS_NUDGES && self.recovering.is_none() {
+            return self.send_nudge(sv, run, workspace, idle, idle_secs, now);
+        }
+        self.recover(
+            sv,
+            run,
+            workspace,
+            idle,
+            idle_secs,
+            self.nudge,
+            now,
+            recovery,
+            TURN_WITHOUT_RECEIPT,
+        )
     }
 
     /// The session stays idle without a receipt after its nudge: its
@@ -932,12 +1058,13 @@ impl StallWatch {
         workspace: &str,
         idle: &IdleMarker,
         idle_secs: i64,
-        nudge: Nudge,
+        nudge: Option<Nudge>,
         now: SystemTime,
         stall: StallRecovery<'_, '_>,
+        why: &'static str,
     ) -> Result<Option<StartCheck>> {
         self.followed = true;
-        let reason = Some(IDLE_WITHOUT_RECEIPT);
+        let reason = Some(why);
         let StallRecovery { recovery, live } = stall;
         // The nudge is the evidence of the alert.
         let evidence: Vec<EventId> = if recovery
@@ -960,11 +1087,27 @@ impl StallWatch {
             "idle_secs": idle_secs,
             "threshold": IDLE_THRESHOLD,
             "threshold_secs": sv.stall.idle_without_receipt_secs,
-            "nudged_secs_ago": secs_between(nudge.at, now),
+            "nudged_secs_ago": nudge.map(|nudge| secs_between(nudge.at, now)),
+            "nudges": self.nudges,
             "background_running": idle.background_running_evidence(),
             "background_tasks": idle.background_tasks(),
             "evidence": evidence,
         });
+        // A headless session's last turn, as its idle marker says it
+        // (ADR-t813-1): its turns are in the job's material too.
+        let mut facts = facts;
+        if let Some(mark) = headless(run)
+            .then(|| run.idle_marker_path().ok())
+            .flatten()
+            .and_then(|marker| last_turn(sv, &marker))
+        {
+            facts["turn"] = json!({
+                "turn": mark.turn,
+                "outcome": mark.outcome,
+                "failure": mark.failure,
+                "permission_denials": mark.permission_denials,
+            });
+        }
         let step = recovery.follow_for(sv, run, live, RecoveryAlert::Stalled, reason, || facts)?;
         if let Some(attempt) = recovery.running_for(RecoveryAlert::Stalled, reason)
             && self
@@ -972,8 +1115,8 @@ impl StallWatch {
                 .as_ref()
                 .is_none_or(|r| r.attempt != attempt)
         {
-            info!(run_id = %run.id(), "run {} stays idle without a receipt {idle_secs}s after its nudge; recovery job {attempt} looks at it", run.id());
-            self.recovery_started(sv, run, attempt, idle_secs, now)?;
+            info!(run_id = %run.id(), "run {} stays idle without a receipt {idle_secs}s after its nudge ({why}); recovery job {attempt} looks at it", run.id());
+            self.recovery_started(sv, run, attempt, why, idle_secs, now)?;
         }
         match step {
             LiveStep::Pending => Ok(None),
@@ -996,7 +1139,7 @@ impl StallWatch {
             }
             LiveStep::Escalate(attempt, escalation) => {
                 let note = escalation.note(run, RecoveryAlert::Stalled, attempt);
-                let extra = json!({"reason": IDLE_WITHOUT_RECEIPT});
+                let extra = json!({"reason": why});
                 // A `stalled` ask another alert opened meanwhile already
                 // has a person looking.
                 if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
@@ -1051,11 +1194,29 @@ impl StallWatch {
                 "workspace_id": workspace,
             }),
         )?;
+        // A headless session's next nudge follows one that did not move
+        // it on.
+        if let Some(nudge) = &mut self.nudge
+            && !nudge.settled
+        {
+            nudge.settled = true;
+            let nudge = *nudge;
+            Self::resolved(
+                sv,
+                run,
+                "nudge",
+                None,
+                nudge.detected_after_secs,
+                nudge.at,
+                "nudged_again",
+            )?;
+        }
         self.nudge = Some(Nudge {
             at: now,
             detected_after_secs: idle_secs,
             settled: false,
         });
+        self.nudges = self.nudges.saturating_add(1);
         let text = stall_nudge(run, idle_secs, background)?;
         let sent_at = sv.files.now();
         match submit(sv, run, workspace, Input::Text(&text), "nudge") {
@@ -1083,7 +1244,7 @@ impl StallWatch {
         workspace: &str,
         idle: &IdleMarker,
         idle_secs: i64,
-        nudge: Nudge,
+        nudge: Option<Nudge>,
         now: SystemTime,
         note: Option<&Note>,
     ) -> Result<AskId> {
@@ -1098,20 +1259,39 @@ impl StallWatch {
                 .collect::<Vec<_>>()
                 .join("\n"),
         };
-        let screen = match sv.cmux.capture(workspace) {
-            Ok(screen) => sv.signals.screen_excerpt(&screen),
-            Err(error) => format!("(the screen could not be read: {error:#})"),
-        };
         let recovered = note.map_or_else(String::new, |note| {
             format!(" And {}.\n{}\n", note.why, note.text)
         });
-        let question = format!(
-            "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), although the supervisor nudged it {nudged}s ago to write its receipt, ask a worker_question or say what it waits for.{recovered} Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
-            run_id = run.id(),
-            task_id = run.task_id(),
-            nudged = secs_between(nudge.at, now),
-            threshold = sv.stall.idle_without_receipt_secs,
+        let nudged = nudge.map_or_else(
+            || "although its turns were refused permissions too often to get on".to_owned(),
+            |nudge| {
+                format!(
+                    "although the supervisor nudged it {}s ago to write its receipt, ask a worker_question or say what it waits for",
+                    secs_between(nudge.at, now)
+                )
+            },
         );
+        let question = if headless(run) {
+            // A headless session has no screen and takes no keys: a
+            // person steps in through the run (ADR-t813-1 decision 4).
+            format!(
+                "The headless session of run {run_id} (task {task_id}) ended its turn without a receipt or an open question ({idle_secs}s ago, phase: {PHASE}), {nudged}.{recovered} Answer `wait` to leave the session alone (the supervisor asks again after its next turn), or `intervene` to step in yourself (a headless session takes no keys: stop the run and recover it, see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\n{turns}",
+                run_id = run.id(),
+                task_id = run.task_id(),
+                turns = turns_excerpt(sv, run),
+            )
+        } else {
+            let screen = match sv.cmux.capture(workspace) {
+                Ok(screen) => sv.signals.screen_excerpt(&screen),
+                Err(error) => format!("(the screen could not be read: {error:#})"),
+            };
+            format!(
+                "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), {nudged}.{recovered} Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
+                run_id = run.id(),
+                task_id = run.task_id(),
+                threshold = sv.stall.idle_without_receipt_secs,
+            )
+        };
         let options = stalled_options(note);
         let outcome = ask::ask(
             &mut *sv.queue,
@@ -1138,7 +1318,9 @@ impl StallWatch {
             applied: false,
             threshold: IDLE_THRESHOLD,
         });
-        if !nudge.settled {
+        if let Some(nudge) = nudge
+            && !nudge.settled
+        {
             self.nudge = Some(Nudge {
                 settled: true,
                 ..nudge
@@ -1170,20 +1352,22 @@ impl StallWatch {
         }
         let marker = sv.files.modified(idle_marker).ok();
         let now = sv.files.now();
-        self.watch_ask(sv, run, marker, now)
+        self.watch_ask(sv, run, marker, now, true)
     }
 
     /// Follow the `stalled` ask: close it when the session ended a turn
     /// since (by itself, or after a person stepped in), and apply its
     /// answer: `wait` restarts the count and closes it; anything else is a
     /// person stepping in, and no ask follows until the session ends a turn
-    /// after it.
+    /// after it; for a headless session any other answer is its next turn,
+    /// sent only when `send` (the run is in its slot).
     fn watch_ask(
         &mut self,
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
         marker: Option<SystemTime>,
         now: SystemTime,
+        send: bool,
     ) -> Result<()> {
         let Some(asked) = self.asked else {
             return Ok(());
@@ -1248,6 +1432,38 @@ impl StallWatch {
                     self.wait_from = Some(now);
                 }
                 info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered wait; counting its idle again", ask.id, run.id());
+            }
+            // A headless session takes no keys: a person's answer other
+            // than `intervene` is its next turn's prompt (ADR-t813-1
+            // decision 6).
+            Some(answer) if headless(run) && !answer.starts_with("intervene") => {
+                // Sent once the run is back in its slot.
+                if !send {
+                    return Ok(());
+                }
+                let text = format!("answer to ask {}: {answer}", ask.id);
+                let workspace = run.workspace_id().unwrap_or_default().to_owned();
+                let sent_at = sv.files.now();
+                submit(
+                    sv,
+                    run,
+                    &workspace,
+                    Input::Text(&text),
+                    "answer of the stalled ask",
+                )?;
+                self.input_sent(sent_at, Some(&text));
+                sv.queue.close_ask(ask.id)?;
+                Self::resolved(
+                    sv,
+                    run,
+                    "ask",
+                    Some((ask.id, asked.threshold)),
+                    asked.detected_after_secs,
+                    asked.at,
+                    "answered_instruction",
+                )?;
+                self.asked = None;
+                info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered; its answer is the headless session's next turn", ask.id, run.id());
             }
             Some(_) => {
                 Self::resolved(

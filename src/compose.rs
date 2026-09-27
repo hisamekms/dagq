@@ -45,7 +45,7 @@ use crate::{
         slot_limits::{SlotFlags, SlotLimits, SupervisorConfig},
         stall::StallConfig,
         stats::{ConflictConfigReport, StatsQuery},
-        worker::{ProviderCheck, Worker},
+        worker::{ProviderCheck, Worker, WorkerMode},
     },
     infrastructure::{
         adapters::{
@@ -1971,20 +1971,27 @@ fn bound_main_checkout(queue: &SqliteQueue) -> Result<Option<Result<PathBuf>>> {
 }
 
 /// The adapters of each worker this binary runs (ADR-t813-2), by provider
-/// and mode: Claude Code's interactive session for now. The non-interactive
-/// mode and the Codex worker are added here as they are built.
+/// and mode: Claude Code's interactive session and its headless turns
+/// (`claude -p`, ADR-t813-1). The Codex worker is added here as it is
+/// built.
 pub fn worker_adapters<'a>(
     claude: &'a ClaudeCode,
     transcripts: &'a ClaudeTranscripts,
 ) -> WorkerAdapters<'a> {
-    WorkerAdapters::default().with(
-        Worker::DEFAULT,
-        WorkerAdapter {
-            agent: claude,
-            signals: claude,
-            transcripts,
-        },
-    )
+    let adapter = WorkerAdapter {
+        agent: claude,
+        signals: claude,
+        transcripts,
+    };
+    WorkerAdapters::default()
+        .with(Worker::DEFAULT, adapter)
+        .with(
+            Worker {
+                provider: Provider::Claude,
+                mode: WorkerMode::Headless,
+            },
+            adapter,
+        )
 }
 
 /// Each provider's executable as `claude` and `codex` resolve, with the
@@ -2061,6 +2068,9 @@ pub fn session(
     let cmux = Cmux {
         executable: cmux.into(),
     };
+    // A headless turn outlives a wrapper killed with its workspace unless
+    // the wrapper stops it (ADR-t813-1 decision 3).
+    crate::infrastructure::process::stop_groups_on_exit_signals();
     run_session(
         db,
         id,

@@ -40,6 +40,10 @@ pub(super) fn answer_known_dialog(
     exit_requested: bool,
     recovery: Option<(RecoveryAlert, usize)>,
 ) -> Result<bool> {
+    // A headless session has no dialog: its terminal only shows its turns.
+    if headless(run) {
+        return Ok(false);
+    }
     let Some(answer) = sv.signals.known_dialog(screen) else {
         return Ok(false);
     };
@@ -118,6 +122,9 @@ pub(super) fn answer_exit_dialog(
     workspace: &str,
     exit_typed: bool,
 ) -> Result<bool> {
+    if headless(run) {
+        return Ok(false);
+    }
     match sv.cmux.capture(workspace) {
         Ok(screen)
             if sv
@@ -180,6 +187,9 @@ pub(super) fn known_dialog_ready(
     exit_typed: bool,
     want: &str,
 ) -> std::result::Result<(), String> {
+    if headless(run) {
+        return Err("a headless session has no dialog".to_owned());
+    }
     let screen = sv
         .cmux
         .capture(workspace)

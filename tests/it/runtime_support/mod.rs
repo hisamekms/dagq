@@ -128,17 +128,30 @@ pub struct StubSpawner {
 
 impl Spawner for StubSpawner {
     fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
-        assert!(matches!(streams, Streams::Inherit), "the agent's terminal");
         let mut stubs = stubs();
         let Some(groups) = stubs.entry(self.db.clone()).or_insert(Some(Vec::new())) else {
             bail!("the test's fixture is gone");
         };
-        let child = process::command(spec)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()?;
+        let mut command = process::command(spec);
+        command.stdin(Stdio::null());
+        match streams {
+            // The agent's terminal.
+            Streams::Inherit => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+            // A headless turn's output (ADR-t813-1).
+            Streams::Files { stdout, stderr } => {
+                command
+                    .stdout(fs::File::create(stdout)?)
+                    .stderr(fs::File::create(stderr)?);
+            }
+            other => panic!("an agent's streams go to its terminal or its files: {other:?}"),
+        }
+        // A command in a session of its own leads its group already.
+        if !spec.get_new_session() {
+            command.process_group(0);
+        }
+        let child = command.spawn()?;
         groups.push(child.id());
         Ok(Box::new(Stub(child)))
     }
@@ -158,6 +171,12 @@ impl Spawned for Stub {
     }
     fn wait(&mut self) -> Result<Exit> {
         Ok(process::exit(self.0.wait()?))
+    }
+    /// Every stub leads its own group.
+    fn kill_group(&mut self) -> Result<()> {
+        // SAFETY: kill(2) takes no pointer; a negative pid names the group.
+        unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
+        Ok(())
     }
 }
 
@@ -572,6 +591,9 @@ pub struct TestWorkspace {
     /// the "Background work is running" screen lets a held session exit,
     /// and Escape closes the Settings panel.
     pub keys: Mutex<Vec<String>>,
+    /// The `claude` a headless run's wrapper calls for its turns
+    /// ([`headless_claude`]); a headless run fails its wrapper without one.
+    pub headless: Option<PathBuf>,
 }
 
 impl TestWorkspace {
@@ -614,6 +636,7 @@ impl TestWorkspace {
             close_ends_session: false,
             close_times_out: false,
             keys: Mutex::new(Vec::new()),
+            headless: None,
         }
     }
     /// Let cmux list `workspace` as if an earlier supervisor opened it.
@@ -720,12 +743,22 @@ impl WorkspaceBackend for TestWorkspace {
             ));
             return Ok(workspace);
         }
+        let headless = headless_provider(run, self.headless.as_deref());
         let worker = thread::spawn(move || {
+            let spawner = StubSpawner { db: db.clone() };
+            if let Some(provider) = headless {
+                return runtime::session_with_provider(
+                    &db,
+                    &id,
+                    &LeaseToken::new(&token),
+                    &provider,
+                    &spawner,
+                );
+            }
             let provider = TestProvider {
                 script,
                 db: db.clone(),
             };
-            let spawner = StubSpawner { db: db.clone() };
             runtime::session_with_provider(&db, &id, &LeaseToken::new(&token), &provider, &spawner)
         });
         sessions.push((
@@ -772,13 +805,17 @@ impl WorkspaceBackend for TestWorkspace {
             tags.description.as_deref(),
             Some(format!("run {} resume", run.id()).as_str())
         );
-        let script = self
-            .resume_scripts
-            .lock()
-            .unwrap()
-            .get(&run.task_id())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("no resume script for task {}", run.task_id()))?;
+        let headless = headless_provider(run, self.headless.as_deref());
+        let script = match &headless {
+            Some(_) => String::new(),
+            None => self
+                .resume_scripts
+                .lock()
+                .unwrap()
+                .get(&run.task_id())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no resume script for task {}", run.task_id()))?,
+        };
         let token: String = Connection::open(&self.db)?.query_row(
             "SELECT token FROM run_leases WHERE run_id=?1",
             [&run.id()],
@@ -799,11 +836,20 @@ impl WorkspaceBackend for TestWorkspace {
         let mut sessions = self.sessions.lock().unwrap();
         let workspace = workspace_id(sessions.len());
         let worker = thread::spawn(move || {
+            let spawner = StubSpawner { db: db.clone() };
+            if let Some(provider) = headless {
+                return runtime::resume_session_with_provider(
+                    &db,
+                    &id,
+                    &LeaseToken::new(&token),
+                    &provider,
+                    &spawner,
+                );
+            }
             let provider = TestProvider {
                 script,
                 db: db.clone(),
             };
-            let spawner = StubSpawner { db: db.clone() };
             runtime::resume_session_with_provider(
                 &db,
                 &id,
@@ -1059,6 +1105,140 @@ impl WorkspaceBackend for TestWorkspace {
         ));
         Ok(())
     }
+}
+
+/// The provider of a headless run's wrapper (ADR-t813-1): Claude Code's own
+/// turns and reader, calling the stub `claude` at `claude`, with the test
+/// tick. `None` for an interactive run.
+fn headless_provider(run: &TaskRun, claude: Option<&Path>) -> Option<HeadlessProvider> {
+    (run.worker_mode() == dagq::domain::worker::WorkerMode::Headless).then(|| HeadlessProvider {
+        claude: dagq::infrastructure::adapters::ClaudeCode {
+            executable: claude
+                .unwrap_or(Path::new("/nonexistent/headless-claude"))
+                .to_owned(),
+        },
+    })
+}
+
+/// Claude Code's headless turns (the real `turn_command` and reader) with
+/// the stub `claude` of [`headless_claude`]; a turn's model and effort go
+/// on its command line as they would.
+pub struct HeadlessProvider {
+    pub claude: dagq::infrastructure::adapters::ClaudeCode,
+}
+
+impl AgentProvider for HeadlessProvider {
+    fn preflight(&self) -> Result<()> {
+        Ok(())
+    }
+    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+        bail!("a headless worker starts no interactive session")
+    }
+    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
+        bail!("a headless worker starts no interactive session")
+    }
+    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+        unreachable!("sessions do not review")
+    }
+    fn wait_interval(&self) -> Duration {
+        TEST_TICK
+    }
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        self.claude.select_model(command, model, effort);
+    }
+    fn turn_command(&self, run: &TaskRun, prompt: &str, resume: bool) -> Result<CommandSpec> {
+        self.claude.turn_command(run, prompt, resume)
+    }
+    fn turn_reader(&self) -> Result<Box<dyn dagq::application::TurnReader>> {
+        self.claude.turn_reader()
+    }
+    fn turn_permission_mode(&self) -> Option<&'static str> {
+        self.claude.turn_permission_mode()
+    }
+}
+
+/// A stub `claude` for headless turns (ADR-t813-1), in `dir`: it takes
+/// `claude -p`'s arguments, appends `<start|resume> <session> <prompt's
+/// first line>` to `stub-calls.log` in the run directory (`--add-dir`),
+/// prints `system/init` in stream-json with the permission mode it was
+/// given (or `$PERMISSION_SAID`), then sources `turn.sh` next to it (see
+/// [`set_turns`]) and prints a result unless the turn did. `$TURN` is the
+/// turn's number in the run, `$PROMPT` its prompt, `$MODE` `start` or
+/// `resume`, `$SESSION` the session id. The turn's helpers: `say TEXT`,
+/// `result [TEXT]` (with `$DENIALS` as its `permission_denials`),
+/// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
+/// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`.
+pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
+    let stub = dir.join("claude-headless");
+    let turns = dir.join("turn.sh");
+    let script = format!(
+        r#"#!/bin/sh
+MODE=; SESSION=; RUN_DIR=; PERMISSION=; PROMPT=
+ARGS="$*"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id) MODE=start; SESSION=$2; shift 2 ;;
+    --resume) MODE=resume; SESSION=$2; shift 2 ;;
+    --add-dir) RUN_DIR=$2; shift 2 ;;
+    --permission-mode) PERMISSION=$2; shift 2 ;;
+    --output-format|--debug-file|--settings|--model|--effort) shift 2 ;;
+    --) PROMPT=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+DAGQ={dagq}
+DB={db}
+RECEIPT="$RUN_DIR/receipt.json"
+printf '%s %s %s\n' "$MODE" "$SESSION" "$(printf '%s\n' "$PROMPT" | head -n 1 | cut -c1-80)" >> "$RUN_DIR/stub-calls.log"
+printf '%s\n' "$ARGS" | head -n 1 >> "$RUN_DIR/stub-args.log"
+TURN=$(wc -l < "$RUN_DIR/stub-calls.log" | tr -d ' ')
+DENIALS=
+RESULTED=
+say() {{ printf '{{"type":"assistant","message":{{"model":"stub","content":[{{"type":"text","text":"%s"}}]}}}}\n' "$1"; }}
+result() {{
+  printf '{{"type":"result","subtype":"success","is_error":false,"num_turns":2,"duration_ms":5,"total_cost_usd":0.01,"session_id":"%s","result":"%s","usage":{{"input_tokens":7,"output_tokens":3}},"permission_denials":[%s]}}\n' "$SESSION" "${{1:-done}}" "$DENIALS"
+  RESULTED=1
+}}
+denied() {{ DENIALS='{{"tool_name":"Bash","tool_use_id":"t1","tool_input":{{}}}},{{"tool_name":"Bash","tool_use_id":"t2","tool_input":{{}}}},{{"tool_name":"Edit","tool_use_id":"t3","tool_input":{{}}}}'; }}
+fail() {{
+  printf '{{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"session_id":"%s","result":"%s"}}\n' "$SESSION" "$1"
+  exit 1
+}}
+commit() {{ printf 'change by %s turn %s\n' "$SESSION" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
+receipt() {{
+  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$SESSION" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
+  mv "$RECEIPT.tmp" "$RECEIPT"
+}}
+ask() {{ "$DAGQ" --db "$DB" ask --run "$SESSION" --kind worker_question --because scope --question "$1" >/dev/null; }}
+printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
+. {turns}
+[ -n "$RESULTED" ] || result
+"#,
+        dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
+        db = shell_join(&[db.display().to_string()]),
+        turns = shell_join(&[turns.display().to_string()]),
+    );
+    fs::write(&stub, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    set_turns(dir, "say working");
+    stub
+}
+
+/// What the stub of [`headless_claude`] in `dir` does in a turn: a shell
+/// script, usually a `case "$TURN"`.
+pub fn set_turns(dir: &Path, script: &str) {
+    fs::write(dir.join("turn.sh"), script).unwrap();
+}
+
+/// The calls the stub of [`headless_claude`] got for `run`, one line each:
+/// `<start|resume> <session> <prompt's first line>`.
+pub fn stub_calls(run: &TaskRun) -> Vec<String> {
+    fs::read_to_string(Path::new(run.run_dir().unwrap()).join("stub-calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// /bin/sh --version is not portable; a tiny standalone provider preflight stub.

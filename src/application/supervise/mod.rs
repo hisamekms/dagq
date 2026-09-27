@@ -106,6 +106,7 @@ mod finding_planner;
 mod forecast;
 mod goal_review;
 mod handoff;
+mod headless;
 mod idle;
 mod jobs;
 mod landing;
@@ -134,8 +135,8 @@ pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
-    deliver::*, dialog::*, exit::*, idle::*, jobs::*, recovery::*, resume::*, revise::*,
-    session::*, stale::*, stall::*, sweep::*, waiting::*,
+    deliver::*, dialog::*, exit::*, headless::*, idle::*, jobs::*, recovery::*, resume::*,
+    revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
 };
 
 /// How often the supervisor records the finished transcript turns of the
@@ -1771,7 +1772,7 @@ impl Supervisor<'_> {
         } else {
             let failed = |why: String| (ABANDON_EXIT_FAILED, Some(why));
             match submit(self, &slot.run, &workspace, Input::Exit, "/exit") {
-                Ok(Submission::Submitted(_)) => (ABANDON_EXIT_SENT, None),
+                Ok(Submission::Submitted(_) | Submission::Queued) => (ABANDON_EXIT_SENT, None),
                 Ok(Submission::Dialog(_)) => {
                     failed("a dialog is on the screen, so /exit was not submitted".into())
                 }

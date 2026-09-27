@@ -77,6 +77,24 @@ pub const IDLE_WITHOUT_RECEIPT: &str = "idle_without_receipt";
 /// decision 31).
 pub const SEND_UNCONFIRMED: &str = "send_unconfirmed";
 
+/// The reason of a headless session's `stalled` alert (ADR-t813-1
+/// decision 9): its turn ended with neither a receipt nor an open
+/// question, and the runtime's nudges were used up.
+pub const TURN_WITHOUT_RECEIPT: &str = "turn_without_receipt";
+
+/// The other reason of a headless session's `stalled` alert: its turn
+/// ended with neither a receipt nor an open question, refused a
+/// permission too many times to get on.
+pub const PERMISSION_DENIED: &str = "permission_denied";
+
+/// The actions for a headless session's `stalled` alert (ADR-t813-1
+/// decision 9): an instruction (sent as the prompt of the session's next
+/// turn), stopping processes of the run (a turn among them), `resume` (the
+/// run parked for a session of its own) and `wait`. No dialog is ever
+/// answered: a headless session has none.
+pub const HEADLESS_STALLED_ACTIONS: [&str; 4] =
+    ["send_instruction", "stop_processes", "resume", "wait"];
+
 impl RecoveryAlert {
     /// The alert of a run that ended `failed` or `interrupted` without a
     /// pending request of its own (`resume_exhausted` records one).

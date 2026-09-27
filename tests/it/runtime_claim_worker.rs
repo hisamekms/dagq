@@ -110,21 +110,18 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
     assert_eq!(runs_of(&db, codex).len(), 0);
 }
 
-/// A supervisor with the adapters of interactive Claude only (ADR-t813-2)
-/// does not claim a Codex task (`provider_unavailable`) nor a headless
-/// Claude one (`mode_unavailable`): each deferral is recorded once, with
-/// the worker, and shown by `status`; the task of interactive Claude is
-/// claimed beside them. A task that leaves the candidates ends its
-/// deferral.
+/// A supervisor with the adapters of Claude only (interactive and headless,
+/// ADR-t813-2) does not claim a Codex task (`provider_unavailable`): the
+/// deferral is recorded once, with the worker, and shown by `status`; the
+/// task of interactive Claude is claimed beside it. A task that leaves the
+/// candidates ends its deferral. (A mode the binary lacks for a provider it
+/// has, `mode_unavailable`, is judged the same way: `domain::worker`.)
 #[test]
 fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     let (_dir, repo, db) = fixture();
-    let (codex, headless) = {
+    let codex = {
         let mut queue = SqliteQueue::open(&db).unwrap();
-        (
-            add_task(&mut queue, "codex", Some(Provider::Codex), None),
-            add_task(&mut queue, "headless", None, Some(WorkerMode::Headless)),
-        )
+        add_task(&mut queue, "codex", Some(Provider::Codex), None)
     };
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let outcome = supervise_with(&db, &repo, &backend, &supervise_options(3, true)).unwrap();
@@ -135,39 +132,29 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     assert_eq!(claimed[0].worker_mode(), WorkerMode::Interactive);
     assert_eq!(claimed[0].requested_provider(), Provider::Claude);
     assert!(runs_of(&db, codex).is_empty());
-    assert!(runs_of(&db, headless).is_empty());
     let deferred = events(&db, "claim_deferred");
-    assert_eq!(deferred.len(), 2, "{deferred:?}");
-    let of = |task: TaskId| {
-        deferred
-            .iter()
-            .find(|(id, _)| *id == Some(task))
-            .map(|(_, payload)| payload.clone())
-            .unwrap()
-    };
-    let payload = of(codex);
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    let (task, payload) = &deferred[0];
+    assert_eq!(*task, Some(codex));
     assert_eq!(payload["reason"], "provider_unavailable");
     assert_eq!(payload["provider"], "codex");
     assert_eq!(payload["worker_mode"], "headless");
     assert!(payload["message"].as_str().unwrap().contains("codex"));
-    assert_eq!(of(headless)["reason"], "mode_unavailable");
     let status = runtime::status(&db).unwrap();
-    let mut reasons: Vec<(Value, Value)> = status["claim_deferrals"]
+    let reasons: Vec<(Value, Value)> = status["claim_deferrals"]
         .as_array()
         .unwrap()
         .iter()
         .map(|open| (open["task_id"].clone(), open["reason"].clone()))
         .collect();
-    reasons.sort_by_key(|(task, _)| task.as_i64());
-    assert_eq!(
-        reasons,
-        [
-            (json!(codex), json!("provider_unavailable")),
-            (json!(headless), json!("mode_unavailable"))
-        ]
-    );
+    assert_eq!(reasons, [(json!(codex), json!("provider_unavailable"))]);
 
-    // Deferred still, not recorded again; the canceled one ends.
+    // Deferred still, not recorded again; canceled, it ends.
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise_with(&db, &repo, &backend, &supervise_options(3, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(events(&db, "claim_deferred").len(), 1);
     SqliteQueue::open(&db)
         .unwrap()
         .transition(codex, TaskAction::Cancel)
@@ -176,8 +163,6 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     let outcome = supervise_with(&db, &repo, &backend, &supervise_options(3, true)).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(events(&db, "claim_deferred").len(), 2);
-    assert!(runs_of(&db, headless).is_empty());
     let ended = events(&db, "claim_deferral_ended");
     assert_eq!(ended.len(), 1, "{ended:?}");
     assert_eq!(ended[0].0, Some(codex));
@@ -221,7 +206,7 @@ fn the_providers_are_recorded_on_the_registration() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(providers[0]["provider"], "claude", "{providers}");
     assert_eq!(providers[0]["found"], true);
-    assert_eq!(providers[0]["modes"], json!(["interactive"]));
+    assert_eq!(providers[0]["modes"], json!(["interactive", "headless"]));
     assert_eq!(providers[1]["provider"], "codex");
     assert_eq!(
         providers[1]["executable"],

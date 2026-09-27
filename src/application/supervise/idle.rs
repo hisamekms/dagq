@@ -184,6 +184,11 @@ impl Supervisor<'_> {
         phase: &str,
     ) -> Result<Option<IdleMarker>> {
         let marker = IdleMarker::read(&*self.files, self.signals, idle_marker)?;
+        // A headless session's wrapper writes the marker when each turn
+        // ends: there is no screen to infer from (ADR-t813-1).
+        if headless(run) {
+            return Ok(marker);
+        }
         let last_input = screen_idle::last_input(&*self.files, idle_marker, after);
         let state = match &marker {
             None => MarkerState::Missing,

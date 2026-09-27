@@ -3,7 +3,8 @@
 //! registers itself under the run's lease, starts the agent through the
 //! [`Spawner`] with the run's prompt, heartbeats while the agent runs and
 //! records its exit (ADR-0007). `resume` reopens the session of a
-//! `needs_session` run instead (ADR-0019).
+//! `needs_session` run instead (ADR-0019). A headless worker's wrapper
+//! runs its turns instead of one agent (ADR-t813-1, `headless_session`).
 
 use crate::domain::LeaseToken;
 use anyhow::{Context, Result, ensure};
@@ -14,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::headless_session::Turns;
 use super::{
     AgentProvider, Queue, RunFiles, Spawner, WorkspaceBackend,
     actor_executor::{
@@ -22,7 +24,8 @@ use super::{
     },
 };
 use crate::domain::{
-    ActorContext, ReasonCode, RunId, TaskRun, run::run_workspaces, worker_model::WorkerSession,
+    ActorContext, ReasonCode, RunId, TaskRun, run::run_workspaces, worker::WorkerMode,
+    worker_model::WorkerSession,
 };
 use tracing::warn;
 
@@ -146,17 +149,32 @@ pub fn run_session(
         }
     };
     let mut child_may_be_alive = false;
-    let result = drive_agent(
-        queue,
-        db,
-        &run,
-        provider,
-        spawner,
-        files,
-        pid,
-        resume,
-        &mut child_may_be_alive,
-    );
+    // A headless worker runs one call per turn (ADR-t813-1).
+    let result = if run.worker_mode() == WorkerMode::Headless {
+        Turns {
+            queue: &mut *queue,
+            db,
+            run: &run,
+            provider,
+            spawner,
+            files,
+            pid,
+            resume,
+        }
+        .drive(&mut child_may_be_alive)
+    } else {
+        drive_agent(
+            queue,
+            db,
+            &run,
+            provider,
+            spawner,
+            files,
+            pid,
+            resume,
+            &mut child_may_be_alive,
+        )
+    };
     match result {
         Ok(code) => {
             record_exit(queue, id, pid, code)?;

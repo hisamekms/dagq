@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod asks;
 pub mod binaries;
 pub mod claude;
+pub mod claude_turns;
 pub mod clock;
 pub mod d2;
 pub mod denials;

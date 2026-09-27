@@ -12,6 +12,7 @@ pub mod commands;
 pub mod diagram;
 pub mod execution;
 pub mod forecast;
+mod headless_session;
 pub mod health;
 pub mod install;
 pub mod integrate;

@@ -84,6 +84,16 @@ pub enum SessionAgent<'a> {
     Worker { run: &'a TaskRun, prompt: &'a str },
     /// The same session reopened for a `needs_session` run (ADR-0019).
     Resume { run: &'a TaskRun },
+    /// One turn of a headless worker (ADR-t813-1): `prompt` starting its
+    /// session or, with `resume`, going on with it, its output to `stdout`
+    /// and `stderr` rather than the wrapper's terminal.
+    Turn {
+        run: &'a TaskRun,
+        prompt: &'a str,
+        resume: bool,
+        stdout: &'a Path,
+        stderr: &'a Path,
+    },
     /// A planner (ADR-0041).
     Planner(PlannerCommand<'a>),
 }
@@ -166,7 +176,10 @@ impl ActorProgram<'_> {
         match self {
             Self::RunWorkspace { .. }
             | Self::SessionAgent {
-                agent: SessionAgent::Worker { .. } | SessionAgent::Resume { .. },
+                agent:
+                    SessionAgent::Worker { .. }
+                    | SessionAgent::Resume { .. }
+                    | SessionAgent::Turn { .. },
                 ..
             } => &[ActorRole::Worker],
             Self::SessionAgent {
@@ -201,7 +214,10 @@ impl ActorProgram<'_> {
         match self {
             Self::RunWorkspace { run, .. }
             | Self::SessionAgent {
-                agent: SessionAgent::Worker { run, .. } | SessionAgent::Resume { run },
+                agent:
+                    SessionAgent::Worker { run, .. }
+                    | SessionAgent::Resume { run }
+                    | SessionAgent::Turn { run, .. },
                 ..
             }
             | Self::Headless {
@@ -585,9 +601,20 @@ impl ActorExecutor for HostActorExecutor<'_> {
             }
             ActorProgram::SessionAgent { agent, model } => {
                 let provider = self.provider()?;
+                let mut streams = Streams::Inherit;
                 let mut command = match agent {
                     SessionAgent::Worker { run, prompt } => provider.command(run, prompt)?,
                     SessionAgent::Resume { run } => provider.resume_command(run)?,
+                    SessionAgent::Turn {
+                        run,
+                        prompt,
+                        resume,
+                        stdout,
+                        stderr,
+                    } => {
+                        streams = Streams::Files { stdout, stderr };
+                        provider.turn_command(run, prompt, resume)?
+                    }
                     SessionAgent::Planner(planner) => provider.planner_command(&planner)?,
                 };
                 if let Some((model, effort)) = model {
@@ -599,7 +626,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 command.envs(actor.env());
                 let child = self
                     .spawner()?
-                    .spawn(&command, Streams::Inherit)
+                    .spawn(&command, streams)
                     .context("launch agent")?;
                 Ok(ActorHandle::Process(child))
             }

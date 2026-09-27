@@ -142,7 +142,7 @@ pub(super) fn nudge_stale_receipt(
             // Only a request that left the input box is a repair; one stuck
             // there or under a dialog went on to the ask. The text is typed,
             // so a record that fails is only noted.
-            if matches!(submission, Submission::Submitted(_))
+            if matches!(submission, Submission::Submitted(_) | Submission::Queued)
                 && let Err(error) = sv.queue.record_runtime_event(
                     run.id(),
                     event_kind::AUTO_REPAIRED,

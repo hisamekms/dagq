@@ -370,6 +370,7 @@ impl Supervisor<'_> {
         self.files
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
+        self.prepare_turns(run, &run_dir)?;
         let command = shell_join(&[
             path_text(&run_dir.join(RUN_RUNNER_FILE))?,
             "--db".into(),
@@ -1028,6 +1029,11 @@ impl ResumeWatch {
     /// goes when it gets ready, and past the resume timeout the session is
     /// asked to exit like one that did not finish.
     fn send_when_ready(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+        // A headless session takes its request as the prompt of its next
+        // turn: nothing to be ready for (ADR-t813-1).
+        if headless(run) {
+            return self.send_request(sv, run);
+        }
         let seen = *self.agent_seen.get_or_insert_with(Instant::now);
         let timed_out = seen.elapsed() >= sv.cmux.resume_timeout();
         let screen = match sv.cmux.capture(&self.workspace) {
@@ -1088,6 +1094,12 @@ impl ResumeWatch {
         if self.not_ready_asked {
             close_answer_prompt_asks(sv, run, INPUT_READY_CLOSED)?;
         }
+        self.send_request(sv, run)
+    }
+
+    /// Send the resolution request, record it and watch whether the
+    /// session took it.
+    fn send_request(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
         let sent_at = sv.files.now();
         let message = self.message.clone();
         let submission = submit(
@@ -1275,7 +1287,8 @@ impl ResumeWatch {
             return Ok(None);
         }
         let Some((_, sent_at)) = self.message_sent else {
-            if processes.iter().any(|p| p.role == "agent") {
+            // A headless session starts no agent before its first request.
+            if headless(run) || processes.iter().any(|p| p.role == "agent") {
                 self.send_when_ready(sv, run)?;
             }
             return Ok(None);

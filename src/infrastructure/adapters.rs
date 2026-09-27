@@ -1,7 +1,8 @@
 use crate::{
     application::{
         AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, PluginState,
-        ProcessControl, Repository, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
+        ProcessControl, Repository, SupervisorEnvironment, TurnReader, WorkspaceBackend,
+        WorkspaceTags,
         actor_executor::{AgentSettings, agent_settings},
         execution::permission_deny,
         stats::WorkspaceListing,
@@ -43,6 +44,7 @@ pub use crate::application::{
     },
     path_text,
 };
+use crate::infrastructure::claude_turns::{ClaudeTurnReader, HEADLESS_PERMISSION_MODE};
 use crate::infrastructure::run_env::load_repository_config;
 
 pub fn executable(path: &Path) -> Result<PathBuf> {
@@ -2557,6 +2559,77 @@ impl AgentProvider for ClaudeCode {
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["--strict-mcp-config"]);
     }
+    /// `claude -p --output-format stream-json --verbose` in the worktree,
+    /// `--session-id <run-id>` for the first turn and `--resume <run-id>`
+    /// after it, in [`HEADLESS_PERMISSION_MODE`] with
+    /// `claude-headless-settings.json` of the run directory (the worker's
+    /// `permissions.deny`, no hook: the wrapper writes the idle marker when
+    /// the turn's process ends), its debug file and the run directory
+    /// added. It leads a session of its own, so that stopping it stops what
+    /// it runs.
+    fn turn_command(&self, run: &TaskRun, prompt: &str, resume: bool) -> Result<CommandSpec> {
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        let settings = run_dir.join(HEADLESS_SETTINGS);
+        fs::write(
+            &settings,
+            headless_worker_settings(&permission_deny(ActorRole::Worker))?,
+        )
+        .with_context(|| format!("write {}", settings.display()))?;
+        let mut command = CommandSpec::new(&self.executable);
+        command
+            .current_dir(run.worktree_path().context("missing worktree")?)
+            .args(["-p", "--output-format", "stream-json", "--verbose"])
+            .arg(if resume { "--resume" } else { "--session-id" })
+            .arg(run.id().as_str())
+            .arg("--permission-mode")
+            .arg(HEADLESS_PERMISSION_MODE)
+            .arg("--debug-file")
+            .arg(run.log_path().context("missing log path")?)
+            .arg("--add-dir")
+            .arg(run_dir)
+            .arg("--settings")
+            .arg(&settings)
+            .arg("--")
+            .arg(prompt)
+            .new_session();
+        Ok(command)
+    }
+    fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
+        Ok(Box::new(ClaudeTurnReader::default()))
+    }
+    /// Its transcript under `$CLAUDE_CONFIG_DIR` (or `~/.claude`): Claude
+    /// Code refuses a `--session-id` in use.
+    fn turn_session_exists(&self, run: &TaskRun) -> bool {
+        run.worktree_path().is_some_and(|cwd| {
+            crate::infrastructure::transcripts::ClaudeTranscripts::from_env()
+                .exists(cwd, run.id().as_str())
+        })
+    }
+    fn turn_permission_mode(&self) -> Option<&'static str> {
+        Some(HEADLESS_PERMISSION_MODE)
+    }
+}
+
+/// The settings file of a headless worker's turns, in the run directory.
+pub const HEADLESS_SETTINGS: &str = "claude-headless-settings.json";
+
+/// Settings of a headless worker's turns (ADR-t813-1): no hook, the
+/// worker's `permissions.deny` ([`SIGNAL_BY_NAME_DENIED`], then `deny`, as
+/// in [`stop_hook_settings`]) and the same `autoMode` environment as an
+/// interactive run session.
+pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "permissions": {
+            "deny": SIGNAL_BY_NAME_DENIED
+                .iter()
+                .map(|rule| (*rule).to_owned())
+                .chain(deny.iter().cloned())
+                .collect::<Vec<_>>()
+        },
+        "autoMode": {
+            "environment": ["$defaults"]
+        }
+    }))?)
 }
 
 /// Write the settings of the agent of `role` (a planner's by its

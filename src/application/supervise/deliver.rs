@@ -52,6 +52,9 @@ pub(super) enum Submission {
     /// A `/exit` timed out on every attempt, the screen showing each time
     /// that it did not get there (task 354): the session was not asked.
     Unsent,
+    /// Written as the next request (or the exit request) of a headless
+    /// session (ADR-t813-1): the turn that runs it is its sign.
+    Queued,
 }
 
 impl Submission {
@@ -60,7 +63,7 @@ impl Submission {
         match self {
             Submission::Submitted(screen) => screen.as_deref(),
             Submission::Dialog(screen) | Submission::Stuck(screen) => Some(screen),
-            Submission::Unsent => None,
+            Submission::Unsent | Submission::Queued => None,
         }
     }
 }
@@ -159,6 +162,11 @@ pub(super) fn submit(
     input: Input<'_>,
     what: &str,
 ) -> Result<Submission> {
+    // A headless session takes no keys: its next turn's request is
+    // written instead (ADR-t813-1 decision 2).
+    if headless(run) {
+        return request_turn(sv, run, workspace, input, what);
+    }
     let (submission, retries) = submit_input(sv.cmux, sv.signals, workspace, input)?;
     let note = |sv: &mut Supervisor<'_>, kind: &str, payload: Value| {
         if let Err(error) = sv.queue.record_runtime_event(run.id(), kind, payload) {
@@ -353,7 +361,9 @@ impl StartCheck {
             sent_at,
             submitted: submission.screen().map(str::to_owned),
             resent: false,
-            done: matches!(submission, Submission::Stuck(_)),
+            // A request of a headless session needs no check: its turn
+            // starts and ends.
+            done: matches!(submission, Submission::Stuck(_) | Submission::Queued),
         }
     }
 

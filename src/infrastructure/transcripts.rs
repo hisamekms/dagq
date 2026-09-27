@@ -78,6 +78,20 @@ impl ClaudeTranscripts {
     }
 }
 
+impl ClaudeTranscripts {
+    /// Whether the transcript of the session `session_id` started in `cwd`
+    /// exists.
+    pub fn exists(&self, cwd: &str, session_id: &str) -> bool {
+        let source = TranscriptSource {
+            session_id: Some(session_id.to_owned()),
+            cwd: Some(cwd.to_owned()),
+            transcript_path: None,
+        };
+        self.path(&source, session_id)
+            .is_some_and(|path| path.is_file())
+    }
+}
+
 /// The directory name Claude Code gives the project of `cwd`: every
 /// character but an ASCII letter or digit is `-`.
 pub fn encode_cwd(cwd: &str) -> String {
@@ -194,6 +208,19 @@ mod tests {
         );
         let nowhere = ClaudeTranscripts::new(None);
         assert_eq!(nowhere.read(&source).unwrap_err().code, TRANSCRIPT_MISSING);
+    }
+
+    #[test]
+    fn a_session_exists_once_its_transcript_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcripts = ClaudeTranscripts::new(Some(dir.path().to_owned()));
+        assert!(!transcripts.exists("/work/tree.x", SESSION));
+        let project = dir.path().join("projects").join("-work-tree-x");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(format!("{SESSION}.jsonl")), "{}\n").unwrap();
+        assert!(transcripts.exists("/work/tree.x", SESSION));
+        assert!(!transcripts.exists("/work/tree.x", "other"));
+        assert!(!ClaudeTranscripts::new(None).exists("/work/tree.x", SESSION));
     }
 
     #[test]

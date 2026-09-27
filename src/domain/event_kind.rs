@@ -168,6 +168,15 @@ pub const TRIAGE_DECIDED: &str = "triage_decided";
 pub const TRIAGE_FAILED: &str = "triage_failed";
 pub const TRIAGE_FINISHED: &str = "triage_finished";
 pub const TRIAGE_STARTED: &str = "triage_started";
+/// A headless worker's turn ended (ADR-t813-1): its `turn`, `outcome`,
+/// `failure`, `session_id`, `usage` and `permission_denials`, recorded by
+/// the session wrapper.
+pub const TURN_FINISHED: &str = "turn_finished";
+/// The supervisor asked a headless worker's session for its next turn
+/// (`seq`, `what`), where it would type into an interactive one.
+pub const TURN_REQUESTED: &str = "turn_requested";
+/// A headless worker's turn started (`turn`, `resume`, `request`, `pid`).
+pub const TURN_STARTED: &str = "turn_started";
 pub const VALIDATION_FINISHED: &str = "validation_finished";
 pub const VERIFICATION_COMMAND: &str = "verification_command";
 pub const WORKSPACE_CLOSED: &str = "workspace_closed";

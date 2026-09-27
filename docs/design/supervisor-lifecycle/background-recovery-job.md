@@ -82,3 +82,7 @@ receiptの形式は`src/domain/views.rs`の`Receipt`で、promptとREADMEに同�
  "tests": {"status": "passed | failed | not_applicable", "evidence_or_reason": "..."},
  "e2e": {...}, "subagent_review": {...}, "summary": "..."}
 ```
+
+## 非対話のrun
+
+非対話のworkerのrun（[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)、task 815）には、画面・ダイアログ・`/exit`に由来するalert（`prompt_waiting`・`stuck_exit`）と`answer_known_dialog`・`close_and_proceed`は出ない。その代わりの`stalled`（理由`turn_without_receipt` / `permission_denied`、操作は`send_instruction`・`stop_processes`・`resume`・`wait`）と、turnの失敗・停止で終わったrunの`failed`（`retry`・`retry_inherit`・`resume`・`wait`）の扱いは[非対話のworker](headless-worker.md#復旧jobのalertと操作決定9)にある。復旧jobは画面の代わりに最後のturnの要約を読む。

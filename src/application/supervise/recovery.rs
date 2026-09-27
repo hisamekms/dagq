@@ -27,8 +27,8 @@ use crate::domain::idle_process::{
 };
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
-    IDLE_WITHOUT_RECEIPT, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS,
-    ProcessInfo, RecoveryAction, SEND_UNCONFIRMED, attempts, failed_live, run_processes,
+    MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS, ProcessInfo, RecoveryAction,
+    SEND_UNCONFIRMED, attempts, failed_live, run_processes,
 };
 
 /// The actions a recovery job may choose for a running session's
@@ -376,7 +376,7 @@ impl RecoveryWatch {
         }
         // The `wait` a `stalled` job answered holds for the adopter too, so
         // it starts no job before the wait is over.
-        for reason in [IDLE_WITHOUT_RECEIPT, SEND_UNCONFIRMED] {
+        for reason in IDLE_REASONS.into_iter().chain([SEND_UNCONFIRMED]) {
             let finished = events.iter().rfind(|e| {
                 e.kind == "recovery_finished"
                     && e.payload["alert"] == RecoveryAlert::Stalled.as_str()
@@ -861,9 +861,14 @@ fn spawn_live(
     launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
     let task = sv.queue.show(run.task_id())?.task;
-    let screen = match sv.cmux.capture(live.workspace) {
-        Ok(screen) => sv.signals.screen_excerpt(&screen),
-        Err(error) => format!("(the screen could not be read: {error:#})"),
+    // A headless session has no screen: its last turns stand in for it.
+    let screen = if headless(run) {
+        turns_excerpt(sv, run)
+    } else {
+        match sv.cmux.capture(live.workspace) {
+            Ok(screen) => sv.signals.screen_excerpt(&screen),
+            Err(error) => format!("(the screen could not be read: {error:#})"),
+        }
     };
     let listed = own_processes(sv, run).map_err(|error| format!("{error:#}"));
     let (status, head, receipt) = git_facts(sv, run)?;

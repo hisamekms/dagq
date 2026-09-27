@@ -4,8 +4,8 @@ type: design
 title: "Stall thresholds"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -23,6 +23,8 @@ related:
 | `send_confirm_secs` | 60 | 送った文が処理されるのを待つ時間と、Enterの送り直しの後に待つ時間 |
 | `background_alert_secs` | 1800（30分） | `stats`の`long_background`の閾値と、supervisorが[復旧job](background-recovery-job.md#backgroundの処理が終わらないときの復旧job)を起動する閾値 |
 | `idle_process_secs` | 1800（30分） | runのプロセスがCPU時間をほとんど使わないまま生きている時間が、supervisorが`idle_process`の[復旧job](background-recovery-job.md#cpu時間が伸びないプロセスidle_process)を起動する閾値（task 469）。`stats`の`stall_thresholds`の`idle_process_secs`の閾値（task 645） |
+| `turn_silence_secs` | 900（15分） | 非対話のworkerのturnが出力の行を出さないまま続いたら、wrapperがturnを止める時間（heartbeatのあるproviderだけ。[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)、task 815）。supervisorが`turns/limits.json`でwrapperに渡す |
+| `turn_limit_secs` | 14400（4時間） | 非対話のworkerの1 turnの時間の上限。超えたらwrapperがturnを止める |
 | `screen_idle_secs` | 120（2分） | idleの印が無いか最後の入力より古いsessionを、画面から`idle`と推定するまでに、入力待ち・作業中でない・ダイアログ無しの画面が続く時間（[ADR-t803-1](../../adr/2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md)、[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)）。検知ではないので`stats`の`stall_thresholds`には項目を持たない（`stall_config`には出る） |
 
 - 書式は`KEY = 秒`（正の整数。`_`の桁区切りと`#`以降のcommentを許す）。未知のkey、整数でない値、0以下、重複したkeyはエラー。表もkeyも無ければ既定値。

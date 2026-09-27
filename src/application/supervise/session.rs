@@ -136,6 +136,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         self.files
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
+        self.prepare_turns(&run, &run_dir)?;
         let git_output = self.repository.create_worktree(&run)?;
         self.files
             .write(&run_dir.join("worktree-create.txt"), git_output.as_bytes())?;
@@ -691,6 +692,10 @@ impl SessionWatch {
         run: &TaskRun,
         agent: &RunProcess,
     ) -> Result<()> {
+        // A headless session has no dialog to wait at (ADR-t813-1).
+        if headless(run) {
+            return Ok(());
+        }
         let started = *self.agent_seen.get_or_insert_with(Instant::now);
         let wait = sv.cmux.prompt_wait();
         if self.receipt_seen {

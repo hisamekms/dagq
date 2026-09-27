@@ -32,6 +32,14 @@ impl RunFiles for LocalRunFiles {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         fs::read(path)
     }
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = fs::File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
         fs::read_to_string(path)
     }

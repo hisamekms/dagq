@@ -20,6 +20,12 @@ pub const DEFAULT_IDLE_PROCESS_SECS: i64 = 30 * 60;
 /// How long a session without a fresh idle marker must look idle on its
 /// screen before it is taken for idle (ADR-t803-1).
 pub const DEFAULT_SCREEN_IDLE_SECS: i64 = 2 * 60;
+/// A headless worker's turn with no line of output this long is stopped
+/// (ADR-t813-1 decision 9): Claude's stream has a heartbeat every 30 s
+/// while a tool runs.
+pub const DEFAULT_TURN_SILENCE_SECS: i64 = 15 * 60;
+/// A headless worker's turn running this long is stopped.
+pub const DEFAULT_TURN_LIMIT_SECS: i64 = 4 * 60 * 60;
 
 /// The event the supervisor records with the values it loaded at start.
 pub const STALL_CONFIG_LOADED: &str = super::event_kind::STALL_CONFIG_LOADED;
@@ -40,6 +46,8 @@ pub struct StallConfig {
     pub background_alert_secs: i64,
     pub idle_process_secs: i64,
     pub screen_idle_secs: i64,
+    pub turn_silence_secs: i64,
+    pub turn_limit_secs: i64,
 }
 
 impl Default for StallConfig {
@@ -50,18 +58,22 @@ impl Default for StallConfig {
             background_alert_secs: DEFAULT_BACKGROUND_ALERT_SECS,
             idle_process_secs: DEFAULT_IDLE_PROCESS_SECS,
             screen_idle_secs: DEFAULT_SCREEN_IDLE_SECS,
+            turn_silence_secs: DEFAULT_TURN_SILENCE_SECS,
+            turn_limit_secs: DEFAULT_TURN_LIMIT_SECS,
         }
     }
 }
 
 impl StallConfig {
     /// The setting names of the `[stall]` table.
-    pub const KEYS: [&str; 5] = [
+    pub const KEYS: [&str; 7] = [
         "idle_without_receipt_secs",
         "send_confirm_secs",
         "background_alert_secs",
         "idle_process_secs",
         "screen_idle_secs",
+        "turn_silence_secs",
+        "turn_limit_secs",
     ];
 
     /// The setting `key` set to `secs`; `None` for a key the table does not have.
@@ -72,10 +84,20 @@ impl StallConfig {
             "background_alert_secs" => &mut self.background_alert_secs,
             "idle_process_secs" => &mut self.idle_process_secs,
             "screen_idle_secs" => &mut self.screen_idle_secs,
+            "turn_silence_secs" => &mut self.turn_silence_secs,
+            "turn_limit_secs" => &mut self.turn_limit_secs,
             _ => return None,
         };
         *field = secs;
         Some(())
+    }
+
+    /// The limits a headless worker's turns are held to.
+    pub fn turn_limits(&self) -> super::turn::TurnLimits {
+        super::turn::TurnLimits {
+            silence_secs: self.turn_silence_secs,
+            limit_secs: self.turn_limit_secs,
+        }
     }
 
     /// The values of the latest `stall_config_loaded` in `events`: what the

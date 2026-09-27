@@ -19,7 +19,7 @@
 
 use super::*;
 use crate::domain::RunEvent;
-use crate::domain::recovery::{IDLE_WITHOUT_RECEIPT, SEND_UNCONFIRMED, STALLED_ACTIONS};
+use crate::domain::recovery::{HEADLESS_STALLED_ACTIONS, SEND_UNCONFIRMED, STALLED_ACTIONS};
 
 /// The events of `events` that start a new session: a send before one of
 /// them is not this session's.
@@ -129,7 +129,12 @@ impl SessionWatch {
         let live = Live {
             workspace: &self.workspace,
             run_dir: &self.run_dir,
-            allowed: &STALLED_ACTIONS,
+            // A headless session has no dialog to answer (ADR-t813-1).
+            allowed: if headless(run) {
+                &HEADLESS_STALLED_ACTIONS
+            } else {
+                &STALLED_ACTIONS
+            },
             exit_typed: false,
             at_prompt: self.at_prompt(sv),
             lands: false,
@@ -164,13 +169,10 @@ impl SessionWatch {
         } else {
             return;
         };
-        self.recovery.stop_reason(
-            sv,
-            run,
-            RecoveryAlert::Stalled,
-            IDLE_WITHOUT_RECEIPT,
-            outcome,
-        );
+        for reason in IDLE_REASONS {
+            self.recovery
+                .stop_reason(sv, run, RecoveryAlert::Stalled, reason, outcome);
+        }
     }
 
     /// Whether the session showed it took something after `at`: its idle

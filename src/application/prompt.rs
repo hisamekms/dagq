@@ -222,6 +222,11 @@ pub fn siblings_in_progress(task: &Task, in_progress: Vec<Task>) -> Vec<Task> {
 /// one worker ended the others' sessions and `integrate`'s checks (task 359).
 pub const STOP_BACKGROUND: &str = "Before writing the receipt, stop every background process you started (run_in_background shells, wait loops, watches); if any is left, /exit stops at a confirmation screen. Stop only what you started, by its pid or task; never signal by name or pattern (pkill, killall, kill $(pgrep ...)), which also hits other runs' sessions and checks on this host.";
 
+/// What a headless worker is told of its session (ADR-t813-1): each turn is
+/// one non-interactive call that ends when the agent stops, and whatever
+/// runs in the background then is stopped with it.
+pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns is one non-interactive call, and the turn ends when you stop. Nobody types into it: the answer to your ask, a review's request to revise, or a request to go on arrives as the prompt of your next turn, in the same session. Do not end a turn while something you need still runs in the background (a build, a test, a wait): what runs in the background when the turn ends is stopped. Run long commands in the foreground and wait for them.\n";
+
 /// What a worker reads before it starts, and nothing more: everything else
 /// about its run is in the prompt, and reading the queue or the whole docs
 /// tree only delays the first commit (goal 11, decision 4).
@@ -355,6 +360,11 @@ pub fn prompt(
             task.paths().join(", ")
         )
     };
+    let headless = if run.worker_mode() == crate::domain::worker::WorkerMode::Headless {
+        HEADLESS_WORKER
+    } else {
+        ""
+    };
     Ok(format!(
         "You are executing dagq task {task_id}, run {run_id}.\n\
          Work only in the assigned Git worktree.\n\
@@ -375,7 +385,8 @@ pub fn prompt(
          The supervisor rejects the run unless the commit is the clean head of your branch on top of the base commit, and integrate runs the verification commands itself after rebasing onto main.\n\
          When you need a decision you cannot make from the task and the repository, do not write the question to the terminal and wait: run `dagq ask --run {run_id} --kind worker_question --because scope --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and stop. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. The answer arrives in this terminal as `answer to ask <id>: ...`; continue from it.\n\
          {stop_background}\n\
-         After submitting, report the outcome briefly and stop; do not run /exit yourself. Once you are idle the supervisor ends the session, and a person can still send /exit. A receipt does not itself end the session.\n",
+         After submitting, report the outcome briefly and stop; do not run /exit yourself. Once you are idle the supervisor ends the session, and a person can still send /exit. A receipt does not itself end the session.\n\
+         {headless}",
         task_id = task.id(),
         run_id = run.id(),
         reading = WORKER_READING,
@@ -1171,6 +1182,25 @@ pub fn ended_run_material(
             ))
         )
     ));
+    // A headless session's turns (ADR-t813-1): how each ended, and why the
+    // runtime stopped one.
+    let turns: Vec<String> = detail
+        .events
+        .iter()
+        .filter(|e| {
+            e.run_id.as_ref() == Some(run.id())
+                && e.kind == crate::domain::event_kind::TURN_FINISHED
+        })
+        .map(|e| e.payload.to_string())
+        .collect();
+    if !turns.is_empty() {
+        let turns = &turns[turns.len().saturating_sub(5)..];
+        material.push_str(&format!(
+            "Turns of the headless session (the last {}; `stopped` says why the runtime stopped one):\n{}\n",
+            turns.len(),
+            fenced("json", &turns.join("\n"))
+        ));
+    }
     let events: Vec<Value> = detail
         .events
         .iter()

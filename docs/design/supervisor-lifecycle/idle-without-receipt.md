@@ -4,8 +4,8 @@ type: design
 title: "receiptの無いidleの検知"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -17,6 +17,7 @@ related:
 
 [ADR-0043](../../adr/0043-detect-stalled-worker-sessions-nudge-once-then-ask.md)の決定1（task 288、`application::supervise::stall`の`StallWatch`）。task 182のworkerはbackgroundの`cargo test`の通知を待ってturnを終え（`Stop` hookのidle markerは書かれた）、receiptの無いまま10.5時間eventが0件だった。[ダイアログ待ちの検知](prompt-waiting.md#ダイアログ待ちの検知)はidle markerのあるrunを見ないので、この型は別に検知する。
 
+- **非対話のrun**（[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の決定9、task 815）: turnの終わりが決まるので閾値を待たずに促し、促しは2回まで（`HEADLESS_NUDGES`）、使い切ったら理由`turn_without_receipt`、turnの`permission_denials`が3件以上なら促さずに理由`permission_denied`の復旧jobにする。画面は読まない。詳細は[非対話のworker](headless-worker.md#turnの後の扱い)。
 - **対象**: 最初のsession（`SessionWatch`）だけ。resumeしたsessionは解消依頼の後にreceiptの無いままidleになれば`/exit`を送って試行を終え（`went idle without a resolving receipt`）、reviseと衝突の依頼を送ったsessionは`approve_landing`のaskにする（`went idle without rewriting the receipt`）ので、receiptの無いidleで止まり続けない。backgroundの処理が`running`のままのidleはどちらも`resume_timeout`（1時間）で終わる。`ExitWatch`（verdictの後）とreceiptの後のbackgroundの処理（Bの型）は対象外。
 - **条件**（wrapperのheartbeatが有効で`/exit`を要求しておらず、receiptの無いpollごと）: idle markerがあり、そのmtimeがsupervisorが最後にsessionへ打った文（workerへの回答、促し）の時刻と、sessionが最後に受けた入力（入力のmarker`prompt-submit.json`のmtime。[送信と確認](session-send.md#sessionへの送信と確認)の5）より新しく（sessionが入力を処理し終えてturnを閉じている）、記録済みで解消していない`prompt_waiting`も、closeされていない`worker_question` / `answer_prompt`のaskも無いまま、markerのmtime（`wait`の答えの後はその時刻との遅い方）から`[stall].idle_without_receipt_secs`（既定1200秒）以上経った。markerの`background_tasks`に`running`の処理があってもidleに数える。時刻はidle markerと同じくfileの時計（`RunFiles::now`）で比べる。idle markerが無いか最後の入力より古いとき（Stop hookが書けなかった。task 475）は、画面から推定したidle（[画面からのidleの推定](receipt-and-session-exit.md#workerのsession)、ADR-t803-1）をmarkerと同じに数え、区間の最初のcaptureの時刻をmarkerのmtimeとする。推定のidleはbackgroundの処理を示さないので、促しと復旧jobのfactsの`background_running`は`null`になる。
 - **促し**（1回だけ）: `stall_nudged`（`phase: session`、`idle_secs`、`threshold_secs`、`background_running`、`background_tasks`（`id` / `description` / `command`）、`workspace_id`）を記録してから、定型の文（`prompt::stall_nudge`。run id、receiptの無いidleの分数、`running`のbackgroundの処理、「終わったならcommitしてreceiptを書く」「判断が要るなら`dagq ask --run <run-id> --kind worker_question`で聞いて止まる」「backgroundの処理を待っているなら何を待っているか、いつ終わる見込みか、戻らなければどうするかを書いて作業を続ける」）を[送信と確認](session-send.md#sessionへの送信と確認)の`submit`で打ち、回答と同じ`StartCheck`で作業の兆候を`[stall].send_confirm_secs`待って見る（ADR-0043の決定2、task 409）。打てなければlogに書き、次のpollでaskに進む。

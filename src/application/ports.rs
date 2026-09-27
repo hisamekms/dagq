@@ -270,6 +270,13 @@ pub trait Spawned: Send {
     fn try_wait(&mut self) -> Result<Option<Exit>>;
     fn kill(&mut self) -> Result<()>;
     fn wait(&mut self) -> Result<Exit>;
+    /// Kill it with every process in its group, for one started in a
+    /// session of its own ([`CommandSpec::new_session`]): a headless turn
+    /// is stopped with what it runs (ADR-t813-1 decision 3). One started
+    /// otherwise is killed alone.
+    fn kill_group(&mut self) -> Result<()> {
+        self.kill()
+    }
 }
 
 /// Starts processes: the agent under the session wrapper, the headless
@@ -290,6 +297,13 @@ pub trait RunFiles: Send + Sync {
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// The bytes of `path` from `offset` on (none past its end): what a
+    /// process appended since the last read.
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        let bytes = self.read(path)?;
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        Ok(bytes.get(offset..).unwrap_or_default().to_vec())
+    }
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     /// When the file was last written.
     fn modified(&self, path: &Path) -> io::Result<SystemTime>;
@@ -452,6 +466,54 @@ pub trait AgentProvider {
     fn review_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(600)
     }
+    /// One turn of a headless worker (ADR-t813-1 decision 1): a
+    /// non-interactive call in the run's worktree with `prompt` as its only
+    /// input, starting the session named by the run's id or, with
+    /// `resume`, going on with it, under the run's settings. Its stdout is
+    /// the turn's output for [`AgentProvider::turn_reader`]. The caller
+    /// closes stdin, says where the output goes and starts it in a process
+    /// group of its own. A provider without one refuses.
+    fn turn_command(
+        &self,
+        run: &crate::domain::TaskRun,
+        prompt: &str,
+        resume: bool,
+    ) -> Result<CommandSpec> {
+        let _ = (run, prompt, resume);
+        anyhow::bail!("this provider has no headless worker")
+    }
+    /// Whether the agent keeps a session named by `run`'s id already (its
+    /// transcript exists), so that the next turn resumes it rather than
+    /// starting one of that name again: a turn that failed before its
+    /// model answered (a login that ran out) may have left one.
+    fn turn_session_exists(&self, run: &crate::domain::TaskRun) -> bool {
+        let _ = run;
+        false
+    }
+    /// The reader of a headless turn's output, one per turn.
+    fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
+        anyhow::bail!("this provider has no headless worker")
+    }
+    /// The permission mode a headless turn must say it started in; one
+    /// that says another is stopped as started otherwise than asked
+    /// (ADR-t813-1 decision 8). `None` when the provider says none.
+    fn turn_permission_mode(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// Reads the output of one headless turn into what the runtime acts on,
+/// whatever the provider (ADR-t813-1): the one place that knows the shape
+/// of a provider's JSONL.
+pub trait TurnReader: Send {
+    /// One line of the turn's stdout, without its line break.
+    fn line(&mut self, line: &str) -> Vec<crate::domain::turn::TurnSignal>;
+    /// Whether the output goes on while the agent works (a heartbeat), so
+    /// that a silence means the turn is stuck.
+    fn heartbeats(&self) -> bool;
+    /// How the turn ended, from the lines read, how its process ended
+    /// (`None` when it was stopped) and its stderr.
+    fn finish(&mut self, exit: Option<&Exit>, stderr: &str) -> crate::domain::turn::TurnResult;
 }
 
 /// Where the transcript of a Claude session span is: the span's session id,

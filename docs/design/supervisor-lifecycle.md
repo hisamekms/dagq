@@ -222,6 +222,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ## `session` wrapper
 
 - [`session` wrapper](supervisor-lifecycle/session-wrapper.md)
+- [非対話のworker](supervisor-lifecycle/headless-worker.md)（1 turnを1回の`claude -p`にする経路、`turns/`の依頼、turnの記録と停止、促しと復旧job）
 
 ## Receipt and session exit
 
