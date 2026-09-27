@@ -62,6 +62,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0047](0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md) | イレギュラーをruntimeの自動修正・復旧job・inboxの3層で扱い、askに人が要る理由の分類を必須にし、自動修正を数え、goalの達成をgoal review jobが判断する（ADR-0019・ADR-0043・ADR-0044を統合） | 2026-09-26 |
 | [ADR-0048](0048-record-claude-sessions-by-kind-with-open-and-active-time.md) | dagqが使うClaude sessionをkindごとの区間としてrun_eventsに記録し、開いている時間と、transcriptのturnから導く稼働時間をstatsで集計する | 2026-09-26 |
 | [ADR-0049](0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md) | 検証をintegrateの1回にし、reviewをsupervisorの工程にし、dagq.tomlでrunのenvを渡してsccacheでcompileの結果をrun間で共有し、taskの5段階の優先度と解放数でclaim順を決め、statsで詰まりを数える（ADR-0040を統合） | 2026-09-26 |
+| [ADR-0050](0050-revise-count-scope-per-review-round.md) | reviseの回数をresume・send_back・衝突の解消で区切ったreviewの回ごとに数え、run全体の往復はresumeの上限で抑える（ADR-0027決定2をamends） | 2026-09-27 |
 | [ADR-0051](0051-kpi-time-series-report-and-push.md) | KPIを決まった規則でrun_eventsから導き、期間・taskの種類・変更の印で比べ、目標割れを判定し、supervisorが日次のHTMLとJSONのレポートを書き、ホストの設定のコマンドにpushし、KPIのfindingから作る改善のproposalの数に上限を付ける | 2026-09-26 |
 | [ADR-0052](0052-rust-single-binary-and-plugin-with-cmux-first.md) | runtimeをRustの単一バイナリdagqとpluginで配り、cmuxを最初のworkspace backendにする（ADR-0001・ADR-0002・ADR-0005・ADR-0015を統合） | 2026-09-26 |
 | [ADR-0053](0053-queue-in-data-dir-run-paths-from-queue-and-rebind.md) | repositoryごとのqueueをデータディレクトリに置き、runのpathをqueueから解決し、repositoryとqueueの移動をrebindで扱う（ADR-0006・ADR-0017・ADR-0020を統合） | 2026-09-26 |
