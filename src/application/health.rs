@@ -523,7 +523,8 @@ pub fn doctor(
 /// Mark an orphaned run `interrupted` (or a run whose `integrate` process
 /// died `awaiting_integration` again) and drop its lease, after checking that
 /// nothing registered for it is still alive. An `awaiting_integration` run
-/// that a dead supervisor still leases (it died during the review) keeps its
+/// that a dead supervisor still leases (it died during the review or the
+/// landing) keeps its
 /// status and loses the stale lease, so that it can be integrated (task
 /// 236). Never reruns, never deletes the worktree or workspace, leaves the
 /// task `in_progress`, and does not touch any other run.

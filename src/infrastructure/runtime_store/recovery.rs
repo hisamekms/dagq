@@ -29,7 +29,8 @@ impl SqliteQueue {
     /// `running`, `validating`, `awaiting_integration` and `needs_session`
     /// runs whose lease carries a token other than `token`, oldest run
     /// first, each with its wrapper registration. An `awaiting_integration`
-    /// run is leased only while its supervisor reviews it (ADR-0027), a
+    /// run is leased while its supervisor reviews and lands it (ADR-0027,
+    /// ADR-0054 decision 6), a
     /// `needs_session` one while it is resumed or waits to land (task 356). Runs in other statuses
     /// and runs without a lease are not adoptable, so they are not listed.
     pub fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {

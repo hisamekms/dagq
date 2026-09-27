@@ -1926,7 +1926,8 @@ pub const ATTENTION_ROLE: SessionRole = SessionRole::Inbox;
 /// session still alive to end first, or, with the resumes used up, hands
 /// the run to a person as a `decide` ask. Nobody opens a session of their
 /// own for it. An `awaiting_integration` run with a
-/// lease is the supervisor's review (ADR-0027); without one it waits for a
+/// lease is the supervisor's review and landing (ADR-0027, ADR-0054
+/// decision 6); without one it waits for a
 /// person (a failed review, or a run validated before the review existed). The caller passes only the latest run of an `in_progress` task, so a
 /// failed run stops counting once the task is retried or canceled.
 pub fn run_attention(
@@ -2834,7 +2835,8 @@ mod attention_tests {
             run_attention(RunStatus::AwaitingIntegration, false, false, false),
             Some(ReviewAndIntegrate)
         );
-        // Leased, it is the supervisor's review (ADR-0027); a session that
+        // Leased, it is the supervisor's review and landing (ADR-0027,
+        // ADR-0054 decision 6); a session that
         // held back the /exit after the verdict is its stuck_exit ask's.
         assert_eq!(
             run_attention(RunStatus::AwaitingIntegration, true, false, true),

@@ -265,8 +265,16 @@ impl SqliteQueue {
         supervisors_of(&self.conn)
     }
 
-    /// Give up ownership of a run that came to rest (`awaiting_integration`
-    /// or `failed`). The run's `supervisor_token` stays as a record.
+    /// Give up ownership of a run the supervisor stops driving. The lease is
+    /// not released when a run comes to rest `awaiting_integration`: it is
+    /// kept through the review and the landing (ADR-0054 decision 6), and a
+    /// landed run loses it with `finish_integration`. The supervisor calls
+    /// this when a run ends short of the landing (`needs_session` or
+    /// `failed`), when a recovery round of a finished run ends, when it opens
+    /// the run's `approve_landing` ask (a `concern` verdict or a failed
+    /// review) or leaves the run waiting for its answer or for a person, when a resumed run's landing cannot start, and when it
+    /// drains or hands off a run it cannot keep. The run's `supervisor_token`
+    /// stays as a record.
     pub fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         let tx = self
             .conn
