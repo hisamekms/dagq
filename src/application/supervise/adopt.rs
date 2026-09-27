@@ -446,6 +446,16 @@ impl Supervisor<'_> {
         // about the same request is not asked again (as for a running run,
         // task 104), one about an earlier request is (task 240).
         watch.exit_asked = !watch.timed_out || history.latest_exit_asked();
+        // A /exit that never got there, whose close to land the previous
+        // supervisor decided but did not record, is judged again now
+        // (task 464) rather than waited out as one the session held back.
+        if watch.requested.is_some()
+            && let Some(unsent) = history.latest_exit_unsent_to_land()
+            && let Some(workspace) = watch.session.as_ref().map(|s| s.workspace.clone())
+        {
+            let attempts = unsent.payload["attempts"].as_u64().unwrap_or(1);
+            watch.adopt_unsent(self, run, &workspace, attempts)?;
+        }
         Ok(Phase::Exiting(watch))
     }
     /// The failed review whose `approve_landing` ask was opened before the

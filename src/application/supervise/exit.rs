@@ -374,41 +374,13 @@ impl ExitWatch {
         sv.queue
             .record_runtime_event(run.id(), event_kind::EXIT_UNSENT, payload)?;
         let Some(why) = held else {
-            // Closed above: the supervisor closes nothing more, and a
-            // dialog ask of the session is closed as for one that exited.
-            match self.session.take().and_then(|session| session.resume) {
-                None => {
-                    sv.queue.workspace_closed(run.id(), &sv.token)?;
-                }
-                Some(attempt) => sv.queue.record_runtime_event(
-                    run.id(),
-                    event_kind::WORKSPACE_CLOSED,
-                    json!({"workspace_id": workspace, "resume_attempt": attempt}),
-                )?,
-            }
-            close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
-            // Closing the workspace to land is a repair (ADR-0047 decisions
-            // 25 and 38); the workspace is closed, so a record that fails is
-            // only noted.
-            if let Err(error) = sv.queue.record_runtime_event(
-                run.id(),
-                event_kind::AUTO_REPAIRED,
-                json!({
-                    "layer": "runtime",
-                    "repair": "exit_forced_close",
-                    "conditions": {
-                        "cause": ReasonCode::BackendTimeout,
-                        "attempts": sv.cmux.call_attempts().max(1),
-                        "exit_reached": false,
-                        "then": "land",
-                        "review": "pass",
-                        "receipt_holds": true,
-                    },
-                    "detail": {"workspace_id": workspace},
-                }),
-            ) {
-                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
-            }
+            self.closed_to_land(
+                sv,
+                run,
+                workspace,
+                u64::from(sv.cmux.call_attempts().max(1)),
+                false,
+            )?;
             info!(run_id = %run.id(), "/exit could not be sent to {} in workspace {workspace}; it lands and its receipt still holds against its clean worktree, so its workspace was closed and it goes on to land", run.id());
             return Ok(true);
         };
@@ -422,6 +394,118 @@ impl ExitWatch {
         self.timed_out = true;
         self.unsent = Some(why);
         self.recover(sv, run, workspace)
+    }
+}
+
+impl ExitWatch {
+    /// The `exit_unsent` (`action: close_and_land`) of a supervisor that
+    /// died before it recorded the workspace closed (task 464): the adopter
+    /// judges again whether the run lands without its session's exit
+    /// ([`landable_without_exit`]) rather than waiting out the exit timeout
+    /// for a session that was never asked. When it does, the workspace is
+    /// closed (one already closed or no longer listed counts as closed) and
+    /// the watch has no session left, so the run goes on to land. When it
+    /// does not, or the close fails, the run takes the path of an
+    /// `exit_unsent` that could not land: `exit_request_timed_out` (with
+    /// `unsent` and `adopted`) and the `stuck_exit` recovery job and ask,
+    /// which the watch's first poll starts.
+    pub(super) fn adopt_unsent(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        attempts: u64,
+    ) -> Result<()> {
+        let mut held = match &self.then {
+            AfterExit::Land => landable_without_exit(sv, run),
+            _ => Some("the run does not land after its exit".to_owned()),
+        };
+        if held.is_none()
+            && let Err(error) = close_unless_gone(sv.cmux, workspace)
+        {
+            held = Some(format!("its workspace could not be closed: {error:#}"));
+        }
+        let Some(why) = held else {
+            self.closed_to_land(sv, run, workspace, attempts, true)?;
+            info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent and before its workspace {workspace} was recorded closed; its receipt still holds against its clean worktree, so the workspace is closed and it goes on to land", run.id());
+            return Ok(());
+        };
+        warn!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent, and it cannot land without its exit ({why}); its recovery job looks at it", run.id());
+        let timeout = sv.cmux.exit_timeout();
+        sv.queue.record_runtime_event(
+            run.id(),
+            event_kind::EXIT_REQUEST_TIMED_OUT,
+            json!({"code": ReasonCode::ExitTimeout, "workspace_id": workspace, "timeout_secs": timeout.as_secs(), "unsent": true, "adopted": true, "held": why}),
+        )?;
+        self.timed_out = true;
+        self.exit_asked = false;
+        self.unsent = Some(why);
+        Ok(())
+    }
+
+    /// The workspace of a run landing without its session's exit is closed:
+    /// `workspace_closed` is recorded (the resume's, for a resumed session),
+    /// the session's dialog asks are closed as for one that exited, and the
+    /// watch keeps no session. `attempts` is how often the `/exit` was tried.
+    /// Closing the workspace to land is a repair
+    /// (ADR-0047 decisions 25 and 38), `adopted` when an adopter did it; the
+    /// workspace is closed, so a record of it that fails is only noted.
+    fn closed_to_land(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        attempts: u64,
+        adopted: bool,
+    ) -> Result<()> {
+        match self.session.take().and_then(|session| session.resume) {
+            None => {
+                sv.queue.workspace_closed(run.id(), &sv.token)?;
+            }
+            Some(attempt) => sv.queue.record_runtime_event(
+                run.id(),
+                event_kind::WORKSPACE_CLOSED,
+                json!({"workspace_id": workspace, "resume_attempt": attempt}),
+            )?,
+        }
+        close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
+        let mut conditions = json!({
+            "cause": ReasonCode::BackendTimeout,
+            "attempts": attempts,
+            "exit_reached": false,
+            "then": "land",
+            "review": "pass",
+            "receipt_holds": true,
+        });
+        if adopted {
+            conditions["adopted"] = json!(true);
+        }
+        if let Err(error) = sv.queue.record_runtime_event(
+            run.id(),
+            event_kind::AUTO_REPAIRED,
+            json!({
+                "layer": "runtime",
+                "repair": "exit_forced_close",
+                "conditions": conditions,
+                "detail": {"workspace_id": workspace},
+            }),
+        ) {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
+        }
+        Ok(())
+    }
+}
+
+/// Close `workspace` unless cmux no longer lists it: one closed already, by
+/// a previous supervisor or a person, counts as closed, and so does one
+/// that is gone after a close that failed.
+fn close_unless_gone(cmux: &dyn WorkspaceBackend, workspace: &str) -> Result<()> {
+    if matches!(cmux.exists(workspace), Ok(false)) {
+        return Ok(());
+    }
+    match cmux.close(workspace) {
+        Err(_) if matches!(cmux.exists(workspace), Ok(false)) => Ok(()),
+        closed => closed,
     }
 }
 

@@ -225,6 +225,25 @@ impl<'a> RunHistory<'a> {
             })
     }
 
+    /// Whether the run's latest `/exit` request never reached the session
+    /// and was to close the workspace and land (`exit_unsent` with `action:
+    /// close_and_land` after the last `exit_requested`), with neither the
+    /// workspace's close (`workspace_closed`) nor a timeout
+    /// (`exit_request_timed_out`) recorded after it: the supervisor that
+    /// decided it died in between (task 464). That `exit_unsent`, if so.
+    pub fn latest_exit_unsent_to_land(&self) -> Option<&'a RunEvent> {
+        let requested = self.last(event_kind::EXIT_REQUESTED)?;
+        self.events
+            .iter()
+            .rev()
+            .find(|e| e.id > requested.id && e.kind == event_kind::EXIT_UNSENT)
+            .filter(|unsent| {
+                unsent.payload["action"] == "close_and_land"
+                    && !self.has_after(unsent.id, event_kind::WORKSPACE_CLOSED)
+                    && !self.has_after(unsent.id, event_kind::EXIT_REQUEST_TIMED_OUT)
+            })
+    }
+
     /// Why the run waits for a session: its latest `integration_deferred`
     /// / `integration_error` / `evidence_missing` / `scope_violation` /
     /// `landing_decided` / `triage_finished` / `triage_decided`, or a
@@ -640,6 +659,35 @@ mod tests {
         assert_eq!(history(&again), (true, false));
         again.push(stuck(8));
         assert_eq!(history(&again), (true, true));
+    }
+
+    #[test]
+    fn an_unsent_exit_to_land_is_pending_until_its_close_or_timeout() {
+        let plain = |id, kind| event(id, kind, json!({}));
+        let unsent = |id, action| event(id, "exit_unsent", json!({"action": action}));
+        let pending = |events: &[RunEvent]| {
+            RunHistory::from_events(events)
+                .latest_exit_unsent_to_land()
+                .map(|e| e.id.as_i64())
+        };
+        assert_eq!(pending(&[]), None);
+        assert_eq!(pending(&[unsent(1, "close_and_land")]), None);
+        let landing = [plain(1, "exit_requested"), unsent(2, "close_and_land")];
+        assert_eq!(pending(&landing), Some(2));
+        assert_eq!(
+            pending(&[plain(1, "exit_requested"), unsent(2, "recover")]),
+            None
+        );
+        for after in ["workspace_closed", "exit_request_timed_out"] {
+            let mut done = landing.to_vec();
+            done.push(plain(3, after));
+            assert_eq!(pending(&done), None, "{after}");
+        }
+        // One about an earlier request does not count.
+        let mut again = landing.to_vec();
+        again.push(plain(3, "resume_started"));
+        again.push(plain(4, "exit_requested"));
+        assert_eq!(pending(&again), None);
     }
 
     #[test]

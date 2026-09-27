@@ -193,3 +193,207 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
 }
+
+/// A passed run whose `/exit` never got there, adopted after its supervisor
+/// recorded `exit_unsent` (`action: close_and_land`) and died before it
+/// recorded its workspace closed: the passed run with its review passed,
+/// `/exit` requested and never reached, and the `extra` shell run in its
+/// worktree, with a stale lease. Returns the run.
+fn adoptable_unsent_exit(
+    repo: &Path,
+    db: &Path,
+    backend: &TestWorkspace,
+    extra: Option<&str>,
+) -> TaskRun {
+    let run = start_run_under_dead_supervisor(repo, db, backend, "dead-supervisor");
+    let idle = run.idle_marker_path().unwrap();
+    wait_until(db, Duration::from_secs(20), |_| idle.is_file());
+    let worktree = Path::new(run.worktree_path().unwrap());
+    let head = git_out(worktree, &["rev-parse", "HEAD"]);
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), head],
+        )
+        .unwrap();
+    if let Some(extra) = extra {
+        let status = std::process::Command::new("sh")
+            .args(["-c", extra])
+            .current_dir(worktree)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let queue = SqliteQueue::open(db).unwrap();
+    for (kind, payload) in [
+        (
+            "validation_finished",
+            json!({"status": "awaiting_integration"}),
+        ),
+        ("review_started", json!({"attempt": 1})),
+        (
+            "review_finished",
+            json!({"verdict": "pass", "reasons": [], "summary": "meets the acceptance", "attempt": 1}),
+        ),
+        (
+            "exit_requested",
+            json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
+        ),
+        (
+            "exit_unsent",
+            json!({"code": "backend_timeout", "workspace_id": WORKSPACE_ID, "attempts": 3, "action": "close_and_land"}),
+        ),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    age_lease(db, &run, 31);
+    run
+}
+
+/// Supervise until the queue is idle, with a reviewer that has no verdict
+/// to give: an adopted run past its review is not reviewed again.
+fn supervise_adopter(
+    db: &Path,
+    repo: &Path,
+    backend: &Arc<TestWorkspace>,
+) -> thread::JoinHandle<Value> {
+    let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
+    thread::spawn(move || {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        let outcome = runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &*backend,
+            &claude_stub(&db),
+            &TestReviewer::new(&[]),
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &supervise_options(4, true),
+        )
+        .unwrap();
+        backend.join();
+        outcome
+    })
+}
+
+/// A run whose supervisor decided to close its workspace and land after a
+/// `/exit` that never got there, and died before recording the close, is
+/// landed by its adopter at once (task 464): the adopter judges again that
+/// its receipt holds against its clean worktree at the reviewed commit,
+/// closes the workspace, and records the close and the repair as adopted,
+/// without a second `/exit` or waiting out the exit timeout.
+#[test]
+fn an_adopter_closes_and_lands_a_run_whose_unsent_exit_was_to_land() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.close_ends_session = true;
+    // Waiting out the exit timeout would outlast the test.
+    backend.exit_timeout = Duration::from_secs(3600);
+    let backend = Arc::new(backend);
+    adoptable_unsent_exit(&repo, &db, &backend, None);
+    let outcome = joined(
+        supervise_adopter(&db, &repo, &backend),
+        "the supervisor thread to return",
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    assert_eq!(
+        payloads(&detail, "auto_repaired"),
+        [&json!({
+            "layer": "runtime",
+            "repair": "exit_forced_close",
+            "conditions": {
+                "cause": "backend_timeout",
+                "attempts": 3,
+                "exit_reached": false,
+                "then": "land",
+                "review": "pass",
+                "receipt_holds": true,
+                "adopted": true,
+            },
+            "detail": {"workspace_id": WORKSPACE_ID},
+        })]
+    );
+    let kinds = event_kinds(&detail);
+    for (earlier, later) in [
+        ("exit_unsent", "run_adopted"),
+        ("run_adopted", "workspace_closed"),
+        ("workspace_closed", "run_integrated"),
+    ] {
+        assert!(
+            position(&kinds, earlier) < position(&kinds, later),
+            "{earlier} before {later}: {kinds:?}"
+        );
+    }
+    assert!(!kinds.contains(&"exit_request_timed_out"), "{kinds:?}");
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
+}
+
+/// The same run whose worktree changed since the close was decided does not
+/// land without its session's exit: its adopter records the timeout of the
+/// `/exit` that never got there with why, and the `stuck_exit` recovery job
+/// escalates to the ask, once (task 464). Once the person cleans up and has
+/// the session exit, the run lands.
+#[test]
+fn an_adopter_asks_when_an_unsent_exit_to_land_no_longer_holds() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.exit_timeout = Duration::from_secs(3600);
+    backend.registration_timeout = common::STEP_LIMIT;
+    let backend = Arc::new(backend);
+    let run = adoptable_unsent_exit(&repo, &db, &backend, Some("printf 'x\\n' > stray.txt"));
+    let supervisor = supervise_adopter(&db, &repo, &backend);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .asks(AskQuery::default())
+            .unwrap()
+            .iter()
+            .any(|ask| ask.kind == AskKind::StuckExit)
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let timed_out = payloads(&detail, "exit_request_timed_out");
+    assert_eq!(timed_out.len(), 1, "{timed_out:?}");
+    assert_eq!(timed_out[0]["unsent"], true);
+    assert_eq!(timed_out[0]["adopted"], true);
+    let held = timed_out[0]["held"].as_str().unwrap();
+    assert!(
+        held.starts_with("its receipt no longer holds: worktree is not clean"),
+        "{held}"
+    );
+    assert!(payloads(&detail, "auto_repaired").is_empty());
+    assert!(backend.closed().is_empty());
+    assert!(queue.run(run.id()).unwrap().workspace_closed_at().is_none());
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(
+        asks[0].question.contains("(exit_unsent)"),
+        "{}",
+        asks[0].question
+    );
+    assert!(asks[0].question.contains(held), "{}", asks[0].question);
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+
+    // The person cleans up and has the session exit: the run lands.
+    fs::remove_file(Path::new(run.worktree_path().unwrap()).join("stray.txt")).unwrap();
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
+    assert_eq!(
+        payloads(
+            &queue.show(TaskId::new(1)).unwrap(),
+            "exit_request_timed_out"
+        )
+        .len(),
+        1
+    );
+}
