@@ -112,6 +112,15 @@ pub const RECOVERY_REQUESTED: &str = "recovery_requested";
 pub const RESUME_FINISHED: &str = "resume_finished";
 pub const RESUME_SKIPPED: &str = "resume_skipped";
 pub const RESUME_STARTED: &str = "resume_started";
+/// A supervisor of a release build read crates.io's sparse index
+/// (ADR-t618-1 decision 2): a queue event with `latest` (the newest
+/// release, `null` for none), `current` (the supervisor's build),
+/// `plugin` (`null` until the plugin is read), `checked_at` (unix seconds)
+/// and `etag`. Not an attention.
+pub const RELEASE_CHECKED: &str = "release_checked";
+/// The index could not be read (`error`, `checked_at`, `current`). Not an
+/// attention; the next look reads it again.
+pub const RELEASE_CHECK_FAILED: &str = "release_check_failed";
 pub const REVIEW_BYPASSED: &str = "review_bypassed";
 pub const REVIEW_FAILED: &str = "review_failed";
 pub const REVIEW_FINISHED: &str = "review_finished";

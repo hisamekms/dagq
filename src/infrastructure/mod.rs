@@ -24,6 +24,7 @@ pub mod process;
 mod proposals;
 pub mod push;
 pub mod related;
+pub mod release_update;
 pub mod report_config;
 pub mod run_env;
 pub mod run_files;

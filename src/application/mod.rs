@@ -25,6 +25,7 @@ pub mod prompt;
 pub mod push;
 pub mod rebind;
 pub mod recording;
+pub mod release_update;
 pub mod report;
 pub mod review;
 pub mod screen_idle;

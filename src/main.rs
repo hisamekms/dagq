@@ -2215,7 +2215,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 }
             }
         }
-        Command::Status { role: r } => one_shot.status_of(&queue, parse_role(r)?)?,
+        Command::Status { role: r } => one_shot.status_of(&db, &queue, parse_role(r)?)?,
         Command::Ask {
             command: Some(AskCommand::Close { id }),
             ..

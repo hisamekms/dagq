@@ -113,6 +113,7 @@ mod push;
 mod queue_hold;
 mod recheck;
 mod recovery;
+mod release;
 mod report;
 mod resume;
 mod revise;
@@ -128,6 +129,7 @@ mod waiting;
 
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
+pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
@@ -319,6 +321,9 @@ pub struct Ports<'a> {
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
+    /// Looks for a new release on crates.io (ADR-t618-1); `None` looks
+    /// for none.
+    pub release: Option<ReleasePort>,
     pub layout: Layout,
 }
 
@@ -562,6 +567,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         report: report::ReportWatch::default(),
         forecasts: ports.forecasts.clone(),
         forecast: forecast::ForecastWatch::default(),
+        release_port: ports.release.clone(),
+        release: release::ReleaseWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
@@ -729,6 +736,10 @@ struct Supervisor<'a> {
     forecasts: Option<ForecastPort>,
     /// The snapshot job and where the last look for triggers left off.
     forecast: forecast::ForecastWatch,
+    /// Looks for a new release; `None` looks for none.
+    release_port: Option<ReleasePort>,
+    /// The release look running and when the last one started.
+    release: release::ReleaseWatch,
     /// The KPI push's messages waiting and the one being sent.
     push: push::PushWatch,
     /// The load samples of each held run's current interval (task 197).
@@ -967,6 +978,7 @@ impl Supervisor<'_> {
                         && !self.push.running()
                         && !self.report.running()
                         && !self.forecast.running()
+                        && !self.release.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         let runs = self.prepare_handoff();
@@ -989,6 +1001,7 @@ impl Supervisor<'_> {
                     self.poll_observer();
                     self.report_pass(false);
                     self.forecast_pass(false);
+                    self.release_pass(false);
                     self.push_pass(false);
                     self.tick(true);
                     thread::sleep(options.tick);
@@ -1009,6 +1022,8 @@ impl Supervisor<'_> {
             // Looked for by a supervisor at work only: the triggers stay in
             // the queue for the next look (ADR-0070 decision 3).
             self.forecast_pass(!stopping && self.claiming);
+            // Looked for by a supervisor at work only (ADR-t618-1).
+            self.release_pass(!stopping && self.claiming);
             // A message waiting is sent while the supervisor does not stop.
             self.push_pass(!stopping);
             if !stopping && self.claiming {
@@ -1036,6 +1051,7 @@ impl Supervisor<'_> {
                 let job = self.observer.is_some()
                     || self.report.running()
                     || self.forecast.running()
+                    || self.release.running()
                     // A message being sent is bounded by the command's
                     // timeout; `--once` also waits for those still to be
                     // tried, a stop does not.

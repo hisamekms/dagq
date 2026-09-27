@@ -716,6 +716,7 @@ mod receipt;
 pub mod recheck;
 pub mod recovery;
 pub mod related;
+pub mod release_update;
 pub mod resume;
 pub mod run;
 pub mod run_env;
@@ -1667,6 +1668,9 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     UPDATE_AWAITING_APPROVAL,
     UPDATE_ANSWERED,
     UPDATE_RETRY,
+    // A supervisor's look for a new release (ADR-t618-1 decision 2).
+    release_update::RELEASE_CHECKED,
+    release_update::RELEASE_CHECK_FAILED,
 ];
 
 /// Whether an event of `kind` may be written with its task, goal and run

@@ -65,6 +65,20 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             checked_at.is_some_and(|value| value.is_u64()),
             "{command} reports checked_at as unix seconds"
         );
+        // Both report the release check's `[update]` (ADR-t618-1), which
+        // comes from the host-wide host.toml of whoever runs the tests, so
+        // only its shape is checked; `tests/it/runtime_release.rs` checks
+        // its values.
+        let release = report.as_object_mut().unwrap().remove("release_update");
+        let field = if command == "doctor" {
+            "release"
+        } else {
+            "mode"
+        };
+        assert!(
+            release.is_some_and(|value| value[field].is_string()),
+            "{command} reports release_update"
+        );
         // `doctor` reports the language in force (ADR-t616-2), which comes
         // from the user's config.toml of whoever runs the tests, so only its
         // shape is checked; `tests/it/language.rs` checks its values.

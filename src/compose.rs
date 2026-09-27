@@ -193,6 +193,22 @@ pub struct SuperviseOptions {
     /// The run files the supervisor works with; `None` is the local file
     /// system. Tests set it (a slow removal, task 405).
     pub files: Option<RunFilesPort>,
+    /// Reads crates.io's sparse index for the release check (ADR-t618-1);
+    /// `None` is `curl`. Tests set it.
+    pub release_index: Option<ReleaseIndexPort>,
+    /// The build identifier the release check takes as the supervisor's;
+    /// `None` is this binary's. Tests set it (a release build looks).
+    pub release_current: Option<String>,
+}
+
+/// The index [`SuperviseOptions::release_index`] gives the release check.
+#[derive(Clone)]
+pub struct ReleaseIndexPort(pub Arc<dyn crate::application::release_update::ReleaseIndex>);
+
+impl std::fmt::Debug for ReleaseIndexPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReleaseIndexPort")
+    }
 }
 
 /// The run files [`SuperviseOptions::files`] gives the supervisor.
@@ -240,6 +256,8 @@ impl SuperviseOptions {
             user_config: None,
             push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
+            release_index: None,
+            release_current: None,
         }
     }
 
@@ -474,6 +492,35 @@ pub fn supervise_with_reviewer(
             check: options.forecast_check,
         }
     });
+    // Read again at each look, never from dagq.toml (ADR-t618-1 decision
+    // 3).
+    let release = {
+        let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let host_wide = options
+            .host_config
+            .clone()
+            .or_else(crate::infrastructure::kpi_config::host_wide_file);
+        crate::application::supervise::ReleasePort {
+            config: Arc::new(move || {
+                crate::infrastructure::release_update::load_host_update(
+                    &queue_dir,
+                    host_wide.as_deref(),
+                )
+                .config
+            }),
+            index: options.release_index.as_ref().map_or_else(
+                || {
+                    Arc::new(crate::infrastructure::release_update::CurlIndex::default())
+                        as Arc<dyn crate::application::release_update::ReleaseIndex>
+                },
+                |port| port.0.clone(),
+            ),
+            current: options
+                .release_current
+                .clone()
+                .unwrap_or_else(|| crate::VERSION.to_owned()),
+        }
+    };
     let ports = Ports {
         // The supervisor's own transitions (ADR-t728-1 decision 4).
         queues: Arc::new(SqliteOpener {
@@ -512,6 +559,7 @@ pub fn supervise_with_reviewer(
         conflicts_file,
         supervisor_file,
         forecasts,
+        release: Some(release),
         layout,
     };
     supervisor::supervise(
@@ -682,15 +730,33 @@ impl OneShot {
     /// `status --role`: see [`health::status`], measured to these
     /// generators' now.
     pub fn status_for(&self, db: &Path, role: Option<SessionRole>) -> Result<Value> {
-        self.status_of(&self.open_read_only(db)?, role)
+        self.status_of(db, &self.open_read_only(db)?, role)
     }
 
     /// [`Self::status_for`] on a queue the caller already opened, so a
     /// command opens it once.
     /// For the inbox and a planner it adds the `language` their prompt
-    /// and the `SessionStart` hook carry (ADR-t616-2).
-    pub fn status_of(&self, queue: &SqliteQueue, role: Option<SessionRole>) -> Result<Value> {
+    /// and the `SessionStart` hook carry (ADR-t616-2). `release_update` is
+    /// the release check of the host's `[update]` (ADR-t618-1).
+    pub fn status_of(
+        &self,
+        db: &Path,
+        queue: &SqliteQueue,
+        role: Option<SessionRole>,
+    ) -> Result<Value> {
         let mut status = health::status(queue, &SystemProcesses, &*self.generators.clock, role)?;
+        let live_builds: Vec<String> = status["supervisors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|supervisor| supervisor["alive"] == true && supervisor["stale"] != true)
+            .filter_map(|supervisor| supervisor["binary_version"].as_str().map(str::to_owned))
+            .collect();
+        status["release_update"] = crate::application::release_update::status(
+            queue,
+            &host_update(db).config,
+            &live_builds,
+        )?;
         if matches!(role, Some(SessionRole::Inbox | SessionRole::Planner)) {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
         }
@@ -749,6 +815,9 @@ impl OneShot {
             }
         };
         report["schema"] = serde_json::to_value(schema)?;
+        // The host's `[update]`, with what was taken as its default
+        // (ADR-t618-1 decision 3).
+        report["release_update"] = serde_json::to_value(host_update(db))?;
         // What `graph --format svg` draws with (ADR-0077 decision 4).
         report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(
             std::env::var_os("PATH").as_deref(),
@@ -1428,6 +1497,15 @@ pub fn integrate(
 /// `status`: see [`status_for`], with all of the attention.
 pub fn status(db: &Path) -> Result<Value> {
     status_for(db, None)
+}
+
+/// The host's `[update]` for the queue at `db`: its `host.toml` over the
+/// host-wide one.
+fn host_update(db: &Path) -> crate::infrastructure::release_update::HostUpdate {
+    crate::infrastructure::release_update::load_host_update(
+        db.parent().unwrap_or(Path::new(".")),
+        crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+    )
 }
 
 /// `status --role` on the system clock: see [`OneShot::status_for`].

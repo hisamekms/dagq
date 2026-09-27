@@ -1091,6 +1091,9 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
             clock: Arc::new(SteadyClock(SystemTime::now(), Instant::now())),
             ..clock::system()
         },
+        // A development build never looks for a release (ADR-t618-1), so
+        // no test reaches crates.io even when Cargo.toml names a release.
+        release_current: Some("0.0.0-dev+test".to_owned()),
         ..SuperviseOptions::new(parallel, once)
     }
 }
