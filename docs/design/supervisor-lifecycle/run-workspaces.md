@@ -4,7 +4,7 @@ type: design
 title: "Run workspaces"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
+updated: 2026-09-28
 last_verified: 2026-09-27
 scope: runtime
 related:
@@ -24,7 +24,7 @@ runが開いたworkspaceは、最初のsession（`task_runs.workspace_id`と`wor
 runが終わる経路ごとの close（task 180）:
 
 - **着地**: supervisorのslotが`integrated`（か`succeeded`）で終わったら、閉じた記録の無いworkspaceのうちcmuxが list しているものを閉じる（`workspace_closed`、`by: supervisor`、`reason: ended`）。sessionのworkspaceはその前に`/exit`とcloseで閉じているので、残るのは時間切れで手放したresumeのworkspaceなど
-- **failed / interrupted**: triageが閉じる（上の6）。`exhaust_resumes`で人に渡すときも同じ
+- **failed / interrupted**: triageが閉じる（[Triage](triage.md#triage-supervisor)の6）。`exhaust_resumes`で人に渡すときも同じ
 - **次のresumeの前**: `close_left_resume_workspaces`が前の試行が残したresumeのworkspaceを閉じ、`workspace_closed`（`by: supervisor`、`resume_attempt`）を記録する
 - **手での`integrate`・`recover`・人の`ready` / cancel、supervisorの外で終わったrun**: 下の掃除が閉じる
 

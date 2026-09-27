@@ -4,7 +4,7 @@ type: design
 title: "Validation"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
+updated: 2026-09-28
 last_verified: 2026-09-27
 scope: runtime
 related:
@@ -15,7 +15,7 @@ related:
 
 # Validation
 
-`validating`のrunに対して、supervisorがセッションと同じleaseの下で、runごとのthreadで次を順に確認する。sessionは開いたまま（上の1）のことも、終了済みのこともある。最初に外れた項目が`failed`の理由（`last_error`）になり、以降は確認しない。
+`validating`のrunに対して、supervisorがセッションと同じleaseの下で、runごとのthreadで次を順に確認する。sessionは開いたまま（[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)の1）のことも、終了済みのこともある。最初に外れた項目が`failed`の理由（`last_error`）になり、以降は確認しない。
 
 1. receiptが存在し、`Receipt`として解釈できる。
 2. `run_id`が一致し、`result`が`succeeded`である。`tests`/`e2e`/`subagent_review`は`failed`でなく、`passed`には証跡、`not_applicable`には理由が空でなく書かれている。`commit`は完全なSHAである。
