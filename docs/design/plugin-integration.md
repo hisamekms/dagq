@@ -97,6 +97,7 @@ plugins/claude-dagq/
   skills/dagq/                    バイナリと DB の解決、goal の登録と task への分解、ready、参照コマンドの要点、結果の読み方
     reference/locate.md             install、version 警告、db_exists false と rebind
     reference/inspect.md            参照コマンドの表と各フィールド（findings・events --full と絞り込み・timeline・observe --history を含む）、list のページング、task / run の状態、graph、goal edit / set-goal
+    reference/register.md           goal と task の登録の詳細: goal の欄と draft goal、task の欄（--verify・--depends-on(-goal)・--context・--evidence・--paths・--kind）、draft から ready まで（submit・plan review の pass / revise / concern・proposal withdraw・ready --bypass-review・candidates）、登録後の変更（edit・draft・cancel・dependency）、priority の段
     reference/goal-close.md         goal の close の手順（planner が行う）
     reference/observer.md           observer の finding の見方（findings・events・timeline・observe --history、kind: kpi の finding と改善の上限）と行き先（印からの runtime の planner、blocked の ask の propose / dismiss、人の planner での submit --finding / finding dismiss）
     reference/kpi.md                dagq kpi（期間・種類・層・比較・目標）、dagq mark / marks と kpi --compare での前後比較、dagq report と日次のレポートの場所、host.toml の [push] と送るもの・失敗の attention

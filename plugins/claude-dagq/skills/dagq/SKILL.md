@@ -9,7 +9,7 @@ dagq runs development tasks in cmux workspaces and isolated Git worktrees. This 
 
 A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering, submitting and closing belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, then runs and lands the queue; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/goal-close.md` (closing a goal) and `reference/kpi.md` (KPIs, change marks, reports, push).
+Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal) and `reference/kpi.md` (KPIs, change marks, reports, push).
 
 ## 1. Locate the binary and the queue
 
@@ -33,17 +33,17 @@ Skip the goal only for a one-shot task that finishes the problem by itself; when
 
 ### Register the goal
 
-Collect, asking only for what is missing: title (the problem, one line), description (what is wrong today and what the repository looks like when solved), acceptance (how the whole goal is judged after every task landed), constraints (naming, boundaries, what not to do, shared by every task), doc (a committed document, relative to the repository root).
+Collect title, description, acceptance, constraints and doc (what each holds, and draft goals: `reference/register.md`).
 
 ```sh
 "$DAGQ" goal add "TITLE" --description "..." --acceptance "..." --constraints "..." --doc docs/adr/NNNN-name.md
 ```
 
-A goal has no verification commands; a goal-level check is a final task depending on the others. It is draft or open: the tasks of a `goal add --draft` goal are never claimed, even when `ready`. Adopt it by submitting it (`submit --goal ID`; a `pass` lifts the draft), or reject it with `goal close ID --verdict abandoned`. The observer's findings, and how they become proposals: `reference/observer.md`.
+A goal has no verification commands; a goal-level check is a final task depending on the others. `goal add --draft` makes a draft goal, adopted by `submit --goal ID` or rejected by `goal close ID --verdict abandoned`. Findings and proposals: `reference/observer.md`.
 
 ### Register the tasks
 
-Split the goal into tasks, each one session in one worktree. Collect per task: title (one line), description (what to change and where; for runtime, the files it mainly touches), acceptance (how a reviewer decides it is done), verification commands (run by `integrate` after its rebase; repeat `--verify`), dependencies (tasks that must be `completed` first, repeat `--depends-on`; to wait for another goal, `--depends-on-goal ID`: claimed only once that goal is closed `achieved`, `reference/inspect.md`), `--context` (why it exists, what to read first), and `--evidence` (receipt checks to report `passed` with evidence: `tests`, `e2e`, `subagent_review`). A missing one parks the run (`evidence_missing`). `--paths GLOB` (repeatable) limits what a task may change: a run changing more parks (`scope_violation`). Pick `--verify`, `--paths`, `--evidence`, `--kind` (docs, plugin, runtime, ci) and the files named per `reference/scope.md`.
+Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--kind` (docs, plugin, runtime, ci); what each means is in `reference/register.md`, the combinations per kind in `reference/scope.md`.
 
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \
@@ -55,9 +55,7 @@ Split the goal into tasks, each one session in one worktree. Collect per task: t
 "$DAGQ" candidates
 ```
 
-A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (refusing what `lint` rejects) makes the tasks `submitted`, never claimed, in one proposal owned by this session. Plan review checks each proposal in turn: `pass` makes its tasks `ready`, `revise` returns them to `draft` with reasons for their planner to fix and `submit --proposal ID` again, `concern` asks the person through the inbox. `proposal list` / `proposal show ID` read proposals. Its planner withdraws one with `proposal withdraw ID` (a dropped plan, or `EmptyProposal`): it ends `canceled`, its submitted tasks `draft` (`reference/inspect.md`). Only plan review readies a task; `ready --bypass-review` skips it on a person's explicit word. `candidates` lists claimable ready tasks; a ready one missing from it is blocked (`show ID`). `edit` changes a draft or submitted task, `draft ID` takes a ready or submitted task back, `cancel ID` drops it, `dependency add|remove TASK PREDECESSOR` (or `--goal ID`) changes prerequisites. `set-goal`, `goal edit`, `edit`: `reference/inspect.md`; `set-paths`: `reference/scope.md`.
-
-`--priority LEVEL` (default `normal`; `set-priority TASK LEVEL` while `draft` or `ready`) orders claiming: `interrupt` (a rare cut-in, never routine), `urgent` (a defect stopping operation), `high` (a prerequisite of other work), `normal`, `low` (deferred). Claim order, and urgency without drafting or bending dependencies: `reference/inspect.md`.
+`add` makes a `draft`, never claimed; `submit` puts drafts in one proposal for plan review, whose `pass` makes them `ready`, `revise` returns them to `draft` to fix and `submit --proposal ID` again, `concern` asks the person. Only plan review readies a task (`ready --bypass-review` only on a person's explicit word). `--priority` (default `normal`) orders claiming. Proposals, withdrawing, editing, dependencies and priority levels: `reference/register.md`.
 
 ## 3. Inspect
 
