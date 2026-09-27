@@ -124,12 +124,22 @@ impl Turns<'_> {
             .iter()
             .filter(|e| e.kind == event_kind::TURN_STARTED)
             .count() as u64;
+        // The session an agent that names its own (Codex's thread) said it
+        // started, the last one recorded.
+        let from_output = self.provider.turn_session_from_output();
+        let mut identified = events
+            .iter()
+            .rfind(|e| e.kind == event_kind::TURN_SESSION_IDENTIFIED)
+            .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned));
         let task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
         let mut first = (!self.resume).then(|| task_prompt.clone());
         let mut registered = false;
+        // The request of a turn that resumed a thread its agent does not
+        // have, run once more as a new session.
+        let mut again: Option<(String, Option<TurnRequest>)> = None;
         loop {
-            let (prompt, request) = match first.take() {
-                Some(prompt) => (prompt, None),
+            let (prompt, request) = match again.take().or_else(|| first.take().map(|p| (p, None))) {
+                Some(next) => next,
                 None => match self.next_request(&run_dir)? {
                     Some(request) => (request.prompt.clone(), Some(request)),
                     None => {
@@ -140,11 +150,18 @@ impl Turns<'_> {
             };
             // A session is resumed once its model answered or the agent
             // keeps it (a turn that failed before an answer may have left
-            // it). One that never was starts with the task's prompt, the
-            // request after it.
-            let resume = created || self.provider.turn_session_exists(self.run);
+            // it); an agent that names its own resumes the one it said it
+            // started. One that never was starts with the task's prompt,
+            // the request after it.
+            let resume = if from_output {
+                identified.clone()
+            } else {
+                (created || self.provider.turn_session_exists(self.run))
+                    .then(|| self.run.id().to_string())
+            };
+            let asked = prompt.clone();
             let prompt = match &request {
-                Some(_) if !resume => format!("{task_prompt}\n\n{prompt}"),
+                Some(_) if resume.is_none() => format!("{task_prompt}\n\n{prompt}"),
                 _ => prompt,
             };
             turn += 1;
@@ -152,13 +169,32 @@ impl Turns<'_> {
                 &run_dir,
                 turn,
                 &prompt,
-                resume,
+                resume.as_deref(),
+                &mut identified,
                 request.as_ref(),
                 &session,
                 &mut registered,
                 child_may_be_alive,
             )?;
             created |= ended.result.session_created;
+            if let Some(missing) = resume.filter(|_| from_output && ended.result.session_missing) {
+                // The agent kept no thread of that id (the turn that named
+                // it ended before it was saved): forget it and start anew.
+                self.queue.record_runtime_event(
+                    self.run.id(),
+                    event_kind::TURN_SESSION_IDENTIFIED,
+                    json!({
+                        "turn": turn,
+                        "session_id": null,
+                        "missing": missing,
+                        "provider": self.run.actual_provider(),
+                    }),
+                )?;
+                say(&format!("session {missing} is gone; a new one starts"));
+                identified = None;
+                again = Some((asked, request));
+                continue;
+            }
             if !ended.outcome.goes_on(ended.failure) {
                 say(&format!(
                     "turn {turn} {}; the session ends",
@@ -210,16 +246,18 @@ impl Turns<'_> {
         }
     }
 
-    /// Run turn `turn` with `prompt`, resuming the session with `resume`,
-    /// and record it. A turn that may still run when an error ends the
-    /// wrapper is stopped with its group first.
+    /// Run turn `turn` with `prompt`, resuming the session `resume`, and
+    /// record it; `identified` is the session the agent last said it
+    /// started. A turn that may still run when an error ends the wrapper
+    /// is stopped with its group first.
     #[allow(clippy::too_many_arguments)]
     fn turn(
         &mut self,
         run_dir: &Path,
         turn: u64,
         prompt: &str,
-        resume: bool,
+        resume: Option<&str>,
+        identified: &mut Option<String>,
         request: Option<&TurnRequest>,
         session: &WorkerSession,
         registered: &mut bool,
@@ -261,6 +299,7 @@ impl Turns<'_> {
             run_dir,
             turn,
             resume,
+            identified,
             request,
             registered,
             &mut *child,
@@ -290,7 +329,8 @@ impl Turns<'_> {
         &mut self,
         run_dir: &Path,
         turn: u64,
-        resume: bool,
+        resume: Option<&str>,
+        identified: &mut Option<String>,
         request: Option<&TurnRequest>,
         registered: &mut bool,
         child: &mut dyn Spawned,
@@ -315,20 +355,33 @@ impl Turns<'_> {
             event_kind::TURN_STARTED,
             json!({
                 "turn": turn,
-                "resume": resume,
+                "resume": resume.is_some(),
                 "request": request.map(|r| r.seq),
                 "what": what,
                 "pid": child.id(),
-                "session_id": run.id(),
+                // An agent that names its own session names a new one in
+                // its output.
+                "session_id": resume.map(str::to_owned).or_else(|| {
+                    (!self.provider.turn_session_from_output()).then(|| run.id().to_string())
+                }),
                 "silence_secs": limits.silence_secs,
                 "limit_secs": limits.limit_secs,
             }),
         )?;
         say(&format!("turn {turn} started: {what}"));
-        let (exit, stop, mut tail) = self.follow(run_dir, child, reader, stdout, limits)?;
+        let (exit, stop, mut tail) =
+            self.follow(run_dir, turn, identified, child, reader, stdout, limits)?;
         // What it wrote after the last look.
         for line in tail.read(self.files, stdout, true) {
-            reader.line(&line);
+            for signal in reader.line(&line) {
+                if let TurnSignal::Started {
+                    session_id: Some(id),
+                    ..
+                } = signal
+                {
+                    self.identify(turn, identified, &id)?;
+                }
+            }
         }
         let stderr_text = self.files.read_to_string(stderr).unwrap_or_default();
         let result = reader.finish(exit.as_ref(), &stderr_text);
@@ -385,12 +438,35 @@ impl Turns<'_> {
         })
     }
 
+    /// Record the session `id` the agent said turn `turn` runs in, when it
+    /// names its own and `id` is not the one `identified` last: the next
+    /// turns resume it (Codex's thread, ADR-t813-1).
+    fn identify(&mut self, turn: u64, identified: &mut Option<String>, id: &str) -> Result<()> {
+        if !self.provider.turn_session_from_output() || identified.as_deref() == Some(id) {
+            return Ok(());
+        }
+        self.queue.record_runtime_event(
+            self.run.id(),
+            event_kind::TURN_SESSION_IDENTIFIED,
+            json!({
+                "turn": turn,
+                "session_id": id,
+                "provider": self.run.actual_provider(),
+            }),
+        )?;
+        *identified = Some(id.to_owned());
+        Ok(())
+    }
+
     /// Follow the turn's process until it exits or the wrapper stops it:
     /// its exit (`None` when stopped), why it was stopped, and the tail of
     /// its stdout read so far.
+    #[allow(clippy::too_many_arguments)]
     fn follow(
         &mut self,
         run_dir: &Path,
+        turn: u64,
+        identified: &mut Option<String>,
         child: &mut dyn Spawned,
         reader: &mut dyn TurnReader,
         stdout: &Path,
@@ -411,8 +487,13 @@ impl Turns<'_> {
                 for signal in reader.line(&line) {
                     match signal {
                         TurnSignal::Started {
-                            permission_mode, ..
+                            session_id,
+                            permission_mode,
+                            ..
                         } => {
+                            if let Some(id) = session_id {
+                                self.identify(turn, identified, &id)?;
+                            }
                             if let Some(expected) = self.provider.turn_permission_mode()
                                 && permission_mode.as_deref() != Some(expected)
                                 && stop.is_none()

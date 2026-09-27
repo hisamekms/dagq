@@ -603,6 +603,9 @@ pub struct TestWorkspace {
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
     pub headless: Option<PathBuf>,
+    /// The `codex` a headless Codex run's wrapper calls for its turns
+    /// ([`headless_codex`]).
+    pub codex: Option<PathBuf>,
 }
 
 impl TestWorkspace {
@@ -649,6 +652,7 @@ impl TestWorkspace {
             screen_after_confirm: Mutex::new(None),
             armed_screen: Mutex::new(None),
             headless: None,
+            codex: None,
         }
     }
     /// Let cmux list `workspace` as if an earlier supervisor opened it.
@@ -755,7 +759,7 @@ impl WorkspaceBackend for TestWorkspace {
             ));
             return Ok(workspace);
         }
-        let headless = headless_provider(run, self.headless.as_deref());
+        let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
             if let Some(provider) = headless {
@@ -817,7 +821,7 @@ impl WorkspaceBackend for TestWorkspace {
             tags.description.as_deref(),
             Some(format!("run {} resume", run.id()).as_str())
         );
-        let headless = headless_provider(run, self.headless.as_deref());
+        let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
         let script = match &headless {
             Some(_) => String::new(),
             None => self
@@ -1130,24 +1134,40 @@ impl WorkspaceBackend for TestWorkspace {
     }
 }
 
-/// The provider of a headless run's wrapper (ADR-t813-1): Claude Code's own
-/// turns and reader, calling the stub `claude` at `claude`, with the test
-/// tick. `None` for an interactive run.
-fn headless_provider(run: &TaskRun, claude: Option<&Path>) -> Option<HeadlessProvider> {
-    (run.worker_mode() == dagq::domain::worker::WorkerMode::Headless).then(|| HeadlessProvider {
-        claude: dagq::infrastructure::adapters::ClaudeCode {
-            executable: claude
-                .unwrap_or(Path::new("/nonexistent/headless-claude"))
-                .to_owned(),
-        },
+/// The provider of a headless run's wrapper (ADR-t813-1): the run's
+/// provider's own turns and reader (Claude Code's calling the stub `claude`
+/// at `claude`, Codex's the stub `codex` at `codex`), with the test tick.
+/// `None` for an interactive run.
+fn headless_provider(
+    run: &TaskRun,
+    claude: Option<&Path>,
+    codex: Option<&Path>,
+) -> Option<HeadlessProvider> {
+    (run.worker_mode() == dagq::domain::worker::WorkerMode::Headless).then(|| {
+        let agent: Box<dyn AgentProvider + Send> = match run.actual_provider() {
+            dagq::domain::Provider::Codex => Box::new(dagq::infrastructure::codex::Codex {
+                executable: codex
+                    .unwrap_or(Path::new("/nonexistent/headless-codex"))
+                    .to_owned(),
+            }),
+            dagq::domain::Provider::Claude => {
+                Box::new(dagq::infrastructure::adapters::ClaudeCode {
+                    executable: claude
+                        .unwrap_or(Path::new("/nonexistent/headless-claude"))
+                        .to_owned(),
+                })
+            }
+        };
+        HeadlessProvider { agent }
     })
 }
 
-/// Claude Code's headless turns (the real `turn_command` and reader) with
-/// the stub `claude` of [`headless_claude`]; a turn's model and effort go
-/// on its command line as they would.
+/// A provider's headless turns (the real `turn_command` and reader) with
+/// the stub `claude` of [`headless_claude`] or `codex` of
+/// [`headless_codex`]; a turn's model and effort go on its command line as
+/// they would.
 pub struct HeadlessProvider {
-    pub claude: dagq::infrastructure::adapters::ClaudeCode,
+    pub agent: Box<dyn AgentProvider + Send>,
 }
 
 impl AgentProvider for HeadlessProvider {
@@ -1167,16 +1187,24 @@ impl AgentProvider for HeadlessProvider {
         TEST_TICK
     }
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
-        self.claude.select_model(command, model, effort);
+        self.agent.select_model(command, model, effort);
     }
-    fn turn_command(&self, run: &TaskRun, prompt: &str, resume: bool) -> Result<CommandSpec> {
-        self.claude.turn_command(run, prompt, resume)
+    fn turn_command(
+        &self,
+        run: &TaskRun,
+        prompt: &str,
+        resume: Option<&str>,
+    ) -> Result<CommandSpec> {
+        self.agent.turn_command(run, prompt, resume)
     }
     fn turn_reader(&self) -> Result<Box<dyn dagq::application::TurnReader>> {
-        self.claude.turn_reader()
+        self.agent.turn_reader()
     }
     fn turn_permission_mode(&self) -> Option<&'static str> {
-        self.claude.turn_permission_mode()
+        self.agent.turn_permission_mode()
+    }
+    fn turn_session_from_output(&self) -> bool {
+        self.agent.turn_session_from_output()
     }
 }
 
@@ -1248,6 +1276,107 @@ printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","per
     stub
 }
 
+/// A stub `codex` for headless turns (ADR-t813-1, ADR-t813-3), in `dir`: it
+/// takes `codex exec --json -C <worktree> -c … -- <prompt>` and `codex exec
+/// resume --json -c … -- <thread> <prompt>`, finds the run directory among
+/// the `-c` writable roots, appends `<start|resume> <thread> <prompt's
+/// first line>` to `stub-calls.log` there and the arguments of the call
+/// (one line each) to `stub-args.log`, prints `thread.started` (a new
+/// thread `codex-thread-<turn>` when it starts, the one it resumes
+/// otherwise) and `turn.started`, then sources `turn.sh` next to it (see
+/// [`set_turns`]) and prints `turn.completed` unless the turn ended. `$TURN`
+/// is the turn's number in the run, `$PROMPT` its prompt, `$MODE` `start`
+/// or `resume`, `$THREAD` the thread. The turn's helpers: `say TEXT`,
+/// `result` (`turn.completed` with its usage), `error TEXT` (an `error`
+/// event), `fail TEXT` (`turn.failed`, exit 1), `refused COMMAND` (a
+/// command the sandbox refused), `commit MESSAGE`, `receipt COMMIT
+/// [RESULT] [EVIDENCE]`, `ask QUESTION`.
+pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
+    let stub = dir.join("codex-headless");
+    let turns = dir.join("turn.sh");
+    let script = format!(
+        r#"#!/bin/sh
+MODE=start; THREAD=; PROMPT=; ROOTS=
+ARGS=
+for arg in "$@"; do ARGS="$ARGS $arg|"; done
+[ "$1" = --version ] && {{ echo "codex-cli stub"; exit 0; }}
+[ "$1" = exec ] || {{ echo "not exec: $*" >&2; exit 2; }}
+shift
+if [ "$1" = resume ]; then MODE=resume; shift; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) case "$2" in sandbox_workspace_write.writable_roots=*) ROOTS=$2 ;; esac; shift 2 ;;
+    -C|-m) shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+if [ "$MODE" = resume ]; then THREAD=$1; PROMPT=$2; else PROMPT=$1; fi
+RUN_DIR=$(printf '%s' "${{ROOTS#*=}}" | tr -d '[]' | tr ',' '
+' | sed -n 5p | tr -d '"')
+DAGQ={dagq}
+DB={db}
+RECEIPT="$RUN_DIR/receipt.json"
+TURN=$(( $(cat "$RUN_DIR/stub-calls.log" 2>/dev/null | wc -l) + 1 ))
+[ -n "$THREAD" ] || THREAD="codex-thread-$TURN"
+printf '%s %s %s
+' "$MODE" "$THREAD" "$(printf '%s
+' "$PROMPT" | head -n 1 | cut -c1-80)" >> "$RUN_DIR/stub-calls.log"
+printf '%s
+' "$ARGS" >> "$RUN_DIR/stub-args.log"
+ENDED=
+say() {{ printf '{{"type":"item.completed","item":{{"id":"m%s","type":"agent_message","text":"%s"}}}}
+' "$TURN" "$1"; }}
+result() {{
+  printf '{{"type":"turn.completed","usage":{{"input_tokens":11,"cached_input_tokens":4,"output_tokens":5,"reasoning_output_tokens":2}}}}
+'
+  ENDED=1
+}}
+error() {{ printf '{{"type":"error","message":"%s"}}
+' "$1"; }}
+fail() {{
+  printf '{{"type":"error","message":"%s"}}
+{{"type":"turn.failed","error":{{"message":"%s"}}}}
+' "$1" "$1"
+  exit 1
+}}
+refused() {{ printf '{{"type":"item.completed","item":{{"id":"c%s","type":"command_execution","command":"%s","exit_code":1,"aggregated_output":"%s: Operation not permitted","status":"failed"}}}}
+' "$TURN" "$1" "$1"; }}
+commit() {{ printf 'change by %s turn %s
+' "$THREAD" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
+receipt() {{
+  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
+  mv "$RECEIPT.tmp" "$RECEIPT"
+}}
+ask() {{ "$DAGQ" --db "$DB" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --question "$1" >/dev/null; }}
+echo "Reading additional input from stdin..." >&2
+printf '{{"type":"thread.started","thread_id":"%s"}}
+{{"type":"turn.started"}}
+' "$THREAD"
+. {turns}
+[ -n "$ENDED" ] || result
+"#,
+        dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
+        db = shell_join(&[db.display().to_string()]),
+        turns = shell_join(&[turns.display().to_string()]),
+    );
+    fs::write(&stub, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    set_turns(dir, "say working");
+    stub
+}
+
+/// The arguments of each call the stub of [`headless_codex`] got for `run`,
+/// each ended by `|`.
+pub fn stub_args(run: &TaskRun) -> Vec<String> {
+    fs::read_to_string(Path::new(run.run_dir().unwrap()).join("stub-args.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// What the stub of [`headless_claude`] in `dir` does in a turn: a shell
 /// script, usually a `case "$TURN"`.
 pub fn set_turns(dir: &Path, script: &str) {
@@ -1299,6 +1428,9 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
         // A development build never looks for a release (ADR-t618-1), so
         // no test reaches crates.io even when Cargo.toml names a release.
         release_current: Some("0.0.0-dev+test".to_owned()),
+        // No Codex worker unless a test gives its stub: the host's `codex`
+        // is not these tests'.
+        codex: PathBuf::from("/nonexistent/codex"),
         ..SuperviseOptions::new(parallel, once)
     }
 }

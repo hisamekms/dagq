@@ -109,7 +109,7 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
                 named,
                 [
                     ("claude", &serde_json::json!(["interactive", "headless"])),
-                    ("codex", &serde_json::json!([]))
+                    ("codex", &serde_json::json!(["headless"]))
                 ]
             );
         }

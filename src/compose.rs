@@ -55,6 +55,7 @@ use crate::{
         },
         binaries::LocalBinaries,
         clock,
+        codex::Codex,
         location::{
             QueueLocation, REPOSITORY_FILE_NAME, data_home, goal_reviews_dir, plan_reviews_dir,
             planners_dir, runs_dir,
@@ -540,8 +541,21 @@ pub fn supervise_with_reviewer(
         executable: claude.into(),
     };
     let transcripts = ClaudeTranscripts::from_env();
-    let workers = worker_adapters(&agent, &transcripts);
-    let codex = executable(&options.codex).unwrap_or_else(|_| options.codex.clone());
+    // A Codex that is not found, or does not run, runs no worker: its
+    // tasks are deferred, and the supervisor starts all the same
+    // (ADR-t813-2).
+    let found_codex = crate::infrastructure::codex::executable(&options.codex).ok();
+    let codex = found_codex.clone().unwrap_or_else(|| options.codex.clone());
+    let codex_agent = found_codex
+        .map(|executable| Codex { executable })
+        .filter(|codex| match codex.preflight() {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "codex {} does not run: {error:#}; no Codex worker", codex.executable.display());
+                false
+            }
+        });
+    let workers = worker_adapters(&agent, &transcripts, codex_agent.as_ref());
     let layout = Layout {
         runs_dir: runs_dir(&db),
         queue_hash: QueueLocation::explicit(&db).hash(),
@@ -1001,16 +1015,19 @@ impl OneShot {
         // The worker providers `claude` and `codex` resolve to on this PATH
         // and the modes this binary runs them in (ADR-t813-2); what each
         // supervisor fixed is on its entry in `supervisors`.
-        let (claude, transcripts) = (
+        let (claude, transcripts, codex) = (
             ClaudeCode {
                 executable: PathBuf::from("claude"),
             },
             ClaudeTranscripts::from_env(),
+            Codex {
+                executable: PathBuf::from("codex"),
+            },
         );
         report["providers"] = serde_json::to_value(provider_checks(
             Path::new("claude"),
             Path::new("codex"),
-            &worker_adapters(&claude, &transcripts),
+            &worker_adapters(&claude, &transcripts, Some(&codex)),
         ))?;
         Ok(report)
     }
@@ -2049,18 +2066,21 @@ fn bound_main_checkout(queue: &SqliteQueue) -> Result<Option<Result<PathBuf>>> {
 
 /// The adapters of each worker this binary runs (ADR-t813-2), by provider
 /// and mode: Claude Code's interactive session and its headless turns
-/// (`claude -p`, ADR-t813-1). The Codex worker is added here as it is
-/// built.
+/// (`claude -p`, ADR-t813-1), and Codex's headless turns (`codex exec`,
+/// ADR-t813-3) when `codex` is given. A headless run has no screen, so
+/// Codex's signals are never read; its spans are looked for as Claude's
+/// and are not found (no active time or tokens are recorded for them).
 pub fn worker_adapters<'a>(
     claude: &'a ClaudeCode,
     transcripts: &'a ClaudeTranscripts,
+    codex: Option<&'a Codex>,
 ) -> WorkerAdapters<'a> {
     let adapter = WorkerAdapter {
         agent: claude,
         signals: claude,
         transcripts,
     };
-    WorkerAdapters::default()
+    let workers = WorkerAdapters::default()
         .with(Worker::DEFAULT, adapter)
         .with(
             Worker {
@@ -2068,7 +2088,20 @@ pub fn worker_adapters<'a>(
                 mode: WorkerMode::Headless,
             },
             adapter,
-        )
+        );
+    match codex {
+        Some(codex) => workers.with(
+            Worker {
+                provider: Provider::Codex,
+                mode: WorkerMode::Headless,
+            },
+            WorkerAdapter {
+                agent: codex,
+                ..adapter
+            },
+        ),
+        None => workers,
+    }
 }
 
 /// Each provider's executable as `claude` and `codex` resolve, with the
@@ -2082,7 +2115,10 @@ pub fn provider_checks(
     [(Provider::Claude, claude), (Provider::Codex, codex)]
         .into_iter()
         .map(|(provider, path)| {
-            let resolved = executable(path);
+            let resolved = match provider {
+                Provider::Codex => crate::infrastructure::codex::executable(path),
+                Provider::Claude => executable(path),
+            };
             ProviderCheck {
                 provider,
                 executable: resolved.as_ref().map_or_else(
@@ -2119,6 +2155,7 @@ pub fn session(
     id: &RunId,
     token: &LeaseToken,
     claude: &Path,
+    codex: &Path,
     resume: bool,
     cmux: &Path,
 ) -> Result<Value> {
@@ -2130,7 +2167,10 @@ pub fn session(
         executable: claude.into(),
     };
     let transcripts = ClaudeTranscripts::from_env();
-    let workers = worker_adapters(&provider, &transcripts);
+    let codex = Codex {
+        executable: codex.into(),
+    };
+    let workers = worker_adapters(&provider, &transcripts, Some(&codex));
     // The run's worker picks the adapters (ADR-t813-2); the supervisor
     // claims no task whose worker this binary has none for.
     let run = SqliteQueue::open(db)?.run(id)?;

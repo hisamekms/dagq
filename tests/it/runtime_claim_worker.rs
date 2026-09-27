@@ -111,7 +111,8 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
 }
 
 /// A supervisor with the adapters of Claude only (interactive and headless,
-/// ADR-t813-2) does not claim a Codex task (`provider_unavailable`): the
+/// ADR-t813-2: its `codex` is not found) does not claim a Codex task
+/// (`provider_unavailable`): the
 /// deferral is recorded once, with the worker, and shown by `status`; the
 /// task of interactive Claude is claimed beside it. A task that leaves the
 /// candidates ends its deferral. (A mode the binary lacks for a provider it
@@ -213,7 +214,8 @@ fn the_providers_are_recorded_on_the_registration() {
         json!(codex.canonicalize().unwrap())
     );
     assert_eq!(providers[1]["found"], true);
-    assert_eq!(providers[1]["modes"], json!([]));
+    // Found, it runs the headless Codex worker (ADR-t813-3).
+    assert_eq!(providers[1]["modes"], json!(["headless"]));
     assert_eq!(doctor["supervisors"][0]["providers"], providers);
 }
 

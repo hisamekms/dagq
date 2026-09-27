@@ -61,6 +61,7 @@ mod runtime_claim_defer;
 mod runtime_claim_hold;
 mod runtime_claim_worker;
 mod runtime_cleanup;
+mod runtime_codex;
 mod runtime_disk;
 mod runtime_evidence;
 mod runtime_forecast;

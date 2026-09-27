@@ -236,6 +236,9 @@ impl TurnReader for ClaudeTurnReader {
                 .flatten()
                 .map(|denial| denial["tool_name"].as_str().unwrap_or("unknown").to_owned())
                 .collect(),
+            // Claude's session is the run's: a missing one is started
+            // by `turn_session_exists` instead.
+            session_missing: false,
         }
     }
 }

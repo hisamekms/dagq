@@ -168,6 +168,11 @@ pub const TRIAGE_DECIDED: &str = "triage_decided";
 pub const TRIAGE_FAILED: &str = "triage_failed";
 pub const TRIAGE_FINISHED: &str = "triage_finished";
 pub const TRIAGE_STARTED: &str = "triage_started";
+/// A headless worker's agent named the session it started in its output
+/// (Codex's `thread.started`, ADR-t813-1): `turn`, `session_id` and
+/// `provider`, recorded by the session wrapper as soon as it is read. The
+/// later turns resume the last one recorded.
+pub const TURN_SESSION_IDENTIFIED: &str = "turn_session_identified";
 /// A headless worker's turn ended (ADR-t813-1): its `turn`, `outcome`,
 /// `failure`, `session_id`, `usage` and `permission_denials`, recorded by
 /// the session wrapper.

@@ -491,19 +491,26 @@ pub trait AgentProvider {
     }
     /// One turn of a headless worker (ADR-t813-1 decision 1): a
     /// non-interactive call in the run's worktree with `prompt` as its only
-    /// input, starting the session named by the run's id or, with
-    /// `resume`, going on with it, under the run's settings. Its stdout is
-    /// the turn's output for [`AgentProvider::turn_reader`]. The caller
-    /// closes stdin, says where the output goes and starts it in a process
-    /// group of its own. A provider without one refuses.
+    /// input, starting a session or, with `resume`, going on with the
+    /// session of that id, under the run's settings. Its stdout is the
+    /// turn's output for [`AgentProvider::turn_reader`]. The caller closes
+    /// stdin, says where the output goes and starts it in a process group
+    /// of its own. A provider without one refuses.
     fn turn_command(
         &self,
         run: &crate::domain::TaskRun,
         prompt: &str,
-        resume: bool,
+        resume: Option<&str>,
     ) -> Result<CommandSpec> {
         let _ = (run, prompt, resume);
         anyhow::bail!("this provider has no headless worker")
+    }
+    /// Whether the agent names a new session itself, in the turn's output
+    /// (Codex's `thread.started`), rather than taking the run's id for it
+    /// (Claude's `--session-id`): the wrapper then records the id it reads
+    /// and resumes that one.
+    fn turn_session_from_output(&self) -> bool {
+        false
     }
     /// Whether the agent keeps a session named by `run`'s id already (its
     /// transcript exists), so that the next turn resumes it rather than

@@ -156,6 +156,8 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             self.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
+            "--codex".into(),
+            path_text(&self.layout.codex)?,
         ]);
         let workspace = self
             .actors()

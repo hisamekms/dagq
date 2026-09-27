@@ -1203,3 +1203,94 @@ fn migration_opening_the_kinds_keeps_rows_and_moves_their_rules_to_the_write_por
             .created
     );
 }
+
+#[test]
+fn migration_opening_the_run_providers_keeps_runs_and_takes_a_codex_run() {
+    use dagq::domain::{Provider, worker::WorkerMode};
+    // Task 816, found by what it creates so a renumbering on landing does
+    // not move it.
+    let open = MIGRATIONS
+        .iter()
+        .position(|m| m.contains("CREATE TABLE task_runs_v49"))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..open] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {open};
+         UPDATE schema_floor SET floor = {floor};
+         INSERT INTO tasks(title,description,acceptance,verification_commands,status,updated_at)
+         VALUES ('t','','a','[]','in_progress','2026-09-02T00:00:00.000Z');
+         INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,worker_mode)
+         VALUES ('0d8e3f1a-7c1b-4e35-9a11-3f6d2c9b8e47',1,'running','claude','claude','{BASE}','headless');
+         INSERT INTO run_events(task_id,run_id,kind,payload)
+         VALUES (1,'0d8e3f1a-7c1b-4e35-9a11-3f6d2c9b8e47','agent_started','{{}}');",
+        floor = floor_for(open as i64),
+    ))
+    .unwrap();
+    // Before it, the queue refuses a run of any provider but claude.
+    let codex = format!(
+        "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+         VALUES ('run-2',1,'failed','codex','codex','{BASE}')"
+    );
+    assert!(raw.execute(&codex, []).is_err());
+    SqliteQueue::migrate(&path, None, 0).unwrap();
+    let mut queue = SqliteQueue::open(&path).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Running);
+    assert_eq!(run.requested_provider(), Provider::Claude);
+    assert_eq!(run.worker_mode(), WorkerMode::Headless);
+    assert_eq!(detail.events.len(), 1);
+    let indexes: i64 = raw
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE tbl_name = 'task_runs' AND type = 'index'
+             AND name IN ('runs_by_task','one_unfinished_run_per_task',
+                          'one_integrated_run_per_task','one_integrating_run_per_queue')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexes, 4);
+    // No CHECK is left on task_runs (ADR-t876-1).
+    let sql: String = raw
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'task_runs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!sql.contains("CHECK"), "{sql}");
+    // The queue takes a Codex run now, and reads it.
+    raw.execute(&codex, []).unwrap();
+    let runs = queue.show(TaskId::new(1)).unwrap().runs;
+    assert_eq!(runs[1].actual_provider(), Provider::Codex);
+    // The rules the CHECKs held are the read's: a value outside the typed
+    // status, provider or mode fails the read of its task (fail closed).
+    for (task, status, provider, mode) in [
+        (2, "failed", "gemini", "headless"),
+        (3, "", "claude", "headless"),
+        (4, "lost", "claude", "headless"),
+        (5, "failed", "claude", "screen"),
+    ] {
+        raw.execute_batch(&format!(
+            "INSERT INTO tasks(id,title,description,acceptance,verification_commands,status,updated_at)
+             VALUES ({task},'t','','a','[]','in_progress','2026-09-02T00:00:00.000Z');
+             INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,worker_mode)
+             VALUES ('r{task}',{task},'{status}','{provider}','{provider}','{BASE}','{mode}');"
+        ))
+        .unwrap();
+        assert!(
+            queue.show(TaskId::new(task)).is_err(),
+            "{status} {provider} {mode}"
+        );
+    }
+    let floor: i64 = raw
+        .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
+        .unwrap();
+    assert!(floor > open as i64, "breaking: the floor rises to {floor}");
+}

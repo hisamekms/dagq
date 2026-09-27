@@ -1081,6 +1081,9 @@ enum Command {
         lease: String,
         #[arg(long)]
         claude: PathBuf,
+        /// The Codex CLI a Codex worker's turns call (ADR-t813-3).
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
         /// Reopen the session of a `needs_session` run the supervisor resumes.
         #[arg(long)]
         resume: bool,
@@ -1804,7 +1807,7 @@ fn execute(cli: Cli) -> Result<Value> {
             restart.extend(["--claude".to_owned(), path_text(&executable(&claude)?)?]);
         }
         if let Some(codex) = codex {
-            let codex = executable(&codex).unwrap_or(codex);
+            let codex = dagq::infrastructure::codex::executable(&codex).unwrap_or(codex);
             restart.extend(["--codex".to_owned(), path_text(&codex)?]);
         }
         if let Some(plugin_dir) = plugin_dir {
@@ -2569,7 +2572,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 plugin_dir,
                 cmux: executable(&cmux)?,
                 claude: executable(&claude)?,
-                codex: executable(&codex).unwrap_or(codex),
+                codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
                 startup_timeout: Duration::from_secs(30),
                 handoff_timeout: Duration::from_secs(handoff_timeout),
                 auto_update,
@@ -2614,7 +2617,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     build_command,
                     cmux: executable(&cmux).unwrap_or(cmux),
                     claude: executable(&claude).unwrap_or(claude),
-                    codex: executable(&codex).unwrap_or(codex),
+                    codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
@@ -2647,7 +2650,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     cargo: executable(&cargo).unwrap_or(cargo),
                     cmux: executable(&cmux).unwrap_or(cmux),
                     claude: executable(&claude).unwrap_or(claude),
-                    codex: executable(&codex).unwrap_or(codex),
+                    codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
@@ -2865,6 +2868,7 @@ fn execute(cli: Cli) -> Result<Value> {
             run,
             lease,
             claude,
+            codex,
             resume,
             cmux,
         } => dagq::compose::session(
@@ -2872,6 +2876,7 @@ fn execute(cli: Cli) -> Result<Value> {
             &RunId::new(run)?,
             &LeaseToken::new(lease),
             &claude,
+            &codex,
             resume,
             &cmux,
         )?,

@@ -51,6 +51,7 @@ string_enum!(TurnFailure {
     Authentication => "authentication",
     UsageLimit => "usage_limit",
     Model => "model",
+    Sandbox => "sandbox",
     Other => "other",
 });
 
@@ -215,6 +216,9 @@ pub struct TurnResult {
     pub usage: Value,
     /// The tools refused a permission, one entry per refusal.
     pub permission_denials: Vec<String>,
+    /// The turn resumed a session the agent does not have (Codex's `no
+    /// rollout found`): it did nothing, and a new session is started.
+    pub session_missing: bool,
 }
 
 /// The idle marker the wrapper writes when turn `turn` ended: a `Stop`
@@ -317,6 +321,7 @@ mod tests {
         assert!(TurnOutcome::Failed.goes_on(Some(TurnFailure::Authentication)));
         assert!(TurnOutcome::Failed.goes_on(Some(TurnFailure::UsageLimit)));
         assert!(!TurnOutcome::Failed.goes_on(Some(TurnFailure::Model)));
+        assert!(!TurnOutcome::Failed.goes_on(Some(TurnFailure::Sandbox)));
         assert!(!TurnOutcome::Failed.goes_on(None));
         for stopped in [
             TurnOutcome::Silent,

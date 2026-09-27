@@ -385,6 +385,8 @@ impl Supervisor<'_> {
             self.token.to_string(),
             "--claude".into(),
             path_text(&self.layout.claude)?,
+            "--codex".into(),
+            path_text(&self.layout.codex)?,
             "--resume".into(),
         ]);
         // The worker's env and group (the same session of the run) and the

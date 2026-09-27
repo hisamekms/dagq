@@ -2644,7 +2644,12 @@ impl AgentProvider for ClaudeCode {
     /// the turn's process ends), its debug file and the run directory
     /// added. It leads a session of its own, so that stopping it stops what
     /// it runs.
-    fn turn_command(&self, run: &TaskRun, prompt: &str, resume: bool) -> Result<CommandSpec> {
+    fn turn_command(
+        &self,
+        run: &TaskRun,
+        prompt: &str,
+        resume: Option<&str>,
+    ) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join(HEADLESS_SETTINGS);
         fs::write(
@@ -2656,8 +2661,12 @@ impl AgentProvider for ClaudeCode {
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
-            .arg(if resume { "--resume" } else { "--session-id" })
-            .arg(run.id().as_str())
+            .arg(if resume.is_some() {
+                "--resume"
+            } else {
+                "--session-id"
+            })
+            .arg(resume.unwrap_or(run.id().as_str()))
             .arg("--permission-mode")
             .arg(HEADLESS_PERMISSION_MODE)
             .arg("--debug-file")

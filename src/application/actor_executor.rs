@@ -85,12 +85,13 @@ pub enum SessionAgent<'a> {
     /// The same session reopened for a `needs_session` run (ADR-0019).
     Resume { run: &'a TaskRun },
     /// One turn of a headless worker (ADR-t813-1): `prompt` starting its
-    /// session or, with `resume`, going on with it, its output to `stdout`
-    /// and `stderr` rather than the wrapper's terminal.
+    /// session or, with `resume`, going on with the session of that id,
+    /// its output to `stdout` and `stderr` rather than the wrapper's
+    /// terminal.
     Turn {
         run: &'a TaskRun,
         prompt: &'a str,
-        resume: bool,
+        resume: Option<&'a str>,
         stdout: &'a Path,
         stderr: &'a Path,
     },
