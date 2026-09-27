@@ -1122,3 +1122,229 @@ fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
     assert!(message.contains("supervisor second"), "{message}");
     assert_eq!(calls.last().unwrap(), "restore /opt/bin/dagq");
 }
+
+/// What a supervisor does once it took its request just as the handoff's
+/// wait ran out.
+#[derive(Clone, Copy)]
+enum Late {
+    /// Comes back under the same token and this build (or another).
+    Resume(&'static str),
+    /// Deregisters, its pid registering again under this build.
+    Reregister,
+    /// Never comes back.
+    Nothing,
+}
+
+/// Have the supervisor `token` take its request at the moment `hand_off`
+/// withdraws it after the wait ran out: the withdrawal finds no request
+/// (`cancel_handoff` is `false`) and is recorded in `withdrawal_seen`, and
+/// the request stays until the supervisor registers again. Armed before
+/// the handoff starts, and only once.
+fn take_at_withdrawal(fixture: &Fixture, token: &str) {
+    rusqlite::Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE withdrawal_seen(token TEXT);
+             CREATE TRIGGER take_at_withdrawal BEFORE UPDATE OF handoff_binary ON supervisors
+             WHEN NEW.handoff_binary IS NULL AND OLD.handoff_binary IS NOT NULL
+                  AND OLD.token = '{token}'
+                  AND NOT EXISTS (SELECT 1 FROM withdrawal_seen)
+             BEGIN
+               INSERT INTO withdrawal_seen VALUES (OLD.token);
+               SELECT RAISE(IGNORE);
+             END;"
+        ))
+        .unwrap();
+}
+
+/// After the withdrawal [`take_at_withdrawal`] armed, do `late` as the
+/// supervisor `token` of `pid`, heartbeating on a moment later when it
+/// came back.
+fn back_after_withdrawal(
+    fixture: &Fixture,
+    processes: &FakeProcesses,
+    token: &str,
+    pid: u32,
+    late: Late,
+) {
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let db = rusqlite::Connection::open(&fixture.location.db).unwrap();
+    wait_until(processes, pid, || {
+        db.query_row("SELECT count(*) FROM withdrawal_seen", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+            > 0
+    });
+    let serving = match late {
+        Late::Resume(version) => {
+            queue
+                .resume_registration(&LeaseToken::new(token), pid, version)
+                .unwrap();
+            token.to_owned()
+        }
+        Late::Reregister => {
+            let again = format!("{token}-again");
+            queue
+                .register_supervisor(&LeaseToken::new(&again), pid, 2, VERSION)
+                .unwrap();
+            queue
+                .deregister_supervisor(&LeaseToken::new(token))
+                .unwrap();
+            again
+        }
+        Late::Nothing => return,
+    };
+    thread::sleep(Duration::from_millis(1100));
+    queue.heartbeat(&LeaseToken::new(&serving)).unwrap();
+}
+
+/// A supervisor still asked when the handoff's wait runs out fails it when
+/// its request is withdrawn (a); one whose request is gone by then took it
+/// just as the wait ran out (task 715) and is looked at again: back under
+/// this build under its token or its pid's successor, it took the handoff
+/// (b); back under its old build, or not back within the grace, it did not,
+/// and the error says it took the request (c).
+#[test]
+fn a_handoff_looks_again_at_a_supervisor_that_took_it_as_the_wait_ran_out() {
+    let hand_off = |late: Option<Late>| {
+        let fixture = fixture();
+        let queue = handoff_supervisor(&fixture, "old", SupervisorMode::InCmux);
+        let registration = queue.supervisors().unwrap().remove(0);
+        let processes = FakeProcesses::default();
+        if late.is_some() {
+            take_at_withdrawal(&fixture, "old");
+        }
+        let handed = thread::scope(|scope| {
+            if let Some(late) = late {
+                let (fixture, processes, pid) = (&fixture, &processes, registration.pid);
+                scope.spawn(move || back_after_withdrawal(fixture, processes, "old", pid, late));
+            }
+            dagq::lifecycle::hand_off(
+                &queue,
+                &processes,
+                &dagq::infrastructure::clock::SystemClock,
+                std::slice::from_ref(&registration),
+                Path::new("/opt/bin/dagq"),
+                VERSION,
+                Duration::from_secs(1),
+                Duration::from_millis(20),
+            )
+            .unwrap()
+        });
+        let request = queue.handoff_request(&LeaseToken::new("old")).unwrap();
+        (handed.into_iter().next().unwrap(), request)
+    };
+
+    let (handed, request) = hand_off(None);
+    let error = handed.error.as_deref().unwrap();
+    assert!(error.contains("did not take the handoff"), "{error}");
+    assert_eq!(handed.now, None);
+    assert_eq!(request, None);
+
+    let (handed, _) = hand_off(Some(Late::Resume(VERSION)));
+    assert_eq!(handed.error, None, "{handed:?}");
+    assert_eq!(handed.now.as_ref().map(LeaseToken::as_str), Some("old"));
+    assert_eq!(handed.report()["previous_token"], "old");
+
+    let (handed, _) = hand_off(Some(Late::Reregister));
+    assert_eq!(handed.error, None, "{handed:?}");
+    assert_eq!(
+        handed.now.as_ref().map(LeaseToken::as_str),
+        Some("old-again")
+    );
+
+    let (handed, _) = hand_off(Some(Late::Resume("0.0.1")));
+    let error = handed.error.as_deref().unwrap();
+    assert!(error.contains("just as the wait ran out"), "{error}");
+    assert!(error.contains("came back as 0.0.1"), "{error}");
+    assert_eq!(handed.now, None);
+
+    let (handed, request) = hand_off(Some(Late::Nothing));
+    let error = handed.error.as_deref().unwrap();
+    assert!(
+        error.contains("took the handoff to /opt/bin/dagq just as the wait ran out"),
+        "{error}"
+    );
+    assert!(
+        error.contains("not back 1s after the wait ran out"),
+        "{error}"
+    );
+    assert_eq!(handed.now, None);
+    // The request is the supervisor's now, not withdrawn.
+    assert_eq!(request.as_deref(), Some("/opt/bin/dagq"));
+}
+
+/// `install` counts a supervisor that took the handoff just as the wait
+/// ran out and came back under the new build as handed over (task 715), so
+/// the binary stays; one that never came back is a failure, and with every
+/// supervisor failed the binary goes back.
+#[test]
+fn install_counts_a_supervisor_that_took_the_handoff_as_the_wait_ran_out() {
+    use dagq::application::install::Source;
+    let install = |late: Late| {
+        let fixture = fixture();
+        let _queue = handoff_supervisor(&fixture, "first", SupervisorMode::InCmux);
+        take_at_withdrawal(&fixture, "first");
+        let binaries = FakeBinaries::new(&[], true);
+        let processes = FakeProcesses::default();
+        let no_down = || -> Result<Value> { panic!("no drain") };
+        let mut options = install_options(Source::Binary("/built/dagq".into()));
+        options.handoff_timeout = Duration::from_secs(1);
+        let result = thread::scope(|scope| {
+            scope.spawn(|| {
+                back_after_withdrawal(&fixture, &processes, "first", std::process::id(), late)
+            });
+            install_with(&fixture, &binaries, &processes, &no_down, &options)
+        });
+        (result, binaries.calls())
+    };
+
+    let (result, calls) = install(Late::Resume(VERSION));
+    let report = result.unwrap();
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["kept"], false, "{report}");
+    assert_eq!(report["supervisors"][0]["error"], Value::Null, "{report}");
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+
+    let (result, calls) = install(Late::Nothing);
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("just as the wait ran out"), "{message}");
+    assert!(calls.iter().any(|c| c.starts_with("restore")), "{calls:?}");
+}
+
+/// The update job does not bring back a supervisor that took the handoff
+/// just as the wait ran out and heartbeats on under the new build (task
+/// 715): it is an install.
+#[test]
+fn the_update_job_installs_past_a_supervisor_that_took_the_handoff_as_the_wait_ran_out() {
+    let fixture = fixture();
+    let _queue = auto_supervisor(&fixture);
+    take_at_withdrawal(&fixture, "auto");
+    let processes = FakeProcesses::default();
+    let restarted = Mutex::new(Vec::new());
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    let report = thread::scope(|scope| {
+        scope.spawn(|| {
+            back_after_withdrawal(
+                &fixture,
+                &processes,
+                "auto",
+                UPDATED_PID,
+                Late::Resume(VERSION),
+            )
+        });
+        run_update_job(&fixture, &binaries, &processes, &restarted)
+    });
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert!(
+        binaries.calls().iter().all(|c| !c.starts_with("restore")),
+        "{:?}",
+        binaries.calls()
+    );
+    assert!(restarted.lock().unwrap().is_empty());
+}

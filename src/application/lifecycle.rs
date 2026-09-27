@@ -980,6 +980,13 @@ pub fn handoff_failures(handed: &[Handed]) -> Option<anyhow::Error> {
     (!errors.is_empty()).then(|| anyhow::anyhow!("{}", errors.join("; ")))
 }
 
+/// The longest `hand_off` looks again at a supervisor that took its
+/// request just as the wait ran out (the withdrawal found no request left,
+/// as its new binary clears it by registering again): one whose row is
+/// gone gets this much more, at most the wait itself, for its pid to
+/// register again under the new build.
+pub const HANDOFF_GRACE: Duration = Duration::from_secs(30);
+
 /// Ask each supervisor in `live` to exec `binary` (ADR-0045 decision 10)
 /// and wait until each of them has either taken its registration back
 /// under `version`, with the same pid, or failed to, within one `timeout`
@@ -990,8 +997,11 @@ pub fn handoff_failures(handed: &[Handed]) -> Option<anyhow::Error> {
 /// exec that failed, after which the old binary goes on) or is still asked
 /// at the timeout. One failing does not stop the wait for the others
 /// (ADR-t632-1): the result names what became of each, and the request of
-/// each one that failed is withdrawn. An error is only a queue that could
-/// not be read or written.
+/// each one that failed is withdrawn. One still asked at the timeout whose
+/// request is gone by the withdrawal took it just then: it is looked at
+/// again for up to [`HANDOFF_GRACE`] (at most `timeout`), and takes the
+/// handoff when it registers again under `version` meanwhile. An error is
+/// only a queue that could not be read or written.
 #[allow(clippy::too_many_arguments)]
 pub fn hand_off(
     queue: &dyn Queue,
@@ -1004,54 +1014,75 @@ pub fn hand_off(
     poll: Duration,
 ) -> Result<Vec<Handed>> {
     let binary_text = path_text(binary)?;
-    let cancel = |registrations: &mut dyn Iterator<Item = &SupervisorRegistration>| {
-        // A request left behind would have the supervisor exec that path
-        // later, after the caller put another binary there.
-        for registration in registrations {
-            let _ = queue.cancel_handoff(&registration.token, &binary_text);
-        }
-    };
-    match wait_for_handoff(
+    // A registration of the same pid counts as a successor only when it was
+    // made after the handoff was asked for: an older one is a stale row of
+    // a pid the system reused.
+    let asked_at = clock.now();
+    let waited = match wait_for_handoff(
         queue,
         processes,
         clock,
         live,
+        asked_at,
         &binary_text,
         version,
         timeout,
         poll,
     ) {
-        Ok(handed) => {
-            cancel(
-                &mut handed
-                    .iter()
-                    .filter(|h| h.error.is_some())
-                    .map(|h| &h.registration),
-            );
-            Ok(handed)
-        }
+        Ok(waited) => waited,
         Err(error) => {
-            cancel(&mut live.iter());
-            Err(error)
+            for registration in live {
+                let _ = queue.cancel_handoff(&registration.token, &binary_text);
+            }
+            return Err(error);
         }
+    };
+    let mut handed = Vec::with_capacity(waited.len());
+    let mut taken_late = Vec::new();
+    for (index, (one, timed_out)) in waited.into_iter().enumerate() {
+        if one.error.is_some() {
+            // A request left behind would have the supervisor exec that path
+            // later, after the caller put another binary there.
+            let withdrawn = queue.cancel_handoff(&one.registration.token, &binary_text);
+            // Nothing left to withdraw from one still asked a moment ago:
+            // its new binary cleared the request by registering again (or
+            // its row went away while it exec'd), so it took the handoff
+            // just then.
+            if timed_out && matches!(withdrawn, Ok(false)) {
+                taken_late.push(index);
+            }
+        }
+        handed.push(one);
     }
+    look_again(
+        queue,
+        processes,
+        clock,
+        &mut handed,
+        taken_late,
+        asked_at,
+        &binary_text,
+        version,
+        HANDOFF_GRACE.min(timeout),
+        poll,
+    )?;
+    Ok(handed)
 }
 
+/// What became of each supervisor in `live`, with whether its failure is
+/// the timeout (it was still asked when the wait ran out).
 #[allow(clippy::too_many_arguments)]
 fn wait_for_handoff(
     queue: &dyn Queue,
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
     live: &[SupervisorRegistration],
+    asked_at: i64,
     binary_text: &str,
     version: &str,
     timeout: Duration,
     poll: Duration,
-) -> Result<Vec<Handed>> {
-    // A registration of the same pid counts as a successor only when it was
-    // made after the handoff was asked for: an older one is a stale row of
-    // a pid the system reused.
-    let asked_at = clock.now();
+) -> Result<Vec<(Handed, bool)>> {
     let mut handed = Vec::with_capacity(live.len());
     for registration in live {
         let error = (!queue.request_handoff(&registration.token, binary_text)?).then(|| {
@@ -1061,20 +1092,23 @@ run `up`",
                 registration.token, registration.pid
             )
         });
-        handed.push(Handed {
-            registration: registration.clone(),
-            now: None,
-            error,
-        });
+        handed.push((
+            Handed {
+                registration: registration.clone(),
+                now: None,
+                error,
+            },
+            false,
+        ));
     }
     let deadline = Instant::now() + timeout;
     loop {
         let now = clock.now();
         let registrations = queue.supervisors()?;
         let expired = Instant::now() >= deadline;
-        for handed in handed
+        for (handed, timed_out) in handed
             .iter_mut()
-            .filter(|h| h.now.is_none() && h.error.is_none())
+            .filter(|(h, _)| h.now.is_none() && h.error.is_none())
         {
             match look_at_handoff(
                 &registrations,
@@ -1094,16 +1128,95 @@ run `up`",
                         handed.registration.pid,
                         timeout.as_secs()
                     ));
+                    *timed_out = true;
                 }
                 Ok(None) => {}
                 Err(error) => handed.error = Some(format!("{error:#}")),
             }
         }
-        if handed.iter().all(|h| h.now.is_some() || h.error.is_some()) {
+        if handed
+            .iter()
+            .all(|(h, _)| h.now.is_some() || h.error.is_some())
+        {
             return Ok(handed);
         }
         thread::sleep(poll);
     }
+}
+
+/// Look again, for up to `grace`, at the supervisors of `handed` at
+/// `pending` that took their request just as the wait ran out: one that
+/// registers again under `version` (its token, or its pid's successor)
+/// took the handoff; one back under another build or no longer
+/// heartbeating, or not back by then, did not, and its error says it took
+/// the request.
+#[allow(clippy::too_many_arguments)]
+fn look_again(
+    queue: &dyn Queue,
+    processes: &dyn ProcessControl,
+    clock: &dyn Clock,
+    handed: &mut [Handed],
+    mut pending: Vec<usize>,
+    asked_at: i64,
+    binary_text: &str,
+    version: &str,
+    grace: Duration,
+    poll: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + grace;
+    while !pending.is_empty() {
+        let now = clock.now();
+        let registrations = queue.supervisors()?;
+        let expired = Instant::now() >= deadline;
+        pending.retain(|&index| {
+            let one = &mut handed[index];
+            let registration = &one.registration;
+            let name = format!(
+                "supervisor {} (pid {})",
+                registration.token, registration.pid
+            );
+            // While it execs, its row can be gone before its pid registers
+            // again: only a row it serves under settles it early.
+            let found = successor(
+                &registrations,
+                &registration.token,
+                registration.pid,
+                version,
+                asked_at,
+            )
+            .is_some();
+            let error = match look_at_handoff(
+                &registrations,
+                registration,
+                processes,
+                now,
+                asked_at,
+                binary_text,
+                version,
+            ) {
+                Ok(Some(token)) => {
+                    one.now = Some(token);
+                    one.error = None;
+                    return false;
+                }
+                Err(error) if found => format!("{error:#}"),
+                _ if expired => format!(
+                    "not back {}s after the wait ran out; see its log, then `status`",
+                    grace.as_secs_f64()
+                ),
+                _ => return true,
+            };
+            one.error = Some(format!(
+                "{name} took the handoff to {binary_text} just as the wait ran out, but did not \
+come back under {version}: {error}"
+            ));
+            false
+        });
+        if !pending.is_empty() {
+            thread::sleep(poll);
+        }
+    }
+    Ok(())
 }
 
 /// The registration a supervisor asked to hand off serves under: the one
