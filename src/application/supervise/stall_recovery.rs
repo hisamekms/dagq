@@ -250,7 +250,7 @@ impl SessionWatch {
         }
         if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)?
             || self.prompt_hash.is_some()
-            || sv.queue.has_unclosed_worker_question(run.id())?
+            || self.waits_for_question(sv, run)?
         {
             self.recovery.stop_reason(
                 sv,

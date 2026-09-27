@@ -463,13 +463,22 @@ pub fn review_anchor(events: &[RunEvent]) -> Option<&RunEvent> {
 /// `worker_question` there, whose answer the supervisor types as it does a
 /// running worker's (task 238).
 pub fn fix_requested(events: &[RunEvent]) -> bool {
-    review_anchor(events).is_some_and(|anchor| {
-        (anchor.kind == "revise_requested"
-            || (anchor.kind == "conflict_precheck" && anchor.payload["requested"] == true))
-            && !events
-                .iter()
-                .any(|e| e.id > anchor.id && e.kind == "exit_requested")
-    })
+    fix_requested_at(events).is_some()
+}
+
+/// When the request [`fix_requested`] finds was sent (its `sent_at`, unix
+/// seconds; 0 when not recorded): only the `worker_question`s asked since
+/// are the supervisor's to answer (task 582).
+pub fn fix_requested_at(events: &[RunEvent]) -> Option<i64> {
+    review_anchor(events)
+        .filter(|anchor| {
+            (anchor.kind == "revise_requested"
+                || (anchor.kind == "conflict_precheck" && anchor.payload["requested"] == true))
+                && !events
+                    .iter()
+                    .any(|e| e.id > anchor.id && e.kind == "exit_requested")
+        })
+        .map(|anchor| anchor.payload["sent_at"].as_i64().unwrap_or_default())
 }
 
 /// Whether a `needs_session` run's resumed session is on: its latest
@@ -490,10 +499,14 @@ pub fn resume_in_progress(events: &[RunEvent]) -> bool {
 /// into its worker's terminal: the run is `running`, awaiting integration
 /// while its live session fixes what it was asked to ([`fix_requested`]),
 /// or `needs_session` while its resumed session is on
-/// ([`resume_in_progress`]). The caller checks that a supervisor leases it.
-pub fn session_takes_answers(status: RunStatus, events: &[RunEvent]) -> bool {
+/// ([`resume_in_progress`]). While a live session fixes a request, only the
+/// answer of an ask created (`ask_created_at`, unix seconds) since the
+/// request was sent is the supervisor's; an older one is the inbox's (task
+/// 582). The caller checks that a supervisor leases it.
+pub fn session_takes_answers(status: RunStatus, events: &[RunEvent], ask_created_at: i64) -> bool {
     status == RunStatus::Running
-        || (status == RunStatus::AwaitingIntegration && fix_requested(events))
+        || (status == RunStatus::AwaitingIntegration
+            && fix_requested_at(events).is_some_and(|sent_at| ask_created_at >= sent_at))
         || (status == RunStatus::NeedsSession && resume_in_progress(events))
 }
 
@@ -2701,37 +2714,43 @@ mod attention_tests {
             created_at: String::new(),
         };
         let waiting = RunStatus::AwaitingIntegration;
-        assert!(session_takes_answers(RunStatus::Running, &[]));
-        assert!(!session_takes_answers(waiting, &[]));
+        assert!(session_takes_answers(RunStatus::Running, &[], 0));
+        assert!(!session_takes_answers(waiting, &[], 0));
         let mut events = vec![
             event(1, "validation_finished", serde_json::json!({})),
             event(2, "revise_requested", serde_json::json!({"attempt": 1})),
             // Not a step of the review: the revise still waits.
             event(3, "ask_opened", serde_json::json!({})),
         ];
-        assert!(session_takes_answers(waiting, &events));
-        assert!(!session_takes_answers(RunStatus::NeedsSession, &events));
+        assert!(session_takes_answers(waiting, &events, 0));
+        assert!(!session_takes_answers(RunStatus::NeedsSession, &events, 0));
         events.push(event(4, "revise_finished", serde_json::json!({})));
-        assert!(!session_takes_answers(waiting, &events));
+        assert!(!session_takes_answers(waiting, &events, 0));
         events.push(event(5, "conflict_precheck", json!({"requested": false})));
-        assert!(!session_takes_answers(waiting, &events));
+        assert!(!session_takes_answers(waiting, &events, 0));
         events.push(event(6, "conflict_precheck", json!({"requested": true})));
-        assert!(session_takes_answers(waiting, &events));
+        assert!(session_takes_answers(waiting, &events, 0));
         assert_eq!(review_anchor(&events).map(|e| e.id), Some(EventId::new(6)));
+        // Only an ask created since the request was sent is the session's
+        // (task 582).
+        events[5].payload = json!({"requested": true, "sent_at": 100});
+        assert!(!session_takes_answers(waiting, &events, 99));
+        assert!(session_takes_answers(waiting, &events, 100));
+        assert_eq!(fix_requested_at(&events), Some(100));
         // A request the session did not fix ends in its `/exit`.
         events.push(event(7, "exit_requested", serde_json::json!({})));
-        assert!(!session_takes_answers(waiting, &events));
+        assert!(!session_takes_answers(waiting, &events, 0));
         // A resumed session takes them until its `/exit` or its end.
         let parked = RunStatus::NeedsSession;
         events.push(event(8, "resume_started", serde_json::json!({})));
-        assert!(session_takes_answers(parked, &events));
-        assert!(!session_takes_answers(waiting, &events));
+        assert!(session_takes_answers(parked, &events, 0));
+        assert!(!session_takes_answers(waiting, &events, 0));
         events.push(event(9, "exit_requested", json!({"resume_attempt": 1})));
-        assert!(!session_takes_answers(parked, &events));
+        assert!(!session_takes_answers(parked, &events, 0));
         events.push(event(10, "resume_started", serde_json::json!({})));
-        assert!(session_takes_answers(parked, &events));
+        assert!(session_takes_answers(parked, &events, 0));
         events.push(event(11, "resume_finished", serde_json::json!({})));
-        assert!(!session_takes_answers(parked, &events));
+        assert!(!session_takes_answers(parked, &events, 0));
     }
 
     #[test]

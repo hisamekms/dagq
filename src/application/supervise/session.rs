@@ -185,6 +185,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             stale: None,
             recovery: RecoveryWatch::default(),
             input_at: None,
+            asks_from: 0,
         })
     }
 }
@@ -239,6 +240,12 @@ pub(super) struct SessionWatch {
     /// newer than this is from before it, so the session works (task 238).
     /// `None` for a worker's own session, where any idle marker counts.
     pub(super) input_at: Option<SystemTime>,
+    /// The `worker_question`s this watch follows (their answers typed, the
+    /// session waiting on them) are those created at or after this (unix
+    /// seconds): for a revise or a conflict request, when it was sent; the
+    /// asks from before it are the inbox's to deliver by hand (task 582).
+    /// 0 follows every ask of the run.
+    pub(super) asks_from: i64,
 }
 
 impl SessionWatch {
@@ -269,6 +276,7 @@ impl SessionWatch {
             stale: None,
             recovery: RecoveryWatch::default(),
             input_at: Some(input_at),
+            asks_from: 0,
         })
     }
 
@@ -285,6 +293,13 @@ impl SessionWatch {
             .map(str::to_owned);
         self.recovery = RecoveryWatch::adopt(queue, run)?;
         Ok(())
+    }
+
+    /// Whether the session waits for the answer of a `worker_question` this
+    /// watch follows ([`SessionWatch::asks_from`]).
+    pub(super) fn waits_for_question(&self, sv: &Supervisor<'_>, run: &TaskRun) -> Result<bool> {
+        sv.queue
+            .has_unclosed_worker_question_since(run.id(), self.asks_from)
     }
 
     /// Whether the session is idle: an idle marker exists, written after
@@ -609,10 +624,7 @@ impl SessionWatch {
             }
             return Ok(());
         }
-        if self.idle(sv)
-            || !sv.processes.alive(agent.pid)
-            || sv.queue.has_unclosed_worker_question(run.id())?
-        {
+        if self.idle(sv) || !sv.processes.alive(agent.pid) || self.waits_for_question(sv, run)? {
             // The agent finished a response, is gone, or stopped at an ask
             // that waits for its answer: no dialog holds it now, and a
             // recorded one must not stay an attention.
@@ -680,13 +692,16 @@ impl SessionWatch {
     /// the second), then close the ask and record `ask_delivered` (ADR-0022
     /// decision 2). Each answer is sent at most once: a failed send records
     /// `ask_delivery_failed` and leaves the ask unclosed for the inbox.
-    /// Returns when the last answer sent was typed, if one was.
+    /// Only the asks this watch follows are typed
+    /// ([`SessionWatch::asks_from`]). Returns when the last answer sent was
+    /// typed, if one was.
     pub(super) fn deliver_answers(
         &mut self,
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<SystemTime>> {
-        let answers = sv.queue.undelivered_answers(run.id())?;
+        let mut answers = sv.queue.undelivered_answers(run.id())?;
+        answers.retain(|ask| ask.created_at >= self.asks_from);
         if answers.is_empty() {
             return Ok(None);
         }

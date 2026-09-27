@@ -65,6 +65,7 @@ mod runtime_report;
 mod runtime_resume;
 mod runtime_review;
 mod runtime_review_adopt;
+mod runtime_review_questions;
 mod runtime_run_env;
 mod runtime_session;
 mod runtime_stale_receipt;

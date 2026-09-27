@@ -930,10 +930,13 @@ pub fn attention(
                     event_kind::ASK_DELIVERY_FAILED,
                     AttentionNext::DeliverAnswer { ask_id: ask.id },
                 )
-            } else if session_takes_answers(queue.run(run_id)?.status(), &queue.run_events(run_id)?)
-                && queue
-                    .run_lease(run_id)?
-                    .is_some_and(|lease| !lease_is_stale(&lease, now, control))
+            } else if session_takes_answers(
+                queue.run(run_id)?.status(),
+                &queue.run_events(run_id)?,
+                ask.created_at,
+            ) && queue
+                .run_lease(run_id)?
+                .is_some_and(|lease| !lease_is_stale(&lease, now, control))
             {
                 (
                     "answered",

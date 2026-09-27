@@ -232,6 +232,7 @@ impl Supervisor<'_> {
                     stale: adopted_stale_nudge(&*self.queue, run, SESSION_PHASE, None)?,
                     recovery: RecoveryWatch::adopt(&*self.queue, run)?,
                     input_at: None,
+                    asks_from: 0,
                 })
             }
         })

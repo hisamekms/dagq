@@ -1501,6 +1501,10 @@ pub trait AskStore {
     fn undelivered_answers(&self, run_id: &RunId) -> Result<Vec<Ask>>;
     fn ask_delivered(&mut self, id: AskId, workspace_id: &str) -> Result<Ask>;
     fn has_unclosed_worker_question(&self, run_id: &RunId) -> Result<bool>;
+    /// Whether the run has a `worker_question` nobody closed that was
+    /// created at or after `created_from` (unix seconds).
+    fn has_unclosed_worker_question_since(&self, run_id: &RunId, created_from: i64)
+    -> Result<bool>;
     /// When the run's `worker_question` closed last (unix seconds).
     fn last_worker_question_closed(&self, run_id: &RunId) -> Result<Option<i64>>;
     /// Close the run's `stuck_exit` asks nobody closed, with `answer`.

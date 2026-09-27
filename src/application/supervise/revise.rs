@@ -83,7 +83,12 @@ impl ReviseWatch {
         sent_at: SystemTime,
         start: Option<StartCheck>,
     ) -> Result<Self> {
-        let live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at)?);
+        let mut live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at)?);
+        // A question from before the request (asked during validation or
+        // the review, or left open before the receipt) is the inbox's to
+        // deliver by hand: it neither gets its answer typed here nor holds
+        // the revise (task 582).
+        live.asks_from = unix_seconds(sent_at);
         Ok(ReviseWatch {
             session,
             attempt,
@@ -187,10 +192,10 @@ impl ReviseWatch {
             self.sent = Instant::now();
             self.start = Some(start);
         }
-        // A session stopped at its own question waits for its answer, however
-        // long a person takes: it neither went idle without rewriting the
-        // receipt nor ran out of time.
-        if sv.queue.has_unclosed_worker_question(run.id())? {
+        // A session stopped at its own question, asked since the request,
+        // waits for its answer, however long a person takes: it neither went
+        // idle without rewriting the receipt nor ran out of time.
+        if self.live.waits_for_question(sv, run)? {
             return Ok(None);
         }
         // An answer delivered by hand (or by the supervisor this one

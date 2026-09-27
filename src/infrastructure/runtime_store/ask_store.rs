@@ -70,6 +70,13 @@ impl AskStore for SqliteQueue {
     fn has_unclosed_worker_question(&self, run_id: &RunId) -> Result<bool> {
         SqliteQueue::has_unclosed_worker_question(self, run_id)
     }
+    fn has_unclosed_worker_question_since(
+        &self,
+        run_id: &RunId,
+        created_from: i64,
+    ) -> Result<bool> {
+        SqliteQueue::has_unclosed_worker_question_since(self, run_id, created_from)
+    }
     fn close_stuck_exit_asks(
         &mut self,
         run_id: &RunId,

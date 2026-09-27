@@ -93,6 +93,18 @@ impl Slot {
         }
     }
 
+    /// Whether the run waits for `ask`: a revise or a conflict request
+    /// follows only the `worker_question`s asked since it was sent
+    /// ([`SessionWatch::asks_from`], task 582).
+    fn follows(&self, ask: &Ask) -> bool {
+        match &self.phase {
+            Phase::Revise(watch) if ask.kind == AskKind::WorkerQuestion => {
+                ask.created_at >= watch.live.asks_from
+            }
+            _ => true,
+        }
+    }
+
     /// The watch of the live session's answers and dialogs, in the phases
     /// that have one.
     fn live_mut(&mut self) -> Option<&mut SessionWatch> {
@@ -196,7 +208,10 @@ impl Supervisor<'_> {
             .unclosed_run_asks(slot.run.id())?
             .into_iter()
             .filter(|ask| {
-                ask.is_open() && waits_for(phase, &ask.kind) && !slot.consumed.contains(&ask.id)
+                ask.is_open()
+                    && waits_for(phase, &ask.kind)
+                    && slot.follows(ask)
+                    && !slot.consumed.contains(&ask.id)
             })
             .collect();
         if asks.is_empty()
@@ -395,11 +410,13 @@ impl Supervisor<'_> {
     fn add_waiting_asks(&mut self, slot: &mut Slot, phase: WaitPhase) -> Result<()> {
         let asks = self.queue.unclosed_run_asks(slot.run.id())?;
         for ask in asks {
+            let follows = slot.follows(&ask);
             let Some(waiting) = &mut slot.waiting else {
                 return Ok(());
             };
             if !ask.is_open()
                 || !waits_for(phase, &ask.kind)
+                || !follows
                 || slot.consumed.contains(&ask.id)
                 || waiting.asks.iter().any(|(id, _)| *id == ask.id)
             {

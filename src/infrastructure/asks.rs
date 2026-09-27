@@ -241,7 +241,8 @@ impl SqliteQueue {
                     || (leased
                         && session_takes_answers(
                             status,
-                            &super::runtime_store::run_events_of(&tx, run_id)?
+                            &super::runtime_store::run_events_of(&tx, run_id)?,
+                            ask.created_at,
                         ))
             );
         }
@@ -494,6 +495,21 @@ impl SqliteQueue {
     /// not: its worker stopped at the ask and waits for the answer.
     pub fn has_unclosed_worker_question(&self, run_id: &RunId) -> Result<bool> {
         self.has_unclosed_ask(run_id, AskKind::WorkerQuestion)
+    }
+
+    /// Whether the run has a `worker_question` nobody closed that was
+    /// created at or after `created_from` (unix seconds).
+    pub fn has_unclosed_worker_question_since(
+        &self,
+        run_id: &RunId,
+        created_from: i64,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND kind='worker_question'
+             AND closed_at IS NULL AND created_at>=?2)",
+            params![run_id, created_from],
+            |r| r.get(0),
+        )?)
     }
 
     /// When the run's `worker_question` closed last (unix seconds): its
