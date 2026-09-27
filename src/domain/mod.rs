@@ -778,7 +778,7 @@ pub use plan_review::{
 pub use planner::{IdleProbe, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
-pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason};
+pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason, required_of};
 pub use run::{
     AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
     TaskRun, after_validation, decide_conflict, decide_revise, run_attention_of,

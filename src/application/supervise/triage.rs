@@ -301,7 +301,11 @@ impl Supervisor<'_> {
             ended: Some(ended),
             facts: &facts,
             workspace: &workspace,
-            screen: "(the session is gone: its final screen is above)",
+            screen: if headless(run) {
+                "(the session is gone: its turns are above)"
+            } else {
+                "(the session is gone: its final screen is above)"
+            },
             processes,
             git_status: &status,
             head: &head,

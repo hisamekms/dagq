@@ -20,14 +20,15 @@ use super::{
     integrate::{integrate_logs, log_names},
     or_none, tail,
 };
+use crate::domain::worker::WorkerMode;
 use crate::domain::{
     Ask, CommitSha, DraftOrigin, DraftTarget, FindingView, Goal, GoalId, GoalPredecessor, GoalTask,
     LintViolation, MAX_DRAFT_PLANNERS, MAX_FINDING_PLANNERS, MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS,
-    MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId, Receipt, RunEvent, RunId, RunStatus,
-    TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId, TaskRun,
+    MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId, Provider, Receipt, RunEvent, RunId,
+    RunStatus, TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId, TaskRun,
     recovery::{ProcessInfo, RecoveryAlert},
     related::RelatedTask,
-    resume,
+    required_of, resume,
     search::SearchHit,
     stats::conflicts::ConflictHotspot,
 };
@@ -224,8 +225,148 @@ pub const STOP_BACKGROUND: &str = "Before writing the receipt, stop every backgr
 
 /// What a headless worker is told of its session (ADR-t813-1): each turn is
 /// one non-interactive call that ends when the agent stops, and whatever
-/// runs in the background then is stopped with it.
-pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns is one non-interactive call, and the turn ends when you stop. Nobody types into it: the answer to your ask, a review's request to revise, or a request to go on arrives as the prompt of your next turn, in the same session. Do not end a turn while something you need still runs in the background (a build, a test, a wait): what runs in the background when the turn ends is stopped. Run long commands in the foreground and wait for them.\n";
+/// runs in the background then is stopped with it. It names no `/exit` and
+/// no terminal: the process ends with the turn, and nobody types into it.
+pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns is one non-interactive call, and the turn ends when you stop. Do the whole task in this turn and end it by writing the receipt, or by an ask when you need a decision. Nobody types into this session: the answer to your ask, a review's request to revise, or a request to go on arrives as the prompt of your next turn, in the same session. Do not rely on background work: what still runs when the turn ends is stopped, so run builds, tests and waits in the foreground and wait for them to finish before you go on.\n";
+
+/// [`STOP_BACKGROUND`] for a headless session: nothing waits for an `/exit`,
+/// but a process the agent detached outlives its turn (the spike measured
+/// Claude's `nohup ... &`), and the signalling rule is the same.
+pub const HEADLESS_STOP: &str = "Before you end the turn, stop every process you started that still runs (a detached `nohup ... &` outlives the turn). Stop only what you started, by its pid; never signal by name or pattern (pkill, killall, kill $(pgrep ...)), which also hits other runs' sessions and checks on this host.";
+
+/// The last step of a request to a headless session: the turn is its reply.
+const HEADLESS_DONE: &str = "Do not merge or push. Follow the repository's instructions for a worker (AGENTS.md or CLAUDE.md) as before. Do all of this in this turn. If you need a decision, run `dagq ask --run <run> --kind worker_question --because <scope|discard> --question '...'` and end the turn: the answer comes as the prompt of your next turn. When done, report briefly and end the turn.";
+
+/// The last step of a request to an interactive session.
+const INTERACTIVE_DONE: &str =
+    "Do not merge or push. When done, report briefly and stop; do not run /exit.";
+
+/// What a headless request opens with: the prompt of a resume reads as the
+/// next turn of the same session.
+const HEADLESS_NEXT_TURN: &str = "dagq: this is the next turn of your session; your previous turn has ended, and anything it left running in the background was stopped.";
+
+/// How a run's worker takes what the runtime tells it (ADR-t813-1): an
+/// interactive session typed into in its terminal, or a headless one whose
+/// every request is the prompt of its next turn, on its provider. The
+/// interactive texts are the ones the runtime has always sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Route {
+    Interactive,
+    Headless(Provider),
+}
+
+impl Route {
+    /// The route of `run`'s worker: its mode, on the provider it runs on
+    /// now (a fallback may have changed it).
+    pub(crate) fn of(run: &TaskRun) -> Self {
+        match run.worker_mode() {
+            WorkerMode::Interactive => Self::Interactive,
+            WorkerMode::Headless => Self::Headless(run.actual_provider()),
+        }
+    }
+
+    fn headless(self) -> bool {
+        matches!(self, Self::Headless(_))
+    }
+
+    /// The line that asks the session to stop its own processes.
+    fn stop(self) -> &'static str {
+        if self.headless() {
+            HEADLESS_STOP
+        } else {
+            STOP_BACKGROUND
+        }
+    }
+
+    /// The last step of a request to `run`'s session.
+    fn done(self, run: &TaskRun) -> String {
+        if self.headless() {
+            HEADLESS_DONE.replace("<run>", run.id().as_str())
+        } else {
+            INTERACTIVE_DONE.to_owned()
+        }
+    }
+
+    /// `first`, the opening line of a request, after the headless opening.
+    fn opening(self, first: String) -> Vec<String> {
+        if self.headless() {
+            vec![HEADLESS_NEXT_TURN.to_owned(), first]
+        } else {
+            vec![first]
+        }
+    }
+}
+
+/// What a headless worker on `provider` is told of its provider (the
+/// spike's measures): Claude Code stops a turn's background shells when
+/// the turn ends, and Codex stops a command still running when the model
+/// answers.
+fn headless_provider_line(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => {
+            "Claude Code stops the background shells of a turn when the turn ends: do not start a build, a test or a wait with run_in_background and end the turn to wait for it.\n"
+        }
+        Provider::Codex => {
+            "Wait for each command to finish before you answer: a command still running when you answer is stopped with the turn.\n"
+        }
+    }
+}
+
+/// What the worker is told of the subagent review. A Codex worker has no
+/// subagent (and a nested `codex exec review` could not write its session
+/// under the sandbox), so it reviews its own diff and reports the check
+/// `not_applicable`; its run does not need the evidence
+/// ([`crate::domain::required_of`]), and the supervisor's review job reviews
+/// the commit before it lands.
+fn review_line(route: Route) -> &'static str {
+    match route {
+        Route::Headless(Provider::Codex) => {
+            "Perform applicable unit tests and E2E. You have no subagent to review your change: before the receipt, read your own diff (git diff <base commit>..HEAD) against the acceptance criteria and fix what you find, then write subagent_review as not_applicable with the reason `codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit` and what the self-review found. Record evidence or an explicit reason when not applicable.\n"
+        }
+        _ => {
+            "Perform applicable unit tests, E2E, and subagent review. Record evidence or an explicit reason when not applicable.\n"
+        }
+    }
+}
+
+/// What follows a text a headless session reads as its next turn's prompt
+/// (an answer, a recovery job's instruction): go on in this turn.
+const HEADLESS_GO_ON: &str = "(dagq: this is the prompt of the next turn of your session; your previous turn has ended. Go on with the task from it in this turn, and end the turn with the receipt, or with an ask when you need a decision.)";
+
+/// `text` for `run`'s session: as it is for an interactive one, followed
+/// by [`HEADLESS_GO_ON`] for a headless one. The text stays first, so its
+/// own first line still says what it is.
+fn to_session(run: &TaskRun, text: String) -> String {
+    if Route::of(run).headless() {
+        format!("{text}\n\n{HEADLESS_GO_ON}")
+    } else {
+        text
+    }
+}
+
+/// The text that tells a session held by a login or a usage limit to go
+/// on, once a person answered the hold's ask `done`.
+pub(crate) fn continue_text(run: &TaskRun) -> String {
+    to_session(run, crate::domain::queue_hold::CONTINUE_TEXT.to_owned())
+}
+
+/// The text that carries a person's answer to the session that asked.
+pub(crate) fn answer_text(run: &TaskRun, ask: impl std::fmt::Display, answer: &str) -> String {
+    to_session(run, format!("answer to ask {ask}: {answer}"))
+}
+
+/// The text that carries a recovery job's `send_instruction` to the
+/// session.
+pub(crate) fn recovery_instruction(run: &TaskRun, alert: &str, instruction: &str) -> String {
+    to_session(
+        run,
+        format!(
+            "dagq: the supervisor's recovery job for run {} (alert {alert}) asks: {}",
+            run.id(),
+            instruction.trim()
+        ),
+    )
+}
 
 /// What a worker reads before it starts, and nothing more: everything else
 /// about its run is in the prompt, and reading the queue or the whole docs
@@ -337,15 +478,14 @@ pub fn prompt(
         }
         text
     };
-    // Known up front, so the receipt carries it (ADR-0019 decision 5).
-    let evidence = if task.required_evidence().is_empty() {
+    let route = Route::of(run);
+    // Known up front, so the receipt carries it (ADR-0019 decision 5): what
+    // this run's provider must back.
+    let required = required_of(task.required_evidence(), run.actual_provider());
+    let evidence = if required.is_empty() {
         String::new()
     } else {
-        let names: Vec<&str> = task
-            .required_evidence()
-            .iter()
-            .map(|c| c.as_str())
-            .collect();
+        let names: Vec<&str> = required.iter().map(|c| c.as_str()).collect();
         format!(
             "Required evidence: {} (each must be passed with evidence in the receipt, or the run waits for a session to add it)\n",
             names.join(", ")
@@ -360,10 +500,28 @@ pub fn prompt(
             task.paths().join(", ")
         )
     };
-    let headless = if run.worker_mode() == crate::domain::worker::WorkerMode::Headless {
-        HEADLESS_WORKER
+    // How the session ends a step and hears back: an interactive session
+    // stops and is typed into; a headless one ends its turn and reads the
+    // next turn's prompt.
+    let (headless, answer_arrives, after_submitting) = match route {
+        Route::Interactive => (
+            String::new(),
+            "The answer arrives in this terminal as `answer to ask <id>: ...`; continue from it.",
+            "After submitting, report the outcome briefly and stop; do not run /exit yourself. Once you are idle the supervisor ends the session, and a person can still send /exit. A receipt does not itself end the session.",
+        ),
+        Route::Headless(provider) => (
+            format!("{HEADLESS_WORKER}{}", headless_provider_line(provider)),
+            "The answer arrives as the prompt of your next turn in this same session, as `answer to ask <id>: ...`; continue from it.",
+            "After writing the receipt, report the outcome briefly and end the turn. A later turn comes only if a review, a landing or a person sends the run back.",
+        ),
+    };
+    let (stop_word, dont_wait) = if route.headless() {
+        (
+            "end the turn",
+            "end the turn with the question in your reply",
+        )
     } else {
-        ""
+        ("stop", "write the question to the terminal and wait")
     };
     Ok(format!(
         "You are executing dagq task {task_id}, run {run_id}.\n\
@@ -371,7 +529,7 @@ pub fn prompt(
          {reading}\
          Implement the task, run the checks described below, and commit the result.\n\
          Do not merge, push, close the workspace, or modify the queue/runtime files.\n\
-         Perform applicable unit tests, E2E, and subagent review. Record evidence or an explicit reason when not applicable.\n\
+         {review}\
          Task title: {title}\nDescription:\n{description}\nAcceptance criteria:\n{acceptance}\n\
          Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n{verification}\n\
          {local_checks}\n\
@@ -383,14 +541,15 @@ pub fn prompt(
          follow_ups is optional: an array of work you found outside this task, each with a title and a description, for the planner to decide on; omit it when there is none.\n\
          You may write this receipt outside the worktree. Keep the worktree clean after committing.\n\
          The supervisor rejects the run unless the commit is the clean head of your branch on top of the base commit, and integrate runs the verification commands itself after rebasing onto main.\n\
-         When you need a decision you cannot make from the task and the repository, do not write the question to the terminal and wait: run `dagq ask --run {run_id} --kind worker_question --because scope --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and stop. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. The answer arrives in this terminal as `answer to ask <id>: ...`; continue from it.\n\
+         When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {answer_arrives}\n\
          {stop_background}\n\
-         After submitting, report the outcome briefly and stop; do not run /exit yourself. Once you are idle the supervisor ends the session, and a person can still send /exit. A receipt does not itself end the session.\n\
+         {after_submitting}\n\
          {headless}",
         task_id = task.id(),
         run_id = run.id(),
         reading = WORKER_READING,
-        stop_background = STOP_BACKGROUND,
+        stop_background = route.stop(),
+        review = review_line(route),
         title = task.title(),
         description = task.description(),
         acceptance = task.acceptance(),
@@ -857,7 +1016,8 @@ pub(crate) fn resume_request(
     landed: &[PredecessorSummary],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
-    let mut lines = vec![match request.kind {
+    let route = Route::of(run);
+    let mut lines = route.opening(match request.kind {
         ResumeKind::EvidenceMissing => format!(
             "dagq: the supervisor's validation of run {} (task {}) found required evidence missing from the receipt, so the run is needs_session.",
             run.id(),
@@ -896,7 +1056,7 @@ pub(crate) fn resume_request(
             task.id(),
             request.branch
         ),
-    }];
+    });
     lines.push(format!("Reason: {}", request.reason));
     let branch = &request.branch;
     lines.push(format!(
@@ -960,7 +1120,7 @@ pub(crate) fn resume_request(
         lines.push(format!("2. {checks}{reproduce} Commit the result."));
     }
     lines.push("3. Keep the worktree clean.".to_owned());
-    lines.push(format!("4. {STOP_BACKGROUND}"));
+    lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
         "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it."
     ));
@@ -968,9 +1128,7 @@ pub(crate) fn resume_request(
         "6. If the change is no longer needed, write the receipt with result failed and the reason in summary."
             .to_owned(),
     );
-    lines.push(
-        "7. Do not merge or push. When done, report briefly and stop; do not run /exit.".to_owned(),
-    );
+    lines.push(format!("7. {}", route.done(run)));
     Ok(lines.join("\n"))
 }
 
@@ -978,21 +1136,21 @@ pub(crate) fn resume_request(
 /// receipt it rewrote for a revise or a conflict request does not name its clean worktree HEAD.
 pub(crate) fn revise_mismatch_request(run: &TaskRun, label: &str, why: &str) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
-    Ok([
-        format!(
-            "dagq: the receipt you rewrote for {label} of run {} cannot be accepted: {why}.",
-            run.id()
-        ),
+    let route = Route::of(run);
+    let mut lines = route.opening(format!(
+        "dagq: the receipt you rewrote for {label} of run {} cannot be accepted: {why}.",
+        run.id()
+    ));
+    lines.extend([
         "Steps:".to_owned(),
         "1. Commit every change you meant to make, so the worktree is clean.".to_owned(),
         format!(
             "2. Rewrite the receipt at {receipt} with the current HEAD commit (git rev-parse HEAD), writing a temporary file in the same directory and renaming it."
         ),
-        format!("3. {STOP_BACKGROUND}"),
-        "4. Do not merge or push. When done, report briefly and stop; do not run /exit."
-            .to_owned(),
-    ]
-    .join("\n"))
+        format!("3. {}", route.stop()),
+        format!("4. {}", route.done(run)),
+    ]);
+    Ok(lines.join("\n"))
 }
 
 /// The one fixed request the supervisor types into a session that went idle
@@ -1005,21 +1163,27 @@ pub(crate) fn stale_receipt_nudge(
     head: &CommitSha,
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
-    Ok([
-        format!(
-            "dagq: run {} went idle, but its receipt names commit {receipt_commit} while the clean worktree HEAD is {head} (for example after a rebase or a new commit). The supervisor cannot accept a receipt for another commit.",
-            run.id()
-        ),
+    let route = Route::of(run);
+    let stopped = if route.headless() {
+        "ended its turn"
+    } else {
+        "went idle"
+    };
+    let mut lines = route.opening(format!(
+        "dagq: run {} {stopped}, but its receipt names commit {receipt_commit} while the clean worktree HEAD is {head} (for example after a rebase or a new commit). The supervisor cannot accept a receipt for another commit.",
+        run.id()
+    ));
+    lines.extend([
         "Steps:".to_owned(),
         format!(
             "1. If HEAD is the work you mean to submit, rewrite the receipt at {receipt} with commit {head} (git rev-parse HEAD), writing a temporary file in the same directory and renaming it. Otherwise fix the worktree, commit, and rewrite the receipt with the new HEAD."
         ),
-        format!("2. {STOP_BACKGROUND}"),
-        "3. Do not merge or push. When done, report briefly and stop; do not run /exit.".to_owned(),
+        format!("2. {}", route.stop()),
+        format!("3. {}", route.done(run)),
         "If the receipt stays as it is, the run goes on as before and validation judges it."
             .to_owned(),
-    ]
-    .join("\n"))
+    ]);
+    Ok(lines.join("\n"))
 }
 
 /// The one nudge the supervisor types into a worker's session that stayed
@@ -1033,6 +1197,32 @@ pub(crate) fn stall_nudge(
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let minutes = idle_secs / 60;
+    let route = Route::of(run);
+    if route.headless() {
+        // A headless session's turn ended: nothing of it still runs, and
+        // the nudge is its next turn (ADR-t813-1 decision 9).
+        let mut lines = route.opening(format!(
+            "dagq: the previous turn of run {} ended without a receipt or an open question.",
+            run.id()
+        ));
+        lines.push("Do one of these in this turn:".to_owned());
+        lines.push(format!(
+            "1. If the work is done, commit it and write the receipt at {receipt} (a temporary file in the same directory, then rename). If it is not, go on with it now and end the turn with the receipt."
+        ));
+        lines.push(format!(
+            "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --question '...'` (or `--because discard` for whether to throw work away) and end the turn.",
+            run.id()
+        ));
+        lines.push(
+            "3. If you ended the turn to wait for something, it was stopped with the turn: run it again in the foreground, wait for it to finish, and go on with the work."
+                .to_owned(),
+        );
+        lines.push(
+            "If the turns keep ending without a receipt or an ask, the supervisor hands the run to its recovery job."
+                .to_owned(),
+        );
+        return Ok(lines.join("\n"));
+    }
     let mut lines = vec![format!(
         "dagq: run {} has been idle for {minutes} minutes without a receipt.",
         run.id()
@@ -1173,7 +1363,7 @@ pub fn ended_run_material(
     }
     let screen = read(&dir.join("terminal-final.txt"));
     material.push_str(&format!(
-        "Final screen of the session (end of terminal-final.txt):\n{}\n",
+        "Final screen of the session (end of terminal-final.txt; a headless session has none, its turns follow):\n{}\n",
         fenced(
             "text",
             or_none(tail(
@@ -1308,9 +1498,13 @@ pub struct RecoveryMaterial<'a> {
     pub allowed: &'a [&'a str],
 }
 
-/// What each allowed action does, for the recovery prompt.
-fn recovery_action_help(action: &str) -> &'static str {
+/// What each allowed action does, for the recovery prompt of a run on
+/// `route`: an instruction to a headless session is its next turn's prompt.
+fn recovery_action_help(route: Route, action: &str) -> &'static str {
     match action {
+        "send_instruction" if route.headless() => {
+            "{\"action\": \"send_instruction\", \"instruction\": string}: send this instruction once, as the prompt of the session's next turn (a resume of the same session; its previous turn has ended), for example to rerun the tests in the foreground, commit and write the receipt."
+        }
         "stop_processes" => {
             "{\"action\": \"stop_processes\", \"pids\": [pid, ...]}: stop these processes (SIGTERM, then SIGKILL after a grace). Only processes listed below as the run's own are allowed; any other pid makes the whole verdict an escalation. Use it for a background process the session waits for that will not end by itself (an orphan holding a pipe, a hung test). Never the session's own wrapper or agent."
         }
@@ -1338,6 +1532,10 @@ fn recovery_action_help(action: &str) -> &'static str {
         _ => "",
     }
 }
+
+/// The recovery actions that answer an interactive session's screen, its
+/// dialogs and its `/exit`: never offered for a headless run.
+pub(crate) const HEADLESS_NEVER: [&str; 2] = ["answer_known_dialog", "close_and_proceed"];
 
 /// What the recovery job of an alert is asked (ADR-0047 decisions 39 and
 /// 40): the alert, the task, the screen, the run's processes, the
@@ -1382,10 +1580,14 @@ pub fn recovery_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let route = Route::of(run);
+    // A headless session has no screen, dialog or `/exit`: the actions
+    // that answer them are never offered for it (ADR-t813-1 decision 9).
     let actions = material
         .allowed
         .iter()
-        .map(|action| format!("- {}", recovery_action_help(action)))
+        .filter(|action| !route.headless() || !HEADLESS_NEVER.contains(action))
+        .map(|action| format!("- {}", recovery_action_help(route, action)))
         .collect::<Vec<_>>()
         .join("\n");
     Ok(format!(
@@ -1396,12 +1598,12 @@ pub fn recovery_prompt(
          Acceptance criteria:\n{acceptance}\n\n\
          Alert facts:\n{facts}\n\n\
          {ended}\
-         Last lines of the session's screen:\n{screen}\n\n\
+         {screen_label}\n{screen}\n\n\
          Processes of the run (working directory in the worktree, or under the session's wrapper; the wrapper and the agent themselves are not listed):\n{processes}\n\n\
          Worktree: HEAD {head}, receipt commit {receipt}, git status:\n{status}\n\n\
          Earlier recovery verdicts and repairs of this run:\n{history}\n\n\
          Allowed actions:\n{actions}\n\
-         Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, sending keys to a dialog that is not a known one. If the repair needs any of these, escalate.\n\n\
+         Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, {never_keys}. If the repair needs any of these, escalate.\n\n\
          Answer with one JSON object and nothing else, matching this schema:\n\
          {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [string, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\"}}\n\
          diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs. reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
@@ -1430,12 +1632,24 @@ pub fn recovery_prompt(
                 "the session did not exit after the supervisor's /exit (or the /exit never reached it), and the runtime's own repairs did not apply.",
             RecoveryAlert::PromptWaiting =>
                 "the session waits at a dialog the runtime does not answer by itself.",
+            RecoveryAlert::Stalled if route.headless() =>
+                "the headless session does not get on: its turns end with neither a receipt nor an open question after the supervisor's nudges, each sent as the next turn (reason turn_without_receipt), or a turn was refused permissions too often to get on (reason permission_denied). The alert facts say which. The session has no screen, input box or dialog: an instruction is the prompt of its next turn, and resume parks the run for a session of its own.",
             RecoveryAlert::Stalled =>
                 "the session looks stuck: it stays idle without a receipt after the supervisor nudged it (reason idle_without_receipt), or it did not take a text the supervisor typed, which stays in its input box, showed no sign of work or brought up a dialog (reason send_unconfirmed). The alert facts say which. An instruction goes only into a session idle at its prompt, never over a text still in its input box. resume applies only to a run in its first session: the run is parked for a session of its own and this session is asked to /exit, which waits for background work it still runs, so stop what hangs with stop_processes in the same verdict.",
             RecoveryAlert::IdleProcess =>
                 "processes of the run (listed in the alert facts with how long they have used almost no CPU time) are alive but have not made progress for longer than the threshold; the session may be waiting for them.",
         },
         worktree = run.worktree_path().unwrap_or("none"),
+        screen_label = if route.headless() {
+            "Last turns of the headless session (it has no screen):"
+        } else {
+            "Last lines of the session's screen:"
+        },
+        never_keys = if route.headless() {
+            "typing into the session (a headless session takes no keys; an instruction goes as its next turn)"
+        } else {
+            "sending keys to a dialog that is not a known one"
+        },
         description = or_none(task.description()),
         acceptance = or_none(task.acceptance()),
         facts = fenced("json", &serde_json::to_string_pretty(material.facts)?),
@@ -1457,11 +1671,12 @@ pub(crate) fn revise_request(
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let checks = local_checks(&serde_json::to_string(task.verification_commands())?);
-    let mut lines = vec![format!(
+    let route = Route::of(run);
+    let mut lines = route.opening(format!(
         "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {round} of {MAX_REVISE_ATTEMPTS}).",
         run.id(),
         task.id()
-    )];
+    ));
     lines.push("Findings:".to_owned());
     for reason in reasons {
         lines.push(format!("- {reason}"));
@@ -1470,13 +1685,11 @@ pub(crate) fn revise_request(
     lines.push("1. Fix the findings in this worktree and commit.".to_owned());
     lines.push(format!("2. {checks}"));
     lines.push("3. Keep the worktree clean.".to_owned());
-    lines.push(format!("4. {STOP_BACKGROUND}"));
+    lines.push(format!("4. {}", route.stop()));
     lines.push(format!(
         "5. Rewrite the receipt at {receipt} with the new head commit, writing a temporary file in the same directory and renaming it."
     ));
-    lines.push(
-        "6. Do not merge or push. When done, report briefly and stop; do not run /exit.".to_owned(),
-    );
+    lines.push(format!("6. {}", route.done(run)));
     Ok(lines.join("\n"))
 }
 
@@ -1887,7 +2100,8 @@ mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
     use crate::domain::{
-        GoalRecord, GoalStatus, GoalVerdict, Provider, RunId, RunRecord, TaskRecord, TaskStatus,
+        EvidenceCheck, GoalRecord, GoalStatus, GoalVerdict, Provider, RunId, RunRecord, TaskRecord,
+        TaskStatus,
     };
     use serde_json::json;
     use std::time::UNIX_EPOCH;
@@ -2324,5 +2538,248 @@ mod tests {
             "{} bytes against {full_text}",
             prompt.len()
         );
+    }
+
+    /// Task 7's claimed run, whose worker is `provider` in `mode`.
+    fn run_on(provider: Provider, mode: WorkerMode) -> TaskRun {
+        TaskRun::restore(RunRecord {
+            id: RunId::new(RUN).unwrap(),
+            task_id: TaskId::new(7),
+            status: RunStatus::Claimed,
+            requested_provider: provider,
+            actual_provider: provider,
+            worker_mode: mode,
+            base_commit: CommitSha::try_from(SHA).unwrap(),
+            branch: Some(format!("dagq/{RUN}")),
+            worktree_path: Some("/runs/run/worktree".into()),
+            workspace_id: Some("ws".into()),
+            receipt_path: Some("/runs/run/receipt.json".into()),
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: Some("/runs/run".into()),
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    /// Every text a worker's session is sent: its prompt, each resolution
+    /// request, the revise, the receipt mismatch, the stale receipt, the
+    /// nudge, an answer and a recovery job's instruction.
+    fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
+        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None).unwrap()];
+        for kind in [
+            ResumeKind::Landing,
+            ResumeKind::EvidenceMissing,
+            ResumeKind::SentBack,
+            ResumeKind::ScopeViolation,
+            ResumeKind::Precheck,
+            ResumeKind::Triage,
+            ResumeKind::Recheck,
+        ] {
+            let request = ResumeRequest {
+                main: CommitSha::try_from(SHA).unwrap(),
+                branch: "main".into(),
+                reason: "why".into(),
+                kind,
+            };
+            texts.push(resume_request(task, run, &request, &[]).unwrap());
+        }
+        texts.push(revise_request(task, run, 1, &["fix it".into()]).unwrap());
+        texts.push(revise_mismatch_request(run, "the revise", "stale").unwrap());
+        let head = CommitSha::try_from("2222222222222222222222222222222222222222").unwrap();
+        texts.push(stale_receipt_nudge(run, SHA, &head).unwrap());
+        texts.push(stall_nudge(run, 600, &[]).unwrap());
+        texts.push(answer_text(run, 3, "blue"));
+        texts.push(recovery_instruction(run, "stalled", "write the receipt"));
+        texts.push(continue_text(run));
+        texts
+    }
+
+    /// Acceptance (1) of task 817: a headless worker, on Claude or Codex,
+    /// is told to do its work in one turn, to end the turn with an ask when
+    /// it needs a decision and to read the repository's AGENTS.md; nothing
+    /// it is sent names /exit, a terminal typed into, or background work
+    /// left running for later.
+    #[test]
+    fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
+        let task = Task::restore(TaskRecord {
+            id: TaskId::new(7),
+            title: "work".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands: vec!["make gate".into()],
+            required_evidence: vec![EvidenceCheck::E2e, EvidenceCheck::SubagentReview],
+            paths: Vec::new(),
+            priority: Default::default(),
+            kind: None,
+            status: TaskStatus::InProgress,
+            goal_id: None,
+            context: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::DEFAULT,
+        })
+        .unwrap();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let run = run_on(provider, WorkerMode::Headless);
+            let texts = session_texts(&task, &run);
+            let first = &texts[0];
+            assert!(first.contains(HEADLESS_WORKER), "{first}");
+            assert!(first.contains(headless_provider_line(provider)), "{first}");
+            assert!(first.contains("Do the whole task in this turn"), "{first}");
+            assert!(first.contains("report briefly that you asked, and end the turn"));
+            assert!(first.contains("as the prompt of your next turn in this same session"));
+            assert!(first.contains("AGENTS.md"), "{first}");
+            assert!(first.contains(HEADLESS_STOP), "{first}");
+            for text in &texts {
+                for never in [
+                    "/exit",
+                    "this terminal",
+                    "to the terminal",
+                    STOP_BACKGROUND,
+                    "write here what you wait for",
+                    "went idle",
+                ] {
+                    assert!(!text.contains(never), "{provider:?} {never}: {text}");
+                }
+                assert!(
+                    text.contains("in this turn") || text.contains("end the turn"),
+                    "{provider:?}: {text}"
+                );
+            }
+            for request in &texts[1..11] {
+                assert!(request.starts_with(HEADLESS_NEXT_TURN), "{request}");
+                assert!(request.contains(HEADLESS_STOP), "{request}");
+                assert!(request.contains("pkill"), "{request}");
+                assert!(request.contains("AGENTS.md"), "{request}");
+                assert!(
+                    request.contains(&format!("dagq ask --run {RUN} --kind worker_question")),
+                    "{request}"
+                );
+                assert!(request.contains("and end the turn"), "{request}");
+            }
+            assert!(texts[14].ends_with(HEADLESS_GO_ON));
+            assert!(texts[11].starts_with(HEADLESS_NEXT_TURN));
+            assert!(texts[11].contains("dagq: the previous turn of run"));
+            assert!(texts[12].starts_with("answer to ask 3: blue\n\n"));
+            assert!(texts[12].ends_with(HEADLESS_GO_ON));
+            assert!(texts[13].starts_with("dagq: the supervisor's recovery job for run"));
+            assert!(texts[13].ends_with(HEADLESS_GO_ON));
+        }
+        // Codex reviews its own diff and does not owe subagent_review.
+        let codex = session_texts(&task, &run_on(Provider::Codex, WorkerMode::Headless));
+        assert!(codex[0].contains("You have no subagent to review your change"));
+        assert!(
+            codex[0].contains("Required evidence: e2e (each"),
+            "{}",
+            codex[0]
+        );
+        let claude = session_texts(&task, &run_on(Provider::Claude, WorkerMode::Headless));
+        assert!(claude[0].contains("and subagent review."));
+        assert!(claude[0].contains("Required evidence: e2e, subagent_review (each"));
+    }
+
+    /// Acceptance (2): the interactive session's texts are the ones it has
+    /// always been sent.
+    #[test]
+    fn interactive_sessions_keep_their_texts() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let texts = session_texts(&task, &run_on(Provider::Claude, WorkerMode::Interactive));
+        let first = &texts[0];
+        assert!(first.contains(STOP_BACKGROUND));
+        assert!(first.contains(
+            "The answer arrives in this terminal as `answer to ask <id>: ...`; continue from it."
+        ));
+        assert!(first.contains("do not write the question to the terminal and wait"));
+        assert!(first.contains(
+            "After submitting, report the outcome briefly and stop; do not run /exit yourself."
+        ));
+        assert!(first.contains("Perform applicable unit tests, E2E, and subagent review."));
+        assert!(!first.contains(HEADLESS_WORKER));
+        for request in &texts[1..11] {
+            assert!(request.starts_with("dagq: "), "{request}");
+            assert!(request.contains(STOP_BACKGROUND), "{request}");
+            assert!(
+                request.ends_with(INTERACTIVE_DONE)
+                    || request.contains(&format!(". {INTERACTIVE_DONE}")),
+                "{request}"
+            );
+        }
+        assert!(texts[11].starts_with(
+            "dagq: run 00000000-0000-4000-8000-000000000001 has been idle for 10 minutes"
+        ));
+        assert_eq!(texts[12], "answer to ask 3: blue");
+        assert_eq!(
+            texts[13],
+            format!(
+                "dagq: the supervisor's recovery job for run {RUN} (alert stalled) asks: write the receipt"
+            )
+        );
+    }
+
+    /// A headless run's recovery job is never offered an action on a
+    /// screen, a dialog or an /exit, and reads its turns instead.
+    #[test]
+    fn a_headless_recovery_job_is_never_offered_a_dialog() {
+        let task = task(7, "work", TaskStatus::InProgress);
+        let facts = json!({});
+        let recovery = |run: &TaskRun, alert| {
+            recovery_prompt(
+                &task,
+                run,
+                1,
+                &RecoveryMaterial {
+                    alert,
+                    ended: None,
+                    facts: &facts,
+                    workspace: "ws",
+                    screen: "turns",
+                    processes: Ok(Vec::new()),
+                    git_status: "",
+                    head: SHA,
+                    receipt_commit: None,
+                    history: &[],
+                    allowed: &[
+                        "send_instruction",
+                        "answer_known_dialog",
+                        "close_and_proceed",
+                        "wait",
+                    ],
+                },
+            )
+            .unwrap()
+        };
+        let headless = recovery(
+            &run_on(Provider::Codex, WorkerMode::Headless),
+            RecoveryAlert::Stalled,
+        );
+        for never in [
+            "answer_known_dialog",
+            "close_and_proceed",
+            "Last lines of the session's screen",
+            "idle at its prompt",
+            "known one",
+        ] {
+            assert!(!headless.contains(never), "{never}: {headless}");
+        }
+        assert!(headless.contains("Last turns of the headless session"));
+        assert!(headless.contains("reason turn_without_receipt"));
+        assert!(headless.contains("as the prompt of the session's next turn"));
+        let interactive = recovery(
+            &run_on(Provider::Claude, WorkerMode::Interactive),
+            RecoveryAlert::Stalled,
+        );
+        for kept in [
+            "answer_known_dialog",
+            "close_and_proceed",
+            "Last lines of the session's screen",
+            "idle at its prompt",
+            "a dialog that is not a known one",
+        ] {
+            assert!(interactive.contains(kept), "{kept}: {interactive}");
+        }
     }
 }

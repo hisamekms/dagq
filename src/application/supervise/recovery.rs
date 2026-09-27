@@ -1019,6 +1019,14 @@ fn check_live(
     actions: &[RecoveryAction],
 ) -> std::result::Result<(), String> {
     for action in actions {
+        // A headless session has no dialog and no /exit, whatever the
+        // alert allows (ADR-t813-1 decision 9).
+        if headless(run) && HEADLESS_NEVER.contains(&action.name()) {
+            return Err(format!(
+                "{} does not apply to a headless session",
+                action.name()
+            ));
+        }
         if !live.allowed.contains(&action.name()) {
             return Err(format!(
                 "{} does not apply to this alert of a live session (allowed: {})",
@@ -1147,12 +1155,7 @@ fn apply_live_verdict(
                 info!(run_id = %run.id(), "run {}: recovery job {} stopped processes {pids:?} of its worktree", run.id(), job.attempt);
             }
             RecoveryAction::SendInstruction { instruction } => {
-                let text = format!(
-                    "dagq: the supervisor's recovery job for run {} (alert {}) asks: {}",
-                    run.id(),
-                    job.alert.as_str(),
-                    instruction.trim()
-                );
+                let text = recovery_instruction(run, job.alert.as_str(), instruction);
                 let sent_at = sv.files.now();
                 let submission = match submit(
                     sv,

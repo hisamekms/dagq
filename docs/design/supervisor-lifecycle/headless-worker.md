@@ -95,6 +95,10 @@ turnが自分で終わったときも、wrapperはそのprocess groupに残っ�
 - runtimeは今と同じく`confidence: high`の`repair`で前提が成り立つときだけ適用する（`send_instruction`はturnが終わってから次の依頼がまだ無いこと）。`escalate`・`low`・上限（alertごとに3回）超えのときだけ`stalled`のask（`reason_category`付き）が開く。復旧jobは画面の代わりに最後のturnの要約（`turns_excerpt`）を読み、`recovery_requested`の`facts`には`turn`（`turn`・`outcome`・`failure`・`permission_denials`）と`nudges`が載る。
 - `headless`の`stalled`のaskは、画面もキーも無いことを書き、選択肢は`wait` / `intervene` / `propose`とjobの足したもの。`wait`は次のturnが終わるまで次のaskを開かない。`intervene`は人が`dagq-recover`の手順で入る。それ以外の答えは`answer to ask N: <答え>`を依頼にして次のturnにし（`stall_resolved`の`answered_instruction`）、askを閉じる。runが待ちでslotの外にいる間は送らず、slotに戻ってから送る（決定6）。
 
+## workerへの文面
+
+非対話のrunのworkerに送るprompt・依頼・答え・復旧jobの指示は、`/exit`・画面への打ち込み・backgroundの処理に頼る指示を持たず、「このturnで終え、receiptかaskでturnを終える」「答えは次のturnのpromptで届く」「AGENTS.mdを読む」「`pkill` / `killall`を使わない」を書く。Codexはsubagent reviewをせず、taskの要る`subagent_review`はCodexのrunには要らない。どれも[Prompt](prompt.md#経路とproviderごとの文面)にまとめる（task 817）。
+
 ## 対話の経路との違い
 
 対話のrunの経路（画面の判定・idleの印・`/exit`・打ち込み・Enterの送り直し・既知のダイアログ・`prompt_waiting`・`stuck_exit`）はそのまま（決定7）。`headless`のrunだけが上の経路を通り、分岐はsupervisorの`headless(run)`とwrapperの`worker_mode`で行う。

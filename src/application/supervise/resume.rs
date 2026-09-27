@@ -4,7 +4,7 @@
 use super::*;
 use crate::domain::language::with_instruction;
 use crate::domain::{
-    ParkCause, RunEvent,
+    ParkCause, RunEvent, required_of,
     run::{RunWorkspace, run_workspaces},
 };
 
@@ -156,7 +156,10 @@ impl Supervisor<'_> {
         if receipt.run_id() != run.id().as_str()
             || receipt.result() != ReceiptResult::Succeeded
             || !receipt
-                .missing_evidence(task.required_evidence())
+                .missing_evidence(&required_of(
+                    task.required_evidence(),
+                    run.actual_provider(),
+                ))
                 .is_empty()
         {
             return Ok(None);
@@ -440,7 +443,7 @@ impl Supervisor<'_> {
             start: None,
             exit_requested: None,
             exit_typed: false,
-            required_evidence: task.required_evidence().to_vec(),
+            required_evidence: required_of(task.required_evidence(), run.actual_provider()),
             approved: self
                 .queue
                 .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
@@ -510,7 +513,7 @@ impl Supervisor<'_> {
             // "Background work is running" dialog is left to the stuck_exit
             // ask (ADR-0047 decision 29).
             exit_typed: false,
-            required_evidence: task.required_evidence().to_vec(),
+            required_evidence: required_of(task.required_evidence(), run.actual_provider()),
             approved,
             silent: false,
             exit_for_silence,

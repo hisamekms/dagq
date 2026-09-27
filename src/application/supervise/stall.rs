@@ -1441,7 +1441,7 @@ impl StallWatch {
                 if !send {
                     return Ok(());
                 }
-                let text = format!("answer to ask {}: {answer}", ask.id);
+                let text = answer_text(run, ask.id, answer);
                 let workspace = run.workspace_id().unwrap_or_default().to_owned();
                 let sent_at = sv.files.now();
                 submit(

@@ -457,7 +457,7 @@ fn a_turn_without_a_receipt_is_nudged_then_its_recovery_job_instructs_it() {
         dir.path(),
         &format!(
             r#"case "$PROMPT" in
-*"recovery job"*) {FINISH} ;;
+*"recovery job for run"*) {FINISH} ;;
 *) say thinking ;;
 esac"#
         ),

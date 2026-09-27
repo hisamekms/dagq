@@ -4,8 +4,8 @@ type: design
 title: "Prompt"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -13,6 +13,8 @@ related:
   - adr-0038
   - adr-0029
   - design-supervisor-lifecycle-language
+  - design-supervisor-lifecycle-headless-worker
+  - adr-t813-1
 ---
 
 # Prompt
@@ -39,6 +41,34 @@ taskに`required_evidence`があれば、verification commandsの直後（4節�
 schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt pathの行だけを読み、`follow_ups`のないreceiptを書くので、節の追加に影響されない。
 
 言語の設定（`[language]`）が解決できるときは、promptの末尾に言語の指示の段落を足す。resumeとreviseの依頼文も同じ（[Language](language.md#promptへの渡し方)、ADR-t616-2）。
+
+## 経路とproviderごとの文面
+
+workerに送る文（`prompt.txt`・resumeの解消依頼・revise・receiptの食い違い・古いreceiptの促し・receiptの無い促し・askの答え・復旧jobの`send_instruction`・queueのholdの後の「続けて」）は、runの経路とprovider（`Route::of(run)`: `worker_mode`が`interactive`なら`Interactive`、`headless`なら`actual_provider`の`Headless(provider)`）で分ける（task 817）。対話のrunの文面は前と同じで、上の説明はすべて対話のrunのもの。非対話のrun（[非対話のworker](headless-worker.md)、[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）は1 turnが1回の呼び出しで、`/exit`も画面への打ち込みも無いので、次のように替える。
+
+| 箇所 | 対話 | 非対話 |
+| --- | --- | --- |
+| 最後の段落 | なし | `HEADLESS_WORKER`（このturnで全部を終え、receiptかaskでturnを終える。答え・revise・続きの依頼は同じsessionの次のturnのpromptで届く。backgroundの処理に頼らず、build・test・待ちはforegroundで終わりまで待つ）と、providerの1行（Claude: turnの終わりにClaude Codeが`run_in_background`のshellを止めるので、それで待つためにturnを終えない。Codex: コマンドの終わりを待ってから答える） |
+| 自分の処理を止める一文 | `STOP_BACKGROUND`（`/exit`の確認画面の説明つき） | `HEADLESS_STOP`（turnを終える前に、自分が起動してまだ走っているもの（`nohup … &`は残る）をpidで止める。名前やパターンで送らない。`pkill` / `killall`の禁止は同じ） |
+| 判断が要るとき | terminalに書いて待たず`dagq ask`、短く報告して止まる。答えはこのterminalに届く | 返事に質問を書いてturnを終えず`dagq ask`、短く報告してturnを終える。答えは同じsessionの次のturnのpromptで届く |
+| receiptの後 | 短く報告して止まる。`/exit`を打たない | 短く報告してturnを終える。次のturnはreview・着地・人が差し戻したときだけ |
+| subagent review | 「unit test・E2E・subagent reviewを行う」 | Claudeは対話と同じ。Codexは下の[subagent review](#subagent-review) |
+| 依頼（resume・revise・食い違い・古いreceipt・促し） | `dagq: ...`で始まり、最後の手順は`INTERACTIVE_DONE`（`/exit`を打たない） | 先頭に`HEADLESS_NEXT_TURN`（前のturnは終わり、backgroundに残したものは止められた）の1行を置き、最後の手順は`HEADLESS_DONE`（repositoryのworker向けの指示（AGENTS.mdかCLAUDE.md）に従い、このturnで行い、判断が要れば`dagq ask --run <run> --kind worker_question`を打ってturnを終える（答えは次のturnのprompt）、終わったら短く報告してturnを終える）。receiptの無い促し（`stall_nudge`）は「前のturnがreceiptもaskも無く終わった」と書き、選択肢の3は「待つためにturnを終えたなら、それはturnと一緒に止められたのでforegroundで流し直す」にする |
+| askの答え・復旧jobの指示・holdの後の続き（`answer_text`・`recovery_instruction`・`continue_text`） | `answer to ask N: ...` / `dagq: the supervisor's recovery job ... asks: ...` / `CONTINUE_TEXT`のまま | 同じ文の後に`HEADLESS_GO_ON`（これは次のturnのprompt。このturnで続け、receiptかaskで終える）を足す。先頭の行は変えない |
+
+WORKER_READINGの「AGENTS.mdかCLAUDE.md」の指示は両方の経路で同じ（Codexは起動時にAGENTS.mdを読む）。
+
+### subagent review
+
+providerごとに決める（task 817）。
+
+- **Claude（対話・非対話）**: 今までどおり、該当すればsubagent（Claude Codeのsubagent）でreviewし、receiptの`subagent_review`にevidenceか該当しない理由を書く。非対話でもsubagentは同じturnの中で動くので変えない。
+- **Codex**: `codex exec`の中にsubagentは無く、`codex exec review`を入れ子で起動すると、workspace-writeのsandboxでは`$CODEX_HOME`（`~/.codex`）のsessionを書けず、呼び出しと費用も倍になる（[spike](../../plans/headless-worker-spike.md)の1.と4.）。そこでCodexのworkerはsubagent reviewをしない。promptは代わりに、receiptの前に自分のdiff（`git diff <base commit>..HEAD`）をacceptanceと突き合わせて見直して直し、`subagent_review`を`not_applicable`にして理由（`codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit`）と見直しで見つけたことを書くよう指示する。着地の前には全runと同じくsupervisorのheadlessのreview job（Claude）がcommitをreviewする。
+- **taskの`required_evidence`に`subagent_review`があるとき**: `domain::required_of(required, provider)`が、runの`actual_provider`がCodexなら`subagent_review`を要るevidenceから外す。validating（`check_receipt`）・`integrate`のreceiptの検査・resumeの解決の判定・promptの`Required evidence:`の行は、どれもこれで絞った一覧を使う。Codexのrunのreceiptの`subagent_review`は要らないcheckと同じ扱いになり、`failed`でなく理由のあることだけを見る（`not_applicable`と理由で通る）。runが途中でClaudeに切り替わった（ADR-t813-2のフォールバック）後は`actual_provider`がClaudeなので、要るevidenceに戻る。testは`src/domain/receipt.rs`の`a_codex_run_does_not_back_a_required_subagent_review`と`src/application/integrate.rs`の`a_codex_receipt_passes_without_a_subagent_review_the_task_requires`。
+
+### 復旧jobのprompt
+
+`recovery_prompt`も経路で分ける。非対話のrunでは、許す操作から`answer_known_dialog`と`close_and_proceed`を必ず外し（`HEADLESS_NEVER`。呼び出し側が渡しても出さず、jobがそれを返してもruntimeの前提の検査（`check_live`）が拒んでverdictをescalationにする）、`send_instruction`の説明を「次のturnのpromptとして1回送る」にし、画面の見出しを「Last turns of the headless session (it has no screen)」に、`stalled`の意味を`turn_without_receipt` / `permission_denied`の説明に、禁止の一覧の「既知でないダイアログへのキー」を「sessionへの打ち込み（非対話のsessionはキーを取らない）」にする。終わった非対話のrunのtriageの画面の欄は「(the session is gone: its turns are above)」、`ended_run_material`の最後の画面の見出しは非対話のsessionには画面が無くturnが続くと書く。対話のrunの文面は変えない。testは`src/application/prompt.rs`の`headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit`・`interactive_sessions_keep_their_texts`・`a_headless_recovery_job_is_never_offered_a_dialog`。
 
 ## repositoryの規則を読む順
 

@@ -61,10 +61,11 @@ use super::{
     },
     or_none, path_text,
     prompt::{
-        GoalPredecessorSummary, Inheritance, PredecessorSummary, RecoveryMaterial, ResumeKind,
-        ResumeRequest, TRIAGE_TOOLS, ended_run_material, prompt, recovery_prompt, resume_request,
-        review_prompt, revise_mismatch_request, revise_request, siblings_in_progress,
-        stale_receipt_nudge, stall_nudge,
+        GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, PredecessorSummary, RecoveryMaterial,
+        ResumeKind, ResumeRequest, TRIAGE_TOOLS, answer_text, continue_text, ended_run_material,
+        prompt, recovery_instruction, recovery_prompt, resume_request, review_prompt,
+        revise_mismatch_request, revise_request, siblings_in_progress, stale_receipt_nudge,
+        stall_nudge,
     },
     recording::{
         RecordingBackend, exit_unsent, reason_of_error, text_on_screen, timed_out_maybe_sent,

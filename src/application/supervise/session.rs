@@ -796,11 +796,7 @@ impl SessionWatch {
             if failed.contains(&ask.id) || idle_at < ask.created_at {
                 continue;
             }
-            let text = format!(
-                "answer to ask {}: {}",
-                ask.id,
-                ask.answer.as_deref().unwrap_or_default()
-            );
+            let text = answer_text(run, ask.id, ask.answer.as_deref().unwrap_or_default());
             let what = format!("answer of ask {}", ask.id);
             let sent_at = sv.files.now();
             let workspace = self.workspace.clone();

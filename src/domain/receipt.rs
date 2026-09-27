@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{CheckStatus, CommitSha, DomainError, EvidenceCheck, ReceiptResult, RunId, require};
+use super::{
+    CheckStatus, CommitSha, DomainError, EvidenceCheck, Provider, ReceiptResult, RunId, require,
+};
 
 /// Completion receipt written by the agent. Its claims are cross-checked by
 /// the supervisor; the receipt alone never marks a run successful.
@@ -222,6 +224,20 @@ impl Receipt {
     }
 }
 
+/// The checks of a task's `required` evidence that a run whose worker is
+/// `provider` must back. A Codex worker has no subagent to review its
+/// change, so a required `subagent_review` does not hold its run: its
+/// receipt reports the check `not_applicable` with a reason, as for any
+/// check that is not required, and the supervisor's review job reviews the
+/// commit before it lands. Claude's workers keep every required check.
+pub fn required_of(required: &[EvidenceCheck], provider: Provider) -> Vec<EvidenceCheck> {
+    required
+        .iter()
+        .copied()
+        .filter(|check| provider != Provider::Codex || *check != EvidenceCheck::SubagentReview)
+        .collect()
+}
+
 /// The `last_error` of a run parked for `missing` evidence, such as
 /// `evidence missing: e2e`.
 pub fn evidence_missing_reason(missing: &[EvidenceCheck]) -> String {
@@ -294,6 +310,33 @@ mod tests {
         assert_eq!(
             evidence_missing_reason(&missing),
             "evidence missing: subagent_review, e2e"
+        );
+    }
+
+    #[test]
+    fn a_codex_run_does_not_back_a_required_subagent_review() {
+        let all = [
+            EvidenceCheck::Tests,
+            EvidenceCheck::E2e,
+            EvidenceCheck::SubagentReview,
+        ];
+        assert_eq!(required_of(&all, Provider::Claude), all);
+        assert_eq!(
+            required_of(&all, Provider::Codex),
+            [EvidenceCheck::Tests, EvidenceCheck::E2e]
+        );
+        // A Codex receipt reports it not_applicable with its reason, and
+        // passes with the task's required subagent_review.
+        let receipt = receipt(
+            ("passed", "cargo test --test e2e"),
+            ("not_applicable", "codex worker: no subagent"),
+        );
+        let required = required_of(&[EvidenceCheck::SubagentReview], Provider::Codex);
+        assert!(receipt.check_requiring(&run(), &required).is_ok());
+        assert!(receipt.missing_evidence(&required).is_empty());
+        assert_eq!(
+            receipt.missing_evidence(&[EvidenceCheck::SubagentReview]),
+            [EvidenceCheck::SubagentReview]
         );
     }
 

@@ -38,6 +38,7 @@ use crate::domain::{
     event_kind, evidence_missing_reason, heartbeat_stale,
     landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
+    required_of,
     scope::{out_of_scope, scope_violation_reason},
     validation::{self, CheckedOut, Fact, Judgement, ReceiptFacts, ReceiptFile},
     verify_failure,
@@ -73,10 +74,11 @@ pub fn check_receipt(
     run: &TaskRun,
 ) -> Result<std::result::Result<(Receipt, CommitSha), Rejection>> {
     let receipt_path = run.receipt_path().context("missing receipt path")?;
+    let required = required_of(task.required_evidence(), run.actual_provider());
     let mut facts = ReceiptFacts::new(
         run.id(),
         run.base_commit(),
-        task.required_evidence(),
+        &required,
         task.paths(),
         receipt_path,
     );
@@ -1088,7 +1090,8 @@ fn land(
             receipt: serde_json::to_value(&receipt)?,
         });
     }
-    if let Err(error) = receipt.check_requiring(run.id(), task.required_evidence()) {
+    let required = required_of(task.required_evidence(), run.actual_provider());
+    if let Err(error) = receipt.check_requiring(run.id(), &required) {
         return defer(
             ReasonCode::of_receipt_error(&error).into(),
             format!("{error:#}"),
@@ -1097,7 +1100,7 @@ fn land(
     }
     // A resumed session may have come back without the evidence it was
     // asked for; `checks` tells the next resume to ask for it again.
-    let missing = receipt.missing_evidence(task.required_evidence());
+    let missing = receipt.missing_evidence(&required);
     if !missing.is_empty() {
         return defer(
             ReasonCode::EvidenceMissing.into(),
@@ -2103,13 +2106,17 @@ mod tests {
     }
 
     fn task(paths: &[&str]) -> Task {
+        task_requiring(paths, &[EvidenceCheck::Tests])
+    }
+
+    fn task_requiring(paths: &[&str], required: &[EvidenceCheck]) -> Task {
         Task::restore(TaskRecord {
             id: TaskId::new(7),
             title: "  land the change  ".to_owned(),
             description: String::new(),
             acceptance: String::new(),
             verification_commands: Vec::new(),
-            required_evidence: vec![EvidenceCheck::Tests],
+            required_evidence: required.to_vec(),
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
             priority: Default::default(),
             kind: None,
@@ -2128,13 +2135,17 @@ mod tests {
     }
 
     fn run_in(dir: &Path, status: RunStatus) -> TaskRun {
+        run_on(dir, status, Provider::Claude)
+    }
+
+    fn run_on(dir: &Path, status: RunStatus, provider: Provider) -> TaskRun {
         TaskRun::restore(RunRecord {
             id: RunId::new(RUN).unwrap(),
             task_id: TaskId::new(7),
             status,
-            requested_provider: Provider::Claude,
-            actual_provider: Provider::Claude,
-            worker_mode: crate::domain::worker::WorkerMode::Interactive,
+            requested_provider: provider,
+            actual_provider: provider,
+            worker_mode: crate::domain::worker::Worker::default_mode(provider),
             base_commit: sha(BASE),
             branch: Some(format!("dagq/{RUN}")),
             worktree_path: Some(path_text(dir).unwrap()),
@@ -2232,6 +2243,30 @@ mod tests {
         write_receipt(&files, dir, "not_applicable");
         let evidence = reason(&FakeRepository::sound(), &task(&[]));
         assert_eq!(evidence.evidence_missing, [EvidenceCheck::Tests]);
+    }
+
+    /// A Codex worker has no subagent: its receipt reports subagent_review
+    /// not_applicable with a reason, and passes validation for a task that
+    /// requires the evidence; the same receipt of a Claude run waits for it.
+    #[test]
+    fn a_codex_receipt_passes_without_a_subagent_review_the_task_requires() {
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        write_receipt(&files, dir, "passed");
+        let task = task_requiring(&[], &[EvidenceCheck::Tests, EvidenceCheck::SubagentReview]);
+        let codex = run_on(dir, RunStatus::Validating, Provider::Codex);
+        let (receipt, commit) = check_receipt(&FakeRepository::sound(), &files, &task, &codex)
+            .unwrap()
+            .unwrap_or_else(|rejection| panic!("{}", rejection.reason));
+        assert_eq!(commit, sha(HEAD));
+        assert_eq!(
+            receipt.subagent_review().status(),
+            crate::domain::CheckStatus::NotApplicable
+        );
+        let claude = run_on(dir, RunStatus::Validating, Provider::Claude);
+        let rejection = check_receipt(&FakeRepository::sound(), &files, &task, &claude)
+            .unwrap()
+            .expect_err("a Claude run owes the subagent review");
+        assert_eq!(rejection.evidence_missing, [EvidenceCheck::SubagentReview]);
     }
 
     #[test]

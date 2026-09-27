@@ -21,8 +21,7 @@ use crate::domain::{
     Ask, GoalId, PlannerOrigin, ProposalId, RunEvent,
     proposal::{PlannerOwner, Submission as Resubmission},
     queue_hold::{
-        self, CANCEL_AFFECTED, CONTINUE_TEXT, DONE, HOLD_CONTINUE_SENT, JOB_RESTARTED,
-        QUEUE_HOLD_APPLIED,
+        self, CANCEL_AFFECTED, DONE, HOLD_CONTINUE_SENT, JOB_RESTARTED, QUEUE_HOLD_APPLIED,
     },
     stats::timestamp_millis,
 };
@@ -327,15 +326,11 @@ impl SessionWatch {
         }
         let sent_at = sv.files.now();
         let workspace = self.workspace.clone();
-        match submit(sv, run, &workspace, Input::Text(CONTINUE_TEXT), "continue") {
+        let text = continue_text(run);
+        match submit(sv, run, &workspace, Input::Text(&text), "continue") {
             Ok(submission) => {
-                self.stall.input_sent(sent_at, Some(CONTINUE_TEXT));
-                self.answer_start = Some(StartCheck::new(
-                    "continue",
-                    CONTINUE_TEXT,
-                    sent_at,
-                    &submission,
-                ));
+                self.stall.input_sent(sent_at, Some(&text));
+                self.answer_start = Some(StartCheck::new("continue", &text, sent_at, &submission));
                 sv.queue.record_runtime_event(
                     run.id(),
                     HOLD_CONTINUE_SENT,
