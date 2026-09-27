@@ -21,7 +21,7 @@ related:
 
 # Headless job processes
 
-task 443。supervisorが起動するheadlessのjob（runのreview、終わったrunと生きているsessionの復旧job、plan review、goal review）の`claude -p`のプロセスをqueueに記録し、そのsupervisorが死んだ後に引き継ぐsupervisorが、同じjobを立て直す前に前のjobを止める。同じ入力のjobが二重に走ること、その費用、古いjobが出力ファイルを書くことを防ぐ。use caseは`src/application/supervise/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。observerの子プロセスは範囲外（task 127）。
+task 443。supervisorが起動するheadlessのjob（runのreview、終わったrunと生きているsessionの復旧job、plan review、goal review）の`claude -p`のプロセスをqueueに記録し、そのsupervisorが死んだ後に引き継ぐsupervisorが、同じjobを立て直す前に前のjobを止める。同じ入力のjobが二重に走ること、その費用、古いjobが出力ファイルを書くことを防ぐ。use caseは`src/application/supervise/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。observerの子プロセスはここに記録せず、時間切れとsupervisorのループのerrorでの終了のときに子孫ごとkillする（task 245、[Observer](observer.md)）。
 
 ## 記録
 

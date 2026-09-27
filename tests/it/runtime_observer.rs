@@ -1,5 +1,5 @@
 //! Runtime tests: The observer.
-use crate::runtime_support;
+use crate::{common, runtime_support};
 
 use runtime_support::*;
 
@@ -392,24 +392,58 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     assert_eq!(limited["observations"].as_array().unwrap().len(), 1);
 }
 
+/// What a process the test started through the runtime wrote to `file`
+/// (renamed into place whole), once it is there.
+fn written_to(file: &Path) -> String {
+    let _waiting = common::within(
+        common::STEP_LIMIT,
+        format!("{} to be written", file.display()),
+    );
+    loop {
+        if let Ok(text) = fs::read_to_string(file) {
+            return text.trim().to_owned();
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether `pid` is gone within a few seconds (a killed orphan is reaped by
+/// the system, not at once).
+fn gone(pid: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while dagq::infrastructure::adapters::process_alive(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// The agent past its timeout is killed with what it started: its Bash
+/// child does not outlive the observation (task 245).
 #[test]
-fn observe_kills_an_agent_past_its_timeout() {
+fn observe_kills_an_agent_past_its_timeout_with_its_children() {
     use dagq::observer::{ObserveMode, observe};
     let (_dir, _repo, db) = fixture();
+    let child_pid = db.parent().unwrap().join("child.pid");
     let slow = ObserverProvider {
-        script: "sleep 30".into(),
+        script: format!(
+            "sleep 60 & echo $! > '{}.tmp' && mv '{0}.tmp' '{0}'; wait",
+            child_pid.display()
+        ),
     };
     let started = Instant::now();
     let outcome = observe(
         &db,
         &slow,
         &dagq::observer::ObserveOptions {
-            timeout: Duration::from_millis(300),
+            timeout: Duration::from_secs(5),
             ..observe_options(ObserveMode::Hourly)
         },
     )
     .unwrap();
-    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(started.elapsed() < Duration::from_secs(30));
     assert_eq!(outcome["outcome"], "error");
     assert!(
         outcome["error"]
@@ -418,6 +452,11 @@ fn observe_kills_an_agent_past_its_timeout() {
             .contains("did not finish")
     );
     assert_eq!(outcome["cursor_saved"], false);
+    let child: u32 = written_to(&child_pid).parse().unwrap();
+    assert!(
+        gone(child),
+        "the agent's child {child} outlived the timeout"
+    );
 }
 
 /// A Claude Code stand-in for the supervisor's observer: `--version` for
@@ -733,5 +772,113 @@ env -u DAGQ_ROLE dagq --db "$DAGQ_QUEUE" finding dismiss {dismissed} --reason 'n
     assert_eq!(
         (&findings["closed"], &findings["closed_ids"]),
         (&json!(1), &json!([resolved]))
+    );
+}
+
+/// A supervisor (not `--once`) started on a fixture where the hourly
+/// observation is due, whose agent starts a child and waits; the thread,
+/// and the pids of the agent and its child once both run.
+fn supervisor_observing(db: &Path, repo: &Path) -> (thread::JoinHandle<Result<Value>>, u32, u32) {
+    {
+        let mut queue = SqliteQueue::open(db).unwrap();
+        queue
+            .transition(TaskId::new(1), TaskAction::Cancel)
+            .unwrap();
+    }
+    let pids = db.parent().unwrap().join("observer.pids");
+    let stub = db.parent().unwrap().join("claude-observer-stub");
+    fs::write(
+        &stub,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "-p" ]; then
+  sleep 60 &
+  echo "$$ $!" > '{pids}.tmp' && mv '{pids}.tmp' '{pids}'
+  wait
+  exit 0
+fi
+printf 'test provider\n'
+"#,
+            pids = pids.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    let backend = TestWorkspace::new(db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        observe_interval: Duration::from_secs(3600),
+        observe_daily: false,
+        ..SuperviseOptions::new(1, false)
+    };
+    let supervisor = {
+        let (db, repo) = (db.to_path_buf(), repo.to_path_buf());
+        thread::spawn(move || {
+            runtime::supervise(
+                &db,
+                &repo,
+                &backend,
+                &stub,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    let written = written_to(&pids);
+    let (agent, child) = written.split_once(' ').unwrap();
+    assert_eq!(queue_events(db, "observe_started").len(), 1);
+    (supervisor, agent.parse().unwrap(), child.parse().unwrap())
+}
+
+fn joined(supervisor: thread::JoinHandle<Result<Value>>) -> Result<Value> {
+    let _waiting = common::within(common::STEP_LIMIT, "the supervisor thread to return");
+    supervisor.join().unwrap()
+}
+
+/// A supervisor whose loop ends on an error kills the observer it started
+/// and what that started: `dagq observe`, its agent and the agent's child
+/// (task 245).
+#[test]
+fn a_failing_supervisor_leaves_no_observer_process() {
+    let (_dir, repo, db) = fixture();
+    let (supervisor, agent, child) = supervisor_observing(&db, &repo);
+    // The heartbeat fails from now on: the loop ends on an error.
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_heartbeat BEFORE UPDATE ON supervisors
+             BEGIN SELECT RAISE(ABORT, 'heartbeat refused by the test'); END;",
+        )
+        .unwrap();
+    let error = format!("{:#}", joined(supervisor).unwrap_err());
+    assert!(error.contains("heartbeat failed"), "{error}");
+    assert!(
+        gone(agent),
+        "the observer's agent {agent} outlived the supervisor"
+    );
+    assert!(
+        gone(child),
+        "the agent's child {child} outlived the supervisor"
+    );
+}
+
+/// A supervisor that hands off (execs another binary) stops the observer
+/// with what it started, not `dagq observe` alone (task 245).
+#[test]
+fn a_handoff_leaves_no_observer_process() {
+    let (_dir, repo, db) = fixture();
+    let (supervisor, agent, child) = supervisor_observing(&db, &repo);
+    let queue = SqliteQueue::open(&db).unwrap();
+    let token = queue.supervisors().unwrap()[0].token.clone();
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    let outcome = joined(supervisor).unwrap();
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert!(
+        gone(agent),
+        "the observer's agent {agent} outlived the handoff"
+    );
+    assert!(
+        gone(child),
+        "the agent's child {child} outlived the handoff"
     );
 }

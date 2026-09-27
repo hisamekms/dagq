@@ -21,13 +21,17 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::{
-    application::{AgentProvider, TaskStore, dependency_graph},
+    application::{AgentProvider, ProcessControl, TaskStore, dependency_graph},
     domain::{
         ActorContext, ActorRole, EventId, FindingQuery, NoteQuery, RunEvent,
         actor_model::{ActorLaunch, ModelRole},
         stats::StatsQuery,
     },
-    infrastructure::{adapters::shell_join, asks::AskQuery, sqlite::SqliteQueue},
+    infrastructure::{
+        adapters::{SystemProcesses, shell_join},
+        asks::AskQuery,
+        sqlite::SqliteQueue,
+    },
     lifecycle::{OBSERVER_ROLE, QUEUE_ENV},
 };
 
@@ -410,7 +414,8 @@ fn agent_env(session_id: &str) -> Vec<(String, String)> {
 }
 
 /// Start the agent in `dir` with its output in `output.log`, and wait for
-/// it up to the timeout (then kill it: an error). The exit code, or `None`
+/// it up to the timeout (then kill it and what it started, so no Bash
+/// child of the agent outlives it: an error). The exit code, or `None`
 /// when a signal ended it.
 fn run_agent(
     provider: &dyn AgentProvider,
@@ -447,8 +452,14 @@ fn run_agent(
             return Ok(status.code());
         }
         if Instant::now() >= deadline {
+            // Listed before the kill: once the agent is gone, its children
+            // are no longer its descendants.
+            let descendants = SystemProcesses.descendants(child.id());
             let _ = child.kill();
             let _ = child.wait();
+            for pid in descendants {
+                let _ = SystemProcesses.kill(pid);
+            }
             anyhow::bail!(
                 "the observer did not finish within {}s",
                 options.timeout.as_secs()

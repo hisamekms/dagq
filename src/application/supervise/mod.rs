@@ -890,6 +890,10 @@ impl Supervisor<'_> {
             self.poll_cleanup(true);
             self.finish_cleanup();
         }
+        if self.exec.is_none() {
+            // Only a loop that ended on an error leaves one running.
+            self.stop_observer("with the supervisor");
+        }
         if self.exec.is_none() && self.heartbeat.check().is_ok() {
             // The mark of the stop (ADR-0051 decision 10); an exec leaves it
             // to the next process's handoff mark.
@@ -1621,6 +1625,28 @@ impl Supervisor<'_> {
                 warn!(error = %format_args!("{error:#}"), "the spans of gone inbox and planner sessions could not be closed: {error:#}")
             }
         }
+    }
+    /// Kill the observer still running and the processes it started (its
+    /// agent and that agent's Bash), so none outlives this supervisor or
+    /// runs on unwatched after its exec; `why` ends the log line.
+    pub(super) fn stop_observer(&mut self, why: &str) {
+        let Some((mode, mut child)) = self.observer.take() else {
+            return;
+        };
+        // Listed before the kill: once `observe` is gone, its agent is no
+        // longer its descendant.
+        let descendants = self.processes.descendants(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        for pid in &descendants {
+            let _ = self.processes.kill(*pid);
+        }
+        info!(
+            "observer ({}) stopped {why}: pid {} and {} descendant(s) killed",
+            mode.as_str(),
+            child.id(),
+            descendants.len()
+        );
     }
     /// Reap the observer once it exited; its own `observe_finished` is the
     /// record.

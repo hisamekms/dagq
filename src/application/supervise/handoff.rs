@@ -87,14 +87,7 @@ impl Supervisor<'_> {
     /// session or a rejected run's `/exit` needs. Returns how many runs the
     /// next process takes over.
     pub(super) fn prepare_handoff(&mut self) -> usize {
-        if let Some((mode, mut child)) = self.observer.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            info!(
-                "observer ({}) stopped for the handoff; it runs again when due",
-                mode.as_str()
-            );
-        }
+        self.stop_observer("for the handoff; it runs again when due");
         // Its row stays unfinished under this token; the next process's
         // first plan review marks it interrupted and reviews again.
         if let Some(mut watch) = self.plan_review.take() {
