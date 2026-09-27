@@ -126,7 +126,9 @@ impl StallConfig {
 /// The file the agent's `Stop` hook appends each idle marker to, one line
 /// per marker (`<unix seconds>\t<marker>`), next to the marker: the
 /// history a background task's first appearance is read from (the marker
-/// itself is replaced each turn and carries no start time).
+/// itself is replaced each turn and carries no start time). A marker that
+/// lists no running task replaces the log, which so holds only the current
+/// streak (task 422).
 pub const IDLE_LOG: &str = "idle.log";
 
 /// When each background task of the last of `markers` (oldest first, each
@@ -216,5 +218,27 @@ mod tests {
         // A task the last marker does not list is not running.
         let seen = background_first_seen([(10, vec![task("b1")]), (20, vec![])]);
         assert!(seen.is_empty());
+    }
+
+    /// Task 422: the hook drops the lines before a marker that lists no
+    /// running task, and the times read from what is left are the same.
+    #[test]
+    fn the_lines_before_a_marker_without_running_tasks_do_not_count() {
+        let whole = vec![
+            (10, vec![task("b1")]),
+            (20, vec![task("b1"), task("b2")]),
+            (30, vec![]),
+            (40, vec![task("b2")]),
+            (50, vec![task("b1"), task("b2")]),
+        ];
+        let tail = whole[2..].to_vec();
+        assert_eq!(
+            background_first_seen(whole),
+            background_first_seen(tail.clone())
+        );
+        assert_eq!(
+            background_first_seen(tail),
+            HashMap::from([("b1".into(), 50), ("b2".into(), 40)])
+        );
     }
 }

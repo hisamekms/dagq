@@ -1525,6 +1525,30 @@ fn stats_time_background_work_from_its_first_marker() {
         ))
         .is_none()
     );
+    // The hook keeps only the lines from the last marker that listed no
+    // running task (task 422): the times read from that tail are the same
+    // as from the whole log.
+    let tail = format!(
+        "{}\t{}\n{}\t{}\n{now}\t{}\n",
+        now - 2500,
+        running(&[]),
+        now - 2400,
+        running(&["b2"]),
+        running(&["b1", "b2"]),
+    );
+    let whole = background(format!(
+        "{}\t{}\n{}\t{}\n{tail}",
+        now - 4000,
+        running(&["b2"]),
+        now - 3000,
+        running(&["b1", "b2"]),
+    ))
+    .expect("long_background");
+    assert_eq!(background(tail), Some(whole.clone()));
+    assert!(
+        (2460..2465).contains(&whole["value"].as_i64().unwrap()),
+        "{whole}"
+    );
     // Without a log (a session started before the hook kept one), the
     // marker's time is all there is.
     fs::remove_file(run_dir.join("idle.log")).unwrap();

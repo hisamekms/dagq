@@ -187,7 +187,7 @@ SQLiteの書き込みトランザクションとIMMEDIATEの挙動は[公式仕�
 $XDG_DATA_HOME/dagq/<hash>/              XDG_DATA_HOME が未設定・空・相対 path なら $HOME/.local/share
   queue.db                               SQLite（WAL の -wal / -shm も隣に置かれる）
   repository                             束縛先の Git common directory（人向けの逆引き）
-  runs/<run-id>/                         prompt、runner（runが終わりleaseが無くなれば消す）、worktree/、claude-settings.json、idle.json、idle.log、receipt.json、refusals.log、ログ
+  runs/<run-id>/                         prompt、runner（runが終わりleaseが無くなれば消す）、worktree/、claude-settings.json、idle.json、idle.log（Stop hookのmarkerの履歴。runningの処理を載せないmarkerで今の連なりの分に切り詰める）、receipt.json、refusals.log、ログ
   logs/                                  <process>-<UTC time>-<pid>.jsonl（supervise・integrate・observe・session・planner-session・auto-update の JSON Lines）、update-*、launchd.log、rebind.jsonl、旧 supervisor-<started_at>-<pid>.log
 ~/Library/LaunchAgents/com.dagq.<hash>.plist   up が書く supervisor の LaunchAgent（down が消す）
 ```

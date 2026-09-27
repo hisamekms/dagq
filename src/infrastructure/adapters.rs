@@ -2778,6 +2778,24 @@ pub fn claude_trusts_repository(config: &Path, root: &Path) -> Result<bool> {
     Ok(accepted(root) || root.canonicalize().is_ok_and(|real| accepted(&real)))
 }
 
+/// The script the `Stop` hook runs (in `sh`, with the marker as `$1` and
+/// the [`IDLE_LOG`] as `$2`) to add the marker's line to the log. A marker
+/// in which no `"status": "running"` pair can be found lists no running
+/// background task (looked for in the line, with the marker's newlines
+/// taken out as the readers see it; JSON escapes a quote inside a string, so the text of
+/// the last assistant message cannot form the pair), and the streaks of
+/// the lines before it are over: the line replaces the log, through a
+/// temporary file and a rename so a reader never sees it empty. Any other
+/// marker is appended. A pair outside `background_tasks` only keeps lines
+/// a reader skips. It always exits 0.
+pub const IDLE_LOG_APPEND: &str = r#"line=$(printf '%s\t' "$(date +%s)" && tr -d '\r\n' < "$1") || exit 0
+if printf '%s' "$line" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"running"'; then
+  printf '%s\n' "$line" >> "$2"
+else
+  printf '%s\n' "$line" > "$2.tmp" && mv -f "$2.tmp" "$2"
+fi
+exit 0"#;
+
 /// Per-run Claude settings. The `Stop` hook publishes the hook's stdin JSON
 /// as the idle marker. Each finished response replaces the marker
 /// atomically, so its modification time tells the supervisor whether the
@@ -2788,6 +2806,10 @@ pub fn claude_trusts_repository(config: &Path, root: &Path) -> Result<bool> {
 /// first marker that listed it; a log that cannot be written does not keep
 /// the marker from being published. The append runs in its own `sh`, so
 /// the command itself stays a plain `&&` chain whatever shell runs hooks.
+/// A marker that lists no running background task ends every streak, so
+/// the log is then replaced by that marker's line alone
+/// ([`IDLE_LOG_APPEND`]): the log holds no more than the current streak
+/// and the first-seen times read from it stay the same (task 422).
 ///
 /// The `UserPromptSubmit` hook publishes its stdin JSON the same way as the
 /// input marker ([`PROMPT_SUBMIT_MARKER`](crate::application::stats::PROMPT_SUBMIT_MARKER),
@@ -2813,9 +2835,7 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
     let marker = path_text(idle_marker)?;
     let command = format!(
         "cat > {tmp} && sh -c {append} sh {tmp} {log} && mv -f {tmp} {marker}",
-        append = shell_quote(
-            r#"{ printf '%s\t' "$(date +%s)" && tr -d '\r\n' < "$1" && echo; } >> "$2"; exit 0"#
-        ),
+        append = shell_quote(IDLE_LOG_APPEND),
         tmp = shell_quote(&format!("{marker}.tmp")),
         log = shell_quote(&log),
         marker = shell_quote(&marker),

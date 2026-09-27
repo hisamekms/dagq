@@ -1708,6 +1708,49 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         .as_secs();
     assert!(now.abs_diff(secs.parse().unwrap()) < 60, "{log}");
     assert_eq!(marker, payload);
+    // The log keeps only the current streak (task 422): a marker listing a
+    // running background task is appended, one listing none (whatever its
+    // message says) ends every streak and replaces the log.
+    let stop = hook_command(&parsed["hooks"]["Stop"][0]["hooks"][0]);
+    let running = r#"{"last_assistant_message":"waiting","background_tasks":[{"id":"b1","status":"running"}]}"#;
+    let quoted = r#"{"last_assistant_message":"it said \"status\": \"running\"","background_tasks":[{"id":"b1", "status" : "running"}]}"#;
+    // Pretty-printed JSON with the pair split over lines still counts.
+    let split = "{\"background_tasks\": [{\"id\": \"b1\", \"status\":\n  \"running\"}]}";
+    let ended = r#"{"last_assistant_message":"{\"status\":\"running\"}","background_tasks":[{"id":"b1","status":"completed"}]}"#;
+    let log_lines = || {
+        fs::read_to_string(run_dir.join("idle.log"))
+            .unwrap()
+            .lines()
+            .map(|line| line.split_once('\t').unwrap().1.to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (payload, expected) in [
+        (running, vec![payload, running]),
+        (quoted, vec![payload, running, quoted]),
+        (
+            split,
+            vec![payload, running, quoted, &split.replace('\n', "")],
+        ),
+        (ended, vec![ended]),
+        (running, vec![ended, running]),
+    ] {
+        run_hook(&stop, payload);
+        assert_eq!(log_lines(), expected);
+        assert_eq!(
+            fs::read_to_string(run.idle_marker_path().unwrap()).unwrap(),
+            payload
+        );
+    }
+    assert!(!run_dir.join("idle.log.tmp").exists());
+    // A log that cannot be appended to does not keep the marker back.
+    fs::remove_file(run_dir.join("idle.log")).unwrap();
+    fs::create_dir(run_dir.join("idle.log")).unwrap();
+    run_hook(&stop, running);
+    assert_eq!(
+        fs::read_to_string(run.idle_marker_path().unwrap()).unwrap(),
+        running
+    );
+    fs::remove_dir_all(run_dir.join("idle.log")).unwrap();
     // The UserPromptSubmit hook publishes each input it takes as the input
     // marker next to the idle marker (ADR-0043 decision 2), printing
     // nothing into the agent's context.
@@ -1818,4 +1861,27 @@ fn a_refused_run_wrapper_closes_its_workspace_the_run_does_not_record() {
     assert!(!error.contains("nothing records"), "{error}");
     assert_eq!(cmux.closed.lock().unwrap().len(), 2);
     assert!(cmux.exists(&recorded).unwrap());
+}
+
+fn hook_command(hook: &Value) -> String {
+    assert_eq!(hook["type"], "command");
+    hook["command"].as_str().unwrap().to_owned()
+}
+
+/// Runs a hook the way Claude Code does: its command in a shell, the event
+/// JSON on stdin; it must exit 0.
+fn run_hook(command: &str, payload: &str) {
+    let status = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            let _waiting = common::within(common::STEP_LIMIT, "the hook to exit");
+            child.stdin.take().unwrap().write_all(payload.as_bytes())?;
+            child.wait()
+        })
+        .unwrap();
+    assert!(status.success());
 }
