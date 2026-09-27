@@ -10,6 +10,7 @@ pub mod actor_executor;
 pub mod ask;
 pub mod commands;
 pub mod diagram;
+pub mod execution;
 pub mod forecast;
 pub mod health;
 pub mod install;

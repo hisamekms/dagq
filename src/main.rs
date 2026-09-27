@@ -2920,4 +2920,118 @@ mod tests {
             .map(OsString::from)
         );
     }
+
+    /// Each command a role's Claude settings deny by its policy needs only
+    /// the capabilities the table lists for it, so a role granted none of
+    /// them is refused it by the CLI as well.
+    #[test]
+    fn the_denied_commands_need_what_the_table_says() {
+        // Clap's parser of every command needs more than a test thread's
+        // stack, as `main` gives it.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(denied_commands_need_what_the_table_says)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn denied_commands_need_what_the_table_says() {
+        use dagq::application::execution::DAGQ_COMMANDS;
+        let samples: &[(&str, &[&str])] = &[
+            ("init", &[]),
+            ("migrate", &[]),
+            ("rebind", &[]),
+            ("install", &[]),
+            (
+                "auto-update",
+                &[
+                    "--commit", "c", "--token", "t", "--to", "/t", "--repo", "/r", "--log", "/l",
+                ],
+            ),
+            ("up", &[]),
+            ("down", &[]),
+            ("plan", &[]),
+            ("supervise", &[]),
+            ("integrate", &["1"]),
+            ("recover", &["r1"]),
+            ("review", &["1"]),
+            (
+                "session",
+                &["--run", "r1", "--lease", "l", "--claude", "/c"],
+            ),
+            ("planner-session", &["--planner", "1", "--claude", "/c"]),
+            ("session-event", &["open"]),
+            ("add", &["t"]),
+            ("draft", &["1"]),
+            ("edit", &["1", "--title", "t"]),
+            ("set-goal", &["1", "1"]),
+            ("set-paths", &["1", "--none"]),
+            ("set-priority", &["1", "high"]),
+            ("dependency", &["add", "1", "2"]),
+            ("cancel", &["1"]),
+            ("ready", &["1"]),
+            ("ready", &["1", "--bypass-review"]),
+            ("submit", &["1"]),
+            ("proposal withdraw", &["1"]),
+            ("goal add", &["g"]),
+            ("goal edit", &["1", "--title", "g"]),
+            ("goal ready", &["1"]),
+            ("goal close", &["1", "--verdict", "achieved"]),
+            ("goal review", &["1"]),
+            ("note", &["--text", "n", "--task", "1"]),
+            ("mark", &["m"]),
+            (
+                "finding record",
+                &["--kind", "k", "--summary", "s", "--queue"],
+            ),
+            ("finding resolve", &["1", "--reason", "r"]),
+            ("finding dismiss", &["1", "--reason", "r"]),
+            (
+                "ask",
+                &[
+                    "--run",
+                    "r1",
+                    "--kind",
+                    "worker_question",
+                    "--question",
+                    "q",
+                    "--because",
+                    "scope",
+                ],
+            ),
+            (
+                "ask",
+                &[
+                    "--kind",
+                    "blocked",
+                    "--finding",
+                    "1",
+                    "--question",
+                    "q",
+                    "--because",
+                    "scope",
+                ],
+            ),
+            ("ask close", &["1"]),
+            ("answer", &["1", "--text", "yes"]),
+        ];
+        for (command, needs) in DAGQ_COMMANDS {
+            let forms: Vec<_> = samples.iter().filter(|(of, _)| of == command).collect();
+            assert!(!forms.is_empty(), "no sample of {command}");
+            for (_, args) in forms {
+                let argv: Vec<&str> = std::iter::once("dagq")
+                    .chain(command.split(' '))
+                    .chain(args.iter().copied())
+                    .collect();
+                let cli =
+                    Cli::try_parse_from(&argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+                let requested = requests(&cli.command);
+                assert!(!requested.is_empty(), "{argv:?}");
+                for (capability, _) in requested {
+                    assert!(needs.contains(&capability), "{argv:?} needs {capability}");
+                }
+            }
+        }
+    }
 }

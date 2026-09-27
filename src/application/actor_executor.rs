@@ -44,36 +44,7 @@ use crate::domain::{
     sessions::{self, LAUNCH_ENV},
 };
 
-/// Where an executor runs its actors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutorBackend {
-    /// Processes of this user on this host.
-    Host,
-}
-
-impl ExecutorBackend {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Host => "host",
-        }
-    }
-}
-
-/// How far an executor holds its actors to their spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Enforcement {
-    /// Recorded and checked by the runtime's own code, not isolated: the
-    /// process can do whatever this user can (ADR-t728-1 decision 6).
-    Advisory,
-}
-
-impl Enforcement {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Advisory => "advisory",
-        }
-    }
-}
+pub use super::execution::{EnforcementLevel, ExecutionConfig, ExecutorBackend};
 
 /// The part of the file system an actor works on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,7 +321,7 @@ impl ActorHandle {
 /// first.
 pub trait ActorExecutor {
     fn backend(&self) -> ExecutorBackend;
-    fn enforcement(&self) -> Enforcement;
+    fn enforcement(&self) -> EnforcementLevel;
     fn spawn(&self, spec: ActorExecutionSpec<'_>) -> Result<ActorHandle>;
 }
 
@@ -439,17 +410,27 @@ pub struct HostActorExecutor<'a> {
     workspaces: Option<&'a dyn WorkspaceBackend>,
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
+    config: ExecutionConfig,
 }
 
 impl<'a> HostActorExecutor<'a> {
-    /// An executor for the actors of the queue at `queue`, with no part yet.
+    /// An executor for the actors of the queue at `queue`, with no part yet
+    /// and every actor on the host.
     pub fn new(queue: &'a Path) -> Self {
         Self {
             queue,
             workspaces: None,
             provider: None,
             spawner: None,
+            config: ExecutionConfig::default(),
         }
+    }
+
+    /// The backend of each actor as `config` names it: an actor it puts on
+    /// another backend is refused.
+    pub fn with_config(mut self, config: ExecutionConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// Workspaces open through `workspaces`.
@@ -526,12 +507,24 @@ impl ActorExecutor for HostActorExecutor<'_> {
         ExecutorBackend::Host
     }
 
-    fn enforcement(&self) -> Enforcement {
-        Enforcement::Advisory
+    fn enforcement(&self) -> EnforcementLevel {
+        EnforcementLevel::Advisory
     }
 
     fn spawn(&self, spec: ActorExecutionSpec<'_>) -> Result<ActorHandle> {
         spec.check()?;
+        // An actor configured for another backend is refused, never started
+        // on the host instead (fail closed).
+        let backend = self.config.backend_of(spec.role());
+        if backend != self.backend() {
+            backend.ensure_implemented()?;
+            bail!(
+                "{} is configured for the {} backend, not {}",
+                spec.role().as_str(),
+                backend.as_str(),
+                self.backend().as_str()
+            );
+        }
         let ActorExecutionSpec { actor, program, .. } = spec;
         match program {
             ActorProgram::RunWorkspace {
@@ -1410,5 +1403,43 @@ mod tests {
                 ])
             );
         }
+    }
+
+    #[test]
+    fn an_actor_configured_for_podman_is_refused_not_run_on_the_host() {
+        let (_, run) = claimed_run("r1");
+        let fake = Fake::default();
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_provider(&fake)
+            .with_spawner(&fake)
+            .with_config(ExecutionConfig {
+                backend: ExecutorBackend::Host,
+                actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],
+            });
+        let error = executor
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::worker(run.id(), run.task_id()),
+                WorkspaceAccess::Write("/w".into()),
+                ActorProgram::SessionAgent {
+                    agent: SessionAgent::Resume { run: &run },
+                    model: None,
+                },
+            ))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("podman"), "{error}");
+        assert!(error.contains("not implemented"), "{error}");
+        assert!(fake.spawned.lock().unwrap().is_empty());
+        // The roles it does not name still run on the host.
+        let dir = tempfile::tempdir().unwrap();
+        executor
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::new(ActorRole::Observer, "observer"),
+                WorkspaceAccess::Scratch(dir.path().into()),
+                job(dir.path()),
+            ))
+            .unwrap();
+        assert_eq!(fake.spawned.lock().unwrap().len(), 1);
     }
 }

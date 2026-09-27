@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
 
+use super::execution::{ActorExecution, actor_executions};
 use super::{AskQuery, Clock, PlannerAnswerRoute, ProcessControl, Queue, RunFiles, TRIAGE_ASKER};
 use crate::domain::{
     AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS, LANDING_OPTIONS, ReasonCode,
@@ -221,6 +222,8 @@ pub struct DoctorReport {
     pub runs: Vec<RunHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_env: Option<Value>,
+    /// Where each AI actor runs and how far that holds it.
+    pub actors: Vec<ActorExecution>,
 }
 
 /// Characters of an ask's question `status` keeps before `…`.
@@ -235,7 +238,8 @@ const REASON_CHARS: usize = 300;
 /// (`attention`, ADR-0022; `None` is all of it), every open ask with its
 /// question cut to 200 characters, the proposals waiting for plan review
 /// or being revised (ADR-0041 decision 7) in plan review's order, and the
-/// newest event id (`cursor`) to `watch` from (ADR-0016).
+/// newest event id (`cursor`) to `watch` from (ADR-0016), with `actors`,
+/// each AI actor's backend and enforcement ([`actor_executions`]).
 pub fn status(
     queue: &dyn Queue,
     control: &dyn ProcessControl,
@@ -330,6 +334,9 @@ pub fn status(
         // of the supervisors' binary (ADR-0045 decision 17); each
         // supervisor's own build is its `binary_version`.
         "version": crate::VERSION,
+        // Where each AI actor runs and how far that holds it (goal 55): on
+        // the host, advisory, not a sandbox (ADR-t728-1 decision 6).
+        "actors": actor_executions()?,
         "auto_update": super::update::status(
             &registrations,
             &queue.update_events(20)?,
@@ -443,7 +450,8 @@ fn slots_and_waits(
 /// `[run.env]` names, where they resolved on the caller's PATH (`run_env`,
 /// or why they could not be checked), and the supervisor's latest
 /// `run_env_program_missing` / `run_env_program_found` (ADR-0049 decision
-/// 9). Reads only.
+/// 9). Both show `actors`, each AI actor's backend and enforcement
+/// ([`actor_executions`]: the host, advisory, not sandboxed). Reads only.
 pub fn doctor(
     queue: &dyn Queue,
     control: &dyn ProcessControl,
@@ -489,6 +497,7 @@ pub fn doctor(
             "checked_at": now,
             "supervisors": supervisors.iter().map(SupervisorHealth::summary).collect::<Vec<_>>(),
             "runs": runs.iter().map(RunHealth::summary).collect::<Vec<_>>(),
+            "actors": actor_executions()?,
         });
         if let Some(run_env) = run_env {
             summary["run_env"] = run_env;
@@ -500,6 +509,7 @@ pub fn doctor(
         supervisors,
         runs,
         run_env,
+        actors: actor_executions()?,
     })?)
 }
 

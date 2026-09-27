@@ -613,3 +613,39 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
     ok(&db, &["timeline", &run]);
     ok(&db, &["stats", "--full"]);
 }
+
+/// `status` and `doctor` name each AI actor's backend and enforcement: on
+/// the host, advisory and not sandboxed (goal 55); the control plane and
+/// the user are not AI actors and are not listed.
+#[test]
+fn status_and_doctor_show_every_actor_on_the_host_advisory() {
+    let (_dir, db) = queue();
+    ok(&db, &["init"]);
+    for args in [&["status"][..], &["doctor"], &["doctor", "--full"]] {
+        let report = ok(&db, args);
+        let actors = report["actors"].as_array().unwrap();
+        let roles: Vec<&str> = actors
+            .iter()
+            .map(|actor| actor["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                "inbox",
+                "planner",
+                "worker",
+                "review-job",
+                "recovery-job",
+                "plan-review-job",
+                "goal-review-job",
+                "observer",
+            ],
+            "{args:?}"
+        );
+        for actor in actors {
+            assert_eq!(actor["backend"], "host", "{args:?}");
+            assert_eq!(actor["enforcement"], "advisory", "{args:?}");
+            assert_eq!(actor["sandboxed"], false, "{args:?}");
+        }
+    }
+}

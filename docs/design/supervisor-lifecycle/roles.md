@@ -4,8 +4,8 @@ type: design
 title: "Roles"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -57,9 +57,28 @@ runtimeが起動するAI actorは全て`ActorExecutor::spawn(ActorExecutionSpec)
 - `program`: `RunWorkspace`（workerとresumeのworkspaceでsession wrapperを動かす）、`NamedWorkspace`（inboxのagent、plannerのwrapper）、`SessionAgent`（session wrapperがworkspaceの中で起動するworker・resume・plannerのagent）、`Headless`（review・recovery・plan review・goal reviewのjobとobserverのagent。`HeadlessProgram::Review`と`Job`）。
 - `spawn`はまず`ActorExecutionSpec::check`で整合を確かめ、合わなければ起動しない（fail closed）: roleの`TrustLevel`が`UntrustedAgent`でない（`user`・`supervisor`・`wrapper`・`integrator`）、programがroleのものでない（`RunWorkspace`はworker、inboxのagentはinbox、`Review`はreview-jobなど）、`capabilities`がroleの`grants`と違う、workerのactorのrunとprogramのrunが違う。
 - `ActorHandle`: workspaceのUUID（`Workspace`）かプロセス（`Process`）。
-- `HostActorExecutor`がただ1つのbackend（`backend()`は`host`、`enforcement()`は`advisory`）。cmuxの`WorkspaceBackend`、`AgentProvider`（Claude Code）、`Spawner`の上に作り、呼び出し元が持つ部品だけを渡す（supervisorは全部、`up`はcmuxとinboxのprovider、plannerを開くところはcmux、session wrapperはproviderとspawner、`observe`はproviderと`LocalSpawner`）。要る部品の無いprogramは拒む。hostではspecは記録と整合の検査だけで隔離ではなく、プロセスはこのユーザーにできることを全てできる（ADR-t728-1の決定6）。`resources.timeout`もhostではsupervisorのtimerとobserverのdeadlineが守る。sandboxのbackend（goal 38）は同じspecを強制する側になる。
-- Claudeのsettingsは`agent_settings(role, planner origin)`の1か所でroleから決まる: workerとruntimeが立てたplannerはsession（`Stop` hook・`UserPromptSubmit` hook・`permissions.deny`、サジェストなし）、人のplannerはサジェストありのsession、review jobはreviewの設定（hookなし）、inbox・recovery・plan review・goal reviewのjobとobserverはdagqの設定を書かない。Claude Code adapterはこれをファイルに書くだけ（[Agent provider lifecycle](../provider-lifecycle.md)）。
+- `HostActorExecutor`がただ1つのbackend（`backend()`は`host`、`enforcement()`は`advisory`。下の「実行のbackendとenforcement」）。cmuxの`WorkspaceBackend`、`AgentProvider`（Claude Code）、`Spawner`の上に作り、呼び出し元が持つ部品だけを渡す（supervisorは全部、`up`はcmuxとinboxのprovider、plannerを開くところはcmux、session wrapperはproviderとspawner、`observe`はproviderと`LocalSpawner`）。要る部品の無いprogramは拒む。hostではspecは記録と整合の検査だけで隔離ではなく、プロセスはこのユーザーにできることを全てできる（ADR-t728-1の決定6）。`resources.timeout`もhostではsupervisorのtimerとobserverのdeadlineが守る。sandboxのbackend（goal 38）は同じspecを強制する側になる。
+- Claudeのsettingsは`agent_settings(role, planner origin)`の1か所でroleから決まる: workerとruntimeが立てたplannerはsession（`Stop` hook・`UserPromptSubmit` hook・`permissions.deny`、サジェストなし）、人のplannerはサジェストありのsession、review jobはreviewの設定（hookなし）、inbox・recovery・plan review・goal reviewのjobとobserverはdagqの設定を書かない。設定を書くrole（worker・planner・review job）の`permissions.deny`には、roleのpolicyが拒むコマンドの規則（`permission_deny(role)`。[Authorization](../authorization.md#claudeのpermissionsdenyguardrail)）が入る。Claude Code adapterはこれをファイルに書くだけ（[Agent provider lifecycle](../provider-lifecycle.md)）。
 - executorの外でClaudeを起動するのはtestのstubだけ。executorの外で起動するもの（`up --in-cmux`のsupervisorのworkspace、session wrapper自身、supervisorが起動する`observe`と`auto-update`のコマンド）はAI actorではなく、信頼する制御側。
+
+### 実行のbackendとenforcement
+
+actorをどこで動かし、specをどこまで守らせるかは`src/application/execution.rs`の型が持つ（task 738）。
+
+- `ExecutorBackend`: `host`（このユーザーのhost上のプロセス）と`podman`（goal 38のための予約の名前）。`podman`は未実装で、`ensure_implemented`がerrorにする。選ばれたactorは起動せず、hostに黙って戻さない（fail closed）。知らない名前も`ExecutorBackend::parse`がerrorにする。
+- `EnforcementLevel`: `advisory`（runtimeのコードが記録と検査をするだけで隔離ではない。hostの値）と`sandbox`（プロセスが抜けられない隔離。`podman`が実装されたときの値）。
+- `ExecutionConfig`: 全actorの既定の`backend`と、roleごとの上書き`actors`（`(ActorRole, ExecutorBackend)`の並び）。将来の設定ファイルの次の形と対応させる。この段では設定ファイルを読まず、既定（全actorが`host`）だけを使う。
+
+  ```toml
+  [security]
+  backend = "host"        # 全actorの既定。今は host だけ
+
+  [actors.worker]
+  backend = "host"        # roleごとの上書き。podman は未実装で起動を拒む
+  ```
+
+- `HostActorExecutor`は`ExecutionConfig`を持ち（`with_config`、既定は全actorが`host`）、`spawn`でactorのroleの`backend`が`host`でなければ起動を拒む。
+- `status`と`doctor`（要約と`--full`）は`actors`に、AI actor（`TrustLevel`が`untrusted_agent`のrole: inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・observer）ごとの`role`・`backend`・`enforcement`・`sandboxed`を出す（`actor_executions`）。今は全て`host`・`advisory`・`false`で、host実行がsandboxではないことをここでも明示する。
 
 ### CLIでの解釈
 

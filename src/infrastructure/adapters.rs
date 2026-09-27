@@ -3,10 +3,11 @@ use crate::{
         AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, PluginState,
         ProcessControl, Repository, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
         actor_executor::{AgentSettings, agent_settings},
+        execution::permission_deny,
         stats::WorkspaceListing,
     },
     domain::{
-        ActorRole, CommitSha, Task, TaskId, TaskRun,
+        ActorRole, CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
         recovery::ProcessInfo,
@@ -2409,11 +2410,7 @@ impl AgentProvider for ClaudeCode {
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        write_settings(
-            &settings,
-            agent_settings(ActorRole::Worker, None),
-            &run.idle_marker_path()?,
-        )?;
+        write_settings(&settings, ActorRole::Worker, None, &run.idle_marker_path()?)?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2435,11 +2432,7 @@ impl AgentProvider for ClaudeCode {
     fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        write_settings(
-            &settings,
-            agent_settings(ActorRole::Worker, None),
-            &run.idle_marker_path()?,
-        )?;
+        write_settings(&settings, ActorRole::Worker, None, &run.idle_marker_path()?)?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2463,7 +2456,8 @@ impl AgentProvider for ClaudeCode {
         let settings = planner.dir.join("claude-settings.json");
         write_settings(
             &settings,
-            agent_settings(ActorRole::Planner, Some(planner.origin)),
+            ActorRole::Planner,
+            Some(planner.origin),
             &planner.idle_marker(),
         )?;
         let mut command = CommandSpec::new(&self.executable);
@@ -2512,7 +2506,8 @@ impl AgentProvider for ClaudeCode {
         let settings = run_dir.join("claude-review-settings.json");
         write_settings(
             &settings,
-            agent_settings(ActorRole::ReviewJob, None),
+            ActorRole::ReviewJob,
+            None,
             // The review has no hook to write a marker with.
             run_dir,
         )?;
@@ -2564,24 +2559,37 @@ impl AgentProvider for ClaudeCode {
     }
 }
 
-/// Write the settings `settings` of an agent whose idle marker is
-/// `idle_marker` to `path`: the one place the role's settings
-/// ([`agent_settings`]) become Claude Code's. Settings of none write
-/// nothing.
-fn write_settings(path: &Path, settings: AgentSettings, idle_marker: &Path) -> Result<()> {
-    let text = match settings {
+/// Write the settings of the agent of `role` (a planner's by its
+/// `origin`) whose idle marker is `idle_marker` to `path`: the one place
+/// the role's settings ([`agent_settings`]) and the `permissions.deny` of
+/// its policy ([`permission_deny`]) become Claude Code's. Settings of none
+/// write nothing.
+fn write_settings(
+    path: &Path,
+    role: ActorRole,
+    origin: Option<PlannerOrigin>,
+    idle_marker: &Path,
+) -> Result<()> {
+    let deny = permission_deny(role);
+    let text = match agent_settings(role, origin) {
         AgentSettings::None => return Ok(()),
-        AgentSettings::Review => review_settings()?,
-        AgentSettings::Session { suggestions: true } => stop_hook_settings(idle_marker)?,
-        AgentSettings::Session { suggestions: false } => runtime_session_settings(idle_marker)?,
+        AgentSettings::Review => review_settings(&deny)?,
+        AgentSettings::Session { suggestions: true } => stop_hook_settings(idle_marker, &deny)?,
+        AgentSettings::Session { suggestions: false } => {
+            runtime_session_settings(idle_marker, &deny)?
+        }
     };
     fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
-/// Settings of the headless review: no hooks, and the same `autoMode`
-/// environment as a run session (see [`stop_hook_settings`]).
-pub fn review_settings() -> Result<String> {
+/// Settings of the headless review: no hooks, the `permissions.deny` of
+/// its role (`deny`, see [`stop_hook_settings`]), and the same `autoMode`
+/// environment as a run session.
+pub fn review_settings(deny: &[String]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "permissions": {
+            "deny": deny
+        },
         "autoMode": {
             "environment": ["$defaults"]
         }
@@ -2646,7 +2654,11 @@ pub fn claude_trusts_repository(config: &Path, root: &Path) -> Result<bool> {
 ///
 /// `permissions.deny` refuses [`SIGNAL_BY_NAME_DENIED`]: the session may
 /// stop what it started by pid, never processes picked by name or pattern.
-pub fn stop_hook_settings(idle_marker: &Path) -> Result<String> {
+/// After them come `deny`, the rules of the role's policy
+/// ([`permission_deny`]): the `dagq` commands the role may not run and
+/// rewriting `DAGQ_ROLE` and the other variables naming the actor. They
+/// are a guardrail, not enforcement: the CLI's own check refuses.
+pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String> {
     let log = path_text(&idle_marker.with_file_name(IDLE_LOG))?;
     let marker = path_text(idle_marker)?;
     let command = format!(
@@ -2676,6 +2688,10 @@ pub fn stop_hook_settings(idle_marker: &Path) -> Result<String> {
         },
         "permissions": {
             "deny": SIGNAL_BY_NAME_DENIED
+                .iter()
+                .map(|rule| (*rule).to_owned())
+                .chain(deny.iter().cloned())
+                .collect::<Vec<_>>()
         },
         "autoMode": {
             "environment": ["$defaults"]
@@ -2689,8 +2705,9 @@ pub fn stop_hook_settings(idle_marker: &Path) -> Result<String> {
 /// fills the input box with grey text that reads on the screen like a
 /// half-typed message, and nobody types in these sessions (goal 48). The
 /// sessions a person works in (the inbox, a person's planner) keep them.
-pub fn runtime_session_settings(idle_marker: &Path) -> Result<String> {
-    let mut settings: serde_json::Value = serde_json::from_str(&stop_hook_settings(idle_marker)?)?;
+pub fn runtime_session_settings(idle_marker: &Path, deny: &[String]) -> Result<String> {
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&stop_hook_settings(idle_marker, deny)?)?;
     settings["promptSuggestionEnabled"] = serde_json::Value::Bool(false);
     Ok(serde_json::to_string_pretty(&settings)?)
 }
@@ -3044,8 +3061,11 @@ mod tests {
             assert!(command.get_args().any(|arg| arg == path.as_os_str()));
             let settings: Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            let expected: Value =
-                serde_json::from_str(&stop_hook_settings(&planner.idle_marker()).unwrap()).unwrap();
+            let expected: Value = serde_json::from_str(
+                &stop_hook_settings(&planner.idle_marker(), &permission_deny(ActorRole::Planner))
+                    .unwrap(),
+            )
+            .unwrap();
             (settings, expected)
         };
         let (runtime, mut expected) = settings_of(PlannerOrigin::Runtime);
@@ -3055,6 +3075,16 @@ mod tests {
         let (person, expected) = settings_of(PlannerOrigin::Person);
         assert_eq!(person.get("promptSuggestionEnabled"), None);
         assert_eq!(person, expected);
+        // Either way the planner's policy denies it landing and answering.
+        let deny = person["permissions"]["deny"].as_array().unwrap();
+        for rule in [
+            "Bash(pkill:*)",
+            "Bash(dagq integrate:*)",
+            "Bash(dagq answer:*)",
+        ] {
+            assert!(deny.contains(&Value::from(rule)), "{rule}");
+        }
+        assert!(!deny.contains(&Value::from("Bash(dagq submit:*)")));
     }
 
     #[test]

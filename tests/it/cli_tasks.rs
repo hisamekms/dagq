@@ -97,6 +97,11 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             );
         }
         let mut expected = serde_json::json!({"supervisors": [], "runs": []});
+        // Every AI actor on the host, advisory (goal 55); `cli_read` checks
+        // the values.
+        expected["actors"] =
+            serde_json::to_value(dagq::application::execution::actor_executions().unwrap())
+                .unwrap();
         if command == "status" {
             // Nothing supervises a fresh queue; no event exists yet.
             expected["attention"] = serde_json::json!([{

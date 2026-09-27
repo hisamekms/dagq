@@ -1549,9 +1549,12 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
 
 #[test]
 fn claude_stop_hook_settings_publish_the_idle_marker() {
+    use dagq::application::execution::permission_deny;
+    use dagq::domain::ActorRole;
     use dagq::infrastructure::adapters::{
         ClaudeCode, runtime_session_settings, stop_hook_settings,
     };
+    let deny = permission_deny(ActorRole::Worker);
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join("run's dir");
     fs::create_dir(&run_dir).unwrap();
@@ -1590,7 +1593,7 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
     let text = fs::read_to_string(&settings).unwrap();
     assert_eq!(
         text,
-        runtime_session_settings(&run.idle_marker_path().unwrap()).unwrap()
+        runtime_session_settings(&run.idle_marker_path().unwrap(), &deny).unwrap()
     );
     let parsed: Value = serde_json::from_str(&text).unwrap();
     // Nobody types in a worker's session: Claude Code's prompt suggestions,
@@ -1603,9 +1606,25 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         .unwrap()
         .remove("promptSuggestionEnabled");
     let expected: Value =
-        serde_json::from_str(&stop_hook_settings(&run.idle_marker_path().unwrap()).unwrap())
+        serde_json::from_str(&stop_hook_settings(&run.idle_marker_path().unwrap(), &deny).unwrap())
             .unwrap();
     assert_eq!(hooks_only, expected);
+    // The worker's policy becomes its `permissions.deny`, after the signals
+    // by name: no landing, answering, readying or rewriting its role.
+    let denied = parsed["permissions"]["deny"].as_array().unwrap();
+    assert_eq!(
+        denied[..2],
+        [json!("Bash(pkill:*)"), json!("Bash(killall:*)")]
+    );
+    for rule in [
+        "Bash(dagq integrate:*)",
+        "Bash(dagq answer:*)",
+        "Bash(dagq ready:*)",
+        "Bash(DAGQ_ROLE=*)",
+    ] {
+        assert!(denied.contains(&json!(rule)), "{rule}: {denied:?}");
+    }
+    assert!(!denied.contains(&json!("Bash(dagq ask:*)")));
     // The model and effort go among the options (ADR-0079 decision 3).
     let claude = ClaudeCode {
         executable: "claude".into(),
@@ -1645,10 +1664,16 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
     assert_eq!(parsed["autoMode"]["environment"], json!(["$defaults"]));
     // The session never signals processes by name or pattern: other runs'
     // sessions carry their prompts, and so the checks' names, in their
-    // command lines (task 359).
+    // command lines (task 359). The worker's policy follows.
     assert_eq!(
         parsed["permissions"]["deny"],
-        json!(["Bash(pkill:*)", "Bash(killall:*)"])
+        json!(
+            ["Bash(pkill:*)", "Bash(killall:*)"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(deny.iter().cloned())
+                .collect::<Vec<_>>()
+        )
     );
     let hook = &parsed["hooks"]["Stop"][0]["hooks"][0];
     assert_eq!(hook["type"], "command");
