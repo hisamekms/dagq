@@ -85,8 +85,8 @@ impl ActorRole {
     }
 
     /// One of the supervisor's headless jobs, whose verdict the supervisor
-    /// applies: the CLI allows them reads only (ADR-0027), until the
-    /// authorizer takes the check over.
+    /// applies: the policy allows them reads only (ADR-0027), and the CLI
+    /// refuses the rest with the reviewer's message.
     pub const fn is_headless_job(self) -> bool {
         matches!(
             self,

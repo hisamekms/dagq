@@ -57,5 +57,5 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 - `DAGQ_ROLE`が上の表の値（`user`を除く）でなければ`unknown DAGQ_ROLE: <値>`のerrorで止まり、queueを開かない（fail closed）。`DAGQ_RUN_ID`・`DAGQ_TASK_ID`が読めないときも同じ。
 - 旧値`reviewer`（入れ替え前のバイナリが起動したjob）は移行の間だけ`review-job`として読む。
 - `DAGQ_ACTOR_ID`が無ければ（それより前に開いたsession）actor idは`DAGQ_ROLE`の値。
-- 4つのjob（と`reviewer`）は今までのreviewerと同じ読み取りだけの制限を受け、状態を変えるコマンドは`reviewer may not change queue state`で拒まれる。observerの制限（findingの記録・解決と、findingに紐づく`blocked`のaskだけ）も変わらない。Authorizer（goal 55）が置き換えるまで、どのjobにも書き込みを与えない。
+- 4つのjob（と`reviewer`）は今までのreviewerと同じ読み取りだけの制限を受け、状態を変えるコマンドは`reviewer may not change queue state`で拒まれる。observerの制限（findingの記録・解決と、findingに紐づく`blocked`のaskだけ）も変わらない。判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
 - noteの`by`・markの`by`・findingの`recorded_by`と状態変更の`by`・askの`asked_by`は`ActorContext::written_by`（roleの名前、userは`human`）、answerの`answered_by`は`ActorContext::answered_by`（roleの名前、userは`person`）から作り、書かれる値は型を入れる前と同じ。

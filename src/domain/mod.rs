@@ -662,6 +662,7 @@ impl std::str::FromStr for Priority {
 
 pub mod actor;
 pub mod actor_model;
+pub mod authorization;
 pub mod claim_defer;
 pub mod claim_hold;
 pub mod disk;
@@ -714,6 +715,7 @@ pub mod worker_model;
 pub mod worktime;
 
 pub use actor::{ActorContext, ActorRole, TrustLevel};
+pub use authorization::{AuthorizationError, Authorizer, Capability, Resource, StaticPolicy};
 pub use error::DomainError;
 use error::require;
 pub use finding::{

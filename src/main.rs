@@ -20,10 +20,11 @@ use dagq::{
         GoalReviewStore, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
     },
     domain::{
-        ActorContext, ActorRole, AskId, AskKind, AskReason, EventId, FindingId, FindingQuery,
-        FindingStatus, FindingTarget, GoalEdit, GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal,
-        NewNote, NewTask, NoteQuery, NoteTarget, PlannerOrigin, PlannerOwner, ProposalId, RunId,
-        SessionRole, Submission, TaskAction, TaskEdit, TaskId, TaskKind, TaskStatus,
+        ActorContext, ActorRole, AskId, AskKind, AskReason, Authorizer, Capability, EventId,
+        FindingId, FindingQuery, FindingStatus, FindingTarget, GoalEdit, GoalId, GoalVerdict,
+        NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget, PlannerId,
+        PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole, StaticPolicy,
+        Submission, TaskAction, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
@@ -1189,66 +1190,27 @@ enum GoalCommand {
 
 /// The error of a command the observer may not run.
 const OBSERVER_DENIED: &str = "observer may not change queue state";
-/// The error of a command the headless reviewer may not run.
+/// The error of a command a headless job may not run.
 const REVIEWER_DENIED: &str = "reviewer may not change queue state";
 
-/// The commands that only read the queue. They open it on a read-only
-/// connection (ADR-0045 decision 18), and the supervisor's headless review
-/// may run them and nothing else (ADR-0027).
-fn reads_only(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Locate
-            | Command::List { .. }
-            | Command::Show { .. }
-            | Command::Candidates
-            | Command::Graph { out: None, .. }
-            | Command::Status { .. }
-            | Command::Asks { .. }
-            | Command::Events { .. }
-            | Command::Timeline { .. }
-            | Command::Stats { .. }
-            | Command::Kpi { .. }
-            | Command::Forecast { .. }
-            | Command::Doctor { .. }
-            | Command::Notes { .. }
-            | Command::Marks { .. }
-            | Command::Findings { .. }
-            | Command::Search { .. }
-            | Command::Related { .. }
-            | Command::Proposal {
-                command: ProposalCommand::List { .. } | ProposalCommand::Show { .. },
-            }
-            | Command::Planners { .. }
-            | Command::Lint { .. }
-            | Command::Goal {
-                command: GoalCommand::List | GoalCommand::Show { .. },
-            }
-            | Command::Observe { history: true, .. }
-    )
+/// A run named on the command line, or [`Resource::Unresolved`] when its
+/// id cannot be read: no owner matches it (fail closed).
+fn run_resource(run: &str) -> Resource {
+    RunId::new(run).map_or(Resource::Unresolved, Resource::run)
 }
 
-/// What the supervisor's headless review may run (ADR-0027): reads only.
-fn reviewer_access(command: &Command) -> ObserverAccess {
-    if reads_only(command) {
-        ObserverAccess::Allowed
-    } else {
-        ObserverAccess::Denied
-    }
+fn task_resource(id: i64) -> Resource {
+    Resource::task(TaskId::new(id))
 }
 
-/// What the observer's environment may run (ADR-0044 decision 4).
-#[derive(Debug, PartialEq, Eq)]
-enum ObserverAccess {
-    Allowed,
-    Denied,
-}
-
-/// An allowlist: reads, findings (recording and resolving; dismissing is a
-/// person's or a planner's) and blocked asks. Notes, goals and tasks are
-/// not; every other command, including ones added later, is refused until
-/// listed here.
-fn observer_access(command: &Command) -> ObserverAccess {
+/// What a command asks of the [`Authorizer`] (ADR-t728-1 decision 5): each
+/// capability and the resource it acts on, as far as the command line names
+/// it. Owners and statuses the command line does not carry are left
+/// unknown. The match has no catch-all, so a new command must be listed.
+fn requests(command: &Command) -> Vec<(Capability, Resource)> {
+    use Capability as C;
+    let one = |capability, resource| vec![(capability, resource)];
+    let queue = |capability| vec![(capability, Resource::Queue)];
     match command {
         Command::Locate
         | Command::List { .. }
@@ -1259,7 +1221,6 @@ fn observer_access(command: &Command) -> ObserverAccess {
         | Command::Asks { .. }
         | Command::Events { .. }
         | Command::Timeline { .. }
-        | Command::Watch { .. }
         | Command::Stats { .. }
         | Command::Kpi { .. }
         | Command::Forecast { .. }
@@ -1267,9 +1228,6 @@ fn observer_access(command: &Command) -> ObserverAccess {
         | Command::Notes { .. }
         | Command::Marks { .. }
         | Command::Findings { .. }
-        | Command::Finding {
-            command: FindingCommand::Record { .. } | FindingCommand::Resolve { .. },
-        }
         | Command::Search { .. }
         | Command::Related { .. }
         | Command::Proposal {
@@ -1280,17 +1238,154 @@ fn observer_access(command: &Command) -> ObserverAccess {
         | Command::Goal {
             command: GoalCommand::List | GoalCommand::Show { .. },
         }
-        | Command::Observe { history: true, .. } => ObserverAccess::Allowed,
-        // The threshold crossings it raises to the inbox, each on its
-        // finding (ADR-0044 decision 23), and nothing else.
+        | Command::Observe { history: true, .. } => queue(C::QueueRead),
+        Command::Watch { .. } => queue(C::QueueWatch),
+        Command::Graph { out: Some(_), .. } | Command::Report { .. } => queue(C::ExportFile),
+        Command::Init | Command::Migrate { .. } | Command::Rebind { .. } => queue(C::QueueAdmin),
+        Command::Install { .. } | Command::AutoUpdate { .. } => queue(C::BinaryInstall),
+        Command::Up { .. } | Command::Down { .. } => queue(C::ServiceLifecycle),
+        Command::Plan { .. } => queue(C::PlannerOpen),
+        Command::Supervise { .. } => queue(C::Supervise),
+        Command::Observe { history: false, .. } => queue(C::ObserveRun),
+        Command::Add { goal_id, .. } => one(
+            C::TaskWrite,
+            goal_id.map_or(Resource::Queue, |goal| Resource::Goal(GoalId::new(goal))),
+        ),
+        Command::Ready { id, bypass_review } => one(
+            if *bypass_review {
+                C::TaskReadyBypassReview
+            } else {
+                C::TaskReady
+            },
+            task_resource(*id),
+        ),
+        Command::Draft { id }
+        | Command::Edit { task: id, .. }
+        | Command::SetGoal { task: id, .. }
+        | Command::SetPaths { task: id, .. }
+        | Command::SetPriority { task: id, .. }
+        | Command::Dependency {
+            command:
+                DependencyCommand::Add { task: id, .. } | DependencyCommand::Remove { task: id, .. },
+        } => one(C::TaskWrite, task_resource(*id)),
+        Command::Cancel { id, .. } => one(C::TaskCancel, task_resource(*id)),
+        Command::Submit { proposal, .. } => one(
+            C::ProposalSubmit,
+            proposal.map_or(Resource::Queue, |id| Resource::Proposal {
+                id: ProposalId::new(id),
+                owner: None,
+            }),
+        ),
+        Command::Proposal {
+            command: ProposalCommand::Withdraw { id },
+        } => one(
+            C::ProposalWithdraw,
+            Resource::Proposal {
+                id: ProposalId::new(*id),
+                owner: None,
+            },
+        ),
+        Command::Goal { command } => match command {
+            GoalCommand::Add { .. } => queue(C::GoalWrite),
+            GoalCommand::Edit { id, .. } => one(C::GoalWrite, Resource::Goal(GoalId::new(*id))),
+            GoalCommand::Ready { id } => one(C::GoalReady, Resource::Goal(GoalId::new(*id))),
+            GoalCommand::Close { id, .. } => one(C::GoalClose, Resource::Goal(GoalId::new(*id))),
+            GoalCommand::Review { id } => {
+                one(C::GoalReviewRequest, Resource::Goal(GoalId::new(*id)))
+            }
+            GoalCommand::List | GoalCommand::Show { .. } => queue(C::QueueRead),
+        },
+        Command::Note {
+            task, run, goal, ..
+        } => one(
+            C::NoteWrite,
+            match (task, run, goal) {
+                (Some(task), _, _) => task_resource(*task),
+                (_, Some(run), _) => run_resource(run),
+                (_, _, Some(goal)) => Resource::Goal(GoalId::new(*goal)),
+                _ => Resource::Unresolved,
+            },
+        ),
+        Command::Mark { .. } => queue(C::MarkWrite),
+        Command::Finding { command } => match command {
+            FindingCommand::Record {
+                task, run, goal, ..
+            } => one(
+                C::FindingRecord,
+                match (task, run, goal) {
+                    (Some(task), _, _) => task_resource(*task),
+                    (_, Some(run), _) => run_resource(run),
+                    (_, _, Some(goal)) => Resource::Goal(GoalId::new(*goal)),
+                    _ => Resource::Queue,
+                },
+            ),
+            FindingCommand::Resolve { id, .. } => {
+                one(C::FindingResolve, Resource::Finding(FindingId::new(*id)))
+            }
+            FindingCommand::Dismiss { id, .. } => {
+                one(C::FindingDismiss, Resource::Finding(FindingId::new(*id)))
+            }
+        },
+        Command::Integrate { id, .. } => one(
+            C::IntegrationRequest,
+            id.map_or(Resource::Queue, task_resource),
+        ),
+        Command::Review { id } => one(C::PrepareReview, task_resource(*id)),
+        Command::Recover { run } => one(C::RunRecover, run_resource(run)),
+        // The threshold crossings the observer raises to the inbox, each on
+        // its finding (ADR-0044 decision 23).
         Command::Ask {
             command: None,
             kind: Some(kind),
-            finding: Some(_),
+            finding: Some(finding),
             ..
-        } if kind == AskKind::Blocked.as_str() => ObserverAccess::Allowed,
-        _ => ObserverAccess::Denied,
+        } if kind == AskKind::Blocked.as_str() => {
+            one(C::FindingAsk, Resource::Finding(FindingId::new(*finding)))
+        }
+        Command::Ask {
+            command: Some(AskCommand::Close { id }),
+            ..
+        } => one(
+            C::AskClose,
+            Resource::Ask {
+                id: AskId::new(*id),
+                run: None,
+            },
+        ),
+        Command::Ask {
+            command: None,
+            task_id,
+            run,
+            ..
+        } => one(
+            C::AskOpen,
+            match (run, task_id) {
+                (Some(run), _) => run_resource(run),
+                (_, Some(task)) => task_resource(*task),
+                _ => Resource::Queue,
+            },
+        ),
+        Command::Answer { id, .. } => one(
+            C::AskAnswer,
+            Resource::Ask {
+                id: AskId::new(*id),
+                run: None,
+            },
+        ),
+        Command::Session { run, .. } => one(C::SessionRun, run_resource(run)),
+        Command::PlannerSession { planner, .. } => {
+            one(C::SessionRun, Resource::Planner(PlannerId::new(*planner)))
+        }
+        Command::SessionEvent { .. } => queue(C::SessionRecord),
     }
+}
+
+/// The commands that only read the queue. They open it on a read-only
+/// connection (ADR-0045 decision 18).
+fn reads_only(command: &Command) -> bool {
+    requests(command)
+        .iter()
+        .all(|(capability, _)| *capability == Capability::QueueRead)
 }
 
 /// The task, run or goal a finding command names, if any.
@@ -1307,16 +1402,28 @@ fn finding_target(
     })
 }
 
-/// The reads-only limits of the observer (ADR-0044 decision 4) and of the
-/// supervisor's headless jobs (ADR-0027), each job by its own role and the
-/// legacy `reviewer` as a review job (ADR-t728-1 decision 2).
+/// The limits of the observer (ADR-0044 decision 4) and of the
+/// supervisor's headless jobs (ADR-0027, each job by its own role and the
+/// legacy `reviewer` as a review job), by the [`StaticPolicy`]. The other
+/// roles are not checked here yet: later tasks of goal 55 move the check
+/// to the application layer, where the owners are known. The refusal keeps
+/// the message these roles always got.
 fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
     let role = actor.role();
-    if role == ActorRole::Observer && observer_access(command) == ObserverAccess::Denied {
-        bail!(OBSERVER_DENIED);
-    }
-    if role.is_headless_job() && reviewer_access(command) == ObserverAccess::Denied {
-        bail!(REVIEWER_DENIED);
+    let denied = if role == ActorRole::Observer {
+        OBSERVER_DENIED
+    } else if role.is_headless_job() {
+        REVIEWER_DENIED
+    } else {
+        return Ok(());
+    };
+    for (capability, resource) in requests(command) {
+        if StaticPolicy
+            .authorize(actor, capability, &resource)
+            .is_err()
+        {
+            bail!(denied);
+        }
     }
     Ok(())
 }

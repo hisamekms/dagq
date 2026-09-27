@@ -29,7 +29,7 @@ related:
 - 集計は`domain::kpi::kpi`（events、task→goal、task→kind、今の時刻、UTCからのoffset、hostの論理コア数、`[kpi]`の設定を受ける純粋関数）が行う。期間ごとの窓は`domain::stats::stats`をその窓（`--since`/`--until`と同じcursorの`(start, end]`）で`full`に呼んで得るので、runの区間（`startup`・`work`・`validate`・`wait_to_land`）、`land_phases`、`retries`、runごとのsession、askの数、`backend_failures`、`auto_repairs`、sessionのkindごとの窓の値は[stats](stats.md)と同じ関数から出る。KPIのために足したのは、`stats`の中の同じ走査を使う読み口`stats::asks::human_waits`（人が答えたaskの`ask_opened`→`ask_answered`と→適用の秒。`runtime_closed`は除く）と`stats::measures::verification_durations`（`integrate`の検証コマンドごとの秒の並び。`verification_commands`と同じeventの選び方を共有する）だけ。
 - `application::kpi::kpi`が`Queue`の`all_events`・`task_goals`・`task_kinds`を読み、`src/compose.rs`の`OneShot::kpi_of(queue, db, query)`が今の時刻、timezone（`infrastructure::clock::local_utc_offset`。`TZ`、無ければsystemのzoneで、今の時刻のoffsetを全期間に使う。夏時間の切り替えをまたぐ期間は1時間ずれる）、コア数（`available_parallelism`）、設定を渡す。
 - workerのmodelの試しの群（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4・6）の比較は、今は`kpi`の層ではなく`stats`の`trial_groups`で読む（[stats](stats.md#workerのmodelと試しの群)、[Worker model](worker-model.md)）。`group=`・`model=`・`effort=`の層は後のtaskで足す。
-- 読み取りのコマンドなので、read-onlyの接続で開き、observerとheadlessのjob（review・triage・plan review）も打てる（`main.rs`の`reads_only`と`observer_access`）。
+- 読み取りのコマンドなので、read-onlyの接続で開き、observerとheadlessのjob（review・triage・plan review）も打てる（`main.rs`の`reads_only`と、[Authorization](../authorization.md)の`StaticPolicy`）。
 
 ## 期間と比較
 
