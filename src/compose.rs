@@ -24,8 +24,8 @@ use crate::{
         install::{self as installation, Binaries, InstallOptions},
         integrate::{self as integration, IntegrateTarget, Integration},
         lifecycle::{
-            self, DownOptions, Ports as LifecyclePorts, QUEUE_ENV, QueuePaths, REVIEWER_ROLE,
-            ROLE_ENV, RepositoryPaths, UpEnvironment, UpOptions, session_env,
+            self, DownOptions, Ports as LifecyclePorts, QUEUE_ENV, QueuePaths, ROLE_ENV,
+            RepositoryPaths, UpEnvironment, UpOptions, session_env,
         },
         planner::{self, PlannerLaunch, PlannerProbes, PlannerWrapper},
         prompt,
@@ -350,11 +350,16 @@ pub fn supervise_with_reviewer(
         pid,
         version: crate::VERSION.to_owned(),
         worker_env: session_env(SessionRole::Worker, &db)?,
-        job_env: vec![
-            (ROLE_ENV.to_owned(), REVIEWER_ROLE.to_owned()),
-            (QUEUE_ENV.to_owned(), path_text(&db)?),
-        ],
-        observer_env_remove: vec![ROLE_ENV.to_owned()],
+        job_base_env: vec![(QUEUE_ENV.to_owned(), path_text(&db)?)],
+        // The observe command runs as the user; its agent is the observer.
+        observer_env_remove: [
+            ROLE_ENV,
+            crate::domain::actor::ACTOR_ID_ENV,
+            crate::domain::actor::RUN_ID_ENV,
+            crate::domain::actor::TASK_ID_ENV,
+        ]
+        .map(str::to_owned)
+        .to_vec(),
         planners_dir: planners_dir(&db),
         plugin_dir: options
             .plugin_dir

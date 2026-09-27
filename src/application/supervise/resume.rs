@@ -377,7 +377,7 @@ impl Supervisor<'_> {
         // The worker's env and group (the same session of the run) and the
         // description `run <run-id> resume` (ADR-0028).
         let tags = WorkspaceTags {
-            env: self.layout.worker_env.clone(),
+            env: self.layout.worker_env_of(run),
             description: Some(resume_workspace_description(run)),
             group: self.workspace_group(),
         };

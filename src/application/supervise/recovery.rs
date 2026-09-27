@@ -20,7 +20,7 @@
 //! `triage.rs`, with the same verdict.
 
 use super::*;
-use crate::domain::actor_model::{ActorLaunch, ActorRole};
+use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
 };
@@ -29,6 +29,7 @@ use crate::domain::recovery::{
     IDLE_WITHOUT_RECEIPT, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS,
     ProcessInfo, RecoveryAction, SEND_UNCONFIRMED, attempts, failed_live, run_processes,
 };
+use crate::domain::{ActorContext, ActorRole};
 
 /// The actions a recovery job may choose for a running session's
 /// `long_background` alert.
@@ -573,7 +574,7 @@ impl RecoveryWatch {
         }
         // What the job is started with (ADR-0079 decision 7): recorded,
         // not shown to the job among the facts.
-        let launch = sv.actor_launch(ActorRole::Recovery);
+        let launch = sv.actor_launch(ModelRole::Recovery);
         let mut recorded = payload.clone();
         recorded["launch"] = launch.to_value();
         sv.queue
@@ -1025,7 +1026,10 @@ pub(super) fn start_job(
         sv.reviewer.assign_session_id(&mut command, session_id);
     }
     sv.reviewer.apply_launch(&mut command, launch);
-    command.envs(sv.layout.job_env.iter().cloned());
+    command.envs(sv.layout.job_env(&ActorContext::instance(
+        ActorRole::RecoveryJob,
+        format_args!("{run}:{}:{attempt}", alert.as_str()),
+    )));
     let child = sv
         .spawner
         .spawn(

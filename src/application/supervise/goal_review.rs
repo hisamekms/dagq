@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::domain::language::with_instruction;
+use crate::domain::{ActorContext, ActorRole};
 use crate::{
     application::{
         GoalReviewApply, GoalReviewJob,
@@ -99,7 +100,10 @@ impl Supervisor<'_> {
         let mut command =
             self.reviewer
                 .headless_command(&self.layout.repo_root, &prompt, PLAN_REVIEW_TOOLS)?;
-        command.envs(self.layout.job_env.iter().cloned());
+        command.envs(self.layout.job_env(&ActorContext::instance(
+            ActorRole::GoalReviewJob,
+            format_args!("{}:{}", job.goal_id, job.attempt),
+        )));
         let child = self
             .spawner
             .spawn(

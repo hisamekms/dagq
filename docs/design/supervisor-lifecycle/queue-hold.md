@@ -35,7 +35,7 @@ supervisorは毎pass（drainの途中も）、ディスクの確認（`check_dis
 - **plan review・goal review・observer**: 起動しない（`plan_review_pass` / `goal_review_pass`に`starting: false`、`start_observer_when_due`を呼ばない）。走っているjobは最後まで追う
 - 走っているrunはleaseとsessionを持ったまま進む。着地（`integrate`）はClaudeを使わないので控えない
 
-`queue_hold`のaskに入った（`affected`に居る）runの促しとstalledのaskを止める扱い（`hold_of`）と、待ちから`queue_hold`で戻す扱い（[人の答えを待つrun](waiting.md)）はtask 361のまま。
+`queue_hold`のaskに入った（`affected`に居る）runの促しとstalledのaskを止める扱い（`hold_of`）と、待ちから`queue_hold`で戻す扱い（[人の答えを待つrun](waiting.md)）はtask 361のまま。促しを止めるのはaskが閉じるまで（`hold_unclosed`。answerの後、supervisorが`done`を適用して続けてよいという文を打つまでの間も含む。task 729）で、その間に促しが先に打たれることはない。
 
 ## answerの適用
 

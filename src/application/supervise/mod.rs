@@ -65,13 +65,14 @@ use super::{
     tail, unix_seconds,
 };
 use crate::domain::{
-    ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, AfterValidation, AskId,
-    AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId, EvidenceCheck,
-    HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS, MAX_RESUME_ATTEMPTS,
-    MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode, Receipt, ReceiptResult,
-    ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision, RunHistory, RunId, RunLease,
-    RunPaths, RunPlan, RunProcess, RunStatus, SessionRole, TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES,
-    TaskAction, TaskId, TaskRun, TaskStatus, TriageState, after_validation,
+    ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, ActorContext,
+    AfterValidation, AskId, AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId,
+    EvidenceCheck, HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS,
+    MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode,
+    Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision,
+    RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus, SessionRole,
+    TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun, TaskStatus, TriageState,
+    after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
     decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
     kpi::{CANDIDATES_SAMPLED, CandidatesSample},
@@ -239,12 +240,14 @@ pub struct Layout {
     /// This process and its binary's version, recorded on the registration.
     pub pid: u32,
     pub version: String,
-    /// `DAGQ_ROLE` / `DAGQ_QUEUE` of a worker's workspace.
+    /// `DAGQ_ROLE` / `DAGQ_QUEUE` of a worker's workspace;
+    /// [`Layout::worker_env_of`] names the run's worker.
     pub worker_env: Vec<(String, String)>,
-    /// The role and queue a headless review or triage runs under: the CLI
-    /// knows the job by its role and allows it only reads of this queue.
-    pub job_env: Vec<(String, String)>,
-    /// Variables the observer's process does not inherit (its role).
+    /// The queue a headless job runs against; [`Layout::job_env`] adds the
+    /// job's actor.
+    pub job_base_env: Vec<(String, String)>,
+    /// Variables the observer's process does not inherit (its role and
+    /// actor).
     pub observer_env_remove: Vec<String>,
     /// `planners/` of the queue, where the planners the runtime opens keep
     /// their files, and the plugin directory they load.
@@ -254,6 +257,24 @@ pub struct Layout {
     pub plan_reviews_dir: PathBuf,
     /// `goal-reviews/` of the queue: one directory per goal review job.
     pub goal_reviews_dir: PathBuf,
+}
+
+impl Layout {
+    /// The environment of a headless job: the queue, and the job's role
+    /// and actor id (ADR-t728-1 decision 4). The CLI knows the job by its
+    /// role and allows it only reads of this queue.
+    pub fn job_env(&self, actor: &ActorContext) -> Vec<(String, String)> {
+        crate::domain::actor::with_actor(self.job_base_env.clone(), actor)
+    }
+
+    /// The environment of the worker workspace of `run` (and of its
+    /// resume): the worker's role, queue, actor id, run and task.
+    pub fn worker_env_of(&self, run: &TaskRun) -> Vec<(String, String)> {
+        crate::domain::actor::with_actor(
+            self.worker_env.clone(),
+            &ActorContext::worker(run.id(), run.task_id()),
+        )
+    }
 }
 
 /// The ports the supervisor works through, and where it works.
@@ -811,7 +832,7 @@ impl Supervisor<'_> {
     /// it as before.
     pub(super) fn actor_launch(
         &self,
-        role: crate::domain::actor_model::ActorRole,
+        role: crate::domain::actor_model::ModelRole,
     ) -> crate::domain::actor_model::ActorLaunch {
         match self.verifier.role_models() {
             Ok(models) => models.launch(role),

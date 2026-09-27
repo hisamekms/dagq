@@ -41,8 +41,8 @@ use crate::domain::language::{Language, with_instruction};
 use crate::{
     VERSION,
     domain::{
-        HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration,
-        marks::SUPERVISOR_STOPPED, run_env::RunEnvCheck,
+        ActorRole, HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode,
+        SupervisorRegistration, marks::SUPERVISOR_STOPPED, run_env::RunEnvCheck,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -62,15 +62,15 @@ use std::{
 /// that `up`, run from inside the inbox session (the plugin skill calls
 /// it), does not open a second one, and the plugin's hook knows the session
 /// however it was started (ADR-0026).
-pub const ROLE_ENV: &str = "DAGQ_ROLE";
+pub const ROLE_ENV: &str = crate::domain::actor::ROLE_ENV;
 /// The queue database the workspace belongs to.
 pub const QUEUE_ENV: &str = "DAGQ_QUEUE";
 /// `DAGQ_ROLE` of a run's workspace (and of the resume workspace of its run).
-pub const WORKER_ROLE: &str = SessionRole::Worker.as_str();
+pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
 /// `DAGQ_ROLE` of a planner session, which writes goals and tasks and
 /// submits them as a proposal. A person opens one with `dagq plan` in a
 /// workspace `[<repo>]planner#<id>`; `up` opens none (ADR-0041 decision 6).
-pub const PLANNER_ROLE: &str = SessionRole::Planner.as_str();
+pub const PLANNER_ROLE: &str = ActorRole::Planner.as_str();
 /// The kind of the session span the plugin's hook records for the session
 /// of the workspace (ADR-0048 decision 6): `inbox`, `planner` or
 /// `runtime_planner`. A workspace without it (opened before it) is taken
@@ -87,14 +87,28 @@ pub const PLANNER_ORIGIN_ENV: &str = "DAGQ_PLANNER_ORIGIN";
 pub const CMUX_WORKSPACE_ENV: &str = "CMUX_WORKSPACE_ID";
 /// `DAGQ_ROLE` of the session where a person answers the queue's asks. `up`
 /// opens its workspace `[<repo>]inbox`.
-pub const INBOX_ROLE: &str = SessionRole::Inbox.as_str();
+pub const INBOX_ROLE: &str = ActorRole::Inbox.as_str();
 /// `DAGQ_ROLE` of the periodic observer job (ADR-0024 decision 4). The CLI
 /// refuses every command that changes queue state from this environment,
 /// except notes, draft goals and the draft tasks of a draft goal.
-pub const OBSERVER_ROLE: &str = SessionRole::Observer.as_str();
+pub const OBSERVER_ROLE: &str = ActorRole::Observer.as_str();
 /// `DAGQ_ROLE` of the supervisor's headless review of a run (ADR-0027). The
-/// CLI allows it only commands that read the queue.
-pub const REVIEWER_ROLE: &str = SessionRole::Reviewer.as_str();
+/// CLI allows it, like every headless job, only commands that read the
+/// queue.
+pub const REVIEW_JOB_ROLE: &str = ActorRole::ReviewJob.as_str();
+/// `DAGQ_ROLE` of the recovery (triage) job of a run (ADR-0047).
+pub const RECOVERY_JOB_ROLE: &str = ActorRole::RecoveryJob.as_str();
+/// `DAGQ_ROLE` of the plan review of a proposal.
+pub const PLAN_REVIEW_JOB_ROLE: &str = ActorRole::PlanReviewJob.as_str();
+/// `DAGQ_ROLE` of the goal review of a goal.
+pub const GOAL_REVIEW_JOB_ROLE: &str = ActorRole::GoalReviewJob.as_str();
+/// `DAGQ_ROLE` every headless job ran under before the four roles above
+/// (ADR-t728-1 decision 2): still read, as a read-only job.
+pub const REVIEWER_ROLE: &str = crate::domain::actor::LEGACY_REVIEWER_ROLE;
+/// The id of the actor a session is (ADR-t728-1 decision 4).
+pub const ACTOR_ID_ENV: &str = crate::domain::actor::ACTOR_ID_ENV;
+/// The run a worker works on.
+pub const RUN_ID_ENV: &str = crate::domain::actor::RUN_ID_ENV;
 /// File under the queue's log directory that launchd appends the
 /// supervisor's stdout and stderr to.
 pub const LAUNCHD_LOG_NAME: &str = "launchd.log";
@@ -528,12 +542,15 @@ pub fn session_look(role: SessionRole) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// `DAGQ_ROLE=<role>` and `DAGQ_QUEUE=<db>`: the environment every
-/// workspace of the queue at `db` is opened with (ADR-0026).
+/// `DAGQ_ROLE=<role>`, `DAGQ_QUEUE=<db>` and the actor id: the
+/// environment every workspace of the queue at `db` is opened with
+/// (ADR-0026, ADR-t728-1 decision 4). The id is the role's until the
+/// caller names the one actor (a planner, a run's worker).
 pub fn session_env(role: SessionRole, db: &Path) -> Result<Vec<(String, String)>> {
     Ok(vec![
         (ROLE_ENV.to_owned(), role.as_str().to_owned()),
         (QUEUE_ENV.to_owned(), path_text(db)?),
+        (ACTOR_ID_ENV.to_owned(), role.as_str().to_owned()),
     ])
 }
 

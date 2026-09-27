@@ -4,7 +4,7 @@
 //! queue directly; no run is claimed.
 
 use crate::plan_review::{
-    Fixture, PlanWorkspace, StubReviewer, add, fixture, options, supervise_with,
+    Fixture, PlanWorkspace, StubReviewer, add, fixture, job_actors, options, supervise_with,
 };
 
 use dagq::{
@@ -105,6 +105,11 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
     assert!(prompts[0].contains("the median landing is under 5 minutes"));
     assert!(prompts[0].contains("cache the build"));
     assert!(prompts[0].contains(&format!("\"id\":{done}")));
+    // The job ran as the goal review job of the goal (ADR-t728-1).
+    assert_eq!(
+        job_actors(&fx.db),
+        [format!("goal-review-job goal-review-job:{goal}:1")]
+    );
 
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let detail = queue.show_goal(goal).unwrap();

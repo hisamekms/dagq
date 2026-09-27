@@ -10,6 +10,7 @@ mod common;
 mod runtime_support;
 
 mod actor_model;
+mod cli_actor;
 mod cli_forecast;
 mod cli_goals;
 mod cli_graph;
@@ -43,6 +44,7 @@ mod queue_search;
 mod queue_tasks;
 mod related;
 mod runtime_abandon;
+mod runtime_actor_env;
 mod runtime_adopt;
 mod runtime_ask;
 mod runtime_candidates;

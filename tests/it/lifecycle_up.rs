@@ -279,6 +279,8 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
                 env: vec![
                     ("DAGQ_ROLE".into(), key.into()),
                     ("DAGQ_QUEUE".into(), db.to_str().unwrap().into()),
+                    // The actor it is (ADR-t728-1 decision 4).
+                    ("DAGQ_ACTOR_ID".into(), key.into()),
                     // The kind of the span the plugin's hook records (ADR-0048).
                     ("DAGQ_SESSION_KIND".into(), key.into()),
                 ],

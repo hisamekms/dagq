@@ -330,6 +330,11 @@ fn a_login_that_stops_several_runs_is_one_ask_that_lists_them() {
     );
     assert_eq!((reasons["cost"].opened, reasons["cost"].open), (2, 2));
     assert!(queue.hold_of(&runs[1]).unwrap().is_none());
+    // Answered but not applied (closed) yet, the login still holds it: a
+    // stall waits for the text to go on (task 729).
+    assert!(queue.hold_unclosed(&runs[1]).unwrap());
+    queue.close_ask(first.ask.id).unwrap();
+    assert!(!queue.hold_unclosed(&runs[1]).unwrap());
     assert!(queue.hold(hold(&runs[1])).unwrap().created);
     // A hold is for authentication or cost only, and those are no other ask.
     assert!(

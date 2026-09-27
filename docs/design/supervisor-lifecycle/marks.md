@@ -56,7 +56,7 @@ eventを書かず、`marks`がclaimの順（`run_claimed`のevent IDの順）に
 
 `dagq mark --retract <id>`は`mark_recorded`か`run_env_changed`の印を取り消したことを`mark_retracted`として記録する。取り消された印は消えず、`marks`で`retracted_by`に取り消しのevent IDを持つ（KPIの集計はこの印を区切りに使わない）。supervisorの起動・停止と取り消し自体は取り消せない。同じ印の2度目の取り消しは拒否する。
 
-inbox・planner・人のsessionから打てる。observer（許可の一覧に無い）とheadlessのreview・triage・plan reviewのjob（`DAGQ_ROLE=reviewer`は読むコマンドだけ）は打てない。
+inbox・planner・人のsessionから打てる。observer（許可の一覧に無い）とheadlessのreview・recovery・plan review・goal reviewのjob（`DAGQ_ROLE`の`review-job`・`recovery-job`・`plan-review-job`・`goal-review-job`と旧値`reviewer`は読むコマンドだけ）は打てない。
 
 ## `dagq marks`
 

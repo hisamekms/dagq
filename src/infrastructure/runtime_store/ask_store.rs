@@ -30,6 +30,9 @@ impl AskStore for SqliteQueue {
     fn hold_of(&self, run_id: &RunId) -> Result<Option<crate::domain::Ask>> {
         SqliteQueue::hold_of(self, run_id)
     }
+    fn hold_unclosed(&self, run_id: &RunId) -> Result<bool> {
+        SqliteQueue::hold_unclosed(self, run_id)
+    }
     fn close_hold_asks(
         &mut self,
         reason: crate::domain::AskReason,

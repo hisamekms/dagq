@@ -1272,7 +1272,7 @@ mod tests {
                 "token",
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
-                &ActorLaunch::default_of(crate::domain::actor_model::ActorRole::PlanReview),
+                &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
             )
             .unwrap()
             .unwrap();
@@ -1359,7 +1359,7 @@ mod tests {
                 "token",
                 &dir.path().join("plan-reviews"),
                 Path::new("/repo"),
-                &ActorLaunch::default_of(crate::domain::actor_model::ActorRole::PlanReview),
+                &ActorLaunch::default_of(crate::domain::actor_model::ModelRole::PlanReview),
             )
             .unwrap()
             .unwrap();

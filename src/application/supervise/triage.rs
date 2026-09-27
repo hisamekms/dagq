@@ -6,7 +6,7 @@
 //! (`triage_started`, `triage_finished`, `triage_failed`).
 
 use super::*;
-use crate::domain::actor_model::{ActorLaunch, ActorRole};
+use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
     ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, RecoveryAction, attempts,
@@ -203,7 +203,7 @@ impl Supervisor<'_> {
                 self.cleanup.deferred = true;
                 continue;
             }
-            let launch = self.actor_launch(ActorRole::Recovery);
+            let launch = self.actor_launch(ModelRole::Recovery);
             let begun = self
                 .queue
                 .begin_triage(run.id(), &self.token, request, &launch)?;
@@ -323,8 +323,8 @@ impl Supervisor<'_> {
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
         let launch = started.map_or_else(
-            || ActorLaunch::default_of(ActorRole::Recovery),
-            |e| ActorLaunch::recorded(&e.payload, ActorRole::Recovery),
+            || ActorLaunch::default_of(ModelRole::Recovery),
+            |e| ActorLaunch::recorded(&e.payload, ModelRole::Recovery),
         );
         let job = start_job(
             self,

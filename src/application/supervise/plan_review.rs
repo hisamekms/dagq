@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::domain::language::with_instruction;
+use crate::domain::{ActorContext, ActorRole};
 use crate::{
     application::{
         PlanReviewApply, PlanReviewJob, StatusFilter, TaskListItem, TaskQuery,
@@ -22,7 +23,7 @@ use crate::{
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
         PlannerOrigin, PlannerState, Proposal, Task, TaskDetail,
-        actor_model::{ActorLaunch, ActorRole},
+        actor_model::{ActorLaunch, ModelRole},
         claim_defer::expected_files,
         next_to_review,
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
@@ -103,7 +104,7 @@ impl Supervisor<'_> {
         let Some(proposal_id) = next_to_review(&self.queue.plan_review_candidates()?) else {
             return Ok(());
         };
-        let launch = self.actor_launch(ActorRole::PlanReview);
+        let launch = self.actor_launch(ModelRole::PlanReview);
         let Some(job) = self.queue.begin_plan_review(
             proposal_id,
             &self.token,
@@ -154,7 +155,10 @@ impl Supervisor<'_> {
         self.reviewer
             .assign_session_id(&mut command, &job.session_id);
         self.reviewer.apply_launch(&mut command, launch);
-        command.envs(self.layout.job_env.iter().cloned());
+        command.envs(self.layout.job_env(&ActorContext::instance(
+            ActorRole::PlanReviewJob,
+            format_args!("{}:{}", job.proposal_id, job.attempt),
+        )));
         let child = self
             .spawner
             .spawn(

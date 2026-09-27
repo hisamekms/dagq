@@ -20,7 +20,7 @@ related:
 
 ## コマンド
 
-`dagq graph [--goal ID] [--format json|d2|svg] [--out PATH]`。既定の`json`は今までの`DependencyGraph`のJSONで変わらない。`d2`はd2のソースを、`svg`はSVGを標準出力にそのまま書く（JSONで包まない。`main.rs`の`RAW_STDOUT`）。`--out`があればそのファイルに書き、`{"format", "out", "tasks"}`（`tasks`は描いたtaskのID）のJSONを返す。`--format json`に`--out`は付けられない。`--goal`は`graph`と同じく`tasks`・`candidates`・`critical`の起点を絞ってから選ぶ。queueの状態を変えず、queueはread-onlyで開く。observerと`review`（`DAGQ_ROLE=observer` / `reviewer`）は`--out`の無い`graph`だけを打てる（`--out`はファイルを書くので許可の一覧から外す）。
+`dagq graph [--goal ID] [--format json|d2|svg] [--out PATH]`。既定の`json`は今までの`DependencyGraph`のJSONで変わらない。`d2`はd2のソースを、`svg`はSVGを標準出力にそのまま書く（JSONで包まない。`main.rs`の`RAW_STDOUT`）。`--out`があればそのファイルに書き、`{"format", "out", "tasks"}`（`tasks`は描いたtaskのID）のJSONを返す。`--format json`に`--out`は付けられない。`--goal`は`graph`と同じく`tasks`・`candidates`・`critical`の起点を絞ってから選ぶ。queueの状態を変えず、queueはread-onlyで開く。observerとheadlessのjob（`DAGQ_ROLE=observer` / `review-job`などのjobのrole）は`--out`の無い`graph`だけを打てる（`--out`はファイルを書くので許可の一覧から外す）。
 
 ## 選び方（`application::diagram::select`）
 

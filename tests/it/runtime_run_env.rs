@@ -62,6 +62,9 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
                 "DAGQ_QUEUE".to_owned(),
                 canonical.to_str().unwrap().to_owned()
             ),
+            ("DAGQ_ACTOR_ID".to_owned(), format!("worker:{}", run.id())),
+            ("DAGQ_RUN_ID".to_owned(), run.id().to_string()),
+            ("DAGQ_TASK_ID".to_owned(), task.id().to_string()),
             ("SHARED".to_owned(), format!("{queue_dir}/target")),
             ("RUN_TMP".to_owned(), run_dir.clone()),
         ]

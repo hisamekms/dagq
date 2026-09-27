@@ -211,6 +211,10 @@ impl AgentProvider for StubReviewer {
         } else {
             format!("printf '%s\\n' '{verdict}'")
         };
+        // The job's actor (ADR-t728-1 decision 4), for [`job_actors`].
+        let script = format!(
+            "printf '%s %s\\n' \"$DAGQ_ROLE\" \"$DAGQ_ACTOR_ID\" >> \"$(dirname \"$DAGQ_QUEUE\")/{JOB_ACTORS}\"; {script}"
+        );
         let mut command = CommandSpec::new("/bin/sh");
         command.current_dir(cwd).arg("-c").arg(script);
         Ok(command)
@@ -227,6 +231,20 @@ impl AgentProvider for StubReviewer {
             .unwrap()
             .push((model.into(), effort.into()));
     }
+}
+
+/// Where [`StubReviewer`]'s jobs append their role and actor id, next to
+/// the queue.
+const JOB_ACTORS: &str = "job-actors.txt";
+
+/// The role and actor id of every job [`StubReviewer`] ran on `db`, in
+/// order.
+pub(crate) fn job_actors(db: &Path) -> Vec<String> {
+    std::fs::read_to_string(db.parent().unwrap().join(JOB_ACTORS))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// cmux as far as plan review uses it: workspaces it lists (the ones
@@ -477,6 +495,11 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     let finished = events(&mut queue, two, "plan_review_finished");
     assert_eq!(finished[0]["decision"], "pass");
     assert_eq!(finished[0]["summary"], "sound");
+    // The job ran as the plan review job of the proposal (ADR-t728-1).
+    assert_eq!(
+        job_actors(&fx.db),
+        [format!("plan-review-job plan-review-job:{proposal}:1")]
+    );
     // The prompt, kept in the job's directory, points the job at the
     // repository's rules and carries the tasks, the lint result and the
     // checks, the acceptance one included.

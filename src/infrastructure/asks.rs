@@ -168,6 +168,18 @@ impl SqliteQueue {
             .optional()?)
     }
 
+    /// Whether a `queue_hold` ask (not the disk's) that holds the run is
+    /// unclosed: open, or answered and not yet applied.
+    pub fn hold_unclosed(&self, run_id: &RunId) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM asks WHERE kind='queue_hold'
+             AND ifnull(subject,'') <> 'disk' AND closed_at IS NULL
+             AND EXISTS (SELECT 1 FROM json_each(asks.affected) WHERE value=?1))",
+            [run_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// A person's answer from a terminal with no `DAGQ_ROLE`: see
     /// [`Self::answer_as`].
     pub fn answer(&mut self, id: AskId, text: &str) -> Result<Ask> {

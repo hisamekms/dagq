@@ -861,8 +861,10 @@ impl StallWatch {
         }
         // A session stopped at a login that ran out waits for a person to
         // log in, in the queue's one authentication ask (ADR-0047 decision
-        // 42), not for a nudge or a stalled ask of its own.
-        if sv.queue.hold_of(run.id())?.is_some() {
+        // 42), not for a nudge or a stalled ask of its own. An answered
+        // hold not applied yet, or a `done` whose text to go on is not
+        // typed yet, still holds it: the text follows, not a nudge.
+        if sv.queue.hold_unclosed(run.id())? || sv.hold_continue.contains_key(run.id()) {
             return Ok(None);
         }
         let idle_secs = secs_between(start, now);

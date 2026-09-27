@@ -49,7 +49,12 @@ pub fn invoke_as(role: Option<&str>, db: &Path, args: &[&str]) -> Output {
     )
     .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command.env("PATH", path).env_remove("DAGQ_ROLE");
+    command
+        .env("PATH", path)
+        .env_remove("DAGQ_ROLE")
+        .env_remove("DAGQ_ACTOR_ID")
+        .env_remove("DAGQ_RUN_ID")
+        .env_remove("DAGQ_TASK_ID");
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }

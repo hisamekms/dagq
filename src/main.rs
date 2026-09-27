@@ -20,10 +20,10 @@ use dagq::{
         GoalReviewStore, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
     },
     domain::{
-        AskId, AskKind, AskReason, EventId, FindingId, FindingQuery, FindingStatus, FindingTarget,
-        GoalEdit, GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery,
-        NoteTarget, PlannerOrigin, PlannerOwner, ProposalId, RunId, SessionRole, Submission,
-        TaskAction, TaskEdit, TaskId, TaskKind, TaskStatus,
+        ActorContext, ActorRole, AskId, AskKind, AskReason, EventId, FindingId, FindingQuery,
+        FindingStatus, FindingTarget, GoalEdit, GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal,
+        NewNote, NewTask, NoteQuery, NoteTarget, PlannerOrigin, PlannerOwner, ProposalId, RunId,
+        SessionRole, Submission, TaskAction, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
@@ -1307,24 +1307,25 @@ fn finding_target(
     })
 }
 
-fn execute(cli: Cli) -> Result<Value> {
-    let role = env::var(dagq::application::lifecycle::ROLE_ENV)
-        .ok()
-        .filter(|role| !role.is_empty());
-    let observer = role.as_deref() == Some(dagq::application::lifecycle::OBSERVER_ROLE);
-    let access = if observer {
-        observer_access(&cli.command)
-    } else {
-        ObserverAccess::Allowed
-    };
-    if access == ObserverAccess::Denied {
+/// The reads-only limits of the observer (ADR-0044 decision 4) and of the
+/// supervisor's headless jobs (ADR-0027), each job by its own role and the
+/// legacy `reviewer` as a review job (ADR-t728-1 decision 2).
+fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
+    let role = actor.role();
+    if role == ActorRole::Observer && observer_access(command) == ObserverAccess::Denied {
         bail!(OBSERVER_DENIED);
     }
-    if role.as_deref() == Some(dagq::application::lifecycle::REVIEWER_ROLE)
-        && reviewer_access(&cli.command) == ObserverAccess::Denied
-    {
+    if role.is_headless_job() && reviewer_access(command) == ObserverAccess::Denied {
         bail!(REVIEWER_DENIED);
     }
+    Ok(())
+}
+
+fn execute(cli: Cli) -> Result<Value> {
+    // Who runs the command (ADR-t728-1 decision 4): no `DAGQ_ROLE` is the
+    // user, and a value that is no role stops it before anything is read.
+    let actor = ActorContext::from_env(|name| env::var(name).ok())?;
+    check_access(&actor, &cli.command)?;
     let cwd = env::current_dir().context("working directory is unavailable")?;
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
     let db = location.db.clone();
@@ -1754,7 +1755,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 target,
                 text,
                 kind,
-                by: role.unwrap_or_else(|| "human".into()),
+                by: actor.written_by().to_owned(),
             })?)?
         }
         Command::Notes {
@@ -1774,7 +1775,7 @@ fn execute(cli: Cli) -> Result<Value> {
             at,
             retract,
         } => {
-            let by = role.unwrap_or_else(|| "human".into());
+            let by = actor.written_by().to_owned();
             match retract {
                 Some(id) => dagq::compose::retract_mark(&queue, EventId::new(id), &by)?,
                 None => dagq::compose::record_mark(
@@ -1811,7 +1812,7 @@ fn execute(cli: Cli) -> Result<Value> {
             impact: impact.map(|impact| impact.parse()).transpose()?,
             evidence: evidence.into_iter().map(EventId::new).collect(),
             propose,
-            by: role.unwrap_or_else(|| "human".into()),
+            by: actor.written_by().to_owned(),
         })?)?,
         Command::Finding {
             command: FindingCommand::Resolve { id, reason },
@@ -1819,7 +1820,7 @@ fn execute(cli: Cli) -> Result<Value> {
             FindingId::new(id),
             FindingStatus::Resolved,
             &reason,
-            role.as_deref().unwrap_or("human"),
+            actor.written_by(),
         )?)?,
         Command::Finding {
             command: FindingCommand::Dismiss { id, reason },
@@ -1827,7 +1828,7 @@ fn execute(cli: Cli) -> Result<Value> {
             FindingId::new(id),
             FindingStatus::Dismissed,
             &reason,
-            role.as_deref().unwrap_or("human"),
+            actor.written_by(),
         )?)?,
         Command::Findings {
             id,
@@ -1968,7 +1969,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     question: question.unwrap_or_default(),
                     options,
                     // The session's role; a person at a plain terminal has none.
-                    asked_by: role.unwrap_or_else(|| "human".into()),
+                    asked_by: actor.written_by().to_owned(),
                     reason_category: because.unwrap_or_default().parse::<AskReason>()?,
                     finding_id: finding.map(FindingId::new),
                 },
@@ -1981,7 +1982,7 @@ fn execute(cli: Cli) -> Result<Value> {
             AskId::new(id),
             &text,
             // The session's role; a person at a plain terminal has none.
-            role.as_deref().unwrap_or(dagq::domain::ANSWERED_BY_PERSON),
+            actor.answered_by(),
         )?)?,
         Command::Asks { open, role: r, all } => {
             json!({"asks": queue.asks(dagq::application::AskQuery {

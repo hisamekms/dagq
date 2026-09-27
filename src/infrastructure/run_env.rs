@@ -25,7 +25,7 @@ use std::{
 use crate::{
     application::{Exit, Verifier},
     domain::{
-        actor_model::{ActorRole, RoleModel, RoleModels, check_effort},
+        actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         disk::DiskConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
@@ -144,8 +144,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut disk_keys: Vec<String> = Vec::new();
     let mut resume_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
-    let mut role: Option<ActorRole> = None;
-    let mut roles_seen: Vec<ActorRole> = Vec::new();
+    let mut role: Option<ModelRole> = None;
+    let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -168,10 +168,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 continue;
             }
             if let Some(name) = name.strip_prefix(ROLES_PREFIX) {
-                let parsed: ActorRole = name.parse().map_err(|_| {
+                let parsed: ModelRole = name.parse().map_err(|_| {
                     anyhow::anyhow!(
                         "{CONFIG_FILE_NAME}:{number}: unknown role [{ROLES_PREFIX}{name}]; the roles are {}",
-                        ActorRole::ALL.map(ActorRole::as_str).join(", ")
+                        ModelRole::ALL.map(ModelRole::as_str).join(", ")
                     )
                 })?;
                 ensure!(
@@ -909,29 +909,29 @@ LITERAL = 'no \n escapes # here'
 
     #[test]
     fn parses_the_role_tables() {
-        use crate::domain::actor_model::{ActorRole, RoleModel};
+        use crate::domain::actor_model::{ModelRole, RoleModel};
         assert_eq!(parse_config("").unwrap().roles, RoleModels::default());
         let config = parse_config(
             "[roles.plan_review]\neffort = \"high\" # up\n\n[roles.observer]\nmodel = 'claude-sonnet-5'\n[roles.review]\n",
         )
         .unwrap();
         assert_eq!(
-            config.roles.get(ActorRole::PlanReview),
+            config.roles.get(ModelRole::PlanReview),
             Some(&RoleModel {
                 model: None,
                 effort: Some("high".into())
             })
         );
         assert_eq!(
-            config.roles.get(ActorRole::Observer),
+            config.roles.get(ModelRole::Observer),
             Some(&RoleModel {
                 model: Some("claude-sonnet-5".into()),
                 effort: None
             })
         );
         // A table without a key is none.
-        assert_eq!(config.roles.get(ActorRole::Review), None);
-        assert_eq!(config.roles.launch(ActorRole::Review).arguments(), None);
+        assert_eq!(config.roles.get(ModelRole::Review), None);
+        assert_eq!(config.roles.launch(ModelRole::Review).arguments(), None);
         for (text, expected) in [
             ("[roles.nobody]", "unknown role [roles.nobody]"),
             (
@@ -959,7 +959,7 @@ LITERAL = 'no \n escapes # here'
         assert_eq!(
             load_role_models(dir.path())
                 .unwrap()
-                .launch(ActorRole::Planner)
+                .launch(ModelRole::Planner)
                 .arguments(),
             Some(("claude-opus-5-5", "xhigh"))
         );

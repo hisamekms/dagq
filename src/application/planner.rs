@@ -35,9 +35,10 @@ use super::{
     prompt::{planner_prompt, runtime_planner_prompt},
 };
 use crate::domain::{
-    IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState, ProposalId,
-    SessionRole, Task,
-    actor_model::{ActorLaunch, ActorRole, REVISE_ESCALATION, RoleModels},
+    ActorContext, IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState,
+    ProposalId, SessionRole, Task,
+    actor::set_env,
+    actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
     language::{Language, with_instruction},
     sessions::{LAUNCH_ENV, RUNTIME_PLANNER},
 };
@@ -97,7 +98,7 @@ pub fn open_person_planner(launch: &PlannerLaunch<'_>) -> Result<OpenedPlanner> 
         PlannerOrigin::Person,
         None,
         &planner_prompt(launch.db)?,
-        &launch.roles.launch(ActorRole::Planner),
+        &launch.roles.launch(ModelRole::Planner),
     )
 }
 
@@ -119,7 +120,7 @@ pub fn open_runtime_planner(
     let prompt = runtime_planner_prompt(launch.db, proposal, tasks, reasons)?;
     let actor = launch
         .roles
-        .launch(ActorRole::RuntimePlanner)
+        .launch(ModelRole::RuntimePlanner)
         .escalated(REVISE_ESCALATION);
     open_planner(
         launch,
@@ -157,7 +158,7 @@ pub fn open_draft_planner(
     planner: PlannerSession,
     prompt: &str,
 ) -> Result<OpenedPlanner> {
-    let actor = launch.roles.launch(ActorRole::RuntimePlanner);
+    let actor = launch.roles.launch(ModelRole::RuntimePlanner);
     launch_planner(launch, planner, prompt, &actor)
 }
 
@@ -279,6 +280,10 @@ fn create_workspace(
     ));
     tags.env
         .push((PLANNER_ID_ENV.to_owned(), planner.id.to_string()));
+    let named = ActorContext::instance(crate::domain::ActorRole::Planner, planner.id);
+    for (name, value) in named.env() {
+        set_env(&mut tags.env, &name, value);
+    }
     tags.env
         .push((LAUNCH_ENV.to_owned(), actor.to_value().to_string()));
     if let Some(description) = &mut tags.description {

@@ -147,7 +147,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             "--claude".into(),
             path_text(&self.layout.claude)?,
         ]);
-        let mut env = self.layout.worker_env.clone();
+        let mut env = self.layout.worker_env_of(&run);
         env.extend(run_env);
         let tags = WorkspaceTags {
             env,

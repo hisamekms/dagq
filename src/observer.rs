@@ -23,12 +23,12 @@ use serde_json::{Value, json};
 use crate::{
     application::{AgentProvider, TaskStore, dependency_graph},
     domain::{
-        EventId, FindingQuery, NoteQuery, RunEvent,
-        actor_model::{ActorLaunch, ActorRole},
+        ActorContext, ActorRole, EventId, FindingQuery, NoteQuery, RunEvent,
+        actor_model::{ActorLaunch, ModelRole},
         stats::StatsQuery,
     },
     infrastructure::{adapters::shell_join, asks::AskQuery, sqlite::SqliteQueue},
-    lifecycle::{OBSERVER_ROLE, QUEUE_ENV, ROLE_ENV},
+    lifecycle::{OBSERVER_ROLE, QUEUE_ENV},
 };
 
 /// Observations `observe --history` lists by default.
@@ -392,15 +392,21 @@ fn observation_dir(db: &Path, started: i64) -> Result<PathBuf> {
 /// checkout, or a file that cannot be read starts it as before.
 fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
     let Some(checkout) = checkout else {
-        return ActorLaunch::default_of(ActorRole::Observer);
+        return ActorLaunch::default_of(ModelRole::Observer);
     };
     match crate::infrastructure::run_env::load_role_models(checkout) {
-        Ok(models) => models.launch(ActorRole::Observer),
+        Ok(models) => models.launch(ModelRole::Observer),
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "[roles.observer] could not be read; starting it as before: {error:#}");
-            ActorLaunch::default_of(ActorRole::Observer)
+            ActorLaunch::default_of(ModelRole::Observer)
         }
     }
+}
+
+/// The role and actor id the observer's agent runs under (ADR-t728-1
+/// decision 4): `observer`, one actor per session.
+fn agent_env(session_id: &str) -> Vec<(String, String)> {
+    ActorContext::instance(ActorRole::Observer, session_id).env()
 }
 
 /// Start the agent in `dir` with its output in `output.log`, and wait for
@@ -428,7 +434,7 @@ fn run_agent(
         path = std::env::join_paths(paths)?;
     }
     command
-        .env(ROLE_ENV, OBSERVER_ROLE)
+        .envs(agent_env(session_id))
         .env(QUEUE_ENV, db)
         .env("PATH", path)
         .stdin(Stdio::null())
@@ -541,6 +547,17 @@ pub fn observer_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_runs_as_the_observer_with_its_actor_id() {
+        assert_eq!(
+            agent_env("s1"),
+            [
+                ("DAGQ_ROLE".to_owned(), "observer".to_owned()),
+                ("DAGQ_ACTOR_ID".to_owned(), "observer:s1".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn the_input_carries_the_kpis_and_the_improvements_next_to_the_rest() {

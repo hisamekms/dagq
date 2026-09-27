@@ -739,6 +739,18 @@ impl WorkspaceBackend for TestWorkspace {
             tags.env
         );
         assert!(tags.env.iter().any(|(k, _)| k == "DAGQ_QUEUE"));
+        // The same actor as the run's worker (ADR-t728-1 decision 4).
+        for (name, value) in [
+            ("DAGQ_ACTOR_ID", format!("worker:{}", run.id())),
+            ("DAGQ_RUN_ID", run.id().to_string()),
+            ("DAGQ_TASK_ID", run.task_id().to_string()),
+        ] {
+            assert!(
+                tags.env.iter().any(|(k, v)| k == name && *v == value),
+                "{name}={value} in {:?}",
+                tags.env
+            );
+        }
         assert_eq!(
             tags.description.as_deref(),
             Some(format!("run {} resume", run.id()).as_str())
@@ -1209,8 +1221,9 @@ pub fn run_agent_with(
             .iter()
             .all(|n| n.0.ends_with("approve_landing"))
     );
-    // The run workspace carries its role and queue in its environment, a
-    // description naming the run and task, and the queue's group.
+    // The run workspace carries its role, queue, actor id, run and task in
+    // its environment (ADR-t728-1 decision 4), a description naming the run
+    // and task, and the queue's group.
     let canonical = db.canonicalize().unwrap();
     let hash = QueueLocation::explicit(&canonical).hash();
     assert_eq!(
@@ -1219,6 +1232,9 @@ pub fn run_agent_with(
             env: vec![
                 ("DAGQ_ROLE".into(), "worker".into()),
                 ("DAGQ_QUEUE".into(), canonical.to_str().unwrap().into()),
+                ("DAGQ_ACTOR_ID".into(), format!("worker:{}", run.id())),
+                ("DAGQ_RUN_ID".into(), run.id().to_string()),
+                ("DAGQ_TASK_ID".into(), run.task_id().to_string()),
             ],
             description: Some(format!(
                 "dagq role=worker queue={hash} run={} task={}",

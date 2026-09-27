@@ -174,6 +174,8 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
                 env: vec![
                     ("DAGQ_ROLE".into(), "planner".into()),
                     ("DAGQ_QUEUE".into(), db.to_str().unwrap().into()),
+                    // One actor per planner (ADR-t728-1 decision 4).
+                    ("DAGQ_ACTOR_ID".into(), format!("planner:{id}")),
                     ("DAGQ_SESSION_KIND".into(), "planner".into()),
                     ("DAGQ_PLANNER_ORIGIN".into(), "person".into()),
                     ("DAGQ_PLANNER_ID".into(), id.to_string()),

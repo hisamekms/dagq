@@ -1506,6 +1506,9 @@ pub trait AskStore {
     fn hold(&mut self, hold: crate::domain::NewHold) -> Result<crate::domain::HoldOutcome>;
     /// The open `queue_hold` ask that holds the run, if any.
     fn hold_of(&self, run_id: &RunId) -> Result<Option<Ask>>;
+    /// Whether a `queue_hold` ask that holds the run is still unclosed:
+    /// open, or answered and not yet applied by a supervisor.
+    fn hold_unclosed(&self, run_id: &RunId) -> Result<bool>;
     /// Close the `queue_hold` asks of `reason` and `subject` nobody
     /// closed, answering the open ones `answer` (task 377).
     fn close_hold_asks(

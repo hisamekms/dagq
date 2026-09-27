@@ -16,7 +16,7 @@ use super::{
     worker_model::{MEDIUM, OPUS},
 };
 
-string_enum!(ActorRole {
+string_enum!(ModelRole {
     PlanReview => "plan_review",
     Review => "review",
     Recovery => "recovery",
@@ -25,7 +25,7 @@ string_enum!(ActorRole {
     Planner => "planner",
 });
 
-impl ActorRole {
+impl ModelRole {
     pub const ALL: [Self; 6] = [
         Self::PlanReview,
         Self::Review,
@@ -74,12 +74,12 @@ impl RoleModel {
 /// Every `[roles.<role>]` of `dagq.toml`; none by default.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleModels {
-    roles: Vec<(ActorRole, RoleModel)>,
+    roles: Vec<(ModelRole, RoleModel)>,
 }
 
 impl RoleModels {
     /// The table of `role`, empty until a key is set.
-    pub fn entry(&mut self, role: ActorRole) -> &mut RoleModel {
+    pub fn entry(&mut self, role: ModelRole) -> &mut RoleModel {
         let at = match self.roles.iter().position(|(known, _)| *known == role) {
             Some(at) => at,
             None => {
@@ -90,7 +90,7 @@ impl RoleModels {
         &mut self.roles[at].1
     }
 
-    pub fn get(&self, role: ActorRole) -> Option<&RoleModel> {
+    pub fn get(&self, role: ModelRole) -> Option<&RoleModel> {
         self.roles
             .iter()
             .find(|(known, _)| *known == role)
@@ -100,7 +100,7 @@ impl RoleModels {
     /// What a session of `role` starts with: its table's model and effort
     /// (the default for the one it leaves out), or, without a table, the
     /// provider's default with nothing given.
-    pub fn launch(&self, role: ActorRole) -> ActorLaunch {
+    pub fn launch(&self, role: ModelRole) -> ActorLaunch {
         match self.get(role) {
             Some(table) => ActorLaunch {
                 role,
@@ -126,7 +126,7 @@ string_enum!(LaunchSource {
 /// default, which the transcript names once the session closes).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorLaunch {
-    pub role: ActorRole,
+    pub role: ModelRole,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub source: LaunchSource,
@@ -138,7 +138,7 @@ pub struct ActorLaunch {
 
 impl ActorLaunch {
     /// A session of `role` started as before: nothing given.
-    pub fn default_of(role: ActorRole) -> Self {
+    pub fn default_of(role: ModelRole) -> Self {
         Self {
             role,
             model: None,
@@ -178,7 +178,7 @@ impl ActorLaunch {
     /// The launch recorded in `payload` (its `launch`), or the default of
     /// `role` when there is none or it cannot be read (one recorded before
     /// launches were).
-    pub fn recorded(payload: &Value, role: ActorRole) -> Self {
+    pub fn recorded(payload: &Value, role: ModelRole) -> Self {
         payload
             .get("launch")
             .and_then(|launch| serde_json::from_value(launch.clone()).ok())
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn a_role_without_a_table_is_started_as_before() {
         let models = RoleModels::default();
-        for role in ActorRole::ALL {
+        for role in ModelRole::ALL {
             let launch = models.launch(role);
             assert_eq!(launch, ActorLaunch::default_of(role));
             assert_eq!(launch.arguments(), None);
@@ -217,16 +217,16 @@ mod tests {
     #[test]
     fn a_table_gives_its_model_and_effort_and_the_default_for_the_rest() {
         let mut models = RoleModels::default();
-        models.entry(ActorRole::PlanReview).effort = Some("high".into());
-        models.entry(ActorRole::Observer).model = Some("claude-sonnet-5".into());
-        let plan = models.launch(ActorRole::PlanReview);
+        models.entry(ModelRole::PlanReview).effort = Some("high".into());
+        models.entry(ModelRole::Observer).model = Some("claude-sonnet-5".into());
+        let plan = models.launch(ModelRole::PlanReview);
         assert_eq!(plan.arguments(), Some((OPUS, "high")));
         assert_eq!(plan.source, LaunchSource::Config);
         assert_eq!(
-            models.launch(ActorRole::Observer).arguments(),
+            models.launch(ModelRole::Observer).arguments(),
             Some(("claude-sonnet-5", MEDIUM))
         );
-        assert_eq!(models.launch(ActorRole::Review).arguments(), None);
+        assert_eq!(models.launch(ModelRole::Review).arguments(), None);
         assert_eq!(plan.to_value()["source"], "dagq.toml");
         assert!(plan.to_value().get("escalated_from").is_none());
     }
@@ -234,16 +234,16 @@ mod tests {
     #[test]
     fn a_revise_raises_the_effort_one_step_up_to_xhigh() {
         let raised =
-            ActorLaunch::default_of(ActorRole::RuntimePlanner).escalated(REVISE_ESCALATION);
+            ActorLaunch::default_of(ModelRole::RuntimePlanner).escalated(REVISE_ESCALATION);
         assert_eq!(raised.arguments(), Some((OPUS, "high")));
         assert_eq!(raised.escalated_from.as_deref(), Some(MEDIUM));
         assert_eq!(raised.escalation_reason.as_deref(), Some(REVISE_ESCALATION));
         assert_eq!(raised.source, LaunchSource::ReviseEscalation);
         let mut models = RoleModels::default();
-        models.entry(ActorRole::RuntimePlanner).effort = Some("high".into());
-        models.entry(ActorRole::RuntimePlanner).model = Some("claude-sonnet-5".into());
+        models.entry(ModelRole::RuntimePlanner).effort = Some("high".into());
+        models.entry(ModelRole::RuntimePlanner).model = Some("claude-sonnet-5".into());
         let raised = models
-            .launch(ActorRole::RuntimePlanner)
+            .launch(ModelRole::RuntimePlanner)
             .escalated(REVISE_ESCALATION);
         assert_eq!(raised.arguments(), Some(("claude-sonnet-5", TOP_EFFORT)));
         let again = raised.escalated(REVISE_ESCALATION);
@@ -255,16 +255,16 @@ mod tests {
 
     #[test]
     fn a_recorded_launch_reads_back_and_a_missing_one_is_the_default() {
-        let launch = ActorLaunch::default_of(ActorRole::Review).escalated("why");
+        let launch = ActorLaunch::default_of(ModelRole::Review).escalated("why");
         let payload = json!({"launch": launch.to_value()});
-        assert_eq!(ActorLaunch::recorded(&payload, ActorRole::Review), launch);
+        assert_eq!(ActorLaunch::recorded(&payload, ModelRole::Review), launch);
         assert_eq!(
-            ActorLaunch::recorded(&json!({}), ActorRole::Recovery),
-            ActorLaunch::default_of(ActorRole::Recovery)
+            ActorLaunch::recorded(&json!({}), ModelRole::Recovery),
+            ActorLaunch::default_of(ModelRole::Recovery)
         );
         assert_eq!(
-            ActorLaunch::recorded(&json!({"launch": 3}), ActorRole::Recovery),
-            ActorLaunch::default_of(ActorRole::Recovery)
+            ActorLaunch::recorded(&json!({"launch": 3}), ModelRole::Recovery),
+            ActorLaunch::default_of(ModelRole::Recovery)
         );
     }
 

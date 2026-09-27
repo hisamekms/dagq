@@ -167,21 +167,32 @@ string_enum!(SupervisorMode {
 });
 
 // The part a cmux workspace plays for a queue, carried in its `DAGQ_ROLE`
-// environment variable and its description (ADR-0026). The five roles of
-// ADR-0041 decision 1 are the supervisor, the worker, the planner, the
-// inbox and the observer; `up` opens the inbox's workspace, and planners
-// open on demand (`dagq plan`, or the runtime). `Observer` is the periodic
-// job: it has no workspace, and the
-// CLI refuses queue changes from its environment. `Reviewer` is the
-// environment of the supervisor's headless review and triage jobs.
+// environment variable and its description (ADR-0026): the actors of
+// [`actor::ActorRole`] that have a workspace or a `--role` view. `up` opens
+// the inbox's workspace, and planners open on demand (`dagq plan`, or the
+// runtime). `Observer` is the periodic job: it has no workspace, and the
+// CLI refuses queue changes from its environment. The headless jobs are
+// actors without a workspace, so they are not session roles.
 string_enum!(SessionRole {
     Supervisor => "supervisor",
     Worker => "worker",
     Planner => "planner",
     Inbox => "inbox",
     Observer => "observer",
-    Reviewer => "reviewer",
 });
+
+impl SessionRole {
+    /// The actor the session is.
+    pub const fn actor_role(self) -> actor::ActorRole {
+        match self {
+            Self::Supervisor => actor::ActorRole::Supervisor,
+            Self::Worker => actor::ActorRole::Worker,
+            Self::Planner => actor::ActorRole::Planner,
+            Self::Inbox => actor::ActorRole::Inbox,
+            Self::Observer => actor::ActorRole::Observer,
+        }
+    }
+}
 
 // Whether a goal's tasks may run (ADR-0024 decision 5). A `draft` goal is a
 // proposal, typically the observer's: its tasks are not candidates until
@@ -649,6 +660,7 @@ impl std::str::FromStr for Priority {
     }
 }
 
+pub mod actor;
 pub mod actor_model;
 pub mod claim_defer;
 pub mod claim_hold;
@@ -701,6 +713,7 @@ pub mod waiting;
 pub mod worker_model;
 pub mod worktime;
 
+pub use actor::{ActorContext, ActorRole, TrustLevel};
 pub use error::DomainError;
 use error::require;
 pub use finding::{

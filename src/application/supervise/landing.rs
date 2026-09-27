@@ -3,8 +3,9 @@
 //! landing itself (ADR-0023, ADR-0027).
 
 use super::*;
-use crate::domain::actor_model::{ActorLaunch, ActorRole};
+use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
+use crate::domain::{ActorContext, ActorRole};
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
 /// ask of a run with when a later review of the run asks again: it failed
@@ -145,7 +146,7 @@ impl Supervisor<'_> {
         };
         // The job's Claude session id (ADR-0048 decision 4).
         let session_id = self.generators.ids.uuid();
-        let launch = self.actor_launch(ActorRole::Review);
+        let launch = self.actor_launch(ModelRole::Review);
         self.queue.record_runtime_event(
             run.id(),
             event_kind::REVIEW_STARTED,
@@ -228,7 +229,10 @@ impl Supervisor<'_> {
             .envs(self.verifier.run_env(&run_dir)?)
             // Like the observer's job: the CLI knows the review by its role
             // and allows it only reads of this queue.
-            .envs(self.layout.job_env.iter().cloned());
+            .envs(self.layout.job_env(&ActorContext::instance(
+                ActorRole::ReviewJob,
+                format_args!("{}:{attempt}", run.id()),
+            )));
         let child = self
             .spawner
             .spawn(
