@@ -610,6 +610,19 @@ impl RecoveryWatch {
         if let Some((job, verdict)) = self.ended(sv, alert, reason)? {
             let verdict = match verdict {
                 Ok(verdict) => verdict,
+                // Stopped at a wall only a person moves: it joins the hold
+                // ask and no failure is recorded; the next job of the alert
+                // starts once the hold ends (task 438).
+                Err(error)
+                    if let Some(wall) = sv.job_wall(&job.job)
+                        && sv.raise_job_wall(
+                            wall,
+                            &HoldJob::Recovery(run.id().clone()),
+                            &error,
+                        ) =>
+                {
+                    return Ok(LiveStep::Pending);
+                }
                 Err(error) => {
                     return Ok(LiveStep::Escalate(
                         job.attempt,

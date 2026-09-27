@@ -1042,8 +1042,11 @@ pub struct NewHold {
     /// The run that hit it; `None` for a hold no run hit yet (the disk a
     /// claim needs, task 377), which opens the ask or leaves the open one.
     pub run_id: Option<RunId>,
-    /// What the person is asked, without the list of runs: the ask's
-    /// question ends with the runs it holds, rewritten as runs join.
+    /// The headless job that hit it (task 438): listed in `affected`
+    /// instead of the run, which then only carries the `ask_updated`.
+    pub job: Option<queue_hold::HoldJob>,
+    /// What the person is asked, without the list of runs and jobs: the
+    /// ask's question ends with what it holds, rewritten as they join.
     pub question: String,
     pub options: Vec<String>,
     pub asked_by: String,
@@ -1067,21 +1070,69 @@ impl NewHold {
         })
     }
 
-    /// The question of the ask holding `affected`; without runs, the
-    /// question alone.
+    /// The supervisor's hold of `wall` (ADR-0047 decision 42) for the run
+    /// or the headless job that hit it, with the wall's question and
+    /// [`HOLD_OPTIONS`].
+    pub fn wall(
+        wall: queue_hold::Wall,
+        run_id: Option<RunId>,
+        job: Option<queue_hold::HoldJob>,
+    ) -> Self {
+        Self {
+            reason_category: wall.reason(),
+            subject: wall.subject().map(str::to_owned),
+            run_id,
+            job,
+            question: wall.question().into(),
+            options: HOLD_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
+            asked_by: SessionRole::Supervisor.as_str().into(),
+        }
+    }
+
+    /// Its entry in the ask's `affected`: the job's, or the run's ID.
+    pub fn entry(&self) -> Option<String> {
+        match (&self.job, &self.run_id) {
+            (Some(job), _) => Some(job.entry()),
+            (None, Some(run)) => Some(run.as_str().to_owned()),
+            (None, None) => None,
+        }
+    }
+
+    /// The question of the ask holding `affected` (runs as `run <id>`,
+    /// jobs by their entry); without any, the question alone.
     pub fn question_for(question: &str, affected: &[String]) -> String {
         if affected.is_empty() {
             return question.to_owned();
         }
-        format!(
-            "{question}\n\n{HOLD_AFFECTED_HEADING}{}",
-            affected.join(", ")
-        )
+        let listed: Vec<String> = affected
+            .iter()
+            .map(|entry| {
+                if queue_hold::is_run_entry(entry) {
+                    format!("run {entry}")
+                } else {
+                    entry.clone()
+                }
+            })
+            .collect();
+        format!("{question}\n\n{HOLD_AFFECTED_HEADING}{}", listed.join(", "))
+    }
+
+    /// The question of a hold ask without its list of what it holds, as
+    /// [`Self::question_for`] wrote it (or an older binary, which listed
+    /// runs only under [`HOLD_AFFECTED_RUNS_HEADING`]).
+    pub fn base_question(question: &str) -> &str {
+        [HOLD_AFFECTED_HEADING, HOLD_AFFECTED_RUNS_HEADING]
+            .iter()
+            .find_map(|heading| question.rsplit_once(&format!("\n\n{heading}")))
+            .map_or(question, |(base, _)| base)
     }
 }
 
-/// Where the question of a `queue_hold` ask lists the runs it holds.
-pub const HOLD_AFFECTED_HEADING: &str = "Affected runs: ";
+/// Where the question of a `queue_hold` ask lists the runs and the
+/// headless jobs it holds.
+pub const HOLD_AFFECTED_HEADING: &str = "Affected: ";
+/// The heading an older binary listed the held runs under.
+pub const HOLD_AFFECTED_RUNS_HEADING: &str = "Affected runs: ";
 
 /// The options of an authentication or usage-limit ask (ADR-0047
 /// decision 42): `done` once the person logged in or the limit is back,
@@ -1689,6 +1740,11 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     // The answer of an authentication or usage-limit ask applied (task
     // 437).
     queue_hold::QUEUE_HOLD_APPLIED,
+    // A headless job with no run (a plan or goal review, the observer)
+    // that joined a hold ask, and the wall it hit (task 438).
+    event_kind::ASK_UPDATED,
+    event_kind::AUTH_REQUIRED,
+    event_kind::USAGE_LIMITED,
     // The cleanup for the disk (task 377) is about no run.
     "auto_repaired",
     // The stop of a gone supervisor's plan or goal review (task 443).
@@ -2365,6 +2421,7 @@ mod attention_tests {
             reason_category: AskReason::Authentication,
             subject: None,
             run_id: Some(RunId::new("run-1").unwrap()),
+            job: None,
             question: "Log in.".into(),
             options: HOLD_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
             asked_by: "supervisor".into(),
@@ -2400,10 +2457,39 @@ mod attention_tests {
             .to_string(),
             "a queue_hold ask is for authentication or cost, not discard"
         );
-        assert_eq!(
-            NewHold::question_for("Log in.", &["a".into(), "b".into()]),
-            "Log in.\n\nAffected runs: a, b"
+        assert_eq!(hold.entry().as_deref(), Some("run-1"));
+        let limit = NewHold::wall(
+            queue_hold::Wall::UsageLimit,
+            None,
+            Some(queue_hold::HoldJob::Observer),
         );
+        assert!(limit.validate().is_ok());
+        assert_eq!(limit.reason_category, AskReason::Cost);
+        assert_eq!(limit.subject.as_deref(), Some("usage_limit"));
+        assert_eq!(limit.entry().as_deref(), Some("observer job"));
+        assert_eq!(limit.asked_by, "supervisor");
+        let job = NewHold {
+            job: Some(queue_hold::HoldJob::Review(RunId::new("run-1").unwrap())),
+            ..hold.clone()
+        };
+        assert_eq!(job.entry().as_deref(), Some("review job of run run-1"));
+        assert_eq!(
+            NewHold {
+                run_id: None,
+                ..hold.clone()
+            }
+            .entry(),
+            None
+        );
+        let question =
+            NewHold::question_for("Log in.", &["a".into(), "b".into(), "observer job".into()]);
+        assert_eq!(question, "Log in.\n\nAffected: run a, run b, observer job");
+        assert_eq!(NewHold::base_question(&question), "Log in.");
+        assert_eq!(
+            NewHold::base_question("Log in.\n\nAffected runs: a"),
+            "Log in."
+        );
+        assert_eq!(NewHold::base_question("Log in."), "Log in.");
         assert_eq!(
             NewHold::question_for("Free the disk.", &[]),
             "Free the disk."

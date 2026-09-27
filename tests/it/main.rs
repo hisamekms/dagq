@@ -74,6 +74,7 @@ mod runtime_observer;
 mod runtime_precheck;
 mod runtime_push;
 mod runtime_queue_hold;
+mod runtime_queue_hold_detect;
 mod runtime_recheck;
 mod runtime_release;
 mod runtime_repair;

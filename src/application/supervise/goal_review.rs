@@ -53,7 +53,12 @@ impl Supervisor<'_> {
                 }
             }
         }
-        if starting && let Err(error) = self.start_goal_review() {
+        // A job reaped above may have hit a login or the usage limit and
+        // raised the hold in this pass (task 438).
+        if starting
+            && self.queue_hold.is_none()
+            && let Err(error) = self.start_goal_review()
+        {
             warn!(error = %format_args!("{error:#}"), "goal review: could not start a goal review: {error:#}");
         }
         progressed
@@ -223,17 +228,28 @@ impl Supervisor<'_> {
         };
         let watch = self.goal_review.take().expect("polled above");
         let duration_secs = watch.headless.started.elapsed().as_secs();
-        let applied = outcome
-            .and_then(|stdout| GoalReviewVerdict::parse(&stdout))
-            .map_err(|error| anyhow!(error))
-            .and_then(|verdict| {
-                let job = ActorContext::goal_review_job(watch.job.goal_id, watch.job.attempt);
-                self.for_job(&job, |sv| {
-                    sv.apply_goal_verdict(&watch.job, verdict, duration_secs)
-                })
-            });
+        let verdict = outcome.and_then(|stdout| GoalReviewVerdict::parse(&stdout));
+        // Only a job that failed or printed no verdict is read for a wall:
+        // a verdict's own text may quote anything (task 438).
+        let wall = verdict
+            .is_err()
+            .then(|| self.job_wall(&watch.headless))
+            .flatten();
+        let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
+            let job = ActorContext::goal_review_job(watch.job.goal_id, watch.job.attempt);
+            self.for_job(&job, |sv| {
+                sv.apply_goal_verdict(&watch.job, verdict, duration_secs)
+            })
+        });
         if let Err(error) = applied {
-            self.fail_goal_review(&watch.job, &format!("{error:#}"), duration_secs);
+            let error = format!("{error:#}");
+            // Stopped at a wall only a person moves: it joins the hold ask,
+            // whose `done` rearms the goal review, and its failure is no
+            // attention meanwhile (task 438).
+            if let Some(wall) = wall {
+                self.raise_job_wall(wall, &HoldJob::GoalReview(watch.job.goal_id), &error);
+            }
+            self.fail_goal_review(&watch.job, &error, duration_secs);
         }
         Ok(true)
     }

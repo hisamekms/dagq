@@ -225,6 +225,7 @@ impl Supervisor<'_> {
                     reason_category: AskReason::Cost,
                     subject: Some(DISK_SUBJECT.into()),
                     run_id: run.clone(),
+                    job: None,
                     question: question.clone(),
                     options: DISK_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
                     asked_by: SessionRole::Supervisor.as_str().into(),

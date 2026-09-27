@@ -29,8 +29,9 @@ use crate::{
         dependency_graph,
     },
     domain::{
-        ActorContext, ActorRole, EventId, FindingQuery, NoteQuery, RunEvent,
+        ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, RunEvent,
         actor_model::{ActorLaunch, ModelRole},
+        queue_hold::{HoldJob, Wall},
         stats::StatsQuery,
     },
     infrastructure::{
@@ -104,7 +105,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
-    let queue = SqliteQueue::open(&db)?;
+    let mut queue = SqliteQueue::open(&db)?;
     let started = queue.generators().clock.now();
     let since = match (options.since, options.mode) {
         (Some(since), _) => Some(since),
@@ -215,6 +216,24 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
             Ok(code) => ("failed", code, None),
             Err(error) => ("error", None, Some(format!("{error:#}"))),
         };
+    // An agent stopped at a login that ran out or the usage limit joins
+    // the queue's hold ask (ADR-0047 decision 42, task 438): no observer
+    // starts again until a person answers it.
+    let wall = if outcome == "succeeded" {
+        None
+    } else {
+        let output = fs::read_to_string(dir.join("output.log")).unwrap_or_default();
+        crate::infrastructure::claude::job_wall(&output)
+    };
+    // A hold that could not be written is logged: the observation's
+    // finish is recorded either way.
+    let hold = wall.and_then(|wall| {
+        hold_wall(&mut queue, wall, checkout.as_deref(), cmux.as_ref())
+            .inspect_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "the observer stopped at the {} wall, and its hold ask could not be written: {error:#}", wall.as_str());
+            })
+            .ok()
+    });
     let written = queue.written_by(OBSERVER_ROLE, event_mark, ask_mark)?;
     let (recorded, updated, closed, asks) = (
         written.recorded.len(),
@@ -244,6 +263,8 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "ask_ids": written.asks,
         "duration_secs": clock.elapsed().as_secs(),
         "dir": dir,
+        "wall": wall.map(Wall::as_str),
+        "hold_ask_id": hold,
     });
     queue.record_queue_event(event_kind::OBSERVE_FINISHED, payload.clone())?;
     tracing::info!(
@@ -259,6 +280,41 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         options.mode.as_str()
     );
     Ok(payload)
+}
+
+/// Add the observer to the hold ask of `wall`, or open it (notifying the
+/// inbox through `cmux` when there is one), and record `auth_required` or
+/// `usage_limited` on the queue when it joined. Returns the ask's ID.
+fn hold_wall(
+    queue: &mut SqliteQueue,
+    wall: Wall,
+    checkout: Option<&Path>,
+    cmux: Option<&crate::infrastructure::adapters::Cmux>,
+) -> Result<AskId> {
+    let hold = NewHold::wall(wall, None, Some(HoldJob::Observer));
+    let outcome = match (checkout, cmux) {
+        (Some(checkout), Some(cmux)) => {
+            crate::application::ask::hold(queue, checkout, hold, cmux)?.0
+        }
+        _ => queue.hold(hold)?,
+    };
+    if outcome.joined {
+        queue.record_queue_event(
+            wall.event_kind(),
+            json!({
+                "job": HoldJob::Observer.kind(),
+                "entry": HoldJob::Observer.entry(),
+                "ask_id": outcome.ask.id,
+            }),
+        )?;
+    }
+    tracing::warn!(
+        ask_id = outcome.ask.id.as_i64(),
+        "the observer stopped at the {} wall: ask {} holds it",
+        wall.as_str(),
+        outcome.ask.id
+    );
+    Ok(outcome.ask.id)
 }
 
 /// What one observation reads, each part as JSON.

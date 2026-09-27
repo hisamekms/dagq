@@ -661,6 +661,29 @@ pub trait AgentSignals {
     fn auth_required(&self, _screen: &str) -> bool {
         false
     }
+    /// Whether the bottom of `screen` shows the agent stopped at its usage
+    /// limit (ADR-0047 decision 42, task 438): only a person decides on
+    /// the cost.
+    fn usage_limited(&self, _screen: &str) -> bool {
+        false
+    }
+    /// The wall only a person moves that `screen` shows the agent stopped
+    /// at: a login that ran out, or the usage limit.
+    fn screen_wall(&self, screen: &str) -> Option<crate::domain::queue_hold::Wall> {
+        use crate::domain::queue_hold::Wall;
+        if self.auth_required(screen) {
+            Some(Wall::Authentication)
+        } else if self.usage_limited(screen) {
+            Some(Wall::UsageLimit)
+        } else {
+            None
+        }
+    }
+    /// The wall the output of a headless job that failed (its stdout and
+    /// stderr) shows the agent stopped at (task 438).
+    fn job_wall(&self, _output: &str) -> Option<crate::domain::queue_hold::Wall> {
+        None
+    }
     /// The last lines of `screen` an ask and `prompt_waiting` carry.
     fn screen_excerpt(&self, screen: &str) -> String;
     /// What the idle marker's content says. A content the adapter cannot

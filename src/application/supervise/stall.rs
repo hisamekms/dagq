@@ -952,7 +952,9 @@ impl StallWatch {
             return Ok(None);
         }
         if let Ok(screen) = screen {
-            if sv.signals.auth_required(&screen) && raise_auth(sv, run, workspace, &screen)? {
+            if let Some(wall) = sv.signals.screen_wall(&screen)
+                && raise_wall(sv, run, workspace, &screen, wall)?
+            {
                 return Ok(None);
             }
             // A Settings panel left open would take the nudge: it is closed

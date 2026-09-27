@@ -725,10 +725,13 @@ impl SessionWatch {
                 return Ok(());
             }
         };
-        // A login that ran out is no dialog to answer: only a person logs
-        // in again, once for every session it stopped (ADR-0047 decision 42).
+        // A login that ran out, or the usage limit, is no dialog to answer:
+        // only a person moves it, once for every session it stopped
+        // (ADR-0047 decision 42).
         let workspace = self.workspace.clone();
-        if sv.signals.auth_required(&screen) && raise_auth(sv, run, &workspace, &screen)? {
+        if let Some(wall) = sv.signals.screen_wall(&screen)
+            && raise_wall(sv, run, &workspace, &screen, wall)?
+        {
             return self.clear_prompt(sv, run);
         }
         // A known dialog is answered by rule once its conditions hold
@@ -902,20 +905,23 @@ pub(super) fn ask_answer_prompt(
     ))
 }
 
-/// Raise a worker's session stopped at a login that ran out (ADR-0047
-/// decision 42): the run joins the queue's open `authentication` ask, or
-/// opens it, and a run that joined records `auth_required` with the
-/// screen's excerpt and its hash. However many sessions stop at it, the
-/// inbox gets one ask and one notification, with the runs it holds listed.
-/// The error stays on the screen after a person logged in and answered the
-/// ask, so a screen the run already raised under an ask that is answered
-/// now is not raised again: returns `false`, and the caller goes on as if
-/// no login held the session (the stall nudge then tells it to go on).
-pub(super) fn raise_auth(
+/// Raise a worker's session stopped at a wall only a person moves
+/// (ADR-0047 decision 42): a login that ran out, or the usage limit (task
+/// 438). The run joins the queue's open `authentication` ask (or `cost`
+/// ask of `subject: usage_limit`), or opens it, and a run that joined
+/// records `auth_required` (or `usage_limited`) with the screen's excerpt
+/// and its hash. However many sessions stop at it, the inbox gets one ask
+/// and one notification, with the runs it holds listed. The error stays
+/// on the screen after a person moved the wall and answered the ask, so a
+/// screen the run already raised under an ask that is answered now is not
+/// raised again: returns `false`, and the caller goes on as if nothing
+/// held the session (the stall nudge then tells it to go on).
+pub(super) fn raise_wall(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
     workspace: &str,
     screen: &str,
+    wall: Wall,
 ) -> Result<bool> {
     let excerpt = sv.signals.screen_excerpt(screen);
     let hash = format!("{:x}", Sha256::digest(excerpt.as_bytes()));
@@ -924,7 +930,7 @@ pub(super) fn raise_auth(
         .run_events(run.id())?
         .into_iter()
         .rev()
-        .find(|e| e.kind == event_kind::AUTH_REQUIRED);
+        .find(|e| e.kind == wall.event_kind() && e.payload.get("job").is_none());
     if let Some(last) = last
         && last.payload.get("screen_hash").and_then(Value::as_str) == Some(hash.as_str())
         && let Some(id) = last.payload.get("ask_id").and_then(Value::as_i64)
@@ -935,20 +941,13 @@ pub(super) fn raise_auth(
     let (outcome, value) = ask::hold(
         &mut *sv.queue,
         &sv.layout.main_checkout,
-        NewHold {
-            reason_category: AskReason::Authentication,
-            subject: None,
-            run_id: Some(run.id().clone()),
-            question: AUTH_QUESTION.into(),
-            options: HOLD_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
-            asked_by: SessionRole::Supervisor.as_str().into(),
-        },
+        NewHold::wall(wall, Some(run.id().clone()), None),
         sv.cmux,
     )?;
     if outcome.joined {
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::AUTH_REQUIRED,
+            wall.event_kind(),
             json!({
                 "workspace_id": workspace,
                 "excerpt": excerpt,
@@ -956,13 +955,10 @@ pub(super) fn raise_auth(
                 "ask_id": outcome.ask.id,
             }),
         )?;
-        warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {} stopped at a login that ran out in workspace {workspace}; authentication ask {} holds {} run(s) (notified: {})", run.id(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
+        warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {} stopped at the {} wall in workspace {workspace}; ask {} holds {} run(s) and job(s) (notified: {})", run.id(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
     }
     Ok(true)
 }
-
-/// The question of the authentication ask; the runs it holds follow it.
-pub(super) const AUTH_QUESTION: &str = "Claude Code's login ran out: worker sessions stopped at an authentication error (`Please run /login`, an API 401). Only a person can log in again: run `claude` in a terminal, `/login`, and answer `done`; the supervisor then tells each held session to go on and starts again the headless jobs that failed at the login. Answer `cancel_affected` to give the held runs up instead (the supervisor releases them as an abandon does, keeping their worktrees, and the inbox recovers them). Until then no new run is claimed and no headless job (review, recovery, plan review, goal review, observer) starts; the runs in flight keep their leases. More runs that stop at the login join this ask instead of opening another.";
 
 /// Close the run's `answer_prompt` asks nobody closed, noting each.
 pub(super) fn close_answer_prompt_asks(

@@ -75,7 +75,7 @@ use super::{
 use crate::domain::{
     ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, ActorContext,
     AfterValidation, AskId, AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId,
-    EvidenceCheck, HEARTBEAT_TIMEOUT_SECS, HOLD_OPTIONS, IntegrationOutcome, LANDING_OPTIONS,
+    EvidenceCheck, HEARTBEAT_TIMEOUT_SECS, IntegrationOutcome, LANDING_OPTIONS,
     MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode,
     Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision,
     RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus, SessionRole,
@@ -86,6 +86,7 @@ use crate::domain::{
     kpi::{CANDIDATES_SAMPLED, CandidatesSample},
     marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
+    queue_hold::{HoldJob, Wall},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
     resume::{ResumeConfig, ResumeCount, inherits_on_exhaustion, is_inherit_retry},
     run_env::RUN_ENV_PROGRAM_KINDS,
@@ -1978,7 +1979,16 @@ impl Supervisor<'_> {
                             sv.act_on_recovery(&run, round, alert, attempt, duration_secs, verdict)
                         })
                     }
-                    Err(error) => Err(anyhow!("{error}")),
+                    Err(error) => {
+                        // Stopped at a wall only a person moves: it joins
+                        // the hold ask, whose `done` starts it again, and
+                        // its `triage_failed` is no attention meanwhile
+                        // (task 438).
+                        if let Some(wall) = self.job_wall(&watch.job) {
+                            self.raise_job_wall(wall, &HoldJob::Recovery(run.id().clone()), &error);
+                        }
+                        Err(anyhow!("{error}"))
+                    }
                 };
                 if let Err(error) = acted {
                     // Another process took the run's lease meanwhile: its
@@ -2087,6 +2097,18 @@ impl Supervisor<'_> {
                 // Kept in the phase until it is replaced (task 237).
                 let session = watch.session.clone();
                 let run = self.queue.run(slot.run.id())?;
+                // A review stopped at a login that ran out or the usage
+                // limit is no failure of the run: it joins the hold ask and
+                // waits, its session open, until the hold ends (task 438).
+                if let ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) = &outcome
+                    && let Some(wall) = self.job_wall(&watch.job)
+                    && self.raise_job_wall(wall, &HoldJob::Review(run.id().clone()), error)
+                {
+                    info!(run_id = %run.id(), "run {} review {attempt} stopped at the {} wall; it waits for the hold ask with its session open", run.id(), wall.as_str());
+                    slot.phase = Phase::ReviewHeld(session);
+                    slot.run = run;
+                    return Ok(Step::Continue);
+                }
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
                         let job = ActorContext::review_job(run.id(), attempt);

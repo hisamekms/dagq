@@ -19,6 +19,7 @@ use crate::domain::{
     SessionRole, SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun,
     UPDATE_FAILED_OPTIONS, event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
+    queue_hold::{self, HoldJob},
     reason, recheck, run_attention, run_attention_of,
     run_env::{RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING, RunEnvCheck},
     session_takes_answers,
@@ -770,6 +771,10 @@ pub fn attention(
     control: &dyn ProcessControl,
 ) -> Result<Vec<Attention>> {
     let mut attention = supervisor_attention(&pulses(registrations, now, control));
+    // A headless job that failed at a login or the usage limit waits in
+    // the hold ask that lists it, which is the attention (task 438).
+    let asks = queue.asks(AskQuery::default())?;
+    let held = |job: HoldJob| queue_hold::job_held(&asks, &job);
     for mut run in queue.latest_runs_in_progress()? {
         let leased = queue.run_lease(run.id())?.is_some();
         if !leased {
@@ -811,6 +816,10 @@ pub fn attention(
         else {
             continue;
         };
+        if matches!(next, AttentionNext::TriageByHand) && held(HoldJob::Recovery(run.id().clone()))
+        {
+            continue;
+        }
         let kind = kind.unwrap_or(run.status().as_str()).to_owned();
         attention.push(Attention {
             run_id: Some(run.id().clone()),
@@ -969,6 +978,11 @@ pub fn attention(
         });
     }
     for hold in queue.plan_review_holds()? {
+        if hold.kind == event_kind::PLAN_REVIEW_FAILED
+            && held(HoldJob::PlanReview(hold.proposal_id))
+        {
+            continue;
+        }
         let (status, next) = match hold.kind {
             event_kind::PLAN_REVIEW_FAILED => ("submitted", AttentionNext::PlanReviewByHand),
             _ => ("revising", AttentionNext::CheckPlanner),
@@ -990,6 +1004,9 @@ pub fn attention(
     // change or `goal review ID` (ADR-0047 decision 43); it is shown on the
     // goal's first task.
     for hold in queue.goal_review_holds()? {
+        if held(HoldJob::GoalReview(hold.goal_id)) {
+            continue;
+        }
         attention.push(Attention {
             run_id: None,
             task_id: hold.anchor,
@@ -1007,7 +1024,7 @@ pub fn attention(
             next: AttentionNext::GoalReviewByHand,
         });
     }
-    for ask in queue.asks(AskQuery::default())? {
+    for ask in asks.iter().cloned() {
         let (status, kind, next) = if ask.is_open() {
             (
                 "open",

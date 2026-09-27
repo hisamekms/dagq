@@ -87,7 +87,9 @@ impl Supervisor<'_> {
                 }
             }
         }
-        if !starting {
+        // A job reaped above may have hit a login or the usage limit and
+        // raised the hold in this pass (task 438).
+        if !starting || self.queue_hold.is_some() {
             return progressed;
         }
         for (what, result) in [
@@ -384,17 +386,28 @@ impl Supervisor<'_> {
         };
         let watch = self.plan_review.take().expect("polled above");
         let duration_secs = watch.headless.started.elapsed().as_secs();
-        let applied = outcome
-            .and_then(|stdout| PlanReviewVerdict::parse(&stdout))
-            .map_err(|error| anyhow!(error))
-            .and_then(|verdict| {
-                let job = ActorContext::plan_review_job(watch.job.proposal_id, watch.job.attempt);
-                self.for_job(&job, |sv| {
-                    sv.apply_plan_verdict(&watch.job, watch.revise_count, verdict, duration_secs)
-                })
-            });
+        let verdict = outcome.and_then(|stdout| PlanReviewVerdict::parse(&stdout));
+        // Only a job that failed or printed no verdict is read for a wall:
+        // a verdict's own text may quote anything (task 438).
+        let wall = verdict
+            .is_err()
+            .then(|| self.job_wall(&watch.headless))
+            .flatten();
+        let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
+            let job = ActorContext::plan_review_job(watch.job.proposal_id, watch.job.attempt);
+            self.for_job(&job, |sv| {
+                sv.apply_plan_verdict(&watch.job, watch.revise_count, verdict, duration_secs)
+            })
+        });
         if let Err(error) = applied {
-            self.fail_plan_review(&watch.job, &format!("{error:#}"), duration_secs);
+            let error = format!("{error:#}");
+            // Stopped at a wall only a person moves: it joins the hold ask,
+            // whose `done` submits the proposal again, and its failure is
+            // no attention meanwhile (task 438).
+            if let Some(wall) = wall {
+                self.raise_job_wall(wall, &HoldJob::PlanReview(watch.job.proposal_id), &error);
+            }
+            self.fail_plan_review(&watch.job, &error, duration_secs);
         }
         Ok(true)
     }

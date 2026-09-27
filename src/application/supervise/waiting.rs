@@ -483,7 +483,9 @@ impl Supervisor<'_> {
         let Some(watch) = slot.live_mut() else {
             return Ok(None);
         };
-        if self.signals.auth_required(&screen) && raise_auth(self, run, workspace, &screen)? {
+        if let Some(wall) = self.signals.screen_wall(&screen)
+            && raise_wall(self, run, workspace, &screen, wall)?
+        {
             watch.clear_prompt(self, run)?;
             return Ok(Some(WaitCause::QueueHold));
         }

@@ -177,6 +177,10 @@ pub const TURN_FINISHED: &str = "turn_finished";
 pub const TURN_REQUESTED: &str = "turn_requested";
 /// A headless worker's turn started (`turn`, `resume`, `request`, `pid`).
 pub const TURN_STARTED: &str = "turn_started";
+/// A worker's session or a headless job stopped at Claude Code's usage
+/// limit (ADR-0047 decision 42): on the run, or on the queue for a job
+/// without one.
+pub const USAGE_LIMITED: &str = "usage_limited";
 pub const VALIDATION_FINISHED: &str = "validation_finished";
 pub const VERIFICATION_COMMAND: &str = "verification_command";
 pub const WORKSPACE_CLOSED: &str = "workspace_closed";

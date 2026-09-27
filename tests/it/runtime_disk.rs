@@ -103,7 +103,7 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     assert!(ask.affected.is_empty());
     assert_eq!(ask.task_id, None);
     assert!(ask.question.contains("0.5 GiB free"), "{}", ask.question);
-    assert!(!ask.question.contains("Affected runs"));
+    assert!(!ask.question.contains("Affected:"));
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
         let detail = queue.show(TaskId::new(1)).unwrap();
@@ -318,7 +318,7 @@ fn a_landing_waits_for_room_before_its_verification() {
     let asks = disk_asks(&db);
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert_eq!(asks[0].affected, [run.id().as_str()]);
-    assert!(asks[0].question.contains("Affected runs"));
+    assert!(asks[0].question.contains("Affected: run "));
     // It holds no session, as a login's ask does.
     assert!(
         SqliteQueue::open(&db)

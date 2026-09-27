@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::adapters::ClaudeCode;
 use crate::{
     application::{AgentSignals, DialogAnswer, IdleHook, InputSource, KnownDialog},
-    domain::stall::BackgroundTask,
+    domain::{queue_hold::Wall, stall::BackgroundTask},
 };
 
 /// `prompt_waiting` carries this many last non-empty lines of the screen.
@@ -179,11 +179,72 @@ const AUTH_ERRORS: &[&str] = &[
     "OAuth token revoked",
 ];
 
+/// How Claude Code reports that the account reached its usage limit
+/// (task 438): its error line, under the tool call or the prompt it
+/// stopped, or a headless job's output line, starts with one of these, or
+/// reads `<window> limit reached · resets <when>` ([`usage_limit_line`]).
+const USAGE_LIMITS: &[&str] = &[
+    "Claude AI usage limit reached",
+    "Claude usage limit reached",
+    "You've hit your limit",
+    "You've hit your usage limit",
+    "You've reached your usage limit",
+    "Credit balance is too low",
+];
+
+/// The longest window name before `limit reached` (`5-hour`, `Opus
+/// weekly`, ...): a longer head is a sentence of the work.
+const LIMIT_WINDOW_CHARS: usize = 24;
+
 /// Whether the bottom of a screen shows the session stopped at a login
 /// that ran out (ADR-0047 decision 42): one of the last lines, box borders
 /// and the `⎿` of a result ignored, starts with one of [`AUTH_ERRORS`] and
 /// asks for `/login`.
 pub fn auth_required(screen: &str) -> bool {
+    bottom_lines(screen).iter().any(|line| auth_line(line))
+}
+
+/// Whether the bottom of a screen shows the session stopped at the usage
+/// limit (ADR-0047 decision 42, task 438): one of the last lines, read as
+/// [`auth_required`] reads them, is [`usage_limit_line`].
+pub fn usage_limited(screen: &str) -> bool {
+    bottom_lines(screen)
+        .iter()
+        .any(|line| usage_limit_line(line))
+}
+
+/// The wall a headless job's output (its stdout and stderr, a `claude -p`
+/// JSON result's `result` too) shows it stopped at, if any (task 438):
+/// the first line that is [`auth_line`] or [`usage_limit_line`]. Read only
+/// from a job that failed, whose output is Claude Code's, not the work's.
+pub fn job_wall(output: &str) -> Option<Wall> {
+    output.lines().find_map(|line| {
+        let parsed: Option<Value> = serde_json::from_str(line.trim()).ok();
+        let fields: Vec<String> = parsed
+            .iter()
+            .flat_map(|value| ["result", "error", "message"].map(|key| value.get(key).cloned()))
+            .flatten()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+        std::iter::once(line)
+            .chain(fields.iter().flat_map(|field| field.lines()))
+            .find_map(|text| {
+                let text = text.trim().trim_start_matches(['⎿', '⏺', ' ']);
+                let text = text.strip_prefix("Error: ").unwrap_or(text);
+                if auth_line(text) {
+                    Some(Wall::Authentication)
+                } else if usage_limit_line(text) {
+                    Some(Wall::UsageLimit)
+                } else {
+                    None
+                }
+            })
+    })
+}
+
+/// The last non-empty lines of a screen, box borders and the `⎿` / `⏺` of
+/// a result stripped.
+fn bottom_lines(screen: &str) -> Vec<&str> {
     let lines: Vec<&str> = screen
         .lines()
         .map(strip_frame)
@@ -192,9 +253,30 @@ pub fn auth_required(screen: &str) -> bool {
     lines[lines.len().saturating_sub(PROMPT_SCAN_LINES)..]
         .iter()
         .map(|line| line.trim_start_matches(['⎿', '⏺', ' ']))
-        .any(|line| {
-            AUTH_ERRORS.iter().any(|error| line.starts_with(error)) && line.contains("/login")
-        })
+        .collect()
+}
+
+fn auth_line(line: &str) -> bool {
+    AUTH_ERRORS.iter().any(|error| line.starts_with(error)) && line.contains("/login")
+}
+
+/// Whether a line is Claude Code's report of the usage limit: it starts
+/// with one of [`USAGE_LIMITS`], or it is `<window> limit reached ∙ resets
+/// ...` (or `·`) with a short window name.
+fn usage_limit_line(line: &str) -> bool {
+    if USAGE_LIMITS.iter().any(|limit| line.starts_with(limit)) {
+        return true;
+    }
+    let Some((window, rest)) = line.split_once("limit reached") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    window.chars().count() <= LIMIT_WINDOW_CHARS
+        && window
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | ' '))
+        && (rest.starts_with('∙') || rest.starts_with('·'))
+        && rest.contains("reset")
 }
 
 fn strip_frame(line: &str) -> &str {
@@ -395,6 +477,14 @@ impl AgentSignals for ClaudeCode {
 
     fn auth_required(&self, screen: &str) -> bool {
         auth_required(screen)
+    }
+
+    fn usage_limited(&self, screen: &str) -> bool {
+        usage_limited(screen)
+    }
+
+    fn job_wall(&self, output: &str) -> Option<Wall> {
+        job_wall(output)
     }
 
     fn screen_excerpt(&self, screen: &str) -> String {
@@ -1039,5 +1129,72 @@ worktree on  dagq/68a96a60 took 8h32m49s
         let mut old = String::from("Please run /login\n");
         old.push_str(&"line\n".repeat(PROMPT_SCAN_LINES));
         assert!(!auth_required(&old));
+    }
+
+    #[test]
+    fn usage_limited_reads_a_limit_reached_at_the_bottom() {
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        for screen in [
+            "⏺ Bash(cargo test)\n  ⎿  5-hour limit reached ∙ resets 3pm\n     /upgrade to increase your usage limit.\n\n│ ❯ \n",
+            "  ⎿  Opus weekly limit reached · resets Mon 9am (Asia/Tokyo)\n",
+            "⏺ Claude AI usage limit reached|1759000000\n",
+            "│ You've hit your limit · resets 11pm │\n",
+        ] {
+            assert!(usage_limited(screen), "{screen}");
+            assert!(claude.usage_limited(screen), "{screen}");
+            assert!(!auth_required(screen), "{screen}");
+        }
+        assert!(!usage_limited(WORK));
+        assert!(!usage_limited(READY));
+        // The work that only mentions it is no limit.
+        assert!(!usage_limited(
+            "src/claude.rs:12: \"Claude AI usage limit reached\"\n"
+        ));
+        assert!(!usage_limited(
+            "  ⎿  The retry budget of the whole job's limit reached · resets nothing\n"
+        ));
+        assert!(!usage_limited("  ⎿  5-hour limit reached (a note)\n"));
+        let mut old = String::from("5-hour limit reached ∙ resets 3pm\n");
+        old.push_str(&"line\n".repeat(PROMPT_SCAN_LINES));
+        assert!(!usage_limited(&old));
+    }
+
+    #[test]
+    fn job_wall_reads_a_headless_jobs_output() {
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        assert_eq!(
+            job_wall("Invalid API key · Please run /login\n"),
+            Some(Wall::Authentication)
+        );
+        assert_eq!(
+            claude.job_wall(
+                "{\"type\":\"result\",\"is_error\":true,\"result\":\"API Error: 401 {\\\"type\\\":\\\"authentication_error\\\"} · Please run /login\"}\n"
+            ),
+            Some(Wall::Authentication)
+        );
+        assert_eq!(
+            job_wall(
+                "{\"type\":\"result\",\"is_error\":true,\"result\":\"Claude AI usage limit reached|1759000000\"}"
+            ),
+            Some(Wall::UsageLimit)
+        );
+        assert_eq!(
+            job_wall("starting\nError: 5-hour limit reached ∙ resets 3pm\n"),
+            Some(Wall::UsageLimit)
+        );
+        assert_eq!(
+            job_wall("Credit balance is too low\n"),
+            Some(Wall::UsageLimit)
+        );
+        assert_eq!(job_wall("no verdict here\n"), None);
+        assert_eq!(job_wall("{\"verdict\":\"pass\"}\n"), None);
+        assert_eq!(
+            job_wall("the diff adds \"Please run /login\" to the tests\n"),
+            None
+        );
     }
 }

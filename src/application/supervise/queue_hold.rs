@@ -85,7 +85,7 @@ impl Supervisor<'_> {
         let mut continued = Vec::new();
         let mut moved_on = Vec::new();
         let mut elsewhere = Vec::new();
-        for run in &ask.affected {
+        for run in queue_hold::affected_runs(ask) {
             match self.slots.iter().find(|slot| slot.run.id().as_str() == run) {
                 Some(slot) if slot.phase.holds_live_session() => {
                     self.hold_continue.insert(slot.run.id().clone(), ask.id);
@@ -111,6 +111,7 @@ impl Supervisor<'_> {
                 "moved_on": moved_on,
                 "restarted": restarted,
                 "elsewhere": elsewhere,
+                "jobs": jobs_of(ask),
                 "supervisor": self.token,
             }),
         )?;
@@ -125,7 +126,7 @@ impl Supervisor<'_> {
         let mut released = Vec::new();
         let mut moved_on = Vec::new();
         let mut elsewhere = Vec::new();
-        for run in &ask.affected {
+        for run in queue_hold::affected_runs(ask) {
             let Some(index) = self
                 .slots
                 .iter()
@@ -167,6 +168,7 @@ impl Supervisor<'_> {
                 "moved_on": moved_on,
                 "restarted": [],
                 "elsewhere": elsewhere,
+                "jobs": jobs_of(ask),
                 "supervisor": self.token,
             }),
         )?;
@@ -293,6 +295,17 @@ impl Supervisor<'_> {
         info!(run_id = %run_id, "the recovery job of {run_id} failed while ask {} held the queue: it is started again", ask.id);
         Ok(true)
     }
+}
+
+/// The headless jobs `ask` lists next to its runs (task 438): a review
+/// held with its session starts again once the hold ends; a failed
+/// recovery, plan review or goal review is started again by `done`
+/// ([`Supervisor::restart_failed_jobs`]).
+fn jobs_of(ask: &Ask) -> Vec<&String> {
+    ask.affected
+        .iter()
+        .filter(|entry| !queue_hold::is_run_entry(entry))
+        .collect()
 }
 
 impl Phase {

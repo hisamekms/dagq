@@ -130,6 +130,15 @@ impl HeadlessJob {
     }
 }
 
+impl HeadlessJob {
+    /// What the job wrote to its stdout and stderr, for the wall it may
+    /// have stopped at (task 438).
+    pub(super) fn output(&self, files: &dyn RunFiles) -> String {
+        let read = |path: &Path| files.read_to_string(path).unwrap_or_default();
+        format!("{}\n{}", read(&self.stdout), read(&self.stderr))
+    }
+}
+
 /// A job dropped before its end was read (an error on the way, a loop that
 /// failed) is stopped, so it neither runs on unwatched nor leaves its row
 /// open while this process lives.
@@ -182,6 +191,64 @@ impl Supervisor<'_> {
             processes: self.processes.clone(),
             record,
         }
+    }
+
+    /// The wall only a person moves (a login that ran out, the usage
+    /// limit) that the output of a headless job that failed shows it
+    /// stopped at (ADR-0047 decision 42, task 438).
+    pub(super) fn job_wall(&self, job: &HeadlessJob) -> Option<Wall> {
+        self.signals.job_wall(&job.output(&*self.files))
+    }
+
+    /// Raise a headless job that failed at `wall` (task 438): the job joins
+    /// the queue's open `authentication` ask (or usage-limit `cost` ask),
+    /// or opens it, listed in its `affected` next to the runs, and records
+    /// `auth_required` (or `usage_limited`) with `job` and its `entry` on
+    /// its run, or on the queue for a job with none. The hold takes effect
+    /// at once: no other headless job starts in this pass either. Its
+    /// failure is no attention while the ask is unclosed
+    /// ([`crate::domain::queue_hold::job_held`]). Whether it was raised: a
+    /// hold that could not be written is logged, and the caller records
+    /// the job's failure as any other.
+    pub(super) fn raise_job_wall(&mut self, wall: Wall, job: &HoldJob, error: &str) -> bool {
+        match self.hold_job(wall, job, error) {
+            Ok(()) => true,
+            Err(hold_error) => {
+                warn!(error = %format_args!("{hold_error:#}"), "the headless {} stopped at the {} wall, and its hold ask could not be written: {hold_error:#}", job.entry(), wall.as_str());
+                false
+            }
+        }
+    }
+
+    fn hold_job(&mut self, wall: Wall, job: &HoldJob, error: &str) -> Result<()> {
+        let run = job.run_id().cloned();
+        let (outcome, value) = ask::hold(
+            &mut *self.queue,
+            &self.layout.main_checkout,
+            NewHold::wall(wall, run.clone(), Some(job.clone())),
+            self.cmux,
+        )?;
+        if outcome.joined {
+            let payload = json!({
+                "job": job.kind(),
+                "entry": job.entry(),
+                "error": tail(error, 500),
+                "ask_id": outcome.ask.id,
+            });
+            match &run {
+                Some(run) => self
+                    .queue
+                    .record_runtime_event(run, wall.event_kind(), payload)?,
+                None => {
+                    self.queue.record_queue_event(wall.event_kind(), payload)?;
+                }
+            }
+        }
+        if self.queue_hold.is_none() {
+            self.queue_hold = crate::domain::queue_hold::hold_of(&outcome.ask);
+        }
+        warn!(ask_id = %outcome.ask.id, "the headless {} stopped at the {} wall: ask {} holds {} run(s) and job(s) (notified: {})", job.entry(), wall.as_str(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
+        Ok(())
     }
 
     /// Write the ends of this process's jobs, then stop the jobs gone

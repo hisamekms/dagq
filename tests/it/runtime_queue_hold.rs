@@ -28,6 +28,7 @@ fn open_hold(db: &Path, reason: AskReason, subject: Option<&str>) -> dagq::domai
             reason_category: reason,
             subject: subject.map(str::to_owned),
             run_id: None,
+            job: None,
             question: "the login ran out".into(),
             options: HOLD_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
             asked_by: "supervisor".into(),

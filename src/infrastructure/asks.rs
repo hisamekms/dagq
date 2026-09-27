@@ -11,9 +11,9 @@ use super::sqlite::{SqliteQueue, enum_col, json_col};
 use crate::domain::Ask;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason,
-    HOLD_AFFECTED_HEADING, HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId,
-    UPDATE_FAILED_OPTIONS, answer_approves, check_ask_kind, check_event_target, finding,
-    option_index, session_takes_answers,
+    HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
+    answer_approves, check_ask_kind, check_event_target, finding, option_index,
+    session_takes_answers,
 };
 
 pub use crate::application::AskQuery;
@@ -34,11 +34,12 @@ impl SqliteQueue {
     }
 
     /// Open the `queue_hold` ask of the hold's reason and subject with its
-    /// run, or add the run to the open one (ADR-0047 decision 42). A new
-    /// ask writes `ask_opened` on the queue; a run that joins an open one
-    /// rewrites its question's list of runs and writes `ask_updated` on
-    /// that run. A run already in it changes nothing, nor does a hold
-    /// without a run while the ask is open (task 377).
+    /// run or headless job, or add it to the open one (ADR-0047 decision
+    /// 42). A new ask writes `ask_opened` on the queue; a run or job that
+    /// joins an open one rewrites its question's list and writes
+    /// `ask_updated` on the run (a job's run, or the queue for a job with
+    /// none, task 438). One already in it changes nothing, nor does a hold
+    /// without a run or job while the ask is open (task 377).
     pub fn hold(&mut self, hold: NewHold) -> Result<HoldOutcome> {
         hold.validate()?;
         let tx = self
@@ -63,25 +64,22 @@ impl SqliteQueue {
                 ask_row,
             )
             .optional()?;
-        let run = hold.run_id.as_ref().map(|run| run.as_str().to_owned());
-        let outcome = match (open, run) {
+        let entry = hold.entry();
+        let outcome = match (open, entry) {
             (Some(ask), None) => HoldOutcome {
                 ask,
                 created: false,
                 joined: false,
             },
-            (Some(ask), Some(run)) if ask.affected.contains(&run) => HoldOutcome {
+            (Some(ask), Some(entry)) if ask.affected.contains(&entry) => HoldOutcome {
                 ask,
                 created: false,
                 joined: false,
             },
-            (Some(ask), Some(run)) => {
+            (Some(ask), Some(entry)) => {
                 let mut affected = ask.affected.clone();
-                affected.push(run);
-                let base = ask
-                    .question
-                    .rsplit_once(&format!("\n\n{HOLD_AFFECTED_HEADING}"))
-                    .map_or(ask.question.as_str(), |(base, _)| base);
+                affected.push(entry.clone());
+                let base = NewHold::base_question(&ask.question);
                 tx.execute(
                     "UPDATE asks SET affected=?2, question=?3 WHERE id=?1",
                     params![
@@ -100,6 +98,7 @@ impl SqliteQueue {
                         "kind": ask.kind,
                         "reason_category": ask.reason_category,
                         "affected": affected,
+                        "joined": entry,
                     }),
                 )?;
                 HoldOutcome {
@@ -108,8 +107,8 @@ impl SqliteQueue {
                     joined: true,
                 }
             }
-            (None, run) => {
-                let affected: Vec<String> = run.into_iter().collect();
+            (None, entry) => {
+                let affected: Vec<String> = entry.into_iter().collect();
                 let kind = AskKind::QueueHold;
                 check_ask_kind(&kind, None, None, hold.reason_category)?;
                 tx.execute(
@@ -142,7 +141,7 @@ impl SqliteQueue {
                 HoldOutcome {
                     ask: read_ask(&tx, id)?,
                     created: true,
-                    joined: hold.run_id.is_some(),
+                    joined: hold.entry().is_some(),
                 }
             }
         };

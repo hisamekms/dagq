@@ -169,6 +169,14 @@ impl StubReviewer {
             models: Mutex::new(Vec::new()),
         }
     }
+    /// A first job that stops at Claude Code's usage limit (it prints the
+    /// limit and exits non-zero), then jobs that print `verdict`.
+    fn limited_then(verdict: &Value) -> Self {
+        Self {
+            verdicts: Mutex::new(vec![LIMIT.into(), verdict.to_string()]),
+            ..Self::new(&[])
+        }
+    }
     pub(crate) fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
     }
@@ -215,6 +223,8 @@ impl AgentProvider for StubReviewer {
         };
         let script = if verdict == "FAIL" {
             "echo 'model unavailable' >&2; exit 3".to_owned()
+        } else if verdict == LIMIT {
+            "printf 'Claude AI usage limit reached|1759000000\\n'; exit 1".to_owned()
         } else {
             format!("printf '%s\\n' '{verdict}'")
         };
@@ -239,6 +249,9 @@ impl AgentProvider for StubReviewer {
             .push((model.into(), effort.into()));
     }
 }
+
+/// The verdict of a [`StubReviewer`] job that stops at the usage limit.
+const LIMIT: &str = "LIMIT";
 
 /// Where [`StubReviewer`]'s jobs append their role and actor id, next to
 /// the queue.
@@ -1086,6 +1099,80 @@ fn a_revise_past_the_limit_is_a_concern() {
     let finished = events(&mut queue, task, "plan_review_finished");
     assert_eq!(finished[2]["verdict"], "revise");
     assert_eq!(finished[2]["decision"], "concern");
+}
+
+/// A plan review stopped at the usage limit is no `plan review by hand`
+/// (task 438): the job joins the queue's usage-limit `cost` ask, listed in
+/// its `affected`, and `usage_limited` is recorded on the queue. While the
+/// ask is open no plan review starts; `done` submits the proposal again.
+#[test]
+fn a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_done() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "limited", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let reviewer = StubReviewer::limited_then(
+        &json!({"verdict": "pass", "reasons": [], "summary": "fits the goal"}),
+    );
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(events(&mut queue, task, "plan_review_failed").len(), 1);
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let ask = &asks[0];
+    assert_eq!(ask.kind, AskKind::QueueHold);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::Cost);
+    assert_eq!(ask.subject.as_deref(), Some("usage_limit"));
+    let entry = format!("plan_review job of proposal {proposal}");
+    assert_eq!(ask.affected, std::slice::from_ref(&entry));
+    assert!(
+        ask.question.ends_with(&format!("\n\nAffected: {entry}")),
+        "{}",
+        ask.question
+    );
+    let limited: Vec<_> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "usage_limited")
+        .collect();
+    assert_eq!(limited.len(), 1, "{limited:?}");
+    assert_eq!(limited[0].task_id, None);
+    assert_eq!(limited[0].payload["job"], "plan_review");
+    assert_eq!(limited[0].payload["ask_id"], json!(ask.id));
+    // The ask is the attention, not the failed plan review.
+    let status_now = runtime::status(&fx.db).unwrap();
+    let kinds: Vec<&Value> = status_now["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| &a["kind"])
+        .collect();
+    assert!(
+        !kinds.contains(&&json!("plan_review_failed")),
+        "{status_now}"
+    );
+    assert!(kinds.contains(&&json!("ask_opened")), "{status_now}");
+    // Held: no plan review starts.
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(reviewer.prompts().len(), 1);
+    queue.answer(ask.id, "done").unwrap();
+    supervise(&fx, &backend, &reviewer);
+    assert_eq!(reviewer.prompts().len(), 2);
+    assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let applied: Vec<_> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "queue_hold_applied")
+        .collect();
+    assert_eq!(applied[0].payload["jobs"], json!([entry]));
+    assert_eq!(
+        applied[0].payload["restarted"],
+        json!([{"job": "plan_review", "proposal_id": proposal}])
+    );
 }
 
 #[test]

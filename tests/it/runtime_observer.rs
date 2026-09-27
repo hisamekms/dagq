@@ -420,6 +420,49 @@ fn gone(pid: u32) -> bool {
     true
 }
 
+/// An observer agent stopped at a login that ran out joins the queue's
+/// authentication ask as the observer job (task 438): `auth_required` on
+/// the queue, and `observe_finished` names the wall and the ask. A second
+/// one changes nothing.
+#[test]
+fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, _repo, db) = fixture();
+    let logged_out = ObserverProvider {
+        script: "printf 'Invalid API key \u{b7} Please run /login\\n'; exit 1".into(),
+    };
+    let first = observe(&db, &logged_out, &observe_options(ObserveMode::Daily)).unwrap();
+    assert_eq!(first["outcome"], "failed", "{first}");
+    assert_eq!(first["wall"], "authentication", "{first}");
+    let queue = SqliteQueue::open(&db).unwrap();
+    let asks = queue
+        .asks(AskQuery {
+            open: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].kind, AskKind::QueueHold);
+    assert_eq!(
+        asks[0].reason_category,
+        dagq::domain::AskReason::Authentication
+    );
+    assert_eq!(asks[0].affected, ["observer job"]);
+    assert_eq!(first["hold_ask_id"], json!(asks[0].id));
+    let required = queue_events(&db, "auth_required");
+    assert_eq!(required.len(), 1, "{required:?}");
+    assert_eq!(required[0]["job"], "observer");
+    let second = observe(&db, &logged_out, &observe_options(ObserveMode::Daily)).unwrap();
+    assert_eq!(second["hold_ask_id"], json!(asks[0].id), "{second}");
+    assert_eq!(queue_events(&db, "auth_required").len(), 1);
+    // A failure at no wall is no hold.
+    let failing = ObserverProvider {
+        script: "exit 7".into(),
+    };
+    let other = observe(&db, &failing, &observe_options(ObserveMode::Daily)).unwrap();
+    assert_eq!(other["wall"], Value::Null, "{other}");
+}
+
 /// The agent past its timeout is killed with what it started: its Bash
 /// child does not outlive the observation (task 245).
 #[test]

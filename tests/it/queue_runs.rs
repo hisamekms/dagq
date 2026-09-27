@@ -242,6 +242,7 @@ fn a_login_that_stops_several_runs_is_one_ask_that_lists_them() {
         reason_category: AskReason::Authentication,
         subject: None,
         run_id: Some(run.clone()),
+        job: None,
         question: "Log in again.".into(),
         options: HOLD_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
         asked_by: "supervisor".into(),
@@ -258,7 +259,10 @@ fn a_login_that_stops_several_runs_is_one_ask_that_lists_them() {
     assert_eq!(second.ask.affected, [runs[0].as_str(), runs[1].as_str()]);
     assert_eq!(
         second.ask.question,
-        format!("Log in again.\n\nAffected runs: {}, {}", runs[0], runs[1])
+        format!(
+            "Log in again.\n\nAffected: run {}, run {}",
+            runs[0], runs[1]
+        )
     );
     let again = queue.hold(hold(&runs[0])).unwrap();
     assert!(!again.created && !again.joined);

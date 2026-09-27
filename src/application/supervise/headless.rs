@@ -188,10 +188,6 @@ pub(super) fn provider_failure(mark: Option<TurnMark>) -> Option<TurnFailure> {
         })
 }
 
-/// The question of the usage-limit hold a headless turn opens; the runs it
-/// holds follow it.
-pub(super) const USAGE_LIMIT_QUESTION: &str = "The worker provider's usage limit was hit: a headless worker's turn failed at it. Only a person can wait it out or raise the limit: answer `done` once it is lifted, and the supervisor tells each held session to go on (its next turn) and starts again the headless jobs that failed at it. Answer `cancel_affected` to give the held runs up instead (the supervisor releases them as an abandon does, keeping their worktrees, and the inbox recovers them). Until then no new run is claimed and no headless job starts; the runs in flight keep their leases. More runs that hit the limit join this ask instead of opening another.";
-
 /// A headless session's last turn failed at its provider's login or usage
 /// limit (`failure`): the run joins the queue's hold of it, or opens it, as
 /// an interactive session stopped at a login does (ADR-0047 decision 42).
@@ -215,26 +211,13 @@ pub(super) fn raise_turn_failure(
         failure.as_str(),
         last["message"].as_str().unwrap_or("no message")
     );
-    if failure == TurnFailure::Authentication {
-        raise_auth(sv, run, workspace, &text)?;
-        return Ok(());
-    }
-    let (outcome, value) = ask::hold(
-        &mut *sv.queue,
-        &sv.layout.main_checkout,
-        NewHold {
-            reason_category: AskReason::Cost,
-            subject: Some(crate::domain::queue_hold::USAGE_LIMIT_SUBJECT.to_owned()),
-            run_id: Some(run.id().clone()),
-            question: USAGE_LIMIT_QUESTION.into(),
-            options: HOLD_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
-            asked_by: SessionRole::Supervisor.as_str().into(),
-        },
-        sv.cmux,
-    )?;
-    if outcome.joined {
-        warn!(ask_id = %outcome.ask.id, run_id = %run.id(), "run {}: {text}; usage-limit ask {} holds {} run(s) (notified: {})", run.id(), outcome.ask.id, outcome.ask.affected.len(), value["notified"]);
-    }
+    // The same hold, event and question as an interactive session's
+    // screen at the wall (task 438).
+    let wall = match failure {
+        TurnFailure::UsageLimit => Wall::UsageLimit,
+        _ => Wall::Authentication,
+    };
+    raise_wall(sv, run, workspace, &text, wall)?;
     Ok(())
 }
 
