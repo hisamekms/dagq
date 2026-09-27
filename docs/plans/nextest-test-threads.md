@@ -1,0 +1,153 @@
+---
+id: plan-nextest-test-threads
+type: plan
+title: NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方
+status: active
+created: 2026-09-27
+updated: 2026-09-27
+owners:
+  - hisamekms
+tags:
+  - performance
+  - testing
+  - measurement
+related:
+  - plan-nextest-measurement
+  - adr-0076
+  - adr-0049
+---
+
+# NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方
+
+task 566（2026-09-26に人がplannerと決めた）が`dagq.toml`の`[run.env]`の`RUST_TEST_THREADS`と`NEXTEST_TEST_THREADS`を4から8に上げた。その前後を比べるため、4の期間の基準値をこの文書に残す（task 565、goal 36のacceptance (4)）。変更後の測定は着地後の10 run以上がそろってから行い、この文書の6章の方法で比べて、8のままか6か4に戻すかを決める。この文書は値を変えない。
+
+## 要点
+
+- **期間**: 両方が4だったのは、task 518の着地（event 11911、2026-09-26 06:50:05Z）からtask 566の着地（`[run.env]`の変更の印 event 14148、11:11:59Z）まで。`--parallel`は3。
+- **llvm-covの段**（integrateの`cargo llvm-cov`／`cargo llvm-cov nextest`のコマンド1本）: 成功した17試行で中央値286秒（236〜355）。うちnextestは3件だけ（266・301・307秒）で、残り14件は旧コマンド（`RUST_TEST_THREADS=4`がbinaryの中のthread数に効く）。
+- **test段**: nextestの`Summary`は200・170・238秒（中央値200秒）。旧コマンドのbinaryごとの`finished in`の合計は中央値230秒（201〜278）。
+- **`backend_call_failed`**: 2件（どちらもcmuxの`exists`の`backend_timeout`で、retryで回復。exhaustedは0）。captureの時間切れは0件。
+- **integrateの検証の失敗によるresume（`verification_failed`）**: 1件（task 325）。llvm-covを流したrun 17件の5.9%。原因はmigrationの内容（`duplicate column name`）で、並列度や時間の上限とは関係ない。時間の上限を持つtestの失敗は0件。
+- **load1**（`metrics.csv`、約30秒ごと）: 期間全体で平均5.9・中央値4.9・p90 11.2・最大20.3。llvm-covの段ごとの平均の中央値は5.8（旧コマンド）。
+
+## 1. 期間の境界
+
+| 項目 | 値 |
+| --- | --- |
+| 始まり | task 518（884b3d5、`NEXTEST_TEST_THREADS = "4"`を足した）の`run_integrated`、event 11911（2026-09-26 06:50:05Z、15:50 JST）。`RUST_TEST_THREADS=4`はそれより前のtask 427の着地（event 10408、02:49Z）から効いている |
+| 終わり | task 566（6cdf238、2026-09-26 20:11:58 JST）の着地。`dagq marks`の`run_env_changed`「`[run.env]` changed: NEXTEST_TEST_THREADS, RUST_TEST_THREADS」がevent 14148（11:11:59Z）。566自身のverifyはfmtだけなので、どちらの期間の数字にも入らない |
+| statsの範囲 | `dagq stats --since 11911 --until 14148 --full`（run 20件、うちllvm-covを流したrun 17件） |
+| `--parallel` | 3（期間内の`supervisor_started`はすべて`parallel 3`） |
+| 対象 | 期間内に`verification_command`のeventがあるintegrateの試行（`phase: integration`）。docsだけのrun（494・537・566）はllvm-covを流さないので段の値に入らない |
+
+注意:
+
+- event 12608（08:49:58Z）の`run_env_changed`は、`[run.env]`の記録を始めたbuildの最初の記録で、値の変更ではない。
+- 518自身のverifyはnextestの既定（8並列）で流れたので、期間に入れていない（[nextest-measurement](nextest-measurement.md)の1章）。
+- 期間の前半（06:50〜09:30Z）は[nextest-measurement](nextest-measurement.md)の「後の期間」と重なる。値は同じ方法で取り直した。
+- 期間の中で比較の前提が変わった点: task 550（09:30Z、dev profileのdebug情報を減らした）、task 551（10:03Z、ADR-0078でintegration testを1つのbinary `it`にまとめた）。551より後の旧コマンドのrun（439・441・468）はtest段が201〜207秒で、前の旧コマンドのrun（中央値231秒）より短い。
+
+## 2. integrateのllvm-covの段とtest段の所要時間
+
+方法は[nextest-measurement](nextest-measurement.md)の2章と同じ。段の時間は同じ試行の直前のコマンド（clippy）の`verification_command` eventとllvm-covのeventの時刻の差、buildはlogの最後の``Finished `test` profile ... in``、test段はnextestでは`Summary [ … s]`、旧コマンドではbinaryごとの`finished in`の合計。loadは`~/.local/share/dagq-hostmetrics/metrics.csv`の`load1`の、段の間の平均と最大。
+
+| 区分 | 試行数 | llvm-covの段 中央値（範囲） | build 中央値（範囲） | test段 中央値（範囲） | load1 段の平均の中央値（範囲）／最大 |
+| --- | --- | --- | --- | --- | --- |
+| 全体（成功した試行） | 17 | 286秒（236〜355） | — | — | — |
+| 旧コマンド（`RUST_TEST_THREADS=4`） | 14 | 286秒（236〜355） | 36.5秒（25〜68） | 230秒（201〜278） | 5.8（2.9〜10.4）／14.7 |
+| nextest（`NEXTEST_TEST_THREADS=4`） | 3 | 301秒（266〜307） | 43秒（23〜62） | 200秒（170〜238） | 6.5（2.8〜13.0）／15.7 |
+
+`land_phases.verify`（fmt・clippyと全試行を含む）はllvm-covを流した17 runで中央値296秒（242〜372）。
+
+runごとの値（時刻はllvm-covの段の開始、JST）:
+
+| task | run | 開始 | コマンド | 段 | build | test段 | load1 平均／最大 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 196 | 902f96b2 | 15:55 | 旧 | 286 | 46 | 219 | 6.0／8.8 |
+| 197 | 498446c4 | 16:21 | 旧 | 285 | 32 | 231 | 6.7／9.8 |
+| 385 | b6d92d34 | 16:33 | 旧 | 297 | 35 | 242 | 6.4／7.8 |
+| 386 | 8d29f958 | 17:06 | 旧 | 286 | 35 | 229 | 4.8／5.8 |
+| 429 | 1b3e865b | 17:11 | 旧 | 271 | 31 | 223 | 2.9／4.4 |
+| 325（試行1、失敗） | 5ec4622a | 17:35 | 旧 | 74 | 32 | 37 | 6.2／6.7 |
+| 241 | dbafdbda | 17:36 | 旧 | 355 | 42 | 278 | 10.4／14.2 |
+| 514 | 489ef2d7 | 17:44 | 旧 | 287 | 45 | 224 | 4.2／7.0 |
+| 445 | 38532947 | 17:57 | 旧 | 300 | 38 | 242 | 5.5／9.5 |
+| 325（試行2） | 5ec4622a | 18:09 | 旧 | 283 | 31 | 231 | 3.7／5.5 |
+| 495 | 5ebae268 | 18:20 | 旧 | 319 | 54 | 243 | 6.1／12.2 |
+| 550 | b2f7b36f | 18:25 | nextest | 266 | 43 | 200 | 6.5／8.9 |
+| 362 | 1cf47dd2 | 18:47 | 旧 | 328 | 68 | 240 | 8.8／14.7 |
+| 551 | 92ffcda6 | 18:58 | nextest | 301 | 23 | 170 | 2.8／3.5 |
+| 439 | 518d0612 | 19:10 | 旧 | 236 | 25 | 207 | 6.4／9.9 |
+| 441 | ec828dc0 | 19:19 | 旧 | 251 | 35 | 201 | 4.4／5.6 |
+| 468 | fe884c5a | 19:34 | 旧 | 247 | 39 | 204 | 4.3／5.4 |
+| 496 | 47b0d7f2 | 19:53 | nextest | 307 | 62 | 238 | 13.0／15.7 |
+
+nextestの3件のtestごとの時間（`PASS [ … s]`の合計）と律速:
+
+| run | test数 | testごとの合計 | 合計÷4 | Summary | 最長のtest | test段の後（段−build−Summary） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 550 | 737 | 795.8秒 | 198.9秒 | 200.2秒 | 24.0秒 | 23秒 |
+| 551 | 739 | 676.5秒 | 169.1秒 | 169.8秒 | 20.8秒 | 109秒 |
+| 496 | 754 | 949.2秒 | 237.3秒 | 238.1秒 | 26.5秒 | 7秒 |
+
+3件ともSummaryは「合計÷並列度」と1%以内で一致する。8にすればtest段はおよそ半分（合計が同じなら85〜120秒）になる見込み。「test段の後」は7〜109秒とばらつき、並列度で縮めた分を打ち消しうる（task 564が中身を測る）。
+
+参考: `RUST_TEST_THREADS=4`だけが効いていた直前の期間（event 10408〜11911、旧コマンド15件）は、llvm-covの段が中央値272秒（214〜474）、test段が220秒（177〜318）、load1の段の平均の中央値が10.1（[nextest-measurement](nextest-measurement.md)の2章の「前」）。
+
+## 3. backend_call_failed
+
+`dagq events --after 11911 --all --full --kind backend_call_failed`（event 14148まで）と`dagq stats`の`backend_failures`:
+
+| 項目 | 値 |
+| --- | --- |
+| 件数 | 2（event 12674・12675、08:52Z） |
+| op | `exists` 2件（同じworkspaceの1回目と2回目の試行、`backend_timeout`、cmuxの`Command timed out`） |
+| retryで回復／使い切り | 2／0（`exhausted` 0） |
+| そのときのload_avg | 15.7・20.0（load帯 8-16が1件、16-32が1件）、slots 3 |
+
+## 4. integrateの検証の失敗によるresume
+
+| 項目 | 値 |
+| --- | --- |
+| `verification_failed`のresume | 1件（task 325、run 5ec4622a の試行1） |
+| 割合 | llvm-covを流したrun 17件の5.9%（期間のrun 20件の5%）。integrateのllvm-covの試行18回のうち失敗1回 |
+| 原因 | `tests/lifecycle_replace.rs`の`up_applies_compatible_migrations_and_refuses_breaking_ones`が`apply queue migration 37: duplicate column name: answered_by`で落ちた。変更の中身の失敗で、並列度・時間の上限・loadとは関係しない（試行2で着地） |
+| 時間の上限を持つtestの失敗 | 0件（`within`の時間切れ・timeoutで落ちたtestは無い。`stats`の`failed_tests.tests`も空） |
+| 他のresume | `rebase_conflict` 3件、`sent_back` 1件、`unknown` 1件（並列度とは関係しない） |
+
+## 5. loadとcmuxのcaptureの時間切れ
+
+| 項目 | 値 |
+| --- | --- |
+| load1（期間全体、`metrics.csv`の496標本、15:50〜20:11 JST） | 平均5.9、中央値4.9、p90 11.2、最大20.3 |
+| load1（llvm-covの段の間） | 段ごとの平均の中央値5.8（旧コマンド）、全試行の最大15.7（496） |
+| cmuxのcaptureの時間切れ | 0件（`backend_call_failed`の`op: capture`は無い） |
+| cmuxの他の時間切れ | `exists` 2件（3章） |
+
+goal 36の発端（並列4、target分離前の設定）では、load averageが最大151〜204、captureの時間切れが400件を超えていた（goal 36のnote 8718）。4の期間はそれより2桁小さい。
+
+## 6. 変更後に比べる方法と戻す目安
+
+### 測り方
+
+566の着地（event 14148）の後、llvm-covを流して着地したrunが10件以上そろったら、1〜5章と同じ指標を同じ方法で取る。
+
+- 範囲: `dagq stats --since 14148 --until <10件目以降の着地のevent> --full`。KPIの前後は`dagq kpi --compare 14148 --kind runtime`でも読む。
+- llvm-covの段・build・test段・test段の後: `verification_command` eventの時刻の差と`integrate-<試行>-verify-<N>.log`（2章の方法）。**旧コマンドとnextestを分けて比べる**（ADR-0076決定4で旧コマンドのtaskが残るため。旧コマンドは`RUST_TEST_THREADS`、nextestは`NEXTEST_TEST_THREADS`が効く）。nextestでは「合計÷8」とSummaryの一致も確かめる。
+- `backend_call_failed`: opごとの件数とload帯、`exhausted`。
+- `verification_failed`のresume: 件数とllvm-covを流したrun数に対する割合、失敗したtestの名前と原因（時間の上限・timeoutによる失敗か）。
+- load1とcaptureの時間切れ: `metrics.csv`の期間全体と段の間の平均・中央値・p90・最大、`op: capture`の件数。
+- 期間の中で他の変更（task 564など、test段の後やtestの待ちを変えるもの）が着地したら、その境界を書き、前後を分けて読む。
+
+### 判断の目安
+
+8のままにするのは、test段（nextest）の中央値が4の期間（200秒）より縮み、次のどれも悪化していないとき。
+
+次のどれかが起きたら6に戻し、6でも起きるなら4に戻す。
+
+- cmuxのcaptureの時間切れが出る（4の期間は0件）、または`backend_call_failed`がllvm-covの段と重なって増える（4の期間は2件でどれもretryで回復）、または`exhausted`が出る。
+- llvm-covの段の間のload1の平均の中央値が4の期間（5.8）の2倍程度（12前後）を超える、または最大が20（4の期間の期間全体の最大）を大きく超える。
+- 時間の上限を持つtest（`within`・各testのtimeout）の失敗で`verification_failed`のresumeが出る（4の期間は0件）。変更の中身による失敗（4章のtask 325のような）は数えない。
+- test段は縮んだが、llvm-covの段の全体が縮まない（test段の後が伸びて打ち消す）。このときは並列度ではなくtest段の後を先に見る（task 564）。
+
+値を戻すときは、`dagq.toml`の`[run.env]`の2つを同じ値にそろえ、AGENTS.mdの`dagq.toml`の項とこの文書に結果を書く。
