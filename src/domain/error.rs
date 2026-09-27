@@ -244,6 +244,17 @@ pub enum DomainError {
         glob: String,
         reason: &'static str,
     },
+    /// A row about a run that names no task: a run belongs to its task
+    /// (ADR-t876-1, the rule the `asks` and `run_events` CHECK held).
+    RunWithoutTask {
+        run_id: RunId,
+    },
+    /// A number below the least value `field` takes (ADR-t876-1).
+    BelowMinimum {
+        field: &'static str,
+        min: i64,
+        value: i64,
+    },
 }
 
 impl fmt::Display for DomainError {
@@ -344,6 +355,12 @@ impl fmt::Display for DomainError {
                 status.as_str()
             ),
             Self::Blank { field } => write!(f, "{field} must not be blank"),
+            Self::RunWithoutTask { run_id } => {
+                write!(f, "run {run_id} is written without its task")
+            }
+            Self::BelowMinimum { field, min, value } => {
+                write!(f, "{field} must be at least {min}, not {value}")
+            }
             Self::InvalidPathGlob { glob, reason } => {
                 write!(f, "invalid --paths glob {glob:?}: {reason}")
             }

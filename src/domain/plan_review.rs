@@ -16,6 +16,35 @@ string_enum!(PlanReviewDecision {
     Concern => "concern",
 });
 
+// How a plan review job's row ended (ADR-t876-1: the rule the
+// `plan_reviews.outcome` CHECK held): its verdict's decision, or `failed` /
+// `interrupted` when the job gave none.
+string_enum!(PlanReviewOutcome {
+    Pass => "pass",
+    Revise => "revise",
+    Concern => "concern",
+    Failed => "failed",
+    Interrupted => "interrupted",
+});
+
+impl From<PlanReviewDecision> for PlanReviewOutcome {
+    fn from(decision: PlanReviewDecision) -> Self {
+        match decision {
+            PlanReviewDecision::Pass => Self::Pass,
+            PlanReviewDecision::Revise => Self::Revise,
+            PlanReviewDecision::Concern => Self::Concern,
+        }
+    }
+}
+
+// Why a submitted proposal waits for a person instead of plan review
+// (ADR-t876-1: the rule the `proposals.review_hold` CHECK held): its job
+// failed, or its verdict was a concern.
+string_enum!(ReviewHold {
+    Failed => "failed",
+    Concern => "concern",
+});
+
 /// A fix plan review makes itself (ADR-0041 decision 11). Nothing else is
 /// the job's to change: rewriting a task, splitting it, removing a
 /// dependency or raising a priority is the planner's, through `revise`.

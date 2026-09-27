@@ -382,7 +382,7 @@ impl SqliteQueue {
         tx.execute(
             "INSERT INTO schema_floor(singleton, floor) VALUES (1, ?1)
              ON CONFLICT(singleton) DO UPDATE SET floor = excluded.floor",
-            [schema::floor_for(BINARY_SCHEMA)],
+            [schema::recorded_floor(BINARY_SCHEMA)?],
         )?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         let violations: i64 =

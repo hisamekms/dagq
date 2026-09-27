@@ -54,6 +54,15 @@ pub fn floor_for(version: i64) -> i64 {
         .unwrap_or(0)
 }
 
+/// The floor a queue at schema `version` records in `schema_floor`
+/// (ADR-t876-1: the rule its CHECK held): at least 1, since the first
+/// migration is breaking.
+pub fn recorded_floor(version: i64) -> Result<i64, crate::domain::DomainError> {
+    let floor = floor_for(version);
+    crate::domain::write_rules::check_at_least("schema floor", floor, 1)?;
+    Ok(floor)
+}
+
 /// Why `migration` may not be declared compatible: every statement that
 /// could break a binary unaware of it. Empty means the declaration holds.
 /// Allowed: `CREATE TABLE`, `CREATE VIRTUAL TABLE`, a non-unique `CREATE
@@ -353,6 +362,15 @@ mod tests {
         assert_eq!(floor_for(FLOOR_SCHEMA), FLOOR_SCHEMA);
         // Beyond what this binary knows, the floor stays at its last breaking one.
         assert_eq!(floor_for(BINARY_SCHEMA + 5), floor_for(BINARY_SCHEMA));
+    }
+
+    #[test]
+    fn a_floor_below_1_is_not_recorded() {
+        assert!(recorded_floor(0).is_err());
+        assert_eq!(
+            recorded_floor(BINARY_SCHEMA).unwrap(),
+            floor_for(BINARY_SCHEMA)
+        );
     }
 
     #[test]

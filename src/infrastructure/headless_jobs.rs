@@ -6,6 +6,7 @@ use rusqlite::{TransactionBehavior, params};
 
 use super::sqlite::SqliteQueue;
 use crate::domain::LeaseToken;
+use crate::domain::write_rules::check_non_blank;
 use crate::{
     application::{HeadlessJobRecord, HeadlessJobStore, NewHeadlessJob},
     domain::HEARTBEAT_TIMEOUT_SECS,
@@ -13,6 +14,7 @@ use crate::{
 
 impl HeadlessJobStore for SqliteQueue {
     fn record_headless_job(&self, job: &NewHeadlessJob) -> Result<i64> {
+        check_non_blank("headless job kind", job.kind)?;
         let now = self.generators.clock.now();
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
@@ -38,6 +40,7 @@ impl HeadlessJobStore for SqliteQueue {
     }
 
     fn end_headless_job(&self, id: i64, outcome: &str) -> Result<bool> {
+        check_non_blank("headless job outcome", outcome)?;
         let now = self.generators.clock.now();
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let ended = tx.execute(
@@ -172,5 +175,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome, "ended");
+    }
+
+    /// A blank kind or outcome is refused before the write (ADR-t876-1: the
+    /// rule the `headless_jobs` CHECK held), and nothing is recorded.
+    #[test]
+    fn a_blank_kind_or_outcome_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("me");
+        let blank = NewHeadlessJob {
+            kind: " ",
+            ..job(&token, 10)
+        };
+        let error = queue.record_headless_job(&blank).unwrap_err();
+        assert_eq!(error.to_string(), "headless job kind must not be blank");
+        let rows: i64 = queue
+            .conn
+            .query_row("SELECT count(*) FROM headless_jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        let id = queue.record_headless_job(&job(&token, 10)).unwrap();
+        let error = queue.end_headless_job(id, "").unwrap_err();
+        assert_eq!(error.to_string(), "headless job outcome must not be blank");
+        assert_eq!(
+            queue.orphaned_headless_jobs(&token, true).unwrap()[0].id,
+            id
+        );
     }
 }

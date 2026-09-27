@@ -4,7 +4,7 @@ use crate::common;
 
 use dagq::{
     application::{TaskQuery, TaskStore, dependency_graph},
-    domain::{ClaimOutcome, TaskAction, TaskId},
+    domain::{AskKind, AskReason, ClaimOutcome, NewAsk, NewTask, TaskAction, TaskId},
     infrastructure::{
         schema::{MIGRATIONS, floor_for},
         sqlite::{ReadOnlyQueue, SqliteQueue},
@@ -363,4 +363,57 @@ fn a_breaking_migration_waits_for_an_idle_queue() {
     // A second migrate has nothing left to do.
     let again = SqliteQueue::migrate(&path, Some(&alive), 0).unwrap();
     assert!(again.applied.is_empty() && again.backup.is_none());
+}
+
+/// The rules the CHECKs of `tasks`, `asks` and `run_events` held on their
+/// json and NULL pairs (ADR-t876-1) hold for what the ports write, read
+/// back from the rows instead of left to the CHECK.
+#[test]
+fn the_rows_the_ports_write_keep_the_check_rules() {
+    let (dir, mut queue) = fixture();
+    let task = queue
+        .add(NewTask {
+            verification_commands: vec!["cargo test".into()],
+            ..new_task("json")
+        })
+        .unwrap();
+    let ask = queue
+        .ask(NewAsk {
+            kind: AskKind::Blocked,
+            task_id: Some(task.id()),
+            run_id: None,
+            question: "go on?".into(),
+            options: vec!["yes".into(), "no".into()],
+            asked_by: "user".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask;
+    queue.answer(ask.id, "yes").unwrap();
+    drop(queue);
+    let conn = Connection::open(dir.path().join("queue.db")).unwrap();
+    for (rows, broken) in [
+        (
+            "SELECT count(*) FROM tasks",
+            "SELECT count(*) FROM tasks WHERE NOT json_valid(verification_commands)",
+        ),
+        (
+            "SELECT count(*) FROM asks",
+            "SELECT count(*) FROM asks WHERE NOT (json_valid(options)
+             AND json_type(options) = 'array' AND json_valid(affected)
+             AND json_type(affected) = 'array'
+             AND (answer IS NULL) = (answered_at IS NULL)
+             AND (run_id IS NULL OR task_id IS NOT NULL))",
+        ),
+        (
+            "SELECT count(*) FROM run_events",
+            "SELECT count(*) FROM run_events WHERE NOT (json_valid(payload)
+             AND (run_id IS NULL OR task_id IS NOT NULL))",
+        ),
+    ] {
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert!(count(rows) > 0, "{rows}");
+        assert_eq!(count(broken), 0, "{broken}");
+    }
 }

@@ -9,6 +9,7 @@ use serde_json::json;
 use super::adapters::process_alive;
 use super::sqlite::{SqliteQueue, enum_col, json_col};
 use crate::domain::Ask;
+use crate::domain::write_rules::check_run_has_task;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason,
     HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
@@ -891,6 +892,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
         (None, None) => None,
     };
     check_ask_kind(&ask.kind, task_id, ask.run_id.as_ref(), ask.reason_category)?;
+    check_run_has_task(task_id, ask.run_id.as_ref())?;
     if let Some(finding_id) = ask.finding_id {
         super::findings::read_finding(tx, finding_id)?;
     }
@@ -1017,6 +1019,7 @@ fn ask_event(
     payload: serde_json::Value,
 ) -> Result<()> {
     check_event_target(kind, task_id, None)?;
+    check_run_has_task(task_id, run_id)?;
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
@@ -1248,5 +1251,39 @@ mod tests {
         assert!(!queue.release_updates_on());
         assert_eq!(release(&mut queue, "install"), (false, false));
         assert_eq!(release_failed(&mut queue, "retry"), (false, false));
+    }
+
+    /// An update ask with a blank question is refused before the write
+    /// (ADR-t876-1: the rule the `asks.question` CHECK held).
+    #[test]
+    fn an_update_ask_with_a_blank_question_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let error = queue
+            .open_update_ask(
+                AskKind::UpdateFailed,
+                " \n",
+                UPDATE_FAILED_OPTIONS,
+                "runtime",
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "question must not be blank");
+        let rows: i64 = queue
+            .conn
+            .query_row("SELECT count(*) FROM asks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    /// An ask's event about a run that names no task is refused before the
+    /// write (ADR-t876-1: the rule the `run_events` CHECK held).
+    #[test]
+    fn an_ask_event_about_a_run_without_its_task_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let error = ask_event(&queue.conn, None, Some(&run), "ask_opened", json!({})).unwrap_err();
+        assert_eq!(error.to_string(), "run run-1 is written without its task");
     }
 }

@@ -2,6 +2,7 @@
 //! headless job (one unfinished at a time, queue-wide), the goals it may
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
+use crate::domain::write_rules::{check_at_least, check_non_blank};
 use crate::domain::{LeaseToken, event_kind};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -112,6 +113,7 @@ fn finish_row(
     verdict: Option<&Value>,
     error: Option<&str>,
 ) -> Result<()> {
+    check_non_blank("goal review outcome", outcome)?;
     conn.execute(
         "UPDATE goal_reviews SET finished_at=?2, outcome=?3, verdict=?4, error=?5
          WHERE id=?1 AND finished_at IS NULL",
@@ -318,6 +320,7 @@ impl GoalReviewStore for SqliteQueue {
             [goal],
             |r| r.get::<_, i64>(0),
         )? as usize;
+        check_at_least("goal review attempt", attempt as i64, 1)?;
         let gaps = gaps_in_a_row(&tx, goal)?;
         tx.execute(
             "INSERT INTO goal_reviews(goal_id, attempt, supervisor_token, fingerprint, started_at)
@@ -708,5 +711,20 @@ impl GoalReviewStore for SqliteQueue {
             "rearmed_goal_review_id": rearmed,
             "reviewable": reviewable,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A blank outcome is refused before the write (ADR-t876-1: the rule
+    /// the `goal_reviews` CHECK held).
+    #[test]
+    fn a_blank_outcome_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let error = finish_row(&queue.conn, 1, 0, " ", None, None).unwrap_err();
+        assert_eq!(error.to_string(), "goal review outcome must not be blank");
     }
 }

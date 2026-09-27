@@ -755,6 +755,7 @@ pub mod waiting;
 pub mod worker;
 pub mod worker_model;
 pub mod worktime;
+pub mod write_rules;
 
 pub use actor::{ActorContext, ActorRole, TrustLevel};
 pub use authorization::{AuthorizationError, Authorizer, Capability, Resource, StaticPolicy};

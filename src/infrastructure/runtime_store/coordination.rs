@@ -716,6 +716,39 @@ mod tests {
             .collect()
     }
 
+    /// A parallel below 1 is refused before the write (ADR-t876-1: the
+    /// rule the `supervisors.parallel` CHECK held), and the row keeps its
+    /// value.
+    #[test]
+    fn a_parallel_below_1_is_not_written() {
+        use crate::domain::slot_limits::{Setting, SettingSource, SlotLimits};
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("me");
+        assert!(queue.register_supervisor(&token, 1, 0, "0.0.1").is_err());
+        assert!(registered(&queue).is_empty());
+        queue.register_supervisor(&token, 1, 3, "0.0.1").unwrap();
+        let setting = |value| Setting {
+            value,
+            source: SettingSource::Flag,
+        };
+        let error = queue
+            .set_slot_limits(
+                &token,
+                SlotLimits {
+                    parallel: setting(0),
+                    max_waiting: setting(2),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "parallel must be at least 1");
+        let parallel: i64 = queue
+            .conn
+            .query_row("SELECT parallel FROM supervisors", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(parallel, 3);
+    }
+
     #[test]
     fn pruning_removes_the_row_and_records_its_stop_from_the_row() {
         let dir = tempfile::tempdir().unwrap();

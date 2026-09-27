@@ -890,6 +890,7 @@ fn insert_at(
     created_at: &str,
 ) -> Result<()> {
     crate::domain::check_event_target(kind, task_id, None)?;
+    crate::domain::write_rules::check_run_has_task(task_id, run_id)?;
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,kind,payload,created_at,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,?5,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
@@ -2244,5 +2245,29 @@ mod tests {
         assert_eq!(closed.payload["active_secs"], 20);
         assert_eq!(closed.created_at, millis_text(start + 30_000));
         assert_eq!(hook_workspaces(conn).unwrap().len(), 1);
+    }
+
+    /// An event about a run that names no task is refused before the write
+    /// (ADR-t876-1: the rule the `run_events` CHECK held).
+    #[test]
+    fn an_event_about_a_run_without_its_task_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let error = insert_at(
+            &queue.conn,
+            None,
+            Some(&run),
+            "supervisor_stopped",
+            &json!({}),
+            "2026-09-28T00:00:00.000Z",
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "run run-1 is written without its task");
+        let rows: i64 = queue
+            .conn
+            .query_row("SELECT count(*) FROM run_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 }

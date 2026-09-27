@@ -189,7 +189,72 @@ SQLiteの書き込みトランザクションとIMMEDIATEの挙動は[公式仕�
 - **規則の置き場所**: CHECKが持っていた規則（値の一覧、`json_valid` / `json_type`の形、`(answer IS NULL) = (answered_at IS NULL)`のようなNULLの組、`priority BETWEEN 0 AND 4`や`attempt >= 1`のような範囲、`length(trim(…)) > 0`の空文字の禁止、singletonなど）は、domainの型（値の一覧は`string_enum!`などの列挙）が表せないものを作れないようにし、型で表せないものはapplicationか書き込みのport（queueのportと`SqliteQueue`の実装）が書く前に検査して、破れていれば書かずにerrorにする。askとeventのkindに結び付いた規則（ADR-0073決定22）と同じ置き方である。規則ごとに違反を拒むtestを置く。
 - **読むとき**: askとeventの`kind`は知らない値を`AskKind::Other`などとして読み、errorにしない（ADR-0073決定21、[domain-model](domain-model.md)）。repositoryが名付けるlabelの`tasks.kind`（ADR-t624-1）も同じく寛容な側で、labelの形に合わない値はnullとして読む。それ以外の列で規則の外の値（知らない`status`、壊れたjson、NULLの組の食い違い、範囲外など）を読むと、その読み込みは`DomainError`（値の一覧なら`UnknownValue`）などのerrorで止まり、既定値や近い値に読み替えない。DBの行はその場で直さない。
 - **値を足すとき**: CHECKが無い列に値を足すのに表の作り直しは要らない。kindの列（`asks.kind`、`run_events.kind`）への追加はmigrationを要さない。それ以外の列（読む側がfail closedの列）への追加は、古いバイナリがその値を読めないので、今までどおり`-- dagq-schema: breaking`のmigrationで下限を上げる。表を作り直さず、宣言だけで下限を上げるmigrationでよい（[Database setup and migrations](#database-setup-and-migrations)の互換の宣言）。
-- **今の姿（2026-09-28）**: 移行はgoal 60の途中で、既存の表にはまだ約60のCHECKが残っている（`task_runs`は0049で外した）（`tasks`・`asks`・`run_events`・`goals`・`proposals`・`plan_reviews`・`findings`・`headless_jobs`・`goal_reviews`・`supervisors`・`planners`・`draft_origins`・`draft_reopens`・`binary_updates`・`schema_floor`・`queue_repository`・`run_processes`・`task_dependencies`など）。この文書の各表の説明に残る「CHECK」は、その規則が今はDBにもあることを示す。goal 60の後続のtaskが、(1) 全てのCHECKの規則がdomainかportにあることを違反を拒むtestで固定し、(2) 1本の非互換のmigrationで全ての表からCHECKを外し（0039・0029・0036と同じ作り直しで、id・index・trigger・viewを保つ。`sqlite_master`の`sql`にCHECKが無いことをtestで確かめる）、(3) 新しいmigrationにCHECKがあればファイルの名前つきで落とす検査を`scripts/check-migration-numbers.sh`に足す（CIも実行する）。migrationの番号と検査の文言は、それらが着地したときにこの節に書く。
+- **今の姿（2026-09-28）**: 移行はgoal 60の途中で、既存の表にはまだ56のCHECKが残っている（`task_runs`は0049で外した）（`tasks`・`asks`・`run_events`・`goals`・`proposals`・`plan_reviews`・`findings`・`headless_jobs`・`goal_reviews`・`supervisors`・`planners`・`draft_origins`・`draft_reopens`・`binary_updates`・`schema_floor`・`queue_repository`・`run_processes`・`task_dependencies`など）。この文書の各表の説明に残る「CHECK」は、その規則が今はDBにもあることを示す。(1) 全てのCHECKの規則がdomainかportにあることは、task 877が違反を拒むtestで固定した（下の[今のCHECKと規則の置き場所](#今のcheckと規則の置き場所)）。goal 60の後続のtaskが、(2) 1本の非互換のmigrationで全ての表からCHECKを外し（0039・0029・0036と同じ作り直しで、id・index・trigger・viewを保つ。`sqlite_master`の`sql`にCHECKが無いことをtestで確かめる）、(3) 新しいmigrationにCHECKがあればファイルの名前つきで落とす検査を`scripts/check-migration-numbers.sh`に足す（CIも実行する）。migrationの番号と検査の文言は、それらが着地したときにこの節に書く。
+
+#### 今のCHECKと規則の置き場所
+
+2026-09-28（task 877）に、最新のschema（全migrationを当てた空のqueueの`sqlite_master`の`sql`）の56個のCHECKを表と列ごとに洗い出し、同じ規則がdomainか書き込みのportにあることを確かめた。CHECKの失敗（`SQLITE_CONSTRAINT_CHECK`）のerrorに頼って分岐するコードは`src/`に無い。「守る場所」の**型**は、portがその型の値からしか書かないので違反を作れないもの（`string_enum!`の値の一覧は`as_str()`で書き、parseは一覧の外の値を`UnknownValue`で拒む）、**構造**は、portの書き方（SQLの定数、同じ文で両方の列を書く、`count(*)+1`、`serde_json`で型の値を直列化した文字列）で違反を書けないものを指す。書く前の検査で型に表せない規則は`domain::write_rules`（`check_run_has_task`・`check_non_blank`・`check_at_least`）が持つ。testは違反をCHECKに届く前に拒むもの（domainかportの検査を直接呼ぶunit test、またはCHECKに頼らずにportが書いた行を読んで確かめるintegration test）で、CHECKを外したschemaでもそのまま通る。`write_rules::tests::each_listed_column_refuses_a_value_outside_its_list`（下の表では「一覧のtest」）は値の一覧を持つ列の型のparseを全部まとめて確かめる。`queue_schema::the_rows_the_ports_write_keep_the_check_rules`（「行のtest」）はportが書いた`tasks`・`asks`・`run_events`の行のjsonとNULLの組をSQLで読んで確かめる。
+
+| 表 | CHECK | 守る場所 | test |
+|---|---|---|---|
+| `tasks` | `length(trim(title)) > 0` | `NewTask::validate`・`TaskEdit::validate`（`domain/input.rs`。Rustの`trim`は全ての空白を落とすのでCHECKより厳しい） | `task::tests::a_new_task_is_a_draft_with_each_check_and_glob_once`、`task::tests::edit_replaces_the_given_fields_of_a_draft_or_submitted_task_only`、`queue_dependencies::invalid_registration_rolls_back_task_dependencies_and_events` |
+| `tasks` | `json_valid(verification_commands)` | 構造（`Vec<String>`を`serde_json`で書く。空のcommandは`validate`が拒む） | 行のtest |
+| `tasks` | `status IN (…)` | 型`TaskStatus` | 一覧のtest |
+| `tasks` | `priority BETWEEN 0 AND 4` | 型`Priority`（`as_i64`は0〜4、`from_i64`は範囲外を拒む） | 一覧のtest、`domain::tests::a_priority_is_a_name_ordered_low_to_interrupt_and_stored_as_0_to_4` |
+| `tasks` | `worker_provider IS NULL OR IN ('claude','codex')` | 型`Provider` | 一覧のtest、`worker::tests::a_task_without_a_worker_runs_claude_interactively` |
+| `tasks` | `worker_mode IS NULL OR IN ('interactive','headless')` | 型`WorkerMode`（`Worker::new`はcodexのinteractiveも拒む） | 一覧のtest |
+| `task_dependencies` | `task_id <> predecessor_id` | `task::check_not_self`（`insert_dependency`の前） | `task::tests::a_dependency_is_neither_on_itself_nor_a_cycle`、`queue_dependencies::dependencies_reject_self_cycles_and_missing_tasks_and_can_be_removed` |
+| `goals` | `length(trim(title)) > 0` | `NewGoal::validate`・`goal::edit` | `goal::tests::a_new_goal_is_open_or_a_draft_and_not_closed`、`goal::tests::an_edit_replaces_the_given_fields` |
+| `goals` | `verdict IN ('achieved','abandoned')` | 型`GoalVerdict` | 一覧のtest |
+| `goals` | `status IN ('draft','open')` | 型`GoalStatus` | 一覧のtest |
+| `goals` | `(closed_at IS NULL) = (verdict IS NULL)` | `goal::close`が両方を決め、`close_goal_in`が同じ文で書く（`Goal::restore`は読むときに確かめる） | `goal::tests::a_goal_closes_once_and_only_when_its_tasks_allow_the_verdict`、`goal::tests::restore_checks_the_id_title_and_close` |
+| `proposals` | `status IN (…)` | 型`ProposalStatus` | 一覧のtest |
+| `proposals` | `owner_origin IN ('person','runtime')` | 型`PlannerOrigin` | 一覧のtest |
+| `proposals` | `revise_count >= 0` | 型（`u32`） | —（負の値を作れない） |
+| `proposals` | `review_hold IS NULL OR IN ('failed','concern')` | 型`plan_review::ReviewHold`（task 877で文字列から型にした。読むときも型にparseし、知らない値はerror） | 一覧のtest |
+| `planners` | `origin IN ('person','runtime')` | 型`PlannerOrigin` | 一覧のtest |
+| `draft_origins` | `origin IN ('follow_up','goal_gap')` | 型`DraftOrigin`と、`record_draft_origin`が`reopened`を書く前に拒む検査 | 一覧のtest、`draft_planners::tests::a_withdrawn_reopen_gives_its_task_origin_reopened` |
+| `draft_origins` | `json_valid(material) AND json_type(material) = 'object'` | `record_draft_origin`の`material.is_object()`の検査（goal gapは`json!({…})`で構造） | `draft_planners::tests::an_origin_is_recorded_once_for_a_draft_with_an_object` |
+| `draft_reopens` | `json_valid(material)` | 構造（`serde_json::Value`を直列化） | —（不正なjsonを作れない） |
+| `asks` | `length(kind) > 0` | `check_ask_kind`（知らないkindを拒み、既知のkindは空でない） | `domain::tests::unknown_ask_kinds_are_read_but_not_parsed_or_written` |
+| `asks` | `length(trim(question)) > 0` | `NewAsk::validate`・`NewHold::validate`・`open_update_ask`の検査 | `domain::tests::new_ask_rejects_blank_texts_and_bad_ids`、`asks::tests::an_update_ask_with_a_blank_question_is_not_written` |
+| `asks` | `options`がjsonの配列 | 構造（`Vec<String>`を直列化） | 行のtest |
+| `asks` | `reason_category IN (…)` | 型`AskReason` | 一覧のtest |
+| `asks` | `affected`がjsonの配列 | 構造（`Vec<String>`を直列化） | 行のtest |
+| `asks` | `(answer IS NULL) = (answered_at IS NULL)` | 構造（`write_answer`だけが両方を同じ文で書く） | 行のtest |
+| `asks` | `run_id IS NULL OR task_id IS NOT NULL` | `write_rules::check_run_has_task`（`insert_ask`。taskはrunから引く） | `write_rules::tests::a_row_about_a_run_is_refused_without_its_task`、行のtest |
+| `run_events` | `json_valid(payload)` | 構造（`serde_json::Value`を直列化） | 行のtest |
+| `run_events` | `run_id IS NULL OR task_id IS NOT NULL` | `write_rules::check_run_has_task`（`sessions::insert_at`・`asks::ask_event`・`findings::finding_event`。`sqlite::event`は`TaskId`を必ず取る） | `sessions::tests::an_event_about_a_run_without_its_task_is_not_written`、`asks::tests::an_ask_event_about_a_run_without_its_task_is_not_written`、行のtest |
+| `findings` | `length(kind) BETWEEN 1 AND 64` | `NewFinding::validate`（64 byte以下のASCIIのslug） | `finding::tests::a_finding_needs_a_slug_kind_a_summary_and_positive_evidence` |
+| `findings` | `target IN (…)` | 型`FindingTarget`（`name()`） | —（列挙の外を作れない） |
+| `findings` | `length(trim(summary)) > 0` | `NewFinding::validate` | `finding::tests::a_finding_needs_a_slug_kind_a_summary_and_positive_evidence` |
+| `findings` | `impact IN ('high','normal','low')` | 型`Impact` | 一覧のtest |
+| `findings` | `occurrences >= 1` | 構造（挿入は定数1、統合は`+= 1`） | `finding::tests::new_evidence_is_one_more_occurrence_and_nothing_new_changes_nothing` |
+| `findings` | `evidence`がjsonの配列 | 構造（`Vec<EventId>`を直列化。IDの正と存在は`validate`とportが確かめる） | `finding::tests::a_finding_needs_a_slug_kind_a_summary_and_positive_evidence` |
+| `findings` | `status IN (…)` | 型`FindingStatus` | 一覧のtest |
+| `findings` | targetごとの`task_id`・`run_id`・`goal_id`の組 | `findings::resolve_target`（`FindingTarget`ごとに組を決め、無い対象をerrorにする） | `queue_goals::findings_on_a_run_or_a_goal_ride_on_their_target` |
+| `findings` | `(propose_reason IS NULL) = (propose_requested_at IS NULL)` | 構造（どの書き込みも両方を同じ文で書く）と、`validate`が空の理由を拒む検査 | `finding::tests::a_finding_needs_a_slug_kind_a_summary_and_positive_evidence` |
+| `binary_updates` | `json_valid(payload)` | 書く場所が無い（表は残すが書かず読まない） | —（書き込みが無い） |
+| `plan_reviews` | `attempt >= 1` | `write_rules::check_at_least`（`count(*)+1`の後） | `write_rules::tests::a_number_below_its_least_value_is_refused` |
+| `plan_reviews` | `outcome IS NULL OR IN (…)` | 型`plan_review::PlanReviewOutcome`（task 877で`finish_row`の`&str`から型にした） | 一覧のtest |
+| `plan_reviews` | `verdict IS NULL OR json_valid(verdict)` | 構造（`Value::to_string`） | —（不正なjsonを作れない） |
+| `plan_reviews` | `(finished_at IS NULL) = (outcome IS NULL)` | 構造（`finish_row`が両方を同じ文で書き、挿入はどちらも書かない） | —（片方だけを書く口が無い） |
+| `goal_reviews` | `attempt >= 1` | `write_rules::check_at_least` | `write_rules::tests::a_number_below_its_least_value_is_refused` |
+| `goal_reviews` | `outcome IS NULL OR length(outcome) > 0` | `write_rules::check_non_blank`（`finish_row`。空白だけの値も拒むのでCHECKより厳しいが、書くのは定数だけ） | `goal_reviews::tests::a_blank_outcome_is_not_written` |
+| `goal_reviews` | `verdict IS NULL OR json_valid(verdict)` | 構造（`Value::to_string`） | —（不正なjsonを作れない） |
+| `goal_reviews` | `(finished_at IS NULL) = (outcome IS NULL)` | 構造（`plan_reviews`と同じ） | —（片方だけを書く口が無い） |
+| `headless_jobs` | `length(kind) > 0` | `write_rules::check_non_blank`（`record_headless_job`。空白だけの値も拒むのでCHECKより厳しいが、書くのは定数だけ） | `headless_jobs::tests::a_blank_kind_or_outcome_is_not_written` |
+| `headless_jobs` | `attempt >= 0` | 型（`usize`） | —（負の値を作れない） |
+| `headless_jobs` | `outcome IS NULL OR length(outcome) > 0` | `write_rules::check_non_blank`（`end_headless_job`。空白だけの値も拒むのでCHECKより厳しいが、書くのは定数だけ） | `headless_jobs::tests::a_blank_kind_or_outcome_is_not_written` |
+| `headless_jobs` | `(ended_at IS NULL) = (outcome IS NULL)` | 構造（`end_headless_job`が両方を同じ文で書く） | —（片方だけを書く口が無い） |
+| `supervisors` | `parallel >= 1` | `register_supervisor`・`set_slot_limits`の検査（`supervise`・`up`・`compose`・`[supervisor]`の読み込みも拒む） | `coordination::tests::a_parallel_below_1_is_not_written`、`run_env::tests::parses_and_loads_the_supervisor_table` |
+| `supervisors` | `mode IS NULL OR IN ('launchd','in_cmux')` | 型`SupervisorMode` | 一覧のtest |
+| `run_processes` | `role IN ('wrapper','agent')` | 構造（SQLの定数） | —（値を変える入力が無い） |
+| `queue_repository` | `singleton = 1` | 構造（SQLの定数1） | —（値を変える入力が無い） |
+| `schema_floor` | `singleton = 1` | 構造（SQLの定数1） | —（値を変える入力が無い） |
+| `schema_floor` | `floor >= 1` | `schema::recorded_floor`（`write_rules::check_at_least`） | `schema::tests::a_floor_below_1_is_not_recorded` |
+
+「—」の行は、portが受け取る型か書き方の上で違反を表せず、拒む対象の入力が無いものである。CHECKに頼るtestは、CHECKを外すtaskが書き直す: `queue_tasks::priority_is_stored_changed_while_editable_and_checked_by_the_schema`（生のSQLで範囲外のpriorityを書き`CHECK constraint failed`を確かめる）、`queue_migration`の`migration_to_v7_adds_the_supervisor_registry_and_keeps_leases`（生のSQLの`parallel`と`mode`）・`migration_from_v6_adds_goals_and_keeps_tasks_runs_and_events`（`reason_category`の一覧、taskの無いrunのevent、`closed_at`の無い`verdict`）・`goals_of_a_version_12_queue_migrate_as_open`（`goals.status`）・`migration_to_v21_keeps_drafts_and_the_task_id_sequence`（`tasks.status`）。これらは最新のschemaに生のSQLで書いてCHECKの失敗を確かめる。
 
 ## Queue location
 

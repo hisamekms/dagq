@@ -5,6 +5,7 @@
 //! in one transaction. Events go to the first task of the proposal, since
 //! an event needs a task or a goal.
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
+use crate::domain::write_rules::check_at_least;
 use crate::domain::{LeaseToken, event_kind};
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -30,6 +31,7 @@ use crate::{
         PlanReviewCandidate, PlanReviewDecision, PlannerId, Priority, ProposalId, ProposalStatus,
         TaskAction, TaskId, TaskStatus,
         plan_quality::{self, ProposalFeatures},
+        plan_review::{PlanReviewOutcome, ReviewHold},
         prediction, proposal,
         sessions::SESSION_CLOSED,
         task,
@@ -46,18 +48,19 @@ fn anchor(conn: &Connection, proposal_id: ProposalId) -> Result<TaskId> {
     .with_context(|| format!("proposal {proposal_id} has no task"))
 }
 
-fn hold(conn: &Connection, proposal_id: ProposalId) -> Result<Option<String>> {
-    Ok(conn.query_row(
+fn hold(conn: &Connection, proposal_id: ProposalId) -> Result<Option<ReviewHold>> {
+    let hold: Option<String> = conn.query_row(
         "SELECT review_hold FROM proposals WHERE id=?1",
         [proposal_id],
         |r| r.get(0),
-    )?)
+    )?;
+    Ok(hold.map(|hold| hold.parse()).transpose()?)
 }
 
-fn set_hold(conn: &Connection, proposal_id: ProposalId, hold: Option<&str>) -> Result<()> {
+fn set_hold(conn: &Connection, proposal_id: ProposalId, hold: Option<ReviewHold>) -> Result<()> {
     conn.execute(
         "UPDATE proposals SET review_hold=?2 WHERE id=?1",
-        params![proposal_id, hold],
+        params![proposal_id, hold.map(ReviewHold::as_str)],
     )?;
     Ok(())
 }
@@ -92,14 +95,20 @@ fn finish_row(
     conn: &Connection,
     id: i64,
     now: i64,
-    outcome: &str,
+    outcome: PlanReviewOutcome,
     verdict: Option<&Value>,
     error: Option<&str>,
 ) -> Result<()> {
     conn.execute(
         "UPDATE plan_reviews SET finished_at=?2, outcome=?3, verdict=?4, error=?5
          WHERE id=?1 AND finished_at IS NULL",
-        params![id, now, outcome, verdict.map(Value::to_string), error],
+        params![
+            id,
+            now,
+            outcome.as_str(),
+            verdict.map(Value::to_string),
+            error
+        ],
     )?;
     Ok(())
 }
@@ -342,7 +351,7 @@ pub(super) fn plan_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> R
     };
     Ok(
         proposals::read(conn, proposal_id)?.status() == ProposalStatus::Submitted
-            && hold(conn, proposal_id)?.as_deref() == Some("concern"),
+            && hold(conn, proposal_id)? == Some(ReviewHold::Concern),
     )
 }
 
@@ -483,7 +492,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 id,
                 now,
-                "interrupted",
+                PlanReviewOutcome::Interrupted,
                 None,
                 Some("its supervisor is gone"),
             )?;
@@ -500,6 +509,7 @@ impl PlanReviewStore for SqliteQueue {
             [proposal_id],
             |r| r.get::<_, i64>(0),
         )? as usize;
+        check_at_least("plan review attempt", attempt as i64, 1)?;
         tx.execute(
             "INSERT INTO plan_reviews(proposal_id, attempt, supervisor_token, started_at)
              VALUES (?1, ?2, ?3, ?4)",
@@ -561,7 +571,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 job.id,
                 now,
-                "interrupted",
+                PlanReviewOutcome::Interrupted,
                 Some(&verdict_json),
                 Some("the proposal moved on during its review"),
             )?;
@@ -581,7 +591,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 job.id,
                 now,
-                "interrupted",
+                PlanReviewOutcome::Interrupted,
                 Some(&verdict_json),
                 Some(&error),
             )?;
@@ -662,7 +672,7 @@ impl PlanReviewStore for SqliteQueue {
                 await_delivery(&tx, job.proposal_id, &apply.revise_reasons, now)?;
             }
             PlanReviewDecision::Concern => {
-                set_hold(&tx, job.proposal_id, Some("concern"))?;
+                set_hold(&tx, job.proposal_id, Some(ReviewHold::Concern))?;
                 let ask = apply
                     .ask
                     .as_ref()
@@ -688,7 +698,7 @@ impl PlanReviewStore for SqliteQueue {
             &tx,
             job.id,
             now,
-            apply.decision.as_str(),
+            apply.decision.into(),
             Some(&verdict_json),
             None,
         )?;
@@ -740,7 +750,14 @@ impl PlanReviewStore for SqliteQueue {
             return Ok(());
         }
         if !reviewable(&tx, job.proposal_id)? {
-            finish_row(&tx, job.id, now, "interrupted", None, Some(error))?;
+            finish_row(
+                &tx,
+                job.id,
+                now,
+                PlanReviewOutcome::Interrupted,
+                None,
+                Some(error),
+            )?;
             sessions::close_plan_review(&tx, job.id, false)?;
             tx.commit()?;
             return Ok(());
@@ -751,7 +768,14 @@ impl PlanReviewStore for SqliteQueue {
             // unreviewed, so the next pass reviews them instead of holding
             // the proposal for a person.
             let error = format!("{error}; {}", edited_error(&edited));
-            finish_row(&tx, job.id, now, "interrupted", None, Some(&error))?;
+            finish_row(
+                &tx,
+                job.id,
+                now,
+                PlanReviewOutcome::Interrupted,
+                None,
+                Some(&error),
+            )?;
             sessions::close_plan_review(&tx, job.id, false)?;
             event(
                 &tx,
@@ -770,8 +794,15 @@ impl PlanReviewStore for SqliteQueue {
             tx.commit()?;
             return Ok(());
         }
-        finish_row(&tx, job.id, now, "failed", None, Some(error))?;
-        set_hold(&tx, job.proposal_id, Some("failed"))?;
+        finish_row(
+            &tx,
+            job.id,
+            now,
+            PlanReviewOutcome::Failed,
+            None,
+            Some(error),
+        )?;
+        set_hold(&tx, job.proposal_id, Some(ReviewHold::Failed))?;
         event(
             &tx,
             job.anchor,
