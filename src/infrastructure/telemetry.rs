@@ -10,6 +10,10 @@
 //! start record and panics, which the default panic hook already prints) go
 //! to the file only. A file that cannot be opened or written leaves the
 //! process running on stderr alone.
+//!
+//! Opening a file also prunes the directory: log files of this runtime
+//! last written more than [`LOG_RETENTION`] ago are removed, except those
+//! of a process that is still alive.
 
 use std::{
     fmt,
@@ -18,7 +22,7 @@ use std::{
     panic,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Map, Value, json};
@@ -36,6 +40,9 @@ use tracing_subscriber::{
 /// The target prefix of events written to the file only.
 pub const FILE_ONLY_TARGET: &str = "dagq::telemetry";
 
+/// How long a log file is kept after it was last written: 14 days.
+pub const LOG_RETENTION: Duration = Duration::from_secs(14 * 86_400);
+
 /// Where the records of one process go.
 pub struct Telemetry {
     pub dispatch: Dispatch,
@@ -46,11 +53,13 @@ pub struct Telemetry {
 impl Telemetry {
     /// Records to `<log_dir>/<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`
     /// (the directory created if missing) and messages to stderr. The
-    /// file starts with a record of the process, its pid and version. A
-    /// file that cannot be opened is reported on stderr once, and the
-    /// process goes on with stderr alone.
+    /// file starts with a record of the process, its pid and version.
+    /// Log files older than [`LOG_RETENTION`] are pruned first (see
+    /// [`prune_logs`]). A file that cannot be opened is reported on stderr
+    /// once, and the process goes on with stderr alone.
     pub fn open(log_dir: &Path, process: &str) -> Self {
         let now = SystemTime::now();
+        let pruned = prune_logs(log_dir, now, LOG_RETENTION);
         let pid = std::process::id();
         let path = log_dir.join(format!("{process}-{}-{pid}.jsonl", file_stamp(now)));
         let opened = fs::create_dir_all(log_dir)
@@ -65,7 +74,17 @@ impl Telemetry {
                         pid,
                         version = crate::VERSION,
                         "dagq {process} started"
-                    )
+                    );
+                    if !pruned.is_empty() {
+                        tracing::info!(
+                            target: FILE_ONLY_TARGET,
+                            removed = pruned.len(),
+                            retention_days = LOG_RETENTION.as_secs() / 86_400,
+                            "removed {} log files last written more than {} days ago",
+                            pruned.len(),
+                            LOG_RETENTION.as_secs() / 86_400
+                        );
+                    }
                 });
                 telemetry
             }
@@ -126,6 +145,79 @@ impl Telemetry {
         }
         self.path
     }
+}
+
+/// Remove from `log_dir` the log files this runtime wrote (a
+/// names [`log_file_owner`] knows) whose last write is more than
+/// `retention` before `now`, unless the process of the pid in the name is
+/// still alive (a quiet supervisor keeps writing to its file). Other files
+/// (`launchd.log`, `rebind.jsonl`, a person's notes) are left alone. Failures are
+/// ignored: pruning never stops a process. Returns the removed paths.
+pub fn prune_logs(log_dir: &Path, now: SystemTime, retention: Duration) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(owner) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(log_file_owner)
+        else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let stale = metadata.is_file()
+            && metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > retention);
+        if stale
+            && !owner.is_some_and(crate::infrastructure::adapters::process_alive)
+            && fs::remove_file(&path).is_ok()
+        {
+            removed.push(path);
+        }
+    }
+    removed.sort();
+    removed
+}
+
+/// Whether a file name is one this runtime writes in `logs/`, and then
+/// the pid of the process writing it, if the name has one:
+/// `<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, an older binary's
+/// `supervisor-<unix time>-<pid>.log`, or an update job's
+/// `update-<unix time>-<commit>.{log,build.log,json}` (no pid).
+fn log_file_owner(name: &str) -> Option<Option<u32>> {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    if let Some(stem) = name.strip_suffix(".jsonl") {
+        let (rest, pid) = stem.rsplit_once('-')?;
+        let (process, stamp) = rest.rsplit_once('-')?;
+        let stamp_ok = stamp.len() == 16
+            && digits(&stamp[..8])
+            && stamp.as_bytes()[8] == b'T'
+            && digits(&stamp[9..15])
+            && stamp.ends_with('Z');
+        return (!process.is_empty() && stamp_ok && digits(pid)).then(|| pid.parse().ok());
+    }
+    if let Some(stem) = name
+        .strip_prefix("supervisor-")
+        .and_then(|rest| rest.strip_suffix(".log"))
+    {
+        let (started_at, pid) = stem.rsplit_once('-')?;
+        return (digits(started_at) && digits(pid)).then(|| pid.parse().ok());
+    }
+    let stem = name.strip_prefix("update-")?;
+    let stem = [".build.log", ".log", ".json"]
+        .iter()
+        .find_map(|suffix| stem.strip_suffix(suffix))?;
+    let (at, commit) = stem.split_once('-')?;
+    (digits(at) && !commit.is_empty() && commit.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then_some(None)
 }
 
 /// Also record a panic, with its thread and location, before the default
@@ -445,6 +537,95 @@ mod tests {
         assert_eq!(lines[0]["fields"]["pid"], pid);
         assert_eq!(lines[0]["fields"]["version"], crate::VERSION);
         assert_eq!(lines[1]["message"], "file only");
+    }
+
+    #[test]
+    fn log_files_past_the_retention_are_pruned_unless_their_process_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path();
+        let dead = u32::MAX; // no process has this pid
+        let alive = std::process::id();
+        let old = SystemTime::now() - LOG_RETENTION - Duration::from_secs(60);
+        let names = [
+            format!("integrate-20260901T000000Z-{dead}.jsonl"),
+            format!("supervisor-1756684800-{dead}.log"),
+            format!("supervise-20260901T000000Z-{alive}.jsonl"),
+            format!("session-20260926T000000Z-{dead}.jsonl"),
+            "launchd.log".to_owned(),
+            "notes.jsonl".to_owned(),
+            "update-1756684800-0123456789ab.build.log".to_owned(),
+        ];
+        for (index, name) in names.iter().enumerate() {
+            let file = fs::File::create(logs.join(name)).unwrap();
+            if index != 3 {
+                file.set_modified(old).unwrap();
+            }
+        }
+        fs::create_dir(logs.join(format!("dir-20260901T000000Z-{dead}.jsonl"))).unwrap();
+
+        let telemetry = Telemetry::open(logs, "observe");
+
+        let mut left: Vec<String> = fs::read_dir(logs)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with("observe-"))
+            .collect();
+        left.sort();
+        let mut expected = vec![
+            names[2].clone(),
+            names[3].clone(),
+            names[4].clone(),
+            names[5].clone(),
+            format!("dir-20260901T000000Z-{dead}.jsonl"),
+        ];
+        expected.sort();
+        assert_eq!(left, expected);
+        let records: Vec<Value> = fs::read_to_string(telemetry.path.unwrap())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records[1]["fields"]["removed"], 3);
+        assert_eq!(records[1]["fields"]["retention_days"], 14);
+        assert_eq!(
+            records[1]["message"],
+            "removed 3 log files last written more than 14 days ago"
+        );
+        assert!(prune_logs(&logs.join("missing"), SystemTime::now(), LOG_RETENTION).is_empty());
+    }
+
+    #[test]
+    fn only_names_this_runtime_writes_are_pruned() {
+        let owner = log_file_owner;
+        assert_eq!(owner("integrate-20260901T000000Z-42.jsonl"), Some(Some(42)));
+        assert_eq!(
+            owner("planner-session-20260901T000000Z-7.jsonl"),
+            Some(Some(7))
+        );
+        assert_eq!(owner("supervisor-1756684800-9.log"), Some(Some(9)));
+        assert_eq!(owner("update-1756684800-0123456789ab.log"), Some(None));
+        assert_eq!(
+            owner("update-1756684800-0123456789ab.build.log"),
+            Some(None)
+        );
+        assert_eq!(owner("update-1756684800-0123456789ab.json"), Some(None));
+        for name in [
+            "launchd.log",
+            "rebind.jsonl",
+            "other-1-2.log",
+            "x-1.jsonl",
+            "-20260901T000000Z-1.jsonl",
+            "x-20260901T000000Z-.jsonl",
+            "notes-2026-1.jsonl",
+            "x-20260901X000000Z-1.jsonl",
+            "x-20260901T000000Z-pid.jsonl",
+            "supervisor-abc-1.log",
+            "update-1756684800-notes.log",
+            "update-x-0123.json",
+            "update-1756684800.log",
+        ] {
+            assert_eq!(owner(name), None, "{name}");
+        }
     }
 
     #[test]
