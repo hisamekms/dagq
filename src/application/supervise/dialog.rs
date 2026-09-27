@@ -142,6 +142,33 @@ pub(super) fn answer_exit_dialog(
     }
 }
 
+/// Answer the Settings panel on `screen` around a submit into `run`'s
+/// session (ADR-0047 decision 31, task 480): typed into, the panel would
+/// take the input, so it is closed first ([`answer_known_dialog`]), once in
+/// the stage. Another dialog gets nothing here: "Background work is
+/// running" after a `/exit` is left to its exit timeout
+/// ([`answer_exit_dialog`]), and one not on the list to its recovery job.
+/// Returns whether keys were sent; a record that fails is only noted, since
+/// the input may have been typed already.
+pub(super) fn answer_send_dialog(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    workspace: &str,
+    screen: &str,
+) -> bool {
+    if !sv
+        .signals
+        .known_dialog(screen)
+        .is_some_and(|answer| answer.dialog == KnownDialog::SettingsPanel)
+    {
+        return false;
+    }
+    answer_known_dialog(sv, run, workspace, screen, false, None).unwrap_or_else(|error| {
+        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the dialog over the input box of {} could not be answered: {error:#}", run.id());
+        false
+    })
+}
+
 /// `auto_repaired`'s `repair` of a dialog the runtime answered by rule.
 const DIALOG_ANSWERED: &str = "dialog_answered";
 

@@ -4,8 +4,8 @@ type: design
 title: "ダイアログ待ちの検知"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -29,7 +29,7 @@ ADR-0047の決定29の固定の一覧にあるダイアログは、安全の条�
   - **Settingsのパネル**（`settings_panel`、`/status`・`/usage`など）: `Settings:`で始まり、タブ名（`Status` / `Config` / `Usage`）を2つ以上含む行と、その下に`Esc to`で始まる行がある。キーは`escape`。
   - それ以外（trust、権限、auto mode、選択肢の無い・`❯`の無い・`Exit and stop tasks`の無い確認画面）は`None`で、キーは送らない。
 - **条件**: `background_work`は、supervisorが`/exit`を打った後（exit timeoutでの読み取り。`ResumeWatch`がresumeのtimeoutでダイアログの上に`/exit`を打たなかったときは満たさない）で、worktreeがclean（`Repository::status`が空）、かつreceipt（run idが一致するもの）の`commit`がworktreeのHEADのときだけ。`settings_panel`は段を問わない（条件は空）。
-- **いつ読むか**: (1) `/exit`のexit timeout（`ExitWatch`、`SessionWatch`のwrapperが黙ったときの`/exit`、`ResumeWatch`）で、`exit_request_timed_out`や`stuck_exit`のaskの前に画面を読む（`answer_exit_dialog`）。ここで扱うのは`background_work`だけで、Settingsのパネルは閉じても`/exit`は打ち直されないのでexit timeoutのまま進む。キーを送ったらexit timeoutを数え直し、それでも終わらなければ今までどおり`exit_request_timed_out`と`stuck_exit`のaskになる。(2) 上の`prompt_waiting`の読み取りで、`detect_prompt`より先に見る。(3) receiptの無いidleの促し（[idle-without-receipt](idle-without-receipt.md)）の前の画面の読み取りで、パネルが開いていればEscで閉じ、促しは次のtickに回す。
+- **いつ読むか**: (1) `/exit`のexit timeout（`ExitWatch`、`SessionWatch`のwrapperが黙ったときの`/exit`、`ResumeWatch`）で、`exit_request_timed_out`や`stuck_exit`のaskの前に画面を読む（`answer_exit_dialog`）。ここで扱うのは`background_work`だけで、Settingsのパネルは閉じても`/exit`は打ち直されないのでexit timeoutのまま進む。キーを送ったらexit timeoutを数え直し、それでも終わらなければ今までどおり`exit_request_timed_out`と`stuck_exit`のaskになる。(2) 上の`prompt_waiting`の読み取りで、`detect_prompt`より先に見る。(3) receiptの無いidleの促し（[idle-without-receipt](idle-without-receipt.md)）の前の画面の読み取りで、パネルが開いていればEscで閉じ、促しは次のtickに回す。(4) 生きているsessionへの送信（`submit`。文面と`/exit`。[session-send](session-send.md)の1・2、task 480）で、打つ前に画面を1回読み、Settingsのパネルが開いていればEscで閉じてから打つ。打った後の確認の読み取りでパネルが出ていれば、Escで閉じて確認を続ける（入力欄に残っていればEnterだけを送り直す。`/exit`は打ち直さない）。ここで扱うのはSettingsのパネルだけで、`/exit`の後の`background_work`は(1)のexit timeoutに任せる（`exit_requested`の段より前に答えると段ごとに1回の数えがずれるため）。キーを送るのは1回の送信で1回まで。(5) 送信の作業の兆候の読み取り（`StartCheck`。session-sendの3）で、兆候の判定より先に見る（条件は`exit_requested: false`）。キーを送ったら確認（Enterだけの送り直し）をやり直し、兆候の待ちを最初から数え直す。パネルが文面を取ってしまい入力欄が空なら、次の読み取りで依頼の消失として1回だけ送り直す。ダイアログが残れば今までどおり`submit_not_started`（`dialog`）になる。
 - **記録**: キーを送ったら`auto_repaired`（`layer: runtime`、`repair: dialog_answered`、`dialog`、`keys`、`conditions`（`exit_requested`、`clean`、`head`、`receipt_commit`。パネルは`{}`）、`detail`（`workspace_id`、`excerpt`=末尾15行））を記録する。条件がそろわないか、キーの送信に失敗したら`known_dialog_unanswered`（`dialog`、`conditions`、`error`、`workspace_id`、`excerpt`）を記録し、今までの経路（`prompt_waiting`と`answer_prompt`のask、exit timeoutの`stuck_exit`のask）に進む。
 - **回数**: 1つのダイアログは段（最後の`agent_started` / `resume_started` / `revise_requested` / `exit_requested`の後）ごとに1回だけ扱う。同じ段に`auto_repaired`（`dialog_answered`）か`known_dialog_unanswered`が同じ`dialog`であれば、2回目のキーも記録も無く、今までの経路に進む。
 - キーは`WorkspaceBackend::send_key`（cmuxは`cmux send-key --workspace <id> -- <key>`）で送る。

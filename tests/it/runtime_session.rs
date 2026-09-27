@@ -1341,6 +1341,174 @@ fn a_settings_panel_is_closed_with_escape() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
 }
 
+/// [`ASKING_AGENT`] that holds after taking its answer until `$EXIT.go`.
+const HOLDING_ASKING_AGENT: &str = r#"
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
+idle
+while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+cp "$MESSAGE" answer.txt
+git add answer.txt
+git commit -q -m answer
+receipt "$(git rev-parse HEAD)"
+idle
+await_exit
+"#;
+
+/// Runs `script` (an [`ASKING_AGENT`]) until its question is asked, sets
+/// the screen to `before` (and the one the typed answer leaves to `after`,
+/// or the submit's confirmation to `after_confirm`),
+/// answers it and lets the worker go idle, and returns once `until` held
+/// and the run went on to its end (`$EXIT.go` written): the backend, the
+/// run's events and the supervisor's outcome. `quick_confirm` has the
+/// send confirmed after 1 second (`[stall].send_confirm_secs`).
+fn answer_over(
+    script: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+    after_confirm: Option<&str>,
+    quick_confirm: bool,
+    until: impl Fn(&mut SqliteQueue) -> bool,
+) -> (Arc<TestWorkspace>, dagq::domain::TaskDetail, Value) {
+    let (_dir, repo, db) = fixture();
+    if quick_confirm {
+        fs::write(repo.join("dagq.toml"), "[stall]\nsend_confirm_secs = 1\n").unwrap();
+    }
+    let backend = TestWorkspace::new(&db, false, script);
+    *backend.screen_after_text.lock().unwrap() = after.map(str::to_owned);
+    *backend.screen_after_confirm.lock().unwrap() = after_confirm.map(str::to_owned);
+    let backend = Arc::new(backend);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !queue.asks(Default::default()).unwrap().is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = queue.asks(Default::default()).unwrap().remove(0);
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    if let Some(before) = before {
+        *backend.screen.lock().unwrap() = before.into();
+    }
+    queue.answer(ask.id, "use blue").unwrap();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("idle"),
+        "",
+    )
+    .unwrap();
+    wait_until(&db, Duration::from_secs(30), until);
+    // The session goes back to work, and the run to its end.
+    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    (backend, detail, outcome)
+}
+
+fn has_event(queue: &mut SqliteQueue, kind: &str) -> bool {
+    event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&kind)
+}
+
+/// A Settings panel open over the input box when the supervisor is to type
+/// is closed with Escape first (ADR-0047 decisions 29 and 31, task 480), so
+/// the answer goes to the session instead of the panel, typed once.
+#[test]
+fn an_answer_is_typed_after_the_settings_panel_over_the_box_is_closed() {
+    let (backend, detail, outcome) = answer_over(
+        ASKING_AGENT,
+        Some(SETTINGS_SCREEN),
+        None,
+        None,
+        false,
+        |queue| has_event(queue, "ask_delivered"),
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    assert_eq!(*backend.keys.lock().unwrap(), ["escape"]);
+    assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
+    let position = |kind: &str| detail.events.iter().position(|e| e.kind == kind).unwrap();
+    assert!(position("auto_repaired") < position("ask_delivered"));
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["repair"], "dialog_answered");
+    assert_eq!(repaired[0]["dialog"], "settings_panel");
+    assert!(payloads(&detail, "prompt_waiting").is_empty());
+    assert!(payloads(&detail, "submit_not_started").is_empty());
+}
+
+/// A Settings panel that came up over the answer just typed is closed with
+/// Escape and the answer is confirmed as delivered, with no ask.
+#[test]
+fn a_settings_panel_over_a_typed_answer_is_closed_with_escape() {
+    let (backend, detail, outcome) = answer_over(
+        ASKING_AGENT,
+        None,
+        Some(SETTINGS_SCREEN),
+        None,
+        false,
+        |queue| has_event(queue, "ask_delivered"),
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    assert_eq!(*backend.keys.lock().unwrap(), ["escape"]);
+    assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["dialog"], "settings_panel");
+    assert!(payloads(&detail, "submit_unconfirmed").is_empty());
+}
+
+/// A Settings panel that came up after the typed answer was confirmed is
+/// closed with Escape when the session shows no sign of it within
+/// `send_confirm_secs` ([`StartCheck`]), instead of `submit_not_started`.
+#[test]
+fn a_settings_panel_found_by_the_start_check_is_closed_with_escape() {
+    let (backend, detail, outcome) = answer_over(
+        HOLDING_ASKING_AGENT,
+        None,
+        None,
+        Some(SETTINGS_SCREEN),
+        true,
+        |queue| has_event(queue, "auto_repaired"),
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    assert_eq!(*backend.keys.lock().unwrap(), ["escape"]);
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["dialog"], "settings_panel");
+    assert!(payloads(&detail, "submit_not_started").is_empty());
+}
+
+/// A dialog not on the list that came up over the typed answer gets no key:
+/// the session shows no sign of the answer, `submit_not_started` with the
+/// dialog, as before.
+#[test]
+fn an_unknown_dialog_over_a_typed_answer_gets_no_key() {
+    let (backend, detail, outcome) = answer_over(
+        HOLDING_ASKING_AGENT,
+        None,
+        Some(DIALOG_SCREEN),
+        None,
+        true,
+        |queue| has_event(queue, "submit_not_started"),
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(backend.keys.lock().unwrap().is_empty());
+    assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
+    let not_started = payloads(&detail, "submit_not_started");
+    assert_eq!(not_started[0]["dialog"], "choice", "{not_started:?}");
+    assert!(payloads(&detail, "auto_repaired").is_empty());
+    assert!(payloads(&detail, "known_dialog_unanswered").is_empty());
+}
+
 /// An unanswered `/exit` is recorded once and raised as one `stuck_exit` ask
 /// to the inbox, notified once through the ask path, but the supervisor
 /// keeps the lease and keeps watching: when the session ends later, the ask

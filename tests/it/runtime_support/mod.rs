@@ -591,6 +591,15 @@ pub struct TestWorkspace {
     /// the "Background work is running" screen lets a held session exit,
     /// and Escape closes the Settings panel.
     pub keys: Mutex<Vec<String>>,
+    /// The screen the next `send_text` leaves, once: a dialog that came up
+    /// over the text the supervisor typed (task 480).
+    pub screen_after_text: Mutex<Option<String>>,
+    /// The screen the first capture after the next `send_text` leaves, once:
+    /// that capture (the submit's confirmation) still shows the text taken,
+    /// and a later one (the send's start check) shows this.
+    pub screen_after_confirm: Mutex<Option<String>>,
+    /// [`Self::screen_after_confirm`] armed by a `send_text`.
+    armed_screen: Mutex<Option<String>>,
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
     pub headless: Option<PathBuf>,
@@ -636,6 +645,9 @@ impl TestWorkspace {
             close_ends_session: false,
             close_times_out: false,
             keys: Mutex::new(Vec::new()),
+            screen_after_text: Mutex::new(None),
+            screen_after_confirm: Mutex::new(None),
+            armed_screen: Mutex::new(None),
             headless: None,
         }
     }
@@ -891,6 +903,12 @@ impl WorkspaceBackend for TestWorkspace {
         if *screen == READY_SCREEN {
             *screen = WORKING_SCREEN.into();
         }
+        if let Some(after) = self.screen_after_text.lock().unwrap().take() {
+            *screen = after;
+        }
+        if let Some(after) = self.screen_after_confirm.lock().unwrap().take() {
+            *self.armed_screen.lock().unwrap() = Some(after);
+        }
         drop(screen);
         let path = resume_message_path(&self.session_run_dir(workspace_id));
         fs::write(path.with_extension("tmp"), text)?;
@@ -939,7 +957,12 @@ impl WorkspaceBackend for TestWorkspace {
         {
             bail!("cmux read-screen failed: Error: Command timed out");
         }
-        Ok(self.screen.lock().unwrap().clone())
+        let mut screen = self.screen.lock().unwrap();
+        let read = screen.clone();
+        if let Some(after) = self.armed_screen.lock().unwrap().take() {
+            *screen = after;
+        }
+        Ok(read)
     }
     fn retry_backoff(&self) -> Duration {
         Duration::from_millis(10)

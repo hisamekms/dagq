@@ -68,6 +68,12 @@ impl Submission {
     }
 }
 
+/// Answers a known dialog on a session's screen by rule (ADR-0047 decision
+/// 29): whether keys were sent to it; a screen without one gets nothing.
+/// The supervisor's closes the Settings panel ([`answer_send_dialog`]),
+/// which is no dialog to [`AgentSignals::detect_prompt`].
+pub(super) type DialogAnswerer<'b> = &'b mut dyn FnMut(&str) -> bool;
+
 /// Type `input` into the session in `workspace` and read the screen
 /// every `submit_check_interval`: while the input box still holds it (and
 /// no dialog is up) Enter alone is sent again, at most
@@ -86,6 +92,34 @@ pub(super) fn submit_input(
     workspace: &str,
     input: Input<'_>,
 ) -> Result<(Submission, usize)> {
+    submit_input_answering(cmux, signals, workspace, input, None)
+}
+
+/// [`submit_input`], with `answer` given the screens read (task 480): a
+/// dialog up before the input is typed is answered first, so the input
+/// does not go into it, and one that came up after it is answered once,
+/// after which the input is confirmed as before (Enter alone while it is in
+/// the box; a `/exit` is never typed again). A dialog `answer` sends
+/// nothing to is [`Submission::Dialog`], as without it.
+pub(super) fn submit_input_answering(
+    cmux: &dyn WorkspaceBackend,
+    signals: &dyn AgentSignals,
+    workspace: &str,
+    input: Input<'_>,
+    mut answer: Option<DialogAnswerer<'_>>,
+) -> Result<(Submission, usize)> {
+    if let Some(answer_now) = answer.as_deref_mut()
+        && let Ok(screen) = cmux.capture(workspace)
+        && answer_now(&screen)
+    {
+        info!(
+            "a dialog in workspace {workspace} was answered before the {} was typed",
+            input.name()
+        );
+        thread::sleep(cmux.submit_check_interval());
+        // At most one answer per submit.
+        answer = None;
+    }
     let typed = match input {
         Input::Text(text) => cmux.send_text(workspace, text),
         Input::Exit => cmux.send_exit_when(workspace, &|screen| exit_unsent_on(signals, screen)),
@@ -112,6 +146,21 @@ pub(super) fn submit_input(
             _ => return Err(error),
         },
     }
+    Ok(confirm_input(cmux, signals, workspace, input, answer))
+}
+
+/// Read the screen after `input` was typed every `submit_check_interval`
+/// and send Enter alone while the input box holds it, at most
+/// [`SUBMIT_RETRIES`] times. The screens are given to `answer` until it
+/// sends keys once, after which the reads go on; a dialog it did not
+/// answer is [`Submission::Dialog`].
+pub(super) fn confirm_input(
+    cmux: &dyn WorkspaceBackend,
+    signals: &dyn AgentSignals,
+    workspace: &str,
+    input: Input<'_>,
+    mut answer: Option<DialogAnswerer<'_>>,
+) -> (Submission, usize) {
     let mut retries = 0;
     loop {
         thread::sleep(cmux.submit_check_interval());
@@ -119,21 +168,29 @@ pub(super) fn submit_input(
             Ok(screen) => screen,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "screen of workspace {workspace} could not be read after a submit: {error:#}");
-                return Ok((Submission::Submitted(None), retries));
+                return (Submission::Submitted(None), retries);
             }
         };
+        if answer.as_deref_mut().is_some_and(|answer| answer(&screen)) {
+            info!(
+                "a dialog in workspace {workspace} was answered after the {} was typed; reading the screen for it again",
+                input.name()
+            );
+            answer = None;
+            continue;
+        }
         if signals.detect_prompt(&screen).is_some() {
-            return Ok((Submission::Dialog(screen), retries));
+            return (Submission::Dialog(screen), retries);
         }
         if !signals.input_pending(&screen, input.text()) {
-            return Ok((Submission::Submitted(Some(screen)), retries));
+            return (Submission::Submitted(Some(screen)), retries);
         }
         if retries == SUBMIT_RETRIES {
-            return Ok((Submission::Stuck(screen), retries));
+            return (Submission::Stuck(screen), retries);
         }
         if let Err(error) = cmux.send_enter(workspace) {
             warn!(error = %format_args!("{error:#}"), "Enter could not be sent again to workspace {workspace}: {error:#}");
-            return Ok((Submission::Stuck(screen), retries));
+            return (Submission::Stuck(screen), retries);
         }
         retries += 1;
     }
@@ -154,7 +211,8 @@ fn exit_unsent_on(signals: &dyn AgentSignals, screen: &str) -> bool {
 /// watch hands to its recovery job (a `/exit` becomes the `stuck_exit`
 /// alert of its exit timeout). An error is only a failed typing: the input
 /// was typed once it returns, so a record that fails after it is only
-/// noted.
+/// noted. The Settings panel over the input box, before or after the
+/// typing, is closed by rule ([`answer_send_dialog`]; task 480).
 pub(super) fn submit(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
@@ -167,7 +225,27 @@ pub(super) fn submit(
     if headless(run) {
         return request_turn(sv, run, workspace, input, what);
     }
-    let (submission, retries) = submit_input(sv.cmux, sv.signals, workspace, input)?;
+    let (cmux, signals) = (sv.cmux, sv.signals);
+    let mut answer = |screen: &str| answer_send_dialog(sv, run, workspace, screen);
+    let (submission, retries) =
+        submit_input_answering(cmux, signals, workspace, input, Some(&mut answer))?;
+    record_submission(sv, run, workspace, input, what, &submission, retries);
+    Ok(submission)
+}
+
+/// Record what [`submit_input`] did with `input` into `run`'s session:
+/// Enters sent again as `submit_retried` (and `auto_repaired` when they got
+/// it through), an input still in the box as `submit_unconfirmed`. A
+/// record that fails is only noted.
+pub(super) fn record_submission(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    workspace: &str,
+    input: Input<'_>,
+    what: &str,
+    submission: &Submission,
+    retries: usize,
+) {
     let note = |sv: &mut Supervisor<'_>, kind: &str, payload: Value| {
         if let Err(error) = sv.queue.record_runtime_event(run.id(), kind, payload) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{kind} of {} could not be recorded: {error:#}", run.id());
@@ -202,7 +280,7 @@ pub(super) fn submit(
             );
         }
     }
-    if let Submission::Stuck(screen) = &submission {
+    if let Submission::Stuck(screen) = submission {
         let excerpt = sv.signals.screen_excerpt(screen);
         note(
             sv,
@@ -217,7 +295,6 @@ pub(super) fn submit(
         );
         warn!(run_id = %run.id(), "{what} is still in the input box of workspace {workspace} after {retries} Enters");
     }
-    Ok(submission)
 }
 
 /// Raise a resumed session whose input box never got ready for its request
@@ -434,25 +511,18 @@ impl StartCheck {
                 return Ok(());
             }
         };
+        // A known dialog is answered by rule (ADR-0047 decisions 29 and 31,
+        // task 480): the text is then confirmed again (Enter alone while it
+        // is in the box) and the wait starts over.
+        if answer_known_dialog(sv, run, workspace, &screen, false, None)? {
+            return self.confirm_after_dialog(sv, run, workspace);
+        }
         let sign = start_sign(sv.signals, &screen, self.submitted.as_deref(), &self.text);
         let excerpt = sv.signals.screen_excerpt(&screen);
         match sign {
             StartSign::Started => self.done = true,
             StartSign::Dialog(kind) => {
-                self.done = true;
-                sv.queue.record_runtime_event(
-                    run.id(),
-                    "submit_not_started",
-                    json!({
-                        "workspace_id": workspace,
-                        "what": self.what,
-                        "waited_secs": wait.as_secs(),
-                        "resent": self.resent,
-                        "dialog": kind,
-                        "excerpt": excerpt,
-                    }),
-                )?;
-                warn!(run_id = %run.id(), "a {kind} dialog came up in the session of {} after the {}; its recovery job looks at it", run.id(), self.what);
+                return self.not_started_at_dialog(sv, run, workspace, kind, &excerpt);
             }
             StartSign::Lost if !self.resent => {
                 sv.queue.record_runtime_event(
@@ -488,6 +558,69 @@ impl StartCheck {
                 warn!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s; its recovery job looks at it", run.id(), self.what, wait.as_secs());
             }
         }
+        Ok(())
+    }
+
+    /// Confirm the text again once a known dialog over the session was
+    /// answered: Enter alone while it is in the box ([`confirm_input`]),
+    /// recorded as [`submit`] records it. A dialog still up is
+    /// `submit_not_started`; otherwise the check starts over from now, a
+    /// text the dialog took then sent once more like any lost one.
+    fn confirm_after_dialog(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+    ) -> Result<()> {
+        let text = self.text.clone();
+        let what = self.what.clone();
+        let input = Input::Text(&text);
+        let (submission, retries) = confirm_input(sv.cmux, sv.signals, workspace, input, None);
+        record_submission(sv, run, workspace, input, &what, &submission, retries);
+        if let Submission::Dialog(after) = &submission {
+            let kind = sv.signals.detect_prompt(after).unwrap_or("dialog");
+            let excerpt = sv.signals.screen_excerpt(after);
+            return self.not_started_at_dialog(sv, run, workspace, kind, &excerpt);
+        }
+        // Work the transcript shows since the send, under the dialog, is the
+        // text taken.
+        if let Submission::Submitted(Some(after)) = &submission
+            && start_sign(sv.signals, after, self.submitted.as_deref(), &text) == StartSign::Started
+        {
+            self.done = true;
+            return Ok(());
+        }
+        info!(run_id = %run.id(), "the dialog over the session of {} after the {what} was answered; waiting again for a sign of it", run.id());
+        let resent = self.resent;
+        *self = Self::new(&what, &text, sv.files.now(), &submission);
+        self.resent = resent;
+        Ok(())
+    }
+
+    /// A dialog holds the session after the send: `submit_not_started` with
+    /// its kind, which the session's recovery job looks at.
+    fn not_started_at_dialog(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        kind: &str,
+        excerpt: &str,
+    ) -> Result<()> {
+        self.done = true;
+        sv.queue.record_runtime_event(
+            run.id(),
+            event_kind::SUBMIT_NOT_STARTED,
+            json!({
+                "workspace_id": workspace,
+                "what": self.what,
+                "waited_secs": confirm_wait(&sv.stall).as_secs(),
+                "resent": self.resent,
+                "dialog": kind,
+                "excerpt": excerpt,
+            }),
+        )?;
+        warn!(run_id = %run.id(), "a {kind} dialog came up in the session of {} after the {}; its recovery job looks at it", run.id(), self.what);
         Ok(())
     }
 }
@@ -732,6 +865,82 @@ mod tests {
         let (submission, _, sent) = submitted(&["dialog"], Input::Text(TEXT));
         assert_eq!(submission.screen(), Some("dialog"));
         assert_eq!(sent, [TEXT]);
+    }
+
+    /// [`submit_input_answering`] over `screens` whose answerer closes a
+    /// `settings` screen with `<escape>` (a known dialog that
+    /// [`AgentSignals::detect_prompt`] does not see): the outcome, the
+    /// Enters sent again, what was sent and the screens given to it.
+    fn answered(
+        screens: &[&str],
+        input: Input<'_>,
+    ) -> (Submission, usize, Vec<String>, Vec<String>) {
+        let backend = Backend::new(screens);
+        let mut seen = Vec::new();
+        let mut answer = |screen: &str| {
+            seen.push(screen.to_owned());
+            let panel = word(screen) == "settings";
+            if panel {
+                backend.sent.lock().unwrap().push("<escape>".to_owned());
+            }
+            panel
+        };
+        let (submission, retries) =
+            submit_input_answering(&backend, &Signals, "ws", input, Some(&mut answer)).unwrap();
+        (submission, retries, backend.sent(), seen)
+    }
+
+    #[test]
+    fn a_settings_panel_over_the_box_is_closed_before_the_text_is_typed() {
+        let (submission, retries, sent, seen) =
+            answered(&["settings", "working"], Input::Text(TEXT));
+        assert_eq!(submission, Submission::Submitted(Some("working".into())));
+        assert_eq!(retries, 0);
+        assert_eq!(sent, ["<escape>", TEXT]);
+        // Answered, it is given no more screens.
+        assert_eq!(seen, ["settings"]);
+        // A screen with no known dialog gets nothing before the typing.
+        let (submission, _, sent, seen) = answered(&["ready", "working"], Input::Text(TEXT));
+        assert_eq!(submission, Submission::Submitted(Some("working".into())));
+        assert_eq!(sent, [TEXT]);
+        assert_eq!(seen, ["ready", "working"]);
+    }
+
+    #[test]
+    fn a_settings_panel_over_a_typed_input_is_closed_and_the_input_confirmed() {
+        let pending = format!("pending:{TEXT}");
+        let (submission, retries, sent, _) = answered(
+            &["ready", "settings", &pending, "working"],
+            Input::Text(TEXT),
+        );
+        assert_eq!(submission, Submission::Submitted(Some("working".into())));
+        assert_eq!(retries, 1);
+        // Enter alone goes again once the panel is gone; the text is typed once.
+        assert_eq!(sent, [TEXT, "<escape>", "<enter>"]);
+        // `/exit` the same, and never typed again.
+        let (submission, retries, sent, _) = answered(
+            &["ready", "settings", "pending:/exit", "ready"],
+            Input::Exit,
+        );
+        assert_eq!(submission, Submission::Submitted(Some("ready".into())));
+        assert_eq!(retries, 1);
+        assert_eq!(sent, ["/exit", "<escape>", "<enter>"]);
+    }
+
+    #[test]
+    fn a_dialog_is_answered_once_and_an_unknown_one_is_left_as_a_dialog() {
+        // The panel back after Escape is left to the reads: at most one
+        // answer per submit.
+        let (submission, _, sent, _) =
+            answered(&["ready", "settings", "settings|dialog"], Input::Text(TEXT));
+        assert_eq!(submission, Submission::Dialog("settings|dialog".into()));
+        assert_eq!(sent, [TEXT, "<escape>"]);
+        // A dialog the answerer does not know gets no key and no Enter.
+        let (submission, retries, sent, seen) = answered(&["ready", "dialog"], Input::Exit);
+        assert_eq!(submission, Submission::Dialog("dialog".into()));
+        assert_eq!(retries, 0);
+        assert_eq!(sent, ["/exit"]);
+        assert_eq!(seen, ["ready", "dialog"]);
     }
 
     #[test]
