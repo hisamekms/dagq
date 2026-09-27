@@ -14,11 +14,16 @@ use crate::domain::language::with_instruction;
 use crate::{
     application::{
         PlanReviewApply, PlanReviewJob, StatusFilter, TaskListItem, TaskQuery,
-        planner::{PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner, planner_view},
+        planner::{
+            PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
+            planner_view,
+        },
+        planner_idle_marker,
         prompt::{
             DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_TOOLS, PlanReviewMaterial,
             plan_review_prompt, plan_revise_request, precedent_line,
         },
+        screen_idle::{self, Inference, ScreenIdle},
     },
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
@@ -585,6 +590,7 @@ impl Supervisor<'_> {
                         plan_revise_request(proposal.id(), &revise.reasons),
                         self.verifier.language().as_ref(),
                     );
+                    self.stamp_planner_input(view);
                     if let Err(error) =
                         submit_input(self.cmux, self.signals, &workspace, Input::Text(&text))
                     {
@@ -665,6 +671,10 @@ impl Supervisor<'_> {
         }
     }
 
+    /// The planners not closed, each judged by [`planner_view`], the
+    /// captures of a screen standing in for a missing idle marker kept
+    /// (ADR-t803-1). A span the screen was first inferred idle over is
+    /// recorded as `idle_inferred` once.
     pub(super) fn planner_views(&self) -> Result<Vec<PlannerView>> {
         let probes = PlannerProbes {
             cmux: self.cmux,
@@ -673,12 +683,75 @@ impl Supervisor<'_> {
             signals: self.signals,
             clock: &*self.generators.clock,
             planners_dir: &self.layout.planners_dir,
+            screen_idle_secs: self.stall.screen_idle_secs,
+            screen_idle: ScreenIdle::Record(&self.screen_spans),
         };
-        self.queue
+        let views = self
+            .queue
             .planners(false)?
             .into_iter()
             .map(|planner| planner_view(&probes, planner))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        for view in &views {
+            if let Some(inference) = view.idle_inferred.filter(|inference| inference.unrecorded)
+                && let Err(error) = self.record_planner_idle_inferred(view, &inference)
+            {
+                // A queue that cannot take the event holds up nothing
+                // else; the next pass records it.
+                warn!(error = %format_args!("{error:#}"), "planner {}: idle_inferred could not be recorded: {error:#}", view.planner.id);
+            }
+        }
+        Ok(views)
+    }
+
+    /// Stamp a text the supervisor is about to type into the planner of
+    /// `view`, so a marker from before it no longer counts and the screen
+    /// span restarts (ADR-t803-1). A stamp that cannot be written is
+    /// logged: the typed text still changes the transcript the span keeps.
+    pub(super) fn stamp_planner_input(&self, view: &PlannerView) {
+        if let Err(error) =
+            screen_idle::record_supervisor_input(&*self.files, &planner_idle_marker(&view.dir))
+        {
+            warn!(error = %error, "planner {}: the stamp of the typed text could not be written: {error}", view.planner.id);
+        }
+    }
+
+    /// Record `idle_inferred` for the planner of `view`, with the line of
+    /// its agent's debug log that says its idle hook failed, if there is
+    /// one, and note its span recorded.
+    fn record_planner_idle_inferred(
+        &self,
+        view: &PlannerView,
+        inference: &Inference,
+    ) -> Result<()> {
+        let marker = planner_idle_marker(&view.dir);
+        let mut payload = json!({
+            "planner_id": view.planner.id,
+            "origin": view.planner.origin.as_str(),
+            "workspace_id": view.planner.workspace_id,
+            "source": inference.source,
+            "marker": inference.marker.as_str(),
+            "since": inference.since,
+            "observed_secs": inference.observed_secs,
+            "captures": inference.captures,
+        });
+        if let Some(line) = screen_idle::hook_failure(
+            &*self.files,
+            self.signals,
+            &view.dir.join(PLANNER_DEBUG_LOG),
+        ) {
+            payload["hook_error"] = json!(line);
+        }
+        self.queue
+            .record_queue_event(event_kind::IDLE_INFERRED, payload)?;
+        info!(
+            "planner {} has no fresh idle marker ({}); its screen looks idle since {}",
+            view.planner.id,
+            inference.marker.as_str(),
+            inference.since
+        );
+        self.screen_spans.mark_recorded(&*self.files, &marker);
+        Ok(())
     }
 
     /// Open a planner of the runtime's for `proposal` with its reasons.

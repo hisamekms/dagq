@@ -81,8 +81,13 @@ impl RunFiles for MemoryFiles {
     fn rename(&self, _: &Path, _: &Path) -> io::Result<()> {
         unimplemented!("no test renames a run file")
     }
-    fn remove_file(&self, _: &Path) -> io::Result<()> {
-        unimplemented!("no test removes a run file")
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .remove(path)
+            .map(drop)
+            .ok_or_else(missing)
     }
     fn tree_size(&self, _: &Path) -> io::Result<Option<u64>> {
         Ok(None)

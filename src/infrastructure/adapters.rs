@@ -2342,7 +2342,11 @@ impl AgentProvider for ClaudeCode {
         command
             .current_dir(planner.cwd)
             .arg("--debug-file")
-            .arg(planner.dir.join("claude.log"))
+            .arg(
+                planner
+                    .dir
+                    .join(crate::application::planner::PLANNER_DEBUG_LOG),
+            )
             .arg("--add-dir")
             .arg(planner.dir)
             .arg("--settings")

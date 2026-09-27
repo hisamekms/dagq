@@ -47,8 +47,10 @@ pub const PLANNER_STARTUP_SECS: i64 = 120;
 
 /// What was looked at to judge a planner: whether cmux still lists its
 /// workspace, whether its wrapper's process is alive, the idle marker its
-/// agent's `Stop` hook wrote and whether its screen shows the agent at work
-/// (`None` when the screen could not be read).
+/// agent's `Stop` hook wrote (only one no older than the session's last
+/// input), whether its screen shows the agent at work (`None` when the
+/// screen could not be read) and, without such a marker, since when its
+/// screen shows it idle (ADR-t803-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannerProbe {
     pub now: i64,
@@ -56,6 +58,7 @@ pub struct PlannerProbe {
     pub wrapper_alive: bool,
     pub idle: Option<IdleProbe>,
     pub working: Option<bool>,
+    pub screen_idle: Option<i64>,
 }
 
 /// The idle marker of a planner's agent: when it was written (Unix
@@ -74,7 +77,9 @@ impl PlannerSession {
     /// without a recorded exit is `lost`; before the wrapper registers it is
     /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed. A live agent is `working` while its screen shows a turn,
     /// and `idle` once its `Stop` hook wrote the marker with no background
-    /// work left; without a marker yet it is `working`.
+    /// work left; without a marker (or with one older than its last
+    /// input) it is `idle` once its screen was inferred idle, `working`
+    /// until then.
     pub fn state(&self, probe: &PlannerProbe) -> PlannerState {
         if self.closed_at.is_some() || (self.workspace_id.is_some() && !probe.workspace_listed) {
             return PlannerState::Closed;
@@ -101,6 +106,7 @@ impl PlannerSession {
         }
         match probe.idle {
             Some(idle) if !idle.background_running => PlannerState::Idle,
+            None if probe.screen_idle.is_some() => PlannerState::Idle,
             _ => PlannerState::Working,
         }
     }
@@ -186,6 +192,7 @@ mod tests {
             wrapper_alive: true,
             idle: None,
             working: None,
+            screen_idle: None,
         }
     }
 
@@ -237,6 +244,35 @@ mod tests {
         );
         assert!(PlannerState::Idle.alive() && PlannerState::Working.alive());
         assert!(!PlannerState::Lost.alive());
+    }
+
+    #[test]
+    fn a_planner_without_a_fresh_marker_is_idle_by_its_screen() {
+        let live = session();
+        let inferred = PlannerProbe {
+            screen_idle: Some(104),
+            ..probe()
+        };
+        assert_eq!(live.state(&inferred), PlannerState::Idle);
+        // A screen at work wins, and a fresh marker left with background
+        // work decides over the screen.
+        assert_eq!(
+            live.state(&PlannerProbe {
+                working: Some(true),
+                ..inferred
+            }),
+            PlannerState::Working
+        );
+        assert_eq!(
+            live.state(&PlannerProbe {
+                idle: Some(IdleProbe {
+                    since: 105,
+                    background_running: true,
+                }),
+                ..inferred
+            }),
+            PlannerState::Working
+        );
     }
 
     #[test]

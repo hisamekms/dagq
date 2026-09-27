@@ -1324,6 +1324,13 @@ same in one step",
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
         };
+        // The screen stands in for a missing marker as the supervisor
+        // judges it, without keeping the capture (ADR-t803-1).
+        let stall = match bound_checkout(queue) {
+            Ok(Some(checkout)) => load_stall_config(&checkout).ok().flatten(),
+            _ => None,
+        }
+        .unwrap_or_default();
         let views = planner::planner_views(
             queue,
             &PlannerProbes {
@@ -1333,6 +1340,8 @@ same in one step",
                 signals: &signals,
                 clock: &*self.generators.clock,
                 planners_dir: &planners_dir(db),
+                screen_idle_secs: stall.screen_idle_secs,
+                screen_idle: crate::application::screen_idle::ScreenIdle::Peek,
             },
             all,
         )?;

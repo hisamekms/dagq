@@ -541,6 +541,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         job_ends: JobEnds::default(),
         jobs_swept: false,
         planner_exits: Vec::new(),
+        screen_spans: Default::default(),
         handoff: None,
         exec: None,
         run_env_missing: false,
@@ -677,6 +678,9 @@ struct Supervisor<'a> {
     jobs_swept: bool,
     /// The runtime's planners this process asked to `/exit`, and when.
     planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
+    /// The screen's idle spans of the sessions without a fresh idle marker
+    /// (ADR-t803-1), kept here so a disk that takes no file loses none.
+    screen_spans: crate::application::screen_idle::Spans,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
     /// 10): no new work starts, and the loop ends once every slot rests at
     /// a point the next process rebuilds it from.

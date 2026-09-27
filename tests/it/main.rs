@@ -37,6 +37,7 @@ mod lifecycle_replace;
 mod lifecycle_up;
 mod location;
 mod plan_review;
+mod planner_screen_idle;
 mod queue_dependencies;
 mod queue_goals;
 mod queue_migration;

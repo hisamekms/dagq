@@ -10,6 +10,7 @@ scope: runtime
 related:
   - design-supervisor-lifecycle
   - adr-0043
+  - adr-t803-1
 ---
 
 # Stall thresholds
@@ -22,6 +23,7 @@ related:
 | `send_confirm_secs` | 60 | 送った文が処理されるのを待つ時間と、Enterの送り直しの後に待つ時間 |
 | `background_alert_secs` | 1800（30分） | `stats`の`long_background`の閾値と、supervisorが[復旧job](background-recovery-job.md#backgroundの処理が終わらないときの復旧job)を起動する閾値 |
 | `idle_process_secs` | 1800（30分） | runのプロセスがCPU時間をほとんど使わないまま生きている時間が、supervisorが`idle_process`の[復旧job](background-recovery-job.md#cpu時間が伸びないプロセスidle_process)を起動する閾値（task 469）。`stats`の`stall_thresholds`の`idle_process_secs`の閾値（task 645） |
+| `screen_idle_secs` | 120（2分） | idleの印が無いか最後の入力より古いsessionを、画面から`idle`と推定するまでに、入力待ち・作業中でない・ダイアログ無しの画面が続く時間（[ADR-t803-1](../../adr/2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md)、[画面からのidleの推定](receipt-and-session-exit.md#画面からのidleの推定)）。検知ではないので`stats`の`stall_thresholds`には項目を持たない（`stall_config`には出る） |
 
 - 書式は`KEY = 秒`（正の整数。`_`の桁区切りと`#`以降のcommentを許す）。未知のkey、整数でない値、0以下、重複したkeyはエラー。表もkeyも無ければ既定値。
 - `stats`は、supervisorが起動時に記録した最新の`stall_config_loaded`（payloadは`[stall]`の各値。task 469で`idle_process_secs`が加わった）があればその値を使い（出力の`stall_config.source`が`supervisor`）、無ければmain checkoutの`dagq.toml`（`file`）、それも無ければ既定値（`default`）で判定する。main checkoutはqueueが束縛されたGit common directoryが`.git`ならその親で、そうでなければ既定値。supervisorは起動時（登録の直後）にmain checkoutの`dagq.toml`の`[stall]`を読み（fileが無ければ既定値。書式の誤りは起動のエラー）、各値と自分の`supervisor` tokenをpayloadにしたtaskの無い`stall_config_loaded`を記録して、その値で[receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)を行う（task 288。値を変えたら`down --wait` → `up`）。`send_confirm_secs`は、送った文の確認（`StartCheck`、[送信と確認](session-send.md#sessionへの送信と確認)の3）が処理された印を待つ時間と、supervisorの送信の後に入力のmarkerを人の入力に数えない幅（その2倍 + 10秒）に使う（ADR-0043の決定2・3、task 409）。

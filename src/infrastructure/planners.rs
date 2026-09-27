@@ -199,6 +199,7 @@ mod tests {
             wrapper_alive: true,
             idle: None,
             working: None,
+            screen_idle: None,
         };
         assert_eq!(again.state(&probe), PlannerState::Closed);
     }

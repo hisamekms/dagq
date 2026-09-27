@@ -60,6 +60,9 @@ pub const GOAL_SUBMITTED: &str = "goal_submitted";
 pub const GOAL_UPDATED: &str = "goal_updated";
 pub const HEADLESS_JOB_STOPPED: &str = "headless_job_stopped";
 pub const HOLD_CONTINUE_SENT: &str = "hold_continue_sent";
+/// A session without a fresh idle marker whose screen was inferred idle
+/// (ADR-t803-1), once per span.
+pub const IDLE_INFERRED: &str = "idle_inferred";
 pub const INPUT_NOT_READY: &str = "input_not_ready";
 pub const INTEGRATION_APPROVED: &str = "integration_approved";
 pub const INTEGRATION_DEFERRED: &str = "integration_deferred";

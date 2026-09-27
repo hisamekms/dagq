@@ -538,6 +538,12 @@ pub trait AgentSignals {
     fn known_dialog(&self, _screen: &str) -> Option<DialogAnswer> {
         None
     }
+    /// The line of `log`, the end of the agent's debug log, that says its
+    /// idle hook failed to write the marker (ADR-t803-1), the latest; a
+    /// provider that logs none never has one.
+    fn idle_hook_failure(&self, _log: &str) -> Option<String> {
+        None
+    }
 }
 
 /// A dialog of the agent's TUI the supervisor answers by a fixed rule once

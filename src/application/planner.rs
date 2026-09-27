@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     thread,
+    time::{Duration, UNIX_EPOCH},
 };
 use tracing::warn;
 
@@ -34,6 +35,7 @@ use super::{
     naming::{planner_workspace_name, shell_join},
     path_text, planner_idle_marker,
     prompt::{planner_prompt, runtime_planner_prompt},
+    screen_idle::{self, Inference, MarkerState, ScreenIdle, ScreenProbe},
     session::{OwnWorkspace, wrapper_refused},
 };
 use crate::domain::{
@@ -45,6 +47,9 @@ use crate::domain::{
 
 /// The planner's first message, which its wrapper hands the agent.
 pub const PLANNER_PROMPT_FILE: &str = "prompt.txt";
+/// The agent's debug log in the planner's directory, where a failed idle
+/// hook shows (ADR-t803-1).
+pub const PLANNER_DEBUG_LOG: &str = "claude.log";
 /// The snapshot of the binary the planner's workspace runs as its wrapper,
 /// so rebuilding the binary does not change a running one.
 pub const PLANNER_RUNNER_FILE: &str = "runner";
@@ -448,8 +453,9 @@ pub(crate) fn remove_runner(files: &dyn RunFiles, path: &Path) -> Result<bool> {
 }
 
 /// A planner with how it stands now: its state, whether it is alive, and
-/// since when its agent is idle (Unix seconds of its idle marker, while
-/// the state is `idle`).
+/// since when its agent is idle (Unix seconds of its idle marker, or of
+/// the first capture its screen was inferred idle from, while the state is
+/// `idle`).
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannerView {
     #[serde(flatten)]
@@ -457,12 +463,18 @@ pub struct PlannerView {
     pub state: PlannerState,
     pub alive: bool,
     pub idle_since: Option<i64>,
+    /// The idle inferred from the screen (ADR-t803-1), when the idle
+    /// marker could not tell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_inferred: Option<Inference>,
     pub dir: PathBuf,
 }
 
 /// What judging a planner reads: cmux for its workspace and screen, the
 /// processes for its wrapper, the files for its idle marker, the agent's
-/// signals for the marker and the screen, and the clock.
+/// signals for the marker and the screen, and the clock; and for a
+/// screen standing in for the marker (ADR-t803-1), how long it must look
+/// idle (`[stall].screen_idle_secs`) and whether its captures are kept.
 pub struct PlannerProbes<'a> {
     pub cmux: &'a dyn WorkspaceBackend,
     pub processes: &'a dyn ProcessControl,
@@ -470,22 +482,29 @@ pub struct PlannerProbes<'a> {
     pub signals: &'a dyn AgentSignals,
     pub clock: &'a dyn Clock,
     pub planners_dir: &'a Path,
+    pub screen_idle_secs: i64,
+    pub screen_idle: ScreenIdle<'a>,
 }
 
 /// Judge `planner` the way a worker session is judged: its workspace UUID
 /// in every window's `cmux workspace list`, its wrapper's pid and heartbeat, the idle
 /// marker its agent's `Stop` hook wrote and, with a marker, whether the
-/// screen shows the agent at work on a new turn. A closed planner is not
-/// looked at.
+/// screen shows the agent at work on a new turn. Without a marker, or with
+/// one older than the planner's last input (its input marker, the
+/// supervisor's stamp of a text it typed, or its opening), the screen
+/// stands in ([`ScreenProbe::infer`]). A closed planner is not looked at.
 pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Result<PlannerView> {
     let dir = planner_dir(probes.planners_dir, planner.id);
+    let now = probes.clock.now();
     let mut probe = PlannerProbe {
-        now: probes.clock.now(),
+        now,
         workspace_listed: false,
         wrapper_alive: false,
         idle: None,
         working: None,
+        screen_idle: None,
     };
+    let mut inferred = None;
     if planner.closed_at.is_none() {
         if let Some(workspace) = &planner.workspace_id {
             probe.workspace_listed = probes.cmux.exists(workspace)?;
@@ -493,30 +512,62 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         probe.wrapper_alive = planner
             .wrapper_pid
             .is_some_and(|pid| probes.processes.alive(pid));
-        if let Some((modified, bytes)) = probes.files.read_stamped(&planner_idle_marker(&dir))? {
-            probe.idle = Some(IdleProbe {
+        let marker_path = planner_idle_marker(&dir);
+        let opened = UNIX_EPOCH + Duration::from_secs(u64::try_from(planner.created_at)?);
+        let last_input = screen_idle::last_input(probes.files, &marker_path, opened);
+        let marker = match probes.files.read_stamped(&marker_path)? {
+            None => Err(MarkerState::Missing),
+            Some((modified, _)) if modified < last_input => Err(MarkerState::Stale),
+            Some((modified, bytes)) => Ok(IdleProbe {
                 since: super::unix_seconds(modified),
                 background_running: probes.signals.idle_hook(&bytes).background_running,
-            });
-            if probe.workspace_listed
-                && let Some(workspace) = &planner.workspace_id
-            {
-                probe.working = probes
-                    .cmux
-                    .capture(workspace)
-                    .ok()
-                    .map(|screen| probes.signals.working(&screen));
+            }),
+        };
+        if probe.workspace_listed
+            && let Some(workspace) = &planner.workspace_id
+        {
+            match marker {
+                Ok(idle) => {
+                    probe.idle = Some(idle);
+                    probe.working = probes
+                        .cmux
+                        .capture(workspace)
+                        .ok()
+                        .map(|screen| probes.signals.working(&screen));
+                }
+                Err(state) => {
+                    inferred = ScreenProbe {
+                        cmux: probes.cmux,
+                        signals: probes.signals,
+                        files: probes.files,
+                        mode: probes.screen_idle,
+                        threshold: probes.screen_idle_secs,
+                    }
+                    .infer(
+                        workspace,
+                        &marker_path,
+                        state,
+                        now,
+                        super::unix_seconds(last_input),
+                    );
+                    probe.screen_idle = inferred.map(|inference| inference.since);
+                }
             }
+        } else if let Ok(idle) = marker {
+            probe.idle = Some(idle);
         }
     }
     let state = planner.state(&probe);
+    let idle = state == PlannerState::Idle;
     Ok(PlannerView {
         state,
         alive: state.alive(),
         idle_since: probe
             .idle
-            .filter(|_| state == PlannerState::Idle)
-            .map(|idle| idle.since),
+            .map(|idle| idle.since)
+            .or(probe.screen_idle)
+            .filter(|_| idle),
+        idle_inferred: inferred.filter(|_| idle),
         dir,
         planner,
     })
@@ -572,6 +623,7 @@ pub fn close_abandoned_planners(
             wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
             idle: None,
             working: None,
+            screen_idle: None,
         };
         if planner.abandoned(&probe) {
             queue.close_planner(planner.id, None)?;
@@ -608,6 +660,7 @@ pub fn remove_unused_planner_runners(
             wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
             idle: None,
             working: None,
+            screen_idle: None,
         };
         if !planner.runner_unused(&probe) {
             continue;

@@ -98,6 +98,7 @@ impl Supervisor<'_> {
                     ask.id,
                     ask.answer.as_deref().unwrap_or_default()
                 );
+                self.stamp_planner_input(view);
                 match submit_input(self.cmux, self.signals, &workspace, Input::Text(&text)) {
                     Ok(_) => {
                         self.queue.ask_delivered(ask.id, &workspace)?;

@@ -27,6 +27,7 @@ pub mod rebind;
 pub mod recording;
 pub mod report;
 pub mod review;
+pub mod screen_idle;
 pub mod session;
 pub mod stats;
 pub mod supervise;

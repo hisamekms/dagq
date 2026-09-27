@@ -55,7 +55,7 @@ pub(crate) struct Fixture {
     _dir: TempDir,
     pub(crate) repo: PathBuf,
     pub(crate) db: PathBuf,
-    claude: PathBuf,
+    pub(crate) claude: PathBuf,
     /// Times the test while held (task 324).
     _test: common::Waiting,
 }
@@ -263,10 +263,13 @@ pub(crate) struct PlanWorkspace {
     pub(crate) exits: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     notifications: Mutex<Vec<(String, String)>>,
+    /// What `capture` returns, or its failure; none is an empty screen
+    /// (no input box).
+    pub(crate) screen: Mutex<Option<Result<String, String>>>,
 }
 
 impl PlanWorkspace {
-    fn listing(workspaces: &[&str]) -> Self {
+    pub(crate) fn listing(workspaces: &[&str]) -> Self {
         let backend = Self::default();
         *backend.listed.lock().unwrap() = workspaces.iter().map(|w| (*w).to_owned()).collect();
         backend
@@ -303,7 +306,12 @@ impl WorkspaceBackend for PlanWorkspace {
         Ok(())
     }
     fn capture(&self, _: &str) -> Result<String> {
-        Ok(String::new())
+        self.screen
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| Ok(String::new()))
+            .map_err(anyhow::Error::msg)
     }
     fn close(&self, workspace_id: &str) -> Result<()> {
         self.closed.lock().unwrap().push(workspace_id.into());
@@ -1381,7 +1389,7 @@ fn a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason() {
 }
 
 /// A draft as the runtime or a job registers it: `origin` with `material`.
-fn runtime_draft(
+pub(crate) fn runtime_draft(
     queue: &mut SqliteQueue,
     title: &str,
     goal: Option<dagq::domain::GoalId>,

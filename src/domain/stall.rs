@@ -17,6 +17,9 @@ pub const DEFAULT_BACKGROUND_ALERT_SECS: i64 = 30 * 60;
 /// A process of the run that makes no progress this long is an
 /// `idle_process` alert (task 469).
 pub const DEFAULT_IDLE_PROCESS_SECS: i64 = 30 * 60;
+/// How long a session without a fresh idle marker must look idle on its
+/// screen before it is taken for idle (ADR-t803-1).
+pub const DEFAULT_SCREEN_IDLE_SECS: i64 = 2 * 60;
 
 /// The event the supervisor records with the values it loaded at start.
 pub const STALL_CONFIG_LOADED: &str = super::event_kind::STALL_CONFIG_LOADED;
@@ -36,6 +39,7 @@ pub struct StallConfig {
     pub send_confirm_secs: i64,
     pub background_alert_secs: i64,
     pub idle_process_secs: i64,
+    pub screen_idle_secs: i64,
 }
 
 impl Default for StallConfig {
@@ -45,17 +49,19 @@ impl Default for StallConfig {
             send_confirm_secs: DEFAULT_SEND_CONFIRM_SECS,
             background_alert_secs: DEFAULT_BACKGROUND_ALERT_SECS,
             idle_process_secs: DEFAULT_IDLE_PROCESS_SECS,
+            screen_idle_secs: DEFAULT_SCREEN_IDLE_SECS,
         }
     }
 }
 
 impl StallConfig {
     /// The setting names of the `[stall]` table.
-    pub const KEYS: [&str; 4] = [
+    pub const KEYS: [&str; 5] = [
         "idle_without_receipt_secs",
         "send_confirm_secs",
         "background_alert_secs",
         "idle_process_secs",
+        "screen_idle_secs",
     ];
 
     /// The setting `key` set to `secs`; `None` for a key the table does not have.
@@ -65,6 +71,7 @@ impl StallConfig {
             "send_confirm_secs" => &mut self.send_confirm_secs,
             "background_alert_secs" => &mut self.background_alert_secs,
             "idle_process_secs" => &mut self.idle_process_secs,
+            "screen_idle_secs" => &mut self.screen_idle_secs,
             _ => return None,
         };
         *field = secs;

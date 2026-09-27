@@ -588,6 +588,8 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         signals: &signals,
         clock: &SystemClock,
         planners_dir: &planners,
+        screen_idle_secs: dagq::domain::stall::DEFAULT_SCREEN_IDLE_SECS,
+        screen_idle: dagq::application::screen_idle::ScreenIdle::Peek,
     };
     let state = |all: bool| -> Vec<(PlannerState, bool, bool)> {
         planner_views(&queue, &probes, all)
@@ -840,6 +842,8 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
         signals: &signals,
         clock: &SystemClock,
         planners_dir: &planners,
+        screen_idle_secs: dagq::domain::stall::DEFAULT_SCREEN_IDLE_SECS,
+        screen_idle: dagq::application::screen_idle::ScreenIdle::Peek,
     };
     let views = planner_views(&queue, &probes, false).unwrap();
     assert_eq!(views.len(), 1);

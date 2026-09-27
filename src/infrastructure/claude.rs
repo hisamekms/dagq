@@ -435,6 +435,19 @@ impl AgentSignals for ClaudeCode {
     fn known_dialog(&self, screen: &str) -> Option<DialogAnswer> {
         known_dialog(screen)
     }
+
+    fn idle_hook_failure(&self, log: &str) -> Option<String> {
+        stop_hook_failure(log)
+    }
+}
+
+/// The latest line of Claude Code's debug log that says its `Stop` hook
+/// failed (`Hook Stop (Stop) error: No space left on device`), trimmed.
+pub fn stop_hook_failure(log: &str) -> Option<String> {
+    log.lines()
+        .rev()
+        .find(|line| line.contains("Hook Stop") && line.to_lowercase().contains("error"))
+        .map(|line| line.trim().to_owned())
 }
 
 #[cfg(test)]
@@ -628,6 +641,22 @@ worktree on  dagq/68a96a60 took 8h32m49s
         assert!(!input_pending(EXIT_PENDING, REQUEST));
         assert!(!input_pending(LONG_PENDING, "answer to ask 3: yes"));
         assert!(!input_pending(READY, ""));
+    }
+
+    #[test]
+    fn a_failed_stop_hook_is_found_in_the_debug_log() {
+        let log = "2026-09-27T01:00:00Z [DEBUG] Hook UserPromptSubmit (UserPromptSubmit) success\n\
+                   2026-09-27T01:02:00Z [DEBUG] Hook Stop (Stop) error: No space left on device\n\
+                   2026-09-27T01:02:01Z [DEBUG] idle\n";
+        assert_eq!(
+            ClaudeCode {
+                executable: "claude".into(),
+            }
+            .idle_hook_failure(log)
+            .as_deref(),
+            Some("2026-09-27T01:02:00Z [DEBUG] Hook Stop (Stop) error: No space left on device")
+        );
+        assert_eq!(stop_hook_failure("Hook Stop (Stop) success\n"), None);
     }
 
     #[test]

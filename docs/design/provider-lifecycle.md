@@ -13,6 +13,7 @@ related:
   - adr-0048
   - adr-0027
   - design-supervisor-lifecycle
+  - adr-t803-1
 ---
 
 # Agent provider lifecycle
@@ -35,6 +36,7 @@ AgentSignals
   detect_prompt(screen)    -- 実装済み: 画面の末尾のダイアログのkind（trust / choice / confirm）
   screen_excerpt(screen)   -- 実装済み: askと`prompt_waiting`に載せる画面の末尾
   idle_hook(content)       -- 実装済み: idle markerの内容（background_running、evidenceに記録するhookのフィールド）
+  idle_hook_failure(log)   -- 実装済み: debug logの末尾からidleのhookの失敗の行（既定はなし。Claude Codeは`Hook Stop`と`error`を含む最後の行。ADR-t803-1）
 ```
 
 providerのメソッドはapplicationのユースケースが直接呼ばず、`ActorExecutor`（`HostActorExecutor`）が呼ぶ。AI actorの起動は全てexecutorを通り、roleとcapabilityの集合をspecに持ち、環境とClaudeのsettingsはroleごとに1か所で決まる（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。settingsを書くのはadapterの`write_settings`で、どの設定を書くかはapplicationの`agent_settings`が決める。
@@ -45,7 +47,7 @@ providerのメソッドはapplicationのユースケースが直接呼ばず、`
 
 Claude Code adapter（`src/infrastructure/adapters.rs`）はworktreeをcwdにし、`--session-id`にrun IDを渡し、`--debug-file`をrun管理領域に置き、`--add-dir`でrun管理領域への書き込みを許可し、promptを位置引数で渡す。workerとresumeのsessionには、session wrapperがclaimの決めたmodelとeffortを`--model` / `--effort`で明示して足す（`AgentProvider::select_model`、既定は`claude-opus-5-5`・`medium`。[Worker model](supervisor-lifecycle/worker-model.md)、ADR-0079の決定3）。stdin/stdout/stderrはwrapperのTTYを継承する。permission modeは上書きしない。
 
-加えて`command()`は`<run-dir>/claude-settings.json`を書いて`--settings`で渡す。内容は`Stop` hook 1件で、hookのstdin（イベントJSON）を`<run-dir>/idle.json`（`TaskRun::idle_marker_path`）へ一時ファイル + renameで書く。supervisorはこのmarkerをidle判定に使う（[supervisor-lifecycle](supervisor-lifecycle.md)）。`SessionEnd` hookは使わず、セッション終了はwrapperの終了コードで確認する。他のproviderは同じmarkerを自分の仕組みで書けばよく、書かなければ手動終了待ちになる。同じ設定に`autoMode.environment: ["$defaults"]`も入れ、auto modeの初回案内（Teach auto mode）を抑止する（[起動時のダイアログ](#起動時のダイアログ)）。さらに`permissions.deny`に`Bash(pkill:*)`と`Bash(killall:*)`（`SIGNAL_BY_NAME_DENIED`）を入れ、sessionが名前やパターンでプロセスを選んでsignalを送るのを拒む（Claude Codeは`;`や`&&`でつないだ各コマンドにdenyを当てる。2026-09-27に`claude -p --settings`で確認。同じ設定を書く`resume_command()`と`planner_command()`のsessionも拒む。拒めるのはコマンドの先頭が`pkill` / `killall`のものだけで、`/usr/bin/pkill`・`sh -c 'pkill ...'`・`kill $(pgrep ...)`・`pgrep ... | xargs kill`は通るので、それはpromptの規則に頼る。`pgrep`は診断に使うので拒まない）。理由: どのrunのsessionもpromptを位置引数で持つので、そのcommand lineは検証コマンドの名前（`cargo test`、`cargo llvm-cov`）を含む。2026-09-23〜26に、workerが自分の検証を止めるつもりで打った`pkill -f llvm-cov` / `pkill -f "cargo test"`が、他のrunのClaude（exit 143、`session_killed`）と`integrate`・validatingの検証の`cargo`をSIGTERMで止めた（task 359。打った本人のClaudeは`pkill`が祖先を除くので残った。`--resume`のsessionはpromptを引数に持たないので当たらなかった）。止めてよいのは自分が起動したものをpidかtaskで、という規則は`STOP_BACKGROUND`の一文（[Prompt](supervisor-lifecycle/prompt.md)）でもworkerに伝える。
+加えて`command()`は`<run-dir>/claude-settings.json`を書いて`--settings`で渡す。内容は`Stop` hook 1件で、hookのstdin（イベントJSON）を`<run-dir>/idle.json`（`TaskRun::idle_marker_path`）へ一時ファイル + renameで書く。supervisorはこのmarkerをidle判定に使う（[supervisor-lifecycle](supervisor-lifecycle.md)）。`SessionEnd` hookは使わず、セッション終了はwrapperの終了コードで確認する。他のproviderは同じmarkerを自分の仕組みで書けばよく、書かなければ手動終了待ちになる（plannerはmarkerが無くても画面から推定したidleで判断する。markerが書けなかったことは`AgentSignals::idle_hook_failure`がdebug logから読み、`idle_inferred`の`hook_error`に入る。[画面からのidleの推定](supervisor-lifecycle/receipt-and-session-exit.md#画面からのidleの推定)、ADR-t803-1）。同じ設定に`autoMode.environment: ["$defaults"]`も入れ、auto modeの初回案内（Teach auto mode）を抑止する（[起動時のダイアログ](#起動時のダイアログ)）。さらに`permissions.deny`に`Bash(pkill:*)`と`Bash(killall:*)`（`SIGNAL_BY_NAME_DENIED`）を入れ、sessionが名前やパターンでプロセスを選んでsignalを送るのを拒む（Claude Codeは`;`や`&&`でつないだ各コマンドにdenyを当てる。2026-09-27に`claude -p --settings`で確認。同じ設定を書く`resume_command()`と`planner_command()`のsessionも拒む。拒めるのはコマンドの先頭が`pkill` / `killall`のものだけで、`/usr/bin/pkill`・`sh -c 'pkill ...'`・`kill $(pgrep ...)`・`pgrep ... | xargs kill`は通るので、それはpromptの規則に頼る。`pgrep`は診断に使うので拒まない）。理由: どのrunのsessionもpromptを位置引数で持つので、そのcommand lineは検証コマンドの名前（`cargo test`、`cargo llvm-cov`）を含む。2026-09-23〜26に、workerが自分の検証を止めるつもりで打った`pkill -f llvm-cov` / `pkill -f "cargo test"`が、他のrunのClaude（exit 143、`session_killed`）と`integrate`・validatingの検証の`cargo`をSIGTERMで止めた（task 359。打った本人のClaudeは`pkill`が祖先を除くので残った。`--resume`のsessionはpromptを引数に持たないので当たらなかった）。止めてよいのは自分が起動したものをpidかtaskで、という規則は`STOP_BACKGROUND`の一文（[Prompt](supervisor-lifecycle/prompt.md)）でもworkerに伝える。
 
 workerの`command()`と`resume_command()`、runtimeが立てるplanner（`PlannerCommand::origin`が`runtime`）の`planner_command()`は、この設定に`"promptSuggestionEnabled": false`を足したもの（`runtime_session_settings`）を書き、Claude Codeの入力欄のサジェスト（次に打ちそうな文の灰色の表示）を止める（goal 48、task 499）。理由: 誰も打たないsessionで、サジェストが画面上は打ちかけの文と見分けにくく、inboxが取り違えた。環境変数`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`ではなくsettingsで出し分けるのは、役割ごとに分けられてtestで確かめやすいため。人が触るsession、つまり`up`が開くinbox（`--settings`を渡さない）と`dagq plan`が開く人のplanner（origin `person`。`stop_hook_settings`のまま）には入れない。
 

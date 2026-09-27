@@ -1622,6 +1622,9 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     "run_env_program_found",
     "session_opened",
     "session_closed",
+    // A planner's screen inferred idle without its idle marker
+    // (ADR-t803-1).
+    event_kind::IDLE_INFERRED,
     "session_turns",
     "supervisor_started",
     "supervisor_stopped",
