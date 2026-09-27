@@ -196,7 +196,9 @@ impl Supervisor<'_> {
                 let receipt_seen =
                     self.files.is_file(&receipt_path) && history.has(event_kind::RECEIPT_OBSERVED);
                 let exit_requested = history.has(event_kind::EXIT_REQUESTED).then(Instant::now);
-                let exit_timed_out = history.has(event_kind::EXIT_REQUEST_TIMED_OUT);
+                // Only the latest request's timeout and ask count: a run
+                // resumed and stuck again is asked again (task 240).
+                let exit_timed_out = history.latest_exit_timed_out();
                 let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
                 // A dialog recorded before adoption is not recorded again
                 // while the same screen stays up.
@@ -221,7 +223,7 @@ impl Supervisor<'_> {
                     // A timeout recorded without its ask (by a binary that
                     // made none, or a supervisor that died between the two)
                     // still gets one; one asked before is not asked again.
-                    exit_asked: !exit_timed_out || self.queue.has_stuck_exit_ask(run.id())?,
+                    exit_asked: !exit_timed_out || history.latest_exit_asked(),
                     // Only a run whose wrapper heartbeats is adopted.
                     silent: false,
                     exit_for_silence: false,
@@ -419,10 +421,12 @@ impl Supervisor<'_> {
         if after(event_kind::EXIT_REQUESTED) {
             watch.requested = Some(Instant::now());
         }
-        watch.timed_out = after(event_kind::EXIT_REQUEST_TIMED_OUT);
+        watch.timed_out =
+            after(event_kind::EXIT_REQUEST_TIMED_OUT) && history.latest_exit_timed_out();
         // A timeout recorded without its ask still gets one; one asked
-        // before is not asked again (as for a running run, task 104).
-        watch.exit_asked = !watch.timed_out || self.queue.has_stuck_exit_ask(run.id())?;
+        // about the same request is not asked again (as for a running run,
+        // task 104), one about an earlier request is (task 240).
+        watch.exit_asked = !watch.timed_out || history.latest_exit_asked();
         Ok(Phase::Exiting(watch))
     }
     /// The failed review whose `approve_landing` ask was opened before the
@@ -478,8 +482,10 @@ impl Supervisor<'_> {
         if after(event_kind::EXIT_REQUESTED) {
             watch.requested = Some(Instant::now());
         }
-        watch.timed_out = after(event_kind::EXIT_REQUEST_TIMED_OUT);
-        watch.exit_asked = !watch.timed_out || self.queue.has_stuck_exit_ask(run.id())?;
+        let history = RunHistory::from_events(events);
+        watch.timed_out =
+            after(event_kind::EXIT_REQUEST_TIMED_OUT) && history.latest_exit_timed_out();
+        watch.exit_asked = !watch.timed_out || history.latest_exit_asked();
         Ok(Some(Phase::Exiting(watch)))
     }
     /// The last `approve_landing` ask the supervisor opened after event

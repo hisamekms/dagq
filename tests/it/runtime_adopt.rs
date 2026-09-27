@@ -967,6 +967,82 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
     assert!(notifications[0].0.ends_with("approve_landing"));
 }
 
+/// A run whose earlier `/exit` timed out and was asked about (the ask
+/// closed since), and whose later `/exit` timed out again under the
+/// previous supervisor without an ask, gets a new stuck_exit ask from the
+/// adopter: only the ask about the latest request counts (task 240).
+#[test]
+fn adopted_run_asks_about_an_exit_that_timed_out_again() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.exit_timeout = Duration::from_secs(1);
+    let backend = Arc::new(backend);
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let timed_out = |queue: &mut SqliteQueue| {
+        for kind in ["exit_requested", "exit_request_timed_out"] {
+            queue
+                .record_runtime_event(
+                    run.id(),
+                    kind,
+                    json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
+                )
+                .unwrap();
+        }
+    };
+    timed_out(&mut queue);
+    let earlier = queue
+        .ask(NewAsk {
+            kind: AskKind::StuckExit,
+            task_id: None,
+            run_id: Some(run.id().clone()),
+            question: "send /exit".into(),
+            options: Vec::new(),
+            asked_by: "supervisor".into(),
+            reason_category: dagq::domain::AskReason::RecoveryFailed,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask;
+    queue.answer(earlier.id, "sent /exit").unwrap();
+    queue.close_ask(earlier.id).unwrap();
+    timed_out(&mut queue);
+    age_lease(&db, &run, 31);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
+    });
+    // The stuck_exit ask follows once its recovery job escalated.
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !queue.asks(AskQuery::default()).unwrap().is_empty()
+    });
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].kind, AskKind::StuckExit);
+    assert_ne!(asks[0].id, earlier.id);
+    let kinds = event_kinds(&queue.show(TaskId::new(1)).unwrap())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| *k == "exit_request_timed_out")
+            .count(),
+        2
+    );
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
+}
+
 /// The supervisor died after the wrapper reported its exit but before
 /// `supervision_finished`, and, separately, while a run was `validating`.
 /// Both are adopted: the first finishes supervision from the recorded exit,

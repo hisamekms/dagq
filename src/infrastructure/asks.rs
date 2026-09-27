@@ -542,15 +542,6 @@ impl SqliteQueue {
         Ok(closed)
     }
 
-    /// Whether the run ever had a `stuck_exit` ask, closed or not.
-    pub fn has_stuck_exit_ask(&self, run_id: &RunId) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND kind='stuck_exit')",
-            [run_id],
-            |r| r.get(0),
-        )?)
-    }
-
     /// Close every `stuck_exit` ask of the run nobody closed: its session
     /// exited, so nobody needs to answer it any more. An open one is
     /// answered with `answer` first and records `ask_answered` with

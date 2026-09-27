@@ -3868,9 +3868,6 @@ impl AskStore for SqliteQueue {
     fn ask_delivered(&mut self, id: AskId, workspace_id: &str) -> Result<crate::domain::Ask> {
         SqliteQueue::ask_delivered(self, id, workspace_id)
     }
-    fn has_stuck_exit_ask(&self, run_id: &RunId) -> Result<bool> {
-        SqliteQueue::has_stuck_exit_ask(self, run_id)
-    }
     fn last_worker_question_closed(&self, run_id: &RunId) -> Result<Option<i64>> {
         SqliteQueue::last_worker_question_closed(self, run_id)
     }

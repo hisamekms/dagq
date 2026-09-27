@@ -205,6 +205,32 @@ impl<'a> RunHistory<'a> {
         .is_some_and(|e| e.kind == event_kind::EXIT_REQUEST_TIMED_OUT)
     }
 
+    /// Whether the run's latest `/exit` request timed out: an
+    /// `exit_request_timed_out` after its last `exit_requested`. A timeout
+    /// of an earlier request, before the run was resumed and asked to exit
+    /// again, does not count (task 240).
+    pub fn latest_exit_timed_out(&self) -> bool {
+        self.last(event_kind::EXIT_REQUESTED)
+            .is_some_and(|requested| {
+                self.has_after(requested.id, event_kind::EXIT_REQUEST_TIMED_OUT)
+            })
+    }
+
+    /// Whether a `stuck_exit` ask was opened about the run's latest `/exit`
+    /// request: an `ask_opened` of that kind after its last
+    /// `exit_requested`. One about an earlier request does not count, so a
+    /// run resumed and stuck again is asked again (task 240).
+    pub fn latest_exit_asked(&self) -> bool {
+        self.last(event_kind::EXIT_REQUESTED)
+            .is_some_and(|requested| {
+                self.events.iter().any(|e| {
+                    e.id > requested.id
+                        && e.kind == event_kind::ASK_OPENED
+                        && e.payload["kind"] == "stuck_exit"
+                })
+            })
+    }
+
     /// Why the run waits for a session: its latest `integration_deferred`
     /// / `integration_error` / `evidence_missing` / `scope_violation` /
     /// `landing_decided` / `triage_finished` / `triage_decided`, or a
@@ -558,6 +584,39 @@ mod tests {
         assert!(!pending(&[]));
         assert!(pending(&["exit_requested", "exit_request_timed_out"]));
         assert!(!pending(&["exit_request_timed_out", "session_exited"]));
+    }
+
+    #[test]
+    fn only_the_latest_exit_request_counts_for_its_timeout_and_ask() {
+        let stuck = |id| event(id, "ask_opened", json!({"kind": "stuck_exit"}));
+        let other = |id| event(id, "ask_opened", json!({"kind": "worker_question"}));
+        let plain = |id, kind| event(id, kind, json!({}));
+        let history = |events: &[RunEvent]| {
+            let h = RunHistory::from_events(events);
+            (h.latest_exit_timed_out(), h.latest_exit_asked())
+        };
+        assert_eq!(history(&[]), (false, false));
+        assert_eq!(
+            history(&[plain(1, "exit_request_timed_out"), stuck(2)]),
+            (false, false)
+        );
+        let first = [
+            plain(1, "exit_requested"),
+            plain(2, "exit_request_timed_out"),
+            stuck(3),
+        ];
+        assert_eq!(history(&first), (true, true));
+        // Resumed and asked to exit again: the old timeout and ask are
+        // behind the new request.
+        let mut again = first.to_vec();
+        again.push(plain(4, "resume_started"));
+        again.push(plain(5, "exit_requested"));
+        assert_eq!(history(&again), (false, false));
+        again.push(plain(6, "exit_request_timed_out"));
+        again.push(other(7));
+        assert_eq!(history(&again), (true, false));
+        again.push(stuck(8));
+        assert_eq!(history(&again), (true, true));
     }
 
     #[test]
