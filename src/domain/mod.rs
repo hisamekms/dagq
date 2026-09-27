@@ -711,6 +711,7 @@ pub mod forecast;
 pub mod goal;
 pub mod goal_review;
 pub mod headless_job;
+pub mod host_metrics;
 pub mod idle_process;
 pub mod ids;
 mod input;

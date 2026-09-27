@@ -305,6 +305,33 @@ pub struct SuperviseOptions {
     /// resolved on PATH when found; a supervisor without it runs no Codex
     /// worker.
     pub codex: PathBuf,
+    /// Record the host's load under `<queue dir>/host/` (task 516): off
+    /// unless asked for (`supervise --host-metrics-interval`, 30 seconds
+    /// by default in the CLI).
+    pub host_metrics: Option<HostMetricsSettings>,
+}
+
+/// How the supervisor records the host's load (task 516).
+#[derive(Debug, Clone)]
+pub struct HostMetricsSettings {
+    /// How often a sample is taken.
+    pub interval: Duration,
+    /// How many local days of files are kept, today's included; zero
+    /// removes none.
+    pub retention_days: u32,
+    /// Takes one sample at a unix second; tests set it.
+    pub sample: fn(i64) -> crate::domain::host_metrics::HostSample,
+}
+
+impl HostMetricsSettings {
+    /// The host's own sample every `interval`, kept `retention_days`.
+    pub fn new(interval: Duration, retention_days: u32) -> Self {
+        Self {
+            interval,
+            retention_days,
+            sample: crate::infrastructure::host_metrics::sample,
+        }
+    }
 }
 
 /// The index [`SuperviseOptions::release_index`] gives the release check.
@@ -366,6 +393,7 @@ impl SuperviseOptions {
             release_index: None,
             release_current: None,
             codex: PathBuf::from("codex"),
+            host_metrics: None,
         }
     }
 
@@ -648,6 +676,27 @@ pub fn supervise_with_reviewer(
                 .unwrap_or_else(|| crate::VERSION.to_owned()),
         }
     };
+    let host_metrics = options.host_metrics.clone().map(|settings| {
+        let dir = db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(crate::domain::host_metrics::HOST_DIR);
+        let interval = settings.interval;
+        crate::application::supervise::HostMetricsPort {
+            interval,
+            record: Arc::new(move |now| {
+                let sample = (settings.sample)(now);
+                crate::infrastructure::host_metrics::record(
+                    &dir,
+                    &sample,
+                    clock::local_utc_offset(now),
+                    interval,
+                    settings.retention_days,
+                )
+                .map(|recorded| recorded.removed)
+            }),
+        }
+    });
     let ports = Ports {
         // The supervisor's own transitions (ADR-t728-1 decision 4).
         queues: Arc::new(SqliteOpener {
@@ -686,6 +735,7 @@ pub fn supervise_with_reviewer(
         supervisor_file,
         forecasts,
         release: Some(release),
+        host_metrics,
         layout,
     };
     supervisor::supervise(
@@ -1019,6 +1069,12 @@ impl OneShot {
             executable: PathBuf::from("claude"),
         };
         let queue_hash = QueueLocation::explicit(db).hash();
+        let host_dir = db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(crate::domain::host_metrics::HOST_DIR);
+        let host_metrics =
+            |from, until| crate::infrastructure::host_metrics::summary(&host_dir, from, until);
         let sources = StatsSources {
             files: &LocalRunFiles,
             signals: &signals,
@@ -1027,6 +1083,7 @@ impl OneShot {
             config_file: &config_file,
             conflicts_file: &conflicts_file,
             history: &history,
+            host_metrics: Some(&host_metrics),
         };
         Ok(serde_json::to_value(statistics::stats(
             queue,

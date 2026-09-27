@@ -395,7 +395,7 @@ pub fn capture(command: &mut Command, timeout: Duration) -> Result<(ExitStatus, 
 }
 
 /// [`capture`] without the UTF-8 requirement on stdout.
-fn capture_bytes(
+pub(crate) fn capture_bytes(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<(ExitStatus, Vec<u8>, String)> {

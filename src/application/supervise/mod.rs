@@ -108,6 +108,7 @@ mod forecast;
 mod goal_review;
 mod handoff;
 mod headless;
+mod host_metrics;
 mod idle;
 mod jobs;
 mod landing;
@@ -132,6 +133,7 @@ mod waiting;
 
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
+pub use self::host_metrics::HostMetricsPort;
 pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
@@ -334,6 +336,9 @@ pub struct Ports<'a> {
     /// Looks for a new release on crates.io (ADR-t618-1); `None` looks
     /// for none.
     pub release: Option<ReleasePort>,
+    /// Records the host's load under `<queue dir>/host/` (task 516);
+    /// `None` records none.
+    pub host_metrics: Option<HostMetricsPort>,
     pub layout: Layout,
 }
 
@@ -591,6 +596,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         forecast: forecast::ForecastWatch::default(),
         release_port: ports.release.clone(),
         release: release::ReleaseWatch::default(),
+        host_metrics_port: ports.host_metrics.clone(),
+        host_metrics: host_metrics::HostMetricsWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
@@ -757,6 +764,10 @@ struct Supervisor<'a> {
     host_versions: fn(&Path, &Path) -> HostVersions,
     /// Writes the daily KPI reports; `None` writes none.
     reports: Option<ReportPort>,
+    /// Records the host's load; `None` records none (task 516).
+    host_metrics_port: Option<HostMetricsPort>,
+    /// The sample job of the host's load.
+    host_metrics: host_metrics::HostMetricsWatch,
     /// Reads the limit on the improvement proposals running.
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     /// The report job and the day the reports were last found written.
@@ -912,6 +923,7 @@ impl Supervisor<'_> {
     /// database may be unreachable), and it goes stale with the leases.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
+        self.finish_host_metrics();
         // The jobs the loop stopped last (a handoff stops them all).
         self.write_job_ends();
         // A loop that ended on an error lets the cleanup job end after its
@@ -957,6 +969,8 @@ impl Supervisor<'_> {
                 return Err(error);
             }
             let stopping = options.stop.load(Ordering::SeqCst);
+            // Every pass, draining or handing off too (task 516).
+            self.host_metrics_pass();
             // Before any job starts: none runs twice (task 443).
             self.tend_headless_jobs();
             // What the cleanup job removed is recorded before the disk is
@@ -1006,6 +1020,7 @@ impl Supervisor<'_> {
                         && !self.cleanup.running()
                         && !self.push.running()
                         && !self.report.running()
+                        && !self.host_metrics.running()
                         && !self.forecast.running()
                         && !self.release.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())

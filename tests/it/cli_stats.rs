@@ -977,6 +977,73 @@ mod stats {
         assert_eq!(goal["goals"][0]["goal_id"], 1);
         assert!(!invoke(&db, &["stats", "--since", "x"]).status.success());
     }
+
+    /// `stats` summarizes the host's load the supervisor recorded under
+    /// the queue's `host/` over its window (task 516): the mean, the
+    /// maximum and the p90 of each column, the pageouts per minute.
+    #[test]
+    fn cli_stats_summarizes_the_host_load_of_its_window() {
+        use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        ok(&db, &["init"]);
+        // No file yet: an empty summary.
+        let empty = ok(&db, &["stats"]);
+        assert_eq!(empty["host"]["samples"], 0);
+        assert_eq!(empty["host"]["metrics"]["load1"], Value::Null);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now = i64::try_from(now).unwrap();
+        let host = dir.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        let mut by_file: HashMap<String, String> = HashMap::new();
+        // Four samples in the window a minute apart, one long before it.
+        for (unix, load, pageouts) in [
+            (now - 4000, 99.0, 0.0),
+            (now - 240, 1.0, 100.0),
+            (now - 180, 2.0, 160.0),
+            (now - 120, 3.0, 220.0),
+            (now - 60, 10.0, 280.0),
+        ] {
+            let mut sample = HostSample::new(unix);
+            sample.set("load1", Some(load));
+            sample.set("pageouts", Some(pageouts));
+            by_file
+                .entry(file_name(local_day(unix, 0)))
+                .or_insert_with(|| format!("{}\n", header()))
+                .push_str(&format!("{}\n", sample.row(0)));
+        }
+        for (name, text) in by_file {
+            std::fs::write(host.join(name), text).unwrap();
+        }
+        let report = ok(&db, &["stats", "--since", &format!("@{}", now - 300)]);
+        let summary = &report["host"];
+        assert_eq!(summary["from"], now - 300);
+        assert_eq!(summary["samples"], 4, "{summary}");
+        assert_eq!(summary["first"], now - 240);
+        assert_eq!(
+            summary["metrics"]["load1"],
+            json!({"samples": 4, "mean": 4.0, "max": 10.0, "p90": 10.0})
+        );
+        assert_eq!(summary["metrics"]["pageouts_per_min"]["mean"], 60.0);
+        assert_eq!(summary["metrics"]["swap_used_mb"], Value::Null);
+        assert!(summary["metrics"].get("pageouts").is_none());
+        // `--until` ends the window at its time.
+        let until = ok(
+            &db,
+            &[
+                "stats",
+                "--since",
+                &format!("@{}", now - 300),
+                "--until",
+                &format!("@{}", now - 150),
+            ],
+        );
+        assert_eq!(until["host"]["samples"], 2);
+        assert_eq!(until["host"]["until"], now - 150);
+    }
 }
 
 /// `dagq mark` records a person's or a planner's mark, `--retract` a

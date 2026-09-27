@@ -484,8 +484,19 @@ pub struct Stats {
     /// runtime and its jobs registered (task 470): by origin, how they were
     /// settled, the backlog at the window's end and the drafts per landing.
     pub draft_flow: drafts::DraftFlow,
+    /// The host's load (task 516) over the window of `asks` in time, from
+    /// the files the supervisor records under `<queue dir>/host/`: the
+    /// mean, the maximum and the p90 of each column. Set by the caller
+    /// that reads the files ([`Stats::window_ms`]); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<super::host_metrics::HostSummary>,
     /// Pass it to `--since` to read only runs that finish later.
     pub next_cursor: EventId,
+    /// The window of `host` in unix milliseconds: from `--since`'s time
+    /// (else the first event of the window of `asks`, else its end) to
+    /// `--until`'s time (else the end of the window of `asks`).
+    #[serde(skip)]
+    pub window_ms: (i64, i64),
 }
 
 /// An alert about a run still in flight (ADR-0043 decision 5): its
@@ -866,6 +877,31 @@ pub fn stats(
         _ => now * 1000,
     };
     let ask_stats = asks::asks(events, window_start, next_cursor, window_end, counts);
+    // The host's load is read over this window in time: from `--since`'s
+    // time, else the window's first event; to `--until`'s time, else the
+    // window's end.
+    let cursor_ms = |cursor: &Option<Cursor>| match cursor {
+        Some(Cursor::Time(millis)) => Some(*millis),
+        Some(Cursor::Event(id)) => events
+            .iter()
+            .find(|event| event.id == *id)
+            .and_then(|event| timestamp_millis(&event.created_at)),
+        None => None,
+    };
+    let window_until = match query.until {
+        Some(Cursor::Time(millis)) => millis.min(now * 1000),
+        _ => window_end,
+    };
+    let window_from = cursor_ms(&query.since)
+        .or_else(|| {
+            events
+                .iter()
+                .filter(|event| event.id > window_start && event.id <= next_cursor)
+                .filter_map(|event| timestamp_millis(&event.created_at))
+                .min()
+        })
+        .unwrap_or(window_until)
+        .min(window_until);
     let auto_repairs = auto_repairs::auto_repairs(events, window_start, next_cursor, counts);
     let updates = updates::updates(events, window_start, next_cursor, counts);
     let draft_flow = drafts::draft_flow(
@@ -1010,7 +1046,9 @@ pub fn stats(
         auto_repairs,
         updates,
         draft_flow,
+        host: None,
         next_cursor,
+        window_ms: (window_from, window_until),
     }
 }
 

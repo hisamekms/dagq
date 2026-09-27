@@ -11,6 +11,7 @@ use anyhow::Result;
 use super::{AgentSignals, ProcessControl, Queue, RunFiles, StatusFilter, TaskQuery};
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SessionRole, SupervisorPulse, TaskRun, TaskStatus,
+    host_metrics::HostSummary,
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{
         ConflictConfig, ConflictConfigReport, History, ListedWorkspace, LiveRun, LiveSnapshot,
@@ -44,6 +45,9 @@ pub struct StatsSources<'a> {
     /// Main's history since a unix second (see
     /// [`crate::application::Repository::main_history`]).
     pub history: &'a dyn Fn(i64) -> Result<MainHistory>,
+    /// The summary of the host's load between two unix seconds (task
+    /// 516); `None` reads none.
+    pub host_metrics: Option<&'a dyn Fn(i64, i64) -> HostSummary>,
 }
 
 /// Main's history since the earliest event of `events` (a second before
@@ -207,6 +211,10 @@ pub fn stats(
         run.title = titles.get(&run.task_id).cloned();
     }
     with_kinds(&mut stats, &queue.task_kinds()?);
+    if let Some(read) = sources.host_metrics {
+        let (from, until) = stats.window_ms;
+        stats.host = Some(read(from.div_euclid(1000), until.div_euclid(1000)));
+    }
     Ok(stats)
 }
 

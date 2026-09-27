@@ -8,6 +8,7 @@ updated: 2026-09-28
 last_verified: 2026-09-28
 scope: runtime
 related:
+  - design-supervisor-lifecycle-host-metrics
   - design-supervisor-lifecycle-actor-model
   - design-supervisor-lifecycle-goal-review
   - design-supervisor-lifecycle-report
@@ -339,6 +340,8 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### `stats`
 
 - [`stats`](supervisor-lifecycle/stats.md)（Claude sessionの区間のkindごとの開いている時間とtranscriptのturnから導く稼働時間の集計`sessions`を含む。[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)。runのsessionの作業の内訳`work_breakdown`（task 514）と、sessionのトークン数`tokens`（task 199）も）
+
+- [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageoutを`<queue dir>/host/metrics-YYYYMMDD.csv`に日ごとに書き、保持の日数を過ぎたファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順。task 516）
 
 ### `mark` / `marks`
 

@@ -566,6 +566,15 @@ enum Command {
         /// passes, on a change mark, after a landing that moved it and once a day (ADR-0070).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         forecast_snapshots: bool,
+        /// Record the host's load (load average, CPU and memory per kind of process, memory,
+        /// swap, pageouts) every this many seconds under the queue's host/metrics-YYYYMMDD.csv;
+        /// 0 records none.
+        #[arg(long, default_value_t = dagq::domain::host_metrics::DEFAULT_INTERVAL_SECS)]
+        host_metrics_interval: u64,
+        /// Keep the host's load files of this many local days, today's included; 0 removes
+        /// none.
+        #[arg(long, default_value_t = dagq::domain::host_metrics::DEFAULT_RETENTION_DAYS)]
+        host_metrics_retention_days: u32,
         /// Maximum number of planners the runtime opens at once for proposals plan review sent
         /// back (apart from --parallel; planners a person opened do not count).
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
@@ -2452,6 +2461,8 @@ fn execute(cli: Cli) -> Result<Value> {
             observe_daily,
             report_daily,
             forecast_snapshots,
+            host_metrics_interval,
+            host_metrics_retention_days,
             runtime_planners,
             planner_timeout,
             plugin_dir,
@@ -2497,6 +2508,12 @@ fn execute(cli: Cli) -> Result<Value> {
                 ),
                 user_config: dagq::infrastructure::language::user_config_file(),
                 codex,
+                host_metrics: (host_metrics_interval > 0).then(|| {
+                    dagq::compose::HostMetricsSettings::new(
+                        Duration::from_secs(host_metrics_interval),
+                        host_metrics_retention_days,
+                    )
+                }),
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
             dagq::compose::supervise(
