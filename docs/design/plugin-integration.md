@@ -98,7 +98,8 @@ plugins/claude-dagq/
     reference/locate.md             install、version 警告、db_exists false と rebind
     reference/inspect.md            参照コマンドの表と各フィールド（findings・events --full と絞り込み・timeline・observe --history を含む）、list のページング、task / run の状態、graph、goal edit / set-goal
     reference/goal-close.md         goal の close の手順（planner が行う）
-    reference/observer.md           observer の finding の見方（findings・events・timeline・observe --history）と行き先（印からの runtime の planner、blocked の ask の propose / dismiss、人の planner での submit --finding / finding dismiss）
+    reference/observer.md           observer の finding の見方（findings・events・timeline・observe --history、kind: kpi の finding と改善の上限）と行き先（印からの runtime の planner、blocked の ask の propose / dismiss、人の planner での submit --finding / finding dismiss）
+    reference/kpi.md                dagq kpi（期間・種類・層・比較・目標）、dagq mark / marks と kpi --compare での前後比較、dagq report と日次のレポートの場所、host.toml の [push] と送るもの・失敗の attention
   skills/dagq-inbox/              inbox のループ: status --role inbox → watch --role inbox を background → open な ask を人に見せて answer → それ以外の attention（回答済みの ask、止まった supervisor、失敗した review / triage / plan review、応答しない planner、runtime の planner が決めきれなかった draft と finding、push の失敗。finding に紐づく blocked の ask の propose（提案にする）/ dismiss と stalled の ask の propose は runtime が適用する）を人に知らせ、人の指示があるときだけ dagq-recover の手順を実行 → 次の watch。自分では判断しない
     reference/status.md             status / watch / events / asks / show のフィールド、attention の next の一覧、stalled の ask（促しの後に開く条件、question の中身、wait / intervene / propose の扱いと runtime が閉じる条件）、run の状態一覧
   skills/dagq-planner/SKILL.md    planner（dagq plan で人が開くものと runtime が立てるもの）: dagq skill による goal / task の登録、lint と submit（ready にはしない）、plan review の revise の修正と再 submit、意図が変わる修正の聞き先（人か planner_question）、runtime が立てた planner の draft の採用・不採用・ask と finding の submit --finding・finding dismiss・ask、交通整理を plan review に任せること、finding を人と決めること、goal close、人に頼まれたときの up / down（dagq-recover の section 5）
