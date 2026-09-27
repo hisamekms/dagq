@@ -164,20 +164,35 @@ const MAX_QUERY_WORDS: usize = 20;
 
 /// A query for documents holding any word of `text` (a task's title, for
 /// the plan review's candidates): its runs of letters, digits and `_ - . /`
-/// of at least [`TRIGRAM`] characters, each once (ASCII case ignored), each
-/// quoted and joined with `OR`; `None` when it has none.
+/// of at least [`TRIGRAM`] characters, and the trigrams of its runs of
+/// Japanese (kanji, kana), which are not separated by spaces, except those
+/// of hiragana alone (particles and endings such as `にする`), each once
+/// (ASCII case ignored), each quoted and joined with `OR`, at most
+/// [`MAX_QUERY_WORDS`] in order; `None` when it has none.
 pub fn any_word_query(text: &str) -> Option<String> {
     let mut words: Vec<String> = Vec::new();
-    for word in text.split(|c: char| !(c.is_alphanumeric() || "_-./".contains(c))) {
-        let word = word.trim_matches(|c: char| ".-/".contains(c));
+    let mut take = |word: &str| {
         if word.chars().count() < TRIGRAM
+            || words.len() == MAX_QUERY_WORDS
             || words.iter().any(|seen| seen.eq_ignore_ascii_case(word))
         {
-            continue;
+            return;
         }
         words.push(word.to_owned());
-        if words.len() == MAX_QUERY_WORDS {
-            break;
+    };
+    for word in text.split(|c: char| !(c.is_alphanumeric() || "_-./".contains(c))) {
+        let chars: Vec<char> = word.chars().collect();
+        for run in chars.chunk_by(|a, b| is_unspaced(*a) == is_unspaced(*b)) {
+            if is_unspaced(run[0]) {
+                for gram in run.windows(TRIGRAM) {
+                    if !gram.iter().all(|&c| is_hiragana(c)) {
+                        take(&gram.iter().collect::<String>());
+                    }
+                }
+            } else {
+                let run: String = run.iter().collect();
+                take(run.trim_matches(|c: char| ".-/".contains(c)));
+            }
         }
     }
     (!words.is_empty()).then(|| {
@@ -187,6 +202,23 @@ pub fn any_word_query(text: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" OR ")
     })
+}
+
+/// Whether `c` is written without spaces between words: kana, kanji and
+/// the iteration mark `々`.
+fn is_unspaced(c: char) -> bool {
+    matches!(c,
+        '\u{3005}'
+        | '\u{3040}'..='\u{30FF}'
+        | '\u{31F0}'..='\u{31FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF66}'..='\u{FF9F}')
+}
+
+fn is_hiragana(c: char) -> bool {
+    matches!(c, '\u{3040}'..='\u{309F}')
 }
 
 /// What a hit is: a task or goal ID, a note's event ID or a commit's SHA.
@@ -342,6 +374,34 @@ mod tests {
         let many: String = (100..200).map(|n| format!("w{n} ")).collect();
         assert_eq!(
             any_word_query(&many).unwrap().matches(" OR ").count(),
+            MAX_QUERY_WORDS - 1
+        );
+    }
+
+    #[test]
+    fn any_word_query_splits_japanese_into_trigrams() {
+        let query =
+            any_word_query("plan review の search 候補を日本語の title でも引けるようにする")
+                .unwrap();
+        assert_eq!(
+            query,
+            "\"plan\" OR \"review\" OR \"search\" OR \"候補を\" OR \"補を日\" OR \"を日本\" OR \
+             \"日本語\" OR \"本語の\" OR \"title\" OR \"でも引\" OR \"も引け\" OR \"引ける\""
+        );
+        assert_eq!(
+            parse_terms(&query).unwrap().fts.as_deref(),
+            Some(query.as_str())
+        );
+        // A word of ASCII and Japanese is split where the script changes.
+        assert_eq!(
+            any_word_query("task591の計画").as_deref(),
+            Some("\"task591\" OR \"の計画\"")
+        );
+        // Runs under three characters and hiragana alone give nothing.
+        assert_eq!(any_word_query("計画 にする ab"), None);
+        let long: String = "計画を検査して準備完了にする仕組みを作り直す".repeat(3);
+        assert_eq!(
+            any_word_query(&long).unwrap().matches(" OR ").count(),
             MAX_QUERY_WORDS - 1
         );
     }

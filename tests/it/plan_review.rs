@@ -2129,6 +2129,51 @@ fn the_prompt_lists_each_tasks_duplicate_candidates_but_not_the_proposals_own() 
     assert_eq!(candidates[2]["search"], json!([]), "{}", candidates[2]);
 }
 
+#[test]
+fn the_search_candidates_of_a_japanese_title_include_similar_japanese_tasks() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let done = add_text(
+        &mut queue,
+        "計画の重複を検出する",
+        "提案の中から重複を探す",
+        "重複が見つかる",
+    );
+    let raw = Connection::open(&fx.db).unwrap();
+    raw.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    raw.execute(
+        "UPDATE tasks SET status = 'completed' WHERE id = ?1",
+        [done.as_i64()],
+    )
+    .unwrap();
+    // No space and no ASCII: the title is one phrase found nowhere else.
+    let asked = add_text(
+        &mut queue,
+        "重複した計画の候補を一覧にする",
+        "候補を並べる",
+        "一覧が出る",
+    );
+    submit(&mut queue, &[asked], None);
+    let reviewer = StubReviewer::new(&[
+        json!({"verdict": "pass", "reasons": [], "summary": "sound", "actions": []}),
+    ]);
+    let outcome = supervise(&fx, &PlanWorkspace::default(), &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let prompt = reviewer.prompts().remove(0);
+    let entry = prompt
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line.get("search").is_some() && line["task_id"] == json!(asked))
+        .unwrap_or_else(|| panic!("{prompt}"));
+    let hit = entry["search"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["kind"] == "task" && hit["id"] == json!(done))
+        .unwrap_or_else(|| panic!("{entry}"));
+    assert_eq!(hit["status"], "completed");
+}
+
 /// A task that declares `paths`, waiting for the draft blocker.
 fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
     queue

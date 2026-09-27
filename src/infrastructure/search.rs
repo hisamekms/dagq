@@ -250,3 +250,58 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
         fields,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::TaskStore;
+    use crate::domain::search::any_word_query;
+    use crate::domain::{NewTask, Priority, TaskId};
+
+    fn add(queue: &mut SqliteQueue, title: &str, description: &str) -> TaskId {
+        queue
+            .add(NewTask {
+                kind: None,
+                title: title.into(),
+                description: description.into(),
+                acceptance: "done".into(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                priority: Priority::Normal,
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                goal_id: None,
+                context: String::new(),
+            })
+            .unwrap()
+            .id()
+    }
+
+    #[test]
+    fn a_japanese_title_finds_tasks_sharing_its_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let by_title = add(&mut queue, "計画の重複を検出する", "plan");
+        let by_description = add(&mut queue, "検索", "候補を並べて見直す");
+        let other = add(&mut queue, "着地の順番", "衝突を避ける");
+        // The whole title appears nowhere else, so the old one-phrase
+        // query found nothing.
+        let terms = any_word_query("重複した計画の候補を一覧にする").unwrap();
+        let page = queue
+            .search(&SearchQuery {
+                terms,
+                kinds: vec![SearchKind::Task],
+                limit: 10,
+                ..SearchQuery::default()
+            })
+            .unwrap();
+        let ids: Vec<SearchRef> = page.hits.into_iter().map(|hit| hit.id).collect();
+        assert!(ids.contains(&SearchRef::Id(by_title.as_i64())), "{ids:?}");
+        assert!(
+            ids.contains(&SearchRef::Id(by_description.as_i64())),
+            "{ids:?}"
+        );
+        assert!(!ids.contains(&SearchRef::Id(other.as_i64())), "{ids:?}");
+    }
+}
