@@ -64,3 +64,5 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 ## Where your authority ends
 
 Yourself: `status`, `watch`, `asks`, `show`, `answer` with the person's own words, and `ask close` after an answer was carried out. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`, keys and `/exit` in a run's workspace). Never answer on the person's behalf, never pick a default, and never `add`, `goal add` or `goal close`: registering work is the planner's.
+
+What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command in this terminal counts as yours; if the person wants it recorded as theirs, they type it in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.

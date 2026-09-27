@@ -4,8 +4,8 @@ type: design
 title: Current design documents
 status: current
 created: 2026-09-21
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 tags:
   - architecture
 ---
@@ -18,6 +18,7 @@ tags:
 - [Domain model](domain-model.md)
 - [Persistence](persistence.md)
 - [Authorization](authorization.md)
+- [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・Podmanとqueue serviceへの道筋）
 - [Supervisor lifecycle](supervisor-lifecycle.md)（目次。各節は[`supervisor-lifecycle/`](supervisor-lifecycle/)の下の別のファイルにある）
 - [Provider lifecycle](provider-lifecycle.md)
 - [Plugin integration](plugin-integration.md)

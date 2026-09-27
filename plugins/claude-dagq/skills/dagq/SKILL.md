@@ -9,7 +9,9 @@ dagq runs development tasks in cmux workspaces and isolated Git worktrees. This 
 
 A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering, submitting and closing belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, then runs and lands the queue; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal) and `reference/kpi.md` (KPIs, change marks, forecasts, reports, push).
+Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal), `reference/kpi.md` (KPIs, change marks, forecasts, reports, push) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
+
+Every state change is checked against your role (`DAGQ_ROLE`) by a default-deny policy; a refusal (`<role> may not ...`) changes nothing and is recorded. Take it as the answer and never work around it; the check is advisory on the host, not a sandbox (`reference/authority.md`).
 
 ## 1. Locate the binary and the queue
 
