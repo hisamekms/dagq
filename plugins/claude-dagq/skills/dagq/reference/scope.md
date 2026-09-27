@@ -39,8 +39,8 @@ The list is a forecast, not a limit: the worker may change other files as the wo
 ## Change the paths
 
 ```sh
-"$DAGQ" set-paths TASK --paths 'docs/**' --paths '*.md'   # replace every glob of a draft or ready task
+"$DAGQ" set-paths TASK --paths 'docs/**' --paths '*.md'   # replace every glob of a draft, submitted or ready task
 "$DAGQ" set-paths TASK --none                             # remove the limit
 ```
 
-Like `set-goal`, only a `draft` or `ready` task can change; a claimed run is checked against the paths it started with. A change records `task_paths_changed` (`from`, `to`).
+Like `set-goal`, only a `draft`, `submitted` or `ready` task can change; a claimed run is checked against the paths it started with. A change records `task_paths_changed` (`from`, `to`).
