@@ -53,14 +53,18 @@ impl Slot {
     }
 
     /// The phase a run may wait in (decision 1): the first session before
-    /// any `/exit`, with a heartbeating wrapper and no recovery job running;
+    /// any `/exit`, with a heartbeating wrapper and no recovery job running
+    /// (nor a dialog its receipt ended that its next poll closes, task 239);
     /// the `/exit` after a verdict, with a session; a revise with a
     /// heartbeating wrapper and no recovery job running; or a resume
     /// before its `/exit`, likewise.
     fn wait_phase(&self) -> Option<WaitPhase> {
         match &self.phase {
             Phase::Session(watch)
-                if watch.exit_requested.is_none() && !watch.silent && !watch.recovery.running() =>
+                if watch.exit_requested.is_none()
+                    && !watch.silent
+                    && !watch.recovery.running()
+                    && !watch.receipt_ends_dialog() =>
             {
                 Some(WaitPhase::Session)
             }

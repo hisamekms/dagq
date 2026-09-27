@@ -770,6 +770,138 @@ fn adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent() {
     assert!(!kinds.contains(&"exit_request_timed_out"));
 }
 
+/// A session whose dialog the previous supervisor raised as an
+/// `answer_prompt` ask (`prompt_waiting`) and whose receipt it then observed
+/// (`receipt_observed`) is adopted with the ask still open: the adopter
+/// closes it because of the receipt, before the session exits (task 239).
+#[test]
+fn adopter_closes_the_answer_prompt_ask_of_a_dialog_the_receipt_ended() {
+    adopt_receipt_after_dialog(false);
+}
+
+/// The same when the previous supervisor had the run wait outside its slot
+/// for that ask: the adopter ends the wait (`phase_changed`) and closes the
+/// ask from the slot.
+#[test]
+fn adopter_ends_the_wait_for_a_dialog_the_receipt_ended_and_closes_its_ask() {
+    adopt_receipt_after_dialog(true);
+}
+
+fn adopt_receipt_after_dialog(waited: bool) {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, HELD_AGENT));
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let receipt = PathBuf::from(run.receipt_path().unwrap());
+    wait_until(&db, Duration::from_secs(10), |_| receipt.is_file());
+    // The dialog is still drawn, so only the receipt ends it.
+    *backend.screen.lock().unwrap() = "\
+ Do you want to proceed?
+
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel
+"
+    .into();
+    // What the previous supervisor recorded before it died.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            "prompt_waiting",
+            json!({
+                "workspace_id": WORKSPACE_ID,
+                "excerpt": "Do you want to proceed?",
+                "screen_hash": "dialog",
+                "prompt": "choice",
+            }),
+        )
+        .unwrap();
+    let ask = queue
+        .ask(dagq::domain::NewAsk {
+            kind: AskKind::AnswerPrompt,
+            task_id: Some(run.task_id()),
+            run_id: Some(run.id().clone()),
+            question: "run waits at a choice dialog".into(),
+            options: vec![],
+            asked_by: "supervisor".into(),
+            reason_category: dagq::domain::AskReason::RecoveryFailed,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask;
+    if waited {
+        queue
+            .record_runtime_event(
+                run.id(),
+                "run_waiting_started",
+                json!({
+                    "ask_id": ask.id,
+                    "ask_kind": "answer_prompt",
+                    "phase": "session",
+                    "status": "running",
+                    "waiting": 1,
+                    "limit": 4,
+                }),
+            )
+            .unwrap();
+    }
+    queue
+        .record_runtime_event(
+            run.id(),
+            "receipt_observed",
+            json!({"path": run.receipt_path(), "validated": false}),
+        )
+        .unwrap();
+    age_lease(&db, &run, 31);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue.read_ask(ask.id).unwrap().closed_at.is_some()
+    });
+    // The session is still up: the receipt closed the ask, not its exit.
+    let closed = queue.read_ask(ask.id).unwrap();
+    assert_eq!(
+        closed.answer.as_deref(),
+        Some("the receipt arrived; closed by the runtime")
+    );
+    assert!(!adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty());
+    release_held_session(run.run_dir().unwrap());
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        outcome["runs"][0]["status"], "awaiting_integration",
+        "{outcome}"
+    );
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "prompt_waiting").count(), 1);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "receipt_observed").count(),
+        1
+    );
+    assert!(!kinds.contains(&"prompt_cleared"), "{kinds:?}");
+    // The adopter closes the ask from its slot, without a wait for it.
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| **k == "run_waiting_started")
+            .count(),
+        usize::from(waited),
+        "{kinds:?}"
+    );
+    let ended = payloads(&detail, "run_waiting_ended");
+    if waited {
+        assert_eq!(ended.len(), 1, "{kinds:?}");
+        assert_eq!(ended[0]["cause"], "phase_changed");
+    } else {
+        assert!(ended.is_empty(), "{kinds:?}");
+    }
+}
+
 /// The exit timeout of an adopted run restarts at adoption: a session that
 /// still ignores the earlier request is reported after the adopter's own
 /// timeout, with one `exit_requested` event in total, and the adopter keeps

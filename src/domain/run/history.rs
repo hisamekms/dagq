@@ -355,6 +355,22 @@ impl<'a> RunHistory<'a> {
         .and_then(|e| e.payload["screen_hash"].as_str())
     }
 
+    /// The `screen_hash` of the dialog the session waited at when its
+    /// receipt was observed: a `prompt_waiting` with no `prompt_cleared`
+    /// since and a `receipt_observed` after it. Its `answer_prompt` ask is
+    /// closed by the receipt, also by a supervisor that adopted the run
+    /// after the receipt (task 239).
+    pub fn prompt_hash_at_receipt(&self) -> Option<&'a str> {
+        let waiting = self
+            .last_of(&[event_kind::PROMPT_WAITING, event_kind::PROMPT_CLEARED])
+            .filter(|e| e.kind == event_kind::PROMPT_WAITING)?;
+        self.events
+            .iter()
+            .any(|e| e.id > waiting.id && e.kind == event_kind::RECEIPT_OBSERVED)
+            .then(|| waiting.payload["screen_hash"].as_str())
+            .flatten()
+    }
+
     /// The asks whose answer the supervisor could not type into the
     /// worker's terminal (`ask_delivery_failed`).
     pub fn failed_deliveries(&self) -> Vec<AskId> {
@@ -1041,6 +1057,30 @@ mod tests {
         assert_eq!(history.push_failure(), Some("new"));
         let events = kinds(&["prompt_waiting", "prompt_cleared"]);
         assert_eq!(RunHistory::from_events(&events).waiting_prompt_hash(), None);
+    }
+
+    #[test]
+    fn a_dialog_the_receipt_ended_keeps_its_hash_for_the_receipt() {
+        let hash = |events: &[RunEvent]| {
+            RunHistory::from_events(events)
+                .prompt_hash_at_receipt()
+                .map(str::to_owned)
+        };
+        let waiting = event(1, "prompt_waiting", json!({"screen_hash": "h"}));
+        let receipt = event(2, "receipt_observed", json!({}));
+        let cleared = event(3, "prompt_cleared", json!({}));
+        assert_eq!(hash(&[waiting.clone(), receipt.clone()]), Some("h".into()));
+        assert_eq!(
+            RunHistory::from_events(&[waiting.clone(), receipt.clone()]).waiting_prompt_hash(),
+            None
+        );
+        // No receipt yet, or the dialog cleared before or after it.
+        assert_eq!(hash(std::slice::from_ref(&waiting)), None);
+        assert_eq!(hash(&[waiting.clone(), receipt.clone(), cleared]), None);
+        let cleared = event(2, "prompt_cleared", json!({}));
+        let receipt = event(3, "receipt_observed", json!({}));
+        assert_eq!(hash(&[waiting, cleared, receipt.clone()]), None);
+        assert_eq!(hash(&[receipt]), None);
     }
 
     #[test]

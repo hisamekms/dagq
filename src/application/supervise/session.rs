@@ -295,6 +295,13 @@ impl SessionWatch {
         Ok(())
     }
 
+    /// Whether the receipt ended a recorded dialog whose `answer_prompt` ask
+    /// the next [`SessionWatch::poll`] closes: set only between the adoption
+    /// of a run with its receipt observed and that first poll (task 239).
+    pub(super) fn receipt_ends_dialog(&self) -> bool {
+        self.receipt_seen && self.prompt_hash.is_some()
+    }
+
     /// Whether the session waits for the answer of a `worker_question` this
     /// watch follows ([`SessionWatch::asks_from`]).
     pub(super) fn waits_for_question(&self, sv: &Supervisor<'_>, run: &TaskRun) -> Result<bool> {
@@ -340,6 +347,19 @@ impl SessionWatch {
             info!(run_id = %run.id(), "receipt received for {}; waiting for the session to go idle (or a person's /exit)", run.id());
             // A send it had not taken ends with the receipt.
             self.watch_sends(sv, run)?;
+        }
+        // `receipt_observed` ends a recorded dialog by itself, also one an
+        // adopted run recorded before its receipt, and before the session
+        // goes on to validation (task 239).
+        if self.receipt_ends_dialog() {
+            self.prompt_hash = None;
+            self.recovery.stop_for(
+                sv,
+                run,
+                Some(RecoveryAlert::PromptWaiting),
+                "dialog_cleared",
+            );
+            close_answer_prompt_asks(sv, run, PROMPT_RECEIPT_CLOSED)?;
         }
         self.stall.settle(sv, run, self.receipt_seen)?;
         self.stop_idle_job(sv, run, true);
@@ -618,10 +638,7 @@ impl SessionWatch {
         let started = *self.agent_seen.get_or_insert_with(Instant::now);
         let wait = sv.cmux.prompt_wait();
         if self.receipt_seen {
-            // `receipt_observed` ends the dialog by itself.
-            if self.prompt_hash.take().is_some() {
-                close_answer_prompt_asks(sv, run, PROMPT_RECEIPT_CLOSED)?;
-            }
+            // `receipt_observed` ended the dialog ([`SessionWatch::poll`]).
             return Ok(());
         }
         if self.idle(sv) || !sv.processes.alive(agent.pid) || self.waits_for_question(sv, run)? {

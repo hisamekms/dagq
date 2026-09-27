@@ -201,8 +201,15 @@ impl Supervisor<'_> {
                 let exit_timed_out = history.latest_exit_timed_out();
                 let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
                 // A dialog recorded before adoption is not recorded again
-                // while the same screen stays up.
-                let prompt_hash = history.waiting_prompt_hash().map(str::to_owned);
+                // while the same screen stays up; one the receipt ended is
+                // kept so the adopter closes its `answer_prompt` ask
+                // (task 239).
+                let prompt_hash = if receipt_seen {
+                    history.prompt_hash_at_receipt()
+                } else {
+                    history.waiting_prompt_hash()
+                }
+                .map(str::to_owned);
                 Phase::Session(SessionWatch {
                     workspace: run
                         .workspace_id()
