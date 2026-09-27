@@ -2360,23 +2360,33 @@ pub fn workspace_handle(raw: &str) -> Result<&str> {
     Ok(handle)
 }
 
-/// What `claude plugin list --json` (an array of `{"id":
-/// "<plugin>@<marketplace>", "enabled": bool, ...}`) says of the plugin
-/// `name`: enabled when any entry of it is.
-pub fn plugin_state(listed: &str, name: &str) -> Result<PluginState> {
+/// The entries of `claude plugin list --json` (an array of `{"id":
+/// "<plugin>@<marketplace>", "enabled": bool, "version": ..., ...}`) that
+/// are of the plugin `name`, each with its id.
+fn plugin_entries(listed: &str, name: &str) -> Result<Vec<(String, Value)>> {
     let entries: Vec<Value> = serde_json::from_str(listed)
         .with_context(|| format!("the plugin list is not a JSON array: {}", listed.trim()))?;
-    let mut disabled = Vec::new();
-    for entry in &entries {
+    let mut found = Vec::new();
+    for entry in entries {
         let id = entry["id"]
             .as_str()
-            .with_context(|| format!("a plugin without an id: {entry}"))?;
-        if id.split_once('@').map_or(id, |(plugin, _)| plugin) != name {
-            continue;
+            .with_context(|| format!("a plugin without an id: {entry}"))?
+            .to_owned();
+        if id.split_once('@').map_or(id.as_str(), |(plugin, _)| plugin) == name {
+            found.push((id, entry));
         }
+    }
+    Ok(found)
+}
+
+/// What `claude plugin list --json` says of the plugin `name`: enabled
+/// when any entry of it is.
+pub fn plugin_state(listed: &str, name: &str) -> Result<PluginState> {
+    let mut disabled = Vec::new();
+    for (id, entry) in plugin_entries(listed, name)? {
         match entry["enabled"].as_bool() {
             Some(true) => return Ok(PluginState::Enabled),
-            Some(false) => disabled.push(id.to_owned()),
+            Some(false) => disabled.push(id),
             None => bail!("the plugin {id} has no enabled flag: {entry}"),
         }
     }
@@ -2385,6 +2395,73 @@ pub fn plugin_state(listed: &str, name: &str) -> Result<PluginState> {
     } else {
         PluginState::Disabled(disabled)
     })
+}
+
+/// The version `claude plugin list --json` gives the plugin `name`: that of
+/// an enabled entry, else of the first; `None` when it is not installed or
+/// its entry has no version.
+pub fn plugin_version(listed: &str, name: &str) -> Result<Option<String>> {
+    let entries = plugin_entries(listed, name)?;
+    let entry = entries
+        .iter()
+        .find(|(_, entry)| entry["enabled"].as_bool() == Some(true))
+        .or_else(|| entries.first());
+    Ok(entry.and_then(|(_, entry)| entry["version"].as_str().map(str::to_owned)))
+}
+
+/// The dagq plugin of the Claude Code at `executable`, as sessions started
+/// in `cwd` see it (ADR-t618-2): its version from the same `claude plugin
+/// list --json` the check of `up` and `plan` reads, and its update by
+/// [`lifecycle::PLUGIN_UPDATE_ARGUMENTS`](crate::application::lifecycle::PLUGIN_UPDATE_ARGUMENTS).
+pub struct ClaudePlugin {
+    pub executable: PathBuf,
+    pub cwd: PathBuf,
+}
+
+/// How long one command of the plugin's update may take: it fetches the
+/// marketplace's repository.
+const PLUGIN_UPDATE_TIMEOUT: Duration = Duration::from_secs(300);
+
+impl crate::application::InstalledPlugin for ClaudePlugin {
+    fn version(&self) -> Result<Option<String>> {
+        let listed = output(
+            Command::new(&self.executable)
+                .args(["plugin", "list", "--json"])
+                .current_dir(&self.cwd),
+        )?;
+        plugin_version(&listed, crate::application::lifecycle::DAGQ_PLUGIN)
+    }
+
+    fn update(&self) -> Vec<crate::application::PluginCommandRun> {
+        let mut runs = Vec::new();
+        for arguments in crate::application::lifecycle::PLUGIN_UPDATE_ARGUMENTS {
+            let command = format!("claude {}", arguments.join(" "));
+            let (succeeded, output) = match capture(
+                Command::new(&self.executable)
+                    .args(arguments)
+                    .current_dir(&self.cwd),
+                PLUGIN_UPDATE_TIMEOUT,
+            ) {
+                Ok((status, stdout, stderr)) => {
+                    let mut output = format!("{stdout}{stderr}").trim().to_owned();
+                    if !status.success() {
+                        output.push_str(&format!(" ({status})"));
+                    }
+                    (status.success(), output)
+                }
+                Err(error) => (false, format!("{error:#}")),
+            };
+            runs.push(crate::application::PluginCommandRun {
+                command,
+                output,
+                succeeded,
+            });
+            if !succeeded {
+                break;
+            }
+        }
+        runs
+    }
 }
 
 pub struct ClaudeCode {

@@ -49,7 +49,7 @@ use crate::{
     },
     infrastructure::{
         adapters::{
-            ClaudeCode, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT,
+            ClaudeCode, ClaudePlugin, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT,
             claude_trusts_repository, executable, free_disk_bytes, host_versions, load_average,
             main_checkout_of, path_text,
         },
@@ -192,6 +192,9 @@ pub struct ReleaseUpdateJob {
     pub plugin_dir: Option<PathBuf>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
+    /// Only bring the installed plugin to the release (ADR-t618-2
+    /// decision 4).
+    pub plugin_only: bool,
 }
 
 /// How the supervisor loop is driven. `stop` is the graceful drain switch
@@ -631,6 +634,14 @@ pub fn supervise_with_reviewer(
                 },
                 |port| port.0.clone(),
             ),
+            // The plugin a `--plugin-dir` supervisor loads is not touched
+            // (ADR-t618-2 decision 3).
+            plugin: options.plugin_dir.is_none().then(|| {
+                Arc::new(crate::infrastructure::adapters::ClaudePlugin {
+                    executable: claude.to_path_buf(),
+                    cwd: main_checkout.clone(),
+                }) as Arc<dyn crate::application::InstalledPlugin>
+            }),
             current: options
                 .release_current
                 .clone()
@@ -1416,6 +1427,11 @@ same in one step",
             job.plugin_dir.as_deref(),
         )?;
         let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
+        // Where the supervisor started it: its sessions' repository.
+        let plugin = job.plugin_dir.is_none().then(|| ClaudePlugin {
+            executable: job.claude.clone(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        });
         update::run_release(
             &update::JobPorts {
                 binaries: &LocalBinaries,
@@ -1428,6 +1444,9 @@ same in one step",
             &crate::infrastructure::binaries::CargoInstaller {
                 program: job.cargo.clone(),
             },
+            plugin
+                .as_ref()
+                .map(|plugin| plugin as &dyn crate::application::InstalledPlugin),
             &db,
             &update::ReleaseJobOptions {
                 version: job.version.clone(),
@@ -1440,6 +1459,7 @@ same in one step",
                 watch_timeout: job.watch_timeout,
                 poll: Duration::from_millis(500),
                 pid: std::process::id(),
+                plugin_only: job.plugin_only,
             },
         )
     }

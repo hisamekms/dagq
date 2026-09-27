@@ -21,7 +21,7 @@
 //! it; the job's own output goes to the queue's `logs/`.
 
 use super::{
-    Clock, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
+    Clock, InstalledPlugin, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
     install::{self, Binaries, InstallOptions, Source, previous_path},
     lifecycle,
 };
@@ -345,7 +345,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         Ok(binary) => binary,
         Err(error) => return failed(queue, &job, "build", &error, json!({})),
     };
-    put_in_place(ports, queue, db, &job, &binary)
+    put_in_place(ports, queue, db, &job, &binary, PluginStep::Untouched)
 }
 
 /// The release update's job (ADR-t618-1 decision 5): the settings of one
@@ -368,6 +368,9 @@ pub struct ReleaseJobOptions {
     pub watch_timeout: Duration,
     pub poll: Duration,
     pub pid: u32,
+    /// Only bring the installed plugin to the release, the binary being it
+    /// already (ADR-t618-2 decision 4).
+    pub plugin_only: bool,
 }
 
 /// Install release `options.version` with `installer` under the queue's
@@ -375,10 +378,15 @@ pub struct ReleaseJobOptions {
 /// and put it in place of the supervisor's binary as [`run`] does a build:
 /// the check, a breaking migration left to the `approve_update` ask, the
 /// swap, the handoff, the watch and the restore. The steps carry `source:
-/// "release"` and the `release`.
+/// "release"` and the `release`. Once the binary is in place, `plugin` (the
+/// installed dagq plugin; `None` when the supervisor loads one from
+/// `--plugin-dir`) is brought to the release (ADR-t618-2): a failure there
+/// asks, and leaves the binary in place. With `options.plugin_only`, the
+/// plugin is all the job updates.
 pub fn run_release(
     ports: &JobPorts,
     installer: &dyn install::ReleaseInstaller,
+    plugin: Option<&dyn InstalledPlugin>,
     db: &Path,
     options: &ReleaseJobOptions,
 ) -> Result<Value> {
@@ -396,6 +404,10 @@ pub fn run_release(
         poll: options.poll,
         pid: options.pid,
     };
+    let step = plugin.map_or(PluginStep::Skipped, PluginStep::Update);
+    if options.plugin_only {
+        return plugin_only(queue, &job, &options.version, step);
+    }
     let installed = install::release_binary(
         ports.binaries,
         installer,
@@ -409,7 +421,95 @@ pub fn run_release(
         Ok(binary) => binary,
         Err(error) => return failed(queue, &job, "build", &error, json!({})),
     };
-    put_in_place(ports, queue, db, &job, &binary)
+    put_in_place(ports, queue, db, &job, &binary, step)
+}
+
+/// What a job does about the installed dagq plugin once the binary is in
+/// place (ADR-t618-2).
+#[derive(Clone, Copy)]
+enum PluginStep<'a> {
+    /// A build of main's commit: the plugin is left as it is.
+    Untouched,
+    /// The supervisor loads the plugin from `--plugin-dir` (decision 3):
+    /// nothing is done, and `update_installed` says so.
+    Skipped,
+    /// Bring the installed plugin to the release (decisions 1 and 2).
+    Update(&'a dyn InstalledPlugin),
+}
+
+/// `plugin` of an `update_installed` whose supervisor loads the plugin from
+/// `--plugin-dir`.
+pub const PLUGIN_SKIPPED: &str = "skipped: plugin-dir";
+
+/// What `update_installed` says of the plugin after `step`, the note of
+/// the attention when it was updated, and the error when its update failed.
+fn plugin_outcome(step: PluginStep) -> (Option<Value>, Option<String>, Option<anyhow::Error>) {
+    let plugin = match step {
+        PluginStep::Untouched => return (None, None, None),
+        PluginStep::Skipped => return (Some(json!(PLUGIN_SKIPPED)), None, None),
+        PluginStep::Update(plugin) => plugin,
+    };
+    let runs = plugin.update();
+    let commands: Vec<Value> = runs
+        .iter()
+        .map(
+            |run| json!({"command": run.command, "output": run.output, "succeeded": run.succeeded}),
+        )
+        .collect();
+    if let Some(run) = runs.iter().find(|run| !run.succeeded) {
+        let error = anyhow::anyhow!("`{}` failed: {}", run.command, run.output);
+        return (
+            Some(json!({"updated": false, "commands": commands})),
+            None,
+            Some(error),
+        );
+    }
+    // What it is now, for the report; an unreadable list is no failure.
+    let version = plugin.version().ok().flatten();
+    let message = format!(
+        "The {} plugin of Claude Code was updated{}. The inbox and planner sessions open now keep the plugin they started with: reopen them to load the new one (headless jobs and sessions opened from now on load it already).",
+        lifecycle::DAGQ_PLUGIN,
+        version
+            .as_deref()
+            .map(|version| format!(" to {version}"))
+            .unwrap_or_default()
+    );
+    (
+        Some(json!({"updated": true, "version": version, "commands": commands})),
+        Some(message),
+        None,
+    )
+}
+
+/// The job that only brings the installed plugin to `version`, which the
+/// binary is already (ADR-t618-2 decision 4): `update_installed` with
+/// `plugin_only`, or `update_failed` at the `plugin` stage.
+fn plugin_only(queue: &mut dyn Queue, job: &Job, version: &str, step: PluginStep) -> Result<Value> {
+    let (plugin, message, error) = plugin_outcome(step);
+    if let Some(error) = error {
+        return failed(
+            queue,
+            job,
+            "plugin",
+            &error,
+            json!({"plugin": plugin, "plugin_only": true, "version": version}),
+        );
+    }
+    let mut payload = json!({
+        "pid": job.pid,
+        "version": version,
+        "plugin_only": true,
+        "plugin": plugin,
+    });
+    if let Some(message) = message {
+        payload["message"] = json!(message);
+    }
+    job.subject
+        .record(&*queue, UPDATE_INSTALLED, payload.clone())?;
+    let mut value = payload;
+    value["outcome"] = json!("installed");
+    job.subject.tag(&mut value);
+    Ok(value)
 }
 
 /// What a job puts in place: a build of main's commit (the automatic
@@ -479,13 +579,15 @@ struct Job<'a> {
 
 /// Check `binary`, leave it to a person when it brings a breaking
 /// migration, else install it as `install` does, watch the supervisors
-/// take it and put the old binary back when none does.
+/// take it and put the old binary back when none does; once it is in place
+/// and taken, do the `plugin` step.
 fn put_in_place(
     ports: &JobPorts,
     queue: &mut dyn Queue,
     db: &Path,
     job: &Job,
     binary: &Path,
+    plugin: PluginStep,
 ) -> Result<Value> {
     let pid = job.pid;
     job.subject.record(
@@ -676,7 +778,7 @@ fn put_in_place(
             }),
         );
     }
-    let payload = json!({
+    let mut payload = json!({
         "pid": pid,
         "version": version,
         "previous_version": report["previous_version"],
@@ -684,8 +786,27 @@ fn put_in_place(
         "supervisors": report["supervisors"],
         "log": job.log,
     });
+    // After the binary, never before (ADR-t618-2 decision 1).
+    let (plugin, message, plugin_error) = plugin_outcome(plugin);
+    if let Some(plugin) = plugin {
+        payload["plugin"] = plugin;
+    }
+    if let Some(message) = message {
+        payload["message"] = json!(message);
+    }
     job.subject
         .record(&*queue, UPDATE_INSTALLED, payload.clone())?;
+    // The new binary works with the plugin it had, so it stays (decision
+    // 2): the failure only asks.
+    if let Some(error) = plugin_error {
+        return failed(
+            queue,
+            job,
+            "plugin",
+            &error,
+            json!({"plugin": payload["plugin"], "version": version}),
+        );
+    }
     let mut value = payload;
     value["outcome"] = json!("installed");
     job.subject.tag(&mut value);
@@ -1007,6 +1128,16 @@ said otherwise below.",
         situation.push_str(&format!(" The binary: {restored}."));
     }
     let question = match job.subject {
+        Subject::Release(version) if stage == "plugin" => format!(
+            "The update of the {plugin} plugin of Claude Code to release {version} failed: {error}\n\nThe binary stays as it is: dagq {version} runs, and works with the plugin it had. The \
+job's log is {}.\n\nAnswer `retry` to have the supervisor run `claude {}` and `claude {}` again at \
+its next check (after fixing what failed), or `skip` to leave the plugin as it is. By hand, run the \
+two commands, then reopen the inbox and planner sessions to load the new plugin.",
+            job.log.display(),
+            lifecycle::PLUGIN_UPDATE_ARGUMENTS[0].join(" "),
+            lifecycle::PLUGIN_UPDATE_ARGUMENTS[1].join(" "),
+            plugin = lifecycle::DAGQ_PLUGIN,
+        ),
         Subject::Commit(_) => format!(
             "The automatic update to {} failed at its {stage}: {error}\n\n{situation} The job's \
 log is {}.\n\nAnswer `retry` to build main's head again at the supervisor's next check (after \

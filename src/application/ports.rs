@@ -357,6 +357,29 @@ pub enum PluginState {
     Missing,
 }
 
+/// One command of an update of the installed dagq plugin and what it
+/// printed (ADR-t618-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginCommandRun {
+    /// The command as a person would type it.
+    pub command: String,
+    /// Its stdout and stderr, or why it could not run.
+    pub output: String,
+    pub succeeded: bool,
+}
+
+/// The dagq plugin installed in the host's Claude Code, which the release
+/// update brings to the release of the binary (ADR-t618-2): `claude` on the
+/// host, a stub in tests.
+pub trait InstalledPlugin: Send + Sync {
+    /// The version of the installed plugin (the enabled install, else any);
+    /// `None` when it is not installed, an error when it cannot tell.
+    fn version(&self) -> Result<Option<String>>;
+    /// Read the marketplace again and update the plugin, in that order,
+    /// stopping at the first command that fails: the commands run.
+    fn update(&self) -> Vec<PluginCommandRun>;
+}
+
 /// Provider-specific CLI construction is kept outside supervisor orchestration.
 pub trait AgentProvider {
     fn preflight(&self) -> Result<()>;

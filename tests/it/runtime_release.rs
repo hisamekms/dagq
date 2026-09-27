@@ -5,7 +5,7 @@
 //! through a stub `cargo` that fails, so nothing is ever replaced.
 use std::os::unix::fs::PermissionsExt;
 
-use crate::runtime_support;
+use crate::{common, runtime_support};
 
 use dagq::infrastructure::release_update::CurlIndex;
 use runtime_support::*;
@@ -121,6 +121,24 @@ impl Setup {
     fn supervise(&self) {
         let backend = TestWorkspace::new(&self.db, false, VALID_AGENT);
         let outcome = supervise_with(&self.db, &self.repo, &backend, &self.options).unwrap();
+        assert_eq!(outcome["runs"], json!([]), "{outcome}");
+    }
+
+    /// [`Self::supervise`] with `claude` as the supervisor's Claude Code.
+    fn supervise_with_claude(&self, claude: &Path) {
+        let backend = TestWorkspace::new(&self.db, false, VALID_AGENT);
+        let outcome = {
+            let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+            runtime::supervise(
+                &self.db,
+                &self.repo,
+                &backend,
+                claude,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &self.options,
+            )
+            .unwrap()
+        };
         assert_eq!(outcome["runs"], json!([]), "{outcome}");
     }
 
@@ -566,4 +584,97 @@ fn an_interrupted_release_job_is_reported_not_retried() {
     assert!(s.release_asks().is_empty());
     s.supervise();
     assert_eq!(s.steps("update_failed", "0.4.0").len(), 1);
+}
+
+/// A `claude` whose installed claude-dagq is `version` and that notes each
+/// call's arguments in `<claude>.calls`.
+fn plugin_claude(s: &Setup, version: &str) -> PathBuf {
+    let claude = s.db.canonicalize().unwrap().with_file_name("plugin-claude");
+    fs::write(
+        &claude,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\ncase \"$*\" in\n\
+'plugin list --json') printf '%s' '[{{\"id\":\"claude-dagq@dagq\",\"version\":\"{version}\",\"enabled\":true}}]' ;;\n\
+*) echo ok ;;\nesac\n",
+            calls = claude.with_extension("calls").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    claude
+}
+
+/// Only the plugin is older than the binary, which is the latest release
+/// (ADR-t618-2 decision 4): the look records its version, `approve_release`
+/// asks about the plugin alone, and `install` starts the job that runs the
+/// two update commands with the supervisor's `claude` and nothing else.
+#[test]
+fn a_plugin_older_than_the_latest_binary_is_asked_about_and_updated_alone() {
+    let s = setup("", "0.4.0", false);
+    let claude = plugin_claude(&s, "0.3.0");
+    s.supervise_with_claude(&claude);
+    let checked = events_of(&s.db, "release_checked");
+    assert_eq!(checked[0]["plugin"], "0.3.0", "{checked:?}");
+    let asks = s.release_asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].subject.as_deref(), Some("0.4.0"));
+    assert!(
+        asks[0]
+            .question
+            .contains("plugin installed in Claude Code is 0.3.0")
+            && asks[0].question.contains("the binary is not touched"),
+        "{}",
+        asks[0].question
+    );
+    s.supervise_with_claude(&claude);
+    assert_eq!(s.release_asks().len(), 1);
+
+    s.answer(&asks[0], "install");
+    s.supervise_with_claude(&claude);
+    let answered = s.steps("update_answered", "0.4.0");
+    assert_eq!(answered[0]["plugin_only"], true, "{answered:?}");
+    let started = s.steps("update_started", "0.4.0");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["plugin_only"], true);
+    let installed = {
+        let begun = Instant::now();
+        loop {
+            if let Some(installed) = s.steps("update_installed", "0.4.0").pop() {
+                break installed;
+            }
+            assert!(
+                begun.elapsed() < Duration::from_secs(60),
+                "the plugin job did not end: {:?}",
+                events_of(&s.db, "update_failed")
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    assert_eq!(installed["plugin_only"], true, "{installed}");
+    assert_eq!(installed["plugin"]["updated"], true, "{installed}");
+    let calls = fs::read_to_string(claude.with_extension("calls")).unwrap();
+    assert!(
+        calls.contains("plugin marketplace update dagq\nplugin update claude-dagq@dagq\n"),
+        "{calls}"
+    );
+    assert!(fs::read_dir(&s.cargo_calls).unwrap().next().is_none());
+    // Done: not asked or started again.
+    s.supervise_with_claude(&claude);
+    assert!(s.release_asks().is_empty());
+    assert_eq!(s.steps("update_started", "0.4.0").len(), 1);
+}
+
+/// A supervisor on `--plugin-dir` neither reads nor asks about the
+/// installed plugin (ADR-t618-2 decision 3).
+#[test]
+fn a_plugin_dir_supervisor_leaves_the_installed_plugin() {
+    let mut s = setup("", "0.4.0", false);
+    s.options.plugin_dir = Some(s.repo.clone());
+    let claude = plugin_claude(&s, "0.3.0");
+    s.supervise_with_claude(&claude);
+    let checked = events_of(&s.db, "release_checked");
+    assert_eq!(checked[0]["plugin"], Value::Null, "{checked:?}");
+    assert!(s.release_asks().is_empty());
+    let calls = fs::read_to_string(claude.with_extension("calls")).unwrap_or_default();
+    assert!(!calls.contains("plugin"), "{calls}");
 }

@@ -15,6 +15,7 @@
 //! update's.
 
 use super::*;
+use crate::application::lifecycle;
 use crate::application::release_update::{self, ReleaseAction, ReleaseIndex};
 use crate::application::update::{
     JOB_STEPS, RELEASE_SOURCE, UPDATE_ANSWERED, UPDATE_ASKER, UPDATE_FAILED, UPDATE_HISTORY,
@@ -36,6 +37,10 @@ pub struct ReleasePort {
     pub config: Arc<dyn Fn() -> ReleaseUpdateConfig + Send + Sync>,
     /// Reads crates.io's sparse index.
     pub index: Arc<dyn ReleaseIndex>,
+    /// The dagq plugin installed in the supervisor's Claude Code; `None`
+    /// when the supervisor loads one from `--plugin-dir`, which the release
+    /// update never touches (ADR-t618-2 decision 3).
+    pub plugin: Option<Arc<dyn crate::application::InstalledPlugin>>,
     /// The supervisor's build identifier as the look takes it.
     pub current: String,
 }
@@ -107,6 +112,7 @@ impl Supervisor<'_> {
             release_update::check(
                 &*queue,
                 &*port.index,
+                port.plugin.as_deref(),
                 &config,
                 &port.current,
                 now,
@@ -157,7 +163,7 @@ impl Supervisor<'_> {
         if config.release == ReleaseMode::Off {
             return Ok(());
         }
-        self.apply_release_answers()?;
+        self.apply_release_answers(&port.current)?;
         if self.release.install.is_some() {
             return Ok(());
         }
@@ -184,10 +190,16 @@ impl Supervisor<'_> {
                 return self.release_job_interrupted(step, version);
             }
         }
-        let latest = self
-            .queue
-            .latest_queue_event(&[RELEASE_CHECKED])?
-            .and_then(|event| event.payload["latest"].as_str().map(str::to_owned));
+        let checked = self.queue.latest_queue_event(&[RELEASE_CHECKED])?;
+        let read = |key: &str| {
+            checked
+                .as_ref()
+                .and_then(|event| event.payload[key].as_str().map(str::to_owned))
+        };
+        // A plugin read under another build is stale: the look after an
+        // exec reads it again before the plugin is asked about.
+        let plugin = read("plugin").filter(|_| read("current").as_deref() == Some(&port.current));
+        let latest = read("latest");
         let open: Vec<String> = self
             .queue
             .asks(AskQuery::default())?
@@ -195,17 +207,34 @@ impl Supervisor<'_> {
             .filter(|ask| ask.kind == AskKind::ApproveRelease)
             .filter_map(|ask| ask.subject)
             .collect();
-        match release_update::next_action(
+        let mut action = release_update::next_action(
             config.release,
             &port.current,
             latest.as_deref(),
             &updates,
             &open,
-        ) {
+        );
+        if action == ReleaseAction::Nothing && port.plugin.is_some() {
+            action = release_update::next_plugin_action(
+                config.release,
+                &port.current,
+                latest.as_deref(),
+                plugin.as_deref(),
+                &updates,
+                &open,
+            );
+        }
+        match action {
             ReleaseAction::Start(version) => {
-                self.start_release_job(&version, &port.current, options)
+                self.start_release_job(&version, &port.current, options, false)
+            }
+            ReleaseAction::StartPlugin(version) => {
+                self.start_release_job(&version, &port.current, options, true)
             }
             ReleaseAction::Ask(version) => self.open_release_ask(&version, &port.current),
+            ReleaseAction::AskPlugin(version) => {
+                self.open_plugin_ask(&version, plugin.as_deref().unwrap_or("older"))
+            }
             ReleaseAction::Nothing => Ok(()),
         }
     }
@@ -214,7 +243,9 @@ impl Supervisor<'_> {
     /// look to start the job, `skip` leaves the release) and the answered
     /// `update_failed` asks of a release's job (`retry` starts it again,
     /// `skip` leaves the release). Any other answer is left for the inbox.
-    fn apply_release_answers(&mut self) -> Result<()> {
+    /// An answer about the release the binary is already is about the
+    /// plugin (ADR-t618-2 decision 4), and says so with `plugin_only`.
+    fn apply_release_answers(&mut self, current: &str) -> Result<()> {
         for ask in self.queue.update_answers(&AskKind::ApproveRelease)? {
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
             let Some(version) = ask.subject.clone() else {
@@ -223,7 +254,7 @@ impl Supervisor<'_> {
             if !APPROVE_RELEASE_OPTIONS.contains(&answer) {
                 continue;
             }
-            self.record_release_answer(UPDATE_ANSWERED, ask.id, answer, &version)?;
+            self.record_release_answer(UPDATE_ANSWERED, ask.id, answer, &version, current)?;
         }
         let updates = self.queue.update_events(UPDATE_HISTORY)?;
         for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
@@ -236,7 +267,7 @@ impl Supervisor<'_> {
                 "skip" => UPDATE_ANSWERED,
                 _ => continue,
             };
-            self.record_release_answer(kind, ask.id, answer, version)?;
+            self.record_release_answer(kind, ask.id, answer, version, current)?;
         }
         Ok(())
     }
@@ -247,19 +278,19 @@ impl Supervisor<'_> {
         ask: crate::domain::AskId,
         answer: &str,
         version: &str,
+        current: &str,
     ) -> Result<()> {
-        record(
-            &*self.queue,
-            kind,
-            None,
-            json!({
-                "ask_id": ask,
-                "answer": answer,
-                "source": RELEASE_SOURCE,
-                "release": version,
-                "supervisor": self.token,
-            }),
-        )?;
+        let mut payload = json!({
+            "ask_id": ask,
+            "answer": answer,
+            "source": RELEASE_SOURCE,
+            "release": version,
+            "supervisor": self.token,
+        });
+        if version == current {
+            payload["plugin_only"] = json!(true);
+        }
+        record(&*self.queue, kind, None, payload)?;
         self.queue.close_ask(ask)?;
         info!(ask_id = %ask, "release update: ask {ask} answered {answer} for release {version}");
         Ok(())
@@ -290,18 +321,55 @@ next release asks again.",
         Ok(())
     }
 
+    /// Open the `approve_release` ask about bringing the installed plugin,
+    /// at `plugin`, to `version`, the release the binary is already
+    /// (ADR-t618-2 decision 4).
+    fn open_plugin_ask(&mut self, version: &str, plugin: &str) -> Result<()> {
+        let question = format!(
+            "The {name} plugin installed in Claude Code is {plugin}, older than dagq {version} that \
+this queue's supervisor runs. Answer `install` to have the supervisor bring only the plugin to the \
+release with `claude {}` and `claude {}` (the binary is not touched); the inbox and planner \
+sessions open now keep the plugin they started with, so reopen them afterwards to load it. Answer \
+`skip` to leave the plugin as it is; the next release asks again.",
+            lifecycle::PLUGIN_UPDATE_ARGUMENTS[0].join(" "),
+            lifecycle::PLUGIN_UPDATE_ARGUMENTS[1].join(" "),
+            name = lifecycle::DAGQ_PLUGIN,
+        );
+        let ask = self.queue.open_update_ask(
+            AskKind::ApproveRelease,
+            &question,
+            APPROVE_RELEASE_OPTIONS,
+            UPDATE_ASKER,
+            Some(version),
+        )?;
+        info!(ask_id = %ask.id, "release update: the plugin {plugin} is older than {version}; ask {} opened", ask.id);
+        Ok(())
+    }
+
     /// A job of a release that died before it recorded how it ended:
     /// record `update_failed` for it and ask the inbox, so it is neither
     /// lost nor tried again on its own.
     fn release_job_interrupted(&mut self, step: &RunEvent, version: &str) -> Result<()> {
-        let question = format!(
-            "The job that installs release {version} (pid {}) ended without recording how, at its \
-{}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ directory. \
+        let plugin_only = step.payload["plugin_only"] == true;
+        let question = if plugin_only {
+            format!(
+                "The job that brings the {} plugin to release {version} (pid {}) ended without \
+recording how, at its {}; the binary was not touched. Its logs are in the queue's logs/ directory. \
+Answer `retry` to update the plugin again at the supervisor's next check, or `skip` to leave it.",
+                lifecycle::DAGQ_PLUGIN,
+                job_pid(step).unwrap_or_default(),
+                step.kind
+            )
+        } else {
+            format!(
+                "The job that installs release {version} (pid {}) ended without recording how, at \
+its {}; nothing tells whether the binary was replaced. Its logs are in the queue's logs/ directory. \
 Answer `retry` to install release {version} again at the supervisor's next check, or `skip` to \
 leave it (the next release asks again).",
-            job_pid(step).unwrap_or_default(),
-            step.kind
-        );
+                job_pid(step).unwrap_or_default(),
+                step.kind
+            )
+        };
         let ask = self.queue.open_update_ask(
             AskKind::UpdateFailed,
             &question,
@@ -314,7 +382,9 @@ leave it (the next release asks again).",
             UPDATE_FAILED,
             None,
             json!({
-                "stage": "interrupted",
+                "stage": if plugin_only { "plugin" } else { "interrupted" },
+                "interrupted": true,
+                "plugin_only": plugin_only,
                 "after": step.kind,
                 "ask_id": ask.id,
                 "supervisor": self.token,
@@ -329,13 +399,15 @@ leave it (the next release asks again).",
         Ok(())
     }
 
-    /// Start the job that installs `version` in a session of its own, its
-    /// output in the queue's `logs/`, and record `update_started`.
+    /// Start the job that installs `version` (only the plugin, with
+    /// `plugin_only`) in a session of its own, its output in the queue's
+    /// `logs/`, and record `update_started`.
     fn start_release_job(
         &mut self,
         version: &str,
         current: &str,
         options: &LoopSettings,
+        plugin_only: bool,
     ) -> Result<()> {
         let layout = self.layout;
         let queue_dir = layout.db.parent().unwrap_or(Path::new("."));
@@ -375,6 +447,9 @@ leave it (the next release asks again).",
         if let Some(cargo) = &options.update.cargo {
             command.arg("--cargo").arg(cargo);
         }
+        if plugin_only {
+            command.arg("--plugin-only");
+        }
         let job = self.spawner.spawn(
             &command,
             Streams::Files {
@@ -382,24 +457,28 @@ leave it (the next release asks again).",
                 stderr: &log,
             },
         )?;
-        record(
-            &*self.queue,
-            UPDATE_STARTED,
-            None,
-            json!({
-                "pid": job.id(),
-                "source": RELEASE_SOURCE,
-                "release": version,
-                "supervisor": self.token,
-                "version": current,
-                "log": log,
-                "build_log": build_log,
-                "report": report,
-            }),
-        )?;
+        let mut started = json!({
+            "pid": job.id(),
+            "source": RELEASE_SOURCE,
+            "release": version,
+            "supervisor": self.token,
+            "version": current,
+            "log": log,
+            "build_log": build_log,
+            "report": report,
+        });
+        if plugin_only {
+            started["plugin_only"] = json!(true);
+        }
+        record(&*self.queue, UPDATE_STARTED, None, started)?;
         info!(
-            "release update: job {} installs release {version} (log {})",
+            "release update: job {} installs release {version}{} (log {})",
             job.id(),
+            if plugin_only {
+                " (the plugin only)"
+            } else {
+                ""
+            },
             log.display()
         );
         self.release.install = Some(job);

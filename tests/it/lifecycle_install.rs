@@ -1510,12 +1510,60 @@ impl dagq::application::install::ReleaseInstaller for FakeCargo {
     }
 }
 
+/// The installed plugin: its version, and an update whose second command
+/// fails when `fails`; each call noted.
+#[derive(Default)]
+struct FakePlugin {
+    fails: bool,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FakePlugin {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl dagq::application::InstalledPlugin for FakePlugin {
+    fn version(&self) -> Result<Option<String>> {
+        self.calls.lock().unwrap().push("version".into());
+        Ok(Some("9.9.9".into()))
+    }
+    fn update(&self) -> Vec<dagq::application::PluginCommandRun> {
+        use dagq::application::lifecycle::PLUGIN_UPDATE_ARGUMENTS;
+        let mut runs = Vec::new();
+        for (n, arguments) in PLUGIN_UPDATE_ARGUMENTS.iter().enumerate() {
+            let command = format!("claude {}", arguments.join(" "));
+            self.calls.lock().unwrap().push(command.clone());
+            let succeeded = !(self.fails && n == 1);
+            runs.push(dagq::application::PluginCommandRun {
+                command,
+                output: if succeeded { "ok" } else { "network down" }.into(),
+                succeeded,
+            });
+        }
+        runs
+    }
+}
+
 fn run_release_job(
     fixture: &Fixture,
     binaries: &UpdateBinaries,
     cargo: &FakeCargo,
     processes: &FakeProcesses,
     version: &str,
+) -> Value {
+    run_release_job_with(fixture, binaries, cargo, processes, version, None, false)
+}
+
+fn run_release_job_with(
+    fixture: &Fixture,
+    binaries: &UpdateBinaries,
+    cargo: &FakeCargo,
+    processes: &FakeProcesses,
+    version: &str,
+    plugin: Option<&FakePlugin>,
+    plugin_only: bool,
 ) -> Value {
     use dagq::application::update;
     let queues = |db: &Path| -> std::sync::Arc<dyn dagq::application::QueueOpener> {
@@ -1538,6 +1586,7 @@ fn run_release_job(
             restart: &restart,
         },
         cargo,
+        plugin.map(|plugin| plugin as &dyn dagq::application::InstalledPlugin),
         &fixture.location.db,
         &update::ReleaseJobOptions {
             version: version.to_owned(),
@@ -1550,6 +1599,7 @@ fn run_release_job(
             watch_timeout: Duration::from_secs(5),
             poll: Duration::from_millis(20),
             pid: 7,
+            plugin_only,
         },
     )
     .unwrap()
@@ -1693,4 +1743,194 @@ fn the_release_job_skips_cargo_when_the_binary_is_that_release() {
     assert_eq!(report["version"], "0.0.1", "{report}");
     assert!(installer.calls.lock().unwrap().is_empty());
     assert!(binaries.calls().is_empty(), "{:?}", binaries.calls());
+}
+
+/// The release job and the installed plugin (ADR-t618-2 decisions 1 to 3,
+/// 5): after the binary is taken, the two update commands run and
+/// `update_installed` says to reopen the sessions; a supervisor on
+/// `--plugin-dir` leaves the plugin (`skipped: plugin-dir`); a failed
+/// update asks at the `plugin` stage and leaves the new binary; a failed
+/// handoff never touches the plugin.
+#[test]
+fn the_release_job_brings_the_plugin_after_the_binary() {
+    let fixture = fixture();
+    let queue = auto_supervisor(&fixture);
+    let processes = FakeProcesses::default();
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    let cargo = || FakeCargo {
+        binary: dir.join("built").join("dagq"),
+        fails: false,
+        calls: Mutex::default(),
+    };
+    let latest = |kind: &str| {
+        queue
+            .update_events(20)
+            .unwrap()
+            .into_iter()
+            .find(|u| u.kind == kind)
+            .unwrap()
+    };
+    let job = |plugin: Option<&FakePlugin>, alive: bool| {
+        let binaries = UpdateBinaries::new(dir, false, &[]);
+        let report = thread::scope(|scope| {
+            scope.spawn(|| take_and_heartbeat(&fixture, &processes, alive));
+            run_release_job_with(
+                &fixture,
+                &binaries,
+                &cargo(),
+                &processes,
+                "9.9.9",
+                plugin,
+                false,
+            )
+        });
+        processes.dead.lock().unwrap().remove(&UPDATED_PID);
+        (report, binaries.calls())
+    };
+
+    // Updated after the binary, and the attention says to reopen.
+    let plugin = FakePlugin::default();
+    let (report, _) = job(Some(&plugin), true);
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(
+        plugin.calls(),
+        [
+            "claude plugin marketplace update dagq",
+            "claude plugin update claude-dagq@dagq",
+            "version"
+        ]
+    );
+    let installed = latest("update_installed");
+    assert_eq!(
+        installed.payload["plugin"]["updated"], true,
+        "{installed:?}"
+    );
+    assert_eq!(installed.payload["plugin"]["version"], "9.9.9");
+    assert_eq!(
+        installed.payload["plugin"]["commands"][1]["command"],
+        "claude plugin update claude-dagq@dagq"
+    );
+    let message = installed.payload["message"].as_str().unwrap();
+    assert!(
+        message.contains("reopen them") && message.contains("inbox and planner"),
+        "{message}"
+    );
+    // As `watch` shows it to the inbox.
+    let attention = dagq::application::health::compact_event(&installed);
+    assert_eq!(attention["plugin"]["updated"], true, "{attention}");
+    assert_eq!(attention["next"], "report the update", "{attention}");
+    assert!(
+        attention["reason"]
+            .as_str()
+            .unwrap()
+            .contains("reopen them"),
+        "{attention}"
+    );
+
+    // A supervisor on --plugin-dir: nothing is run.
+    let (report, _) = job(None, true);
+    assert_eq!(report["outcome"], "installed", "{report}");
+    let installed = latest("update_installed");
+    assert_eq!(installed.payload["plugin"], "skipped: plugin-dir");
+    assert!(installed.payload.get("message").is_none(), "{installed:?}");
+
+    // The update fails: the binary stays, the ask is at the plugin stage.
+    let plugin = FakePlugin {
+        fails: true,
+        ..FakePlugin::default()
+    };
+    let (report, calls) = job(Some(&plugin), true);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "plugin", "{report}");
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+    let failed = latest("update_failed");
+    assert_eq!(failed.payload["stage"], "plugin");
+    assert_eq!(failed.payload["plugin"]["updated"], false);
+    assert_eq!(
+        failed.payload["plugin"]["commands"][1]["output"],
+        "network down"
+    );
+    let question = queue
+        .asks(dagq::application::AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == dagq::domain::AskKind::UpdateFailed)
+        .unwrap()
+        .question;
+    assert!(
+        question.contains("claude-dagq plugin")
+            && question.contains("network down")
+            && question.contains("The binary stays")
+            && question.contains("claude plugin marketplace update dagq"),
+        "{question}"
+    );
+
+    // The supervisor does not take the binary: it goes back, and the
+    // plugin is not touched.
+    let plugin = FakePlugin::default();
+    let (report, calls) = job(Some(&plugin), false);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "watch", "{report}");
+    assert!(calls.iter().any(|c| c.starts_with("restore")), "{calls:?}");
+    assert!(plugin.calls().is_empty(), "{:?}", plugin.calls());
+}
+
+/// The job that only brings the plugin to the release the binary is
+/// already (ADR-t618-2 decision 4): no cargo, no swap; `update_installed`
+/// with `plugin_only`, or `update_failed` at the `plugin` stage.
+#[test]
+fn the_plugin_only_job_updates_the_plugin_and_nothing_else() {
+    let fixture = fixture();
+    let queue = auto_supervisor(&fixture);
+    let processes = FakeProcesses::default();
+    let dir = fixture._dir.path();
+    let cargo = FakeCargo {
+        binary: dir.join("built").join("dagq"),
+        fails: true,
+        calls: Mutex::default(),
+    };
+    let binaries = UpdateBinaries::new(dir, true, &[]);
+    let plugin = FakePlugin::default();
+    let report = run_release_job_with(
+        &fixture,
+        &binaries,
+        &cargo,
+        &processes,
+        "9.9.9",
+        Some(&plugin),
+        true,
+    );
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["plugin_only"], true, "{report}");
+    assert!(cargo.calls.lock().unwrap().is_empty());
+    assert!(binaries.calls().is_empty(), "{:?}", binaries.calls());
+    assert_eq!(plugin.calls().len(), 3, "{:?}", plugin.calls());
+    let installed = &queue.update_events(1).unwrap()[0];
+    assert_eq!(installed.kind, "update_installed");
+    assert_eq!(installed.payload["release"], "9.9.9");
+    assert_eq!(installed.payload["plugin"]["updated"], true);
+    assert!(installed.payload["message"].is_string(), "{installed:?}");
+
+    let failing = FakePlugin {
+        fails: true,
+        ..FakePlugin::default()
+    };
+    let report = run_release_job_with(
+        &fixture,
+        &binaries,
+        &cargo,
+        &processes,
+        "9.9.9",
+        Some(&failing),
+        true,
+    );
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "plugin", "{report}");
+    let failed = &queue.update_events(1).unwrap()[0];
+    assert_eq!(failed.kind, "update_failed");
+    assert_eq!(failed.payload["plugin_only"], true);
+    assert!(binaries.calls().is_empty());
 }

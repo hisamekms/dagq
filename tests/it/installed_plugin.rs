@@ -283,3 +283,93 @@ fn a_restart_by_the_runtime_does_not_check_the_installed_plugin() {
         serde_json::json!({"restart": "1", "arguments": "up --in-cmux"})
     );
 }
+
+#[test]
+fn plugin_version_reads_the_enabled_entry_of_the_plugin_list() {
+    use dagq::infrastructure::adapters::plugin_version;
+    assert_eq!(
+        plugin_version(ENABLED, "claude-dagq").unwrap().as_deref(),
+        Some("0.4.0")
+    );
+    let two = r#"[{"id":"claude-dagq@old","version":"0.1.0","enabled":false},{"id":"claude-dagq@dagq","version":"0.4.0","enabled":true}]"#;
+    assert_eq!(
+        plugin_version(two, "claude-dagq").unwrap().as_deref(),
+        Some("0.4.0")
+    );
+    let disabled = r#"[{"id":"claude-dagq@dagq","version":"0.2.0","enabled":false}]"#;
+    assert_eq!(
+        plugin_version(disabled, "claude-dagq").unwrap().as_deref(),
+        Some("0.2.0")
+    );
+    assert_eq!(plugin_version("[]", "claude-dagq").unwrap(), None);
+    let versionless = r#"[{"id":"claude-dagq@dagq","enabled":true}]"#;
+    assert_eq!(plugin_version(versionless, "claude-dagq").unwrap(), None);
+    assert!(plugin_version("No plugins installed.", "claude-dagq").is_err());
+}
+
+/// The release update reaches the installed plugin through the `claude` it
+/// is given (ADR-t618-2): the version from `plugin list --json`, and the
+/// update as the marketplace's and then the plugin's, in the directory
+/// given, stopping at the first failure with what it printed.
+#[test]
+fn the_installed_plugin_is_read_and_updated_through_claude() {
+    use dagq::application::InstalledPlugin;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("calls");
+    let claude = dir.path().join("claude");
+    fs::write(
+        &claude,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> '{log}'\ncase \"$*\" in\n\
+'plugin list --json') printf '%s' '{ENABLED}' ;;\n\
+'plugin update claude-dagq@dagq') [ -f '{fail}' ] && {{ echo 'fetch failed' >&2; exit 1; }}; echo updated ;;\n\
+*) echo ok ;;\nesac\n",
+            log = log.display(),
+            fail = dir.path().join("fail").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let cwd = dir.path().canonicalize().unwrap();
+    let plugin = dagq::infrastructure::adapters::ClaudePlugin {
+        executable: claude.clone(),
+        cwd: cwd.clone(),
+    };
+    assert_eq!(plugin.version().unwrap().as_deref(), Some("0.4.0"));
+    let runs = plugin.update();
+    assert_eq!(
+        runs.iter().map(|r| r.command.as_str()).collect::<Vec<_>>(),
+        [
+            "claude plugin marketplace update dagq",
+            "claude plugin update claude-dagq@dagq"
+        ]
+    );
+    assert!(runs.iter().all(|r| r.succeeded), "{runs:?}");
+    assert_eq!(runs[1].output, "updated");
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls,
+        format!(
+            "{cwd}|plugin list --json\n{cwd}|plugin marketplace update dagq\n{cwd}|plugin update claude-dagq@dagq\n",
+            cwd = cwd.display()
+        )
+    );
+
+    fs::write(dir.path().join("fail"), "").unwrap();
+    let runs = plugin.update();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0].succeeded && !runs[1].succeeded, "{runs:?}");
+    assert!(runs[1].output.contains("fetch failed"), "{runs:?}");
+
+    // A claude that is not there: the first command fails, the second is
+    // not run.
+    let missing = dagq::infrastructure::adapters::ClaudePlugin {
+        executable: dir.path().join("no-claude"),
+        cwd,
+    };
+    let runs = missing.update();
+    assert_eq!(runs.len(), 1);
+    assert!(!runs[0].succeeded);
+    assert!(missing.version().is_err());
+}

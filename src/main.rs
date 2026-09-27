@@ -670,6 +670,10 @@ enum Command {
         /// Seconds the new supervisor may take to heartbeat on.
         #[arg(long, default_value_t = 60)]
         watch_timeout: u64,
+        /// Only bring the installed claude-dagq plugin to RELEASE, the binary being it already
+        /// (ADR-t618-2 decision 4).
+        #[arg(long)]
+        plugin_only: bool,
     },
     /// Run the observer job once: headless Claude under DAGQ_ROLE=observer reads stats past the
     /// cursor, the open findings, the latest notes, the open asks and the graph, and writes
@@ -2612,6 +2616,7 @@ fn execute(cli: Cli) -> Result<Value> {
             plugin_dir,
             handoff_timeout,
             watch_timeout,
+            plugin_only,
         } => {
             use dagq::infrastructure::adapters::executable;
             drop(queue);
@@ -2629,6 +2634,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
+                    plugin_only,
                 },
             )?
         }

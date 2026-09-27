@@ -673,8 +673,9 @@ pub fn truncate_reason(text: &str) -> String {
 
 /// One event as the inbox reads it: the row's ids and kind, and from the
 /// payload only `status`, `exit_code`, the reason `code`, a truncated `reason` (from
-/// `reason`, `message` or `error`) and, for a step of the automatic update,
-/// its `commit`, `version` and `stage`. Paths and receipts are left out.
+/// `reason`, `message` or `error`) and, for a step of the automatic or the
+/// release update, its `commit` or `release`, `version`, `stage` and
+/// `plugin` (ADR-t618-2). Paths and receipts are left out.
 /// An attention event also carries its `next`.
 pub fn compact_event(event: &RunEvent) -> Value {
     let mut value = json!({"id": event.id, "kind": event.kind});
@@ -704,7 +705,7 @@ pub fn compact_event(event: &RunEvent) -> Value {
     if crate::domain::UPDATE_EVENT_KINDS.contains(&event.kind.as_str()) {
         // Which build a step of the automatic update is about, and where
         // a failure happened.
-        for key in ["commit", "version", "stage"] {
+        for key in ["commit", "release", "version", "stage", "plugin"] {
             if let Some(value) = payload.get(key) {
                 object.insert(key.into(), value.clone());
             }

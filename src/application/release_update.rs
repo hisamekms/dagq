@@ -10,8 +10,10 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::Queue;
-use super::update::{UPDATE_ANSWERED, UPDATE_RETRY, UPDATE_STARTED, step_release};
+use super::update::{
+    UPDATE_ANSWERED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RETRY, UPDATE_STARTED, step_release,
+};
+use super::{InstalledPlugin, Queue};
 use crate::domain::release_update::{
     RELEASE_CHECK_FAILED, RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig,
     check_due, is_newer, is_release_build, latest_release,
@@ -36,12 +38,16 @@ pub trait ReleaseIndex: Send + Sync {
 
 /// Look for a new release when one is due: `current` is the supervisor's
 /// build identifier, `now` its clock in unix seconds, `first_pass` whether
-/// this is the process's first look. Returns the event written, `None`
-/// when nothing was due (a development build, `release = "off"`, or a look
-/// by any supervisor within the interval).
+/// this is the process's first look, `plugin` the installed dagq plugin
+/// whose version the look records too (`None` when the supervisor loads one
+/// from `--plugin-dir`, or it cannot be read: `plugin` is null). Returns the
+/// event written, `None` when nothing was due (a development build,
+/// `release = "off"`, or a look by any supervisor within the interval).
+#[allow(clippy::too_many_arguments)]
 pub fn check(
     queue: &dyn Queue,
     index: &dyn ReleaseIndex,
+    plugin: Option<&dyn InstalledPlugin>,
     config: &ReleaseUpdateConfig,
     current: &str,
     now: i64,
@@ -88,8 +94,8 @@ pub fn check(
             json!({
                 "latest": latest,
                 "current": current,
-                // The plugin's version is read by a later step (ADR-t618-2).
-                "plugin": null,
+                // Unread, only the binary decides (ADR-t618-2 decision 4).
+                "plugin": plugin.and_then(|plugin| plugin.version().ok().flatten()),
                 "checked_at": now,
                 "etag": etag,
                 "not_modified": not_modified,
@@ -144,7 +150,21 @@ pub enum ReleaseAction {
     Start(String),
     /// Open the `approve_release` ask about this release.
     Ask(String),
+    /// Start the job that brings the installed plugin to this release, the
+    /// binary being it already (ADR-t618-2 decision 4).
+    StartPlugin(String),
+    /// Open the `approve_release` ask about bringing the plugin to this
+    /// release.
+    AskPlugin(String),
     Nothing,
+}
+
+/// Whether `update` asks for a job of its release: a `retry`, or an
+/// `install` answer.
+fn is_request(update: &RunEvent) -> bool {
+    update.kind == UPDATE_RETRY
+        || (update.kind == UPDATE_ANSWERED
+            && update.payload["answer"].as_str().map(str::trim) == Some("install"))
 }
 
 /// The next step of the release update: `mode` is the host's `release`,
@@ -165,19 +185,13 @@ pub fn next_action(
     if mode == ReleaseMode::Off || !is_release_build(current) {
         return ReleaseAction::Nothing;
     }
-    fn answer(update: &RunEvent) -> Option<&str> {
-        update.payload["answer"].as_str().map(str::trim)
-    }
     // Each request no job of its release (or a newer one) started after;
     // of those, the newest release, so an answer about another release in the same pass
     // does not hide it.
     let pending = updates
         .iter()
         .enumerate()
-        .filter(|(_, update)| {
-            update.kind == UPDATE_RETRY
-                || (update.kind == UPDATE_ANSWERED && answer(update) == Some("install"))
-        })
+        .filter(|(_, update)| is_request(update))
         .filter_map(|(at, update)| {
             let version = step_release(update)?;
             // A job of it, or of a newer release, answered it.
@@ -213,6 +227,62 @@ pub fn next_action(
         ReleaseMode::Auto => ReleaseAction::Start(latest.to_owned()),
         _ if open.iter().any(|version| version == latest) => ReleaseAction::Nothing,
         _ => ReleaseAction::Ask(latest.to_owned()),
+    }
+}
+
+/// The next step of the plugin's side of the release update (ADR-t618-2
+/// decision 4), once [`next_action`] has nothing to do about the binary and
+/// the supervisor does not load the plugin from `--plugin-dir`: only while
+/// the binary is the latest release (the marketplace hands out the latest,
+/// and a plugin newer than the binary could name what it lacks). A request
+/// (an `install` answer or a `retry`) about the release the binary is
+/// already that no job followed starts the plugin's job; otherwise an
+/// installed `plugin` older than the release is brought to it (`auto`) or
+/// asked about (`ask`), unless a job already tried it (the binary's job
+/// updates the plugin after it, and its failure asks on its own) or an
+/// answer decided.
+pub fn next_plugin_action(
+    mode: ReleaseMode,
+    current: &str,
+    latest: Option<&str>,
+    plugin: Option<&str>,
+    updates: &[RunEvent],
+    open: &[String],
+) -> ReleaseAction {
+    if mode == ReleaseMode::Off || !is_release_build(current) || latest != Some(current) {
+        return ReleaseAction::Nothing;
+    }
+    let requested = updates.iter().enumerate().any(|(at, update)| {
+        is_request(update)
+            && step_release(update) == Some(current)
+            && !updates[..at].iter().any(|later| {
+                later.kind == UPDATE_STARTED
+                    && step_release(later)
+                        .is_some_and(|started| started == current || is_newer(started, current))
+            })
+    });
+    if requested {
+        return ReleaseAction::StartPlugin(current.to_owned());
+    }
+    if !plugin.is_some_and(|plugin| is_newer(current, plugin)) {
+        return ReleaseAction::Nothing;
+    }
+    let decided = updates.iter().any(|update| {
+        step_release(update) == Some(current)
+            && match update.kind.as_str() {
+                UPDATE_STARTED | UPDATE_ANSWERED => update.payload["plugin_only"] == true,
+                UPDATE_INSTALLED => update.payload.get("plugin").is_some(),
+                UPDATE_FAILED => update.payload["stage"] == "plugin",
+                _ => false,
+            }
+    });
+    if decided {
+        return ReleaseAction::Nothing;
+    }
+    match mode {
+        ReleaseMode::Auto => ReleaseAction::StartPlugin(current.to_owned()),
+        _ if open.iter().any(|version| version == current) => ReleaseAction::Nothing,
+        _ => ReleaseAction::AskPlugin(current.to_owned()),
     }
 }
 
@@ -382,6 +452,136 @@ mod tests {
             next_action(ask, "0.3.0", Some("0.4.0"), &source, &[]),
             Ask("0.4.0".into())
         );
+    }
+
+    fn plugin_step(kind: &str, version: &str, extra: Value) -> RunEvent {
+        let mut payload = json!({"source": "release", "release": version});
+        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+            payload.extend(extra);
+        }
+        update(kind, payload)
+    }
+
+    #[test]
+    fn a_plugin_older_than_the_binary_is_asked_about_or_updated_once() {
+        use ReleaseAction::*;
+        let ask = ReleaseMode::Ask;
+        let plugin = |mode, current, latest, plugin, updates: &[RunEvent], open: &[String]| {
+            next_plugin_action(mode, current, latest, plugin, updates, open)
+        };
+        // Only the plugin is old: asked about, or updated without asking.
+        assert_eq!(
+            plugin(ask, "0.4.0", Some("0.4.0"), Some("0.3.0"), &[], &[]),
+            AskPlugin("0.4.0".into())
+        );
+        assert_eq!(
+            plugin(
+                ReleaseMode::Auto,
+                "0.4.0",
+                Some("0.4.0"),
+                Some("0.3.0"),
+                &[],
+                &[]
+            ),
+            StartPlugin("0.4.0".into())
+        );
+        // Not while its ask is open, the plugin is not older, unread, the
+        // binary is not the latest, off, or a development build.
+        for (mode, current, latest, version, open) in [
+            (
+                ask,
+                "0.4.0",
+                Some("0.4.0"),
+                Some("0.3.0"),
+                vec!["0.4.0".into()],
+            ),
+            (ask, "0.4.0", Some("0.4.0"), Some("0.4.0"), vec![]),
+            (ask, "0.4.0", Some("0.4.0"), None, vec![]),
+            (ask, "0.4.0", Some("0.4.0"), Some("unknown"), vec![]),
+            (ask, "0.3.0", Some("0.4.0"), Some("0.2.0"), vec![]),
+            (ask, "0.4.0", None, Some("0.2.0"), vec![]),
+            (
+                ReleaseMode::Off,
+                "0.4.0",
+                Some("0.4.0"),
+                Some("0.3.0"),
+                vec![],
+            ),
+            (
+                ask,
+                "0.4.0-dev+a",
+                Some("0.4.0-dev+a"),
+                Some("0.3.0"),
+                vec![],
+            ),
+        ] {
+            assert_eq!(
+                plugin(mode, current, latest, version, &[], &open),
+                Nothing,
+                "{current} {latest:?} {version:?}"
+            );
+        }
+        // Tried or decided: the binary's job updated it (or failed to), a
+        // plugin job ran, or the plugin's ask was skipped.
+        for decided in [
+            plugin_step(
+                UPDATE_INSTALLED,
+                "0.4.0",
+                json!({"plugin": {"updated": true}}),
+            ),
+            plugin_step(UPDATE_FAILED, "0.4.0", json!({"stage": "plugin"})),
+            plugin_step(UPDATE_STARTED, "0.4.0", json!({"plugin_only": true})),
+            plugin_step(
+                UPDATE_ANSWERED,
+                "0.4.0",
+                json!({"plugin_only": true, "answer": "skip"}),
+            ),
+        ] {
+            assert_eq!(
+                plugin(ask, "0.4.0", Some("0.4.0"), Some("0.3.0"), &[decided], &[]),
+                Nothing
+            );
+        }
+        // The binary's own steps do not decide the plugin's: an older
+        // runtime's install without `plugin`, a skip of the binary.
+        for binary in [
+            plugin_step(UPDATE_INSTALLED, "0.4.0", json!({})),
+            plugin_step(UPDATE_STARTED, "0.4.0", json!({})),
+            plugin_step(UPDATE_FAILED, "0.4.0", json!({"stage": "build"})),
+        ] {
+            assert_eq!(
+                plugin(ask, "0.4.0", Some("0.4.0"), Some("0.3.0"), &[binary], &[]),
+                AskPlugin("0.4.0".into())
+            );
+        }
+        // An install answer or a retry about the release the binary is:
+        // the plugin's job starts once, whatever the plugin reads.
+        for request in [
+            plugin_step(
+                UPDATE_ANSWERED,
+                "0.4.0",
+                json!({"plugin_only": true, "answer": "install"}),
+            ),
+            plugin_step(UPDATE_RETRY, "0.4.0", json!({"answer": "retry"})),
+        ] {
+            let pending = [
+                request.clone(),
+                plugin_step(UPDATE_FAILED, "0.4.0", json!({"stage": "plugin"})),
+                plugin_step(UPDATE_STARTED, "0.4.0", json!({})),
+            ];
+            assert_eq!(
+                plugin(ask, "0.4.0", Some("0.4.0"), None, &pending, &[]),
+                StartPlugin("0.4.0".into())
+            );
+            let started = [
+                plugin_step(UPDATE_STARTED, "0.4.0", json!({"plugin_only": true})),
+                request,
+            ];
+            assert_eq!(
+                plugin(ask, "0.4.0", Some("0.4.0"), Some("0.4.0"), &started, &[]),
+                Nothing
+            );
+        }
     }
 
     struct Index(Result<IndexFetch, String>);

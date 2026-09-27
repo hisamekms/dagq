@@ -183,6 +183,13 @@ pub const PLUGIN_INSTALL_COMMANDS: [&str; 2] = [
     "claude plugin marketplace add hisamekms/dagq",
     "claude plugin install claude-dagq@dagq",
 ];
+/// The arguments of `claude` that bring the installed [`DAGQ_PLUGIN`] to
+/// the newest release its marketplace names, in order (ADR-t618-2): read
+/// the marketplace again, then update the plugin.
+pub const PLUGIN_UPDATE_ARGUMENTS: [&[&str]; 2] = [
+    &["plugin", "marketplace", "update", "dagq"],
+    &["plugin", "update", "claude-dagq@dagq"],
+];
 
 /// Make sure the `claude` at `executable` (`agent`) loads [`DAGQ_PLUGIN`]
 /// in sessions started in `cwd`, before `dagq <command>` opens the
