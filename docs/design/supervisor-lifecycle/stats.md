@@ -208,7 +208,7 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 
 ## 完了見込み
 
-[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。見込みの計算と`dagq forecast`はtask 474で、snapshotの記録はtask 475で、答え合わせはtask 476で実装した。observerの`forecast`のfindingは未実装。
+[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。見込みの計算と`dagq forecast`はtask 474で、snapshotの記録はtask 475で、答え合わせはtask 476で、observerの`forecast`のfindingはtask 477で実装した（[Observer](observer.md#完了見込みの誤差)）。
 
 - **見込み**（実装済み、`method` 1）: `domain::forecast::forecast`（純粋関数）が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とopen なgoal（`draft`でなく閉じていない）の完了のp50 / p90をsimulationで出す。`application::forecast`がqueueを読んで入力を組み立てる。
   - **入力**: 依存は`graph`の`ready_after`（未完了の前のtaskと、achievedで閉じていないgoal）。見込みに入らないtask（`draft` / `submitted`）やgoal（`draft`、abandonedで閉じた）を待つtaskは終わらない。claimの順は`graph`と同じ`ClaimRank`（効く優先度、`unblocks`、ID。`domain`に移した）を今の時点で固定して使う。slotは生きているsupervisorの`parallel`の合計（`stats`の空きslotと同じ判定。`--parallel N`で置き換えられる）。

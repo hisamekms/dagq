@@ -643,7 +643,10 @@ fn observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_sub
     .unwrap();
     let prompt = dry["prompt"].as_str().unwrap();
     assert!(prompt.contains("Reading the KPIs"), "{prompt}");
-    assert!(prompt.contains("--kind kpi --queue --subject"), "{prompt}");
+    assert!(
+        prompt.contains("--kind <finding_kind> --queue --subject"),
+        "{prompt}"
+    );
 
     let provider = ObserverProvider {
         script: r#"
@@ -693,6 +696,153 @@ q finding record --kind kpi --queue --subject 'lead_time/all' --summary 'lead ti
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].finding.subject, "lead_time/all");
     assert_eq!(findings[0].finding.evidence.len(), 2);
+}
+
+/// An observer that does what the prompt asks of the KPIs' breaches: it
+/// reads `kpi.breaches` from the prompt's inputs and records each breach
+/// with its evidence as a finding of its `finding_kind` and `subject`.
+struct BreachRecorder;
+
+impl AgentProvider for BreachRecorder {
+    fn preflight(&self) -> Result<()> {
+        Ok(())
+    }
+    fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+        bail!("the observer has no run")
+    }
+    fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
+        bail!("the observer has no run")
+    }
+    fn headless_command(&self, cwd: &Path, prompt: &str, _: &[&str]) -> Result<CommandSpec> {
+        let start = prompt.rfind("```json\n").unwrap() + "```json\n".len();
+        let end = prompt.rfind("\n```").unwrap();
+        let input: Value = serde_json::from_str(&prompt[start..end]).unwrap();
+        fs::write(cwd.join("seen.json"), input["kpi"].to_string()).unwrap();
+        let mut script = String::from("set -e\n");
+        for breach in input["kpi"]["breaches"].as_array().unwrap() {
+            let Some(evidence) = breach["evidence_event_id"].as_i64() else {
+                continue;
+            };
+            script.push_str(&format!(
+                "dagq --db \"$DAGQ_QUEUE\" finding record --kind {} --queue --subject '{}' --summary 'value {} since {}' --evidence {evidence} > /dev/null\n",
+                breach["finding_kind"].as_str().unwrap(),
+                breach["subject"].as_str().unwrap(),
+                breach["value"],
+                breach["breach_since"],
+            ));
+        }
+        let mut command = CommandSpec::new("/bin/sh");
+        command.current_dir(cwd).arg("-c").arg(script);
+        Ok(command)
+    }
+    fn without_mcp(&self, _: &mut CommandSpec) {}
+    fn select_model(&self, _: &mut CommandSpec, _: &str, _: &str) {}
+    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+        bail!("the observer reviews no run")
+    }
+}
+
+/// ADR-0070 decisions 4 and 5: a forecast that missed its p90 is scored
+/// in the observer's input (`kpi.forecast`), the target on its p90 hit
+/// rate goes into breach, and the breach is recorded as a `forecast`
+/// finding, not a `kpi` one.
+#[test]
+fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding() {
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .bind_repository(repo.join(".git").to_str().unwrap())
+        .unwrap();
+    // The queue's host.toml wins over the host-wide one of whoever runs the
+    // tests: one sample judges a day, and one day off target is a breach.
+    fs::write(
+        db.parent().unwrap().join("host.toml"),
+        "[kpi]\nmin_samples = 1\nbreach_periods = 1\nbreach_weeks = 1\n\
+         [kpi.targets.\"forecast.p90_hit_rate\"]\nmin = 0.75\n",
+    )
+    .unwrap();
+    // Two days ago, a snapshot gave task 1 a p50 of 1 hour and a p90 of 2;
+    // it completed 4 hours later: late past its p90.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO run_events(kind, payload, created_at) VALUES ('forecast_recorded',
+           json_object('at_secs', CAST(strftime('%s','now','-40 hours') AS INTEGER), 'method', 1,
+             'tasks', json_array(json_object('id', 1, 'p50_secs', 3600, 'p90_secs', 7200)),
+             'goals', json_array()),
+           strftime('%Y-%m-%dT%H:%M:%fZ','now','-40 hours'))",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_events(task_id, kind, payload, created_at) VALUES (1, 'task_status_changed',
+           json_object('from', 'in_progress', 'to', 'completed'),
+           strftime('%Y-%m-%dT%H:%M:%fZ','now','-36 hours'))",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let started = SqliteQueue::open(&db)
+        .unwrap()
+        .record_kpi_breach(
+            "kpi_breach_started",
+            json!({"period": "day", "kpi": "forecast.p90_hit_rate", "stratum": "all"}),
+            None,
+        )
+        .unwrap();
+    assert!(started.is_some());
+
+    let done = observe(&db, &BreachRecorder, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    let dir = PathBuf::from(done["dir"].as_str().unwrap());
+    let kpi: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("seen.json")).unwrap()).unwrap();
+
+    // The scoring is in the input: the day of the finish, one sample, the
+    // p90 missed and the p50 4 times short (3 hours late over 1).
+    let scored = kpi["forecast"]["day"].as_array().unwrap();
+    assert_eq!(scored.len(), 1, "{kpi}");
+    assert_eq!(scored[0]["details"]["samples"], 1, "{kpi}");
+    let kpis = &scored[0]["kpis"];
+    assert_eq!(kpis["forecast.p90_hit_rate"]["all"]["value"], 0.0, "{kpi}");
+    assert_eq!(kpis["forecast.late_rate"]["all"]["value"], 1.0, "{kpi}");
+    assert_eq!(
+        kpis["forecast.p50_error"]["all"]["median"],
+        3.0 * 3600.0,
+        "{kpi}"
+    );
+    assert_eq!(
+        kpis["forecast.p50_error_ratio"]["marks=0"]["median"], 3.0,
+        "{kpi}"
+    );
+
+    let breach = kpi["breaches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|breach| breach["period"] == "day")
+        .unwrap_or_else(|| panic!("no breach of the days: {kpi}"));
+    assert_eq!(breach["finding_kind"], "forecast");
+    assert_eq!(breach["subject"], "p90_hit_rate/all");
+    assert_eq!(breach["value"], 0.0);
+    assert!(breach["evidence_event_id"].is_i64(), "{breach}");
+
+    let queue = SqliteQueue::open(&db).unwrap();
+    let findings = queue
+        .findings(&dagq::domain::FindingQuery {
+            kinds: vec!["forecast".into()],
+            ..dagq::domain::FindingQuery::default()
+        })
+        .unwrap();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].finding.subject, "p90_hit_rate/all");
+    let kpi_findings = queue
+        .findings(&dagq::domain::FindingQuery {
+            kinds: vec!["kpi".into()],
+            ..dagq::domain::FindingQuery::default()
+        })
+        .unwrap();
+    assert!(kpi_findings.is_empty(), "{kpi_findings:?}");
 }
 
 #[test]

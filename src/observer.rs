@@ -525,7 +525,7 @@ pub fn observer_prompt(
          - When the problem no longer occurs, resolve its finding with the evidence in the reason: `{dagq} finding resolve ID --reason '...'`.\n\
          - Raise what needs a person now (an alert past its threshold that waiting does not clear) to the inbox as a blocked ask on its finding: `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' [--task ID | --run ID]`, with your reading of it and the next moves a person can choose as options. \
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
-         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
+         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} forecast`, `{dagq} goal show ID`.\n\
          - Read the record, not prose, for the evidence: `{dagq} events --full` gives each event with its run_id and whole payload, narrowed by `--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
            without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
            `{dagq} timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...). \
@@ -555,14 +555,18 @@ pub fn observer_prompt(
          Reading the KPIs (`kpi` in the inputs, `{dagq} kpi` for more):\n\
          - `kpi.targets` is each target of `[kpi.targets]` judged on the days and on the weeks: `state` is `ok`, `missed` (off target fewer periods in a row than `kpi.config.breach_periods` days or `breach_weeks` weeks), \
            `breach` (off target that many judged periods in a row, `streak` of them since `breach_since`) or `not_judged` (too few samples or no value); `values` are the periods' values, the latest in progress not judged (`partial`).\n\
-         - Each entry of `kpi.breaches` is a target in `breach`: record it as a finding of kind `kpi` on the queue with its `subject` (`<kpi>/<stratum>`), \
+         - Each entry of `kpi.breaches` is a target in `breach`: record it as a finding of its `finding_kind` (`kpi`, or `forecast` for the forecast's `forecast.*` KPIs) on the queue with its `subject` (`<kpi>/<stratum>`, without the `forecast.` prefix for a forecast KPI), \
            its `evidence_event_id` (the `kpi_breach_started` event; a breach without one is not recorded by the supervisor yet, so leave it for the next observation) as the evidence, \
            and in the summary and detail the `value`, the target (`min` / `max` of `stat`), the `streak` since `breach_since`, and the `marks` (the changes that took effect since it started), copied as they are: \
-           `{dagq} finding record --kind kpi --queue --subject '<subject>' --summary '...' --detail '...' --evidence <evidence_event_id>`. \
+           `{dagq} finding record --kind <finding_kind> --queue --subject '<subject>' --summary '...' --detail '...' --evidence <evidence_event_id>`. \
            A breach of the days and of the weeks of one KPI and stratum is one finding, as is a breach that goes on: record it again only with a new event.\n\
-         - `missed` and `not_judged` are no findings. When an open `kpi` finding's target is `ok` again, resolve it with the period it came back in: `{dagq} finding resolve ID --reason '...'`.\n\
+         - `missed` and `not_judged` are no findings. When an open `kpi` or `forecast` finding's target is `ok` again, resolve it with the period it came back in: `{dagq} finding resolve ID --reason '...'`.\n\
          - `kpi.trend` lists the periods with their runs, their marks and the KPIs judged worse than the period before (`worsened`); read a change next to its marks, and never compute a number the inputs do not give.\n\
-         - Add `--propose '<why>'` to a `kpi` finding when its impact and the periods it went on call for a remedy. Never raise a breach as an ask. \
+         - `kpi.forecast` lists, per day and per week with a scored snapshot, how the completion forecasts came out against the finishes (`{dagq} forecast` shows the forecast itself): \
+           `details` counts the samples, the rows left out and the samples with change marks between the snapshot and the finish; `kpis` holds each `forecast.*` KPI per stratum \
+           (`p50_error` and `p50_error_ratio` positive when the finish came later than the p50, `p50_abs_error`, `p90_hit_rate`, `late_rate`, `early_rate`; `marks=0` is the forecast method's own error, the other samples include the plan's changes). \
+           A bias that goes on (the p50 always short or long, the p90 hit rate low) is a `forecast` finding only through a breach of a `forecast.*` target in `kpi.breaches`; never judge a bias yourself from these numbers.\n\
+         - Add `--propose '<why>'` to a `kpi` or `forecast` finding when its impact and the periods it went on call for a remedy. Never raise a breach as an ask. \
            `improvements` shows the improvement proposals `running` against their `limit` (`[kpi] max_improvement_proposals`); while it is `reached`, a marked finding waits (`waiting`) and no planner is opened for it until one ends.\n\
          \n\
          Do not:\n\
@@ -633,9 +637,12 @@ mod tests {
         for text in [
             "`kpi.targets`",
             "`breach` (off target that many judged periods in a row",
-            "kind `kpi` on the queue with its `subject` (`<kpi>/<stratum>`)",
+            "its `finding_kind` (`kpi`, or `forecast` for the forecast's `forecast.*` KPIs) on the queue with its `subject` (`<kpi>/<stratum>`",
             "`evidence_event_id`",
-            "`dagq finding record --kind kpi --queue --subject '<subject>'",
+            "`dagq finding record --kind <finding_kind> --queue --subject '<subject>'",
+            "`kpi.forecast` lists",
+            "`marks=0` is the forecast method's own error",
+            "is a `forecast` finding only through a breach of a `forecast.*` target",
             "`missed` and `not_judged` are no findings",
             "`kpi.trend`",
             "never compute a number the inputs do not give",

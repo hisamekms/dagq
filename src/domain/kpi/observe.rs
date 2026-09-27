@@ -6,6 +6,12 @@
 //! observer copies these numbers into its `kpi` findings and makes none
 //! of its own; a breach of one KPI and stratum is one finding whatever
 //! its period (`subject` `<kpi>/<stratum>`, ADR-0044 decision 18).
+//!
+//! The forecast's scoring KPIs (`forecast.*`, ADR-0070 decisions 4 and 5)
+//! are read the same way: their periods' values are listed under
+//! `forecast`, and a breach of their targets (the bias that goes on) is a
+//! finding of kind `forecast` whose subject drops the `forecast.` prefix
+//! (`<metric>/<stratum>`), never a `kpi` finding.
 use serde_json::{Value, json};
 
 use super::{ALL, Kpi, PeriodKpis, TargetReport, push::breach_key};
@@ -14,9 +20,28 @@ use crate::domain::EventId;
 /// The kind of the observer's findings of a breach (ADR-0051 decision 24).
 pub const FINDING_KIND: &str = "kpi";
 
-/// The subject of the `kpi` finding of `kpi`'s breach in `stratum`.
+/// The kind of the observer's findings of a breach of the forecast's
+/// scoring KPIs (ADR-0070 decision 5).
+pub const FORECAST_FINDING_KIND: &str = "forecast";
+
+/// The prefix of the forecast's scoring KPIs.
+const FORECAST_PREFIX: &str = "forecast.";
+
+/// The subject of the finding of `kpi`'s breach in `stratum`: of a
+/// `forecast.*` KPI without the prefix.
 pub fn subject(kpi: &str, stratum: &str) -> String {
-    format!("{kpi}/{stratum}")
+    let metric = kpi.strip_prefix(FORECAST_PREFIX).unwrap_or(kpi);
+    format!("{metric}/{stratum}")
+}
+
+/// The kind of the finding of `kpi`'s breach: `forecast` for the
+/// forecast's scoring KPIs, `kpi` for the rest.
+pub fn finding_kind(kpi: &str) -> &'static str {
+    if kpi.starts_with(FORECAST_PREFIX) {
+        FORECAST_FINDING_KIND
+    } else {
+        FINDING_KIND
+    }
 }
 
 /// The observer's KPI input: `day` and `week` are `kpi` of the days and of
@@ -45,7 +70,45 @@ pub fn observer_input(day: &Kpi, week: &Kpi, open: &[(EventId, Value)]) -> Value
             "day": day.periods.iter().map(trend_entry).collect::<Vec<_>>(),
             "week": week.periods.iter().map(trend_entry).collect::<Vec<_>>(),
         },
+        "forecast": {
+            "day": day.periods.iter().filter_map(forecast_entry).collect::<Vec<_>>(),
+            "week": week.periods.iter().filter_map(forecast_entry).collect::<Vec<_>>(),
+        },
     })
+}
+
+/// A period's scoring of the forecast (ADR-0070 decision 4), for a period
+/// with a sample or a row left out: the counts (`details.forecast`) and
+/// each `forecast.*` KPI in the strata that have samples.
+fn forecast_entry(period: &PeriodKpis) -> Option<Value> {
+    let details = period.window.details.get("forecast")?;
+    let excluded: u64 = details["excluded"]
+        .as_object()
+        .map(|reasons| reasons.values().filter_map(Value::as_u64).sum())
+        .unwrap_or_default();
+    if details["samples"].as_u64().unwrap_or_default() == 0 && excluded == 0 {
+        return None;
+    }
+    let kpis: serde_json::Map<String, Value> = period
+        .window
+        .kpis
+        .iter()
+        .filter(|(kpi, _)| kpi.starts_with(FORECAST_PREFIX))
+        .map(|(kpi, strata)| {
+            let strata: serde_json::Map<String, Value> = strata
+                .iter()
+                .filter(|(_, measure)| measure.n > 0)
+                .map(|(stratum, measure)| (stratum.clone(), json!(measure)))
+                .collect();
+            (kpi.clone(), Value::Object(strata))
+        })
+        .collect();
+    Some(json!({
+        "label": period.label,
+        "partial": period.partial,
+        "details": details,
+        "kpis": kpis,
+    }))
 }
 
 fn target_entry(period: &str, target: &TargetReport) -> Value {
@@ -97,7 +160,7 @@ fn breach_entry(
         .map(|(p, mark)| json!({"period": p.label, "label": mark.label, "kind": mark.kind, "at": mark.at}))
         .collect();
     json!({
-        "finding_kind": FINDING_KIND,
+        "finding_kind": finding_kind(&target.kpi),
         "subject": subject(&target.kpi, &target.stratum),
         "evidence_event_id": evidence,
         "period": period,
@@ -342,5 +405,71 @@ mod tests {
         assert_eq!(input["breaches"][0]["evidence_event_id"], Value::Null);
         assert_eq!(input["breaches"][0]["subject"], "lead_time/all");
         assert_eq!(input["breaches"][0]["marks"], json!([]));
+    }
+    #[test]
+    fn a_forecast_breach_is_a_forecast_finding_and_its_scoring_is_listed() {
+        let mut scored = period("2026-09-25", &[], None);
+        let mut ratio = BTreeMap::new();
+        ratio.insert(
+            "all".to_owned(),
+            crate::domain::kpi::Measure::spread([0.5, 0.75]),
+        );
+        ratio.insert(
+            "kind=docs".to_owned(),
+            crate::domain::kpi::Measure::spread(std::iter::empty()),
+        );
+        scored
+            .window
+            .kpis
+            .insert("forecast.p50_error_ratio".into(), ratio);
+        scored
+            .window
+            .kpis
+            .insert("lead_time".into(), BTreeMap::new());
+        scored.window.details.insert(
+            "forecast",
+            json!({"samples": 2, "excluded": {"canceled": 0}, "with_marks": 0}),
+        );
+        let mut empty = period("2026-09-24", &[], None);
+        empty.window.details.insert(
+            "forecast",
+            json!({"samples": 0, "excluded": {"canceled": 0, "abandoned": 0}}),
+        );
+        let day = kpi(
+            "day",
+            vec![target(
+                "forecast.p50_error_ratio",
+                "kind=runtime",
+                "breach",
+                Some("2026-09-25"),
+            )],
+            vec![empty, scored],
+        );
+        let week = kpi("week", Vec::new(), vec![period("2026-W39", &[], None)]);
+        let input = observer_input(&day, &week, &[]);
+
+        let breach = &input["breaches"][0];
+        assert_eq!(breach["finding_kind"], "forecast");
+        assert_eq!(breach["subject"], "p50_error_ratio/kind=runtime");
+        assert_eq!(breach["kpi"], "forecast.p50_error_ratio");
+
+        // Only the period with samples, only the forecast's KPIs, and only
+        // the strata with samples.
+        let forecast = input["forecast"]["day"].as_array().unwrap();
+        assert_eq!(forecast.len(), 1, "{forecast:?}");
+        assert_eq!(forecast[0]["label"], "2026-09-25");
+        assert_eq!(forecast[0]["details"]["samples"], 2);
+        let kpis = forecast[0]["kpis"].as_object().unwrap();
+        assert_eq!(
+            kpis.keys().collect::<Vec<_>>(),
+            ["forecast.p50_error_ratio"]
+        );
+        let strata = kpis["forecast.p50_error_ratio"].as_object().unwrap();
+        assert_eq!(strata.keys().collect::<Vec<_>>(), ["all"]);
+        assert_eq!(strata["all"]["n"], 2);
+        assert_eq!(input["forecast"]["week"], json!([]));
+
+        assert_eq!(finding_kind("lead_time"), "kpi");
+        assert_eq!(subject("lead_time", "all"), "lead_time/all");
     }
 }
