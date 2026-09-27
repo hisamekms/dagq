@@ -927,6 +927,65 @@ fn integrate_by_hand_closes_the_landing_ask_of_the_run() {
     assert!(queue.asks(Default::default()).unwrap().is_empty());
 }
 
+/// Landing a run closes the `blocked` asks the observer opened on the run
+/// or on its task, as the runtime, so they no longer raise
+/// `ask_unanswered`; a blocked ask about no task stays open (task 329).
+#[test]
+fn integrate_closes_the_blocked_asks_of_the_run_and_its_task() {
+    use dagq::domain::{AskKind, AskReason, NewAsk};
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "first")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let mut blocked = |task_id: Option<TaskId>, run_id: Option<RunId>| {
+        queue
+            .ask(NewAsk {
+                kind: AskKind::Blocked,
+                task_id,
+                run_id,
+                question: "is it stuck?".into(),
+                options: Vec::new(),
+                asked_by: "observer".into(),
+                reason_category: AskReason::Scope,
+                finding_id: None,
+            })
+            .unwrap()
+            .ask
+    };
+    let of_run = blocked(None, Some(run.id().clone()));
+    let of_task = blocked(Some(TaskId::new(1)), None);
+    let of_queue = blocked(None, None);
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    for stale in [&of_run, &of_task] {
+        assert_closed_by_runtime(
+            &mut queue,
+            &run,
+            stale,
+            "the run was integrated; closed by the runtime",
+        );
+    }
+    let left: Vec<_> = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .map(|ask| ask.id)
+        .collect();
+    assert_eq!(left, [of_queue.id]);
+    // Each close is recorded on the run and task its ask named, so
+    // `stats` pairs it with the ask's `ask_opened`.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let closed_of_task = detail
+        .events
+        .iter()
+        .find(|e| e.kind == "ask_answered" && e.payload["ask_id"] == of_task.id.as_i64())
+        .unwrap();
+    assert!(closed_of_task.run_id.is_none());
+}
+
 /// A headless review that fails (a non-zero exit, stdout without a verdict,
 /// or the timeout) exits and closes the session, and in the step that
 /// records `review_failed` opens an `approve_landing` ask with the failure

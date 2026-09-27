@@ -119,4 +119,12 @@ impl AskStore for SqliteQueue {
     ) -> Result<Vec<crate::domain::Ask>> {
         SqliteQueue::close_approve_landing_asks(self, run_id, answer)
     }
+    fn close_blocked_asks(
+        &mut self,
+        run_id: &RunId,
+        task_id: crate::domain::TaskId,
+        answer: &str,
+    ) -> Result<Vec<crate::domain::Ask>> {
+        SqliteQueue::close_blocked_asks(self, run_id, task_id, answer)
+    }
 }

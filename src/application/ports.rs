@@ -1583,6 +1583,14 @@ pub trait AskStore {
     fn note_on_asks(&mut self, run_id: &RunId, note: &str, why: &str) -> Result<Vec<Ask>>;
     /// Close the run's `approve_landing` asks nobody closed, with `answer`.
     fn close_approve_landing_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>>;
+    /// Close the `blocked` asks of the run, or of its task with no run
+    /// named, nobody closed, with `answer`.
+    fn close_blocked_asks(
+        &mut self,
+        run_id: &RunId,
+        task_id: TaskId,
+        answer: &str,
+    ) -> Result<Vec<Ask>>;
 }
 
 /// Which asks [`AskStore::asks`] lists. By default the ones nobody closed;

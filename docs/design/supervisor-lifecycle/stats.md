@@ -60,7 +60,7 @@ related:
 - **`alerts`**: `[{kind, task_id, run_id, value, threshold, path?}]`（`value`と`threshold`は秒か回数）。対象のrunに加えて、まだ終わっていないrunも見る。
   - `awaiting_integration`: `wait_to_land`が15分（900秒）を超えたrun。まだ`awaiting_integration`にいるrunは最初に`awaiting_integration`になってからの経過で判定する（着地の失敗で戻っても起点は変えない）。着地待ちの内訳で最も長い工程を`phase`に添える（まだ待っているrunは今の時刻までの内訳。どの工程も0秒なら付けない）。他のalertは`phase`を持たない
   - `needs_session`: `needs_session`が3回目に達したrun
-  - `ask_unanswered`: `ask_opened`から60分答えられていないask（ADR-0022。`ask_answered`とはpayloadの`ask_id`（無ければ`id`）とrun・taskで対にする）
+  - `ask_unanswered`: `ask_opened`から60分答えられていないask（ADR-0022。`ask_answered`とはpayloadの`ask_id`（無ければ`id`）とrun・taskで対にする）。その後に`run_integrated`になったrunのask、runを名指さない`blocked`のaskでそのtaskのrunが`run_integrated`になったものは数えない（task 329。runtimeが閉じる前に開いたaskも含む）
   - `task_failed`: 同じtaskのrunの`failed`が合わせて2回。回数はpageに関係なく全runで数え、`run_id`はその最後に失敗したrunで、そのrunが対象に入るときに出す（`--since`で2回目だけが新しくても出る）
   - `work_over_median`: `work`がそのgoal（goalの無いrunはgoalの無いrun同士）の中央値の2倍を超えたrun
   - `idle_slots`: staleでないsupervisorの`parallel`の合計から実行中（`integrating`以外の未完了のrunと、登録されたsupervisorのtokenのleaseを持つrun（`integrating`、reviewや着地の順番を待つ`awaiting_integration`、resume中の`needs_session`などstatusを問わない）の和から、人の答えを待つ・slotへ戻るのを待つrunを除いたもの。登録の無いtokenのlease（人が手で打った`integrate`など）で着地中のrunは数えない。登録されたsupervisorについてはその`used_slots()`と同じ集合。[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定13、[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)）runを引いた空きslotがあるのに、candidatesがゼロで`ready`のtaskが残っている（依存で詰まっている）。`value`は空きslot数で、`task_id` / `run_id`はnull。readyのtaskが無い空のqueueは詰まりではないので出さない。draftのgoalに属するreadyのtaskは`goal ready`を待っているだけなので数えない。`stats`を読んだ時点のsnapshotで判定し、時間帯の履歴は持たない

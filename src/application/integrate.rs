@@ -1705,22 +1705,35 @@ fn commit_message(task: &Task, run: &TaskRun, receipt: &Receipt) -> Vec<String> 
 const LANDED_LANDING_ASK_CLOSED: &str = "the run was integrated; closed by the runtime";
 
 /// Close the `approve_landing` asks of the landed `run` nobody closed
-/// (task 425): whether it was landed by hand or by the supervisor, nobody
-/// needs to answer them any more. `main` already moved, so a failure is
-/// only reported.
+/// (task 425), and the `blocked` asks of the run or its task (task 329):
+/// whether it was landed by hand or by the supervisor, nobody needs to
+/// answer them any more. `main` already moved, so a failure is only
+/// reported.
 fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
-    match queue.close_approve_landing_asks(run.id(), LANDED_LANDING_ASK_CLOSED) {
-        Ok(closed) => {
-            for ask in closed {
-                info!(op = "integrate", ask_id = %ask.id, "run {}: closed its approve_landing ask {} as it was integrated", run.id(), ask.id);
-            }
-        }
-        Err(error) => warn!(
-            op = "integrate",
-            error = %format_args!("{error:#}"),
-            "run {}: could not close its approve_landing asks: {error:#}",
-            run.id()
+    let closes = [
+        (
+            "approve_landing",
+            queue.close_approve_landing_asks(run.id(), LANDED_LANDING_ASK_CLOSED),
         ),
+        (
+            "blocked",
+            queue.close_blocked_asks(run.id(), run.task_id(), LANDED_LANDING_ASK_CLOSED),
+        ),
+    ];
+    for (kind, result) in closes {
+        match result {
+            Ok(closed) => {
+                for ask in closed {
+                    info!(op = "integrate", ask_id = %ask.id, "run {}: closed its {kind} ask {} as it was integrated", run.id(), ask.id);
+                }
+            }
+            Err(error) => warn!(
+                op = "integrate",
+                error = %format_args!("{error:#}"),
+                "run {}: could not close its {kind} asks: {error:#}",
+                run.id()
+            ),
+        }
     }
 }
 

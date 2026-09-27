@@ -1682,7 +1682,11 @@ struct OpenAsk {
 
 /// Asks (ADR-0022) whose `ask_opened` has no `ask_answered` yet. The two
 /// events are paired by the payload's `ask_id` (or `id`), and by run and
-/// task when neither is recorded.
+/// task when neither is recorded. An ask of a run integrated since, or a
+/// `blocked` ask of a task with no run named whose run was integrated
+/// after it opened, is over and left out (task 329): nobody needs to
+/// answer it. The runtime closes the `blocked` and `approve_landing` ones
+/// on landing; others, and ones from before it did, stay unanswered.
 fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
     let key = |event: &RunEvent| {
         let id = event
@@ -1715,6 +1719,16 @@ fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
             "ask_answered" => {
                 let answered = key(event);
                 open.retain(|(opened, _)| *opened != answered);
+            }
+            "run_integrated" => {
+                open.retain(|(_, ask)| {
+                    let of_run = ask.run_id.is_some() && ask.run_id == event.run_id;
+                    let of_task = ask.run_id.is_none()
+                        && ask.kind.as_deref() == Some("blocked")
+                        && ask.task_id.is_some()
+                        && ask.task_id == event.task_id;
+                    !of_run && !of_task
+                });
             }
             _ => {}
         }
@@ -1785,6 +1799,66 @@ mod tests {
             created_at: at(secs),
             ..event(id, 1, kind, payload)
         }
+    }
+
+    /// An ask of a run integrated since, and a `blocked` ask of its task
+    /// with no run named, are no longer open (task 329); another task's
+    /// blocked ask and an ask opened after the landing still are.
+    #[test]
+    fn open_asks_leave_out_the_asks_of_an_integrated_run() {
+        let task = |mut event: RunEvent, id: i64| {
+            event.task_id = Some(TaskId::new(id));
+            event
+        };
+        let events = [
+            run_event(
+                1,
+                R1,
+                "ask_opened",
+                json!({"ask_id": 1, "kind": "blocked"}),
+                T,
+            ),
+            RunEvent {
+                created_at: at(T),
+                ..event(2, 1, "ask_opened", json!({"ask_id": 2, "kind": "blocked"}))
+            },
+            RunEvent {
+                created_at: at(T),
+                ..event(3, 2, "ask_opened", json!({"ask_id": 3, "kind": "blocked"}))
+            },
+            RunEvent {
+                created_at: at(T),
+                ..event(
+                    4,
+                    1,
+                    "ask_opened",
+                    json!({"ask_id": 4, "kind": "planner_question"}),
+                )
+            },
+            run_event(5, R1, "run_integrated", json!({}), T + 10),
+            task(
+                run_event(
+                    6,
+                    R2,
+                    "ask_opened",
+                    json!({"ask_id": 6, "kind": "worker_question"}),
+                    T + 20,
+                ),
+                1,
+            ),
+        ];
+        let ids: Vec<_> = open_asks(&events)
+            .iter()
+            .map(|ask| (ask.task_id.map(TaskId::as_i64), ask.kind.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (Some(2), "blocked".to_owned()),
+                (Some(1), "planner_question".to_owned()),
+                (Some(1), "worker_question".to_owned()),
+            ]
+        );
     }
 
     /// A failed attempt with a backoff is `retried`; one with a null

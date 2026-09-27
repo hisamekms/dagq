@@ -634,6 +634,19 @@ impl SqliteQueue {
         self.close_runtime_asks(run_id, AskKind::ApproveLanding, answer)
     }
 
+    /// Close every `blocked` ask of the run, or of its task, nobody closed,
+    /// the way [`Self::close_stuck_exit_asks`] does: the run was integrated
+    /// and its task completed, so what the observer asked about is over
+    /// (task 329). Its finding, if any, stays as it is.
+    pub fn close_blocked_asks(
+        &mut self,
+        run_id: &RunId,
+        task_id: TaskId,
+        answer: &str,
+    ) -> Result<Vec<Ask>> {
+        self.close_asks_of(run_id, Some(task_id), AskKind::Blocked, answer)
+    }
+
     /// Add `note` as a paragraph to the question of every ask of the run
     /// nobody closed, answered or not, and record `ask_updated` (with the
     /// ask, its kind and `why`) on the run for each: what the person reads
@@ -719,15 +732,28 @@ impl SqliteQueue {
         kind: AskKind,
         answer: &str,
     ) -> Result<Vec<Ask>> {
+        self.close_asks_of(run_id, None, kind, answer)
+    }
+
+    /// Close the asks of `kind` nobody closed that are about the run, or
+    /// about `task_id` with no run named, recording each on the run and
+    /// task its `ask_opened` named.
+    fn close_asks_of(
+        &mut self,
+        run_id: &RunId,
+        task_id: Option<TaskId>,
+        kind: AskKind,
+        answer: &str,
+    ) -> Result<Vec<Ask>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let unclosed: Vec<Ask> = tx
             .prepare(
-                "SELECT * FROM asks WHERE run_id=?1 AND kind=?2
-                 AND closed_at IS NULL ORDER BY id",
+                "SELECT * FROM asks WHERE (run_id=?1 OR (run_id IS NULL AND task_id=?3))
+                 AND kind=?2 AND closed_at IS NULL ORDER BY id",
             )?
-            .query_map(params![run_id, kind.as_str()], ask_row)?
+            .query_map(params![run_id, kind.as_str(), task_id], ask_row)?
             .collect::<rusqlite::Result<_>>()?;
         let now = self.generators.clock.now();
         let mut closed = Vec::with_capacity(unclosed.len());
@@ -739,7 +765,7 @@ impl SqliteQueue {
                 ask_event(
                     &tx,
                     ask.task_id,
-                    Some(run_id),
+                    ask.run_id.as_ref(),
                     event_kind::ASK_ANSWERED,
                     payload,
                 )?;
@@ -748,7 +774,7 @@ impl SqliteQueue {
                 ask_event(
                     &tx,
                     ask.task_id,
-                    Some(run_id),
+                    ask.run_id.as_ref(),
                     event_kind::ASK_CLOSED,
                     json!({"ask_id": ask.id, "kind": ask.kind}),
                 )?;
