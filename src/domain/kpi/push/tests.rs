@@ -96,10 +96,13 @@ fn a_breach_message_carries_its_kpi_value_and_target() {
     let body = &message.body;
     assert_eq!(body["kind"], "breach");
     assert_eq!(body["queue"], "/q/queue.db");
-    assert_eq!(body["title"], "dagq 目標割れ: phase.work (kind=runtime)");
+    assert_eq!(
+        body["title"],
+        "dagq target breach: phase.work (kind=runtime)"
+    );
     assert_eq!(
         body["text"],
-        "phase.work (kind=runtime): 1h 06m（median、目標 ≤ 1h 00m）、3 期間続けて外れ（2026-09-22 から）"
+        "phase.work (kind=runtime): 1h 06m (median, target ≤ 1h 00m), missed 3 period(s) in a row (since 2026-09-22)"
     );
     assert_eq!(body["breaches"][0]["periods"], 3);
     assert_eq!(body["breaches"][0]["value"], 4000.0);
@@ -133,7 +136,7 @@ fn a_summary_carries_the_kpis_breaches_misses_resolved_and_asks() {
     assert_eq!(message.period, "2026-09-24");
     assert_eq!(message.report_html.as_deref(), Some("/r/d.html"));
     let body = &message.body;
-    assert_eq!(body["title"], "dagq 2026-09-24: 着地 1、目標割れ 1");
+    assert_eq!(body["title"], "dagq 2026-09-24: landings 1, breaches 1");
     assert_eq!(body["breaches"][0]["kpi"], "landings");
     assert_eq!(body["breaches"][0]["min"], 2.0);
     assert_eq!(body["missed"][0]["kpi"], "revise_rate");
@@ -142,13 +145,13 @@ fn a_summary_carries_the_kpis_breaches_misses_resolved_and_asks() {
     assert_eq!(body["report_json"], "/r/d.json");
     let text = body["text"].as_str().unwrap();
     for line in [
-        "着地 1",
+        "landings 1",
         "lead_time ",
-        "目標割れ:\n- landings (all): 1（value、目標 ≥ 2）",
-        "外れ（1 期間）:\n- revise_rate (all)",
-        "解消:\n- first_pass_rate (all)",
-        "open な ask: 2",
-        "レポート: /r/d.html",
+        "Breaches:\n- landings (all): 1 (value, target ≥ 2)",
+        "Missed (1 period):\n- revise_rate (all)",
+        "Resolved:\n- first_pass_rate (all)",
+        "open asks: 2",
+        "report: /r/d.html",
     ] {
         assert!(text.contains(line), "{line} in {text}");
     }

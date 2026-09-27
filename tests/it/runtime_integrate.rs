@@ -1760,7 +1760,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
         ])
     );
     let context = format!(
-        "task 1（test task）の run {} の receipt が提案した follow_up",
+        "follow_up proposed by the receipt of run {} of task 1 (test task)",
         run.id()
     );
     for (id, title, description) in [(2, "later work", "outside the task"), (3, "more work", "")] {

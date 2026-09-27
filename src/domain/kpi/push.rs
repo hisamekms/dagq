@@ -203,7 +203,7 @@ fn bounds(kpi: &str, min: Option<f64>, max: Option<f64>) -> String {
     if let Some(max) = max {
         parts.push(format!("≤ {}", shown(kpi, Some(max))));
     }
-    parts.join(" かつ ")
+    parts.join(" and ")
 }
 
 /// A breach as `breaches` of a message lists it.
@@ -229,7 +229,7 @@ fn breach_text(breach: &Value) -> String {
     let text = |name: &str| breach.get(name).and_then(Value::as_str).unwrap_or("—");
     let kpi = text("kpi");
     format!(
-        "{kpi} ({}): {}（{}、目標 {}）、{} 期間続けて外れ（{} から）",
+        "{kpi} ({}): {} ({}, target {}), missed {} period(s) in a row (since {})",
         text("stratum"),
         shown(kpi, breach.get("value").and_then(Value::as_f64)),
         text("stat"),
@@ -248,7 +248,11 @@ fn breach_text(breach: &Value) -> String {
 pub fn breach_message(name: &str, queue: &str, started: &Value) -> PushMessage {
     let text = |field: &str| started.get(field).and_then(Value::as_str).unwrap_or("—");
     let period = text("label").to_owned();
-    let title = format!("{name} 目標割れ: {} ({})", text("kpi"), text("stratum"));
+    let title = format!(
+        "{name} target breach: {} ({})",
+        text("kpi"),
+        text("stratum")
+    );
     PushMessage {
         kind: PushKind::Breach,
         period: period.clone(),
@@ -312,7 +316,7 @@ pub fn summary_message(
         .filter(|target| target.state == "missed")
         .collect();
     let title = format!(
-        "{name} {label}: 着地 {}、目標割れ {}",
+        "{name} {label}: landings {}, breaches {}",
         shown("landings", landings),
         breaches.len()
     );
@@ -326,21 +330,21 @@ pub fn summary_message(
                 Some(format!("{kpi} {}", shown(kpi, Some(value))))
             })
             .collect();
-        lines.push(format!("着地 {}", shown("landings", landings)));
+        lines.push(format!("landings {}", shown("landings", landings)));
         if !values.is_empty() {
-            lines.push(values.join("、"));
+            lines.push(values.join(", "));
         }
     }
     if !breaches.is_empty() {
-        lines.push("目標割れ:".to_owned());
+        lines.push("Breaches:".to_owned());
         lines.extend(breaches.iter().map(|b| format!("- {}", breach_text(b))));
     }
     if !missed.is_empty() {
-        lines.push("外れ（1 期間）:".to_owned());
+        lines.push("Missed (1 period):".to_owned());
         lines.extend(missed.iter().map(|target| {
             let value = latest_judged(target).and_then(|(_, value)| value);
             format!(
-                "- {} ({}): {}（目標 {}）",
+                "- {} ({}): {} (target {})",
                 target.kpi,
                 target.stratum,
                 shown(&target.kpi, value),
@@ -349,15 +353,15 @@ pub fn summary_message(
         }));
     }
     if !resolved.is_empty() {
-        lines.push("解消:".to_owned());
+        lines.push("Resolved:".to_owned());
         lines.extend(resolved.iter().map(|end| {
             let text = |field: &str| end.get(field).and_then(Value::as_str).unwrap_or("—");
             format!("- {} ({})", text("kpi"), text("stratum"))
         }));
     }
-    lines.push(format!("open な ask: {open_asks}"));
+    lines.push(format!("open asks: {open_asks}"));
     let (html, json_path) = (files.0.display().to_string(), files.1.display().to_string());
-    lines.push(format!("レポート: {html}"));
+    lines.push(format!("report: {html}"));
     PushMessage {
         kind,
         period: label.clone(),

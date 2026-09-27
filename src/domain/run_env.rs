@@ -66,7 +66,7 @@ impl RunEnvCheck {
             .join(", ");
         Some(format!(
             "the [run.env] of dagq.toml names a program that cannot be executed: {names} (PATH: {}); \
-install it where this PATH finds it, or register a task that takes the variable out of dagq.toml (ADR-0049 decision 9)",
+install it where this PATH finds it, or register a task that takes the variable out of dagq.toml",
             self.path
         ))
     }

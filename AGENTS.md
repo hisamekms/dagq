@@ -80,6 +80,14 @@ worker の手元の test を関係する範囲に絞るのは 2026-09-26 に人�
 
 - タスクの完了はキューが持つ。`integrate` が run を `integrated`、タスクを `completed` にする
 
+## plan review
+
+runtime の plan review の prompt は repository の規則を持たず、この文書とそれが名指す文書・規則を読ませる（task 625）。この repository の plan review job は、この文書の規則に加えて次を当てはめる。
+
+- [docs/adr/README.md](docs/adr/README.md)（ADR の索引）と、task が名指す ADR と `docs/design/` の文書を読む。`accepted` の ADR の決定と矛盾する task は `concern` にする（`superseded` なら `superseded_by` を辿る）
+- ADR を書く task は「文書のルール」の ADR の ID の形（`adr-t<task ID>-<N>`、ファイル名 `docs/adr/<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`）に従い、`--verify 'sh scripts/check-adr-numbers.sh'` を持つこと。足りなければ `revise`。ID は task の ID から決まるので、番号の割り当ての棚卸しはしない
+- verify・paths・evidence・kind は「テストの制約」の推奨の組み合わせと `--kind` の 4 値に合うこと（runtime の task は `cargo llvm-cov nextest --locked --fail-under-lines 80` と `--evidence e2e`、llvm-cov と `cargo test --locked` を重ねない、migration を足すなら `check-migration-numbers.sh`）
+
 ## コミット
 
 - run session は自分の run branch `dagq/<run-id>` にコミットする。main への着地は `dagq integrate` だけが行い（1 タスク 1 squash commit）、push は integrate が行う（`push_failed` の attention が inbox に出たら、人の指示で原因を直して `git push origin main`）

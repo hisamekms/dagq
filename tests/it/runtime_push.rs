@@ -145,7 +145,7 @@ fn the_daily_summary_and_a_breach_reach_the_command_once() {
     let (breach, breach_env) = &messages[0];
     assert_eq!(breach["breaches"][0]["kpi"], pushed_now[0]["kpi"]);
     assert_eq!(breach["queue"], db);
-    assert!(breach["title"].as_str().unwrap().contains("目標割れ"));
+    assert!(breach["title"].as_str().unwrap().contains("target breach"));
     assert_eq!(breach_env, &["breach", db.as_str(), "", ""]);
 
     let (daily, daily_env) = &messages[1];
@@ -165,13 +165,13 @@ fn the_daily_summary_and_a_breach_reach_the_command_once() {
     assert!(breaches.contains(&"landings") && breaches.contains(&"auto_repairs"));
     assert_eq!(daily["open_asks"], 0);
     let text = daily["text"].as_str().unwrap();
-    assert!(text.contains("目標割れ:\n- "), "{text}");
-    assert!(text.contains("open な ask: 0"), "{text}");
+    assert!(text.contains("Breaches:\n- "), "{text}");
+    assert!(text.contains("open asks: 0"), "{text}");
     assert!(
         daily["title"]
             .as_str()
             .unwrap()
-            .ends_with("着地 0、目標割れ 2")
+            .ends_with("landings 0, breaches 2")
     );
     assert_eq!(messages[2].1[0], "weekly");
 

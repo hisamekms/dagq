@@ -1359,7 +1359,7 @@ impl GitRepository {
         )
         .with_context(|| {
             format!(
-                "repair worktree {} (was its record pruned after the queue moved? see ADR-0017)",
+                "repair worktree {} (was its record pruned after the queue moved?)",
                 worktree.display()
             )
         })?;

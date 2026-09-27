@@ -22,24 +22,26 @@ related:
 
 runtimeが出す固定の文字列は英語だけで持ち（[ADR-t616-1](../../adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md)）、AIが人に向けて書く文の言語は`[language]`の設定で指定できる（[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。
 
-**実装状況**: どちらも未実装（ADRだけが入っている）。固定の文字列には下の「日本語が残る固定の文字列」が残り、`[language]`は`dagq.toml`で未知の表としてerrorになり、利用者ごとの`config.toml`は読まれず、promptに言語の指示は入らない。
+**実装状況**: ADR-t616-1は実装した（task 625。下の「日本語が残っていた固定の文字列」をすべて英語にした）。ADR-t616-2は未実装で、`[language]`は`dagq.toml`で未知の表としてerrorになり、利用者ごとの`config.toml`は読まれず、promptに言語の指示は入らない。
 
 ## runtimeの固定の文字列
 
 runtimeが自分で組み立てる文字列（prompt、askのquestionとoptionの定型部分、CLIの出力とerror、eventのpayloadの文言、runtimeやjobが作るtaskの`context`の見出し、runtimeが組み立てる着地のcommitのメッセージの定型部分、attentionの`next`、KPIのレポートとpushのメッセージ）は英語で書く。`[language]`では変えない。人やAIが書いた文（title・description・context・summary・question・note・finding）は埋め込んでも訳さない。記録済みのqueueの行とcommitは書き換えない。
 
-### 日本語が残る固定の文字列
+### 日本語が残っていた固定の文字列
 
-ADR-t616-1の時点（2026-09-27）で、英語に直す対象はこれだけである（testの中の入力の例と、人の文を読む`search` / `related`の語の区切り（`、`・`と`・`タスク`など）は対象外）。
+ADR-t616-1の時点（2026-09-27）で英語に直す対象だったもので、task 625でどれも右の英語にした。これから記録される`context`と着地のcommitとpushのメッセージが英語になり、記録済みの行は書き換えない（testの中の入力の例と、人の文を読む`search` / `related`の語の区切り（`、`・`と`・`タスク`など）は対象外）。
 
-| 場所 | 文字列 | 用途 |
+| 場所 | 文字列（今） | 用途 |
 | --- | --- | --- |
-| `src/application/integrate.rs`の`register_follow_ups` | `task {id}（{title}）の run {run_id} の receipt が提案した follow_up` | follow_upのdraftの`context` |
-| `src/application/prompt.rs`の`draft_planner_prompt` | `follow-up draft（task {} の run {} の receipt が提案）`、`goal gap draft（goal {} の判断が提案）` | runtimeのplannerが`--context`の冒頭に書く見出し |
-| `src/application/prompt.rs`の`finding_planner_prompt` | `finding {id}（{kind}）から` | 同上（findingから作るtask） |
-| `src/domain/kpi/push.rs` | `目標割れ`、`着地`、`期間続けて外れ`、`目標`、`から`、`かつ`、`外れ（1 期間）:`、`解消:`、`open な ask: {open_asks}`、`レポート: {html}`、区切りの`、`と全角括弧 | KPIの目標割れと日次のまとめのpushのメッセージ |
+| `src/application/integrate.rs`の`register_follow_ups` | `follow_up proposed by the receipt of run {run_id} of task {id} ({title})` | follow_upのdraftの`context` |
+| `src/application/prompt.rs`の`draft_planner_prompt` | `follow-up draft (proposed by the receipt of run {} of task {})`、`goal gap draft (proposed by the judgment of goal {})` | runtimeのplannerが`--context`の冒頭に書く見出し |
+| `src/application/prompt.rs`の`finding_planner_prompt` | `from finding {id} ({kind})` | 同上（findingから作るtask） |
+| `src/domain/kpi/push.rs` | `target breach`、`landings`、`breaches`、`missed N period(s) in a row (since …)`、`target`、`and`、`Breaches:`、`Missed (1 period):`、`Resolved:`、`open asks: {open_asks}`、`report: {html}`、区切りの`, ` | KPIの目標割れと日次のまとめのpushのメッセージ |
 
-pluginのskill（`dagq-recover`の`reference/review-by-hand.md`、`dagq`の`reference/goal-close.md`）はfollow_upのcontextの文言を引用しているので、直すときは合わせて変える。`tests/it/related.rs`はその文言の形のcontextを入力の例に使うが、読むのはtaskの番号だけなので変えなくてよい。
+pluginのskill（`dagq-recover`の`reference/review-by-hand.md`、`dagq`の`reference/goal-close.md`）はfollow_upのcontextの文言を引用しているので、合わせて英語の文言にした（古い日本語の文言の記録が残ることも書いた）。`tests/it/related.rs`は古い文言の形のcontextを入力の例に使うが、読むのはtaskの番号だけなので変えていない。
+
+同じtask 625で、promptとerror・commitの文言からdagqのADR番号（`ADR-0044 decision 22`など）を除いた（[Prompt](prompt.md#repositoryの規則を読む順)）。
 
 ## `[language]`の欄
 

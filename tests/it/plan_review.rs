@@ -476,7 +476,8 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     );
     for expected in [
         "You are the plan review of dagq proposal 1",
-        "AGENTS.md and CLAUDE.md, docs/adr/README.md",
+        "its instructions (AGENTS.md and CLAUDE.md), the documents and rules they name",
+        "Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show",
         "\"title\":\"two\"",
         "depends_on_draft",
         "an acceptance criterion that contradicts the task's own description or a sibling task's acceptance",
@@ -1330,7 +1331,8 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
         format!("dagq cancel {follow_up}"),
         format!("dagq cancel {follow_up} --duplicate-of <that task>"),
         format!("dagq ask --task {follow_up} --kind planner_question --because scope"),
-        "follow-up draft（task".to_owned(),
+        "`follow-up draft (proposed by the receipt of run ".to_owned(),
+        "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ask a person with a `planner_question` ask".to_owned(),
     ] {
         assert!(prompt.contains(&expected), "{expected}\n{prompt}");
     }

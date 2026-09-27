@@ -352,7 +352,7 @@ impl fmt::Display for DomainError {
             ),
             Self::AskHoldsTheQueue { reason } => write!(
                 f,
-                "authentication and cost asks are queue_hold asks the runtime opens, one per queue (ADR-0047 decision 42; this one is for {}); ask with --because scope, discard or recovery_failed, or leave a note",
+                "authentication and cost asks are queue_hold asks the runtime opens, one per queue (this one is for {}); ask with --because scope, discard or recovery_failed, or leave a note",
                 reason.as_str()
             ),
             Self::HoldWithoutQueueReason { reason } => write!(

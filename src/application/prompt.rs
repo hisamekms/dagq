@@ -223,7 +223,7 @@ pub const STOP_BACKGROUND: &str = "Before writing the receipt, stop every backgr
 /// What a worker reads before it starts, and nothing more: everything else
 /// about its run is in the prompt, and reading the queue or the whole docs
 /// tree only delays the first commit (goal 11, decision 4).
-pub const WORKER_READING: &str = "Read first, and only: the worker section of the repository instructions (AGENTS.md), the task context below and the documents it names, the goal doc if there is one, and the predecessor summaries below. \
+pub const WORKER_READING: &str = "Read first, and only: the worker section of the repository instructions (AGENTS.md or CLAUDE.md), the task context below and the documents it names, the goal doc if there is one, and the predecessor summaries below. \
 Do not run `dagq list` or `dagq show`, and skip the rest of the docs tree; open other files only when the task needs them.\n";
 
 /// Which checks a session runs in its worktree before the receipt, given
@@ -401,6 +401,22 @@ pub fn inbox_prompt(db: &Path) -> Result<String> {
     ))
 }
 
+/// Where a planner takes a task's verification commands, declared paths
+/// and required evidence from. The runtime has no such rules of its own:
+/// they are the repository's, and a repository without an AGENTS.md still
+/// shows them in its CLAUDE.md, README, CI and build configuration. `ask`
+/// is the last step, when none of them settles it: the person in the
+/// session, or a `planner_question` ask for a planner the runtime opened.
+pub(crate) fn repository_rules(ask: &str) -> String {
+    format!(
+        "Take a task's verification commands (`--verify`), declared paths (`--paths`) and required evidence (`--evidence`) from the repository's instructions and the documents and rules they name, in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, {ask}."
+    )
+}
+
+/// The last step of [`repository_rules`] for a planner the runtime opens:
+/// no person watches it, so it asks the inbox.
+const RUNTIME_PLANNER_ASK: &str = "ask a person with a `planner_question` ask as below";
+
 /// The initial prompt of a planner session a person opens with `dagq plan`
 /// (ADR-0041 decisions 1, 6): it turns the person's problems into goals and
 /// tasks, hands them over as the skill says (a proposal for plan review),
@@ -409,16 +425,18 @@ pub fn planner_prompt(db: &Path) -> Result<String> {
     Ok(format!(
         "You are a planner of the dagq queue at {db}: listen to the person's problems and turn them into goals and tasks.\n\
          Follow the dagq-planner skill of the dagq plugin: register them and submit them for plan review as its dagq skill describes. You do not land runs or answer asks.\n\
+         {rules}\n\
          When every task of a goal is completed, check their receipts against the goal's acceptance and close the goal (`dagq goal close ID --verdict achieved`).\n\
          Never open the queue database directly; use the dagq CLI only.\n",
         db = super::path_text(db)?,
+        rules = repository_rules("ask the person"),
     ))
 }
 
 /// The CLI that reads the queue's record (ADR-0044 decision 22), named by
 /// the prompts of the planners the runtime opens and of the plan review so
 /// they read evidence from the events rather than from prose.
-pub const RECORD_READING: &str = "To see what happened, read the record rather than prose (ADR-0044 decision 22): \
+pub const RECORD_READING: &str = "To see what happened, read the record rather than prose: \
 `dagq events --full --task ID` gives a task's events with their run_id and whole payload, narrowed by `--run ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
 without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
 `dagq timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...).";
@@ -464,9 +482,11 @@ pub fn runtime_planner_prompt(
          Its tasks:\n{tasks}\n\
          Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`.\n\
          {RECORD_READING}\n\
+         {rules}\n\
          A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer typed into this terminal.\n\
          Never open the queue database directly; use the dagq CLI only.\n",
         db = super::path_text(db)?,
+        rules = repository_rules(RUNTIME_PLANNER_ASK),
     ))
 }
 
@@ -561,7 +581,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
         }
         DraftOrigin::Reopened => {
             out.push_str(&format!(
-                "It was a ready task. The plan review of proposal {reviewed} found that it has to change and reopened it into proposal {proposal} (ADR-0044 decision 14), which was then withdrawn, so it returned to draft. The reason plan review gave:\n\n{reason}\n",
+                "It was a ready task. The plan review of proposal {reviewed} found that it has to change and reopened it into proposal {proposal}, which was then withdrawn, so it returned to draft. The reason plan review gave:\n\n{reason}\n",
                 reviewed = target.material["reviewed_proposal_id"],
                 proposal = target.material["proposal_id"],
                 reason = or_none(target.material["reason"].as_str().unwrap_or_default()),
@@ -606,21 +626,21 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     }
     out.push_str(&format!(
         "\n## What to do\n\n\
-         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR numbers. Look for tasks that already cover the draft or code that already does it (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. {RECORD_READING}\n\
+         Follow the dagq-planner skill of the dagq plugin. {rules} Look for tasks that already cover the draft or code that already does it (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. {RECORD_READING}\n\
          Then do exactly one of these three:\n\
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {id}` and submit it with `dagq submit {id}`. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {id}` and record why with `dagq note --task {id} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {id} --duplicate-of <that task>` instead, so the queue records which task it duplicates.\n\
-         3. Ask: when you cannot decide without a person (the plan's intent, its scope, whether it belongs to this goal or a new one), run `dagq ask --task {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option adopt --option cancel --option keep_draft`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is and stop.\n\
+         3. Ask: when you cannot decide without a person (the plan's intent, its scope, whether it belongs to this goal or a new one, or verification, paths or evidence the repository does not settle; then say in the question what you propose, so the person's adopt applies it), run `dagq ask --task {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option adopt --option cancel --option keep_draft`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is and stop.\n\
          The runtime refuses your submit of a follow_up draft whose goal is closed or that is two follow-ups from a person's judgement unless a person answered adopt: ask then.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this draft. Never open the queue database directly; use the dagq CLI only.\n",
         adopt = match target.origin {
             DraftOrigin::FollowUp => format!(
-                "complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `follow-up draft（task {} の run {} の receipt が提案）`),",
-                target.material["source_task_id"],
+                "complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `follow-up draft (proposed by the receipt of run {} of task {})`),",
                 target.material["source_run_id"].as_str().unwrap_or("?"),
+                target.material["source_task_id"],
             ),
             DraftOrigin::GoalGap => format!(
-                "complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `goal gap draft（goal {} の判断が提案）`),",
+                "complete the draft with `dagq edit {id}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `goal gap draft (proposed by the judgment of goal {})`),",
                 task.goal_id().map_or("?".to_owned(), |g| g.to_string())
             ),
             DraftOrigin::Reopened => format!(
@@ -628,6 +648,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
                 target.material["proposal_id"],
             ),
         },
+        rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
     if let Some(answer) = material.answer {
         out.push_str(&format!(
@@ -745,15 +766,16 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
     }
     out.push_str(&format!(
         "\n## What to do\n\n\
-         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR IDs. Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`). Then do exactly one of these:\n\
-         1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `finding {id}（{kind}）から`), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
+         Follow the dagq-planner skill of the dagq plugin. {rules} Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`). Then do exactly one of these:\n\
+         1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `from finding {id} ({kind})`), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
          2. A new goal: when no open goal covers it, write a draft goal (`dagq goal add --draft ...`) and its draft tasks, lint them and submit with `dagq submit --goal GOAL --finding {id}`.\n\
          Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. \
-         An improvement's tasks are `--priority normal` (the default) or `low`, never higher: plan review lowers a higher one to normal (ADR-0051 decision 26).\n\
+         An improvement's tasks are `--priority normal` (the default) or `low`, never higher: plan review lowers a higher one to normal.\n\
          3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`.\n\
-         4. Ask: only when a person must decide (the plan's intent or scope, an acceptance, a contradiction with a goal's constraints or an ADR's decision, a precedent a person answered otherwise, or a change that is large and hard to undo), run `dagq ask --finding {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option propose --option dismiss`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
+         4. Ask: only when a person must decide (the plan's intent or scope, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise, a change that is large and hard to undo, or verification, paths or evidence the repository does not settle; then say in the question what you propose, so the person's propose applies it), run `dagq ask --finding {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option propose --option dismiss`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n",
         kind = finding.kind,
+        rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
     if let Some(answer) = material.answer {
         out.push_str(&format!(
@@ -1038,7 +1060,7 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
          Acceptance criteria of the task:\n{acceptance}\n\n\
          Decide one verdict:\n\
          - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
-         - revise: findings the worker can fix without a person's judgment: missing tests or evidence, lint, fmt or clippy findings, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
+         - revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
          - concern: findings that need a person's judgment: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call.\n\n\
          Answer with one JSON object and nothing else, matching this schema:\n\
          {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [string], \"summary\": string}}\n\
@@ -1701,8 +1723,9 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
         "You are the plan review of dagq proposal {id}: decide whether the queue may run its tasks as written, before they become ready.\n\
          Read only. Do not change any file and do not run dagq commands that write: the runtime lets you run the dagq commands that read (`dagq show ID`, `dagq proposal show ID`, `dagq search`, `dagq related`, `dagq findings`, `dagq stats`, ...) and refuses the rest.\n\
          {RECORD_READING}\n\n\
-         First read the repository's own rules in {repo}: AGENTS.md and CLAUDE.md, docs/adr/README.md (the ADR index) and the ADRs and design documents the tasks name. \
-         Apply what they say (the verification each kind of change needs, the declared paths, how ADR numbers are assigned, ...); the runtime has no such rules of its own.\n\n\
+         First read the repository's own rules in {repo}: its instructions (AGENTS.md and CLAUDE.md), the documents and rules they name (the plan review's part of them above all), and the documents the tasks name. \
+         Apply what they say (the verification each kind of change needs, the declared paths, the required evidence, the rules for the records they keep, ...); the runtime has no such rules of its own. \
+         Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show; when none of them settles it, it needs a person: a concern.\n\n\
          The proposal was submitted {submitted} and was sent back {revises} time(s) before (at most {max}; a revise past that goes to a person as a concern).\n\n\
          Tasks of the proposal:\n{tasks}\n\n\
          Files each task of the proposal is expected to touch (its declared paths; without them, the files the landings of its 3 most related completed tasks changed; a guess, so check it against the source):\n{own_expected}\n\n\
@@ -1717,7 +1740,7 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          Check the meaning of the plan:\n\
          - a task that repeats another task (ready, in progress, in another proposal, or already landed); start from its candidates above, a completed or canceled one included, and judge from their titles, clues and the source whether the task really repeats one;\n\
          - a task whose change has already landed (read the source; a completed candidate or a landed commit is where to look);\n\
-         - a contradiction with an ADR or with the goal's constraints;\n\
+         - a contradiction with a decision the repository records (in its instructions or the decision records they name) or with the goal's constraints;\n\
          - an acceptance criterion that contradicts the task's own description or a sibling task's acceptance (for example a change of a type whose acceptance says a test file that uses the type is not changed);\n\
          - tasks that change the same files without a dependency between them, above all a file listed as conflicting often: for each hotspot whose proposal_tasks and queued_tasks are both non-empty, add a dependency (add_dependency, the task of the proposal waiting for the queued one) or say in summary why none is needed; you may read the source to see which files a task of the proposal really touches;\n\
          - a task that partly repeats a ready or in-progress task (the overlap goes once the scope of one is cut): not pass but revise, saying in the reason which part to cut and which of the two keeps it;\n\
@@ -1727,11 +1750,11 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          Decide one verdict:\n\
          - pass: the tasks may run as written, after the actions below.\n\
          - revise: findings the planner can fix without a person's judgment (wording, acceptance, verification, paths, a split, a scope that partly overlaps another task, a missing task or dependency). Each reason says what to change.\n\
-         - concern: findings that need a person's judgment: a doubtful duplicate, a change that looks already done, a contradiction with an ADR or the goal's constraints, a change of the plan's intent.\n\
+         - concern: findings that need a person's judgment: a doubtful duplicate, a change that looks already done, a contradiction with a decision the repository records or with the goal's constraints, a change of the plan's intent.\n\
          When a finding is of the same kind as an answered ask above, put that ask's id in precedents and say in the reason how the person answered then.\n\n\
-         actions are the only changes you make yourself, and only with pass: add_dependency (a task of the proposal waits for another task), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (ADR-0051 decision 26; a pass lowers any you miss).\n\n\
+         actions are the only changes you make yourself, and only with pass: add_dependency (a task of the proposal waits for another task), lower_priority (never raise one), cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern). Everything else is the planner's. A proposal that remedies a finding (an improvement) keeps its tasks at normal or low: lower a high or urgent one to normal with lower_priority and pass, never revise for it (a pass lowers any you miss).\n\n\
          Whatever the verdict, also estimate the weight of each submitted task of the proposal (tasks {predicted}), one entry per task in predictions, from what you read: \
-         a worker (one Claude Opus session in its own Git worktree) implements the task, runs fmt, clippy and the tests of the change (e2e when the runtime changes), commits and writes a receipt; \
+         a worker (one Claude Opus session in its own Git worktree) implements the task, runs the checks the repository's instructions ask of a worker (formatting, lint, the tests of the change, ...), commits and writes a receipt; \
          then a headless review (pass / revise / concern) and `integrate`'s verification after the rebase onto main follow, and a failure, a conflict or missing evidence resumes the run. \
          size is S, M or L; nature is mechanical, implementation, design_judgment or investigation; uncertainty is 0 to 1 (1 the least certain); \
          expected_output_tokens is the output tokens (thinking included) of one worker run: a small one about 5000, a large one about 250000, the median about 35000; \
@@ -1922,6 +1945,9 @@ mod tests {
             "when the instructions name no such checks, run the verification commands above."
         ));
         assert!(!worker.contains("run in the worktree):"));
+        assert!(worker.contains(
+            "the worker section of the repository instructions (AGENTS.md or CLAUDE.md), the task context"
+        ));
         let inheritance = Inheritance {
             run_id: RunId::new(RUN).unwrap(),
             base: CommitSha::try_from(SHA).unwrap(),
@@ -2145,6 +2171,50 @@ mod tests {
         assert!(prompt.contains("for each hotspot whose proposal_tasks and queued_tasks are both non-empty, add a dependency"));
         let (prompt, _) = plan_prompt(4, 0);
         assert!(!prompt.contains("are left out of this list"), "{prompt}");
+    }
+
+    /// The prompts carry no rules of dagq's own repository (its ADRs, a
+    /// Rust linter): they send each session to the repository's rules, and
+    /// say where to find them when the repository has no AGENTS.md.
+    #[test]
+    fn prompts_take_the_rules_from_the_repository_in_order() {
+        let db = Path::new("/q/queue.db");
+        let (plan_review, _) = plan_prompt(4, 0);
+        let planner = planner_prompt(db).unwrap();
+        let revise = runtime_planner_prompt(db, ProposalId::new(3), &[], &["fix".into()]).unwrap();
+        let review = review_prompt(
+            &task(7, "work", TaskStatus::InProgress),
+            &run(7, RunStatus::Succeeded, Some(SHA)),
+            "/r/review.md",
+        );
+        let order = "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ";
+        assert!(
+            planner.contains(&format!("{order}ask the person.")),
+            "{planner}"
+        );
+        assert!(
+            revise.contains(&format!(
+                "{order}ask a person with a `planner_question` ask"
+            )),
+            "{revise}"
+        );
+        assert!(plan_review.contains("Where the repository has no AGENTS.md, judge a task's verification, paths and evidence in this order: CLAUDE.md; then what the README, the CI configuration and the build configuration show; when none of them settles it, it needs a person: a concern."));
+        assert!(plan_review.contains(
+            "the documents and rules they name (the plan review's part of them above all)"
+        ));
+        assert!(review.contains("findings of the repository's formatter, linter or other checks"));
+        for text in [
+            &plan_review,
+            &planner,
+            &revise,
+            &review,
+            &inbox_prompt(db).unwrap(),
+        ] {
+            for dagq_own in ["ADR", "docs/adr", "clippy"] {
+                assert!(!text.contains(dagq_own), "{dagq_own} in {text}");
+            }
+        }
+        assert!(!RECORD_READING.contains("ADR"));
     }
 
     #[test]

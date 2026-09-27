@@ -431,7 +431,7 @@ pub fn observer_prompt(
         }
     };
     Ok(format!(
-        "You are the observer of the dagq queue (ADR-0044 decision 4), started headless by the supervisor.\n\
+        "You are the observer of the dagq queue, started headless by the supervisor.\n\
          Your job is to observe whether dagq is running well, not to fix it.\n\
          {window}\n\
          \n\
@@ -445,12 +445,12 @@ pub fn observer_prompt(
          - Raise what needs a person now (an alert past its threshold that waiting does not clear) to the inbox as a blocked ask on its finding: `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' [--task ID | --run ID]`, with your reading of it and the next moves a person can choose as options. \
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
          - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
-         - Read the record, not prose, for the evidence (ADR-0044 decision 22): `{dagq} events --full` gives each event with its run_id and whole payload, narrowed by `--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
+         - Read the record, not prose, for the evidence: `{dagq} events --full` gives each event with its run_id and whole payload, narrowed by `--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
            without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
            `{dagq} timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...). \
            `{dagq} observe --history` gives what each earlier observation read and wrote.\n\
          \n\
-         Reading the stalled-session thresholds (ADR-0043 decision 6, ADR-0044 decision 21):\n\
+         Reading the stalled-session thresholds:\n\
          - stats' `stall_thresholds` has one entry per `[stall]` setting (`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`), each with \
            `threshold_secs` (the value now), `detections`, `by_detection` (nudge, ask, enter_retry, resend, with their outcomes), `outcomes`, `detected_after_secs` / `resolved_after_secs` (count, median, max), \
            `preempted` (a person stepped in by input or recover before any detection), `by_threshold_secs` (the outcomes per value the detections were made with) and `running_alerts`.\n\
@@ -461,7 +461,7 @@ pub fn observer_prompt(
          - When a threshold needs revisiting, record a finding with `--kind threshold --subject <the setting's name>` (a missed detection too, on the run), and add `--propose` when it recurs. \
            You never change the threshold yourself.\n\
          \n\
-         Reading the KPIs (ADR-0051 decisions 18 and 24; `kpi` in the inputs, `{dagq} kpi` for more):\n\
+         Reading the KPIs (`kpi` in the inputs, `{dagq} kpi` for more):\n\
          - `kpi.targets` is each target of `[kpi.targets]` judged on the days and on the weeks: `state` is `ok`, `missed` (off target fewer periods in a row than `kpi.config.breach_periods` days or `breach_weeks` weeks), \
            `breach` (off target that many judged periods in a row, `streak` of them since `breach_since`) or `not_judged` (too few samples or no value); `values` are the periods' values, the latest in progress not judged (`partial`).\n\
          - Each entry of `kpi.breaches` is a target in `breach`: record it as a finding of kind `kpi` on the queue with its `subject` (`<kpi>/<stratum>`), \

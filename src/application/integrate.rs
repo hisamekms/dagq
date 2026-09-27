@@ -677,7 +677,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
             goal_dependencies: Vec::new(),
             goal_id: task.goal_id().filter(|_| !goal_closed),
             context: format!(
-                "task {}（{}）の run {run_id} の receipt が提案した follow_up",
+                "follow_up proposed by the receipt of run {run_id} of task {} ({})",
                 task.id(),
                 task.title()
             ),
@@ -1218,7 +1218,7 @@ fn renumber_migration(
         &[
             format!("fix: renumber migration {old_digits} to {next_digits}"),
             format!(
-                "main {main} took number {old_digits} while the run was open, so dagq integrate moved {old} to {new} (ADR-0067)."
+                "main {main} took number {old_digits} while the run was open, so dagq integrate moved {old} to {new}."
             ),
         ],
     )? {
