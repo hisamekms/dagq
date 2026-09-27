@@ -1,7 +1,9 @@
 //! Adoption (ADR-0012): runs whose supervisor died while their session
 //! lives on are taken over, each in the phase it was in.
 
+use super::stall_recovery::recorded_at;
 use super::*;
+use crate::domain::RunEvent;
 
 impl Supervisor<'_> {
     /// Take over `running` / `validating` runs whose lease went stale under
@@ -182,9 +184,13 @@ impl Supervisor<'_> {
     }
     /// Rebuild the slot of an adopted run from what the queue and the run
     /// directory hold: the planned paths, whether the receipt is already on
-    /// disk and whether `/exit` was already requested (never sent twice; its
-    /// timeout restarts now, and an `exit_request_timed_out` already recorded
-    /// is not recorded again). The wrapper is registered, so no registration
+    /// disk and whether `/exit` was already requested (never sent twice, and
+    /// an `exit_request_timed_out` already recorded is not recorded again).
+    /// The wait after the receipt and the `/exit`'s timeout run from the
+    /// events that started them (`receipt_observed`, and `exit_requested` or
+    /// a dialog answered by rule since), not from the takeover: supervisors
+    /// handed over more often than the resume timeout must not hold a run
+    /// forever (task 879). The wrapper is registered, so no registration
     /// timeout applies. A `validating` run restarts validation from the
     /// beginning: it is a function of the receipt and the worktree alone.
     pub(super) fn resume(&self, run: &TaskRun) -> Result<Phase> {
@@ -199,7 +205,18 @@ impl Supervisor<'_> {
                 let history = RunHistory::from_events(&events);
                 let receipt_seen =
                     self.files.is_file(&receipt_path) && history.has(event_kind::RECEIPT_OBSERVED);
-                let exit_requested = history.has(event_kind::EXIT_REQUESTED).then(Instant::now);
+                let now = Instant::now();
+                let since = |event: &RunEvent| self.instant_of(event, now);
+                let exit_requested = history.last(event_kind::EXIT_REQUESTED).map(|requested| {
+                    // A known dialog answered by rule gave the `/exit` its
+                    // timeout again (ADR-0047 decision 29).
+                    let answered = history.events().iter().rev().find(|e| {
+                        e.id > requested.id
+                            && e.kind == event_kind::AUTO_REPAIRED
+                            && e.payload["repair"] == DIALOG_ANSWERED
+                    });
+                    since(answered.unwrap_or(requested))
+                });
                 // Only the latest request's timeout and ask count: a run
                 // resumed and stuck again is asked again (task 240).
                 let exit_timed_out = history.latest_exit_timed_out();
@@ -222,9 +239,12 @@ impl Supervisor<'_> {
                     run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
                     receipt_path,
                     idle_marker: run.idle_marker_path()?,
-                    startup: Instant::now(),
+                    startup: now,
                     receipt_seen,
-                    receipt_seen_at: receipt_seen.then(Instant::now),
+                    receipt_seen_at: history
+                        .last(event_kind::RECEIPT_OBSERVED)
+                        .filter(|_| receipt_seen)
+                        .map(since),
                     exit_requested,
                     exit_timed_out,
                     first_commit_seen,
@@ -553,6 +573,20 @@ impl Supervisor<'_> {
     /// is dead or its heartbeat is older than `HEARTBEAT_TIMEOUT_SECS`.
     pub(super) fn lease_stale(&self, lease: &RunLease, now: i64) -> bool {
         heartbeat_stale(self.processes.alive(lease.pid), now - lease.heartbeat_at)
+    }
+}
+
+impl Supervisor<'_> {
+    /// The instant, on the monotonic clock whose `now` is `now`, at which
+    /// `event` was recorded on the files' wall clock: an adopted wait keeps
+    /// the time already waited.
+    fn instant_of(&self, event: &RunEvent, now: Instant) -> Instant {
+        let ago = self
+            .files
+            .now()
+            .duration_since(recorded_at(event))
+            .unwrap_or_default();
+        now.checked_sub(ago).unwrap_or(now)
     }
 }
 

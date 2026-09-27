@@ -170,7 +170,7 @@ pub(super) fn answer_send_dialog(
 }
 
 /// `auto_repaired`'s `repair` of a dialog the runtime answered by rule.
-const DIALOG_ANSWERED: &str = "dialog_answered";
+pub(super) const DIALOG_ANSWERED: &str = "dialog_answered";
 
 /// `auto_repaired`'s `repair` of a dialog a recovery job's verdict answered.
 const RECOVERY_DIALOG_ANSWERED: &str = "answer_known_dialog";

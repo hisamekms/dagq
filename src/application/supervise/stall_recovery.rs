@@ -75,7 +75,7 @@ fn repaired(finished: &RunEvent) -> bool {
 }
 
 /// When `event` was recorded, on the files' wall clock.
-fn recorded_at(event: &RunEvent) -> SystemTime {
+pub(super) fn recorded_at(event: &RunEvent) -> SystemTime {
     crate::domain::stats::timestamp_millis(&event.created_at).map_or(UNIX_EPOCH, |ms| {
         UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
     })

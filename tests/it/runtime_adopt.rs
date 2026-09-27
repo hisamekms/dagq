@@ -905,15 +905,98 @@ fn adopt_receipt_after_dialog(waited: bool) {
     }
 }
 
-/// The exit timeout of an adopted run restarts at adoption: a session that
-/// still ignores the earlier request is reported after the adopter's own
-/// timeout, with one `exit_requested` event in total, and the adopter keeps
-/// the run until the session ends.
+/// Background work a session left after its receipt is waited for up to
+/// the resume timeout from the recorded `receipt_observed`, not from the
+/// adoption (task 879): a run adopted with a receipt older than the timeout
+/// and its background work still running goes on to validation on the
+/// adopter's first passes, its `session_idle_observed` saying the work
+/// still ran. Handovers more frequent than the timeout no longer hold it.
 #[test]
-fn adopted_exit_request_times_out_from_the_adoption() {
+fn adopted_wait_after_the_receipt_runs_from_the_recorded_receipt() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(
+        &db,
+        false,
+        "commit work; receipt \"$(git rev-parse HEAD)\"; idle_bg; await_exit",
+    );
+    let resume_timeout = Duration::from_secs(60);
+    backend.resume_timeout = resume_timeout;
+    let backend = Arc::new(backend);
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let idle = run.idle_marker_path().unwrap();
+    wait_until(&db, Duration::from_secs(10), |_| idle.is_file());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            "receipt_observed",
+            json!({"path": run.receipt_path(), "validated": false}),
+        )
+        .unwrap();
+    // Observed by the dead supervisor twice the timeout ago.
+    backdate_event(&db, &run, "receipt_observed", 120);
+    age_lease(&db, &run, 31);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(adoption_events(&detail).len(), 1);
+    let observed = payloads(&detail, "session_idle_observed");
+    assert_eq!(observed.len(), 1, "{observed:?}");
+    assert_eq!(observed[0]["background_running"], true);
+    let kinds = event_kinds(&detail);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "receipt_observed").count(),
+        1
+    );
+    assert!(position(&kinds, "run_adopted") < position(&kinds, "session_idle_observed"));
+    let waited = between(&mut queue, "run_adopted", "session_idle_observed");
+    assert!(
+        waited < resume_timeout,
+        "went on {waited:?} after the adoption"
+    );
+}
+
+/// Move the latest `kind` event of `run` `seconds` into the past, as if an
+/// earlier supervisor recorded it then.
+fn backdate_event(db: &Path, run: &TaskRun, kind: &str, seconds: i64) {
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3 || ' seconds')
+             WHERE id=(SELECT MAX(id) FROM run_events WHERE run_id=?1 AND kind=?2)",
+            rusqlite::params![run.id(), kind, -seconds],
+        )
+        .unwrap();
+}
+
+/// The time between the first `from` and the first `to` event of task 1.
+fn between(queue: &mut SqliteQueue, from: &str, to: &str) -> Duration {
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let at = |kind: &str| {
+        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
+        dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
+    };
+    Duration::from_millis(u64::try_from(at(to) - at(from)).unwrap())
+}
+
+/// The exit timeout of an adopted run runs from the recorded
+/// `exit_requested`, not from the adoption (task 879): a session that still
+/// ignores a request older than the timeout is reported on the adopter's
+/// first passes, with one `exit_requested` event in total, and the adopter
+/// keeps the run until the session ends.
+#[test]
+fn adopted_exit_request_times_out_from_its_recorded_request() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    let exit_timeout = Duration::from_secs(60);
+    backend.exit_timeout = exit_timeout;
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -921,9 +1004,11 @@ fn adopted_exit_request_times_out_from_the_adoption() {
         .record_runtime_event(
             run.id(),
             "exit_requested",
-            json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
+            json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 60}),
         )
         .unwrap();
+    // Requested by the dead supervisor twice the timeout ago.
+    backdate_event(&db, &run, "exit_requested", 120);
     age_lease(&db, &run, 31);
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
@@ -932,6 +1017,11 @@ fn adopted_exit_request_times_out_from_the_adoption() {
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_request_timed_out")
     });
+    let waited = between(&mut queue, "run_adopted", "exit_request_timed_out");
+    assert!(
+        waited < exit_timeout,
+        "timed out {waited:?} after the adoption"
+    );
     assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
     let lease = queue.run_lease(run.id()).unwrap().unwrap();
     assert_ne!(lease.token, "dead-supervisor");
