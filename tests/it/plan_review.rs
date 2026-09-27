@@ -156,7 +156,7 @@ impl StubReviewer {
         self
     }
     /// A job that fails: it exits non-zero.
-    fn failing() -> Self {
+    pub(crate) fn failing() -> Self {
         Self {
             verdicts: Mutex::new(vec!["FAIL".into()]),
             prompts: Mutex::new(Vec::new()),

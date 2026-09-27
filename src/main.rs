@@ -16,7 +16,9 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 use dagq::{
-    application::{StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph},
+    application::{
+        GoalReviewStore, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
+    },
     domain::{
         AskId, AskKind, AskReason, EventId, FindingId, FindingQuery, FindingStatus, FindingTarget,
         GoalEdit, GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery,
@@ -1165,6 +1167,9 @@ enum GoalCommand {
         #[arg(long, value_parser = ["achieved", "abandoned"])]
         verdict: String,
     },
+    /// Have the supervisor's goal review judge the open goal again although its tasks did not
+    /// change since its last review (after a failed review or a keep_open answer).
+    Review { id: i64 },
 }
 
 /// The error of a command the observer may not run.
@@ -1664,6 +1669,7 @@ fn execute(cli: Cli) -> Result<Value> {
             GoalCommand::Close { id, verdict } => serde_json::to_value(
                 queue.close_goal(GoalId::new(id), verdict.parse::<GoalVerdict>()?)?,
             )?,
+            GoalCommand::Review { id } => queue.rearm_goal_review(GoalId::new(id))?,
         },
         Command::SetGoal {
             task,

@@ -23,6 +23,7 @@ use crate::domain::{
     ReasonCode, RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission,
     SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId,
     TaskKind, TaskRun, TaskStatus,
+    goal_review::{GoalReviewDecision, GoalReviewVerdict},
     related::RelatedPage,
     search::{SearchPage, SearchQuery},
 };
@@ -1832,11 +1833,144 @@ pub trait PlanReviewStore {
     fn answered_asks(&self, limit: usize) -> Result<Vec<Ask>>;
 }
 
-/// The queue a use case works on: its tasks and goals, its runs and its asks.
-pub trait Queue: TaskStore + RunStore + AskStore + DraftPlannerStore + PlanReviewStore {}
+/// A goal review job the queue recorded (ADR-0047 decision 43): the goal
+/// it reviews, its attempt at that goal, the goal's first task (where its
+/// `approve_goal` ask is), its directory, and how many `gaps` verdicts the
+/// goal got in a row before it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GoalReviewJob {
+    pub id: i64,
+    pub goal_id: GoalId,
+    pub attempt: usize,
+    pub anchor: TaskId,
+    pub dir: PathBuf,
+    pub gaps_in_a_row: usize,
+}
 
-impl<T: TaskStore + RunStore + AskStore + DraftPlannerStore + PlanReviewStore + ?Sized> Queue
-    for T
+/// A finished goal review of a goal, for the next one's prompt.
+#[derive(Debug, Clone, Serialize)]
+pub struct GoalReviewRecord {
+    pub id: i64,
+    pub attempt: usize,
+    pub outcome: String,
+    pub verdict: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// What the runtime makes of a goal review's verdict before it is applied:
+/// the decision it acts on (a `gaps` past
+/// [`crate::domain::goal_review::MAX_GOAL_GAPS`] in a row is an `ask`,
+/// `overridden` saying why) and the `approve_goal` ask an `ask` opens.
+#[derive(Debug, Clone)]
+pub struct GoalReviewApply {
+    pub verdict: GoalReviewVerdict,
+    pub decision: GoalReviewDecision,
+    pub overridden: Option<String>,
+    pub ask: Option<NewAsk>,
+    pub duration_secs: u64,
+}
+
+/// What applying a goal review's verdict did. `stale`: nothing, because
+/// the job's row moved on or the goal's tasks changed meanwhile.
+#[derive(Debug, Clone, Default)]
+pub struct GoalReviewApplied {
+    pub stale: bool,
+    pub closed: bool,
+    /// The drafts a `gaps` verdict registered.
+    pub gap_tasks: Vec<TaskId>,
+    pub ask: Option<AskOutcome>,
+}
+
+/// A goal whose goal review failed and that waits for a person
+/// (`goal_review_failed`) until its tasks change or `goal review ID`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalReviewHold {
+    pub goal_id: GoalId,
+    pub anchor: Option<TaskId>,
+    pub error: Option<String>,
+}
+
+/// What a person's `approve_goal` answer did to the goal.
+#[derive(Debug, Clone)]
+pub struct GoalDecided {
+    pub goal_id: GoalId,
+    pub answer: String,
+    pub closed: Option<GoalVerdict>,
+    pub gap_tasks: Vec<TaskId>,
+}
+
+/// Goal review (ADR-0047 decision 43): the open goals whose tasks all
+/// ended, its one job at a time, the verdicts and answers the runtime
+/// applies (each in one transaction).
+pub trait GoalReviewStore {
+    /// Open goals a goal review may take now, in ID order: at least one
+    /// task, each completed or canceled with one completed, no unclosed
+    /// `approve_goal` ask, and tasks that changed since the goal's last
+    /// review (or a person rearmed it).
+    fn goal_review_candidates(&self) -> Result<Vec<GoalId>>;
+    /// Record the start of a goal review of `goal` by `token`, in the
+    /// directory named by its row's ID under `goal_reviews_dir`
+    /// (`goal_review_started`). Rows of gone supervisors are finished as
+    /// `interrupted` first. `None`: another supervisor's job runs, or the
+    /// goal is no longer a candidate.
+    fn begin_goal_review(
+        &mut self,
+        goal: GoalId,
+        token: &str,
+        goal_reviews_dir: &Path,
+    ) -> Result<Option<GoalReviewJob>>;
+    /// The finished reviews of `goal`, oldest first.
+    fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>>;
+    /// Apply the verdict in one transaction (`goal_review_finished`).
+    fn finish_goal_review(
+        &mut self,
+        job: &GoalReviewJob,
+        token: &str,
+        apply: &GoalReviewApply,
+    ) -> Result<GoalReviewApplied>;
+    /// Record the job's failure (`goal_review_failed`, the inbox's); the
+    /// goal is not reviewed again until its tasks change or a person
+    /// rearms it.
+    fn fail_goal_review(
+        &mut self,
+        job: &GoalReviewJob,
+        token: &str,
+        error: &str,
+        duration_secs: u64,
+    ) -> Result<()>;
+    /// Answered `approve_goal` asks nobody closed whose answer the runtime
+    /// took to apply when it was given (`runtime_delivers`), oldest first;
+    /// an answer left to the inbox is never applied later by itself.
+    fn goal_answers(&self) -> Result<Vec<Ask>>;
+    /// Apply a person's answer to an `approve_goal` ask and close it.
+    /// `None` when the answer is not one the runtime applies now (left
+    /// open for the inbox), or the goal no longer waits for it (the ask is
+    /// closed).
+    fn decide_goal(&mut self, ask: AskId) -> Result<Option<GoalDecided>>;
+    /// Whether the supervisor applies the answer the `approve_goal` ask has.
+    fn applies_goal_answer(&self, ask: &Ask) -> Result<bool>;
+    /// The goals whose review failed, held for a person.
+    fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>>;
+    /// `goal review ID`: let the supervisor review the open goal again
+    /// although its tasks did not change (`goal_review_rearmed`).
+    fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;
+}
+
+/// The queue a use case works on: its tasks and goals, its runs and its asks.
+pub trait Queue:
+    TaskStore + RunStore + AskStore + DraftPlannerStore + PlanReviewStore + GoalReviewStore
+{
+}
+
+impl<
+    T: TaskStore
+        + RunStore
+        + AskStore
+        + DraftPlannerStore
+        + PlanReviewStore
+        + GoalReviewStore
+        + ?Sized,
+> Queue for T
 {
 }
 

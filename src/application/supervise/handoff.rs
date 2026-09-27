@@ -104,6 +104,13 @@ impl Supervisor<'_> {
                 watch.job.attempt
             );
         }
+        if let Some(mut watch) = self.goal_review.take() {
+            watch.headless.stop();
+            info!(
+                "goal review {} of goal {} stopped for the handoff; it runs again",
+                watch.job.attempt, watch.job.goal_id
+            );
+        }
         let mut kept = 0;
         for mut slot in std::mem::take(&mut self.slots) {
             let run = slot.run.clone();

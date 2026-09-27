@@ -1710,7 +1710,14 @@ impl AgentProvider for TestReviewer {
     // A run that fails under these tests is recovered by this provider too:
     // with no script left, a live session's recovery job escalates, and one
     // for a run that ended cannot start (it waits to be recovered by hand).
+    // A goal whose tasks all landed is not reviewed by this provider: its
+    // goal review cannot start, and the goal stays open (tests/it/goal_review.rs
+    // plays the goal review).
     fn headless_command(&self, cwd: &Path, prompt: &str, tools: &[&str]) -> Result<CommandSpec> {
+        ensure!(
+            !prompt.starts_with("You are the goal review"),
+            "the test reviewer runs no goal review"
+        );
         assert_eq!(tools, runtime::TRIAGE_TOOLS);
         let mut triages = self.triages.lock().unwrap();
         if triages.is_empty() && prompt.contains(LIVE_RECOVERY) {

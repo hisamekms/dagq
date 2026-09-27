@@ -228,6 +228,11 @@ known_ask_kinds!(AskKind {
     // or a proposal sent back too often. It belongs to the first task of
     // the proposal and no run, and the supervisor applies its answer.
     ApprovePlan => "approve_plan",
+    // A goal review that needs a person (ADR-0047 decision 43): about the
+    // first task of the goal and no run; the goal is the one its review
+    // row names. The supervisor applies its answer, one of
+    // [`goal_review::GOAL_OPTIONS`].
+    ApproveGoal => "approve_goal",
     // A planner of the runtime's that needs a person (ADR-0041 decision
     // 13): about the draft (or the proposal's task) it works on and no run.
     // The supervisor types the answer into that planner's workspace, as it
@@ -637,6 +642,7 @@ pub mod finding;
 pub mod follow_up;
 pub mod forecast;
 pub mod goal;
+pub mod goal_review;
 pub mod idle_process;
 pub mod ids;
 mod input;
@@ -1293,6 +1299,10 @@ pub enum AttentionNext {
     /// (`plan_review_failed`): a person readies its tasks with the bypass
     /// or has a planner fix and submit them again (ADR-0041 decision 17).
     PlanReviewByHand,
+    /// The headless goal review of a goal failed (`goal_review_failed`,
+    /// ADR-0047 decision 43): a person decides the goal (`goal close`, or a
+    /// planner's tasks) or has it reviewed again with `goal review ID`.
+    GoalReviewByHand,
     /// The planner a revise went to did not submit its proposal again
     /// within the planner timeout (`planner_unresponsive`, ADR-0041
     /// decision 13): a person looks at its workspace.
@@ -1355,6 +1365,7 @@ impl fmt::Display for AttentionNext {
             Self::TriageByHand => f.write_str("triage by hand"),
             Self::RecoverByHand => f.write_str("recover by hand"),
             Self::PlanReviewByHand => f.write_str("plan review by hand"),
+            Self::GoalReviewByHand => f.write_str("goal review by hand"),
             Self::CheckPlanner => f.write_str("check the planner"),
             Self::DecideDraft => f.write_str("decide the draft in a planner"),
             Self::DecideFinding => f.write_str("decide the finding in a planner"),
@@ -1387,6 +1398,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "triage_failed",
     "recovery_failed",
     "plan_review_failed",
+    "goal_review_failed",
     "planner_unresponsive",
     "draft_planner_exhausted",
     run_env::RUN_ENV_PROGRAM_MISSING,
@@ -1588,6 +1600,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // verdict (ADR-0041 decision 11); only a plan review that failed
         // and a planner that did not answer a revise are a person's.
         ("plan_review_failed", _) => Some(AttentionNext::PlanReviewByHand),
+        ("goal_review_failed", _) => Some(AttentionNext::GoalReviewByHand),
         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
         ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
@@ -1642,6 +1655,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
                 Some(kind) if kind == AskKind::ApproveLanding.as_str()
                     || kind == AskKind::Decide.as_str()
                     || kind == AskKind::ApprovePlan.as_str()
+                    || kind == AskKind::ApproveGoal.as_str()
                     || kind == AskKind::UpdateFailed.as_str()
             ) && payload.get("runtime_delivers") == Some(&serde_json::Value::Bool(true)) =>
         {

@@ -299,6 +299,13 @@ impl SqliteQueue {
             payload["runtime_delivers"] =
                 json!(super::plan_reviews::plan_answer_applies(&tx, &ask, text)?);
         }
+        if ask.kind == AskKind::ApproveGoal {
+            // The supervisor closes the goal, registers its gaps or leaves
+            // it open as answered (ADR-0047 decision 43); any other answer,
+            // or one that cannot be applied now, is a person's to read.
+            payload["runtime_delivers"] =
+                json!(super::goal_reviews::goal_answer_applies(&tx, &ask, text)?);
+        }
         if ask.kind == AskKind::UpdateFailed {
             // The live supervisor that updates the binary retries or leaves
             // the update as answered (ADR-0045 decision 17), by the rule

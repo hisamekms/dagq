@@ -1004,27 +1004,12 @@ impl TaskStore for SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let goal = read_goal(&tx, goal_id)?;
-        let counts = task_counts(&tx, goal_id)?;
-        let closed = goal::close(goal, verdict, &counts, self.generators.clock.timestamp())?;
-        // `closed_at IS NULL` only detects a concurrent close; the domain
-        // decided whether this one may happen.
-        let changed = tx.execute(
-            "UPDATE goals SET closed_at=?1, verdict=?2, updated_at=?3
-             WHERE id=?4 AND closed_at IS NULL",
-            params![
-                closed.closed_at(),
-                closed.verdict().map(GoalVerdict::as_str),
-                closed.updated_at(),
-                goal_id
-            ],
-        )?;
-        ensure!(changed == 1, "goal {goal_id} was closed concurrently");
-        goal_event(
+        close_goal_in(
             &tx,
             goal_id,
-            event_kind::GOAL_CLOSED,
-            json!({"verdict": verdict, "tasks": counts}),
+            verdict,
+            &self.generators.clock.timestamp(),
+            json!({}),
         )?;
         let result = read_goal(&tx, goal_id)?;
         tx.commit()?;
@@ -1493,6 +1478,39 @@ pub(super) fn next_id(conn: &Connection, table: &str) -> Result<i64> {
         [table],
         |r| r.get(0),
     )?)
+}
+
+/// Close `goal_id` with `verdict` as `goal close` does, recording
+/// `goal_closed` with the task counts and the fields of `extra` (who closed
+/// it and why, for a goal review).
+pub(super) fn close_goal_in(
+    conn: &Connection,
+    goal_id: GoalId,
+    verdict: GoalVerdict,
+    now: &str,
+    extra: serde_json::Value,
+) -> Result<()> {
+    let goal = read_goal(conn, goal_id)?;
+    let counts = task_counts(conn, goal_id)?;
+    let closed = goal::close(goal, verdict, &counts, now.to_owned())?;
+    // `closed_at IS NULL` only detects a concurrent close; the domain
+    // decided whether this one may happen.
+    let changed = conn.execute(
+        "UPDATE goals SET closed_at=?1, verdict=?2, updated_at=?3
+         WHERE id=?4 AND closed_at IS NULL",
+        params![
+            closed.closed_at(),
+            closed.verdict().map(GoalVerdict::as_str),
+            closed.updated_at(),
+            goal_id
+        ],
+    )?;
+    ensure!(changed == 1, "goal {goal_id} was closed concurrently");
+    let mut payload = json!({"verdict": verdict, "tasks": counts});
+    if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+        payload.extend(extra.clone());
+    }
+    goal_event(conn, goal_id, event_kind::GOAL_CLOSED, payload)
 }
 
 fn task_counts(conn: &Connection, goal_id: GoalId) -> Result<TaskStatusCounts> {

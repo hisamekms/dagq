@@ -881,6 +881,27 @@ pub fn attention(
             next,
         });
     }
+    // A goal whose goal review failed waits for a person until its tasks
+    // change or `goal review ID` (ADR-0047 decision 43); it is shown on the
+    // goal's first task.
+    for hold in queue.goal_review_holds()? {
+        attention.push(Attention {
+            run_id: None,
+            task_id: hold.anchor,
+            pid: None,
+            ask_id: None,
+            reason_category: Some(crate::domain::AskReason::RecoveryFailed),
+            status: "open".into(),
+            kind: event_kind::GOAL_REVIEW_FAILED.into(),
+            last_error: Some(truncate_reason(&format!(
+                "goal {}: {}",
+                hold.goal_id,
+                hold.error.as_deref().unwrap_or("the goal review failed")
+            ))),
+            last_error_code: Some(ReasonCode::JobFailed),
+            next: AttentionNext::GoalReviewByHand,
+        });
+    }
     for ask in queue.asks(AskQuery::default())? {
         let (status, kind, next) = if ask.is_open() {
             (
@@ -964,6 +985,14 @@ pub fn attention(
         } else if ask.kind == AskKind::ApprovePlan && queue.applies_plan_answer(&ask)? {
             // The supervisor readies, sends back or cancels the proposal
             // (ADR-0041 decision 11).
+            (
+                "answered",
+                event_kind::ASK_ANSWERED,
+                AttentionNext::ApplyingAnswer { ask_id: ask.id },
+            )
+        } else if ask.kind == AskKind::ApproveGoal && queue.applies_goal_answer(&ask)? {
+            // The supervisor closes the goal, registers its gaps or leaves
+            // it open (ADR-0047 decision 43).
             (
                 "answered",
                 event_kind::ASK_ANSWERED,

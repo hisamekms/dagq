@@ -1774,6 +1774,60 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
     ))
 }
 
+/// What the goal review job is shown about one goal (ADR-0047 decision
+/// 43): the goal, each of its tasks with what landed for it, the goal's
+/// notes and edits, and the goal's earlier reviews. Each value is one
+/// JSON line of the prompt.
+pub struct GoalReviewMaterial<'a> {
+    pub goal: Value,
+    pub tasks: Vec<Value>,
+    pub events: Vec<Value>,
+    pub previous: Vec<Value>,
+    pub gaps_in_a_row: usize,
+    pub repo_root: &'a Path,
+}
+
+/// The prompt of the headless goal review (ADR-0047 decision 43): whether
+/// the goal whose tasks all ended met its acceptance.
+pub fn goal_review_prompt(material: &GoalReviewMaterial<'_>) -> String {
+    let lines = |values: &[Value]| {
+        if values.is_empty() {
+            "(none)".to_owned()
+        } else {
+            super::fenced(
+                "json",
+                &values
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+    };
+    let goal_id = material.goal["id"].clone();
+    format!(
+        "You are the goal review of the dagq queue, a headless job. Every task of goal {goal_id} ended (completed or canceled): judge whether the goal met its acceptance. Change nothing: read the repository's documents and source in {repo} (the main checkout, where the tasks landed) and run read-only dagq commands (`dagq show ID`, `dagq goal show {goal_id} --full`, `dagq findings`, `dagq events --goal {goal_id} --full`, `dagq search ...`) as you need.\n\n\
+         The goal:\n{goal}\n\n\
+         Its tasks, each with the run that landed it (the receipt's summary, its evidence and its follow_ups) when it was completed by a run:\n{tasks}\n\n\
+         The goal's notes, edits and earlier decisions:\n{events}\n\n\
+         The goal's earlier reviews (gaps verdicts in a row before this one: {gaps}; after {max} in a row a gaps verdict is turned into a question to a person):\n{previous}\n\n\
+         Split the acceptance into its items and check each against what landed, with evidence you saw (a commit, a file, a test, a receipt). Then answer one of:\n\
+         - achieved: every item is met. The runtime closes the goal as achieved and records your criteria.\n\
+         - gaps: some items are not met and the work to meet them is clear and within the goal. List each missing piece as a gap with a title and a description a planner can turn into a task; the runtime registers each as a draft of the goal and a planner of the runtime decides it. The goal stays open.\n\
+         - ask: only when a person has to decide: the acceptance should change, the goal should be abandoned or split, or you cannot judge it. Write the question; the person answers achieved, abandoned, gaps (the gaps you listed, or `gaps: <what>`) or keep_open. reason_category is scope (the acceptance, the scope or a decision changes) or discard (work would be thrown away).\n\n\
+         Answer with one JSON object and nothing else, matching this schema:\n\
+         {{\"verdict\": \"achieved\" | \"gaps\" | \"ask\", \"criteria\": [{{\"criterion\": string, \"met\": bool, \"evidence\": [string]}}], \"gaps\": [{{\"title\": string, \"description\": string, \"criterion\": string}}], \"summary\": string, \"question\": string, \"options\": [string], \"reason_category\": \"scope\" | \"discard\"}}\n\
+         criteria has one entry for each item of the acceptance; gaps is empty unless the verdict is gaps (or ask, to offer them); summary is one or two sentences; question, options and reason_category are for ask only.\n",
+        repo = material.repo_root.display(),
+        goal = lines(std::slice::from_ref(&material.goal)),
+        tasks = lines(&material.tasks),
+        events = lines(&material.events),
+        previous = lines(&material.previous),
+        gaps = material.gaps_in_a_row,
+        max = crate::domain::goal_review::MAX_GOAL_GAPS,
+    )
+}
+
 /// What the supervisor types into the live planner a revise goes back to
 /// (ADR-0041 decisions 12, 13).
 pub fn plan_revise_request(proposal: ProposalId, reasons: &[String]) -> String {

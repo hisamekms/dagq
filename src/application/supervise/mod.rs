@@ -93,6 +93,7 @@ mod draft_planner;
 mod exit;
 mod finding_planner;
 mod forecast;
+mod goal_review;
 mod handoff;
 mod idle;
 mod jobs;
@@ -239,6 +240,8 @@ pub struct Layout {
     pub plugin_dir: Option<PathBuf>,
     /// `plan-reviews/` of the queue: one directory per plan review job.
     pub plan_reviews_dir: PathBuf,
+    /// `goal-reviews/` of the queue: one directory per goal review job.
+    pub goal_reviews_dir: PathBuf,
 }
 
 /// The ports the supervisor works through, and where it works.
@@ -484,6 +487,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         stall: settings.stall,
         conflicts: settings.conflicts,
         plan_review: None,
+        goal_review: None,
         planner_exits: Vec::new(),
         handoff: None,
         exec: None,
@@ -586,6 +590,8 @@ struct Supervisor<'a> {
     /// The plan review job running now (ADR-0041 decision 11): one at a
     /// time, queue-wide, outside the run slots.
     plan_review: Option<plan_review::PlanReviewWatch>,
+    /// The goal review job running now: one at a time, queue-wide.
+    goal_review: Option<goal_review::GoalReviewWatch>,
     /// The runtime's planners this process asked to `/exit`, and when.
     planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
@@ -873,7 +879,8 @@ impl Supervisor<'_> {
             }
             // A plan review that just readied tasks is followed by one more
             // pass, which claims them.
-            let progressed = self.plan_review_pass(options, !stopping && self.claiming);
+            let mut progressed = self.plan_review_pass(options, !stopping && self.claiming);
+            progressed |= self.goal_review_pass(!stopping && self.claiming);
             if self.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space or one a triage or resume waits
@@ -892,6 +899,7 @@ impl Supervisor<'_> {
                     || self.push.running()
                     || (options.once && !stopping && self.push.busy())
                     || self.plan_review.is_some()
+                    || self.goal_review.is_some()
                     || self.rechecks.running()
                     || self.cleanup.for_disk()
                     || self.cleanup.deferred

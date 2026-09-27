@@ -51,8 +51,8 @@ use crate::{
         binaries::LocalBinaries,
         clock,
         location::{
-            QueueLocation, REPOSITORY_FILE_NAME, data_home, plan_reviews_dir, planners_dir,
-            runs_dir,
+            QueueLocation, REPOSITORY_FILE_NAME, data_home, goal_reviews_dir, plan_reviews_dir,
+            planners_dir, runs_dir,
         },
         process::LocalSpawner,
         run_env::{
@@ -343,6 +343,7 @@ pub fn supervise_with_reviewer(
             })
             .transpose()?,
         plan_reviews_dir: plan_reviews_dir(&db),
+        goal_reviews_dir: goal_reviews_dir(&db),
         db: db.clone(),
     };
     let agent = ClaudeCode {

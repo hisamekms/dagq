@@ -8,6 +8,7 @@ updated: 2026-09-27
 last_verified: 2026-09-27
 scope: runtime
 related:
+  - design-supervisor-lifecycle-goal-review
   - design-supervisor-lifecycle-report
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
@@ -267,6 +268,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ## Plan review (supervisor)
 
 - [Plan review (supervisor)](supervisor-lifecycle/plan-review.md)
+
+## Goal review (supervisor)
+
+- [Goal review (supervisor)](supervisor-lifecycle/goal-review.md)（所属taskがすべて終わったgoalをacceptanceと照合し、achievedで閉じるか、gapをdraftにするか、人に聞く）
 
 ## `review`
 
