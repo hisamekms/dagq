@@ -78,7 +78,7 @@ Who asks the person:
 
 ## watch and events
 
-`"$DAGQ" watch --after <cursor> [--timeout 600] [--interval 2]` blocks until an attention event arrives after the cursor or the supervisors' registrations or `alive` / `stale` change, then returns `{events, supervisors_changed, supervisors, cursor}`. On timeout `events` is empty and the cursor is unchanged. `--role inbox` wakes for every attention event and for the supervisors, `--role planner` for nothing. Asks ride the same cursor: registering one writes `ask_opened`, answering it `ask_answered`. `"$DAGQ" events --after <cursor>` returns the same attention events without waiting (`--all` for every kind, `--limit N`, default 100). Each event is compact: `status`, `exit_code`, `ask_id`, `reason` cut to 300 characters, and `next`.
+`"$DAGQ" watch --after <cursor> [--timeout 600] [--interval 2]` blocks until an attention event arrives after the cursor or the supervisors' registrations or `alive` / `stale` change, then returns `{events, supervisors_changed, supervisors, cursor}`. On timeout `events` is empty and the cursor is unchanged; the inbox does not report such a timeout and watches again from the same cursor, in the loop of `watch.md`. `--role inbox` wakes for every attention event and for the supervisors, `--role planner` for nothing. Asks ride the same cursor: registering one writes `ask_opened`, answering it `ask_answered`. `"$DAGQ" events --after <cursor>` returns the same attention events without waiting (`--all` for every kind, `--limit N`, default 100). Each event is compact: `status`, `exit_code`, `ask_id`, `reason` cut to 300 characters, and `next`.
 
 ## asks
 

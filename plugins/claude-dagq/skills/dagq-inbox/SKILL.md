@@ -23,7 +23,7 @@ This session holds no state of its own. After a restart, compaction or `/clear`,
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --after <cursor>` with the Bash tool's `run_in_background`. It returns when an attention event arrives or the supervisors' health changes (default `--timeout 600`; on a timeout `events` is empty and the cursor unchanged). Handle the returned `events` and `supervisors_changed` (steps 3 and 4), then watch again from the returned `cursor`. Keep exactly one watch running; never poll `status` in a loop.
+Run `"$DAGQ" watch --role inbox --after <cursor>` in one loop of `reference/watch.md` under `run_in_background`. Never report an empty timeout (default `--timeout 600`: no `events`, cursor unchanged): a "nothing new" every ten minutes is noise. The loop watches again and ends only with `events` or `supervisors_changed`; handle them (steps 3, 4), then loop from its `cursor`. Keep exactly one watch running; never poll `status` in a loop.
 
 ## 3. Show an ask and write the answer
 
@@ -33,7 +33,7 @@ Run `"$DAGQ" watch --role inbox --after <cursor>` with the Bash tool's `run_in_b
 
 It prints each open ask in full, oldest first. Take them one at a time:
 
-1. Show the person the question as written, its `reason_category`, who asked (`asked_by`), the task and run, and the options. Use `AskUserQuestion` with the options as choices when available. Add no recommendation of your own.
+1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices when available. Add no recommendation of your own.
 2. Write the answer exactly as the person gave it: the option's text, or their own words.
 
 ```sh
