@@ -16,8 +16,8 @@ use std::{
 use tracing::{info, warn};
 
 use super::{
-    Clock, IdGenerator, Landing, MainRemote, ProcessControl, Queue, Repository, RunFiles, RunStore,
-    Verifier, path_text, reason_of_error, tail,
+    AskStore, Clock, IdGenerator, Landing, MainRemote, ProcessControl, Queue, Repository, RunFiles,
+    RunLog, Verifier, path_text, reason_of_error, tail,
 };
 use crate::domain::{
     CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
@@ -1326,7 +1326,7 @@ const LANDED_LANDING_ASK_CLOSED: &str = "the run was integrated; closed by the r
 /// (task 425): whether it was landed by hand or by the supervisor, nobody
 /// needs to answer them any more. `main` already moved, so a failure is
 /// only reported.
-fn close_landing_asks(queue: &mut dyn Queue, run: &TaskRun) {
+fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
     match queue.close_approve_landing_asks(run.id(), LANDED_LANDING_ASK_CLOSED) {
         Ok(closed) => {
             for ask in closed {
@@ -1374,7 +1374,7 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
 /// How many more counted resumes the run has (ADR-0047 decision 24: a
 /// resume of a run parked only by a conflict after its review passed is
 /// not counted); unreadable events leave none.
-fn resumes_left<Q: RunStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
+fn resumes_left<Q: RunLog + ?Sized>(queue: &Q, id: &RunId) -> usize {
     queue.run_events(id).map_or(0, |events| {
         RunHistory::from_events(&events).resumes().left()
     })
@@ -1384,7 +1384,8 @@ fn resumes_left<Q: RunStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
-    use crate::domain::{Provider, RunRecord, TaskRecord, TaskStatus};
+    use crate::application::{EndedRunWorkspace, EndedRunWorktree};
+    use crate::domain::{EventId, Provider, RunEvent, RunRecord, TaskRecord, TaskStatus};
     use std::cell::RefCell;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
@@ -1699,5 +1700,117 @@ mod tests {
         assert_eq!(commit_error_gist(" \n"), "git commit failed without output");
         let long = "é".repeat(600);
         assert_eq!(commit_error_gist(&long), format!("{}…", "é".repeat(500)));
+    }
+
+    /// The run log alone, for a use case that reads only it: a test double
+    /// implements this one port, not the whole queue.
+    struct EventsOnly {
+        events: Option<Vec<RunEvent>>,
+    }
+
+    #[allow(unused_variables)]
+    impl RunLog for EventsOnly {
+        fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn active_runs(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn all_runs(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn all_events(&self) -> Result<Vec<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn run(&self, id: &RunId) -> Result<TaskRun> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn run_events(&self, _id: &RunId) -> Result<Vec<RunEvent>> {
+            self.events
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("unreadable"))
+        }
+        fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn record_runtime_event(
+            &self,
+            id: &RunId,
+            kind: &str,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn latest_event_id(&self) -> Result<EventId> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn record_backend_failure(
+            &self,
+            run: Option<&RunId>,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+        fn events_of_between(
+            &self,
+            kinds: &[&str],
+            after: EventId,
+            upto: EventId,
+            limit: usize,
+        ) -> Result<Vec<RunEvent>> {
+            unreachable!("resumes_left reads only the run's events")
+        }
+    }
+
+    #[test]
+    fn resumes_left_reads_the_run_log_alone() {
+        let run = RunId::new(RUN).unwrap();
+        let fresh = EventsOnly {
+            events: Some(Vec::new()),
+        };
+        assert_eq!(
+            resumes_left(&fresh, &run),
+            RunHistory::from_events(&[]).resumes().left()
+        );
+        assert_eq!(resumes_left(&EventsOnly { events: None }, &run), 0);
     }
 }

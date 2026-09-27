@@ -1857,7 +1857,7 @@ mod tests {
     /// without its active time, and its event is written all the same.
     #[test]
     fn spans_closed_in_a_write_transaction_take_the_transcripts_read_before_it() {
-        use crate::application::RunStore;
+        use crate::application::SessionRegistry;
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
         let conn = &queue.conn;
@@ -1900,7 +1900,10 @@ mod tests {
 
         SqliteQueue::record_runtime_event(&queue, &run, "session_exited", json!({"exit_code": 0}))
             .unwrap();
-        assert_eq!(RunStore::close_review_session(&queue, &run).unwrap(), 1);
+        assert_eq!(
+            SessionRegistry::close_review_session(&queue, &run).unwrap(),
+            1
+        );
         queue
             .record_queue_event("observe_finished", json!({"dir": "/obs"}))
             .unwrap();

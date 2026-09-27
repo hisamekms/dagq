@@ -5,16 +5,17 @@ use anyhow::{Result, bail, ensure};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-use super::{Clock, ProcessControl, Repository, RunFiles, RunStore};
+use super::{Clock, ProcessControl, Repository, RunCoordination, RunFiles, RunLog};
 use crate::domain::RunStatus;
 
 /// Append-only record of `rebind` under the queue's `logs/`, one JSON
 /// object per changed binding; the schema has no queue-level event.
 pub const REBIND_LOG: &str = "rebind.jsonl";
 
-/// What `rebind` reads and changes through.
-pub struct Rebind<'a> {
-    pub queue: &'a mut dyn RunStore,
+/// What `rebind` reads and changes through: of the queue, only its
+/// registrations, leases and binding, and its runs.
+pub struct Rebind<'a, Q: RunCoordination + RunLog + ?Sized> {
+    pub queue: &'a mut Q,
     /// The repository the queue is bound to from now on.
     pub repository: &'a dyn Repository,
     pub files: &'a dyn RunFiles,
@@ -45,7 +46,10 @@ pub struct RebindTarget {
 /// disk gets its Git link repaired from the new repository. Reports where a
 /// repository-resolved queue now lives, which differs from the queue's own
 /// directory until it is moved there.
-pub fn rebind(ports: Rebind<'_>, target: RebindTarget) -> Result<Value> {
+pub fn rebind<Q: RunCoordination + RunLog + ?Sized>(
+    ports: Rebind<'_, Q>,
+    target: RebindTarget,
+) -> Result<Value> {
     let Rebind {
         queue,
         repository,

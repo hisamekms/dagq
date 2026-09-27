@@ -21,7 +21,7 @@
 //! it; the job's own output goes to the queue's `logs/`.
 
 use super::{
-    Clock, ProcessControl, Queue, QueueOpener, RunFiles,
+    Clock, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
     install::{self, Binaries, InstallOptions, Source, previous_path},
 };
 use crate::domain::{
@@ -465,7 +465,10 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
     Ok(value)
 }
 
-fn registration(queue: &dyn Queue, token: &str) -> Result<Option<SupervisorRegistration>> {
+fn registration(
+    queue: &dyn RunCoordination,
+    token: &str,
+) -> Result<Option<SupervisorRegistration>> {
     Ok(queue
         .supervisors()?
         .into_iter()

@@ -2347,7 +2347,7 @@ fn execute(cli: Cli) -> Result<Value> {
             resume,
         } => dagq::compose::session(&db, &RunId::new(run)?, &lease, &claude, resume)?,
         Command::SessionEvent { event } => {
-            use dagq::{application::RunStore, domain::sessions::SessionHook};
+            use dagq::{application::SessionRegistry, domain::sessions::SessionHook};
             let mut input = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
                 .context("read the hook input")?;

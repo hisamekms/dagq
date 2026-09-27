@@ -490,7 +490,7 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
 #[test]
 fn the_supervisor_closes_the_session_spans_of_gone_inbox_and_planner_workspaces() {
     use dagq::{
-        application::RunStore,
+        application::SessionRegistry,
         domain::sessions::{HookEvent, INBOX, PLANNER, SessionHook},
     };
     let (_dir, repo, db) = fixture();

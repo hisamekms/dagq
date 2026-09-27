@@ -960,11 +960,12 @@ impl TriageAction {
 /// `asked_by` of the triage's `decide` asks: the supervisor that triaged.
 pub const TRIAGE_ASKER: &str = "supervisor";
 
-/// The durable state of runs: their leases, the supervisors that hold
-/// them, their events and the integration slot. Every transition that
-/// takes a `token` is refused unless that token holds the run's lease, so
-/// two processes never move one run at once; the refusal is an error.
-pub trait RunStore {
+/// The run aggregate saved as it moves (ADR-0032's first kind): its claim,
+/// provisioning, supervision, validation, landing decisions, integration
+/// and clean-up. Every transition that takes a `token` is refused unless
+/// that token holds the run's lease, so two processes never move one run
+/// at once; the refusal is an error.
+pub trait RunTransitions {
     /// Reserve the next dependency-ready task for the supervisor `token`:
     /// the run and its lease are created together.
     fn claim_for_supervisor(
@@ -972,62 +973,6 @@ pub trait RunStore {
         base_commit: &CommitSha,
         token: &str,
     ) -> Result<ClaimOutcome>;
-    /// Refresh every lease `token` holds; how many there were.
-    fn heartbeat_leases(&self, token: &str) -> Result<usize>;
-    fn register_supervisor(
-        &mut self,
-        token: &str,
-        pid: u32,
-        parallel: u32,
-        binary_version: &str,
-    ) -> Result<SupervisorRegistration>;
-    /// Whether a registration under `token` was removed.
-    fn deregister_supervisor(&self, token: &str) -> Result<bool>;
-    /// Every registered supervisor, oldest first, alive or not.
-    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
-    fn release_lease(&mut self, id: &RunId, token: &str) -> Result<()>;
-    /// Adoptable runs whose lease carries a token other than `token`.
-    fn runs_leased_by_others(&self, token: &str) -> Result<Vec<LeasedRun>>;
-    /// Mark `token`'s registration as one that takes a handoff.
-    fn accept_handoff(&self, token: &str) -> Result<()>;
-    /// Ask the supervisor `token` to exec `binary`; `false` when it is not
-    /// registered or does not take a handoff (ADR-0045 decision 10).
-    fn request_handoff(&self, token: &str, binary: &str) -> Result<bool>;
-    /// The binary the supervisor `token` was asked to exec, if any.
-    fn handoff_request(&self, token: &str) -> Result<Option<String>>;
-    /// Withdraw a request to exec `binary` not taken yet.
-    fn cancel_handoff(&self, token: &str, binary: &str) -> Result<bool>;
-    /// Take `token`'s registration back under `binary_version` after an
-    /// exec, clearing the request.
-    fn resume_registration(
-        &mut self,
-        token: &str,
-        pid: u32,
-        binary_version: &str,
-    ) -> Result<SupervisorRegistration>;
-    /// Every run whose lease carries `token`, oldest first.
-    fn runs_leased_by(&self, token: &str) -> Result<Vec<TaskRun>>;
-    /// Turn the automatic update of the supervisor `token` on or off
-    /// (ADR-0045 decision 17).
-    fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()>;
-    /// Record the supervisor `token`'s `--max-waiting` (ADR-0062 decision 7).
-    fn set_max_waiting(&self, token: &str, max_waiting: u32) -> Result<()>;
-    /// The unclosed asks of the run, answered or not, oldest first.
-    fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>>;
-    /// The latest `limit` steps of the automatic update (its `update_*`
-    /// queue events), newest first.
-    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
-    /// Take over the stale lease `previous_token` holds on `id`; `None`
-    /// when another process got there first or the lease is fresh again.
-    fn adopt_run(
-        &mut self,
-        id: &RunId,
-        previous_token: &str,
-        token: &str,
-        pid: u32,
-        wrapper: serde_json::Value,
-    ) -> Result<Option<TaskRun>>;
-    fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool>;
     /// Record a runtime error and give the lease up, leaving the status.
     fn abandon_run(
         &mut self,
@@ -1036,80 +981,6 @@ pub trait RunStore {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun>;
-    fn run_leases(&self) -> Result<Vec<RunLease>>;
-    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;
-    fn active_runs(&self) -> Result<Vec<TaskRun>>;
-    /// Every run of the queue, oldest first.
-    fn all_runs(&self) -> Result<Vec<TaskRun>>;
-    /// Every run event, oldest first, for `stats`.
-    fn all_events(&self) -> Result<Vec<RunEvent>>;
-    /// Per task, its newest event of one of `kinds` (ADR-0069).
-    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
-    /// The commits that landed the `limit` completed tasks most related to
-    /// `task` (`dagq related`, ADR-0046), for the files it is expected to
-    /// touch when it declares no paths (ADR-0069).
-    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
-    /// The `limit` tasks most related to `task` in any status, best first,
-    /// with their clues (`dagq related`, ADR-0046 decision 4).
-    fn related_tasks(&self, task: TaskId, limit: usize) -> Result<RelatedPage>;
-    /// The documents matching `query`, best first (`dagq search`, ADR-0046).
-    fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage>;
-    /// The goal of every task, for `stats`.
-    fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>>;
-    /// The title of every task, for `stats`.
-    fn task_titles(&self) -> Result<HashMap<TaskId, String>>;
-    /// The kind of every task (none for a task without one), for `stats`.
-    fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>>;
-    /// The findings `query` lists, larger impact first (`findings`), for
-    /// the KPI report's open findings.
-    fn findings(&self, query: &crate::domain::FindingQuery) -> Result<Vec<FindingView>>;
-    /// The reports recorded as written (`report_written`, ADR-0051
-    /// decision 20): each (period, label).
-    fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>>;
-    /// Record `report_written` with `payload` (its `period` and `label`)
-    /// unless the same report is recorded; `false` when it is.
-    fn record_report_written(&self, payload: serde_json::Value) -> Result<bool>;
-    /// The KPI breaches started and not resolved (ADR-0051 decision 18),
-    /// each its `kpi_breach_started` payload.
-    fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>>;
-    /// Record a breach's start or end unless it already stands so; a
-    /// start is marked `pushed` while `push_day` (the local day, the
-    /// day's limit) allows. Returns the payload recorded.
-    fn record_kpi_breach(
-        &self,
-        kind: &str,
-        payload: serde_json::Value,
-        push_day: Option<(i64, usize)>,
-    ) -> Result<Option<serde_json::Value>>;
-    /// Record `kpi_push_abandoned` unless one stands since the latest
-    /// push that succeeded (ADR-0051 decision 23); `false` when it does.
-    fn record_kpi_push_abandoned(&self, payload: serde_json::Value) -> Result<bool>;
-    /// Where every draft the runtime or a job registered came from, for
-    /// `stats`' `draft_flow`.
-    fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>>;
-    /// Point the queue at `common_dir` whatever it was bound to, and return
-    /// the previous binding (`rebind`, ADR-0020).
-    fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;
-    /// Recover an orphaned run whose `checked_processes` registered
-    /// processes the caller found dead.
-    fn recover_run(
-        &mut self,
-        id: &RunId,
-        checked_processes: usize,
-        report: serde_json::Value,
-    ) -> Result<TaskRun>;
-    fn run(&self, id: &RunId) -> Result<TaskRun>;
-    fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>>;
-    /// The run awaiting integration longest, by validation time.
-    fn next_awaiting_integration(&self) -> Result<Option<TaskRun>>;
-    fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;
-    fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool>;
-    fn record_runtime_event(
-        &self,
-        id: &RunId,
-        kind: &str,
-        payload: serde_json::Value,
-    ) -> Result<()>;
     /// Take the single integration slot for `id` under `token`.
     fn begin_integration(&mut self, id: &RunId, token: &str, main: &CommitSha) -> Result<TaskRun>;
     /// Leave the integrating run to a session (`needs_session`).
@@ -1154,11 +1025,7 @@ pub trait RunStore {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun>;
-    /// Git common directory the queue is bound to, if any.
-    fn repository_binding(&self) -> Result<Option<String>>;
-    fn bind_repository(&mut self, common_dir: &str) -> Result<()>;
-    fn assert_repository(&self, common_dir: &str) -> Result<()>;
-    /// [`RunStore::claim_for_supervisor`], taking the first task of `order`
+    /// [`RunTransitions::claim_for_supervisor`], taking the first task of `order`
     /// that is still claimable, with `attributes` (an object) in its
     /// `run_claimed`, and the worker session `trial` chooses for the task
     /// there (ADR-0079 decisions 3 and 4).
@@ -1170,11 +1037,6 @@ pub trait RunStore {
         attributes: Option<&serde_json::Value>,
         trial: &crate::domain::worker_model::WorkerTrial,
     ) -> Result<ClaimOutcome>;
-    /// One heartbeat of the process `token`: its registration and every
-    /// lease it holds; how many leases there were.
-    fn heartbeat(&mut self, token: &str) -> Result<usize>;
-    /// The processes registered for the run (its wrapper and agent).
-    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
     /// Record a runtime error on the run without changing its status.
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()>;
     /// Save the paths a claimed run is provisioned at.
@@ -1222,6 +1084,44 @@ pub trait RunStore {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>>;
+    /// Record `workspace_closed` (`payload` and the `workspace_id`) of a
+    /// workspace the triage or the supervisor's sweep closed.
+    fn record_workspace_closed(
+        &mut self,
+        id: &RunId,
+        workspace_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<()>;
+}
+
+/// The run aggregate moved by recovery: the triage of ended runs, the
+/// resumes of `needs_session` runs and the adoption of runs a stale
+/// supervisor leased. The same lease rule as [`RunTransitions`] applies.
+pub trait RunRecovery {
+    /// Adoptable runs whose lease carries a token other than `token`.
+    fn runs_leased_by_others(&self, token: &str) -> Result<Vec<LeasedRun>>;
+    /// Every run whose lease carries `token`, oldest first.
+    fn runs_leased_by(&self, token: &str) -> Result<Vec<TaskRun>>;
+    /// The unclosed asks of the run, answered or not, oldest first.
+    fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>>;
+    /// Take over the stale lease `previous_token` holds on `id`; `None`
+    /// when another process got there first or the lease is fresh again.
+    fn adopt_run(
+        &mut self,
+        id: &RunId,
+        previous_token: &str,
+        token: &str,
+        pid: u32,
+        wrapper: serde_json::Value,
+    ) -> Result<Option<TaskRun>>;
+    /// Recover an orphaned run whose `checked_processes` registered
+    /// processes the caller found dead.
+    fn recover_run(
+        &mut self,
+        id: &RunId,
+        checked_processes: usize,
+        report: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// The latest `failed` / `interrupted` run of every task in progress.
     fn runs_to_triage(&self) -> Result<Vec<TaskRun>>;
     /// Take the run's lease for a recovery round, recording `request` as
@@ -1243,20 +1143,6 @@ pub trait RunStore {
         payload: serde_json::Value,
         also: Vec<(&'static str, serde_json::Value)>,
     ) -> Result<TaskRun>;
-    /// Record `workspace_closed` (`payload` and the `workspace_id`) of a
-    /// workspace the triage or the supervisor's sweep closed.
-    fn record_workspace_closed(
-        &mut self,
-        id: &RunId,
-        workspace_id: &str,
-        payload: serde_json::Value,
-    ) -> Result<()>;
-    /// The workspaces of the ended runs the triage does not take, for the
-    /// supervisor's sweep.
-    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>>;
-    /// The worktrees of the runs nobody leases that ended or whose task is
-    /// `completed` / `canceled`, for the supervisor's clean-up of the disk.
-    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>>;
     /// Apply a person's answer to the triage's `decide` ask.
     fn decide_triage(
         &mut self,
@@ -1300,8 +1186,86 @@ pub trait RunStore {
         exhaustion: &Exhaustion,
         reason: &str,
     ) -> Result<Option<TaskRun>>;
-    /// When an observation of `mode` last started or finished.
-    fn last_observe(&self, mode: &str) -> Result<Option<i64>>;
+}
+
+/// The state processes coordinate through (ADR-0032's second kind): run
+/// leases and heartbeats, supervisor registrations and their handoffs, the
+/// wrapper and agent processes of runs, the backend's slots and the
+/// repository the queue is bound to.
+pub trait RunCoordination {
+    /// Refresh every lease `token` holds; how many there were.
+    fn heartbeat_leases(&self, token: &str) -> Result<usize>;
+    fn register_supervisor(
+        &mut self,
+        token: &str,
+        pid: u32,
+        parallel: u32,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration>;
+    /// Whether a registration under `token` was removed.
+    fn deregister_supervisor(&self, token: &str) -> Result<bool>;
+    /// Every registered supervisor, oldest first, alive or not.
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
+    fn release_lease(&mut self, id: &RunId, token: &str) -> Result<()>;
+    /// Mark `token`'s registration as one that takes a handoff.
+    fn accept_handoff(&self, token: &str) -> Result<()>;
+    /// Ask the supervisor `token` to exec `binary`; `false` when it is not
+    /// registered or does not take a handoff (ADR-0045 decision 10).
+    fn request_handoff(&self, token: &str, binary: &str) -> Result<bool>;
+    /// The binary the supervisor `token` was asked to exec, if any.
+    fn handoff_request(&self, token: &str) -> Result<Option<String>>;
+    /// Withdraw a request to exec `binary` not taken yet.
+    fn cancel_handoff(&self, token: &str, binary: &str) -> Result<bool>;
+    /// Take `token`'s registration back under `binary_version` after an
+    /// exec, clearing the request.
+    fn resume_registration(
+        &mut self,
+        token: &str,
+        pid: u32,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration>;
+    /// Turn the automatic update of the supervisor `token` on or off
+    /// (ADR-0045 decision 17).
+    fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()>;
+    /// Record the supervisor `token`'s `--max-waiting` (ADR-0062 decision 7).
+    fn set_max_waiting(&self, token: &str, max_waiting: u32) -> Result<()>;
+    fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool>;
+    fn run_leases(&self) -> Result<Vec<RunLease>>;
+    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;
+    /// Point the queue at `common_dir` whatever it was bound to, and return
+    /// the previous binding (`rebind`, ADR-0020).
+    fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;
+    /// Git common directory the queue is bound to, if any.
+    fn repository_binding(&self) -> Result<Option<String>>;
+    fn bind_repository(&mut self, common_dir: &str) -> Result<()>;
+    fn assert_repository(&self, common_dir: &str) -> Result<()>;
+    /// One heartbeat of the process `token`: its registration and every
+    /// lease it holds; how many leases there were.
+    fn heartbeat(&mut self, token: &str) -> Result<usize>;
+    /// The processes registered for the run (its wrapper and agent).
+    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
+    /// Record how `up` started the supervisor `token`.
+    fn set_supervisor_mode(
+        &self,
+        token: &str,
+        mode: SupervisorMode,
+        workspace_id: Option<&str>,
+    ) -> Result<()>;
+    fn register_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()>;
+    fn register_resume_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()>;
+    fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
+    fn register_resume_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32)
+    -> Result<()>;
+    fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()>;
+    fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()>;
+    /// The leases `token` holds (every lease with `None`) and the
+    /// `parallel` it registered (null without a supervisor).
+    fn backend_slots(&self, token: Option<&str>) -> Result<(i64, Option<i64>)>;
+}
+
+/// The sessions around runs: the workspaces `up` opened, the planner
+/// sessions and the Claude session spans the hooks and transcripts report.
+pub trait SessionRegistry {
     /// The workspace `up` recorded for `role`.
     fn session_workspace(&self, role: SessionRole) -> Result<Option<String>>;
     /// Record the cmux workspace `up` opened for `role`, replacing any
@@ -1330,37 +1294,6 @@ pub trait RunStore {
     fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()>;
     fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()>;
     fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()>;
-    /// Record how `up` started the supervisor `token`.
-    fn set_supervisor_mode(
-        &self,
-        token: &str,
-        mode: SupervisorMode,
-        workspace_id: Option<&str>,
-    ) -> Result<()>;
-    /// The newest `run_events` id, 0 for an empty queue.
-    fn latest_event_id(&self) -> Result<EventId>;
-    /// The latest run of every `in_progress` task, oldest first.
-    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>>;
-    /// The `integrated` runs whose push of `main` failed after the latest
-    /// successful push, oldest first.
-    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>>;
-    fn register_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()>;
-    fn register_resume_wrapper(&mut self, id: &RunId, token: &str, pid: u32) -> Result<()>;
-    fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
-    fn register_resume_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32)
-    -> Result<()>;
-    fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()>;
-    fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()>;
-    /// The run whose workspace is `workspace_id`, the latest one first.
-    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>>;
-    /// The leases `token` holds (every lease with `None`) and the
-    /// `parallel` it registered (null without a supervisor).
-    fn backend_slots(&self, token: Option<&str>) -> Result<(i64, Option<i64>)>;
-    /// Record `backend_call_failed`, on `run` when the call was for one.
-    fn record_backend_failure(&self, run: Option<&RunId>, payload: serde_json::Value)
-    -> Result<()>;
-    /// Record an event of the queue itself, on no task, goal or run.
-    fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId>;
     /// Record the finished transcript turns of the Claude session spans
     /// still open (ADR-0048 decision 8); returns how many spans got turns.
     fn record_session_turns(&self) -> Result<usize>;
@@ -1382,6 +1315,55 @@ pub trait RunStore {
     /// `review_failed` waits for the session's `/exit` (task 541); returns
     /// how many spans it closed.
     fn close_review_session(&self, id: &RunId) -> Result<usize>;
+}
+
+/// Runs and their events as read (ADR-0032's third kind), and the events
+/// recorded outside a run transition.
+pub trait RunLog {
+    /// The latest `limit` steps of the automatic update (its `update_*`
+    /// queue events), newest first.
+    fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
+    fn active_runs(&self) -> Result<Vec<TaskRun>>;
+    /// Every run of the queue, oldest first.
+    fn all_runs(&self) -> Result<Vec<TaskRun>>;
+    /// Every run event, oldest first, for `stats`.
+    fn all_events(&self) -> Result<Vec<RunEvent>>;
+    /// Per task, its newest event of one of `kinds` (ADR-0069).
+    fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
+    fn run(&self, id: &RunId) -> Result<TaskRun>;
+    fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>>;
+    /// The run awaiting integration longest, by validation time.
+    fn next_awaiting_integration(&self) -> Result<Option<TaskRun>>;
+    fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;
+    fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool>;
+    fn record_runtime_event(
+        &self,
+        id: &RunId,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> Result<()>;
+    /// The workspaces of the ended runs the triage does not take, for the
+    /// supervisor's sweep.
+    fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>>;
+    /// The worktrees of the runs nobody leases that ended or whose task is
+    /// `completed` / `canceled`, for the supervisor's clean-up of the disk.
+    fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>>;
+    /// When an observation of `mode` last started or finished.
+    fn last_observe(&self, mode: &str) -> Result<Option<i64>>;
+    /// The newest `run_events` id, 0 for an empty queue.
+    fn latest_event_id(&self) -> Result<EventId>;
+    /// The latest run of every `in_progress` task, oldest first.
+    fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>>;
+    /// The `integrated` runs whose push of `main` failed after the latest
+    /// successful push, oldest first.
+    fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>>;
+    /// The run whose workspace is `workspace_id`, the latest one first.
+    fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>>;
+    /// Record `backend_call_failed`, on `run` when the call was for one.
+    fn record_backend_failure(&self, run: Option<&RunId>, payload: serde_json::Value)
+    -> Result<()>;
+    /// Record an event of the queue itself, on no task, goal or run.
+    fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId>;
     /// The newest event of `kind`, on whatever task, goal or run.
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
     /// The newest `limit` events of `kind`, on whatever task, goal or run,
@@ -1389,13 +1371,6 @@ pub trait RunStore {
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>>;
     /// The newest event of the queue itself (on no run) of one of `kinds`.
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
-    /// Record a forecast snapshot (`forecast_recorded`, ADR-0070 decision
-    /// 3) unless another was recorded after `previous`; its ID, or `None`.
-    fn record_forecast(
-        &self,
-        payload: serde_json::Value,
-        previous: Option<EventId>,
-    ) -> Result<Option<EventId>>;
     /// The events of one of `kinds` with `after < id <= upto`, oldest
     /// first, at most `limit`.
     fn events_of_between(
@@ -1405,6 +1380,60 @@ pub trait RunStore {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>>;
+}
+
+/// What reports read and record of the queue as a whole: the written
+/// reports, KPI breaches, forecasts and the lookups `stats` joins runs with.
+pub trait QueueRecords {
+    /// The commits that landed the `limit` completed tasks most related to
+    /// `task` (`dagq related`, ADR-0046), for the files it is expected to
+    /// touch when it declares no paths (ADR-0069).
+    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
+    /// The `limit` tasks most related to `task` in any status, best first,
+    /// with their clues (`dagq related`, ADR-0046 decision 4).
+    fn related_tasks(&self, task: TaskId, limit: usize) -> Result<RelatedPage>;
+    /// The documents matching `query`, best first (`dagq search`, ADR-0046).
+    fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage>;
+    /// The goal of every task, for `stats`.
+    fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>>;
+    /// The title of every task, for `stats`.
+    fn task_titles(&self) -> Result<HashMap<TaskId, String>>;
+    /// The kind of every task (none for a task without one), for `stats`.
+    fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>>;
+    /// The findings `query` lists, larger impact first (`findings`), for
+    /// the KPI report's open findings.
+    fn findings(&self, query: &crate::domain::FindingQuery) -> Result<Vec<FindingView>>;
+    /// The reports recorded as written (`report_written`, ADR-0051
+    /// decision 20): each (period, label).
+    fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>>;
+    /// Record `report_written` with `payload` (its `period` and `label`)
+    /// unless the same report is recorded; `false` when it is.
+    fn record_report_written(&self, payload: serde_json::Value) -> Result<bool>;
+    /// The KPI breaches started and not resolved (ADR-0051 decision 18),
+    /// each its `kpi_breach_started` payload.
+    fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>>;
+    /// Record a breach's start or end unless it already stands so; a
+    /// start is marked `pushed` while `push_day` (the local day, the
+    /// day's limit) allows. Returns the payload recorded.
+    fn record_kpi_breach(
+        &self,
+        kind: &str,
+        payload: serde_json::Value,
+        push_day: Option<(i64, usize)>,
+    ) -> Result<Option<serde_json::Value>>;
+    /// Record `kpi_push_abandoned` unless one stands since the latest
+    /// push that succeeded (ADR-0051 decision 23); `false` when it does.
+    fn record_kpi_push_abandoned(&self, payload: serde_json::Value) -> Result<bool>;
+    /// Where every draft the runtime or a job registered came from, for
+    /// `stats`' `draft_flow`.
+    fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>>;
+    /// Record a forecast snapshot (`forecast_recorded`, ADR-0070 decision
+    /// 3) unless another was recorded after `previous`; its ID, or `None`.
+    fn record_forecast(
+        &self,
+        payload: serde_json::Value,
+        previous: Option<EventId>,
+    ) -> Result<Option<EventId>>;
 }
 
 /// The questions the runtime and its sessions put to a person (ADR-0022).
@@ -1932,15 +1961,31 @@ pub trait GoalReviewStore {
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;
 }
 
-/// The queue a use case works on: its tasks and goals, its runs and its asks.
+/// The queue a use case works on: its tasks and goals, its runs and its
+/// asks. A use case that needs only some of it takes those ports instead.
 pub trait Queue:
-    TaskStore + RunStore + AskStore + DraftPlannerStore + PlanReviewStore + GoalReviewStore
+    TaskStore
+    + RunTransitions
+    + RunRecovery
+    + RunCoordination
+    + SessionRegistry
+    + RunLog
+    + QueueRecords
+    + AskStore
+    + DraftPlannerStore
+    + PlanReviewStore
+    + GoalReviewStore
 {
 }
 
 impl<
     T: TaskStore
-        + RunStore
+        + RunTransitions
+        + RunRecovery
+        + RunCoordination
+        + SessionRegistry
+        + RunLog
+        + QueueRecords
         + AskStore
         + DraftPlannerStore
         + PlanReviewStore
