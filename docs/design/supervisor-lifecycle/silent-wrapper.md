@@ -4,8 +4,8 @@ type: design
 title: "wrapperが黙ったsession"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -21,4 +21,5 @@ task 170。wrapperのheartbeatが`HEARTBEAT_TIMEOUT_SECS`（30秒）より古く
 - **閉じないとき**: `exit_timeout`（cmuxは120秒）を過ぎれば、それぞれの既存の経路のまま`exit_request_timed_out`とinbox宛ての`stuck_exit`のaskになる（workerはleaseを持ったまま`running`で待ち、resumeは`unresolved`で手放し、`ExitWatch`はverdictの後のstatusで待つ）。`/exit`をheartbeat切れのために送ったときだけ（`exit_for_silence`）、askのquestionの「sessionが終わった後」の文の前にそのこと（`SILENT_WRAPPER_EXIT`）を置く。`/exit`を送った後で黙った場合は置かない。
 - **askのkind**: 新しいkindを作らず`stuck_exit`を使う。人に求める判断（画面を読み、ダイアログがあれば応答して`/exit`を送るか、`wait`でそのままにするか）、options（`exit` / `wait`）、sessionが終わったらruntimeがaskを閉じること、drainがsessionの終了を待つことが、ダイアログで`/exit`が止まった場合と同じで、inboxと`dagq-recover` skillの`reference/stuck-exit.md`がそのまま扱えるため。heartbeat切れはquestionの文とrun_eventsの`wrapper_heartbeat_expired`で区別できる。
 - **終わった後**: wrapperが`session_exited`を記録すれば通常どおり進む（workerは`supervision_finished`→`validating`、resumeは書き直したreceiptで判定、`ExitWatch`はworkspaceを閉じてverdictのとおり）。PIDの死を見たときはwrapperの行を読み直し、終了が記録されていれば（読んだ後に記録して死んだ）次のpollで通常の終了として扱う。記録できないままプロセスが死んでいれば従来どおりのerrorになり、黙ったことで開いた`stuck_exit`のaskは終わらせるsessionが無いのでそのときに閉じる（`the session exited; closed by the runtime`）。
+- **wrapperの側**: heartbeatの書き込みが失敗しても、wrapperは子を待ち続け、理由をqueueのlog（`logs/session-*.jsonl`）に`wrapper heartbeat failed`として書く。終了の記録（`wrapper_exited`→`session_exited`）はSQLITE_BUSYなどの一時的な失敗で失わないよう、`application::session`の`record_exit`が上限付きで再試行する（`EXIT_RECORD_ATTEMPTS`は3回、間の待ちは200ミリ秒から倍々。applicationの層は一時的な失敗を見分けないのでerrorはすべて再試行する。1回ごとにbusy timeoutの5秒まで待ちうるので合計は最大約15.6秒で、supervisorがwrapperを黙ったとみなす30秒に収める。task 243）。失敗のたびに`recording wrapper exit failed, retrying`を、使い切ったら`wrapper exit not recorded after N attempts`を理由つきでlogに書き、wrapperはそのerrorで終わる（その後は上の「記録できないままプロセスが死んでいれば」のとおり）。
 - supervisorはsessionをkillしない。heartbeatが止まった原因（DB書き込みの失敗など）はここでは扱わない。
