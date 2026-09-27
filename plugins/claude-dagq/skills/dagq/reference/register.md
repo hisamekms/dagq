@@ -48,3 +48,22 @@ A one-shot task omits `--goal`. `add` makes a `draft`, never claimed. `submit` (
 - `low`: deferred
 
 Claim order, and urgency without drafting or bending dependencies: `reference/inspect.md`.
+
+## For a planner: checks, traffic control, revise and runtime planners
+
+What the `dagq-planner` skill's sections 1 to 3 name in short.
+
+**Before and after `add`.** Name in a runtime task's description the files it mainly touches: a forecast plan review and `related` match, not a limit, never `--paths` (`reference/scope.md`). To wait for another goal, depend on the goal (`--depends-on-goal ID`), not its last task, which follow-up drafts outlive; inside a goal, task dependencies (`reference/inspect.md`). A task needing paths outside its `--paths` (a `failed` receipt names them): `set-paths` before a claim, else add it again wider. Before each `add`, `"$DAGQ" search` the problem's file and test names and title words; after it, `"$DAGQ" related ID`, reading only the top candidates in full (`show ID --full`). Cancel a duplicate or work already done: `"$DAGQ" cancel ID --duplicate-of X`.
+
+**Traffic control is plan review's.** It checks the proposal against other proposals and ready tasks (duplicates, done work, conflicts, same-file dependencies) and adds dependencies, lowers priorities or cancels an obvious duplicate itself. Beyond `search` / `related`, a planner does not take stock of other drafts, or re-wire or park other tasks. Set a priority only when the person says a task goes first or can wait (`add --priority`, `set-priority`); never draft other tasks or bend dependencies to hurry one.
+
+**A revise.** The supervisor types "Plan review sent proposal N back" with the reasons into the planner's terminal (a runtime planner: in its initial prompt). The proposal's drafts are `draft` again (tasks plan review reopened stay `submitted` and go again as they are). Fix what the reasons point at with `edit`, `dependency`, `add` or `cancel`, `lint --proposal N`, then `"$DAGQ" submit --proposal N`. If that fails with `EmptyProposal` (a bypass or `cancel` left no draft), or the plan is dropped: `"$DAGQ" proposal withdraw N` (it ends `canceled`, its `submitted` tasks `draft`). A fix that changes the plan's intent (acceptance, scope, the relation to the goal):
+
+- **Opened by a person**: ask the person in that terminal before changing it. A revise left unanswered is told to the inbox (`check the planner`); nothing closes the workspace.
+- **Opened by the runtime**: `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, the recommendation), report and stop. The answer arrives as `answer to ask <id>: ...`; apply it.
+
+A ready task plan review must change is moved back to `submitted` (never claimed) into a proposal of its own for a runtime planner, with the reasons: fix it and `submit --proposal N`. A person's concern (`approve_plan`) goes to the inbox, never to a planner; its `send_back` returns as a revise.
+
+**A runtime planner for a draft** first runs `related ID` on it (and `search`), then does one of what its prompt lists: adopt (complete it with `edit`, `lint`, `submit`), drop (`cancel` and `note`; `cancel --duplicate-of X` when a candidate already covers it), or ask (`planner_question` with `adopt` / `cancel` / `keep_draft`). It reports briefly and stops; the runtime ends the session. A draft kept with `keep_draft` or left undecided (`decide the draft in a planner`) is decided the same way by a person-opened planner with the person.
+
+**A runtime planner for a finding** (a `kpi` one too: tasks `normal` or lower) checks `search` / `related` first, then does one: `submit ... --finding N` of tasks on an open goal or a new draft goal (no person's approval needed); `finding dismiss N --reason`; or, only for what a person must decide, `ask --finding N --kind planner_question` (`reference/observer.md`).

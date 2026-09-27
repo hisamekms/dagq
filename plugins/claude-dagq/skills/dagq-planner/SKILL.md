@@ -13,7 +13,7 @@ Which planner you are is in your initial prompt: opened by a person (they are at
 
 ## 1. Plan with the person and submit
 
-Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--kind` per AGENTS.md). Name in a runtime task's description the files it mainly touches: a forecast plan review and `related` match, not a limit, never `--paths` (`skills/dagq/reference/scope.md`). To wait for another goal, depend on the goal (`--depends-on-goal ID`), not its last task, which follow-up drafts outlive; inside a goal, task dependencies (`skills/dagq/reference/inspect.md`). A task needing paths outside its `--paths` (a `failed` receipt names them): `set-paths` before a claim, else add it again wider. Before each `add`, `"$DAGQ" search` the problem's file and test names and title words; after it, `"$DAGQ" related ID`, reading only the top candidates in full (`show ID --full`). Cancel a duplicate or work already done: `"$DAGQ" cancel ID --duplicate-of X`. Check the order with `"$DAGQ" graph --goal ID`, then lint and submit once the person agrees:
+Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--kind` per AGENTS.md). Before each `add`, `"$DAGQ" search`; after it, `"$DAGQ" related ID`; cancel a duplicate or done work with `cancel ID --duplicate-of X`. Files to name, goal dependencies, `set-paths`: `skills/dagq/reference/register.md`, "For a planner". Check the order with `"$DAGQ" graph --goal ID`, then lint and submit once the person agrees:
 
 ```sh
 "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
@@ -22,20 +22,15 @@ Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) 
 
 `submit` refuses what `lint` rejects, makes this session the proposal's owner and its tasks `submitted` (never claimed). Report the proposal ID. Unsubmitted drafts never run. To drop or reshape a submitted plan, withdraw it (section 2).
 
-Leave traffic control to plan review: it checks the proposal against other proposals and ready tasks (duplicates, done work, conflicts, same-file dependencies) and adds dependencies, lowers priorities or cancels an obvious duplicate itself. Beyond `search` / `related`, do not take stock of other drafts, or re-wire or park other tasks. Set a priority only when the person says a task goes first or can wait (`add --priority`, `set-priority`); never draft other tasks or bend dependencies to hurry one.
+Leave traffic control (duplicates, conflicts, re-wiring or parking other tasks) to plan review. Set a priority only when the person says a task goes first or can wait; never bend dependencies to hurry one.
 
 ## 2. When plan review sends it back (revise)
 
-The supervisor types "Plan review sent proposal N back" with the reasons into this terminal (a runtime planner: in its initial prompt). The proposal's drafts are `draft` again (tasks plan review reopened stay `submitted` and go again as they are). Fix what the reasons point at with `edit`, `dependency`, `add` or `cancel`, `lint --proposal N`, then `"$DAGQ" submit --proposal N`. If that fails with `EmptyProposal` (a bypass or `cancel` left no draft), or the plan is dropped: `"$DAGQ" proposal withdraw N` (it ends `canceled`, its `submitted` tasks `draft`). A fix that changes the plan's intent (acceptance, scope, the relation to the goal):
-
-- **Opened by a person**: ask the person here before changing it. A revise left unanswered is told to the inbox (`check the planner`); nothing closes this workspace.
-- **Opened by the runtime**: `"$DAGQ" ask --task ID --kind planner_question --because scope --question '...'` (everything the person needs, your recommendation), report and stop. The answer arrives here as `answer to ask <id>: ...`; apply it.
-
-A ready task plan review must change is moved back to `submitted` (never claimed) into a proposal of its own for a runtime planner, with the reasons: fix it and `submit --proposal N`. A person's concern (`approve_plan`) goes to the inbox, never here; its `send_back` returns as a revise.
+"Plan review sent proposal N back" arrives here with reasons (a runtime planner: in its prompt). Fix them (`edit`, `dependency`, `add`, `cancel`), `lint --proposal N`, `"$DAGQ" submit --proposal N`; on `EmptyProposal` or a dropped plan, `"$DAGQ" proposal withdraw N`. A fix that changes the plan's intent: opened by a person, ask the person here first; opened by the runtime, `ask --task ID --kind planner_question --because scope`, report and stop. A ready task plan review moved back to `submitted` is fixed the same way. Details: `skills/dagq/reference/register.md`, "A revise".
 
 ## 3. A draft the runtime opened you for
 
-A runtime planner for a draft first runs `related ID` on it (and `search`), then does one of what its prompt lists: adopt (complete it with `edit`, `lint`, `submit`), drop (`cancel` and `note`; `cancel --duplicate-of X` when a candidate already covers it), or ask (`planner_question` with `adopt` / `cancel` / `keep_draft`). Report briefly and stop; the runtime ends the session. A draft kept with `keep_draft` or left undecided (`decide the draft in a planner`) is decided the same way by a person-opened planner with the person. A runtime planner for a finding (a `kpi` one too: tasks `normal` or lower) checks `search` / `related` first, then does one: `submit ... --finding N` of tasks on an open goal or a new draft goal (no person's approval needed); `finding dismiss N --reason`; or, only for what a person must decide, `ask --finding N --kind planner_question`.
+Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or ask (`planner_question`); for a finding, `submit ... --finding N`, `finding dismiss N --reason` or `ask --finding N`. Report and stop. A person-opened planner decides a draft left undecided the same way. Details: `skills/dagq/reference/register.md`, "A runtime planner".
 
 ## 4. Follow a goal, findings, KPIs
 
