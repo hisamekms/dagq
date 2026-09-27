@@ -4,8 +4,8 @@ type: design
 title: "Run environment"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -45,7 +45,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   - 起動し直すときの引き継ぎ: `install --allow-breaking`のdrainと自動更新の見張りがsupervisorを`up`で起動し直すときは、止めた登録の値のうち出どころが`flag`のもの（と、出どころの列より古いbinaryの登録の値）だけを`--parallel` / `--max-waiting`で渡し、`dagq.toml`か既定から決めた値は渡さない（`SupervisorRegistration::flag_arguments`）。引き継ぎのexecは元のargvのまま続くので、この変更より前の`up`が`--parallel N`を付けて起動したsupervisorは、入れ替わっても`flag`のままで`[supervisor]`を読まない。`[supervisor]`に従わせるには、`down --wait`の後にflagなしの`up`で起動し直す。
   - `[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[supervisor]`を知るものに入れ替えてから足す。この repositoryの`dagq.toml`にはまだ置かない（`--parallel 3`はAGENTS.mdの`up`のコマンドが渡す）。
 
-- `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、`dagq kpi`だけが読む（[kpi](kpi.md#目標targets)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。`load_kpi_settings`、解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[kpi]`を知るものに入れ替えてから足す（先に足すとqueue全体が止まる）。
+- `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、`dagq kpi`だけが読む（[kpi](kpi.md#目標targets)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。`load_kpi_settings`、解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[kpi]`を知るものに入れ替えてから足す（先に足すとqueue全体が止まる）。この repositoryの`dagq.toml`には、固定バイナリがtask 430を含んでから、人とplannerがask 112で決めた`all`の層の7つの目標（`first_pass_rate`・`revise_rate`・`conflict_rate`・`verification_failed_rate`・`failed_rate`・`resumes_per_run`・`asks_per_landing`）を足した（task 572。値と経緯は`dagq.toml`のcomment）。`[kpi]`の設定の数値は既定のまま書かない。
 
 - `[worker.trial]`はworkerのmodelの限定の試しの設定で、`enabled`（`true` / `false`、既定`false`）と`window`（正の整数、既定60。対象の判定で比べる直近の予測の件数）を持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4。`load_worker_trial`、`Verifier::worker_trial`）。supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。既定は無効で、有効にするのは人の判断。この repositoryの`dagq.toml`には置かない。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
 

@@ -39,3 +39,43 @@ NEXTEST_TEST_THREADS = "8"
 # 書式と流れは docs/design/supervisor-lifecycle/landing-recheck.md と run-environment.md。
 # [recheck] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 462 を含んでから足した。
 command = "cargo check --locked --all-targets"
+
+# KPI の目標（ADR-0051 の決定 17・19。書式は docs/design/supervisor-lifecycle/kpi.md の「目標」）。
+# ここには host に依らない repository の方針だけを書く。phase.* や max_load_avg のように host の性能で
+# 決まる目標は host.toml に書く。[kpi] の min_samples・breach_periods・breach_weeks・
+# max_improvement_proposals は既定のまま書かない。層はどれも all（kind を省く）、stat は率・値の既定（value）。
+# 目標は 2026-09-26 に人と planner が ask 112 で決めた（planner の推奨を人が adopt し、inbox 経由の補足で
+# first_pass_rate と asks_per_landing を緩めた）。「実績」は決めたときの 2026-W39 途中、all、n≈240 の値。
+# [kpi] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 430 を含んでから足した。
+
+# 1 つの run が resume・revise・着地の延期なしで着地した task の割合。実績 0.70。
+# 人の決定で推奨より緩めた: 実績とほぼ同じ線では揺れだけで目標割れになり、
+# 2026-09-26 の test 並列度の変更（task 566）でも数字が動くため。
+[kpi.targets.first_pass_rate]
+min = 0.65
+
+# 着地した run のうち revise を受けたものの割合。実績 0.05。planner の推奨どおり。
+[kpi.targets.revise_rate]
+max = 0.1
+
+# integrate を試みた run のうち rebase の衝突で延期されたものの割合。実績 0.062。planner の推奨どおり。
+[kpi.targets.conflict_rate]
+max = 0.1
+
+# integrate の検証を実行した試行のうち検証の失敗で延期されたものの割合。実績 0.04。planner の推奨どおり。
+[kpi.targets.verification_failed_rate]
+max = 0.1
+
+# 終わった run のうち failed / interrupted のものの割合。実績 0.088。planner の推奨どおり。
+[kpi.targets.failed_rate]
+max = 0.1
+
+# 終わった run あたりの resume の回数。実績 0.22。planner の推奨どおり。
+[kpi.targets.resumes_per_run]
+max = 0.3
+
+# 着地 1 件あたりに開いた ask の数。実績 0.47。
+# 人の決定で推奨より緩めた: 実績とほぼ同じ線では揺れだけで目標割れになり、
+# 2026-09-26 の test 並列度の変更（task 566）でも数字が動くため。
+[kpi.targets.asks_per_landing]
+max = 0.6
