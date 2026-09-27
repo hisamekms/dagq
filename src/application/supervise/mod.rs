@@ -77,7 +77,7 @@ use crate::domain::{
     marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
-    resume::{ResumeCount, inherits_on_exhaustion},
+    resume::{CONFLICT_ONLY_RESUME_LIMIT, ResumeCount, inherits_on_exhaustion, is_inherit_retry},
     run_env::RUN_ENV_PROGRAM_KINDS,
     stall::{BackgroundTask, STALL_CONFIG_LOADED, StallConfig},
     triage_state,

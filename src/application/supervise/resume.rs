@@ -623,19 +623,28 @@ impl Supervisor<'_> {
 
 /// How often the run was resumed, for its used-up reason and ask: the
 /// counted resumes against [`MAX_RESUME_ATTEMPTS`], and the conflict-only
-/// ones (ADR-0047 decision 24) when there were any.
+/// ones (ADR-0047 decision 24) when there were any, with the conflict
+/// precheck's requests that shared their limit.
 fn resumed_text(resumes: ResumeCount) -> String {
-    if resumes.conflict_only == 0 {
+    if resumes.conflict_attempts() == 0 {
         format!(
             "resumed {} times (at most {MAX_RESUME_ATTEMPTS})",
             resumes.counted
         )
-    } else {
+    } else if resumes.conflict_requests == 0 {
         format!(
             "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted, and {} of at most {CONFLICT_ONLY_RESUME_LIMIT} for conflicts only after its review passed)",
             resumes.total(),
             resumes.counted,
             resumes.conflict_only
+        )
+    } else {
+        format!(
+            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted) and asked {} times by the conflict precheck ({} of at most {CONFLICT_ONLY_RESUME_LIMIT} attempts for conflicts only after its review passed)",
+            resumes.total(),
+            resumes.counted,
+            resumes.conflict_requests,
+            resumes.conflict_attempts()
         )
     }
 }

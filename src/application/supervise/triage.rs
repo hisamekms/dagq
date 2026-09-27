@@ -484,7 +484,8 @@ impl Supervisor<'_> {
                 if resumes.exhausted() {
                     return Err(format!(
                         "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only)",
-                        resumes.counted, resumes.conflict_only
+                        resumes.counted,
+                        resumes.conflict_attempts()
                     ));
                 }
                 let worktree = run

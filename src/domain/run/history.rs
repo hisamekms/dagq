@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::domain::resume::ResumeCount;
+use crate::domain::resume::{CONFLICT_ONLY_RESUME_LIMIT, ResumeCount};
 use crate::domain::{
     ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
     RunEvent, RunStatus, TriageState, event_attention, event_kind, recheck, run_attention,
@@ -178,15 +178,9 @@ impl<'a> RunHistory<'a> {
     /// How many conflict resolutions the precheck sent to the live
     /// session: each `conflict_precheck` with `requested: true` but those a
     /// later one with `unsent: true` withdrew (the request is recorded
-    /// before it is typed).
+    /// before it is typed). [`ResumeCount::conflict_requests`].
     pub fn conflict_requests(&self) -> usize {
-        let count = |key: &str| {
-            self.events
-                .iter()
-                .filter(|e| e.kind == event_kind::CONFLICT_PRECHECK && e.payload[key] == true)
-                .count()
-        };
-        count("requested").saturating_sub(count("unsent"))
+        self.resumes().conflict_requests
     }
 
     /// Where the recovery of a `failed` or `interrupted` run stands
@@ -423,20 +417,35 @@ pub fn run_attention_of<'a>(
 pub enum ConflictDecision {
     /// Send the live session the resolution request.
     RequestRebase,
-    /// The conflict requests and the resumes together used up
-    /// [`MAX_RESUME_ATTEMPTS`]: a person decides.
+    /// The conflict-only attempts (the requests and the conflict-only
+    /// resumes) reached [`CONFLICT_ONLY_RESUME_LIMIT`] with counted
+    /// resumes left, and the run can be retried with its branch carried
+    /// over: nobody is asked, the run goes on to land, and a landing that
+    /// conflicts parks it with its resumes used up, which retries it
+    /// (ADR-0047 decision 24).
+    Inherit,
+    /// The counted resumes used up [`MAX_RESUME_ATTEMPTS`], or the
+    /// conflict-only attempts their limit on a run that cannot be retried
+    /// with its branch carried over: a person decides.
     Ask,
 }
 
-/// The conflict requests and the run's counted resumes share
-/// [`MAX_RESUME_ATTEMPTS`]: past it, a person is asked. Resumes of a run
-/// parked only by a conflict after its review passed are not counted
-/// (ADR-0047 decision 24).
-pub fn decide_conflict(history: &RunHistory<'_>) -> ConflictDecision {
-    if history.conflict_requests() + history.resumes().counted >= MAX_RESUME_ATTEMPTS {
+/// The precheck's requests are conflict-only attempts after a passed
+/// review: they share [`CONFLICT_ONLY_RESUME_LIMIT`] with the conflict-only
+/// resumes and are not counted toward [`MAX_RESUME_ATTEMPTS`] (ADR-0047
+/// decision 24). `inheritable` says whether the run can be retried with its
+/// branch carried over (no run of its task was, and its head holds commits
+/// on top of its base).
+pub fn decide_conflict(history: &RunHistory<'_>, inheritable: bool) -> ConflictDecision {
+    let resumes = history.resumes();
+    if resumes.counted >= MAX_RESUME_ATTEMPTS {
         ConflictDecision::Ask
-    } else {
+    } else if resumes.conflict_attempts() < CONFLICT_ONLY_RESUME_LIMIT {
         ConflictDecision::RequestRebase
+    } else if inheritable {
+        ConflictDecision::Inherit
+    } else {
+        ConflictDecision::Ask
     }
 }
 
@@ -620,26 +629,78 @@ mod tests {
     }
 
     #[test]
-    fn conflict_requests_and_resumes_share_the_limit() {
+    fn conflict_requests_are_conflict_only_attempts() {
         let precheck =
             |id, requested| event(id, "conflict_precheck", json!({"requested": requested}));
         let events = vec![precheck(1, true), precheck(2, false)];
         let history = RunHistory::from_events(&events);
         assert_eq!(history.conflict_requests(), 1);
-        assert_eq!(decide_conflict(&history), ConflictDecision::RequestRebase);
+        assert_eq!(history.resumes().counted, 0);
+        assert_eq!(history.resumes().conflict_attempts(), 1);
+        assert_eq!(
+            decide_conflict(&history, true),
+            ConflictDecision::RequestRebase
+        );
         // A request withdrawn before it was typed is not one.
         let events = vec![
             precheck(1, true),
             event(2, "conflict_precheck", json!({"unsent": true})),
         ];
         assert_eq!(RunHistory::from_events(&events).conflict_requests(), 0);
+        // Three requests and a resume no longer reach the three attempts.
         let events = vec![
             precheck(1, true),
             event(2, "resume_started", json!({})),
             precheck(3, true),
+            precheck(4, true),
         ];
         let history = RunHistory::from_events(&events);
-        assert_eq!(decide_conflict(&history), ConflictDecision::Ask);
+        assert_eq!(history.resumes().counted, 1);
+        assert_eq!(
+            decide_conflict(&history, true),
+            ConflictDecision::RequestRebase
+        );
+        // The requests and the conflict-only resumes share their limit:
+        // past it, the run is retried with its branch, or a person asked
+        // when it cannot be.
+        let pass = event(1, "review_finished", json!({"verdict": "pass"}));
+        let conflict = |id| {
+            event(
+                id,
+                "integration_deferred",
+                json!({"code": "rebase_conflict"}),
+            )
+        };
+        let mut events = vec![pass, conflict(2), event(3, "resume_started", json!({}))];
+        events.extend(
+            (4..)
+                .take(CONFLICT_ONLY_RESUME_LIMIT - 2)
+                .map(|id| precheck(id, true)),
+        );
+        let history = RunHistory::from_events(&events);
+        assert_eq!(history.resumes().conflict_only, 1);
+        assert_eq!(
+            history.resumes().conflict_attempts(),
+            CONFLICT_ONLY_RESUME_LIMIT - 1
+        );
+        assert!(!history.resumes().exhausted());
+        assert_eq!(
+            decide_conflict(&history, true),
+            ConflictDecision::RequestRebase
+        );
+        events.push(precheck(10, true));
+        let history = RunHistory::from_events(&events);
+        assert!(history.resumes().exhausted());
+        assert_eq!(decide_conflict(&history, true), ConflictDecision::Inherit);
+        assert_eq!(decide_conflict(&history, false), ConflictDecision::Ask);
+        // Counted resumes used up ask, whatever the conflicts.
+        let events = vec![
+            event(1, "resume_started", json!({})),
+            event(2, "resume_started", json!({})),
+            event(3, "resume_started", json!({})),
+        ];
+        let history = RunHistory::from_events(&events);
+        assert_eq!(decide_conflict(&history, true), ConflictDecision::Ask);
     }
 
     #[test]
@@ -662,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn resumes_after_a_conflict_only_park_do_not_share_the_conflict_limit() {
+    fn conflict_only_resumes_and_requests_are_not_counted() {
         let events = vec![
             event(1, "review_finished", json!({"verdict": "pass"})),
             event(
@@ -677,7 +738,11 @@ mod tests {
         let history = RunHistory::from_events(&events);
         assert_eq!(history.resumes().counted, 0);
         assert_eq!(history.resumes().conflict_only, 1);
-        assert_eq!(decide_conflict(&history), ConflictDecision::RequestRebase);
+        assert_eq!(history.resumes().conflict_attempts(), 3);
+        assert_eq!(
+            decide_conflict(&history, true),
+            ConflictDecision::RequestRebase
+        );
     }
 
     #[test]

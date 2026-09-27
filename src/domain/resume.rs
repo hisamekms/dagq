@@ -2,12 +2,16 @@
 //! whose resumes are used up is retried with its branch carried over
 //! (ADR-0047 decision 24). Both are read from the run's events alone.
 
-use super::{CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, recheck};
+use super::{
+    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, event_kind, recheck,
+};
 
-/// How many resumes of one run the supervisor starts while the run was
-/// parked only by a rebase conflict after its review passed: such a resume
-/// is not one of [`MAX_RESUME_ATTEMPTS`], but a conflict that never
-/// resolves stops here (ADR-0047 decision 24's fence).
+/// How many conflict-only attempts of one run the supervisor makes: the
+/// resumes it starts while the run was parked only by a rebase conflict
+/// after its review passed, and the conflict precheck's requests to the
+/// live session of a passed run (ADR-0027 decision 4, task 511). Neither is
+/// one of [`MAX_RESUME_ATTEMPTS`], but a conflict that never resolves stops
+/// here (ADR-0047 decision 24's fence).
 pub const CONFLICT_ONLY_RESUME_LIMIT: usize = 5;
 
 /// `triage_finished`'s `action` for the automatic retry that carries the
@@ -118,7 +122,8 @@ pub fn parked_by_recheck(events: &[RunEvent]) -> bool {
 }
 
 /// The resumes of one run (`resume_started` events), split by whether
-/// each counts toward [`MAX_RESUME_ATTEMPTS`].
+/// each counts toward [`MAX_RESUME_ATTEMPTS`], and the conflict precheck's
+/// requests to its live session, which share the conflict-only limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResumeCount {
     /// Resumes that count toward [`MAX_RESUME_ATTEMPTS`].
@@ -126,12 +131,23 @@ pub struct ResumeCount {
     /// Resumes of a run parked only by a rebase conflict after its review
     /// passed, fenced by [`CONFLICT_ONLY_RESUME_LIMIT`].
     pub conflict_only: usize,
+    /// The conflict precheck's resolution requests sent to the live
+    /// session of a passed run (`conflict_precheck` with `requested: true`,
+    /// but those a later one with `unsent: true` withdrew): conflicts only
+    /// after a passed review, fenced with [`Self::conflict_only`] by
+    /// [`CONFLICT_ONLY_RESUME_LIMIT`].
+    pub conflict_requests: usize,
+    /// Whether the run, as its events end, is parked only by a conflict
+    /// ([`parked_for_conflict_only`]): its next resume would be a
+    /// conflict-only one, which the precheck's requests fence too.
+    pub parked_for_conflict: bool,
 }
 
 impl ResumeCount {
     pub fn of(events: &[RunEvent]) -> Self {
         let mut history = History::default();
         let mut count = Self::default();
+        let mut withdrawn = 0;
         for event in events {
             if event.kind == "resume_started" {
                 if history.conflict_only() {
@@ -139,10 +155,25 @@ impl ResumeCount {
                 } else {
                     count.counted += 1;
                 }
+            } else if event.kind == event_kind::CONFLICT_PRECHECK {
+                if event.payload["requested"] == true {
+                    count.conflict_requests += 1;
+                }
+                if event.payload["unsent"] == true {
+                    withdrawn += 1;
+                }
             }
             history.see(event);
         }
+        count.conflict_requests = count.conflict_requests.saturating_sub(withdrawn);
+        count.parked_for_conflict = history.conflict_only();
         count
+    }
+
+    /// The attempts fenced by [`CONFLICT_ONLY_RESUME_LIMIT`]: the
+    /// conflict-only resumes and the precheck's conflict requests.
+    pub const fn conflict_attempts(self) -> usize {
+        self.conflict_only + self.conflict_requests
     }
 
     /// Every resume started, counted or not: the number of the last one.
@@ -156,10 +187,16 @@ impl ResumeCount {
     }
 
     /// No further resume starts: the counted ones reached
-    /// [`MAX_RESUME_ATTEMPTS`] or the conflict-only ones
-    /// [`CONFLICT_ONLY_RESUME_LIMIT`].
+    /// [`MAX_RESUME_ATTEMPTS`], the conflict-only resumes
+    /// [`CONFLICT_ONLY_RESUME_LIMIT`], or, while the run is parked only by a
+    /// conflict, the conflict-only attempts with the precheck's requests
+    /// ([`Self::conflict_attempts`]) reached it. A run the requests brought
+    /// to the limit that is parked for another reason (a failed
+    /// verification, missing evidence) keeps its counted resumes.
     pub const fn exhausted(self) -> bool {
-        self.counted >= MAX_RESUME_ATTEMPTS || self.conflict_only >= CONFLICT_ONLY_RESUME_LIMIT
+        self.counted >= MAX_RESUME_ATTEMPTS
+            || self.conflict_only >= CONFLICT_ONLY_RESUME_LIMIT
+            || (self.parked_for_conflict && self.conflict_attempts() >= CONFLICT_ONLY_RESUME_LIMIT)
     }
 }
 
@@ -246,7 +283,9 @@ mod tests {
             count,
             ResumeCount {
                 counted: 0,
-                conflict_only: 2
+                conflict_only: 2,
+                conflict_requests: 0,
+                parked_for_conflict: true,
             }
         );
         assert_eq!(count.total(), 2);
@@ -322,7 +361,9 @@ mod tests {
             ResumeCount::of(&events),
             ResumeCount {
                 counted: 1,
-                conflict_only: 1
+                conflict_only: 1,
+                conflict_requests: 0,
+                parked_for_conflict: true,
             }
         );
     }
@@ -332,21 +373,80 @@ mod tests {
         let counted = ResumeCount {
             counted: MAX_RESUME_ATTEMPTS,
             conflict_only: 0,
+            conflict_requests: 0,
+            ..Default::default()
         };
         assert!(counted.exhausted());
         assert_eq!(counted.left(), 0);
         let conflicts = ResumeCount {
             counted: 0,
             conflict_only: CONFLICT_ONLY_RESUME_LIMIT,
+            conflict_requests: 0,
+            ..Default::default()
         };
         assert!(conflicts.exhausted());
         assert!(
             !ResumeCount {
                 counted: MAX_RESUME_ATTEMPTS - 1,
                 conflict_only: CONFLICT_ONLY_RESUME_LIMIT - 1,
+                conflict_requests: 0,
+                ..Default::default()
             }
             .exhausted()
         );
+    }
+
+    #[test]
+    fn precheck_requests_share_the_conflict_only_limit() {
+        let precheck = |payload| event("conflict_precheck", payload);
+        let mut events = vec![
+            pass(),
+            conflict(),
+            resume(),
+            precheck(json!({"requested": true})),
+            precheck(json!({"requested": false})),
+            precheck(json!({"requested": true})),
+            // Withdrawn before it was typed.
+            precheck(json!({"requested": false, "unsent": true})),
+        ];
+        let count = ResumeCount::of(&events);
+        assert_eq!(
+            count,
+            ResumeCount {
+                counted: 0,
+                conflict_only: 1,
+                conflict_requests: 1,
+                parked_for_conflict: true,
+            }
+        );
+        assert_eq!(count.total(), 1);
+        assert_eq!(count.conflict_attempts(), 2);
+        assert_eq!(count.left(), MAX_RESUME_ATTEMPTS);
+        events.extend(
+            std::iter::repeat_with(|| precheck(json!({"requested": true})))
+                .take(CONFLICT_ONLY_RESUME_LIMIT - 2),
+        );
+        let count = ResumeCount::of(&events);
+        assert_eq!(count.conflict_attempts(), CONFLICT_ONLY_RESUME_LIMIT);
+        assert_eq!(count.counted, 0);
+        assert!(count.exhausted());
+        // A conflict found by the landing after the requests is retried
+        // with the branch carried over.
+        events.push(conflict());
+        assert!(inherits_on_exhaustion(&events, &events));
+        // Parked for another reason, the run keeps its counted resumes: the
+        // requests fence conflict-only attempts only.
+        let mut failed = events.clone();
+        failed.push(event(
+            "integration_deferred",
+            json!({"code": "verification_failed"}),
+        ));
+        let count = ResumeCount::of(&failed);
+        assert!(!count.parked_for_conflict);
+        assert_eq!(count.conflict_attempts(), CONFLICT_ONLY_RESUME_LIMIT);
+        assert!(!count.exhausted());
+        failed.push(resume());
+        assert_eq!(ResumeCount::of(&failed).counted, 1);
     }
 
     #[test]
@@ -386,7 +486,9 @@ mod tests {
             ResumeCount::of(&events),
             ResumeCount {
                 counted: 0,
-                conflict_only: 1
+                conflict_only: 1,
+                conflict_requests: 0,
+                parked_for_conflict: true,
             }
         );
         // The retry that carries the branch over still needs a review that

@@ -1626,10 +1626,12 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
     backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
     // It never gets the request, and exits at the /exit of the resume
-    // timeout, once the ask is open.
+    // timeout, once the ask is open. The /exit also ends its wait for the
+    // ask: under load the ask may be opened and closed between two looks,
+    // and a session still waiting then would never exit.
     backend.resume_script_for(
         2,
-        "until \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done; await_exit",
+        "until [ -f \"$EXIT\" ] || \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done; await_exit",
     );
     let options = SuperviseOptions {
         stall: Some(dagq::domain::stall::StallConfig {

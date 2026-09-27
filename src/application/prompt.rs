@@ -7,6 +7,7 @@
 //! revise, a receipt that does not match).
 
 use crate::domain::event_kind;
+use crate::domain::resume::CONFLICT_ONLY_RESUME_LIMIT;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -1232,8 +1233,10 @@ pub fn ended_run_material(
     };
     let resume_rule = if resumes.exhausted() {
         format!(
-            "The run was resumed {} time(s) and its resumes are used up: do not choose resume.",
-            resumes.total()
+            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {CONFLICT_ONLY_RESUME_LIMIT} conflict-only attempts with the conflict precheck's requests) and its resumes are used up: do not choose resume.",
+            resumes.total(),
+            resumes.counted,
+            resumes.conflict_attempts()
         )
     } else {
         format!(

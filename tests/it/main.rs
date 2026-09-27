@@ -52,6 +52,7 @@ mod runtime_forecast;
 mod runtime_handoff;
 mod runtime_integrate;
 mod runtime_observer;
+mod runtime_precheck;
 mod runtime_push;
 mod runtime_recheck;
 mod runtime_repair;

@@ -311,10 +311,16 @@ impl Supervisor<'_> {
     /// exits the session and lands. A conflict records `conflict_precheck`
     /// and sends the live session the resolution request of a resume; the
     /// session's rewritten receipt is validated and reviewed again. The
-    /// requests and the run's resumes share `MAX_RESUME_ATTEMPTS`: past it,
-    /// the session exits and a person is asked. Without a live session to
-    /// ask (or when Git cannot judge), the run lands as before, and a
-    /// conflicting landing parks it for a resume.
+    /// requests are conflict-only attempts after a passed review (ADR-0047
+    /// decision 24): with the run's conflict-only resumes they stop at
+    /// `CONFLICT_ONLY_RESUME_LIMIT`, and they are not counted toward
+    /// `MAX_RESUME_ATTEMPTS`. Past the conflict-only limit, a run that can
+    /// be retried with its branch carried over goes on to land without a
+    /// person: a conflicting landing parks it with its resumes used up, and
+    /// the resume pass retries it (`exhaust_resumes`). Otherwise, and when
+    /// its counted resumes are used up, the session exits and a person is
+    /// asked. Without a live session to ask (or when Git cannot judge), the
+    /// run lands as before, and a conflicting landing parks it for a resume.
     pub(super) fn precheck(
         &mut self,
         run: &TaskRun,
@@ -352,8 +358,9 @@ impl Supervisor<'_> {
         let history = RunHistory::from_events(&events);
         let requested = history.conflict_requests();
         // Resumes of the run parked only by a conflict after its review
-        // passed are not counted (ADR-0047 decision 24).
-        let resumes = history.resumes().counted;
+        // passed are not counted (ADR-0047 decision 24), nor are the
+        // requests: both are conflict-only attempts.
+        let resumes = history.resumes();
         let attempt = requested + 1;
         let mut payload = json!({
             "code": ReasonCode::RebaseConflict,
@@ -369,17 +376,60 @@ impl Supervisor<'_> {
             "git merge-tree finds that main {main} conflicts with the run in {}",
             conflicts.join(", ")
         );
-        if decide_conflict(&history) == ConflictDecision::Ask {
-            let why = format!("{why}, after {requested} conflict requests and {resumes} resumes");
-            // What an adopter asks, if it takes the run over before the ask.
-            payload["asked"] = json!(why);
-            self.queue
-                .record_runtime_event(run.id(), event_kind::CONFLICT_PRECHECK, payload)?;
-            info!(run_id = %run.id(), "run {}: {why}; asking a person", run.id());
-            return Ok(Phase::Exiting(ExitWatch::new(
-                session,
-                Fix::Conflict(verdict).ask(String::new(), why),
-            )));
+        // What the retry that carries the branch over needs besides the
+        // conflict after a passed review: no run of the task was retried
+        // that way, and the head holds commits on top of the run's base.
+        let inherited = self
+            .queue
+            .show(run.task_id())?
+            .events
+            .iter()
+            .any(is_inherit_retry);
+        let own_commits = head != *run.base_commit();
+        match decide_conflict(&history, !inherited && own_commits) {
+            ConflictDecision::RequestRebase => {}
+            ConflictDecision::Inherit => {
+                // Recorded for the reader and an adopter, which goes on
+                // to land as well.
+                payload["exhausted"] = json!(true);
+                self.queue.record_runtime_event(
+                    run.id(),
+                    event_kind::CONFLICT_PRECHECK,
+                    payload,
+                )?;
+                info!(run_id = %run.id(), "run {}: {why}, after {requested} conflict requests and {} conflict-only resumes (at most {CONFLICT_ONLY_RESUME_LIMIT} in all); landing, and a conflicting landing retries the task with the run's branch carried over", run.id(), resumes.conflict_only);
+                return Ok(land(session));
+            }
+            ConflictDecision::Ask => {
+                let why = if resumes.counted >= MAX_RESUME_ATTEMPTS {
+                    format!(
+                        "{why}, after {requested} conflict requests and {} counted resumes (at most {MAX_RESUME_ATTEMPTS})",
+                        resumes.counted
+                    )
+                } else {
+                    let cannot = if inherited {
+                        "a run of its task was already retried with its branch carried over"
+                    } else {
+                        "its branch holds no commit to carry over"
+                    };
+                    format!(
+                        "{why}, after {requested} conflict requests and {} conflict-only resumes (at most {CONFLICT_ONLY_RESUME_LIMIT} in all), and {cannot}",
+                        resumes.conflict_only
+                    )
+                };
+                // What an adopter asks, if it takes the run over before the ask.
+                payload["asked"] = json!(why);
+                self.queue.record_runtime_event(
+                    run.id(),
+                    event_kind::CONFLICT_PRECHECK,
+                    payload,
+                )?;
+                info!(run_id = %run.id(), "run {}: {why}; asking a person", run.id());
+                return Ok(Phase::Exiting(ExitWatch::new(
+                    session,
+                    Fix::Conflict(verdict).ask(String::new(), why),
+                )));
+            }
         }
         let live = session
             .clone()

@@ -2018,7 +2018,7 @@ fn background_work_that_never_ends_is_waited_for_up_to_the_resume_timeout() {
 
 /// A reviewer script that moves main in the main checkout with a change to
 /// `change.txt` that conflicts with the run's, then passes the run.
-fn moving_main_then_pass() -> String {
+pub(crate) fn moving_main_then_pass() -> String {
     format!(
         "cd \"$(git rev-parse --path-format=absolute --git-common-dir)/..\" && \
          printf 'main moved by %s\\n' $$ > change.txt && git add change.txt && \
@@ -2031,7 +2031,7 @@ fn moving_main_then_pass() -> String {
 /// time a conflict request arrives in its terminal it rebases onto the main
 /// the request names, resolves `change.txt`, rewrites the receipt and goes
 /// idle again, `requests` times.
-fn rebasing_agent(requests: usize) -> String {
+pub(crate) fn rebasing_agent(requests: usize) -> String {
     format!(
         "commit work; receipt \"$(git rev-parse HEAD)\"; idle; {RESUME_PRELUDE}\n\
          for n in $(seq 1 {requests}); do \
@@ -2181,59 +2181,6 @@ fn a_passed_run_that_merges_cleanly_with_main_lands_without_a_request() {
     assert!(backend.texts().is_empty());
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
     assert_eq!(reviewer.prompts().len(), 1);
-}
-
-/// Conflict requests and resumes share the run's `MAX_RESUME_ATTEMPTS`:
-/// when main keeps moving into the run, the precheck after the third
-/// request exits the session and opens an `approve_landing` ask instead of
-/// a fourth request.
-#[test]
-fn conflict_requests_past_the_limit_ask_a_person() {
-    let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, &rebasing_agent(3));
-    let reviewer = TestReviewer::new(&[moving_main_then_pass()]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let run = detail.runs[0].clone();
-    let prechecks = payloads(&detail, "conflict_precheck");
-    let requested: Vec<&Value> = prechecks.iter().map(|p| &p["requested"]).collect();
-    assert_eq!(
-        requested,
-        [&json!(true), &json!(true), &json!(true), &json!(false)]
-    );
-    assert_eq!(prechecks[3]["attempt"], 4);
-    assert!(prechecks[3].get("sent_at").is_none());
-    assert!(
-        prechecks[3]["asked"]
-            .as_str()
-            .unwrap()
-            .ends_with("after 3 conflict requests and 0 resumes")
-    );
-    assert_eq!(payloads(&detail, "conflict_resolved").len(), 3);
-    assert_eq!(payloads(&detail, "review_finished").len(), 4);
-    assert_eq!(backend.texts().len(), 3);
-    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    assert_eq!(backend.closed(), vec![WORKSPACE_ID.to_owned()]);
-    assert!(queue.run_leases().unwrap().is_empty());
-    let kinds = event_kinds(&detail);
-    assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
-    assert!(!kinds.contains(&"integration_started"), "{kinds:?}");
-    let asks = queue.asks(Default::default()).unwrap();
-    assert_eq!(asks.len(), 1);
-    let ask = &asks[0];
-    assert_eq!(ask.kind, dagq::domain::AskKind::ApproveLanding);
-    assert_eq!(ask.run_id.as_ref(), Some(run.id()));
-    assert!(
-        ask.question.contains("returned pass (git merge-tree finds that main")
-            && ask
-                .question
-                .contains("conflicts with the run in change.txt, after 3 conflict requests and 0 resumes): meets the acceptance"),
-        "{}",
-        ask.question
-    );
 }
 
 /// [`fixture`] whose supervisors look for a sign of work one second after

@@ -189,6 +189,7 @@ pub fn record_exhausted_resumes(
         "resumes": resumes.total(),
         "counted_resumes": resumes.counted,
         "conflict_only_resumes": resumes.conflict_only,
+        "conflict_requests": resumes.conflict_requests,
         "previous_status": previous.as_str(),
         "status": run.status().as_str(),
     });
@@ -220,6 +221,7 @@ pub fn record_exhausted_resumes(
                             "parked": ReasonCode::RebaseConflict,
                             "counted_resumes": resumes.counted,
                             "conflict_only_resumes": resumes.conflict_only,
+                            "conflict_requests": resumes.conflict_requests,
                             "branch": branch,
                             "head": head,
                         },
@@ -459,6 +461,7 @@ mod tests {
         let resumes = ResumeCount {
             counted: 3,
             conflict_only: 1,
+            ..Default::default()
         };
         let events = [finished_resume(7), finished_resume(9)];
         let (run_, recorded) = record_exhausted_resumes(
@@ -487,6 +490,8 @@ mod tests {
         let resumes = ResumeCount {
             counted: 0,
             conflict_only: 5,
+            conflict_requests: 0,
+            parked_for_conflict: true,
         };
         let (_, recorded) = record_exhausted_resumes(
             run(RunStatus::NeedsSession),
