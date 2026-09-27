@@ -48,4 +48,6 @@ related:
 
 ## dagqのソースのrepositoryだけ
 
+リリースのバイナリ（`X.Y.Z`）で動く外部のprojectの更新は、source buildではなくcrates.ioのリリースの検知とaskで行う（[Release update](release-update.md)、ADR-t618-1。未実装）。
+
 `up --auto-update`のsource buildは、queueのrepositoryがdagqのソースのときだけ動く（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。ソースでないrepositoryでは`up --auto-update`がerrorで止まり、自動更新の設定を持つsupervisorもbuildに進まない。判定と対象の一覧は[Source repository](source-repository.md)にある。`up`はpreflightで`--auto-update`とソースでないrepositoryの組み合わせを`--auto-update builds dagq from the repository's sources, and <checkout> is not dagq's source (...); leave --auto-update off and update dagq with `cargo install dagq`, or with `dagq install --from <binary or checkout>`; the supervisor was not started`で止める（`lifecycle::auto_update_refused`）。登録の`auto_update`が真のsupervisorは、見る回ごとに判定し、ソースでなければ`update_failed`のaskの答えの適用もjobの起動もせずに戻り、ソースでなくなった最初の回だけ警告をlogに出す。

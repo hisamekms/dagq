@@ -177,6 +177,7 @@ claude plugin install claude-dagq@dagq
 - 利用者の更新はバイナリの`cargo install --locked dagq`とpluginの`claude plugin update claude-dagq@dagq`の組。launcherのmajor.minorの警告は残す（launcherのエラーと警告の案内はこの組に揃え済み。上の「launcher」）。
 - `up`・`plan`は`--plugin-dir`が無ければ`claude`に何も足さず、installしたpluginを使う。skillは`$CLAUDE_PLUGIN_ROOT`を`--plugin-dir`に渡さず、repositoryの指示が指定するpathがあるときだけ付ける。`--plugin-dir`が無く`claude-dagq`がinstallされて有効なことを確かめられなければ、`up`・`plan`はsessionを開く前に止めてinstallのコマンドを案内する（確かめ方は実装のtaskで決める）。dagqのrepositoryはAGENTS.mdのとおり`--plugin-dir <repository>/plugins/claude-dagq`を付け、`--plugin-dir`のpluginが同じ名前のinstall済みのpluginより優先される。
 - Anthropicのdirectoryと公式のmarketplace（`claude-plugins-official`）には出さない。
+- 外部のprojectのリリースの更新は、バイナリを入れ替えた後にinstallしたpluginも同じリリースへ上げる（[ADR-t618-2](../adr/2026-09-27-t618-2-plugin-follows-the-release-update.md)、[Release update](supervisor-lifecycle/release-update.md)。未実装）。
 
 ### 読み込みと検証
 

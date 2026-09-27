@@ -166,6 +166,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### Auto-update
 
 - [Auto-update](supervisor-lifecycle/auto-update.md)
+- [Release update](supervisor-lifecycle/release-update.md)（外部のprojectのリリースのバイナリを、crates.ioの新しいリリースの検知とinboxのaskで入れ替え、pluginも揃える。未実装）
 
 ### Source repository
 
