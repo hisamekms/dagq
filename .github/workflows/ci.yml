@@ -20,6 +20,10 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history with its tags: check-migration-numbers.sh compares
+          # the migrations with the latest release tag (ADR-t614-2).
+          fetch-depth: 0
 
       - name: Install Rust
         # rust-toolchain.toml pins the channel, components and target; rustup
@@ -44,8 +48,11 @@ jobs:
       - name: ADR numbers
         run: sh scripts/check-adr-numbers.sh
 
-      - name: Migration numbers
+      - name: Migration numbers and released migrations
         run: sh scripts/check-migration-numbers.sh
+
+      - name: Plugin version
+        run: sh scripts/check-plugin-version.sh
 
       - name: Test file lines
         run: sh scripts/check-test-file-lines.sh

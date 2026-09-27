@@ -4,14 +4,41 @@
 # the same numbers when it lists the migrations; this names them without a
 # build, for CI and a task's verification.
 #
+# It also checks that the migrations of the latest release are unchanged
+# (ADR-t614-2): every migrations/*.sql in the latest v<X.Y.Z> tag must still be
+# in the working tree under the same name with the same bytes. The rule starts
+# with the first release after ADR-t614-2, so tags up to v0.3.0 are not a base
+# (decision 3). A clone without such a tag (a shallow clone, a checkout that
+# did not fetch tags) says so and passes this part.
+#
+# Usage: sh scripts/check-migration-numbers.sh [--release vX.Y.Z]
+#   --release TAG  compare with the latest release tag before TAG instead of
+#                  the latest one (release.yml, which runs on TAG itself).
+#
 # Meant to be run from the repository root (`sh scripts/check-migration-numbers.sh`).
 # When run from anywhere else it changes to the repository root found from the
 # script's own location, so the result does not depend on the cwd.
 #
-# Exit 0 when the numbers are fine, 1 when a file is misnamed or a number is
-# shared or missing (the offending files go to stderr), 2 when migrations/ is
-# not found.
+# Exit 0 when the numbers are fine and the released migrations are unchanged,
+# 1 when a file is misnamed, a number is shared or missing, or a released
+# migration was changed, renamed or removed (the offending files go to
+# stderr), 2 when migrations/ is not found or the arguments are wrong.
 set -eu
+
+release=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --release)
+      [ $# -ge 2 ] || { echo "check-migration-numbers: --release needs a tag" >&2; exit 2; }
+      release=$2
+      shift 2
+      ;;
+    *)
+      echo "check-migration-numbers: unknown argument $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
@@ -68,5 +95,86 @@ for n in $(printf '%s\n' "$numbers" | uniq); do
     expected=$((value + 1))
   fi
 done
+
+# Released migrations (ADR-t614-2).
+
+# The version of a release tag vX.Y.Z as one comparable number, or nothing for
+# any other tag.
+tag_key() {
+  printf '%s\n' "$1" | sed -n 's/^v\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)$/\1 \2 \3/p' |
+    awk '{ printf "%d%06d%06d\n", $1, $2, $3 }'
+}
+
+# Tags up to v0.3.0 predate ADR-t614-2 and are not a base (decision 3).
+first_key=$(tag_key v0.3.0)
+limit_key=
+if [ -n "$release" ]; then
+  limit_key=$(tag_key "$release")
+  if [ -z "$limit_key" ]; then
+    echo "check-migration-numbers: --release $release is not a vX.Y.Z tag" >&2
+    exit 2
+  fi
+fi
+
+base=
+base_key=
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  for t in $(git tag --list 'v*'); do
+    key=$(tag_key "$t")
+    [ -n "$key" ] || continue
+    [ "$key" -gt "$first_key" ] || continue
+    if [ -n "$limit_key" ] && [ "$key" -ge "$limit_key" ]; then
+      continue
+    fi
+    if [ -z "$base_key" ] || [ "$key" -gt "$base_key" ]; then
+      base=$t
+      base_key=$key
+    fi
+  done
+fi
+
+if [ -z "$base" ]; then
+  if [ -n "$release" ]; then
+    echo "check-migration-numbers: no release tag after v0.3.0 and before $release; released migrations not checked"
+  else
+    echo "check-migration-numbers: no release tag after v0.3.0 in this clone; released migrations not checked"
+  fi
+  exit "$status"
+fi
+
+changed=0
+released=$(git ls-tree --name-only "$base" migrations/ | grep '\.sql$' || true)
+count=0
+for f in $released; do
+  count=$((count + 1))
+  if [ -e "$f" ]; then
+    if ! git cat-file blob "$base:$f" | cmp -s - "$f"; then
+      echo "check-migration-numbers: $f was released in $base and has changed; add a new migration instead" >&2
+      changed=1
+    fi
+    continue
+  fi
+  blob=$(git rev-parse "$base:$f")
+  renamed=
+  for g in migrations/*.sql; do
+    [ -e "$g" ] || continue
+    if [ "$(git hash-object "$g")" = "$blob" ]; then
+      renamed=$g
+      break
+    fi
+  done
+  if [ -n "$renamed" ]; then
+    echo "check-migration-numbers: $f was released in $base and was renamed to $renamed" >&2
+  else
+    echo "check-migration-numbers: $f was released in $base and was removed" >&2
+  fi
+  changed=1
+done
+
+if [ "$changed" -eq 0 ]; then
+  echo "check-migration-numbers: $count migrations released in $base are unchanged"
+else
+  status=1
+fi
 
 exit "$status"

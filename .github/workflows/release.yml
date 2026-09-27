@@ -20,6 +20,9 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The tags, for the comparison with the previous release below.
+          fetch-depth: 0
 
       - name: Check that the tag matches the crate version
         id: version
@@ -34,6 +37,15 @@ jobs:
             exit 1
           fi
           echo "version=${crate_version}" >> "$GITHUB_OUTPUT"
+
+      # Cargo.toml, plugin.json and the marketplace ref agree with the tag
+      # (ADR-t617-1), so the plugin users install is this release's.
+      - name: Check the plugin version
+        run: sh scripts/check-plugin-version.sh --tag "$GITHUB_REF_NAME"
+
+      # The migrations of the previous release are unchanged (ADR-t614-2).
+      - name: Check the migrations
+        run: sh scripts/check-migration-numbers.sh --release "$GITHUB_REF_NAME"
 
       - name: Install the Rust toolchain
         run: |

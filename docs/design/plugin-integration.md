@@ -47,6 +47,16 @@ binary releaseとchecksumはruntime側の責務なので（[ADR-0005](../adr/000
 
 tagは`v<version>`で、`<version>`は`Cargo.toml`の`[package].version`と完全に一致する（例: version `0.2.0` には tag `v0.2.0`）。workflowはcheckoutの直後、buildより前のstepで`GITHUB_REF_NAME`から先頭の`v`を外したものと`Cargo.toml`の値を比べ、違えばそこでfailする。pluginの`.claude-plugin/plugin.json`のversionもクレートと同じ値にそろえる。
 
+version の一致は`scripts/check-plugin-version.sh`が検査し（[ADR-t617-1](../adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)の決定3・4）、一致しないものをファイルと両方の値つきで出してexit 1にする。CI（`.github/workflows/ci.yml`）は引数なしで、`release.yml`は上のstepの後、buildより前に`--tag "$GITHUB_REF_NAME"`で実行する。
+
+| 検査 | いつ |
+| --- | --- |
+| `plugins/claude-dagq/.claude-plugin/plugin.json`の`version`が`Cargo.toml`の`[package].version`と同じ | 常に（mainではどちらも`X.Y.Z-dev`） |
+| `.claude-plugin/marketplace.json`のclaude-dagqのentryの`ref`が`vX.Y.Z` | versionがリリースの`X.Y.Z`（`-dev`などの後置が無い）のとき。`-dev`のあいだは前のリリースの`ref`のまま（切り替え前は`ref`無し）でよいので見ない |
+| `Cargo.toml`と`plugin.json`のversionがtagの`X.Y.Z` | `--tag vX.Y.Z`のとき（`release.yml`） |
+
+migrationについては`release.yml`が同じくbuildの前に`scripts/check-migration-numbers.sh --release "$GITHUB_REF_NAME"`を実行し、前のリリースのtagのmigrationが変わっていないことを検査する（[Persistence](persistence.md)のリリース済みのmigration）。
+
 ### artifact
 
 Releaseには2つのファイルを添付する。
@@ -172,8 +182,8 @@ claude plugin install claude-dagq@dagq
 **決定済み・未実装（[ADR-t617-1](../adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)、[ADR-t617-2](../adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)）**: 実装が入るまでは上のとおりmainのHEADのpluginを配る。実装後の姿は次のとおり。
 
 - marketplaceのentryの`source`は`{"source": "git-subdir", "url": "hisamekms/dagq", "path": "plugins/claude-dagq", "ref": "v<X.Y.Z>"}`で、`ref`は最新のリリースのtag。entryに`version`は書かない（versionはtagの`plugins/claude-dagq/.claude-plugin/plugin.json`の`X.Y.Z`になり、cacheは`~/.claude/plugins/cache/dagq/claude-dagq/<X.Y.Z>/`）。利用者の導線（`marketplace add hisamekms/dagq`・`install claude-dagq@dagq`・`plugin update claude-dagq@dagq`）は変わらない。
-- `release.yml`はtagの`Cargo.toml`の`[package].version`と`plugin.json`の`version`がtagの`X.Y.Z`と一致することを検査し、違えばbuildの前に止まる。
-- `-dev`を外してversionを`X.Y.Z`にするリリースの変更で、entryの`ref`をこれから打つ`vX.Y.Z`に書き換え、着地したらすぐにtagをpushする（release skillの手順）。`release.yml`はtagの`marketplace.json`のentryの`ref`がそのtagであることも検査する。切り替えは次のリリース（`v0.4.0`）から。
+- `release.yml`はtagの`Cargo.toml`の`[package].version`と`plugin.json`の`version`がtagの`X.Y.Z`と一致することを検査し、違えばbuildの前に止まる（実装済み: `scripts/check-plugin-version.sh --tag`。上の「tagとversionの一致規則」）。
+- `-dev`を外してversionを`X.Y.Z`にするリリースの変更で、entryの`ref`をこれから打つ`vX.Y.Z`に書き換え、着地したらすぐにtagをpushする（release skillの手順）。`release.yml`はtagの`marketplace.json`のentryの`ref`がそのtagであることも検査する（実装済み。リリースのversionでは`ref`が無いと落ちるので、`v0.4.0`のリリースの変更でentryを書き換えないとreleaseが止まる）。切り替えは次のリリース（`v0.4.0`）から。
 - 利用者の更新はバイナリの`cargo install --locked dagq`とpluginの`claude plugin update claude-dagq@dagq`の組。launcherのmajor.minorの警告は残す（launcherのエラーと警告の案内はこの組に揃え済み。上の「launcher」）。
 - `up`・`plan`は`--plugin-dir`が無ければ`claude`に何も足さず、installしたpluginを使う。skillは`$CLAUDE_PLUGIN_ROOT`を`--plugin-dir`に渡さず、repositoryの指示が指定するpathがあるときだけ付ける。`--plugin-dir`が無く`claude-dagq`がinstallされて有効なことを確かめられなければ、`up`・`plan`はsessionを開く前に止めてinstallのコマンドを案内する（確かめ方は実装のtaskで決める）。dagqのrepositoryはAGENTS.mdのとおり`--plugin-dir <repository>/plugins/claude-dagq`を付け、`--plugin-dir`のpluginが同じ名前のinstall済みのpluginより優先される。
 - Anthropicのdirectoryと公式のmarketplace（`claude-plugins-official`）には出さない。
