@@ -38,8 +38,10 @@ jobs:
           fi
           echo "version=${crate_version}" >> "$GITHUB_OUTPUT"
 
-      # Cargo.toml, plugin.json and the marketplace ref agree with the tag
-      # (ADR-t617-1), so the plugin users install is this release's.
+      # Cargo.toml and plugin.json agree with the tag, and the tag's
+      # marketplace entry is the git-subdir source of plugins/claude-dagq with
+      # ref this tag and no version (ADR-t617-1), so the plugin users install
+      # is this release's.
       - name: Check the plugin version
         run: sh scripts/check-plugin-version.sh --tag "$GITHUB_REF_NAME"
 

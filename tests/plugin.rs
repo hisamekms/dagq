@@ -1067,13 +1067,151 @@ fn the_marketplace_offers_this_repository_s_plugin_from_its_own_path() {
     assert_eq!(plugins.len(), 1);
     let entry = &plugins[0];
     assert_eq!(entry["name"], plugin_manifest()["name"]);
-    let source = entry["source"].as_str().expect("a path source");
-    assert_eq!(source, "./plugins/claude-dagq");
-    assert_eq!(
-        repository_root().join(source.trim_start_matches("./")),
-        plugin_root()
+    // Two forms (ADR-t617-1): the repository-relative path before the first
+    // pinned release, or this repository's plugin directory at a release tag.
+    let directory = match &entry["source"] {
+        Value::String(source) => {
+            assert_eq!(source, "./plugins/claude-dagq");
+            source.trim_start_matches("./").to_owned()
+        }
+        Value::Object(source) => {
+            assert_eq!(source["source"], "git-subdir", "{entry}");
+            assert_eq!(source["url"], "hisamekms/dagq", "{entry}");
+            let reference = source["ref"].as_str().expect("a ref");
+            let version = reference.strip_prefix('v').expect("a v<X.Y.Z> ref");
+            assert_eq!(version.split('.').count(), 3, "{entry}");
+            assert!(
+                version
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
+                "{entry}"
+            );
+            assert!(entry.get("version").is_none(), "{entry}");
+            source["path"].as_str().expect("a path").to_owned()
+        }
+        other => panic!("unexpected source {other}"),
+    };
+    assert_eq!(repository_root().join(&directory), plugin_root());
+    assert!(
+        repository_root()
+            .join(&directory)
+            .join(".claude-plugin/plugin.json")
+            .is_file()
     );
-    assert!(plugin_root().join(".claude-plugin/plugin.json").is_file());
+}
+
+/// Runs a copy of `scripts/check-plugin-version.sh` in a repository of only
+/// the three files it reads, with crate and plugin version `version`.
+fn check_plugin_version(version: &str, marketplace: &Value, args: &[&str]) -> Output {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for sub in [
+        "scripts",
+        ".claude-plugin",
+        "plugins/claude-dagq/.claude-plugin",
+    ] {
+        fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    fs::copy(
+        repository_root().join("scripts/check-plugin-version.sh"),
+        root.join("scripts/check-plugin-version.sh"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[package]\nname = \"dagq\"\nversion = \"{version}\"\n"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("plugins/claude-dagq/.claude-plugin/plugin.json"),
+        serde_json::to_string_pretty(
+            &serde_json::json!({"name": "claude-dagq", "version": version}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".claude-plugin/marketplace.json"),
+        serde_json::to_string_pretty(
+            &serde_json::json!({"name": "dagq", "plugins": [marketplace]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    Command::new("sh")
+        .arg(root.join("scripts/check-plugin-version.sh"))
+        .args(args)
+        .env_remove("GITHUB_REF_TYPE")
+        .env_remove("GITHUB_REF_NAME")
+        .bounded_output()
+        .unwrap()
+}
+
+fn pinned_entry(reference: &str) -> Value {
+    serde_json::json!({
+        "name": "claude-dagq",
+        "source": {
+            "source": "git-subdir",
+            "url": "hisamekms/dagq",
+            "path": "plugins/claude-dagq",
+            "ref": reference,
+        },
+    })
+}
+
+#[test]
+fn check_plugin_version_accepts_the_relative_source_on_dev_and_the_tag_s_own_ref_on_release() {
+    let relative = serde_json::json!({"name": "claude-dagq", "source": "./plugins/claude-dagq"});
+    let passes = |version: &str, entry: &Value, args: &[&str]| {
+        let output = check_plugin_version(version, entry, args);
+        assert!(
+            output.status.success(),
+            "{version} {entry} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    passes("0.4.0-dev", &relative, &[]);
+    passes("0.5.0-dev", &pinned_entry("v0.4.0"), &[]);
+    passes("0.4.0", &pinned_entry("v0.4.0"), &[]);
+    passes("0.4.0", &pinned_entry("v0.4.0"), &["--tag", "v0.4.0"]);
+}
+
+#[test]
+fn check_plugin_version_names_what_is_wrong_with_the_marketplace_entry_of_a_tag() {
+    let fails = |entry: &Value, expected: &[&str]| {
+        let output = check_plugin_version("0.4.0", entry, &["--tag", "v0.4.0"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{entry}: {stderr}");
+        for text in expected {
+            assert!(stderr.contains(text), "{entry}: {stderr} lacks {text}");
+        }
+    };
+    fails(
+        &serde_json::json!({"name": "claude-dagq", "source": "./plugins/claude-dagq"}),
+        &["relative source", "tag v0.4.0 needs a git-subdir source"],
+    );
+    fails(
+        &pinned_entry("v0.3.0"),
+        &["source.ref \"v0.3.0\" but tag v0.4.0 needs ref v0.4.0"],
+    );
+    let mut versioned = pinned_entry("v0.4.0");
+    versioned["version"] = "0.4.0".into();
+    fails(&versioned, &["has version \"0.4.0\""]);
+    let mut elsewhere = pinned_entry("v0.4.0");
+    elsewhere["source"]["path"] = "plugins/other".into();
+    elsewhere["source"]["url"] = "someone/else".into();
+    fails(
+        &elsewhere,
+        &[
+            "source.path \"plugins/other\" but needs \"plugins/claude-dagq\"",
+            "source.url \"someone/else\" but needs \"hisamekms/dagq\"",
+        ],
+    );
+    fails(&pinned_entry("main"), &["needs a release tag v<X.Y.Z>"]);
+    // A release commit without a tag still needs the ref of its own version.
+    let output = check_plugin_version("0.4.0", &pinned_entry("v0.3.0"), &[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("release 0.4.0 needs ref v0.4.0"));
 }
 
 /// A stub that answers only `--version` and `locate`, which is all `--resolve`
