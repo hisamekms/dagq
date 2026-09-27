@@ -275,3 +275,53 @@ fn up_and_doctor_check_the_configured_push_remote() {
     );
     assert!(error.contains("not a valid remote name"), "{error}");
 }
+
+/// A run whose commit rewrites `[repository] branch` of dagq.toml: the
+/// landing resolves its branch once, so the fast-forward of the checkout
+/// (which rewrites the checkout's dagq.toml) and the push both go to the
+/// branch the landing began on, not the one the landed commit names.
+#[test]
+fn a_landing_that_renames_the_branch_still_lands_and_pushes_on_its_branch() {
+    let (dir, repo, db) = renamed("trunk");
+    fs::write(repo.join("dagq.toml"), "[repository]\nbranch = \"trunk\"\n").unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "name the landing branch"]);
+    git(&repo, &["branch", "other"]);
+    let origin = dir.path().join("origin.git");
+    git(&repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "trunk", "other"]);
+    let other = git_out(&repo, &["rev-parse", "other"]);
+    let base = git_out(&repo, &["rev-parse", "trunk"]);
+
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        "printf '[repository]\\nbranch = \"other\"\\n' > dagq.toml && git add dagq.toml && git commit -q -m rename; receipt \"$(git rev-parse HEAD)\"",
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let landed = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(landed["outcome"], "integrated", "{landed}");
+    assert_eq!(landed["push"]["outcome"], "pushed", "{landed}");
+    assert_eq!(landed["push"]["branch"], "trunk", "{landed}");
+    let head = git_out(&repo, &["rev-parse", "trunk"]);
+    assert_eq!(
+        git_out(&repo, &["rev-parse", "trunk^"]),
+        base,
+        "landed on trunk"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("dagq.toml")).unwrap(),
+        "[repository]\nbranch = \"other\"\n",
+        "the checkout of trunk moved with the landing"
+    );
+    assert_eq!(git_out(&repo, &["rev-parse", "other"]), other);
+    assert_eq!(git_out(&origin, &["rev-parse", "refs/heads/trunk"]), head);
+    assert_eq!(git_out(&origin, &["rev-parse", "refs/heads/other"]), other);
+}

@@ -23,7 +23,7 @@ use crate::domain::{
     CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
     Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus,
     Task, TaskId, TaskRun, event_kind, evidence_missing_reason, heartbeat_stale,
-    landing_branch::{DEFAULT_REMOTE, RemoteSource, missing_remote},
+    landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
     scope::{out_of_scope, scope_violation_reason},
     verify_failure,
@@ -358,17 +358,25 @@ pub fn land_integrating(
         run.id(),
         run.task_id()
     );
-    let verdict = match land(
-        queue,
-        repository,
-        ctx.verifier,
-        ctx.load_average,
-        ctx.files,
-        &task,
-        run,
-        main,
-    ) {
-        Ok(verdict) => verdict,
+    // The landing branch is resolved once: the landed commit may rewrite
+    // `[repository] branch` of the main checkout's dagq.toml, and the
+    // fast-forward and the push still go to the branch this landing began on.
+    let landed = repository.landing_branch().and_then(|onto| {
+        let verdict = land(
+            queue,
+            repository,
+            ctx.verifier,
+            ctx.load_average,
+            ctx.files,
+            &task,
+            run,
+            &onto,
+            main,
+        )?;
+        Ok((onto, verdict))
+    });
+    let (onto, verdict) = match landed {
+        Ok(landed) => landed,
         Err(error) => {
             // Nothing reached main: give the slot back and keep the run where it was.
             let message = format!("integration stopped before main moved: {error:#}");
@@ -414,7 +422,7 @@ pub fn land_integrating(
             );
             close_landing_asks(queue, &run);
             remove_landed_worktree(queue, repository, &run);
-            let push = push_main(queue, repository, ctx.remote, run.id(), &landing.commit);
+            let push = push_main(queue, &onto, ctx.remote, run.id(), &landing.commit);
             let follow_ups = register_follow_ups(queue, &task, run.id(), proposed.as_ref());
             IntegrationOutcome::Integrated {
                 task: Box::new(task),
@@ -460,17 +468,19 @@ pub fn land_integrating(
 /// Push the landing branch to the remote `[repository]` of `dagq.toml`
 /// names (`origin` by default, ADR-t615-1) and record the outcome as
 /// `push_finished`, `push_skipped` or `push_failed` on the landed run.
+/// `onto` is the landing branch resolved when the landing began, not
+/// resolved again from the dagq.toml the landing may have rewritten.
 /// `push = false` and a missing default remote skip the push; a configured
 /// remote that is missing fails it. A failure to record is only reported:
 /// the landing stands either way.
 fn push_main(
     queue: &dyn Queue,
-    repository: &dyn Repository,
+    onto: &LandingBranch,
     remote: Option<&dyn MainRemote>,
     run_id: &RunId,
     commit: &CommitSha,
 ) -> PushReport {
-    let branch = repository.landing_branch().ok().map(|branch| branch.name);
+    let branch = Some(onto.name.clone());
     let report = |outcome, remote: &str, error: Option<String>, reason: Option<&str>| PushReport {
         outcome,
         remote: remote.to_owned(),
@@ -501,7 +511,7 @@ fn push_main(
                         Some(&format!("the repository has no remote {name}")),
                     ),
                     Ok(false) => report(PushResult::Failed, name, Some(missing_remote(name)), None),
-                    Ok(true) => match main_remote.push_main(name) {
+                    Ok(true) => match main_remote.push_main(name, onto) {
                         Ok(()) => report(PushResult::Pushed, name, None, None),
                         Err(error) => failed(name, &error),
                     },
@@ -776,6 +786,7 @@ fn land(
     files: &dyn RunFiles,
     task: &Task,
     run: &TaskRun,
+    landing_branch: &LandingBranch,
     main: &CommitSha,
 ) -> Result<Verdict> {
     let defer = |code: Reason, reason: String, detail: Value| {
@@ -796,7 +807,7 @@ fn land(
     repository.repair_worktree(worktree)?;
     let branch = run.branch().context("missing branch")?;
     // The landing branch's name, for the reasons a resumed session reads.
-    let onto = repository.landing_branch()?.name;
+    let onto = &landing_branch.name;
     let run_dir = Path::new(run.run_dir().context("missing run directory")?);
     // A rebase left behind by a crashed landing or an unfinished session is undone first.
     if repository.rebase_in_progress(worktree)? {
@@ -1079,7 +1090,7 @@ fn land(
     let commit = repository.commit_tree(&tree, main.as_str(), &paragraphs)?;
     let history_ref = format!("refs/dagq/runs/{}", run.id());
     repository.update_ref(&history_ref, rebased.as_str())?;
-    repository.advance_main(main.as_str(), commit.as_str())?;
+    repository.advance_main(landing_branch, main.as_str(), commit.as_str())?;
     Ok(Verdict::Landed(
         Landing {
             commit,
@@ -1542,7 +1553,7 @@ mod tests {
         fn update_ref(&self, _: &str, _: &str) -> Result<()> {
             unimplemented!()
         }
-        fn advance_main(&self, _: &str, _: &str) -> Result<()> {
+        fn advance_main(&self, _: &LandingBranch, _: &str, _: &str) -> Result<()> {
             unimplemented!()
         }
         fn repair_worktree(&self, _: &Path) -> Result<()> {

@@ -1298,7 +1298,12 @@ impl GitRepository {
 
     /// The worktree that has the landing branch checked out, if any.
     pub fn main_checkout(&self) -> Result<Option<PathBuf>> {
-        let line = format!("branch {}", self.landing_branch()?.reference());
+        self.checkout_of(&self.landing_branch()?)
+    }
+
+    /// The worktree that has `branch` checked out, if any.
+    fn checkout_of(&self, branch: &LandingBranch) -> Result<Option<PathBuf>> {
+        let line = format!("branch {}", branch.reference());
         Ok(self
             .worktrees()?
             .into_iter()
@@ -1317,13 +1322,13 @@ impl GitRepository {
             .unwrap_or_else(|| self.root.clone()))
     }
 
-    /// Fast-forward the landing branch from `from` to `to`. Where it is
-    /// checked out the merge goes through that worktree so its index and
-    /// files move with the ref (local changes that collide make it fail);
-    /// otherwise the ref is updated with `from` as the expected old value.
-    pub fn advance_main(&self, from: &str, to: &str) -> Result<()> {
-        let branch = self.landing_branch()?;
-        match self.main_checkout()? {
+    /// Fast-forward `branch`, the landing branch resolved once when the
+    /// landing began, from `from` to `to`. Where it is checked out the
+    /// merge goes through that worktree so its index and files move with
+    /// the ref (local changes that collide make it fail); otherwise the ref
+    /// is updated with `from` as the expected old value.
+    pub fn advance_main(&self, branch: &LandingBranch, from: &str, to: &str) -> Result<()> {
+        match self.checkout_of(branch)? {
             Some(checkout) => {
                 output(
                     Command::new(&self.git)
@@ -1587,8 +1592,8 @@ impl Repository for GitRepository {
     fn update_ref(&self, name: &str, value: &str) -> Result<()> {
         GitRepository::update_ref(self, name, value)
     }
-    fn advance_main(&self, from: &str, to: &str) -> Result<()> {
-        GitRepository::advance_main(self, from, to)
+    fn advance_main(&self, branch: &LandingBranch, from: &str, to: &str) -> Result<()> {
+        GitRepository::advance_main(self, branch, from, to)
     }
     fn prune_worktrees(&self) -> Result<()> {
         GitRepository::prune_worktrees(self)
@@ -1654,8 +1659,7 @@ impl MainRemote for GitRepository {
         Ok(remotes.lines().any(|line| line.trim() == remote))
     }
 
-    fn push_main(&self, remote: &str) -> Result<()> {
-        let branch = self.landing_branch()?;
+    fn push_main(&self, remote: &str, branch: &LandingBranch) -> Result<()> {
         let reference = branch.reference();
         let (status, stdout, stderr) = capture(
             Command::new(&self.git)

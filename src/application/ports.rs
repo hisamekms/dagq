@@ -573,9 +573,14 @@ pub trait MainRemote {
     }
     /// Whether the repository has a remote named `remote`.
     fn has_remote(&self, remote: &str) -> Result<bool>;
-    /// Push the landing branch to the same branch of `remote`. An error is
-    /// the failed push, with Git's message.
-    fn push_main(&self, remote: &str) -> Result<()>;
+    /// Push `branch`, the landing branch resolved when the landing began,
+    /// to the same branch of `remote`. An error is the failed push, with
+    /// Git's message.
+    fn push_main(
+        &self,
+        remote: &str,
+        branch: &crate::domain::landing_branch::LandingBranch,
+    ) -> Result<()>;
 }
 
 /// The one `CMUX_*` variable a detached process may carry: cmux's CLI
@@ -2034,8 +2039,14 @@ pub trait Repository {
     /// One commit with `tree` on top of `parent`, `paragraphs` its message.
     fn commit_tree(&self, tree: &str, parent: &str, paragraphs: &[String]) -> Result<CommitSha>;
     fn update_ref(&self, name: &str, value: &str) -> Result<()>;
-    /// Fast-forward the landing branch from `from` to `to`.
-    fn advance_main(&self, from: &str, to: &str) -> Result<()>;
+    /// Fast-forward `branch`, the landing branch resolved when the landing
+    /// began, from `from` to `to`.
+    fn advance_main(
+        &self,
+        branch: &crate::domain::landing_branch::LandingBranch,
+        from: &str,
+        to: &str,
+    ) -> Result<()>;
     /// Point the repository's record of a moved worktree at it again.
     fn repair_worktree(&self, worktree: &Path) -> Result<()>;
     /// Forget the worktrees whose directory is gone (`git worktree

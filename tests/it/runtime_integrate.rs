@@ -27,7 +27,11 @@ impl MainRemote for TestRemote {
         Ok(!self.missing && remote == "origin")
     }
 
-    fn push_main(&self, remote: &str) -> Result<()> {
+    fn push_main(
+        &self,
+        remote: &str,
+        _: &dagq::domain::landing_branch::LandingBranch,
+    ) -> Result<()> {
         self.pushes.lock().unwrap().push(remote.to_owned());
         match &self.failure {
             Some(failure) => bail!("{failure}"),
@@ -199,7 +203,15 @@ fn git_adapter_pushes_main_to_a_bare_origin() {
     );
     assert!(adapter.has_remote("origin").unwrap());
     assert!(!adapter.has_remote("upstream").unwrap());
-    let error = format!("{:#}", adapter.push_main("origin").unwrap_err());
+    let error = format!(
+        "{:#}",
+        adapter
+            .push_main(
+                "origin",
+                &dagq::domain::landing_branch::LandingBranch::main()
+            )
+            .unwrap_err()
+    );
     assert!(error.contains("git push origin main failed"), "{error}");
 }
 

@@ -23,7 +23,7 @@ related:
 
 着地先のbranch、着地後のpushのremote、pushするかは、repositoryの`dagq.toml`の`[repository]`で指定でき、指定が無ければruntimeが決める（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)。ADR-0008決定3・4・6・7・8、ADR-0047決定26、ADR-0054決定7をamends）。
 
-**実装状況**: すべて実装済み（branchはtask 619、remoteとpushはtask 620）。`src/domain/landing_branch.rs`の`resolve`が下の順で決め、`GitRepository::landing_branch`（`src/infrastructure/adapters.rs`）がmain checkoutの`dagq.toml`の`[repository]`（`run_env.rs`の`load_repository_config`。`GitRepository::repository_config`が`branch`と`remote`をGitの名前として検査する）・pushのremoteのHEAD・ローカルのbranchを読んで呼ぶ。`main_head`・`main_history`・`main_checkout`・`advance_main`・`push_main`は使うたびに解決したbranchを読み、`GitRepository::inspect`はbranchを読まない（`rebind`・`review`・`plan`は着地先が無くても動く）。pushは`integrate`の`push_main`（`src/application/integrate.rs`）が`MainRemote::push_config`で`[repository]`を読んで下の表のとおりに決め、既定のremoteは`landing_branch::DEFAULT_REMOTE`（`origin`）。`up`のpreflightと`doctor`は`GitRepository::repository_settings`（branchの解決と`PushTarget`。明示した`remote`が無くpushするならerror）を出す。
+**実装状況**: すべて実装済み（branchはtask 619、remoteとpushはtask 620）。`src/domain/landing_branch.rs`の`resolve`が下の順で決め、`GitRepository::landing_branch`（`src/infrastructure/adapters.rs`）がmain checkoutの`dagq.toml`の`[repository]`（`run_env.rs`の`load_repository_config`。`GitRepository::repository_config`が`branch`と`remote`をGitの名前として検査する）・pushのremoteのHEAD・ローカルのbranchを読んで呼ぶ。`main_head`・`main_history`・`main_checkout`は使うたびに解決したbranchを読み、`advance_main`（`Repository`）と`push_main`（`MainRemote`）は解決せず、`integrate`の`land_integrating`が着地ごとに1度解決した`LandingBranch`を受け取る（task 667。下の「着地ごとに1度解決する」）。`GitRepository::inspect`はbranchを読まない（`rebind`・`review`・`plan`は着地先が無くても動く）。pushは`integrate`の`push_main`（`src/application/integrate.rs`）が`MainRemote::push_config`で`[repository]`を読んで下の表のとおりに決め、既定のremoteは`landing_branch::DEFAULT_REMOTE`（`origin`）。`up`のpreflightと`doctor`は`GitRepository::repository_settings`（branchの解決と`PushTarget`。明示した`remote`が無くpushするならerror）を出す。
 
 ## `[repository]`の欄
 
@@ -58,6 +58,10 @@ push = false
 どれも無ければ解決できない。main checkoutが今checkoutしているbranch（`HEAD`）は見ない。
 
 解決は使うたびにその時点のrepositoryと`dagq.toml`で行い、DBにもsupervisorの登録にも保存しない。途中で指定を変えたときは、次のclaimと次の着地から新しいbranchを使う（claim済みのrunは着地のrebaseで新しいbranchに載る）。
+
+### 着地ごとに1度解決する
+
+1回の着地（`integrate`と、supervisorが行う着地。どちらも`land_integrating`）はbranchを開始時に1度だけ解決し、依頼文に書くrebase先の名前、`advance_main`のff先（`branch refs/heads/<branch>`をcheckoutしているworktreeの判定も含む）、pushの`refs/heads/<branch>:refs/heads/<branch>`と`push_*`のeventの`branch`に同じものを使う。着地するcommitが`[repository] branch`を書き換えると、main checkoutでの`merge --ff-only`がその`dagq.toml`を書き換えるが、その着地のpushは開始時のbranchへ行き、新しい指定は次の着地から効く。rebase先とff元のcommit（main head）は、それより前に着地の枠を取る`begin`が`main_head`で読む（その間に指定が変わると、`update-ref`は古い値の検査で、`merge --ff-only`はfast-forwardにならずに失敗し、branchは動かない）。pushのremoteと`push`（下の「pushの解決」）は今までどおり着地の後に`push_config`で読む。
 
 解決の結果は`branch`（名前）と`branch_source`（`config` / `remote_head` / `main` / `master`）で表す。
 
