@@ -391,6 +391,10 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         empty.contains("(none given)") && empty.contains("(none)"),
         "{empty}"
     );
+    // It names the CLI that reads the record (ADR-0044 decision 22).
+    for expected in ["`dagq events --full --task ID`", "`dagq timeline RUN`"] {
+        assert!(empty.contains(expected), "{expected}\n{empty}");
+    }
 
     let missing = open_runtime_planner(&launch, ProposalId::new(99), &[], &reasons);
     assert!(missing.is_err());

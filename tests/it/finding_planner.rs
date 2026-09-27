@@ -150,9 +150,12 @@ fn a_marked_finding_gets_one_planner_whose_proposal_plan_review_readies() {
         format!("dagq finding dismiss {marked}"),
         format!("dagq ask --finding {marked} --kind planner_question"),
         "`dagq goal list`".to_owned(),
+        "`dagq events --full --task ID`".to_owned(),
+        "`dagq timeline RUN`".to_owned(),
     ] {
         assert!(prompt.contains(&expected), "{expected}\n{prompt}");
     }
+    assert!(!prompt.contains("events --all"), "{prompt}");
     let opened_events = finding_events(&fx.db, marked, "finding_planner_opened");
     assert_eq!(opened_events.len(), 1);
     assert_eq!(opened_events[0]["attempt"], 1);

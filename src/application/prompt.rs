@@ -415,6 +415,14 @@ pub fn planner_prompt(db: &Path) -> Result<String> {
     ))
 }
 
+/// The CLI that reads the queue's record (ADR-0044 decision 22), named by
+/// the prompts of the planners the runtime opens and of the plan review so
+/// they read evidence from the events rather than from prose.
+pub const RECORD_READING: &str = "To see what happened, read the record rather than prose (ADR-0044 decision 22): \
+`dagq events --full --task ID` gives a task's events with their run_id and whole payload, narrowed by `--run ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
+without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
+`dagq timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...).";
+
 /// The initial prompt of a planner the runtime opens for a proposal plan
 /// review sent back while its own planner was closed (ADR-0041 decision
 /// 12): the proposal, its tasks, and the reasons to fix. No person watches
@@ -455,6 +463,7 @@ pub fn runtime_planner_prompt(
          Plan review sent the proposal back. Its reasons:\n{reasons}\n\
          Its tasks:\n{tasks}\n\
          Follow the dagq-planner skill of the dagq plugin: read the proposal with `dagq proposal show {proposal}` and each task with `dagq show ID`, fix what the reasons point at, and submit it again with `dagq submit --proposal {proposal}`.\n\
+         {RECORD_READING}\n\
          A fix that changes the plan's intent (acceptance, scope, the relation to the goal) needs a person: raise it to the inbox with `dagq ask --task ID --kind planner_question --because scope` as the skill describes, stop, and continue from the answer typed into this terminal.\n\
          Never open the queue database directly; use the dagq CLI only.\n",
         db = super::path_text(db)?,
@@ -597,7 +606,8 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     }
     out.push_str(&format!(
         "\n## What to do\n\n\
-         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR numbers. Look for tasks that already cover the draft or code that already does it (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. Then do exactly one of these three:\n\
+         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR numbers. Look for tasks that already cover the draft or code that already does it (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. {RECORD_READING}\n\
+         Then do exactly one of these three:\n\
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {id}` and submit it with `dagq submit {id}`. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {id}` and record why with `dagq note --task {id} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {id} --duplicate-of <that task>` instead, so the queue records which task it duplicates.\n\
          3. Ask: when you cannot decide without a person (the plan's intent, its scope, whether it belongs to this goal or a new one), run `dagq ask --task {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option adopt --option cancel --option keep_draft`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is and stop.\n\
@@ -693,7 +703,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
         _ => out.push_str("(no event)\n"),
     }
     out.push_str(&format!(
-        "Read more with `dagq findings {id} --full`, `dagq events --all --full` (narrowed by `--run`, `--task`, `--kind`, `--since`), and `dagq timeline RUN` for a run.\n"
+        "Read more with `dagq findings {id} --full`. {RECORD_READING}\n"
     ));
     if !material.asks.is_empty() {
         out.push_str("\n### Asks about it\n\n");
@@ -735,7 +745,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
     }
     out.push_str(&format!(
         "\n## What to do\n\n\
-         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR IDs. Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related --task ID` or `--goal ID`, `dagq show ID`). Then do exactly one of these:\n\
+         Follow the dagq-planner skill of the dagq plugin. Read the repository's AGENTS.md (or CLAUDE.md) for its rules on verification, paths, evidence and ADR IDs. Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`). Then do exactly one of these:\n\
          1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `finding {id}（{kind}）から`), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
          2. A new goal: when no open goal covers it, write a draft goal (`dagq goal add --draft ...`) and its draft tasks, lint them and submit with `dagq submit --goal GOAL --finding {id}`.\n\
          Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. \
@@ -1413,8 +1423,10 @@ pub(crate) fn revise_request(
 }
 
 /// The tools the headless plan review may use beyond what needs no
-/// permission: reading only, like the triage.
-pub const PLAN_REVIEW_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
+/// permission: reading files, and the dagq CLI (ADR-0044 decision 22). It
+/// runs with the reviewer's role in its environment, like the review, so
+/// the CLI refuses every dagq command that writes.
+pub const PLAN_REVIEW_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Bash(dagq:*)"];
 
 /// Characters of a precedent's question and answer the plan review prompt
 /// and the revise request quote.
@@ -1687,7 +1699,8 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
     };
     Ok(format!(
         "You are the plan review of dagq proposal {id}: decide whether the queue may run its tasks as written, before they become ready.\n\
-         Read only. Do not change any file and do not run dagq commands that write.\n\n\
+         Read only. Do not change any file and do not run dagq commands that write: the runtime lets you run the dagq commands that read (`dagq show ID`, `dagq proposal show ID`, `dagq search`, `dagq related`, `dagq findings`, `dagq stats`, ...) and refuses the rest.\n\
+         {RECORD_READING}\n\n\
          First read the repository's own rules in {repo}: AGENTS.md and CLAUDE.md, docs/adr/README.md (the ADR index) and the ADRs and design documents the tasks name. \
          Apply what they say (the verification each kind of change needs, the declared paths, how ADR numbers are assigned, ...); the runtime has no such rules of its own.\n\n\
          The proposal was submitted {submitted} and was sent back {revises} time(s) before (at most {max}; a revise past that goes to a person as a concern).\n\n\

@@ -1069,9 +1069,32 @@ fn reviewer_may_only_read_the_queue() {
         &["goal", "show", "1"],
         &["proposal", "list", "--all"],
         &["planners"],
+        // The record the plan review reads (ADR-0044 decision 22).
+        &["events", "--full", "--all", "--task", "1"],
+        &[
+            "events",
+            "--full",
+            "--kind",
+            "task_added",
+            "--since",
+            "2000-01-01",
+        ],
+        &["search", "existing"],
+        &["related", "1"],
+        &["observe", "--history"],
     ] {
         ok_as("reviewer", &db, args);
     }
+    // `timeline` of a run the queue lacks fails for that, not for the role.
+    let output = invoke_as(
+        Some("reviewer"),
+        &db,
+        &["timeline", "00000000-0000-4000-8000-000000000000"],
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("may not change queue state"),
+        "{output:?}"
+    );
     // No planner was opened yet.
     assert_eq!(
         ok(&db, &["planners", "--all"]),

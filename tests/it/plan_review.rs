@@ -179,7 +179,9 @@ impl AgentProvider for StubReviewer {
         unreachable!("no run starts in these tests")
     }
     fn headless_command(&self, cwd: &Path, prompt: &str, tools: &[&str]) -> Result<CommandSpec> {
-        assert_eq!(tools, ["Read", "Grep", "Glob"]);
+        // Files and the dagq CLI; the reviewer role in its env makes the
+        // CLI refuse every command that writes.
+        assert_eq!(tools, ["Read", "Grep", "Glob", "Bash(dagq:*)"]);
         self.prompts.lock().unwrap().push(prompt.into());
         // The job has started: its row and its event are in the queue.
         if let Some((db, task)) = self.edit.lock().unwrap().take() {
@@ -481,6 +483,10 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
         "cancel_duplicate (only an obvious duplicate; a doubtful one, or a change that looks already made, is a concern)",
         "Files the landings conflicted in most lately",
         "\"path\":\"seed.txt\"",
+        "the runtime lets you run the dagq commands that read",
+        "`dagq events --full --task ID`",
+        "`--run ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME`",
+        "`dagq timeline RUN`",
     ] {
         assert!(
             prompts[0].contains(expected),
@@ -1312,6 +1318,8 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     for expected in [
         format!("draft task {follow_up}"),
         "## Where it came from: follow_up".to_owned(),
+        "`dagq events --full --task ID`".to_owned(),
+        "`dagq timeline RUN`".to_owned(),
         "### Source task".to_owned(),
         "source: change the type of Foo".to_owned(),
         "## Goal".to_owned(),

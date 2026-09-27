@@ -444,7 +444,11 @@ pub fn observer_prompt(
          - When the problem no longer occurs, resolve its finding with the evidence in the reason: `{dagq} finding resolve ID --reason '...'`.\n\
          - Raise what needs a person now (an alert past its threshold that waiting does not clear) to the inbox as a blocked ask on its finding: `{dagq} ask --kind blocked --because <scope|discard|recovery_failed> --finding ID --question '...' --option '...' [--task ID | --run ID]`, with your reading of it and the next moves a person can choose as options. \
            One ask per finding stays open: do not ask again when an open ask below already covers it.\n\
-         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} events --all`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
+         - Read more when needed: `{dagq} findings [ID] [--full]`, `{dagq} stats`, `{dagq} kpi`, `{dagq} marks`, `{dagq} notes`, `{dagq} show ID`, `{dagq} asks`, `{dagq} graph`, `{dagq} goal show ID`.\n\
+         - Read the record, not prose, for the evidence (ADR-0044 decision 22): `{dagq} events --full` gives each event with its run_id and whole payload, narrowed by `--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME` (UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ); \
+           without `--kind` it lists attention events only, so add `--all` for every kind; it gives the oldest 100 first, so page on with `--after <cursor>` or narrow with `--since`. \
+           `{dagq} timeline RUN` gives a run's events oldest first with each gap and its reason (idle, waiting_ask, background, after_receipt, ...). \
+           `{dagq} observe --history` gives what each earlier observation read and wrote.\n\
          \n\
          Reading the stalled-session thresholds (ADR-0043 decision 6, ADR-0044 decision 21):\n\
          - stats' `stall_thresholds` has one entry per `[stall]` setting (`idle_without_receipt_secs`, `send_confirm_secs`, `background_alert_secs`), each with \
@@ -559,6 +563,22 @@ mod tests {
             "`--kind threshold --subject <the setting's name>`",
             "add `--propose` when it recurs",
             "You never change the threshold yourself.",
+        ] {
+            assert!(prompt.contains(text), "the prompt lacks {text:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_names_the_cli_that_reads_the_record() {
+        let prompt =
+            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        assert!(!prompt.contains("events --all"), "{prompt}");
+        for text in [
+            "`dagq events --full`",
+            "`--run ID`, `--task ID`, `--goal ID`, `--kind KIND` (repeatable), `--since TIME` and `--until TIME`",
+            "add `--all` for every kind",
+            "`dagq timeline RUN`",
+            "`dagq observe --history`",
         ] {
             assert!(prompt.contains(text), "the prompt lacks {text:?}");
         }
