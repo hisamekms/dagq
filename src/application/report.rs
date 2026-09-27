@@ -4,13 +4,16 @@
 //! (`<queue dir>/reports/` unless `report --out`), each file through a
 //! temporary file in the same directory and a rename. Each write lists the
 //! reports again in `index.html` and removes what the retention no longer
-//! keeps. The supervisor writes the reports it owes once a day
+//! keeps. The page carries the near-term dependency diagram (ADR-0077
+//! decision 7), drawn by [`ReportSetup::diagram`] (the host's d2 and TALA)
+//! and put inline, or why it is not drawn; the rest is written either way. The supervisor writes the reports it owes once a day
 //! ([`write_due`]); a person writes any with `dagq report`. No LLM, no run
 //! slot, nothing sent outside the queue's directory.
 use crate::domain::LeaseToken;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -21,14 +24,29 @@ use crate::domain::{
     FindingQuery,
     kpi::{
         DAY_MS, KpiConfig, KpiQuery, Period,
-        report::{self, INDEX_FILE, Keep, Report, ReportFile},
+        report::{self, DiagramSection, INDEX_FILE, Keep, Report, ReportFile},
     },
     marks,
     stats::Cursor,
 };
 
+/// Draws a d2 source as SVG, or says why it cannot (ADR-0077 decisions 4
+/// and 5).
+pub type RenderSvg = Arc<dyn Fn(&str) -> Result<String> + Send + Sync>;
+
+/// What draws the report's dependency diagram.
+#[derive(Clone)]
+pub struct DiagramRenderer(pub RenderSvg);
+
+impl std::fmt::Debug for DiagramRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DiagramRenderer")
+    }
+}
+
 /// What a report is made with: where it goes, the host's time zone and
-/// cores, the `[kpi]` settings, the retention and the build that makes it.
+/// cores, the `[kpi]` settings, the retention, the build that makes it and
+/// what draws its dependency diagram.
 #[derive(Debug, Clone)]
 pub struct ReportSetup {
     /// The reports' root: `daily/`, `weekly/` and `index.html` go under it.
@@ -37,6 +55,7 @@ pub struct ReportSetup {
     pub config: KpiConfig,
     pub keep: Keep,
     pub build: String,
+    pub diagram: DiagramRenderer,
 }
 
 /// One report written.
@@ -53,13 +72,64 @@ pub struct Written {
 }
 
 /// The report of the `period` that holds `at` (now without), at the unix
-/// second `now`.
+/// second `now`, with the dependency diagram of the queue now.
 pub fn make(
     queue: &dyn Queue,
     setup: &ReportSetup,
     now: i64,
     period: Period,
     at: Option<Cursor>,
+) -> Result<Report> {
+    let diagram = diagram(queue, &setup.diagram);
+    make_with(queue, setup, now, period, at, diagram)
+}
+
+/// The near-term dependency diagram of the queue now, drawn by `render`:
+/// its tasks and the inline SVG, or why there is none. A queue with no
+/// near-term task is not drawn.
+pub fn diagram(queue: &dyn Queue, render: &DiagramRenderer) -> DiagramSection {
+    let graph = match queue.graph_input() {
+        Ok(input) => super::dependency_graph(input, None),
+        Err(error) => {
+            return DiagramSection::not_drawn(
+                Vec::new(),
+                false,
+                format!("could not read the dependency graph: {error:#}"),
+            );
+        }
+    };
+    let titles: BTreeMap<_, _> = match queue.list_goals() {
+        Ok(goals) => goals
+            .into_iter()
+            .map(|goal| (goal.id, goal.title))
+            .collect(),
+        Err(error) => {
+            return DiagramSection::not_drawn(
+                Vec::new(),
+                false,
+                format!("could not read the goals: {error:#}"),
+            );
+        }
+    };
+    let near_term = super::diagram::near_term(&graph, &titles);
+    let tasks: Vec<i64> = near_term.task_ids().iter().map(|id| id.as_i64()).collect();
+    if tasks.is_empty() {
+        return DiagramSection::not_drawn(tasks, false, "no near-term task to draw");
+    }
+    match (render.0)(&near_term.to_d2()) {
+        Ok(svg) => DiagramSection::drawn(tasks, &svg),
+        Err(error) => DiagramSection::not_drawn(tasks, true, format!("{error:#}")),
+    }
+}
+
+/// [`make`] with the diagram drawn already.
+fn make_with(
+    queue: &dyn Queue,
+    setup: &ReportSetup,
+    now: i64,
+    period: Period,
+    at: Option<Cursor>,
+    diagram: DiagramSection,
 ) -> Result<Report> {
     let kpi = super::kpi::kpi(
         queue,
@@ -83,6 +153,7 @@ pub fn make(
         now * 1000,
         &setup.build,
         &findings,
+        diagram,
     ))
 }
 
@@ -123,8 +194,9 @@ pub fn write(
 /// Write the reports the supervisor owes at `now` (the days and the week
 /// [`report::due`] names that no `report_written` records), oldest first,
 /// recording each as `report_written` by `supervisor`, with the report
-/// made. A report another supervisor recorded meanwhile is not recorded
-/// twice nor returned.
+/// made. The dependency diagram is drawn once, for the first report owed,
+/// and shared by the others. A report another supervisor recorded
+/// meanwhile is not recorded twice nor returned.
 pub fn write_due(
     queue: &dyn Queue,
     files: &dyn RunFiles,
@@ -135,6 +207,7 @@ pub fn write_due(
     let written = queue.reports_written()?;
     let offset_ms = setup.host.utc_offset_secs * 1000;
     let mut done = Vec::new();
+    let mut drawn: Option<DiagramSection> = None;
     for (period, label, at) in report::due(now * 1000, offset_ms, &written) {
         // A day the retention would remove at once (`keep_daily_days` under
         // the backfill) is not written.
@@ -146,7 +219,10 @@ pub fn write_due(
         if report::expired(&file, now * 1000, offset_ms, setup.keep, &HashSet::new()) {
             continue;
         }
-        let report = make(queue, setup, now, period, Some(Cursor::Time(at)))
+        let diagram = drawn
+            .get_or_insert_with(|| diagram(queue, &setup.diagram))
+            .clone();
+        let report = make_with(queue, setup, now, period, Some(Cursor::Time(at)), diagram)
             .with_context(|| format!("the report of {label}"))?;
         let output = write(files, setup, &report, period, now)
             .with_context(|| format!("write the report of {label}"))?;

@@ -166,3 +166,88 @@ fn graph_prints_the_near_term_diagram_as_d2_or_svg() {
         "{error}"
     );
 }
+
+/// `dagq report` draws the report's dependency diagram as the supervisor
+/// does (ADR-0077 decision 7): d2 and TALA from PATH, the SVG inline, and
+/// the reason in its place when they cannot draw.
+#[test]
+fn report_carries_the_near_term_diagram_or_why_not() {
+    let (dir, db) = queue();
+    let first = ok(&db, &["add", "groundwork"])["id"].as_i64().unwrap();
+    let second = ok(
+        &db,
+        &[
+            "add",
+            "on top",
+            "--depends-on",
+            &first.to_string(),
+            "--priority",
+            "high",
+        ],
+    )["id"]
+        .as_i64()
+        .unwrap();
+    let bin = dir.path().join("tools");
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    let path =
+        std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let report = |args: &[&str]| -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .env("PATH", &path)
+            .env("TZ", "UTC")
+            .env("XDG_CONFIG_HOME", &config)
+            .env_remove("DAGQ_ROLE")
+            .arg("--db")
+            .arg(&db)
+            .arg("report")
+            .args(args)
+            .bounded_output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let printed = report(&["--print", "json"]);
+    assert_eq!(
+        printed["diagram"]["tasks"],
+        serde_json::json!([first, second])
+    );
+    assert_eq!(printed["diagram"]["d2_source"], true);
+    assert!(
+        printed["diagram"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("d2 and d2plugin-tala not found on PATH")
+    );
+    let written = report(&[]);
+    let page = std::fs::read_to_string(written["html"].as_str().unwrap()).unwrap();
+    assert!(page.contains("Not drawn: cannot draw the dependency diagram"));
+
+    stub(&bin, "d2plugin-tala", "exit 0");
+    stub(
+        &bin,
+        "d2",
+        "[ \"$1\" = --layout=tala ] || exit 9\nprintf '<svg xmlns=\"http://www.w3.org/2000/svg\"><text>'; sed 's/</[/g'; printf '</text><a href=\"https://x\">x</a></svg>'",
+    );
+    let written = report(&[]);
+    let page = std::fs::read_to_string(written["html"].as_str().unwrap()).unwrap();
+    let start = page
+        .find("<div class=\"scroll diagram\"><svg><text>")
+        .unwrap();
+    assert!(page[start..].contains("on top"));
+    for external in ["http://", "https://", "xmlns", "<script", "url(", "src="] {
+        assert!(!page.contains(external), "{external}");
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(written["json"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(
+        json["diagram"],
+        serde_json::json!({"tasks": [first, second], "d2_source": true})
+    );
+}

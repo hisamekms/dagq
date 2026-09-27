@@ -1,6 +1,7 @@
 //! The KPI report (ADR-0051 decisions 20 and 21): what `dagq kpi` derives
 //! for one day or ISO week, with the build and time it was made and the
-//! top open findings, as JSON and as one self-contained HTML page; where
+//! top open findings, and the near-term dependency diagram (ADR-0077
+//! decision 7) as JSON and as one self-contained HTML page; where
 //! each report's files go under `<queue dir>/reports/`, which periods the
 //! supervisor still owes, and which files the retention removes. Pure: the
 //! caller reads the queue and writes the files.
@@ -12,8 +13,10 @@ use super::{DAY_MS, Kpi, Period, date};
 use crate::domain::{Finding, marks, stats::timestamp_millis};
 
 mod html;
+mod svg;
 
 pub use html::{index_html, render_html};
+pub use svg::{external_references, inline_svg};
 
 /// A KPI's value in its unit as the report shows it; `—` for none.
 pub fn format_value(kpi: &str, value: Option<f64>) -> String {
@@ -79,8 +82,51 @@ pub struct FindingLine {
     pub last_seen_at: String,
 }
 
+/// The near-term dependency diagram's section (ADR-0077 decision 7): the
+/// tasks drawn and whether their d2 source was made, and the inline SVG or
+/// why there is none. The JSON carries no SVG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagramSection {
+    /// The IDs of the tasks the diagram selects, ascending.
+    pub tasks: Vec<i64>,
+    /// Whether the d2 source was made.
+    pub d2_source: bool,
+    /// Why the page has no diagram; none when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The SVG, fit to put inline ([`inline_svg`]); only in the page.
+    #[serde(skip)]
+    pub svg: Option<String>,
+}
+
+impl DiagramSection {
+    /// The diagram of `tasks` drawn as `svg` (d2's output), or the reason
+    /// the SVG cannot go inline.
+    pub fn drawn(tasks: Vec<i64>, svg: &str) -> Self {
+        match inline_svg(svg) {
+            Ok(svg) => Self {
+                tasks,
+                d2_source: true,
+                reason: None,
+                svg: Some(svg),
+            },
+            Err(reason) => Self::not_drawn(tasks, true, reason),
+        }
+    }
+
+    /// No diagram, and why.
+    pub fn not_drawn(tasks: Vec<i64>, d2_source: bool, reason: impl Into<String>) -> Self {
+        Self {
+            tasks,
+            d2_source,
+            reason: Some(reason.into()),
+            svg: None,
+        }
+    }
+}
+
 /// The report: `dagq kpi --period <period> --at <the period>` with the
-/// header and the top open findings.
+/// header, the top open findings and the dependency diagram.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     pub report: ReportHeader,
@@ -90,6 +136,9 @@ pub struct Report {
     pub findings_open: usize,
     /// The first [`FINDINGS_LISTED`] of them, larger impact first.
     pub findings: Vec<FindingLine>,
+    /// The near-term dependency diagram as the queue stood when the report
+    /// was generated.
+    pub diagram: DiagramSection,
 }
 
 impl Report {
@@ -101,6 +150,7 @@ impl Report {
         generated_at_ms: i64,
         build: &str,
         findings: &[Finding],
+        diagram: DiagramSection,
     ) -> Self {
         let latest = kpi.periods.last();
         Self {
@@ -128,6 +178,7 @@ impl Report {
                     last_seen_at: marks::utc_text(finding.last_seen_at * 1000),
                 })
                 .collect(),
+            diagram,
         }
     }
 

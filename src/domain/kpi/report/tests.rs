@@ -206,7 +206,14 @@ pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
     let findings: Vec<Finding> = (1..=12)
         .map(|id| finding(id, &format!("work <slow> {id}")))
         .collect();
-    Report::new(kpi, period, now * 1000, "0.1.0-dev+abc", &findings)
+    Report::new(
+        kpi,
+        period,
+        now * 1000,
+        "0.1.0-dev+abc",
+        &findings,
+        DiagramSection::not_drawn(Vec::new(), false, "no near-term task to draw"),
+    )
 }
 
 /// The JSON is `kpi`'s with the header and the top findings; the page shows
@@ -255,6 +262,66 @@ fn a_report_carries_the_kpis_the_header_and_the_top_findings() {
     );
     let targets = html.find("<h2>Targets</h2>").unwrap();
     assert!(targets < html.find("<h2>Trend</h2>").unwrap());
+}
+
+/// The diagram d2 drew goes inline with nothing that loads from outside;
+/// without one the section says why, and the rest of the page is the same.
+/// The JSON names the tasks and whether the d2 source was made, never the
+/// SVG.
+#[test]
+fn a_report_carries_the_dependency_diagram_or_why_not() {
+    let thursday = MONDAY + 3 * DAY + 12 * HOUR;
+    let mut report = report(MONDAY + 4 * DAY + 12 * HOUR, thursday, Period::Day);
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json["diagram"],
+        json!({"tasks": [], "d2_source": false, "reason": "no near-term task to draw"})
+    );
+    let without = render_html(&report);
+    assert!(without.contains("<h2>Near-term dependencies</h2>"));
+    assert!(without.contains("Not drawn: no near-term task to draw"));
+
+    let d2 = concat!(
+        "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 9 9\">",
+        "<style><![CDATA[@font-face{src:url(\"data:font/woff;base64,AA==\")} @import url(https://x/y.css);]]></style>",
+        "<a href=\"https://example.com\"><rect fill=\"url(#g)\"/></a><image href=\"http://x/i.png\"/>",
+        "<script>alert(1)</script><text>#7 on top</text></svg>"
+    );
+    report.diagram = DiagramSection::drawn(vec![7, 9], d2);
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["diagram"], json!({"tasks": [7, 9], "d2_source": true}));
+    let html = render_html(&report);
+    assert_eq!(external_references(&html), Vec::<String>::new());
+    let start = html.find("<div class=\"scroll diagram\"><svg").unwrap();
+    let end = html[start..].find("</svg></div>").unwrap() + start;
+    assert!(html[start..end].contains("#7 on top"));
+    // Outside the SVG, the page is as it was without the diagram.
+    let outside = format!("{}{}", &html[..start], &html[end..]);
+    for external in EXTERNAL {
+        assert!(!outside.contains(external), "{external} in the page");
+    }
+    assert!(html.contains("2 task(s) as the queue stood at 2026-09-25T03:00:00.000Z"));
+    assert!(!html.contains("Not drawn"));
+
+    // What d2 could not do is shown, escaped.
+    report.diagram = DiagramSection::not_drawn(
+        vec![7],
+        true,
+        "cannot draw the dependency diagram: d2plugin-tala not found <PATH>",
+    );
+    let html = render_html(&report);
+    assert!(html.contains(
+        "Not drawn: cannot draw the dependency diagram: d2plugin-tala not found &lt;PATH&gt;"
+    ));
+    assert!(!html.contains("<svg data"));
+    assert_eq!(
+        serde_json::to_value(&report).unwrap()["diagram"]["reason"],
+        "cannot draw the dependency diagram: d2plugin-tala not found <PATH>"
+    );
+    // An SVG that cannot go inline is a reason too.
+    let refused = DiagramSection::drawn(vec![7], "not an svg");
+    assert!(refused.svg.is_none() && refused.d2_source);
+    assert!(refused.reason.unwrap().contains("no <svg>"));
 }
 
 /// The page shows the period's forecast errors per stratum, which way the

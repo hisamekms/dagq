@@ -4,8 +4,8 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle-actor-model
@@ -349,7 +349,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 ### `report`
 
-- [KPIのレポート（`report`）](supervisor-lifecycle/report.md)（supervisorが日次でKPIのレポートをHTMLとJSONで`<queue dir>/reports/`に書き、`dagq report`で手でも書く。ADR-0051の決定20・21）
+- [KPIのレポート（`report`）](supervisor-lifecycle/report.md)（supervisorが日次でKPIのレポートをHTMLとJSONで`<queue dir>/reports/`に書き、`dagq report`で手でも書く。当面の依存図をinline SVGで載せる。ADR-0051の決定20・21、ADR-0077の決定7）
 - [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
 
 ### `graph --format d2|svg`

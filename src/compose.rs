@@ -265,6 +265,9 @@ pub struct SuperviseOptions {
     /// The host-wide `host.toml` the supervisor reads (`[kpi]`, `[report]`,
     /// `[push]`); `None` is `$XDG_CONFIG_HOME/dagq/host.toml`. Tests set it.
     pub host_config: Option<PathBuf>,
+    /// The PATH the reports' dependency diagram finds d2 and TALA on
+    /// (ADR-0077 decision 4); `None` is the supervisor's. Tests set it.
+    pub diagram_path: Option<std::ffi::OsString>,
     /// The user's `config.toml` the supervisor reads `[language]` from
     /// (ADR-t616-2); `None` reads none. The CLI gives
     /// `$XDG_CONFIG_HOME/dagq/config.toml`.
@@ -335,6 +338,7 @@ impl SuperviseOptions {
             forecast_snapshots: false,
             forecast_check: crate::application::supervise::FORECAST_CHECK,
             host_config: None,
+            diagram_path: None,
             user_config: None,
             push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
@@ -537,10 +541,16 @@ pub fn supervise_with_reviewer(
         };
         let (setup_db, setup_wide) = (db.clone(), host_wide.clone());
         let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let diagram_path = options.diagram_path.clone();
         crate::application::supervise::ReportPort {
             utc_offset: clock::local_utc_offset,
             setup: Arc::new(move |now| {
-                report_setup(&setup_db, Some(&checkout), None, setup_wide.as_deref(), now)
+                let mut setup =
+                    report_setup(&setup_db, Some(&checkout), None, setup_wide.as_deref(), now)?;
+                if let Some(path) = &diagram_path {
+                    setup.diagram = d2_renderer(Some(path.clone()));
+                }
+                Ok(setup)
             }),
             push_config: Arc::new(move || {
                 crate::infrastructure::push::load_host_push(&queue_dir, host_wide.as_deref())
@@ -1844,8 +1854,9 @@ fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
 /// What the KPIs and their reports of the queue at `db` are made with at
 /// `now`: the `[kpi]` of `checkout`'s `dagq.toml` with the host's
 /// `host.toml` (the queue's, over the host-wide one) over it, the host's
-/// time zone and cores, the `[report]` retention of `host.toml`, and the
-/// reports' root (`out`, else `<queue dir>/reports/`).
+/// time zone and cores, the `[report]` retention of `host.toml`, the
+/// reports' root (`out`, else `<queue dir>/reports/`), and the host's d2
+/// and TALA on this process's PATH for the dependency diagram.
 fn report_setup(
     db: &Path,
     checkout: Option<&Path>,
@@ -1869,7 +1880,22 @@ fn report_setup(
         config: crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref()),
         keep: load_host_report(queue_dir, host_wide)?,
         build: crate::VERSION.to_owned(),
+        diagram: d2_renderer(std::env::var_os("PATH")),
     })
+}
+
+/// Draws the reports' dependency diagram with d2 and TALA on `path_var`
+/// (ADR-0077 decisions 4 and 5).
+fn d2_renderer(
+    path_var: Option<std::ffi::OsString>,
+) -> crate::application::report::DiagramRenderer {
+    crate::application::report::DiagramRenderer(Arc::new(move |source| {
+        crate::infrastructure::d2::render_svg(
+            source,
+            path_var.as_deref(),
+            crate::infrastructure::d2::RENDER_TIMEOUT,
+        )
+    }))
 }
 
 /// `[kpi]`'s `max_improvement_proposals` of `checkout`'s `dagq.toml`, or

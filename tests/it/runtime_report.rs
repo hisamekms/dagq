@@ -183,3 +183,137 @@ fn the_backfill_stops_at_the_retention_and_old_temporary_files_go() {
     assert!(!old.exists());
     assert!(fresh.exists());
 }
+
+/// A stub `name` in `bin` running `body`.
+fn stub(bin: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = bin.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The reports carry the near-term dependency diagram d2 and TALA drew
+/// (ADR-0077 decision 7), inline and with nothing that loads from outside
+/// the page; the tools are found on the supervisor's PATH, and d2 runs once
+/// for all the reports owed. Without TALA the section says why and the rest
+/// of the report is written.
+#[test]
+fn the_reports_carry_the_dependency_diagram_or_why_not() {
+    let (dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let draft = |queue: &mut SqliteQueue, title: &str, priority: &str, dependencies| {
+        queue
+            .add(NewTask {
+                title: title.into(),
+                description: "d".into(),
+                acceptance: "a".into(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                priority: priority.parse().unwrap(),
+                kind: None,
+                dependencies,
+                goal_dependencies: Vec::new(),
+                goal_id: None,
+                context: String::new(),
+            })
+            .unwrap()
+            .id()
+    };
+    let groundwork = draft(&mut queue, "groundwork", "normal", Vec::new());
+    let on_top = draft(&mut queue, "on top", "high", vec![groundwork]);
+    draft(&mut queue, "someday", "normal", Vec::new());
+    drop(queue);
+
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let calls = dir.path().join("d2-calls");
+    stub(&bin, "d2plugin-tala", "exit 0");
+    // Echoes the source back inside an SVG that would load from outside.
+    stub(
+        &bin,
+        "d2",
+        &format!(
+            "[ \"$1\" = --layout=tala ] || exit 9\necho call >> '{}'\nprintf '<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><style>@font-face{{src:url(\"data:font/woff;base64,AA==\")}}</style><image href=\"https://example.com/i.png\"/><script>x()</script><text>'\nsed 's/</[/g'\nprintf '</text></svg>'",
+            calls.display()
+        ),
+    );
+    let path =
+        std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        report_daily: true,
+        diagram_path: Some(path),
+        ..supervise_options(1, true)
+    };
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let written = report_events(&db);
+    assert_eq!(written.len(), 8, "{written:?}");
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "call\n");
+    let reports = db.canonicalize().unwrap().parent().unwrap().join("reports");
+    for event in [&written[0], &written[7]] {
+        let html = fs::read_to_string(event["html"].as_str().unwrap()).unwrap();
+        let start = html.find("<div class=\"scroll diagram\"><svg").unwrap();
+        let end = start + html[start..].find("</svg></div>").unwrap();
+        let svg = &html[start..end];
+        assert!(
+            svg.contains("on top") && svg.contains("groundwork"),
+            "{svg}"
+        );
+        assert!(!svg.contains("someday"));
+        for gone in ["<?xml", "xmlns", "https://", "<script"] {
+            assert!(!svg.contains(gone), "{gone} in {svg}");
+        }
+        // The image keeps nothing to load; the font is carried along.
+        assert!(svg.contains("<image/>"));
+        assert!(svg.contains("url(\"data:font/woff;base64,AA==\")"));
+        let outside = format!("{}{}", &html[..start], &html[end..]);
+        for external in EXTERNAL {
+            assert!(
+                !outside.contains(external),
+                "{external} outside the diagram"
+            );
+        }
+        let json: Value =
+            serde_json::from_slice(&fs::read(event["json"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(
+            json["diagram"],
+            json!({"tasks": [groundwork.as_i64(), on_top.as_i64()], "d2_source": true})
+        );
+    }
+
+    // Without TALA: the reports are written with the reason.
+    fs::remove_file(bin.join("d2plugin-tala")).unwrap();
+    fs::remove_dir_all(&reports).unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute("DELETE FROM run_events WHERE kind='report_written'", [])
+        .unwrap();
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    let written = report_events(&db);
+    assert_eq!(written.len(), 8);
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "call\n");
+    let html = fs::read_to_string(written[7]["html"].as_str().unwrap()).unwrap();
+    assert!(
+        html.contains(
+            "Not drawn: cannot draw the dependency diagram: d2plugin-tala not found on PATH"
+        ),
+        "{html}"
+    );
+    assert!(html.contains("<h2>Open findings</h2>"));
+    for external in EXTERNAL {
+        assert!(!html.contains(external), "{external} in the page");
+    }
+    let json: Value =
+        serde_json::from_slice(&fs::read(written[7]["json"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(json["diagram"]["d2_source"], true);
+    assert!(
+        json["diagram"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("d2plugin-tala not found")
+    );
+}

@@ -4,25 +4,35 @@ type: design
 title: "KPIのレポート（`report`）"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-kpi
   - design-supervisor-lifecycle-observer
+  - design-supervisor-lifecycle-dependency-diagram
   - adr-0051
+  - adr-0077
 ---
 
 # KPIのレポート（`report`）
 
-[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定20・21の実装（task 431）。supervisorが日に1回、[`kpi`](kpi.md)の結果から日とISO週のレポートをJSONと自己完結のHTMLでqueueのディレクトリに書き、人は`dagq report`で同じものを手で書く。集計は`dagq kpi`と同じ関数で、LLMもrun slotも使わず、queueのディレクトリの外に何も送らない。JSONは集計の写しで、正はrun_events（消しても`dagq kpi` / `dagq report`で作り直せる）。
+[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定20・21の実装（task 431）と、[ADR-0077](../../adr/0077-near-term-dependency-graph-with-d2-tala.md)の決定7の後半の当面の依存図の節（task 534）。supervisorが日に1回、[`kpi`](kpi.md)の結果から日とISO週のレポートをJSONと自己完結のHTMLでqueueのディレクトリに書き、人は`dagq report`で同じものを手で書く。集計は`dagq kpi`と同じ関数で、LLMもrun slotも使わず、queueのディレクトリの外に何も送らない。JSONは集計の写しで、正はrun_events（消しても`dagq kpi` / `dagq report`で作り直せる）。
 
 ## 中身
 
-- **JSON**は`dagq kpi --period <day|week> --at <その期間>`（`--last`は既定の7、期間は古い順で最後がレポートの期間）と同じ形に、`report`（`period`・`label`・`partial`・`generated_at`・`build`（書いたバイナリのbuild識別子））、`findings_open`（`open` / `proposed`のfindingの数）、`findings`（そのうち`findings`の順（影響の大きい順）で先頭10件。どれもレポートを書いた時点の値で、遡って書いた日のレポートでもその日の値ではないの`id`・`kind`・`target`・`subject`・`summary`・`impact`・`status`・`occurrences`・`last_seen_at`）を足したもの。`domain::kpi::report::Report`。
-- **HTML**（`domain::kpi::report::render_html`）は1ファイルで、CSSと小さなグラフ（inline SVG）を埋め込み、script・外部のCSS・font・画像・CDNを読まない（JavaScriptを使わない）。上から: 見出し（期間、区間、終わったrunの数、生成時刻、build、`partial`の印）、目標（`breach` → `missed` → `not_judged` → `ok`の順に、KPI・層・stat・目標・最新の値・状態・連続・始まり・設定の出どころ）、推移（`all`の層に値のあるKPIごとに、並べた期間の棒グラフ、最新・前・差・判定。印のある期間の上に三角、`partial`の期間は薄い棒）、変更の印の一覧、見込みの誤差（ADR-0070の決定5。レポートの期間に終わった対象の答え合わせ（[kpi](kpi.md#完了見込みの答え合わせ)）の標本数・印のある標本数・除いた行の数と、層（`all` → `target=` → `kind=` → `band=` → `marks=` → `method=`）ごとの`n`・p50の誤差の中央値（符号つき）・絶対値の中央値・残り時間に対する比の中央値・p90の的中率・遅れと早いの割合・偏り（`late_rate`と`early_rate`の大きい方、同じなら`even`）・`forecast.*`の目標の最も悪い状態（`breach` → `missed` → `not_judged` → `ok`）。標本が0なら表を出さない）、レポートの期間のKPIの表（`all`の層の`n`・`value`・`median`・`p90`・前・差・7日の基準・判定と、`<details>`に他の層）、open なfindingの上位、記録の無いKPI（`unavailable`）。値は秒のKPIを`1h 02m`の形、割合を`%`（差は`pt`）で出す。文字列はHTMLのescapeをする。
+- **JSON**は`dagq kpi --period <day|week> --at <その期間>`（`--last`は既定の7、期間は古い順で最後がレポートの期間）と同じ形に、`report`（`period`・`label`・`partial`・`generated_at`・`build`（書いたバイナリのbuild識別子））、`findings_open`（`open` / `proposed`のfindingの数）、`findings`（そのうち`findings`の順（影響の大きい順）で先頭10件。どれもレポートを書いた時点の値で、遡って書いた日のレポートでもその日の値ではないの`id`・`kind`・`target`・`subject`・`summary`・`impact`・`status`・`occurrences`・`last_seen_at`）と、`diagram`（[当面の依存図](#当面の依存図)の`tasks`（描いたtaskのID、昇順）・`d2_source`（d2のソースを作ったか）・`reason`（HTMLに図が無いときだけ、その理由）。SVGはJSONに入れない）を足したもの。`domain::kpi::report::Report`。
+- **HTML**（`domain::kpi::report::render_html`）は1ファイルで、CSSと小さなグラフ（inline SVG）を埋め込み、script・外部のCSS・font・画像・CDNを読まない（JavaScriptを使わない）。上から: 見出し（期間、区間、終わったrunの数、生成時刻、build、`partial`の印）、目標（`breach` → `missed` → `not_judged` → `ok`の順に、KPI・層・stat・目標・最新の値・状態・連続・始まり・設定の出どころ）、推移（`all`の層に値のあるKPIごとに、並べた期間の棒グラフ、最新・前・差・判定。印のある期間の上に三角、`partial`の期間は薄い棒）、変更の印の一覧、見込みの誤差（ADR-0070の決定5。レポートの期間に終わった対象の答え合わせ（[kpi](kpi.md#完了見込みの答え合わせ)）の標本数・印のある標本数・除いた行の数と、層（`all` → `target=` → `kind=` → `band=` → `marks=` → `method=`）ごとの`n`・p50の誤差の中央値（符号つき）・絶対値の中央値・残り時間に対する比の中央値・p90の的中率・遅れと早いの割合・偏り（`late_rate`と`early_rate`の大きい方、同じなら`even`）・`forecast.*`の目標の最も悪い状態（`breach` → `missed` → `not_judged` → `ok`）。標本が0なら表を出さない）、レポートの期間のKPIの表（`all`の層の`n`・`value`・`median`・`p90`・前・差・7日の基準・判定と、`<details>`に他の層）、open なfindingの上位、当面の依存図（「Near-term dependencies」。図か、描けなかった理由）、記録の無いKPI（`unavailable`）。値は秒のKPIを`1h 02m`の形、割合を`%`（差は`pt`）で出す。文字列はHTMLのescapeをする。
+- HTMLに外部の資源を読むものが無いことはtestで検査する（依存図のSVGを含めて。`domain::kpi::report::external_references`と、SVGの外の部分に`url(`・`@font-face`・`http://`などの文字列が無いこと）。
 - `index.html`（`index_html`）は日・週のレポートへの相対リンクを新しい順に並べ、書くたびに書き直す。
+
+## 当面の依存図
+
+- レポートを作る関数（`application::report::make`。supervisorの日次と`dagq report`が同じものを使う）が、`dagq graph --format svg`と同じ関数で当面の依存図を描く: queueの今の`graph`から`application::diagram::near_term`でtaskを選んで配置し、`Diagram::to_d2`のソースを`ReportSetup::diagram`（`compose`が`infrastructure::d2::render_svg`をPATHと`RENDER_TIMEOUT`（60秒）で包んだもの）に渡す（[当面の依存図](dependency-diagram.md)）。PATHは`dagq report`ではそのプロセスの、supervisorでは`up`で固定されたsupervisorのもの（testは`SuperviseOptions::diagram_path`で差し替える）。
+- 図はレポートを書いた時点のqueueの姿で、遡って書いた日・週のレポートでもその期間の姿ではない。supervisorの`write_due`は1回の周回で書くレポート（最大で7日と1週）に同じ図を使い、d2は周回ごとに1回だけ実行する。
+- SVGは`domain::kpi::report::inline_svg`でHTMLにinlineで埋め込める形にする。読むのはmarkup（tagと`<style>`の中身）だけで、textは読まない（taskのtitleに`url(`や`@import`が含まれていても、labelの文字とその後のmarkupはそのまま）: 最初の`<svg`から最後の`</svg>`までを取り（XMLの宣言を落とす）、次の要素を終わりのtagまで（終わりのtagが無ければ始まりのtagだけ）消す: 外から読み込む・実行する・他へ導く要素（`script`・`link`・`img`・`iframe`・`frame`・`object`・`embed`・`audio`・`video`・`source`・`track`・`portal`・`base`）、属性を時間で変えるSMILの要素（`set`・`animate`・`animateMotion`・`animateTransform`）、すべての`meta`（refreshで他へ導きうる。図には要らない）。tagの属性はHTMLと同じく読み（`=`の前後の空白、引用符の無い値、`/`での区切り、前の値の直後に続く名前も）、`xmlns`と`xmlns:*`を消し（HTMLはsvgとxlinkの名前空間を知っている）、`href`・`xlink:href`・`src`・`srcset`・`action`・`formaction`・`poster`・`background`・`data`で値が`#id`でも`data:`でもないものと、値に`image-set(`を含むものを消し、残る値の中の外を指す`url(...)`（`)`の欠けたものを含む）を値ごとに`none`に置き換える。`<style>`の中身からは`@import`の規則を消し、外を指す`url(...)`を`none`に置き換える。残るのはSVGの中を指す`#id`と、中身を運ぶ`data:`（d2が埋め込むfontなど）だけ。そのあと`external_references`で外を指すもの（上の要素（`meta`は`http-equiv`を持つものだけ）、上の属性、外を指すか`)`の欠けた`url(`、`<style>`に残る`@import`か`image-set(`）が残っていれば、図を載せずに理由にする。
+- 描けないとき（選んだtaskが無い、`d2`か`d2plugin-tala`がPATHに無い、d2の失敗・時間切れ・SVGを書かない、SVGが外を指す、queueを読めない）は、図の節を「Not drawn: <理由>」に置き換え、KPIなど他の節はそのまま書く（レポート全体は失敗にしない）。理由はd2の側では`render_svg`のもの（見つからないtool、終了コードとstderrの末尾など）。
 
 ## 場所と保持
 

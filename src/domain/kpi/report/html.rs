@@ -1,6 +1,8 @@
 //! The report as one self-contained HTML page (ADR-0051 decision 20): the
 //! styles and the charts (inline SVG) are in the page, and nothing is
 //! loaded from anywhere else — no script, stylesheet, font, image or CDN.
+//! The dependency diagram is d2's SVG put inline once nothing in it refers
+//! outside the page (ADR-0077 decision 7).
 //! Readable without JavaScript, which it does not use.
 use std::fmt::Write;
 
@@ -60,6 +62,8 @@ details{margin-top:12px}
 summary{cursor:pointer;color:var(--accent)}
 ul{padding-left:20px}
 a{color:var(--accent)}
+.diagram{background:#ffffff;border:1px solid var(--line);padding:8px}
+.diagram>svg{display:block;width:100%;min-width:720px;height:auto}
 "#;
 
 /// The page of `report`.
@@ -93,6 +97,7 @@ pub fn render_html(report: &Report) -> String {
         kpis(&mut page, latest);
     }
     findings(&mut page, report);
+    diagram(&mut page, report);
     if let Some(latest) = latest.filter(|p| !p.window.unavailable.is_empty()) {
         page.push_str("<h2>Not recorded</h2><ul>");
         for (kpi, reason) in &latest.window.unavailable {
@@ -506,6 +511,29 @@ fn findings(page: &mut String, report: &Report) {
         );
     }
     page.push_str("</table></div>");
+}
+
+/// The near-term dependency diagram, or why it is not drawn.
+fn diagram(page: &mut String, report: &Report) {
+    let section = &report.diagram;
+    let _ = write!(
+        page,
+        "<h2>Near-term dependencies</h2><p class=\"meta\">{} task(s) as the queue stood at {}: in progress, high priority or above, the critical chain, and what they still wait for; drawn with d2 and TALA</p>",
+        section.tasks.len(),
+        esc(&report.report.generated_at),
+    );
+    match (&section.svg, &section.reason) {
+        (Some(svg), _) => {
+            let _ = write!(page, "<div class=\"scroll diagram\">{svg}</div>");
+        }
+        (None, reason) => {
+            let _ = write!(
+                page,
+                "<p class=\"muted\">Not drawn: {}</p>",
+                esc(reason.as_deref().unwrap_or("no reason recorded"))
+            );
+        }
+    }
 }
 
 fn verdict(change: Option<&Change>) -> String {
