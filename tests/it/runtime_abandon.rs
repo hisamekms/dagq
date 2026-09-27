@@ -40,8 +40,16 @@ fn a_run_given_up_in_its_review_asks_its_session_to_exit() {
         json!(run.workspace_id())
     );
     assert!(backend.exits_sent.load(Ordering::SeqCst) >= 1);
+    // The session was open through the review and ended at the `/exit`
+    // (the idle stub exits at nothing else). The `/exit` is typed before
+    // `runtime_error` is recorded, and the stub's wrapper records
+    // `session_exited` as soon as it sees it, so the two may come in either
+    // order.
     let kinds = event_kinds(&detail);
-    assert!(position(&kinds, "runtime_error") < position(&kinds, "session_exited"));
+    assert!(
+        position(&kinds, "review_finished") < position(&kinds, "session_exited"),
+        "{kinds:?}"
+    );
     let status = runtime::status(&db).unwrap();
     let attention = run_attention_of(&status, run.id()).unwrap();
     assert_eq!(attention["next"], "review and integrate", "{status}");

@@ -1619,19 +1619,19 @@ fn a_lost_request_is_sent_again_after_no_sign_of_work() {
 #[test]
 fn a_request_lost_twice_is_asked_to_the_inbox() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
     count_resumes_of_parked(&db);
-    backend.resume_timeout = Duration::from_secs(4);
     backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    // It never gets the request, and exits at the /exit of the resume
-    // timeout, once the ask is open. The /exit also ends its wait for the
-    // ask: under load the ask may be opened and closed between two looks,
-    // and a session still waiting then would never exit.
+    // It never gets the request, and exits by itself once the ask is open
+    // (or at an /exit, so that it never outlives the test). The fixture's
+    // resume timeout does not end the resume first: a timeout short enough
+    // to end each resume raced the two sends and the recovery job, which
+    // under load took longer, and left the resume without its ask.
     backend.resume_script_for(
         2,
-        "until [ -f \"$EXIT\" ] || \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done; await_exit",
+        "until [ -f \"$EXIT\" ] || \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done",
     );
     let options = SuperviseOptions {
         stall: Some(dagq::domain::stall::StallConfig {
