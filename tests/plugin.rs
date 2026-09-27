@@ -968,21 +968,21 @@ fn launcher_reports_missing_binary_and_repository_as_json_errors() {
     assert!(!missing.status.success());
     let error: Value = serde_json::from_slice(&missing.stderr).unwrap();
     let message = error["error"].as_str().unwrap();
-    assert!(
-        message.contains("https://github.com/hisamekms/dagq/releases"),
-        "{message}"
-    );
-    assert!(
-        message.contains(&format!(
-            "dagq-v{}-aarch64-apple-darwin.tar.gz",
-            plugin_manifest()["version"].as_str().unwrap()
-        )),
-        "{message}"
-    );
-    assert!(message.contains("SHA256SUMS"), "{message}");
-    assert!(message.contains("~/.local/bin"), "{message}");
-    assert!(message.contains("cargo build --locked"), "{message}");
+    assert!(message.contains("cargo install --locked dagq"), "{message}");
+    assert!(message.contains("~/.cargo/bin"), "{message}");
     assert!(message.contains("DAGQ_BIN"), "{message}");
+    // Only the published install path: no Release assets and no advice that
+    // applies only when developing dagq itself.
+    for absent in [
+        "github.com/hisamekms/dagq/releases",
+        "aarch64-apple-darwin",
+        ".tar.gz",
+        "SHA256SUMS",
+        "cargo build",
+        "dagq repository",
+    ] {
+        assert!(!message.contains(absent), "{absent}: {message}");
+    }
 
     let bogus = dir.path().join("not-executable");
     fs::write(&bogus, "").unwrap();
@@ -1102,9 +1102,10 @@ fn launcher_warns_only_when_plugin_and_binary_differ_in_major_minor() {
     let message = warning["warning"].as_str().expect("warning");
     assert!(message.contains(&plugin_version), "{message}");
     assert!(message.contains(&other), "{message}");
-    assert!(message.contains("claude plugin update"), "{message}");
     assert!(
-        message.contains("https://github.com/hisamekms/dagq/releases"),
+        message.contains("claude plugin update claude-dagq@dagq"),
         "{message}"
     );
+    assert!(message.contains("cargo install --locked dagq"), "{message}");
+    assert!(!message.contains("releases"), "{message}");
 }

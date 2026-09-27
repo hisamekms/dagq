@@ -11,8 +11,6 @@
 #   dagq <command> ...    any dagq command, including init and locate
 set -eu
 
-RELEASES=https://github.com/hisamekms/dagq/releases
-
 json_string() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
@@ -47,7 +45,7 @@ resolve_binary() {
   elif command -v dagq >/dev/null 2>&1; then
     command -v dagq
   else
-    fail "dagq was not found on PATH and DAGQ_BIN is unset. Download dagq-v${plugin_version:-<version>}-aarch64-apple-darwin.tar.gz from the GitHub Release at $RELEASES, verify it with the SHA256SUMS published beside it ('shasum -a 256 -c SHA256SUMS'), and move the extracted dagq into ~/.local/bin (which must be on PATH). When developing in the dagq repository, build it instead with 'cargo build --locked' and export DAGQ_BIN=/absolute/path/to/target/debug/dagq"
+    fail "dagq was not found on PATH and DAGQ_BIN is unset. Install it with 'cargo install --locked dagq' (~/.cargo/bin must be on PATH), or set DAGQ_BIN to the absolute path of a dagq binary installed elsewhere"
   fi
 }
 
@@ -74,7 +72,7 @@ case "${1:-}" in
     # CLI. Report it and let the caller decide; the resolution itself is valid.
     if [ -n "$plugin_version" ] && [ -n "$binary_version" ] &&
       [ "$(major_minor "$plugin_version")" != "$(major_minor "$binary_version")" ]; then
-      printf '{"warning": "%s"}\n' "$(json_string "claude-dagq plugin $plugin_version and dagq binary $binary_version differ in major.minor; update the older one: the plugin with 'claude plugin update claude-dagq@dagq', the binary from $RELEASES")" >&2
+      printf '{"warning": "%s"}\n' "$(json_string "claude-dagq plugin $plugin_version and dagq binary $binary_version differ in major.minor; update the older one: the plugin with 'claude plugin update claude-dagq@dagq', the binary with 'cargo install --locked dagq'")" >&2
     fi
     exit 0
     ;;
