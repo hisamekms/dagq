@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use super::{
-    asks::{insert_ask, read_ask},
+    asks::{insert_ask, read_ask, record_ask_closed},
     sqlite::{SqliteQueue, close_goal_in, enum_col, goal_event, insert_task},
 };
 use crate::{
@@ -559,6 +559,9 @@ impl GoalReviewStore for SqliteQueue {
             )?;
             if closed {
                 close(&tx)?;
+                // Nothing else names the ask: `ask_closed` ends its wait
+                // (task 568).
+                record_ask_closed(&tx, &ask)?;
                 tx.commit()?;
                 return Ok(None);
             }

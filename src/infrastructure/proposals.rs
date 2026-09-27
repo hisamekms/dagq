@@ -310,7 +310,7 @@ fn reopened_into(
 }
 
 /// Close the task's `approve_plan` asks nobody closed, answering an open
-/// one `withdrawn` first.
+/// one `withdrawn` first and recording `ask_closed` for an answered one.
 fn close_plan_asks(conn: &Connection, task_id: TaskId, now: i64) -> Result<()> {
     let unclosed: Vec<Ask> = conn
         .prepare(
@@ -332,6 +332,10 @@ fn close_plan_asks(conn: &Connection, task_id: TaskId, now: i64) -> Result<()> {
                 &mut payload,
             )?;
             event(conn, task_id, None, event_kind::ASK_ANSWERED, payload)?;
+        } else {
+            // An answer given before is closed unapplied: `ask_closed` ends
+            // its wait (task 568).
+            super::asks::record_ask_closed(conn, &ask)?;
         }
         conn.execute(
             "UPDATE asks SET closed_at=?2 WHERE id=?1",

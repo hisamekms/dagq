@@ -422,6 +422,29 @@ fn only_goals_whose_tasks_ended_are_reviewed() {
     assert!(queue.rearm_goal_review(GoalId::new(99)).is_err());
 }
 
+/// An answered `approve_goal` ask of a goal closed meanwhile is closed
+/// unapplied and records `ask_closed` (task 568).
+#[test]
+fn an_answer_to_a_goal_closed_meanwhile_is_closed_with_ask_closed() {
+    let fx = fixture();
+    let (goal, anchor) = goal_done(&fx);
+    supervise(
+        &fx,
+        &StubReviewer::new(&[json!({"verdict": "ask", "summary": "split the goal?"})]),
+    );
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let ask = queue.asks(Default::default()).unwrap().remove(0);
+    queue.answer(ask.id, "keep_open").unwrap();
+    queue.close_goal(goal, GoalVerdict::Achieved).unwrap();
+    assert_eq!(queue.decide_goal(ask.id).unwrap().map(|d| d.goal_id), None);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    assert!(goal_events(&mut queue, goal, "goal_decided").is_empty());
+    assert_eq!(
+        crate::plan_review::events(&mut queue, anchor, "ask_closed"),
+        [json!({"ask_id": ask.id, "kind": "approve_goal"})]
+    );
+}
+
 /// The payload of the latest `ask_answered` on `task`.
 fn goal_answered(queue: &mut SqliteQueue, task: TaskId) -> Value {
     queue

@@ -12,7 +12,7 @@ use std::path::Path;
 use tracing::warn;
 
 use super::{
-    asks::{insert_ask, read_ask},
+    asks::{insert_ask, read_ask, record_ask_closed},
     proposals, sessions,
     sqlite::{
         SqliteQueue, cancel_as_duplicate, check_duplicate, enum_col, event, insert_dependency,
@@ -984,6 +984,8 @@ impl PlanReviewStore for SqliteQueue {
         };
         if !plan_answer_applies(&tx, &ask, &text)? {
             close(&tx)?;
+            // Nothing else names the ask: `ask_closed` ends its wait (task 568).
+            record_ask_closed(&tx, &ask)?;
             tx.commit()?;
             return Ok(None);
         }

@@ -872,6 +872,62 @@ fn a_withdrawn_proposal_closes_its_concern_and_its_drafts_are_free() {
     assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
 }
 
+/// An answered `approve_plan` ask closed without its answer applied
+/// records `ask_closed` (task 568): when the answer no longer applies, and
+/// when its proposal is withdrawn before the supervisor applies it. `stats`
+/// counts both as applied.
+#[test]
+fn an_answered_plan_ask_closed_unapplied_records_ask_closed() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let blocker = TaskId::new(1);
+    let stale = add(&mut queue, "stale", &[blocker], Priority::Normal);
+    let withdrawn = add(&mut queue, "withdrawn", &[blocker], Priority::Normal);
+    let proposals = [stale, withdrawn].map(|task| submit(&mut queue, &[task], None));
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "concern", "reasons": ["looks already implemented"], "summary": "maybe"
+    })]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 2);
+    queue.answer(asks[0].id, "ready").unwrap();
+    queue.answer(asks[1].id, "cancel").unwrap();
+
+    // (2) Withdrawn before the supervisor applies the answer.
+    queue.withdraw_proposal(proposals[1]).unwrap();
+    assert!(queue.read_ask(asks[1].id).unwrap().closed_at.is_some());
+    assert_eq!(
+        events(&mut queue, withdrawn, "ask_closed"),
+        [json!({"ask_id": asks[1].id, "kind": "approve_plan"})]
+    );
+    assert!(events(&mut queue, withdrawn, "plan_decided").is_empty());
+
+    // (1) The concern no longer holds the proposal: the answer does not
+    // apply, and the supervisor closes the ask.
+    Connection::open(&fx.db)
+        .unwrap()
+        .execute(
+            "UPDATE proposals SET review_hold=NULL WHERE id=?1",
+            [proposals[0].as_i64()],
+        )
+        .unwrap();
+    supervise(&fx, &backend, &reviewer);
+    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
+    assert_eq!(status(&mut queue, stale), TaskStatus::Submitted);
+    assert!(events(&mut queue, stale, "plan_decided").is_empty());
+    assert_eq!(
+        events(&mut queue, stale, "ask_closed"),
+        [json!({"ask_id": asks[0].id, "kind": "approve_plan"})]
+    );
+
+    let stats = common::cli::ok(&fx.db, &["stats", "--full"]);
+    let waits = &stats["asks"]["times"]["by_kind"]["approve_plan"];
+    assert_eq!(waits["to_answer"]["count"], 2, "{waits}");
+    assert_eq!(waits["to_apply"]["count"], 2, "{waits}");
+    assert_eq!(waits["answer_to_apply"]["count"], 2, "{waits}");
+}
+
 #[test]
 fn a_revise_past_the_limit_is_a_concern() {
     let fx = fixture();

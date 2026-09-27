@@ -853,6 +853,19 @@ pub(super) fn write_answer(
     Ok(())
 }
 
+/// Record `ask_closed` for `ask`, on its task and run, in the caller's
+/// transaction that closes it: `stats` reads it as the answer applied
+/// (task 468) when nothing else that names the ask applied it (task 568).
+pub(super) fn record_ask_closed(conn: &Connection, ask: &Ask) -> Result<()> {
+    ask_event(
+        conn,
+        ask.task_id,
+        ask.run_id.as_ref(),
+        event_kind::ASK_CLOSED,
+        json!({"ask_id": ask.id, "kind": ask.kind}),
+    )
+}
+
 /// An ask's event: on its task (and run), or, for a task-less `blocked`
 /// ask, on nothing.
 fn ask_event(
