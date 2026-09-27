@@ -16,13 +16,13 @@ use std::{
 use super::{GraphInput, TaskPage, TaskQuery, timestamp, unix_seconds};
 use crate::domain::{
     Ask, AskId, AskKind, AskOutcome, ClaimOutcome, CommitSha, DraftOrigin, DraftTarget, EventId,
-    EvidenceCheck, Finding, FindingId, FindingStatus, FindingView, Goal, GoalDetail, GoalEdit,
-    GoalId, GoalPredecessor, GoalSummary, GoalVerdict, LintInput, NewAsk, NewGoal, NewNote,
-    NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
-    PlannerId, PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason,
-    ReasonCode, RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission,
-    SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId,
-    TaskKind, TaskRun, TaskStatus,
+    Finding, FindingId, FindingStatus, FindingView, Goal, GoalDetail, GoalEdit, GoalId,
+    GoalPredecessor, GoalSummary, GoalVerdict, LintInput, NewAsk, NewGoal, NewNote, NewTask,
+    NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict, PlannerId,
+    PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason, RunEvent,
+    RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission, SupervisorMode,
+    SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRun,
+    TaskStatus,
     goal_review::{GoalReviewDecision, GoalReviewVerdict},
     related::RelatedPage,
     search::{SearchPage, SearchQuery},
@@ -876,33 +876,7 @@ pub struct Landing {
     pub verification_skipped: bool,
 }
 
-/// Outcome of supervisor-side receipt validation. `result_commit` is kept on
-/// rejection too when the commit itself was verified, so inspection can start there.
-/// A rejection for nothing but `evidence_missing` (the task's required checks
-/// the receipt does not back, ADR-0019 decision 5) parks the run as
-/// `needs_session` instead of failing it, and so does one for a diff that
-/// changes `scope_violation`, paths none of the task's `allowed_paths`
-/// match (ADR-0029).
-#[derive(Debug, Serialize)]
-pub struct Validation {
-    pub accepted: bool,
-    pub result_commit: Option<CommitSha>,
-    pub reason: Option<String>,
-    /// The code of `reason` (ADR-0034); `None` for an accepted run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<ReasonCode>,
-    pub receipt: serde_json::Value,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub evidence_missing: Vec<EvidenceCheck>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub scope_violation: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub allowed_paths: Vec<String>,
-    /// The load average from `receipt_observed` to this validation (task
-    /// 197): the supervisor's samples, filled in when it records the result.
-    #[serde(flatten)]
-    pub load: crate::domain::measure::LoadSummary,
-}
+pub use crate::domain::validation::Validation;
 
 /// A workspace an ended run opened (the worker's or a resume's), which the
 /// supervisor's sweep closes while cmux still lists it.
@@ -938,20 +912,7 @@ pub struct ResumeCandidate {
     pub resumes: crate::domain::resume::ResumeCount,
 }
 
-/// How a run whose resumes are used up ends (ADR-0047 decision 24).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Exhaustion {
-    /// The run becomes `failed` and its `resume_exhausted` alert goes to
-    /// the recovery job (ADR-0047 decision 39).
-    Recover,
-    /// The task is ready again, and its next run carries this run's
-    /// `branch` over from `head` (its review passed; only conflicts kept
-    /// it from landing).
-    Inherit {
-        branch: Option<String>,
-        head: CommitSha,
-    },
-}
+pub use crate::domain::resume::Exhaustion;
 
 /// What a recovery round of a `failed` or `interrupted` run does to it
 /// (ADR-0047 decision 40), recorded as `triage_finished`'s `action`: the

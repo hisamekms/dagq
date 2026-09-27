@@ -26,6 +26,7 @@ use crate::domain::{
     landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
     scope::{out_of_scope, scope_violation_reason},
+    validation::{self, CheckedOut, Fact, Judgement, ReceiptFacts, ReceiptFile},
     verify_failure,
 };
 use crate::migration_numbers;
@@ -48,157 +49,80 @@ pub struct Rejection {
 
 /// Cross-check the agent's receipt against Git: the receipt names the
 /// clean head of the run branch, new work on top of the base commit, within
-/// the task's paths and with the task's required evidence. `Ok(Err(_))` is
-/// a verdict on the run; `Err` a failure of the checks themselves.
+/// the task's paths and with the task's required evidence. The domain
+/// judges ([`validation::judge`]) and says which fact it needs next; this
+/// gathers it from the run files and Git. `Ok(Err(_))` is a verdict on the
+/// run; `Err` a failure of the checks themselves.
 pub fn check_receipt(
     repository: &dyn Repository,
     files: &dyn RunFiles,
     task: &Task,
     run: &TaskRun,
 ) -> Result<std::result::Result<(Receipt, CommitSha), Rejection>> {
-    let reject =
-        |code: ReasonCode, reason: String, commit: Option<CommitSha>, receipt: Option<Receipt>| {
-            Ok(Err(Rejection {
-                reason,
-                code,
-                commit,
-                receipt,
-                evidence_missing: Vec::new(),
-                scope_violation: Vec::new(),
-            }))
+    let receipt_path = run.receipt_path().context("missing receipt path")?;
+    let mut facts = ReceiptFacts::new(
+        run.id(),
+        run.base_commit(),
+        task.required_evidence(),
+        task.paths(),
+        receipt_path,
+    );
+    let worktree =
+        || -> Result<&Path> { Ok(Path::new(run.worktree_path().context("missing worktree")?)) };
+    loop {
+        let fact = match validation::judge(&facts) {
+            Judgement::Need(fact) => fact,
+            Judgement::Accept(commit) => {
+                let receipt = facts.into_receipt().context("accepted without a receipt")?;
+                return Ok(Ok((receipt, commit)));
+            }
+            Judgement::Reject(rejection) => {
+                return Ok(Err(Rejection {
+                    reason: rejection.reason,
+                    code: rejection.code,
+                    commit: rejection.commit,
+                    receipt: facts.into_receipt(),
+                    evidence_missing: rejection.evidence_missing,
+                    scope_violation: rejection.scope_violation,
+                }));
+            }
         };
-    let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
-    let text = match files.read_to_string(receipt_path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return reject(
-                ReasonCode::ReceiptMissing,
-                format!("receipt was not submitted at {}", receipt_path.display()),
-                None,
-                None,
-            );
-        }
-        Err(error) => return Err(error).context("read receipt"),
-    };
-    let receipt = match Receipt::parse(&text) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            return reject(
-                ReasonCode::of_receipt_error(&error),
-                format!("{error:#}"),
-                None,
-                None,
-            );
-        }
-    };
-    if let Err(error) = receipt.check_requiring(run.id(), task.required_evidence()) {
-        return reject(
-            ReasonCode::of_receipt_error(&error),
-            format!("{error:#}"),
-            None,
-            Some(receipt),
-        );
-    }
-    // The commit must be the head of the run branch, checked out in the worktree,
-    // and new work on top of the base commit.
-    let worktree = Path::new(run.worktree_path().context("missing worktree")?);
-    let branch = run.branch().context("missing branch")?;
-    let expected_ref = format!("refs/heads/{branch}");
-    match repository.current_branch(worktree)? {
-        Some(current) if current == expected_ref => (),
-        current => {
-            return reject(
-                ReasonCode::CommitMismatch,
-                format!(
-                    "worktree is on {} instead of {expected_ref}",
-                    current.as_deref().unwrap_or("a detached HEAD")
-                ),
-                None,
-                Some(receipt),
-            );
+        match fact {
+            Fact::Receipt => {
+                let text = match files.read_to_string(Path::new(receipt_path)) {
+                    Ok(text) => Some(text),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error).context("read receipt"),
+                };
+                facts.receipt = Some(ReceiptFile::of(text.as_deref()));
+            }
+            Fact::CheckedOut => {
+                let worktree = worktree()?;
+                let branch = run.branch().context("missing branch")?;
+                facts.checked_out = Some(CheckedOut {
+                    branch: branch.to_owned(),
+                    current: repository.current_branch(worktree)?,
+                });
+            }
+            Fact::Head => facts.head = Some(repository.head(worktree()?)?),
+            Fact::Descends => {
+                let head = facts.head.as_ref().context("no head to check")?;
+                facts.descends =
+                    Some(repository.is_ancestor(run.base_commit().as_str(), head.as_str())?);
+            }
+            Fact::Status => facts.status = Some(repository.status(worktree()?)?),
+            // The diff starts where the branch forked from the current main,
+            // not at the base commit: a resumed session that rebased carries
+            // what other tasks landed since, which is not its change.
+            Fact::Changes => {
+                let head = facts.head.as_ref().context("no head to diff")?;
+                let fork = repository
+                    .merge_base(repository.main_head()?.as_str(), head.as_str())?
+                    .context("the run branch shares no history with main")?;
+                facts.changes = Some(repository.changed_paths(fork.as_str(), head.as_str())?);
+            }
         }
     }
-    let head = repository.head(worktree)?;
-    if !receipt.names_commit(head.as_str()) {
-        return reject(
-            ReasonCode::CommitMismatch,
-            format!(
-                "receipt commit {} is not the head of {branch} ({head})",
-                receipt.commit()
-            ),
-            None,
-            Some(receipt),
-        );
-    }
-    let commit = head;
-    if commit == *run.base_commit() {
-        return reject(
-            ReasonCode::CommitMismatch,
-            format!("no commit was made on top of base {}", run.base_commit()),
-            Some(commit),
-            Some(receipt),
-        );
-    }
-    if !repository.is_ancestor(run.base_commit().as_str(), commit.as_str())? {
-        return reject(
-            ReasonCode::CommitMismatch,
-            format!(
-                "commit {commit} does not descend from base {}",
-                run.base_commit()
-            ),
-            Some(commit),
-            Some(receipt),
-        );
-    }
-    let status = repository.status(worktree)?;
-    if !status.trim().is_empty() {
-        return reject(
-            ReasonCode::WorktreeDirty,
-            format!("worktree is not clean:\n{}", status.trim_end()),
-            Some(commit),
-            Some(receipt),
-        );
-    }
-    // Checked last, like the evidence below: only a run that is otherwise
-    // sound waits for a session to take out what it changed outside the
-    // task's paths (ADR-0029). The diff starts where the branch forked from
-    // the current main, not at the base commit: a resumed session that
-    // rebased carries what other tasks landed since, which is not its change.
-    let outside = if task.paths().is_empty() {
-        Vec::new()
-    } else {
-        let fork = repository
-            .merge_base(repository.main_head()?.as_str(), commit.as_str())?
-            .context("the run branch shares no history with main")?;
-        out_of_scope(
-            task.paths(),
-            &repository.changed_paths(fork.as_str(), commit.as_str())?,
-        )
-    };
-    if !outside.is_empty() {
-        return Ok(Err(Rejection {
-            reason: scope_violation_reason(&outside),
-            code: ReasonCode::ScopeViolation,
-            commit: Some(commit),
-            receipt: Some(receipt),
-            evidence_missing: Vec::new(),
-            scope_violation: outside,
-        }));
-    }
-    // Only a run that is otherwise sound waits for a session to add the
-    // evidence (ADR-0019 decision 5).
-    let missing = receipt.missing_evidence(task.required_evidence());
-    if !missing.is_empty() {
-        return Ok(Err(Rejection {
-            reason: evidence_missing_reason(&missing),
-            code: ReasonCode::EvidenceMissing,
-            commit: Some(commit),
-            receipt: Some(receipt),
-            evidence_missing: missing,
-            scope_violation: Vec::new(),
-        }));
-    }
-    Ok(Ok((receipt, commit)))
 }
 
 /// Which run `integrate` lands.

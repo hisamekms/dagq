@@ -14,10 +14,15 @@ use super::{
 };
 
 mod history;
+mod recorded;
 
 pub use history::{
     AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
     after_validation, decide_conflict, decide_revise, run_attention_of,
+};
+pub use recorded::{
+    NewRunEvent, Recorded, end_session, finish_validation, record_exhausted_resumes,
+    record_landing_decision, record_live_park, record_recheck_park, resume_finished,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no

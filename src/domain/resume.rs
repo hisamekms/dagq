@@ -2,7 +2,7 @@
 //! whose resumes are used up is retried with its branch carried over
 //! (ADR-0047 decision 24). Both are read from the run's events alone.
 
-use super::{MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, recheck};
+use super::{CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, recheck};
 
 /// How many resumes of one run the supervisor starts while the run was
 /// parked only by a rebase conflict after its review passed: such a resume
@@ -161,6 +161,21 @@ impl ResumeCount {
     pub const fn exhausted(self) -> bool {
         self.counted >= MAX_RESUME_ATTEMPTS || self.conflict_only >= CONFLICT_ONLY_RESUME_LIMIT
     }
+}
+
+/// How a run whose resumes are used up ends (ADR-0047 decision 24).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exhaustion {
+    /// The run becomes `failed` and its `resume_exhausted` alert goes to
+    /// the recovery job (ADR-0047 decision 39).
+    Recover,
+    /// The task is ready again, and its next run carries this run's
+    /// `branch` over from `head` (its review passed; only conflicts kept
+    /// it from landing).
+    Inherit {
+        branch: Option<String>,
+        head: CommitSha,
+    },
 }
 
 /// Whether the event is the automatic retry that carried a run's branch

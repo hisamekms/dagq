@@ -202,6 +202,25 @@ failed / interrupted ──resume_after_triage──▶ needs_session ──exha
 
 storeの保存は「`stored_run`で読む → domainのコマンド → `save_run`で書く」の形で、[persistence](persistence.md#集約の読み書き)にある。
 
+遷移に付随して`run_events`を記録するコマンドは、記録つきの形`fn command(run, ...) -> Result<(TaskRun, Vec<NewRunEvent>), DomainError>`（`run::Recorded`、`src/domain/run/recorded.rs`）も持ち、記録するeventのkindとpayloadを決めて返す。storeはそれを同じトランザクションで書くだけ（[persistence](persistence.md#集約の読み書き)）。
+
+| 記録つきのコマンド | 遷移 | 記録するevent |
+| --- | --- | --- |
+| `end_session(run, exit_code)` | `finish_session` | `supervision_finished`（status、`exit_code`、非0なら`Reason::of_exit_code`。`None`は`exit_code: null`と`session_live: true`） |
+| `finish_validation(run, &Validation)` | 受理は`accept`、拒否は`reject`（`Validation::resumable()`なら`needs_session`） | `validation_finished`（`Validation`とstatus）。`needs_session`なら続けて`scope_violation`（宣言外のpathがあれば優先）か`evidence_missing`（statusは持たない） |
+| `record_landing_decision(run, to, reason, payload)` | `decide_landing` | `landing_decided`（payloadにstatusとreason） |
+| `record_live_park(run, reason, payload)` | `park_live` | `recovery_parked`（payloadにstatusとreason） |
+| `record_recheck_park(run, reason, payload)` | `park_after_recheck` | `landing_recheck_failed`（payloadに`action: resumed`とstatusとreason） |
+| `record_exhausted_resumes(run, reason, &Exhaustion, resumes, &events)` | `exhaust_resumes` | `Exhaustion::Recover`は`recovery_requested`（`alert: resume_exhausted`、次のattempt、最後の`resume_finished`をevidence）、`Exhaustion::Inherit`は`auto_repaired`（`repair: inherit_retry`）と`triage_finished`（`action: retry_inherit`） |
+
+`run::resume_finished(to, payload)`は遷移を伴わない`resume_finished`のevent（`to`が無ければstatusは`needs_session`）を作る。`Exhaustion`は`domain::resume`にある（applicationの`ports`は再公開する）。
+
+### receiptの検証（`domain::validation`）
+
+supervisorのvalidatingがreceiptを受理するか拒否するかの判定は、domainの純粋関数`validation::judge(&ReceiptFacts) -> Judgement`（`src/domain/validation.rs`）にある。`Judgement`は`Need(Fact)`（次に要る事実）、`Accept(CommitSha)`、`Reject(Rejection)`（`reason`、`code`、確かめたcommit、`evidence_missing`、`scope_violation`）。applicationの`integrate::check_receipt`は`ReceiptFacts::new`（run ID、base commit、taskの要求evidenceとpaths、receiptのpath）から始め、`judge`が求める事実だけをrun filesとGitから集めて渡し直す（ADR-0013の方針8の段階分け）。前の拒否で決まった後の事実は読まないので、Gitの呼び出しとその失敗の出方は前と同じ。
+
+判定の順序と拒否の理由: `Receipt`（ファイルが無ければ`receipt_missing`、parseの失敗と`check_requiring`の拒否は`ReasonCode::of_receipt_error`）→ `CheckedOut`（worktreeがrun branchに居なければ`commit_mismatch`）→ `Head`（receiptがheadを指さなければ`commit_mismatch`、baseと同じなら`commit_mismatch`でcommitつき）→ `Descends`（baseの子孫でなければ`commit_mismatch`）→ `Status`（汚れていれば`worktree_dirty`）→ `Changes`（taskに`paths`があるときだけ。mainから分かれた点からの差分が宣言外なら`scope_violation`）→ 要求evidenceが欠ければ`evidence_missing` → 受理。拒否の結果は`Validation`（`domain::validation`、applicationの`ports`は再公開する）にまとまり、`Validation::resumable()`（`evidence_missing`か`scope_violation`がある）が`needs_session`か`failed`かを決める。
+
 ### runの履歴（`RunHistory`）
 
 runの状態のうちstatusの外にあるもの（承認、resume・revise・reviewの回数、conflictの依頼、recoveryの進み、`/exit`の待ち、最後に`needs_session`にした理由など）は、`run_events`をdomainの`RunHistory`（`src/domain/run/history.rs`）に畳み込んで読む。`RunHistory::from_events(&events)`はapplicationかinfrastructureが読んだ1 runのevent（古い順）を借りるだけの読み取り専用の型で、I/Oはしない。クエリは`approved()`（`integration_approved`がある）、`landing_pushes()`、`resumes()`（`domain::resume::ResumeCount`。数えるresumeと、review通過後の衝突だけのresumeの内訳）、`revise_attempts()`（`revise_requested`から`revise_unsent`を引いた数）、`review_attempts()` / `triage_attempts()`、`conflict_requests()`（`requested: true`の`conflict_precheck`から`unsent: true`のものを引いた数）、`triage_state()`（`domain::triage_state`）、`exit_pending()`、`last_park()`（`ParkCause`と理由。landing recheckがresumeにしたものは`Recheck`）、`unresolved_since_park()`、`last_resume_skipped()`、`resumed_session()`、`waiting_prompt_hash()`、`failed_deliveries()`、`registered_follow_ups()`、`push_failure()`と、汎用の`has` / `count` / `last` / `last_of` / `last_before` / `has_after`。

@@ -1392,19 +1392,14 @@ impl SqliteQueue {
             "SELECT exit_code FROM run_processes WHERE run_id=?1 AND role='wrapper' AND exited_at IS NOT NULL",
             [id], |r| r.get(0)
         ).context("wrapper has not reported session exit")?;
-        let run = apply(
+        let run = apply_recorded(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             Some(token),
             || "run is not owned by this supervisor".to_owned(),
-            |run| run::finish_session(run, Some(code)),
+            |run| run::end_session(run, Some(code)),
         )?;
-        let mut payload = json!({"status": run.status(), "exit_code": code});
-        if code != 0 {
-            Reason::of_exit_code(code).apply_to(&mut payload);
-        }
-        run_event(&tx, id, event_kind::SUPERVISION_FINISHED, payload)?;
         // Completion and dependency release belong to the next validation stage.
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -1419,19 +1414,13 @@ impl SqliteQueue {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
-        let run = apply(
+        let run = apply_recorded(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             Some(token),
             || "run is not owned by this supervisor".to_owned(),
-            |run| run::finish_session(run, None),
-        )?;
-        run_event(
-            &tx,
-            id,
-            event_kind::SUPERVISION_FINISHED,
-            json!({"status": run.status(), "exit_code": null, "session_live": true}),
+            |run| run::end_session(run, None),
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -1467,7 +1456,7 @@ impl SqliteQueue {
         id: &RunId,
         status: crate::domain::RunStatus,
         reason: &str,
-        mut payload: serde_json::Value,
+        payload: serde_json::Value,
     ) -> Result<TaskRun> {
         let tx = self
             .conn
@@ -1478,17 +1467,14 @@ impl SqliteQueue {
             |r| r.get(0),
         )?;
         ensure!(!leased, "run {id} is leased");
-        let run = apply(
+        let run = apply_recorded(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             None,
             || format!("run {id} is not awaiting integration"),
-            |run| run::decide_landing(run, status, reason.to_owned()),
+            |run| run::record_landing_decision(run, status, reason, payload),
         )?;
-        payload["status"] = json!(run.status());
-        payload["reason"] = json!(reason);
-        run_event(&tx, id, event_kind::LANDING_DECIDED, payload)?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }
@@ -1503,23 +1489,20 @@ impl SqliteQueue {
         id: &RunId,
         token: &str,
         reason: &str,
-        mut payload: serde_json::Value,
+        payload: serde_json::Value,
     ) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
-        let run = apply(
+        let run = apply_recorded(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             Some(token),
             || "run is not running under this supervisor".to_owned(),
-            |run| run::park_live(run, reason.to_owned()),
+            |run| run::record_live_park(run, reason, payload),
         )?;
-        payload["status"] = json!(run.status());
-        payload["reason"] = json!(reason);
-        run_event(&tx, id, crate::domain::event_kind::RECOVERY_PARKED, payload)?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }
@@ -1537,7 +1520,7 @@ impl SqliteQueue {
         id: &RunId,
         token: Option<&str>,
         reason: &str,
-        mut payload: serde_json::Value,
+        payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let tx = self
             .conn
@@ -1552,14 +1535,20 @@ impl SqliteQueue {
         if lease.as_deref() != token || !waiting {
             return Ok(None);
         }
+        let mut events = Vec::new();
         let run = apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             None,
             || format!("run {id} is not awaiting integration"),
-            |run| run::park_after_recheck(run, reason.to_owned()),
+            |run| {
+                let (run, recorded) = run::record_recheck_park(run, reason, payload)?;
+                events = recorded;
+                Ok(run)
+            },
         )?;
+        // The lease goes first, as it always has in the event log.
         if let Some(token) = token {
             tx.execute(
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
@@ -1572,15 +1561,7 @@ impl SqliteQueue {
                 json!({"reason": crate::domain::recheck::LANDING_RECHECK_FAILED}),
             )?;
         }
-        payload["action"] = json!(crate::domain::recheck::RESUMED);
-        payload["status"] = json!(run.status());
-        payload["reason"] = json!(reason);
-        run_event(
-            &tx,
-            id,
-            crate::domain::recheck::LANDING_RECHECK_FAILED,
-            payload,
-        )?;
+        record_events(&tx, id, events)?;
         tx.commit()?;
         Ok(Some(run.relocated(&self.runs_dir)))
     }
@@ -1596,56 +1577,14 @@ impl SqliteQueue {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let refusal = || "run is not validating under this supervisor".to_owned();
-        let run = apply(
+        let run = apply_recorded(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             Some(token),
             refusal,
-            |run| match (validation.accepted, validation.result_commit.clone()) {
-                (true, Some(commit)) => run::accept(run, commit),
-                (true, None) => Err(DomainError::InvalidCommit {
-                    field: "accepted result commit",
-                }),
-                (false, commit) => run::reject(
-                    run,
-                    commit,
-                    validation.reason.clone(),
-                    !validation.evidence_missing.is_empty()
-                        || !validation.scope_violation.is_empty(),
-                ),
-            },
+            |run| run::finish_validation(run, validation),
         )?;
-        let status = run.status();
-        let mut payload = serde_json::to_value(validation)?;
-        payload["status"] = json!(status);
-        run_event(&tx, id, event_kind::VALIDATION_FINISHED, payload)?;
-        // No `status` in the payloads: `validation_finished` already
-        // reports the park, and `stats` counts it once.
-        if status == RunStatus::NeedsSession && !validation.scope_violation.is_empty() {
-            run_event(
-                &tx,
-                id,
-                event_kind::SCOPE_VIOLATION,
-                json!({
-                    "code": ReasonCode::ScopeViolation,
-                    "paths": validation.scope_violation,
-                    "allowed": validation.allowed_paths,
-                    "reason": validation.reason,
-                }),
-            )?;
-        } else if status == RunStatus::NeedsSession {
-            run_event(
-                &tx,
-                id,
-                event_kind::EVIDENCE_MISSING,
-                json!({
-                    "code": ReasonCode::EvidenceMissing,
-                    "checks": validation.evidence_missing,
-                    "reason": validation.reason,
-                }),
-            )?;
-        }
         // Task completion still waits for integration into main.
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
@@ -2044,7 +1983,7 @@ impl SqliteQueue {
         status: Option<crate::domain::RunStatus>,
         reason: Option<&str>,
         keep_lease: bool,
-        mut payload: serde_json::Value,
+        payload: serde_json::Value,
     ) -> Result<TaskRun> {
         let tx = self
             .conn
@@ -2060,8 +1999,8 @@ impl SqliteQueue {
                 |run| run::finish_resume(run, status, reason.map(str::to_owned)),
             )?;
         }
-        let status = status.unwrap_or(RunStatus::NeedsSession);
-        payload["status"] = json!(status.as_str());
+        let finished = run::resume_finished(status, payload);
+        let mut payload = finished.payload;
         // The work of the resumed session, closed when it exited (task 514).
         let resumed: i64 = tx.query_row(
             &format!(
@@ -2088,7 +2027,7 @@ impl SqliteQueue {
         )? {
             payload["tokens"] = tokens;
         }
-        run_event(&tx, id, event_kind::RESUME_FINISHED, payload)?;
+        run_event(&tx, id, finished.kind, payload)?;
         if !keep_lease {
             tx.execute(
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
@@ -2605,74 +2544,31 @@ impl SqliteQueue {
             }
         }
         tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        let mut recorded = Vec::new();
         let result = apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
             id,
             None,
             || format!("run {id} changed"),
-            |run| run::exhaust_resumes(run, reason.to_owned()),
+            |run| {
+                let (run, events) =
+                    run::record_exhausted_resumes(run, reason, exhaustion, resumes, &events)?;
+                recorded = events;
+                Ok(run)
+            },
         )?;
-        let mut payload = json!({
-            "code": ReasonCode::ResumeExhausted,
-            "by": "runtime",
-            "reason": reason,
-            "resumes": resumes.total(),
-            "counted_resumes": resumes.counted,
-            "conflict_only_resumes": resumes.conflict_only,
-            "previous_status": run.status().as_str(),
-            "status": result.status().as_str(),
-        });
-        match exhaustion {
-            Exhaustion::Recover => {
-                let resumed = events
-                    .iter()
-                    .rev()
-                    .find(|e| e.kind == event_kind::RESUME_FINISHED)
-                    .map(|e| e.id);
-                payload["alert"] = json!(crate::domain::recovery::RecoveryAlert::ResumeExhausted);
-                payload["attempt"] = json!(
-                    crate::domain::recovery::attempts(
-                        &events,
-                        crate::domain::recovery::RecoveryAlert::ResumeExhausted
-                    ) + 1
-                );
-                payload["evidence"] = json!(resumed.into_iter().collect::<Vec<_>>());
-                run_event(&tx, id, event_kind::RECOVERY_REQUESTED, payload)?;
-                tx.commit()?;
-                return Ok(Some(result.relocated(&self.runs_dir)));
-            }
-            Exhaustion::Inherit { branch, head } => {
-                super::sqlite::transition_task(
-                    &tx,
-                    run.task_id(),
-                    TaskAction::Ready,
-                    &self.generators.clock.timestamp(),
-                )?;
-                payload["verdict"] = json!(resume::RETRY_INHERIT);
-                payload["action"] = json!(resume::RETRY_INHERIT);
-                payload["inherit"] = json!({"branch": branch, "head": head});
-                run_event(
-                    &tx,
-                    id,
-                    event_kind::AUTO_REPAIRED,
-                    json!({
-                        "layer": "runtime",
-                        "repair": "inherit_retry",
-                        "conditions": {
-                            "review": "pass",
-                            "parked": ReasonCode::RebaseConflict,
-                            "counted_resumes": resumes.counted,
-                            "conflict_only_resumes": resumes.conflict_only,
-                            "branch": branch,
-                            "head": head,
-                        },
-                        "detail": "the resumes were used up on conflicts with main; the task is ready again for a run that carries this run's branch over",
-                    }),
-                )?;
-            }
+        // The task is ready again before the run's events, as it always
+        // was in the event log.
+        if matches!(exhaustion, Exhaustion::Inherit { .. }) {
+            super::sqlite::transition_task(
+                &tx,
+                run.task_id(),
+                TaskAction::Ready,
+                &self.generators.clock.timestamp(),
+            )?;
         }
-        run_event(&tx, id, event_kind::TRIAGE_FINISHED, payload)?;
+        record_events(&tx, id, recorded)?;
         tx.commit()?;
         Ok(Some(result.relocated(&self.runs_dir)))
     }
@@ -3037,6 +2933,35 @@ fn apply(
     })?;
     ensure!(save_run(conn, &run, from, token)?, refusal());
     Ok(run)
+}
+
+/// [`apply`] for a transition that returns the events it records
+/// ([`run::Recorded`]): the run is saved and the events written in the
+/// caller's transaction, in order.
+fn apply_recorded(
+    conn: &Connection,
+    refusals: Refusals<'_>,
+    id: &RunId,
+    token: Option<&str>,
+    refusal: impl Fn() -> String,
+    command: impl FnOnce(TaskRun) -> Result<run::Recorded, DomainError>,
+) -> Result<TaskRun> {
+    let mut events = Vec::new();
+    let run = apply(conn, refusals, id, token, refusal, |run| {
+        let (run, recorded) = command(run)?;
+        events = recorded;
+        Ok(run)
+    })?;
+    record_events(conn, id, events)?;
+    Ok(run)
+}
+
+/// Write the events a transition returned for run `id`.
+fn record_events(conn: &Connection, id: &RunId, events: Vec<run::NewRunEvent>) -> Result<()> {
+    for event in events {
+        run_event(conn, id, event.kind, event.payload)?;
+    }
+    Ok(())
 }
 
 /// The file in a run's directory that keeps why the domain refused a
