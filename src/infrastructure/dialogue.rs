@@ -37,7 +37,12 @@ impl DialogueStore for DialogueQueue<'_> {
     }
 
     fn open_ask(&mut self, ask: NewAsk) -> Result<Value> {
-        crate::application::ask::ask(self.queue, self.checkout, ask, self.cmux)
+        let binding = self
+            .queue
+            .repository_binding()?
+            .map(std::path::PathBuf::from);
+        let checkout = super::adapters::naming_checkout(binding.as_deref(), self.checkout);
+        crate::application::ask::ask(self.queue, &checkout, ask, self.cmux)
     }
 
     fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {

@@ -577,7 +577,7 @@ pub(super) fn ask_stuck_exit(
     }
     let outcome = ask::ask(
         &mut *sv.queue,
-        &sv.layout.repo_root,
+        &sv.layout.main_checkout,
         NewAsk {
             kind: AskKind::StuckExit,
             task_id: Some(run.task_id()),

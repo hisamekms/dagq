@@ -185,6 +185,9 @@ pub struct QueuePaths {
 pub struct RepositoryPaths {
     pub root: PathBuf,
     pub common_dir: PathBuf,
+    /// The main checkout, whose `dagq.toml` `up` reads and whose folder
+    /// Claude Code trusts, or why the repository has none.
+    pub checkout: std::result::Result<PathBuf, String>,
     pub landing: std::result::Result<crate::domain::landing_branch::RepositorySettings, String>,
     /// Whether the repository is dagq's source (ADR-t614-1), which
     /// `--auto-update` needs.
@@ -297,12 +300,12 @@ pub fn up(
     cmux.preflight()?;
     claude.preflight()?;
     // Claude Code keys trust by the main checkout even for a linked
-    // worktree, and `up` may run from any worktree of the repository.
-    let trust_root = repository
-        .common_dir
-        .parent()
-        .filter(|_| repository.common_dir.file_name() == Some(".git".as_ref()))
-        .unwrap_or(&repository.root);
+    // worktree, and `up` may run from any worktree of the repository; the
+    // supervisor reads every setting from its `dagq.toml`.
+    let trust_root = match &repository.checkout {
+        Ok(checkout) => checkout.as_path(),
+        Err(error) => bail!("{error}; the supervisor was not started"),
+    };
     let trusted = match environment.claude_config.as_deref() {
         Some(config) => (ports.trusts_repository)(config, trust_root)?,
         None => false,

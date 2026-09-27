@@ -1506,7 +1506,7 @@ impl SessionWatch {
         );
         let outcome = ask::ask(
             &mut *sv.queue,
-            &sv.layout.repo_root,
+            &sv.layout.main_checkout,
             NewAsk {
                 kind: AskKind::Stalled,
                 task_id: Some(run.task_id()),
@@ -1630,7 +1630,7 @@ impl SessionWatch {
         }
         let outcome = ask::ask(
             &mut *sv.queue,
-            &sv.layout.repo_root,
+            &sv.layout.main_checkout,
             NewAsk {
                 kind: AskKind::Stalled,
                 task_id: Some(run.task_id()),

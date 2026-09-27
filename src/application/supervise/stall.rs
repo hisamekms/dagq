@@ -1117,7 +1117,7 @@ impl StallWatch {
         let options = stalled_options(note);
         let outcome = ask::ask(
             &mut *sv.queue,
-            &sv.layout.repo_root,
+            &sv.layout.main_checkout,
             NewAsk {
                 kind: AskKind::Stalled,
                 task_id: Some(run.task_id()),

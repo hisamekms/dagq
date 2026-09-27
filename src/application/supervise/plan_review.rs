@@ -462,11 +462,15 @@ impl Supervisor<'_> {
         if let Some(outcome) = &applied.ask {
             // The verdict is applied: a notification that fails is only
             // reported.
-            let error =
-                match ask::notify(&mut *self.queue, &self.layout.repo_root, outcome, self.cmux) {
-                    Ok(notified) => notified.get("notify_error").map(ToString::to_string),
-                    Err(error) => Some(format!("{error:#}")),
-                };
+            let error = match ask::notify(
+                &mut *self.queue,
+                &self.layout.main_checkout,
+                outcome,
+                self.cmux,
+            ) {
+                Ok(notified) => notified.get("notify_error").map(ToString::to_string),
+                Err(error) => Some(format!("{error:#}")),
+            };
             if let Some(error) = error {
                 warn!(ask_id = %outcome.ask.id, "proposal {proposal}: the inbox was not notified of ask {}: {error}", outcome.ask.id);
             }

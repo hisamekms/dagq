@@ -679,7 +679,7 @@ impl Supervisor<'_> {
         // Through `ask`, like the CLI: a new ask notifies the inbox.
         let outcome = ask::ask(
             &mut *self.queue,
-            &self.layout.repo_root,
+            &self.layout.main_checkout,
             NewAsk {
                 kind: AskKind::ApproveLanding,
                 task_id: None,

@@ -642,7 +642,7 @@ impl Supervisor<'_> {
         );
         let outcome = ask::ask(
             &mut *self.queue,
-            &self.layout.repo_root,
+            &self.layout.main_checkout,
             NewAsk {
                 kind: alert.ask_kind(),
                 task_id: None,

@@ -1688,15 +1688,11 @@ fn execute(cli: Cli) -> Result<Value> {
             (false, Some(from)) if from.is_file() => Source::Binary(from),
             (false, Some(from)) => Source::Checkout(from),
             (false, None) => {
-                let common_dir = location.git_common_dir.as_deref().context(
+                location.git_common_dir.as_deref().context(
                     "not in a repository: pass --from with a checkout or a built binary",
                 )?;
-                let checkout = match common_dir.parent() {
-                    Some(parent) if common_dir.file_name() == Some(".git".as_ref()) => {
-                        parent.to_path_buf()
-                    }
-                    _ => cwd.clone(),
-                };
+                let checkout = dagq::infrastructure::adapters::main_checkout_of(&cwd)
+                    .context("the checkout to build is unknown: pass --from with a checkout or a built binary")?;
                 let dagq_source = dagq::infrastructure::adapters::is_dagq_source(&checkout);
                 Source::default_checkout(checkout, dagq_source)?
             }

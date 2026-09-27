@@ -554,6 +554,89 @@ pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
         .context("resolve Git common directory")
 }
 
+/// The main checkout of the repository at `path` (any worktree of it, or
+/// its Git common directory): the main worktree, which `git worktree list`
+/// lists first and whose `dagq.toml` dagq reads. The only place dagq
+/// decides it. A bare main worktree has no files, and so no main checkout;
+/// Git does not record the main worktree of a repository with a separate
+/// Git directory (`git init --separate-git-dir`) and lists the Git
+/// directory in its place, which leaves only `path` itself when it is that
+/// worktree. Both are errors that say why and what to do: the `dagq.toml`
+/// of the worktree dagq runs in is never read in the main checkout's place.
+pub fn main_checkout_of(path: &Path) -> Result<PathBuf> {
+    let git = executable(Path::new("git"))?;
+    let common_dir = git_common_dir(path)?;
+    let listing =
+        output(
+            Command::new(&git)
+                .arg("-C")
+                .arg(path)
+                .args(["worktree", "list", "--porcelain"]),
+        )?;
+    let block = listing.split("\n\n").next().unwrap_or_default();
+    let first = block
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .with_context(|| {
+            format!(
+                "git worktree list printed no worktree for {}",
+                path.display()
+            )
+        })?;
+    let first = first.canonicalize().unwrap_or(first);
+    // A bare repository lists its Git directory. A worktree apart from it
+    // is a checkout even when Git, run in a Git directory whose config has
+    // no `core.bare`, marks it bare.
+    if first != common_dir {
+        return Ok(first);
+    }
+    ensure!(
+        !block.lines().any(|line| line == "bare"),
+        "the repository {} is bare: its main worktree has no files, so there is no main checkout to read dagq.toml from; use a clone that is not bare, so that its main worktree is a checkout, and run dagq there",
+        common_dir.display()
+    );
+    // Git lists the Git directory for a main worktree it does not know:
+    // only that worktree itself can say where it is.
+    let (status, stdout, _) = capture(
+        Command::new(&git).arg("-C").arg(path).args([
+            "rev-parse",
+            "--is-inside-work-tree",
+            "--absolute-git-dir",
+            "--show-toplevel",
+        ]),
+        Duration::from_secs(30),
+    )?;
+    let mut lines = stdout.lines();
+    if status.success()
+        && lines.next() == Some("true")
+        && lines
+            .next()
+            .and_then(|dir| Path::new(dir).canonicalize().ok())
+            .is_some_and(|dir| dir == common_dir)
+        && let Some(root) = lines.next()
+    {
+        return Ok(PathBuf::from(root).canonicalize()?);
+    }
+    bail!(
+        "the repository whose Git directory is {} keeps it apart from its main worktree (git init --separate-git-dir), and Git does not record where that worktree is, so the main checkout to read dagq.toml from is unknown from {}; run the command in the main worktree",
+        common_dir.display(),
+        path.display()
+    )
+}
+
+/// The checkout that names, in a notification, the repository a queue is
+/// bound to (`binding`, its Git common directory): its main checkout
+/// ([`main_checkout_of`]), else the bound path itself; `checkout`, where
+/// the command runs, for a queue bound to none.
+pub fn naming_checkout(binding: Option<&Path>, checkout: &Path) -> PathBuf {
+    match binding {
+        Some(dir) => main_checkout_of(dir).unwrap_or_else(|_| dir.to_path_buf()),
+        None => checkout.to_path_buf(),
+    }
+}
+
 /// The full message of `commit` in the repository whose Git directory is
 /// `git_dir`; `None` when Git cannot read it there.
 pub fn commit_message(git_dir: &Path, commit: &str) -> Option<String> {
@@ -596,9 +679,9 @@ pub fn is_dagq_source(dir: &Path) -> bool {
 pub struct GitRepository {
     pub root: PathBuf,
     pub common_dir: PathBuf,
-    /// The main checkout, whose `dagq.toml` names the landing branch: the
-    /// parent of a `.git` common directory, otherwise `root`.
-    pub checkout: PathBuf,
+    /// The main checkout, whose `dagq.toml` names the landing branch
+    /// ([`main_checkout_of`]), or why the repository has none.
+    checkout: std::result::Result<PathBuf, String>,
     git: PathBuf,
 }
 
@@ -616,10 +699,7 @@ impl GitRepository {
         )
         .canonicalize()?;
         let common_dir = git_common_dir(&root)?;
-        let checkout = match common_dir.parent() {
-            Some(parent) if common_dir.file_name() == Some(".git".as_ref()) => parent.to_path_buf(),
-            _ => root.clone(),
-        };
+        let checkout = main_checkout_of(&root).map_err(|error| format!("{error:#}"));
         Ok(Self {
             root,
             common_dir,
@@ -628,11 +708,20 @@ impl GitRepository {
         })
     }
 
+    /// The main checkout ([`main_checkout_of`]), whose `dagq.toml` dagq
+    /// reads; an error for a repository that has none (a bare one, or one
+    /// with a separate Git directory inspected from a linked worktree).
+    pub fn checkout(&self) -> Result<&Path> {
+        self.checkout
+            .as_deref()
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     /// `[repository]` of the main checkout's `dagq.toml` (ADR-t615-1),
     /// with its `branch` and `remote` checked as Git names; an error points
     /// at `[repository]`.
     pub fn repository_config(&self) -> Result<RepositoryConfig> {
-        let config = load_repository_config(&self.checkout).with_context(|| {
+        let config = load_repository_config(self.checkout()?).with_context(|| {
             format!(
                 "cannot resolve the landing branch; {}",
                 landing_branch::HINT
@@ -731,7 +820,7 @@ impl GitRepository {
     /// Whether the repository is dagq's source (ADR-t614-1), judged now
     /// from the main checkout's `Cargo.toml`.
     pub fn is_dagq_source(&self) -> bool {
-        is_dagq_source(&self.checkout)
+        self.checkout().is_ok_and(is_dagq_source)
     }
 
     /// `git -C <root>`.

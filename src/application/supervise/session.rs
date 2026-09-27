@@ -858,7 +858,7 @@ pub(super) fn ask_answer_prompt(
     );
     let outcome = ask::ask(
         &mut *sv.queue,
-        &sv.layout.repo_root,
+        &sv.layout.main_checkout,
         NewAsk {
             kind: AskKind::AnswerPrompt,
             task_id: Some(run.task_id()),
@@ -909,7 +909,7 @@ pub(super) fn raise_auth(
     }
     let (outcome, value) = ask::hold(
         &mut *sv.queue,
-        &sv.layout.repo_root,
+        &sv.layout.main_checkout,
         NewHold {
             reason_category: AskReason::Authentication,
             subject: None,

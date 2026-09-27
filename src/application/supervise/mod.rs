@@ -242,6 +242,8 @@ pub struct Layout {
     pub queue_hash: String,
     /// The checkout `supervise` was given, and its Git common directory.
     pub repo_root: PathBuf,
+    /// The repository's main checkout, which names it in notifications.
+    pub main_checkout: PathBuf,
     pub common_dir: PathBuf,
     /// The `claude` the run sessions start.
     pub claude: PathBuf,

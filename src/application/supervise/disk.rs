@@ -220,7 +220,7 @@ impl Supervisor<'_> {
         for run in joining {
             let (outcome, value) = ask::hold(
                 &mut *self.queue,
-                &self.layout.repo_root,
+                &self.layout.main_checkout,
                 NewHold {
                     reason_category: AskReason::Cost,
                     subject: Some(DISK_SUBJECT.into()),

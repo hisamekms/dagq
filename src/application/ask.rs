@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::{Queue, WorkspaceBackend, naming::ask_notification_title};
 use crate::domain::{AskOutcome, HoldOutcome, NewAsk, NewHold, SessionRole};
@@ -16,7 +16,7 @@ const NOTIFY_QUESTION_CHARS: usize = 200;
 /// workspace when there is none). A repeated ask notifies nobody. The ask
 /// stands whether or not the notification goes out; a failure is reported
 /// as `notify_error` next to `notified: false`. `checkout` names the
-/// repository in the title when the queue is bound to none.
+/// repository in the title: its main checkout, as the caller resolved it.
 pub fn ask(
     queue: &mut dyn Queue,
     checkout: &Path,
@@ -64,14 +64,8 @@ pub fn notify(
         value["notified"] = json!(false);
         return Ok(value);
     }
-    // The main checkout names the repository, as the workspace group does;
-    // a queue bound to no repository falls back to the working directory.
-    let common_dir = queue.repository_binding()?.map(PathBuf::from);
-    let repo_root = match &common_dir {
-        Some(dir) if dir.file_name() == Some(".git".as_ref()) => dir.parent().unwrap_or(dir),
-        Some(dir) => dir.as_path(),
-        None => checkout,
-    };
+    // The caller resolves the checkout that names the repository.
+    let repo_root = checkout;
     let ask = &outcome.ask;
     let question = super::health::truncate(&ask.question, NOTIFY_QUESTION_CHARS)
         .unwrap_or_else(|| ask.question.clone());

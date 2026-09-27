@@ -48,7 +48,8 @@ use crate::{
     infrastructure::{
         adapters::{
             ClaudeCode, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT,
-            claude_trusts_repository, free_disk_bytes, host_versions, load_average, path_text,
+            claude_trusts_repository, free_disk_bytes, host_versions, load_average,
+            main_checkout_of, path_text,
         },
         binaries::LocalBinaries,
         clock,
@@ -318,18 +319,20 @@ pub fn supervise_with_reviewer(
         .canonicalize()
         .context("queue must already be initialized")?;
     let repository = GitRepository::inspect(repo)?;
+    // Every setting is read from it: a repository without one stops here.
+    let main_checkout = repository.checkout()?.to_path_buf();
     // Every claim and landing reads it (ADR-t615-1).
     repository.landing_branch()?;
     let stall = match options.stall {
         Some(stall) => stall,
-        None => load_stall_config(&main_checkout(&repository))?.unwrap_or_default(),
+        None => load_stall_config(&main_checkout)?.unwrap_or_default(),
     };
     // For the plan review's hotspots and the claims deferred on them
     // (ADR-0069): a `[conflicts]` that cannot be read at the start leaves
     // the defaults rather than stopping the supervisor; later reads keep
     // the values in use (ADR-0080).
     let conflicts = statistics::conflict_config(options.conflicts.or_else(|| {
-        load_conflict_config(&main_checkout(&repository)).unwrap_or_else(|error| {
+        load_conflict_config(&main_checkout).unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "[conflicts] of dagq.toml not read: {error:#}; using the defaults");
             None
         })
@@ -338,7 +341,7 @@ pub fn supervise_with_reviewer(
     // 44): a `[disk]` that cannot be read leaves the defaults, as
     // `[conflicts]` does.
     let disk = options.disk.unwrap_or_else(|| {
-        load_disk_config(&main_checkout(&repository))
+        load_disk_config(&main_checkout)
             .unwrap_or_else(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "[disk] of dagq.toml not read: {error:#}; using the defaults");
                 None
@@ -348,7 +351,7 @@ pub fn supervise_with_reviewer(
     // The limit of the conflict-only attempts (ADR-0047 decision 24): a
     // `[resume]` that cannot be read leaves the default, as `[disk]` does.
     let resume = options.resume.unwrap_or_else(|| {
-        load_resume_config(&main_checkout(&repository))
+        load_resume_config(&main_checkout)
             .unwrap_or_else(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "[resume] of dagq.toml not read: {error:#}; using the defaults");
                 None
@@ -364,7 +367,7 @@ pub fn supervise_with_reviewer(
         if slot_flags.complete() {
             SupervisorConfig::default()
         } else {
-            load_supervisor_config(&main_checkout(&repository))
+            load_supervisor_config(&main_checkout)
                 .unwrap_or_else(|error| {
                     tracing::warn!(error = %format_args!("{error:#}"), "[supervisor] of dagq.toml not read: {error:#}; using the defaults");
                     None
@@ -373,7 +376,7 @@ pub fn supervise_with_reviewer(
         },
     );
     let supervisor_file = (!slot_flags.complete()).then(|| {
-        let checkout = main_checkout(&repository);
+        let checkout = main_checkout.clone();
         Arc::new(move || load_supervisor_config(&checkout))
             as crate::application::supervise::SupervisorFile
     });
@@ -383,6 +386,7 @@ pub fn supervise_with_reviewer(
         runs_dir: runs_dir(&db),
         queue_hash: QueueLocation::explicit(&db).hash(),
         repo_root: repository.root.clone(),
+        main_checkout: main_checkout.clone(),
         common_dir: repository.common_dir.clone(),
         claude: claude.into(),
         runner: runner.into(),
@@ -418,7 +422,7 @@ pub fn supervise_with_reviewer(
     let review_db = db.clone();
     let review_material = move |task_id: TaskId| review(&review_db, task_id);
     let reports = options.report_daily.then(|| {
-        let (db, checkout) = (db.clone(), main_checkout(&repository));
+        let (db, checkout) = (db.clone(), main_checkout.clone());
         let host_wide = options
             .host_config
             .clone()
@@ -449,14 +453,14 @@ pub fn supervise_with_reviewer(
     // Read again each pass (ADR-0080), unless the options set the
     // thresholds.
     let conflicts_file = options.conflicts.is_none().then(|| {
-        let checkout = main_checkout(&repository);
+        let checkout = main_checkout.clone();
         Arc::new(move || load_conflict_config(&checkout))
             as crate::application::supervise::ConflictsFile
     });
-    let limit_checkout = main_checkout(&repository);
+    let limit_checkout = main_checkout.clone();
     let max_improvement_proposals = Arc::new(move || max_improvement_proposals(&limit_checkout));
     let forecasts = options.forecast_snapshots.then(|| {
-        let (db, checkout) = (db.clone(), main_checkout(&repository));
+        let (db, checkout) = (db.clone(), main_checkout.clone());
         let host_wide = options
             .host_config
             .clone()
@@ -481,7 +485,7 @@ pub fn supervise_with_reviewer(
             )),
         }),
         verifier: Arc::new(ShellVerifier {
-            checkout: main_checkout(&repository),
+            checkout: main_checkout.clone(),
             db: db.clone(),
             user_config: options.user_config.clone(),
             verification_timeout: VERIFICATION_TIMEOUT,
@@ -618,9 +622,10 @@ impl OneShot {
         // a person, or the inbox at a person's word.
         let requester = queue.actor();
         let repository = GitRepository::inspect(repo)?;
+        let main_checkout = repository.checkout()?.to_path_buf();
         let common_dir = path_text(&repository.common_dir)?;
         let verifier = ShellVerifier {
-            checkout: main_checkout(&repository),
+            checkout: main_checkout.clone(),
             db: db.clone(),
             user_config: None,
             verification_timeout: self.verification_timeout,
@@ -629,7 +634,7 @@ impl OneShot {
         // supervisor reads it (task 638): a `[disk]` that cannot be read
         // leaves the defaults.
         let disk = self.disk.unwrap_or_else(|| {
-            load_disk_config(&main_checkout(&repository))
+            load_disk_config(&main_checkout)
                 .unwrap_or_else(|error| {
                     tracing::warn!(error = %format_args!("{error:#}"), "[disk] of dagq.toml not read: {error:#}; using the defaults");
                     None
@@ -1275,7 +1280,9 @@ same in one step",
         // `dagq plan` reads `[roles.planner]` of the main checkout's
         // `dagq.toml` (ADR-0079 decision 7); a file it cannot read starts
         // the planner as before, with a warning.
-        let roles = crate::infrastructure::run_env::load_role_models(&main_checkout(&repository))
+        let roles = repository
+            .checkout()
+            .and_then(crate::infrastructure::run_env::load_role_models)
             .map_err(|error| format!("{error:#}"));
         let mut opened = planner::open_person_planner(&PlannerLaunch {
             queue: &queue,
@@ -1289,7 +1296,7 @@ same in one step",
             claude: &options.claude,
             plugin_dir: plugin_dir.as_deref(),
             language: crate::infrastructure::language::language_for_prompt(
-                Some(&main_checkout(&repository)),
+                repository.checkout().ok(),
                 options.user_config.as_deref(),
             ),
             roles: roles.clone().unwrap_or_default(),
@@ -1442,7 +1449,10 @@ pub fn recover(db: &Path, id: &RunId) -> Result<Value> {
 /// `cmux notify` aimed at the inbox workspace `up` recorded (see
 /// [`crate::application::ask::ask`]).
 pub fn ask(db: &Path, checkout: &Path, ask: NewAsk, cmux: &dyn WorkspaceBackend) -> Result<Value> {
-    crate::application::ask::ask(&mut SqliteQueue::open(db)?, checkout, ask, cmux)
+    let mut queue = SqliteQueue::open(db)?;
+    let binding = queue.repository_binding()?.map(PathBuf::from);
+    let checkout = crate::infrastructure::adapters::naming_checkout(binding.as_deref(), checkout);
+    crate::application::ask::ask(&mut queue, &checkout, ask, cmux)
 }
 
 /// Where the queue of `location` lives, as `up` and `down` take it.
@@ -1462,8 +1472,13 @@ fn inspect_repository(repo: &Path) -> Result<RepositoryPaths> {
         .repository_settings()
         .map_err(|error| format!("{error:#}"));
     let dagq_source = repository.is_dagq_source();
+    let checkout = repository
+        .checkout()
+        .map(Path::to_path_buf)
+        .map_err(|error| format!("{error:#}"));
     Ok(RepositoryPaths {
         dagq_source,
+        checkout,
         root: repository.root,
         common_dir: repository.common_dir,
         landing,
@@ -1560,13 +1575,11 @@ fn up_run_env_programs(
 /// queue is bound to names, resolved on this process's PATH (ADR-0049
 /// decision 9).
 fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_env::RunEnvCheck> {
-    // A queue no supervisor or `up` bound has no repository to read.
-    let Some(common_dir) = queue.repository_binding()?.map(PathBuf::from) else {
+    // A queue no supervisor or `up` bound has no repository to read, and a
+    // repository without a main checkout (`repository` says why) no
+    // `dagq.toml`.
+    let Some(checkout) = bound_checkout(queue)? else {
         return Ok(crate::domain::run_env::RunEnvCheck::default());
-    };
-    let checkout = match common_dir.parent() {
-        Some(parent) if common_dir.file_name() == Some(".git".as_ref()) => parent.to_path_buf(),
-        _ => common_dir.clone(),
     };
     ShellVerifier {
         checkout,
@@ -1581,10 +1594,11 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
 /// as `up`'s preflight resolves them (ADR-t615-1), or `error` with why
 /// they do not resolve; `None` for a queue bound to no checkout.
 fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
-    let Some(checkout) = bound_checkout(queue)? else {
+    let Some(checkout) = bound_main_checkout(queue)? else {
         return Ok(None);
     };
-    let resolved = GitRepository::inspect(&checkout)
+    let resolved = checkout
+        .and_then(|checkout| GitRepository::inspect(&checkout))
         .and_then(|repository| repository.resolve_repository_settings());
     Ok(Some(match resolved {
         // A configured push remote that is missing keeps the fields.
@@ -1599,8 +1613,6 @@ fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
     }))
 }
 
-/// The main checkout of the repository the queue is bound to: the parent
-/// of its `.git`; `None` for a queue bound to none, or to a bare one.
 /// What the KPIs and their reports of the queue at `db` are made with at
 /// `now`: the `[kpi]` of `checkout`'s `dagq.toml` with the host's
 /// `host.toml` (the queue's, over the host-wide one) over it, the host's
@@ -1644,24 +1656,19 @@ fn max_improvement_proposals(checkout: &Path) -> Result<usize> {
 /// The KPI reports' directory in the queue's (ADR-0051 decision 20).
 pub const REPORTS_DIR: &str = "reports";
 
+/// The main checkout of the repository the queue is bound to; `None` for a
+/// queue bound to none, or to one without a main checkout.
 pub(crate) fn bound_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
-    Ok(queue
-        .repository_binding()?
-        .map(PathBuf::from)
-        .and_then(|common_dir| {
-            (common_dir.file_name() == Some(".git".as_ref()))
-                .then(|| common_dir.parent().map(Path::to_path_buf))
-                .flatten()
-        }))
+    Ok(bound_main_checkout(queue)?.and_then(Result::ok))
 }
 
-fn main_checkout(repository: &GitRepository) -> PathBuf {
-    match repository.common_dir.parent() {
-        Some(parent) if repository.common_dir.file_name() == Some(".git".as_ref()) => {
-            parent.to_path_buf()
-        }
-        _ => repository.root.clone(),
-    }
+/// The main checkout of the repository the queue is bound to
+/// ([`main_checkout_of`]), or why it has none; `None` for a queue bound to
+/// no repository.
+fn bound_main_checkout(queue: &SqliteQueue) -> Result<Option<Result<PathBuf>>> {
+    Ok(queue
+        .repository_binding()?
+        .map(|common_dir| main_checkout_of(Path::new(&common_dir))))
 }
 
 /// What the recovery job of a run that ended reads about it (see

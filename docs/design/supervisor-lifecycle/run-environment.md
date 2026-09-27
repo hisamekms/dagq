@@ -25,7 +25,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
 - 値の`${DAGQ_QUEUE_DIR}`はqueue directory（DBのある directory）、`${DAGQ_RUN_DIR}`はそのrunのrun directoryに展開する。ほかの`$`は書いたまま残す（shellの展開はしない）。`${DAGQ_RUN_DIR}`はtask 91で加えた（ADR-0040の決定3、ADR-0049の決定3が引き継ぐ）。
-- 読むのはrepositoryのmain checkout（Git common directoryが`.git`ならその親、bareなら`supervise` / `integrate`を実行したcheckout）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む（common directoryが`.git`という名前でない構成だけは、実行したcheckoutのものを読む）。検証コマンドが1件も無ければ読まない。
+- 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む。検証コマンドが1件も無ければ読まない。
 - 渡し先: (a) `provision`がworkerのworkspaceを作るとき、`DAGQ_ROLE` / `DAGQ_QUEUE`の後ろに`--env KEY=VALUE`で並べる（ADR-0026の仕組み）。worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、workspaceは開かずsupervisorはclaimを止める。(b) `integrate`の`verification_commands`を`Command`のenvに足す（validatingは検証コマンドを実行しない）。読めないファイルは着地処理のエラーで、runは元の状態に戻る。(c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。(d) `needs_session`のresumeが開くworkspaceに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる（task 303）。resumeのsessionはworkerと同じ手元の検証（fmt・clippy・関係するtest・e2e）を回すので、workerと同じ`[run.env]`（sccache、buildとtestの並列度）が要るため。ADR-0049の決定3（ADR-0040の決定3を引き継ぐ）は渡し先をworkerのworkspace・`integrate`の検証・reviewの3つと書くが、resumeのsessionはrunのworkerのsessionの続きで、その「workerのworkspace」に含まれると読む。値は`begin_resume`の前に読み（`start_resume`に渡す）、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。`[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
 - `dagq.toml`はrepositoryにcommitされ、値はworkspaceを開く`cmux`のargvに出るので、secretは入れない。
 - この repositoryでは`dagq.toml`の`[run.env]`に`RUSTC_WRAPPER = "sccache"`と`SCCACHE_IGNORE_SERVER_IO_ERROR = "1"`を置き、依存crateのcompileの結果をsccacheでrun間に共有する（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定6・7、task 393）。sccacheは人が`mise use -g sccache`で入れ、`~/.local/bin/sccache`にmiseのshimへのlinkを置く。serverと話せないときはclientがrustcを直接実行する。targetは共有しない（ADR-0040の決定3をADR-0049の決定3が引き継ぐ。ADR-0023の決定3は`CARGO_TARGET_DIR = "${DAGQ_QUEUE_DIR}/target"`を置くとしたが、task 91の着地前のreviewの指摘を受けて2026-09-23にユーザーが決めた）。理由: (a) cargoのlockはbuildだけを直列化し、その後のtest実行は分離されないので、`CARGO_BIN_EXE_dagq`をexecするtest（`tests/it`の`cli_*`・`runtime_*`・`location`と、`plugin.rs`・`e2e.rs`）が、並行する別のrunのbuildが上書きした`target/debug/dagq`を実行しうる。(b) 同時の`cargo llvm-cov`が共有の`llvm-cov-target`のprofrawを消し合い・混ぜ合い、coverageの関門が誤る。`CARGO_TARGET_DIR`はrunごとの値でもsccacheの鍵に入って依存crateまで当たらなくなるので置かず、`CARGO_INCREMENTAL`も変えない（ADR-0049の決定6）。
@@ -54,6 +54,18 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
 
 - `[repository]`は着地先のbranch（`branch`、既定は推定）、pushのremote（`remote`、既定`"origin"`）、pushするか（`push`、既定`true`）を持つ（[Landing branch](landing-branch.md)、[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。3つのkeyはどれも読み（`load_repository_config`）、ほかのkeyは未知のkeyとして拒む。`[repository]`を知らない旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。dagq自身のrepositoryは既定で今までどおり`main`と`origin`になるので足さない。
+
+## main checkoutの決め方
+
+`dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのは`src/infrastructure/adapters.rs`の`main_checkout_of`の1か所だけ（task 669）。`GitRepository::inspect`（`checkout()`）、`supervise`・`integrate`・`plan`・`up`（`RepositoryPaths.checkout`。Claude Codeのtrustの確認も同じpathで引く）、queueの束縛から引く`doctor`・`stats`・`observer`など（`bound_checkout`）、`--from`なしの`install`の既定のcheckout、askの通知のrepositoryの名前（`naming_checkout`）が、どれもこの結果を使う。Git common directoryの名前（`.git`かどうか）では決めない。
+
+| 構成 | main checkout |
+| --- | --- |
+| 通常（common directoryが`<checkout>/.git`） | その`<checkout>`。どのworktreeからでも、common directory自体からでも同じ |
+| bare（main worktreeに作業ファイルが無い。bareのrepositoryに`git worktree add`した構成を含む） | 無い。理由（`... is bare ...`）とbareでないcloneを使う案内のerror |
+| `git init --separate-git-dir`（common directoryがmain worktreeの外） | Gitはmain worktreeの場所を記録せず、`worktree list`はcommon directoryそのものを出す。実行したcheckoutがmain worktree（`--absolute-git-dir`がcommon directory）ならそれ、linked worktreeやcommon directoryからは分からず、main worktreeで打つよう案内するerror（ask 142で人が決めた） |
+
+main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。`up`はpreflightで`...; the supervisor was not started`で止まり、`supervise`と`integrate`は起動時に同じerrorで止まり、`doctor`の`repository`は`error`を出して`run_env`は出さない。`plan`は`[roles.planner]`を読めない警告を出して既定で開き、`--from`なしの`install`は`--from`を求めるerrorになる。askの通知は、main checkoutが無ければqueueが束縛されたcommon directoryの名前で出す（束縛の無いqueueでは実行したcheckout）。supervisorのaskの通知は`Layout.main_checkout`の名前で出す。
 
 ## `[run.env]`が名指すプログラムの検査
 
