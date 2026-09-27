@@ -796,3 +796,50 @@ fn plan_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone() {
         assert!(dir(id).join("runner").is_file(), "planner {id}");
     }
 }
+
+/// Task 344: planner IDs start over with a new queue database, so the
+/// directory of planner 1 may still hold the idle marker a planner 1 of
+/// the old database left. Opening the new planner removes it: its session
+/// is `working` until its own agent stops, not `idle` from the old marker.
+#[test]
+fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
+    use dagq::application::planner::{PlannerProbes, planner_views};
+    use dagq::domain::{PlannerId, PlannerState};
+    use dagq::infrastructure::{clock::SystemClock, run_files::LocalRunFiles};
+    let fixture = fixture();
+    let cmux = FakeCmux::default();
+    let options = plan_options(&fixture);
+    let planners = planners_dir(&fixture);
+    fs::create_dir_all(planners.join("1")).unwrap();
+    fs::write(
+        planners.join("1/idle.json"),
+        r#"{"hook_event_name":"Stop","background_tasks":[]}"#,
+    )
+    .unwrap();
+
+    let opened = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
+    let id = PlannerId::new(opened["planner"]["id"].as_i64().unwrap());
+    assert_eq!(id, PlannerId::new(1));
+    assert!(!planners.join("1/idle.json").exists());
+    assert!(planners.join("1/prompt.txt").is_file());
+
+    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    queue.register_planner_wrapper(id, 4242).unwrap();
+    queue.heartbeat_planner(id, 4242).unwrap();
+    let processes = FakeProcesses::default();
+    let signals = dagq::infrastructure::adapters::ClaudeCode {
+        executable: "claude".into(),
+    };
+    let probes = PlannerProbes {
+        cmux: &cmux,
+        processes: &processes,
+        files: &LocalRunFiles,
+        signals: &signals,
+        clock: &SystemClock,
+        planners_dir: &planners,
+    };
+    let views = planner_views(&queue, &probes, false).unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].state, PlannerState::Working);
+    assert_eq!(views[0].idle_since, None);
+}

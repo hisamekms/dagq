@@ -237,6 +237,17 @@ fn create_workspace(
     files
         .create_dir_all(dir)
         .with_context(|| format!("create {}", dir.display()))?;
+    // Planner IDs start over with a new queue database, so the directory
+    // may be one an earlier planner of the same ID left: its idle marker
+    // would make this planner look idle before its agent ever stopped.
+    let marker = planner_idle_marker(dir);
+    match files.remove_file(&marker) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("remove {}", marker.display()));
+        }
+    }
     files.write(&dir.join(PLANNER_PROMPT_FILE), prompt.as_bytes())?;
     let runner = dir.join(PLANNER_RUNNER_FILE);
     files

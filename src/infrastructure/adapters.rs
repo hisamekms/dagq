@@ -1787,7 +1787,7 @@ impl WorkspaceBackend for Cmux {
             Path::new(run.run_dir().context("missing run directory")?).join("workspace-create.txt"),
             &raw,
         )?;
-        self.identify(workspace_handle(&raw)?)
+        self.identify_created(workspace_handle(&raw)?)
     }
 
     fn create_resume(
@@ -1803,7 +1803,7 @@ impl WorkspaceBackend for Cmux {
             command,
             tags,
         )?;
-        self.identify(workspace_handle(&raw)?)
+        self.identify_created(workspace_handle(&raw)?)
     }
 
     /// `cmux send` reads `\n`, `\r` and `\t` as keys, so the text goes as
@@ -1917,7 +1917,7 @@ impl WorkspaceBackend for Cmux {
         tags: &WorkspaceTags,
     ) -> Result<String> {
         let raw = self.create_workspace(name, cwd, command, tags)?;
-        self.identify(workspace_handle(&raw)?)
+        self.identify_created(workspace_handle(&raw)?)
     }
 
     fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
@@ -2056,6 +2056,22 @@ impl Cmux {
         let mut create = Command::new(&self.executable);
         create.args(workspace_create_arguments(name, command, tags));
         output(create.arg("--cwd").arg(cwd))
+    }
+
+    /// Resolve the handle of a workspace this process just created to its
+    /// UUID. A workspace cmux created but did not identify would be left
+    /// open with nothing to find it by (its caller records no UUID), so it
+    /// is closed by its handle; the error says whether that close failed
+    /// too.
+    fn identify_created(&self, handle: &str) -> Result<String> {
+        self.identify(handle).map_err(|error| match self.close(handle) {
+            Ok(()) => error.context(format!(
+                "cmux created workspace {handle} but did not identify it; it was closed"
+            )),
+            Err(close) => error.context(format!(
+                "cmux created workspace {handle} but did not identify it, and closing it failed: {close:#}"
+            )),
+        })
     }
 
     /// Resolve a numeric handle to the workspace's stable UUID.
@@ -3250,6 +3266,59 @@ esac
             ]
         );
         assert!(calls.contains("identify\n--workspace\nworkspace:7\n"));
+    }
+
+    /// Task 344: a workspace cmux created but did not identify is closed
+    /// by its handle, and the error says so; when the close fails too, the
+    /// error carries both.
+    #[cfg(unix)]
+    #[test]
+    fn a_created_workspace_cmux_does_not_identify_is_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args.log");
+        let script = |close: &str| {
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{log}'
+case "$1 $2" in
+  "workspace create") echo "OK workspace:9" ;;
+  "workspace close") {close} ;;
+  "--json --id-format") echo 'identify broke' >&2; exit 1 ;;
+esac
+"#,
+                log = log.display()
+            )
+        };
+        let executable = dir.path().join("cmux");
+        fs::write(&executable, script(r#"echo "OK workspace:9""#)).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let cmux = Cmux {
+            executable: executable.clone(),
+        };
+        let tags = WorkspaceTags::default();
+        let error = cmux
+            .create_named("[dagq]planner#1", dir.path(), "true", &tags)
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains(
+                "cmux created workspace workspace:9 but did not identify it; it was closed"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("identify broke"), "{text}");
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(calls.contains("workspace close workspace:9\n"), "{calls}");
+
+        fs::write(&executable, script("echo 'no such workspace' >&2; exit 1")).unwrap();
+        let error = cmux
+            .create_named("[dagq]planner#2", dir.path(), "true", &tags)
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("and closing it failed"), "{text}");
+        assert!(text.contains("no such workspace"), "{text}");
+        assert!(text.contains("identify broke"), "{text}");
     }
 
     #[test]
