@@ -700,6 +700,7 @@ pub mod run_env;
 pub mod scope;
 pub mod search;
 pub mod sessions;
+pub mod slot_limits;
 pub mod source_repository;
 pub mod stall;
 pub mod stats;
@@ -1544,6 +1545,8 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     claim_hold::CLAIM_RESUMED,
     // The `[conflicts]` a supervisor read again changed (ADR-0080).
     stats::conflicts::CONFLICTS_CONFIG_CHANGED,
+    // The `[supervisor]` a supervisor read again changed (task 698).
+    slot_limits::SUPERVISOR_CONFIG_CHANGED,
     claim_hold::LANDING_HELD,
     claim_hold::LANDING_RESUMED,
     // The answer of an authentication or usage-limit ask applied (task
@@ -2796,6 +2799,8 @@ mod attention_tests {
             handoff_binary: None,
             auto_update: false,
             max_waiting: None,
+            parallel_source: None,
+            max_waiting_source: None,
             binary_version: None,
         };
         let fresh =

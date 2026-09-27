@@ -64,8 +64,8 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 
 ## 登録と見せ方
 
-- `supervise --max-waiting N`（既定4、0で待ちを使わない）と`up --max-waiting N`（既定と違うときだけ`supervise`の引数に足す）。supervisorは登録（と引き継ぎの取り戻し）の直後に`supervisors.max_waiting`（schema v37、互換の列。[persistence](../persistence.md)）を書く。
-- `status`の各登録に`slots: {used, parallel}`と`waiting: {count, returning, limit}`（`count`は待ちと戻り待ちの合計で`--max-waiting`が数えるものと同じ、`returning`はその内訳の戻り待ち。数え方は`src/domain/waiting.rs`の`WaitCount`の1つで、supervisorの`waiting_runs()`と`status`の両方が使う）、全体に`waiting`の配列（[`status`](status.md)）。`stats`に`waiting`（[`stats`](stats.md)）。
+- `supervise --max-waiting N`（0で待ちを使わない。明示が無ければ`dagq.toml`の`[supervisor] max_waiting`、それも無ければ4。[Run environment](run-environment.md)の`[supervisor]`、task 698）と`up --max-waiting N`（明示されたときだけ`supervise`の引数に足す）。supervisorは登録（と引き継ぎの取り戻し、`[supervisor]`の読み直しで変わったとき）に`supervisors.max_waiting`（schema v37、互換の列。[persistence](../persistence.md)）と出どころの`max_waiting_source`を書く。
+- `status`の各登録に`slots: {used, parallel, source}`と`waiting: {count, returning, limit, source}`（`source`は値の出どころ）（`count`は待ちと戻り待ちの合計で`--max-waiting`が数えるものと同じ、`returning`はその内訳の戻り待ち。数え方は`src/domain/waiting.rs`の`WaitCount`の1つで、supervisorの`waiting_runs()`と`status`の両方が使う）、全体に`waiting`の配列（[`status`](status.md)）。`stats`に`waiting`（[`stats`](stats.md)）。
 
 ## test
 

@@ -488,13 +488,16 @@ enum Command {
         /// defaults to the working directory.
         #[arg(long)]
         repo: Option<PathBuf>,
-        /// Maximum number of runs executing at once.
-        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..))]
-        parallel: u16,
+        /// Maximum number of runs executing at once. Without it, `parallel`
+        /// of `[supervisor]` in the main checkout's dagq.toml (read again
+        /// each pass), else 4.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        parallel: Option<u16>,
         /// Maximum number of runs waiting for a person's answer outside the
         /// --parallel slots (ADR-0062); 0 keeps every run in its slot.
-        #[arg(long, default_value_t = 4)]
-        max_waiting: u16,
+        /// Without it, `max_waiting` of `[supervisor]` in dagq.toml, else 4.
+        #[arg(long)]
+        max_waiting: Option<u16>,
         /// Claim no new run while the host's 1-minute load average is above
         /// this; the runs in flight go on. 0 disables the hold.
         #[arg(long, default_value_t = dagq::domain::claim_hold::DEFAULT_MAX_LOAD)]
@@ -628,14 +631,17 @@ enum Command {
     },
     /// Start the queue's runtime: a launchd-resident supervisor and the inbox's cmux workspace. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no planner (`plan` does) and forgets the resident planner's record.
     Up {
-        /// Maximum number of runs the supervisor executes at once.
-        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..))]
-        parallel: u16,
+        /// Maximum number of runs the supervisor executes at once. Passed
+        /// to the supervisor only when given; without it, `parallel` of
+        /// `[supervisor]` in the main checkout's dagq.toml, else 4.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        parallel: Option<u16>,
         /// Maximum number of runs the supervisor keeps waiting for a
         /// person's answer outside the --parallel slots (ADR-0062); 0 keeps
-        /// every run in its slot.
-        #[arg(long, default_value_t = 4)]
-        max_waiting: u16,
+        /// every run in its slot. Passed only when given; without it,
+        /// `max_waiting` of `[supervisor]` in dagq.toml, else 4.
+        #[arg(long)]
+        max_waiting: Option<u16>,
         /// The supervisor claims no new run while the host's 1-minute load
         /// average is above this; the runs in flight go on. 0 disables the
         /// hold.
@@ -2215,10 +2221,11 @@ fn execute(cli: Cli) -> Result<Value> {
                     build_command: update_build_command,
                     cmux: Some(cmux.clone()),
                 },
-                max_waiting: usize::from(max_waiting),
+                parallel: parallel.map(usize::from),
+                max_waiting: max_waiting.map(usize::from),
                 max_load: (max_load > 0.0).then_some(max_load),
                 user_config: dagq::infrastructure::language::user_config_file(),
-                ..SuperviseOptions::new(usize::from(parallel), once)
+                ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
             dagq::compose::supervise(
                 &db,

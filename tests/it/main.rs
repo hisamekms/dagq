@@ -71,6 +71,7 @@ mod runtime_review_adopt;
 mod runtime_review_questions;
 mod runtime_run_env;
 mod runtime_session;
+mod runtime_slot_limits;
 mod runtime_stale_receipt;
 mod runtime_stall;
 mod runtime_stall_recovery;

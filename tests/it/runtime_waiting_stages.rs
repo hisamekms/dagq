@@ -310,7 +310,7 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
     backend.script_for(3, ASKING_AGENT);
     let backend = Arc::new(backend);
     let options = SuperviseOptions {
-        max_waiting: 1,
+        max_waiting: Some(1),
         ..supervise_options(2, true)
     };
     let supervisor = supervise_in_thread(&db, &repo, &backend, None, options);

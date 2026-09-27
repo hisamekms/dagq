@@ -98,8 +98,8 @@ pub fn fixture() -> Fixture {
             user_config: None,
         },
         options: UpOptions {
-            parallel: 2,
-            max_waiting: 4,
+            parallel: Some(2),
+            max_waiting: None,
             max_load: dagq::domain::claim_hold::DEFAULT_MAX_LOAD,
             in_cmux: false,
             no_wait: false,

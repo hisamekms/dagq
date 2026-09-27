@@ -58,6 +58,7 @@ run_processes        -- 0002: runごとのwrapper/agentのPID、heartbeat、終�
 run_leases           -- 0005: runごとのsupervisor token、PID、heartbeat（0002のsupervisor_leasesを置き換え）
 supervisors          -- 0007: 常駐superviseプロセスの登録（token主キー、PID、parallel、started_at、heartbeat_at）
                      -- 0009: mode（'launchd' | 'in_cmux' | null）とworkspace_id
+                     -- 0045: parallel_sourceとmax_waiting_source（'flag' | 'dagq.toml' | 'default' | null。task 698）
 goals                -- 0008: 複数taskが解く課題（title、description、acceptance、constraints、doc、closed_at、verdict）
                      -- 0013: status（'draft' | 'open'、既定'open'）
                      -- 0021: proposal_id（所属するproposal、null可）

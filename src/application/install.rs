@@ -19,7 +19,9 @@ use super::{
     lifecycle::{Handed, hand_off, handoff_failures},
     path_text,
 };
-use crate::domain::{HEARTBEAT_TIMEOUT_SECS, SupervisorMode, SupervisorRegistration};
+use crate::domain::{
+    HEARTBEAT_TIMEOUT_SECS, SupervisorMode, SupervisorRegistration, slot_limits::SettingSource,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -383,13 +385,18 @@ replaced, and `up` starts the old binary again"
     let started = match live.first() {
         None => Value::Null,
         Some(drained) => {
-            let mut arguments = vec![
-                "--db".to_owned(),
-                path_text(db)?,
-                "up".to_owned(),
-                "--parallel".to_owned(),
-                drained.parallel.to_string(),
-            ];
+            // A value the drained supervisor took from a flag carries over
+            // as that flag; one it took from `dagq.toml` or the default is
+            // left for the started one to resolve again (task 698). A
+            // registration of an older binary says nothing, and was given
+            // its values.
+            let flagged = |source: Option<SettingSource>| {
+                source.is_none_or(|source| source == SettingSource::Flag)
+            };
+            let mut arguments = vec!["--db".to_owned(), path_text(db)?, "up".to_owned()];
+            if flagged(drained.parallel_source) {
+                arguments.extend(["--parallel".to_owned(), drained.parallel.to_string()]);
+            }
             if live
                 .iter()
                 .any(|registration| registration.mode == Some(SupervisorMode::InCmux))
@@ -406,6 +413,7 @@ replaced, and `up` starts the old binary again"
             }
             if let Some(max_waiting) = live
                 .iter()
+                .filter(|registration| flagged(registration.max_waiting_source))
                 .find_map(|registration| registration.max_waiting)
                 && !restarts("--max-waiting")
             {

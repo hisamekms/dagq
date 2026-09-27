@@ -19,7 +19,9 @@ use crate::domain::{
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
     reason, recheck, run_attention, run_attention_of,
     run_env::{RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING, RunEnvCheck},
-    session_takes_answers, supervisor_attention,
+    session_takes_answers,
+    slot_limits::SettingSource,
+    supervisor_attention,
     waiting::{WaitCount, WaitState},
 };
 
@@ -172,6 +174,13 @@ pub struct SupervisorHealth {
     /// the column (ADR-0014).
     pub binary_version: Option<String>,
     pub parallel: Option<u32>,
+    /// Where `parallel` comes from: `flag`, `dagq.toml` or `default` (task
+    /// 698); `None` for a lease holder or a registration of an older binary.
+    pub parallel_source: Option<SettingSource>,
+    /// The registration's `max_waiting` (ADR-0062 decision 7) and where it
+    /// comes from, `None` as for `parallel_source`.
+    pub max_waiting: Option<u32>,
+    pub max_waiting_source: Option<SettingSource>,
     /// It updates its own binary on every landing that changes the runtime
     /// (ADR-0045 decision 17).
     pub auto_update: bool,
@@ -192,6 +201,10 @@ impl SupervisorHealth {
             "mode": self.mode,
             "workspace_id": self.workspace_id,
             "binary_version": self.binary_version,
+            "parallel": self.parallel,
+            "parallel_source": self.parallel_source,
+            "max_waiting": self.max_waiting,
+            "max_waiting_source": self.max_waiting_source,
             "auto_update": self.auto_update,
             "heartbeat_age_secs": self.heartbeat_age_secs,
             "stale": self.stale,
@@ -393,11 +406,16 @@ fn slots_and_waits(
                     .get(registration.token.as_str())
                     .copied()
                     .unwrap_or_default();
-                value["slots"] = json!({"used": used, "parallel": registration.parallel});
+                value["slots"] = json!({
+                    "used": used,
+                    "parallel": registration.parallel,
+                    "source": registration.parallel_source,
+                });
                 value["waiting"] = json!({
                     "count": count.count(),
                     "returning": count.returning,
                     "limit": registration.max_waiting,
+                    "source": registration.max_waiting_source,
                 });
                 for (key, hold) in &holds {
                     if let Some(event) = hold.as_ref().filter(|event| {
@@ -563,6 +581,9 @@ pub fn supervisors(
             workspace_id: registration.and_then(|r| r.workspace_id.clone()),
             binary_version: registration.and_then(|r| r.binary_version.clone()),
             parallel: registration.map(|r| r.parallel),
+            parallel_source: registration.and_then(|r| r.parallel_source),
+            max_waiting: registration.and_then(|r| r.max_waiting),
+            max_waiting_source: registration.and_then(|r| r.max_waiting_source),
             auto_update: registration.is_some_and(|r| r.auto_update),
             started_at: registration.map(|r| r.started_at),
             heartbeat_at,
@@ -1120,6 +1141,8 @@ mod tests {
             handoff_binary: None,
             auto_update: false,
             max_waiting: None,
+            parallel_source: None,
+            max_waiting_source: None,
             binary_version: Some("1.0.0".into()),
         }
     }

@@ -220,12 +220,22 @@ impl SqliteQueue {
         Ok(())
     }
 
-    /// Record the supervisor `token`'s `--max-waiting` (ADR-0062 decision 7).
-    pub fn set_max_waiting(&self, token: &str, max_waiting: u32) -> Result<()> {
+    /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
+    /// (ADR-0062 decision 7) and where each comes from (task 698).
+    pub fn set_slot_limits(&self, token: &str, limits: SlotLimits) -> Result<()> {
+        let parallel = u32::try_from(limits.parallel.value)?;
+        ensure!(parallel >= 1, "parallel must be at least 1");
+        let max_waiting = u32::try_from(limits.max_waiting.value)?;
         ensure!(
             self.conn.execute(
-                "UPDATE supervisors SET max_waiting=?2 WHERE token=?1",
-                params![token, max_waiting],
+                "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5 WHERE token=?1",
+                params![
+                    token,
+                    parallel,
+                    limits.parallel.source.as_str(),
+                    max_waiting,
+                    limits.max_waiting.source.as_str()
+                ],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -573,8 +583,8 @@ impl RunCoordination for SqliteQueue {
     fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()> {
         SqliteQueue::set_auto_update(self, token, enabled)
     }
-    fn set_max_waiting(&self, token: &str, max_waiting: u32) -> Result<()> {
-        SqliteQueue::set_max_waiting(self, token, max_waiting)
+    fn set_slot_limits(&self, token: &str, limits: SlotLimits) -> Result<()> {
+        SqliteQueue::set_slot_limits(self, token, limits)
     }
     fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool> {
         SqliteQueue::holds_lease(self, id, token)

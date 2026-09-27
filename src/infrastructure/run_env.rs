@@ -11,7 +11,9 @@
 //! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
 //! decision 24). `[worker.trial]` turns on the limited trial of the worker's model
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the model and effort of a
-//! session other than the worker's (ADR-0079 decision 7). The file is parsed by
+//! session other than the worker's (ADR-0079 decision 7). `[supervisor]`
+//! holds `parallel` and `max_waiting` of a supervisor started without the
+//! flags (task 698). The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
 use anyhow::{Context, Result, bail, ensure};
@@ -31,6 +33,7 @@ use crate::{
         landing_branch::RepositoryConfig,
         resume::ResumeConfig,
         run_env::{RunEnvCheck, RunEnvProgram},
+        slot_limits::SupervisorConfig,
         stall::StallConfig,
         stats::ConflictConfig,
         worker_model::WorkerTrial,
@@ -67,7 +70,9 @@ const ROLES_TABLE: &str = "roles";
 /// [`super::language`] reads and checks it, so a mistake in it never stops
 /// a claim or a landing.
 const LANGUAGE_TABLE: &str = "language";
-const TABLES: [&str; 9] = [
+/// `[supervisor]`: `parallel` and `max_waiting` (task 698).
+const SUPERVISOR_TABLE: &str = "supervisor";
+const TABLES: [&str; 10] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -77,6 +82,7 @@ const TABLES: [&str; 9] = [
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
     LANGUAGE_TABLE,
+    SUPERVISOR_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -132,6 +138,8 @@ pub struct Config {
     pub worker_trial: WorkerTrial,
     /// `[roles.<role>]`, none by default (ADR-0079 decision 7).
     pub roles: RoleModels,
+    /// `[supervisor]`, each key it sets (task 698).
+    pub supervisor: SupervisorConfig,
 }
 
 /// Parse the whole file.
@@ -144,6 +152,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut disk_keys: Vec<String> = Vec::new();
     let mut resume_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
+    let mut supervisor_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
@@ -186,7 +195,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -328,6 +337,28 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
                 trial_keys.push(key.to_owned());
             }
+            Some(SUPERVISOR_TABLE) => {
+                ensure!(
+                    SupervisorConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{SUPERVISOR_TABLE}]; the keys are {}",
+                    SupervisorConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !supervisor_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                if key == "parallel" {
+                    let parallel = parse_positive(rest.trim(), "number").with_context(with)?;
+                    config.supervisor.parallel =
+                        Some(u16::try_from(parallel).with_context(with)?.into());
+                } else {
+                    let limit = parse_whole(rest.trim()).with_context(with)?;
+                    config.supervisor.max_waiting =
+                        Some(u16::try_from(limit).with_context(with)?.into());
+                }
+                supervisor_keys.push(key.to_owned());
+            }
             Some(DISK_TABLE) => {
                 ensure!(
                     DiskConfig::KEYS.contains(&key),
@@ -395,7 +426,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -412,6 +443,18 @@ pub(super) fn parse_positive(text: &str, what: &str) -> Result<i64> {
         .parse()
         .with_context(|| format!("expected a whole {what}, not {digits}"))?;
     ensure!(value > 0, "must be a positive {what}, not {value}");
+    Ok(value)
+}
+
+/// A whole number, 0 or more, followed by nothing but an optional comment.
+fn parse_whole(text: &str) -> Result<i64> {
+    let digits = strip_comment(text);
+    ensure!(!digits.is_empty(), "missing value");
+    let value: i64 = digits
+        .replace('_', "")
+        .parse()
+        .with_context(|| format!("expected a whole number, not {digits}"))?;
+    ensure!(value >= 0, "must be 0 or more, not {value}");
     Ok(value)
 }
 
@@ -533,6 +576,20 @@ pub fn load_repository_config(root: &Path) -> Result<RepositoryConfig> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .repository)
+}
+
+/// `[supervisor]` of the `dagq.toml` in `root` (task 698), `None` when
+/// there is no file; no table or no key sets nothing.
+pub fn load_supervisor_config(root: &Path) -> Result<Option<SupervisorConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .supervisor,
+    ))
 }
 
 /// `[roles.<role>]` of the `dagq.toml` in `root` (ADR-0079 decision 7);
@@ -1225,6 +1282,76 @@ LITERAL = 'no \n escapes # here'
             error.contains("dagq.toml:2: unknown key x in [resume]"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn parses_and_loads_the_supervisor_table() {
+        let config =
+            parse_config("[supervisor] # slots\nparallel = 3 # build is heavy\nmax_waiting = 0\n")
+                .unwrap();
+        assert_eq!(
+            config.supervisor,
+            SupervisorConfig {
+                parallel: Some(3),
+                max_waiting: Some(0),
+            }
+        );
+        assert_eq!(
+            parse_config("[supervisor]\nmax_waiting = 2\n")
+                .unwrap()
+                .supervisor,
+            SupervisorConfig {
+                parallel: None,
+                max_waiting: Some(2),
+            }
+        );
+        assert_eq!(
+            parse_config("").unwrap().supervisor,
+            SupervisorConfig::default()
+        );
+        for (text, message) in [
+            ("[supervisor]\nparallel = 0\n", "must be a positive number"),
+            ("[supervisor]\nparallel = -1\n", "must be a positive number"),
+            ("[supervisor]\nparallel = 70000\n", "value of parallel"),
+            ("[supervisor]\nmax_waiting = -1\n", "must be 0 or more"),
+            (
+                "[supervisor]\nmax_waiting = two\n",
+                "expected a whole number",
+            ),
+            ("[supervisor]\nmax_waiting =\n", "missing value"),
+            (
+                "[supervisor]\nparallel = 2\nparallel = 3\n",
+                "parallel is defined twice",
+            ),
+            (
+                "[supervisor]\nslots = 2\n",
+                "unknown key slots in [supervisor]; the keys are parallel, max_waiting",
+            ),
+            (
+                "[supervisor]\n[supervisor]\n",
+                "[supervisor] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(message), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_supervisor_config(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[run.env]\nA = 'x'\n[supervisor]\nparallel = 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_supervisor_config(dir.path()).unwrap(),
+            Some(SupervisorConfig {
+                parallel: Some(2),
+                max_waiting: None,
+            })
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
+        let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
+        assert!(error.contains("[supervisor] and [kpi]"), "{error}");
     }
 
     #[test]

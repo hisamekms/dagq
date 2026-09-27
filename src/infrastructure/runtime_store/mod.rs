@@ -26,6 +26,7 @@ use crate::application::{
     AskStore, Generators, QueueRecords, RunCoordination, RunLog, RunRecovery, RunTransitions,
     SessionRegistry, timestamp, unix_seconds,
 };
+use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker_model::{WorkerSession, WorkerTrial};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
@@ -282,7 +283,17 @@ fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
         handoff_binary: r.get("handoff_binary")?,
         auto_update: r.get::<_, Option<i64>>("auto_update")? == Some(1),
         max_waiting: r.get("max_waiting")?,
+        parallel_source: source(r, "parallel_source")?,
+        max_waiting_source: source(r, "max_waiting_source")?,
     })
+}
+
+/// A `*_source` column of `supervisors` (task 698); an unknown text reads
+/// as none.
+fn source(r: &Row<'_>, column: &str) -> rusqlite::Result<Option<SettingSource>> {
+    Ok(r.get::<_, Option<String>>(column)?
+        .as_deref()
+        .and_then(SettingSource::parse))
 }
 
 fn assert_wrapper(conn: &Connection, id: &RunId, pid: u32) -> Result<()> {

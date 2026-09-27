@@ -84,12 +84,12 @@ fn a_run_waiting_for_its_answer_leaves_the_slot_to_another_task() {
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         status["supervisors"][0]["slots"],
-        json!({"used": 0, "parallel": 1}),
+        json!({"used": 0, "parallel": 1, "source": "flag"}),
         "{status}"
     );
     assert_eq!(
         status["supervisors"][0]["waiting"],
-        json!({"count": 1, "returning": 0, "limit": 4})
+        json!({"count": 1, "returning": 0, "limit": 4, "source": "default"})
     );
     let waiting = &status["waiting"][0];
     assert_eq!(waiting["run_id"], json!(first.id()));
@@ -153,7 +153,7 @@ fn the_waits_stay_within_their_limit() {
     backend.script_for(3, VALID_AGENT);
     let backend = Arc::new(backend);
     let options = SuperviseOptions {
-        max_waiting: 1,
+        max_waiting: Some(1),
         ..supervise_options(2, true)
     };
     let supervisor = supervise_in_thread(&db, &repo, &backend, options);
@@ -189,12 +189,12 @@ fn the_waits_stay_within_their_limit() {
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         status["supervisors"][0]["waiting"],
-        json!({"count": 1, "returning": 0, "limit": 1}),
+        json!({"count": 1, "returning": 0, "limit": 1, "source": "flag"}),
         "{status}"
     );
     assert_eq!(
         status["supervisors"][0]["slots"],
-        json!({"used": 1, "parallel": 2})
+        json!({"used": 1, "parallel": 2, "source": "flag"})
     );
 
     // The first wait ends; the deferred run takes its place in the waits.
@@ -235,7 +235,7 @@ fn a_returning_run_counts_toward_the_limit() {
     );
     let backend = Arc::new(backend);
     let options = SuperviseOptions {
-        max_waiting: 1,
+        max_waiting: Some(1),
         ..supervise_options(1, true)
     };
     let supervisor = supervise_in_thread(&db, &repo, &backend, options);
@@ -253,12 +253,12 @@ fn a_returning_run_counts_toward_the_limit() {
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         status["supervisors"][0]["waiting"],
-        json!({"count": 1, "returning": 1, "limit": 1}),
+        json!({"count": 1, "returning": 1, "limit": 1, "source": "flag"}),
         "{status}"
     );
     assert_eq!(
         status["supervisors"][0]["slots"],
-        json!({"used": 1, "parallel": 1})
+        json!({"used": 1, "parallel": 1, "source": "flag"})
     );
     assert_eq!(status["waiting"][0]["run_id"], json!(first.id()));
     assert_eq!(status["waiting"][0]["state"], "returning");
@@ -409,7 +409,7 @@ fn no_wait_without_a_limit() {
     let (_dir, repo, db) = fixture();
     let backend = Arc::new(TestWorkspace::new(&db, false, ASKING_AGENT));
     let options = SuperviseOptions {
-        max_waiting: 0,
+        max_waiting: Some(0),
         ..supervise_options(1, true)
     };
     let supervisor = supervise_in_thread(&db, &repo, &backend, options);
@@ -424,7 +424,7 @@ fn no_wait_without_a_limit() {
     let status = runtime::status(&db).unwrap();
     assert_eq!(
         status["supervisors"][0]["waiting"],
-        json!({"count": 0, "returning": 0, "limit": 0}),
+        json!({"count": 0, "returning": 0, "limit": 0, "source": "flag"}),
         "{status}"
     );
     let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
@@ -793,7 +793,7 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
         let status = runtime::status(&db).unwrap();
         assert_eq!(
             status["supervisors"][0]["slots"],
-            json!({"used": used, "parallel": 2}),
+            json!({"used": used, "parallel": 2, "source": null}),
             "{token}: {status}"
         );
         // The dependent task is ready but blocked by the landing one.
@@ -821,7 +821,7 @@ fn a_landing_run_fills_its_supervisors_slot_in_status_and_stats() {
         let status = runtime::status(&db).unwrap();
         assert_eq!(
             status["supervisors"][0]["slots"],
-            json!({"used": used, "parallel": 2}),
+            json!({"used": used, "parallel": 2, "source": null}),
             "{token}: {status}"
         );
         assert_eq!(idle_slots(&db), Some(json!(free)), "{token}");

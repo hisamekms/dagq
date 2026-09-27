@@ -8,7 +8,14 @@ use crate::common;
 use common::lifecycle::*;
 
 use anyhow::{Result, bail};
-use dagq::{VERSION, domain::SupervisorMode, infrastructure::sqlite::SqliteQueue};
+use dagq::{
+    VERSION,
+    domain::{
+        SupervisorMode,
+        slot_limits::{Setting, SettingSource, SlotLimits},
+    },
+    infrastructure::sqlite::SqliteQueue,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -288,7 +295,9 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     // A drained supervisor with the automatic update and a wait limit gets
     // both back from the `up`, once each even when the restart names them.
     queue.set_auto_update("live", true).unwrap();
-    queue.set_max_waiting("live", 2).unwrap();
+    queue
+        .set_slot_limits("live", slot_limits(SettingSource::Flag, 2))
+        .unwrap();
     let binaries = FakeBinaries::new(&[(28, false)], false);
     install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
     options.restart = vec!["--auto-update".into(), "--max-waiting".into(), "6".into()];
@@ -323,6 +332,23 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         ]
     );
 
+    // Values the drained supervisor took from `dagq.toml` (or the
+    // default) are not baked into the `up`: the started one reads them
+    // again (task 698).
+    for source in [SettingSource::File, SettingSource::Default] {
+        queue
+            .set_slot_limits("live", slot_limits(source, 2))
+            .unwrap();
+        let binaries = FakeBinaries::new(&[(28, false)], false);
+        options.restart = vec![];
+        install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+        assert_eq!(
+            binaries.up.lock().unwrap()[0],
+            ["--db", db, "up", "--in-cmux", "--auto-update"],
+            "{source:?}"
+        );
+    }
+
     let binaries = FakeBinaries::new(&[], false);
     let dir = tempfile::tempdir().unwrap();
     let mut options = install_options(Source::Rollback);
@@ -343,6 +369,17 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         "1.2.3"
     );
     assert!(dagq::application::install::parse_version("").is_err());
+}
+
+/// `parallel` 4 and `max_waiting` `max_waiting`, both from `source`.
+fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
+    SlotLimits {
+        parallel: Setting { value: 4, source },
+        max_waiting: Setting {
+            value: max_waiting,
+            source,
+        },
+    }
 }
 
 /// [`Binaries`] for the automatic update's job: the build leaves a real

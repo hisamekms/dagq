@@ -207,9 +207,39 @@ pub struct SupervisorRegistration {
     /// binary, which waits in its slots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_waiting: Option<u32>,
+    /// Where `parallel` comes from (task 698); `None` for a supervisor of
+    /// an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_source: Option<super::slot_limits::SettingSource>,
+    /// Where `max_waiting` comes from; `None` as for `parallel_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_waiting_source: Option<super::slot_limits::SettingSource>,
 }
 
 impl SupervisorRegistration {
+    /// `--parallel N` and `--max-waiting N` for an `up` that starts this
+    /// supervisor again: each value it took from a flag, or that a
+    /// registration of an older binary recorded without a source; one it
+    /// took from `dagq.toml` or the default is left for the started one to
+    /// resolve again (task 698).
+    pub fn flag_arguments(&self) -> Vec<String> {
+        use super::slot_limits::SettingSource;
+        let flagged = |source: Option<SettingSource>| {
+            source.is_none_or(|source| source == SettingSource::Flag)
+        };
+        let mut arguments = Vec::new();
+        if flagged(self.parallel_source) {
+            arguments.extend(["--parallel".to_owned(), self.parallel.to_string()]);
+        }
+        if let Some(max_waiting) = self
+            .max_waiting
+            .filter(|_| flagged(self.max_waiting_source))
+        {
+            arguments.extend(["--max-waiting".to_owned(), max_waiting.to_string()]);
+        }
+        arguments
+    }
+
     /// Whether this is a live supervisor that updates its binary (ADR-0045
     /// decision 17): `auto_update`, its pid `alive` and its heartbeat no
     /// older than [`super::HEARTBEAT_TIMEOUT_SECS`]. The one rule by which

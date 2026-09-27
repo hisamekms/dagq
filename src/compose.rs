@@ -40,6 +40,7 @@ use crate::{
     domain::{
         IntegrationOutcome, NewAsk, PlannerId, RunId, SessionRole, SupervisorMode,
         SupervisorRegistration, TaskDetail, TaskId, TaskRun,
+        slot_limits::{SlotFlags, SlotLimits, SupervisorConfig},
         stall::StallConfig,
         stats::{ConflictConfigReport, StatsQuery},
     },
@@ -57,7 +58,7 @@ use crate::{
         process::LocalSpawner,
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_kpi_settings,
-            load_resume_config, load_stall_config,
+            load_resume_config, load_stall_config, load_supervisor_config,
         },
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
@@ -99,11 +100,14 @@ pub struct AutoUpdateJob {
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
 #[derive(Debug, Clone)]
 pub struct SuperviseOptions {
-    /// Upper bound on runs executing at once.
-    pub parallel: usize,
+    /// Upper bound on runs executing at once (`supervise --parallel`);
+    /// `None` follows `[supervisor] parallel` of the main checkout's
+    /// `dagq.toml`, read again each pass, else 4 (task 698).
+    pub parallel: Option<usize>,
     /// Upper bound on the runs waiting for a person outside the slots
-    /// (ADR-0062 decision 7); zero keeps every run in its slot.
-    pub max_waiting: usize,
+    /// (ADR-0062 decision 7); zero keeps every run in its slot. `None`
+    /// follows `[supervisor] max_waiting` as `parallel` does.
+    pub max_waiting: Option<usize>,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -202,8 +206,8 @@ impl std::fmt::Debug for RunFilesPort {
 impl SuperviseOptions {
     pub fn new(parallel: usize, once: bool) -> Self {
         Self {
-            parallel,
-            max_waiting: crate::domain::waiting::DEFAULT_MAX_WAITING,
+            parallel: Some(parallel),
+            max_waiting: None,
             once,
             stop: Arc::new(AtomicBool::new(false)),
             observe_interval: Duration::ZERO,
@@ -237,16 +241,25 @@ impl SuperviseOptions {
         }
     }
 
+    /// The flags `parallel` and `max_waiting` stand for.
+    fn slot_flags(&self) -> SlotFlags {
+        SlotFlags {
+            parallel: self.parallel,
+            max_waiting: self.max_waiting,
+        }
+    }
+
     fn settings(
         &self,
         stall: StallConfig,
         conflicts: ConflictConfigReport,
         disk: crate::domain::disk::DiskConfig,
         resume: crate::domain::resume::ResumeConfig,
+        limits: SlotLimits,
     ) -> LoopSettings {
         LoopSettings {
-            parallel: self.parallel,
-            max_waiting: self.max_waiting,
+            limits,
+            slot_flags: self.slot_flags(),
             once: self.once,
             stop: self.stop.clone(),
             observe_interval: self.observe_interval,
@@ -296,7 +309,10 @@ pub fn supervise_with_reviewer(
     runner: &Path,
     options: &SuperviseOptions,
 ) -> Result<Value> {
-    ensure!(options.parallel >= 1, "parallel must be at least 1");
+    ensure!(
+        options.parallel.is_none_or(|parallel| parallel >= 1),
+        "parallel must be at least 1"
+    );
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
@@ -337,6 +353,28 @@ pub fn supervise_with_reviewer(
                 None
             })
             .unwrap_or_default()
+    });
+    // `parallel` and `max_waiting` the flags did not give (task 698): a
+    // `[supervisor]` that cannot be read at the start leaves the defaults,
+    // as `[disk]` does; later reads keep the values in use.
+    let slot_flags = options.slot_flags();
+    let limits = SlotLimits::resolve(
+        slot_flags,
+        if slot_flags.complete() {
+            SupervisorConfig::default()
+        } else {
+            load_supervisor_config(&main_checkout(&repository))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(error = %format_args!("{error:#}"), "[supervisor] of dagq.toml not read: {error:#}; using the defaults");
+                    None
+                })
+                .unwrap_or_default()
+        },
+    );
+    let supervisor_file = (!slot_flags.complete()).then(|| {
+        let checkout = main_checkout(&repository);
+        Arc::new(move || load_supervisor_config(&checkout))
+            as crate::application::supervise::SupervisorFile
     });
     let pid = std::process::id();
     let generators = options.generators.clone();
@@ -469,10 +507,14 @@ pub fn supervise_with_reviewer(
         reports,
         max_improvement_proposals,
         conflicts_file,
+        supervisor_file,
         forecasts,
         layout,
     };
-    supervisor::supervise(&ports, &options.settings(stall, conflicts, disk, resume))
+    supervisor::supervise(
+        &ports,
+        &options.settings(stall, conflicts, disk, resume, limits),
+    )
 }
 
 /// The runtime's own constructor of the cmux wrapper `up`, `down` and the
@@ -1137,9 +1179,9 @@ same in one step",
                         "up".to_owned(),
                         "--in-cmux".to_owned(),
                         "--auto-update".to_owned(),
-                        "--parallel".to_owned(),
-                        registration.parallel.to_string(),
                     ];
+                    // Only the values it took from flags (task 698).
+                    arguments.extend(registration.flag_arguments());
                     arguments.extend(restart_arguments.iter().cloned());
                     let started = LocalBinaries.run(&job.target, &arguments)?;
                     Ok(json!({"by": "up --in-cmux", "up": started["supervisor"]}))

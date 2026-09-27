@@ -69,7 +69,7 @@ fn up_in_cmux_starts_the_supervisor_in_a_workspace_and_leaves_launchd_alone() {
     assert_eq!(
         command,
         &format!(
-            "'/opt/bin/dagq' '--db' {} 'supervise' '--parallel' '2' '--log-dir' {} '--cmux' {} '--claude' {} '--mode' 'in_cmux' '--plugin-dir' {}",
+            "'/opt/bin/dagq' '--db' {} 'supervise' '--log-dir' {} '--cmux' {} '--claude' {} '--mode' 'in_cmux' '--plugin-dir' {} '--parallel' '2'",
             quoted(&db),
             quoted(&fixture.location.log_dir),
             quoted(&fixture.options.cmux),

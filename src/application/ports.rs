@@ -1280,8 +1280,13 @@ pub trait RunCoordination {
     /// Turn the automatic update of the supervisor `token` on or off
     /// (ADR-0045 decision 17).
     fn set_auto_update(&self, token: &str, enabled: bool) -> Result<()>;
-    /// Record the supervisor `token`'s `--max-waiting` (ADR-0062 decision 7).
-    fn set_max_waiting(&self, token: &str, max_waiting: u32) -> Result<()>;
+    /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
+    /// (ADR-0062 decision 7) and where each comes from (task 698).
+    fn set_slot_limits(
+        &self,
+        token: &str,
+        limits: crate::domain::slot_limits::SlotLimits,
+    ) -> Result<()>;
     fn holds_lease(&self, id: &RunId, token: &str) -> Result<bool>;
     fn run_leases(&self) -> Result<Vec<RunLease>>;
     fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;

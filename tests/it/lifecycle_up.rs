@@ -191,8 +191,6 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         "--db",
         db.to_str().unwrap(),
         "supervise",
-        "--parallel",
-        "2",
         "--log-dir",
         fixture.location.log_dir.to_str().unwrap(),
         "--cmux",
@@ -204,6 +202,9 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         "launchd",
         "--plugin-dir",
         plugin_dir.to_str().unwrap(),
+        // Given to `up`, so passed on (task 698).
+        "--parallel",
+        "2",
     ]
     .iter()
     .map(|argument| format!("\t\t{}\n", string(argument)))
@@ -1172,4 +1173,55 @@ fn up_passes_max_load_to_the_supervisor_only_off_the_default() {
     assert!(command.contains("'--max-load' '0'"), "{command}");
     let command = in_cmux_command(dagq::domain::claim_hold::DEFAULT_MAX_LOAD);
     assert!(!command.contains("--max-load"), "{command}");
+}
+
+/// `up --parallel` and `--max-waiting` reach the supervisor it starts only
+/// when given (task 698): one not given is left out in both modes, so the
+/// supervisor follows `[supervisor]` of `dagq.toml` instead of a default
+/// baked into its arguments.
+#[test]
+fn up_passes_parallel_and_max_waiting_only_when_given() {
+    let launchd_arguments = |parallel: Option<u16>, max_waiting: Option<u16>| {
+        let mut fixture = fixture();
+        fixture.options.parallel = parallel;
+        fixture.options.max_waiting = max_waiting;
+        let cmux = FakeCmux::default();
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        let installs = launchd.installs.lock().unwrap();
+        installs[0].2.clone()
+    };
+    let contents = launchd_arguments(None, None);
+    assert!(!contents.contains("--parallel"), "{contents}");
+    assert!(!contents.contains("--max-waiting"), "{contents}");
+    let contents = launchd_arguments(Some(4), Some(0));
+    assert!(
+        contents.contains("\t\t<string>--parallel</string>\n\t\t<string>4</string>\n"),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("\t\t<string>--max-waiting</string>\n\t\t<string>0</string>\n"),
+        "{contents}"
+    );
+
+    let in_cmux_command = |parallel: Option<u16>, max_waiting: Option<u16>| {
+        let mut fixture = fixture();
+        fixture.options.in_cmux = true;
+        fixture.options.parallel = parallel;
+        fixture.options.max_waiting = max_waiting;
+        let cmux = FakeCmux {
+            registers_supervisor_in: Some(fixture.location.db.clone()),
+            ..FakeCmux::default()
+        };
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        let workspaces = cmux.workspaces.lock().unwrap();
+        workspaces[0].3.clone()
+    };
+    let command = in_cmux_command(None, None);
+    assert!(!command.contains("--parallel"), "{command}");
+    assert!(!command.contains("--max-waiting"), "{command}");
+    let command = in_cmux_command(Some(3), Some(4));
+    assert!(command.contains("'--parallel' '3'"), "{command}");
+    assert!(command.contains("'--max-waiting' '4'"), "{command}");
 }

@@ -216,9 +216,12 @@ pub type ResolveLanguage = dyn Fn(&Path, Option<&Path>) -> Result<Option<Languag
 
 #[derive(Debug, Clone)]
 pub struct UpOptions {
-    pub parallel: u16,
-    /// The supervisor's `--max-waiting` (ADR-0062 decision 7).
-    pub max_waiting: u16,
+    /// The supervisor's `--parallel`, passed only when given: without it
+    /// the supervisor follows `[supervisor]` of `dagq.toml` (task 698).
+    pub parallel: Option<u16>,
+    /// The supervisor's `--max-waiting` (ADR-0062 decision 7), passed only
+    /// when given, as `parallel` is.
+    pub max_waiting: Option<u16>,
     /// The supervisor's `--max-load` (task 327): no new run is claimed
     /// while the 1-minute load average is above it; 0 or below disables
     /// the hold.
@@ -273,7 +276,10 @@ pub fn up(
     environment: &UpEnvironment,
     options: &UpOptions,
 ) -> Result<Value> {
-    ensure!(options.parallel >= 1, "parallel must be at least 1");
+    ensure!(
+        options.parallel.is_none_or(|parallel| parallel >= 1),
+        "parallel must be at least 1"
+    );
     let (cmux, launchd, processes) = (ports.cmux, ports.launchd, ports.processes);
     let db = ports
         .files
@@ -1285,7 +1291,7 @@ pub fn supervise_command(
     )?))
 }
 
-/// `<this binary> --db <db> supervise --parallel N --log-dir <queue logs>
+/// `<this binary> --db <db> supervise [--parallel N] --log-dir <queue logs>
 /// --cmux <resolved> --claude <resolved> --mode <mode> [--plugin-dir <dir>]`:
 /// what keeps a supervisor of this queue going, in either mode. The
 /// executables are absolute so neither launchd's PATH nor the terminal's
@@ -1305,8 +1311,6 @@ fn supervise_arguments(
         "--db".into(),
         path_text(db)?,
         "supervise".into(),
-        "--parallel".into(),
-        options.parallel.to_string(),
         "--log-dir".into(),
         path_text(&location.log_dir)?,
         "--cmux".into(),
@@ -1322,11 +1326,15 @@ fn supervise_arguments(
             &dir.canonicalize().unwrap_or_else(|_| dir.clone()),
         )?);
     }
-    // The default is left out, so a supervisor started before the option
-    // existed is started with the same arguments.
-    if usize::from(options.max_waiting) != crate::domain::waiting::DEFAULT_MAX_WAITING {
+    // Only a value given is passed, so one not given follows `[supervisor]`
+    // of `dagq.toml` rather than a default baked in (task 698).
+    if let Some(parallel) = options.parallel {
+        arguments.push("--parallel".into());
+        arguments.push(parallel.to_string());
+    }
+    if let Some(max_waiting) = options.max_waiting {
         arguments.push("--max-waiting".into());
-        arguments.push(options.max_waiting.to_string());
+        arguments.push(max_waiting.to_string());
     }
     // 0 or below disables the hold; it is passed as 0, since a negative
     // value would read as a flag.

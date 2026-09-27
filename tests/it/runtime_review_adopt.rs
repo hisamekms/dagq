@@ -37,7 +37,7 @@ fn screen_hash(screen: &str) -> String {
 /// (ADR-0071), and goes back to its revise once the session moves.
 #[test]
 fn an_adopted_revise_keeps_the_dialog_recorded_before_and_clears_it_at_its_end() {
-    adopt_revise_at_dialog(SuperviseOptions::new(4, true).max_waiting);
+    adopt_revise_at_dialog(dagq::domain::waiting::DEFAULT_MAX_WAITING);
 }
 
 /// The same with waits turned off: the revise's own watch reads the screen
@@ -146,7 +146,7 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
                 &*reviewer,
                 Path::new(env!("CARGO_BIN_EXE_dagq")),
                 &SuperviseOptions {
-                    max_waiting,
+                    max_waiting: Some(max_waiting),
                     ..supervise_options(4, true)
                 },
             )

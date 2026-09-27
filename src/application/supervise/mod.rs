@@ -25,6 +25,7 @@
 //! idle marker). The prompts and requests are in [`super::prompt`].
 
 use crate::domain::language::with_instruction;
+use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -110,6 +111,7 @@ mod report;
 mod resume;
 mod revise;
 mod session;
+mod slot_limits;
 mod stale;
 mod stall;
 mod stall_recovery;
@@ -161,11 +163,14 @@ impl ObserveMode {
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
 #[derive(Debug, Clone)]
 pub struct LoopSettings {
-    /// Upper bound on runs executing at once.
-    pub parallel: usize,
-    /// Upper bound on the runs waiting for a person outside the slots
-    /// (ADR-0062 decision 7); zero keeps every run in its slot.
-    pub max_waiting: usize,
+    /// Upper bound on runs executing at once (`parallel`), and on the runs
+    /// waiting for a person outside the slots (`max_waiting`, ADR-0062
+    /// decision 7; zero keeps every run in its slot), with where each
+    /// comes from (task 698).
+    pub limits: SlotLimits,
+    /// The flags `limits` was resolved from: a value not given is read
+    /// again from `[supervisor]` each pass.
+    pub slot_flags: SlotFlags,
     /// Exit when no run is active and no task can be claimed, instead of
     /// polling for new work.
     pub once: bool,
@@ -321,6 +326,10 @@ pub struct Ports<'a> {
     /// file), read again each pass (ADR-0080); `None` when the options
     /// set the thresholds, which are then never read again.
     pub conflicts_file: Option<ConflictsFile>,
+    /// `[supervisor]` of the main checkout's `dagq.toml` (`None` for no
+    /// file), read again each pass for the values the flags did not give
+    /// (task 698); `None` reads nothing.
+    pub supervisor_file: Option<SupervisorFile>,
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
@@ -330,6 +339,9 @@ pub struct Ports<'a> {
 /// Reads `[conflicts]` of the main checkout's `dagq.toml` (ADR-0080).
 pub type ConflictsFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::stats::ConflictConfig>> + Send + Sync>;
+
+/// Reads `[supervisor]` of the main checkout's `dagq.toml` (task 698).
+pub type SupervisorFile = Arc<dyn Fn() -> Result<Option<SupervisorConfig>> + Send + Sync>;
 
 /// Spawn a thread that reports its `tracing` events to the subscriber of
 /// the spawning thread, so a supervisor run under a scoped subscriber (the
@@ -411,7 +423,10 @@ pub struct RunError {
 /// is picked up on a later pass with the then-current `main` as its base.
 /// Accepted runs are reviewed headless by the reviewer (ADR-0027).
 pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
-    ensure!(settings.parallel >= 1, "parallel must be at least 1");
+    ensure!(
+        settings.limits.parallel.value >= 1,
+        "parallel must be at least 1"
+    );
     let layout = &ports.layout;
     ensure!(
         !layout.db.starts_with(&layout.repo_root) || layout.db.starts_with(&layout.common_dir),
@@ -421,8 +436,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     ports.agent.preflight()?;
     let mut queue = ports.queues.open()?;
     queue.bind_repository(&path_text(&layout.common_dir)?)?;
-    let parallel =
-        u32::try_from(settings.parallel).context("parallel does not fit a registration")?;
+    let parallel = u32::try_from(settings.limits.parallel.value)
+        .context("parallel does not fit a registration")?;
     let pid = layout.pid;
     let mut previous_version = None;
     let token = match &settings.handoff_token {
@@ -464,11 +479,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         }
     };
     // Next to `parallel` on the registration, for `status` (ADR-0062
-    // decision 7); written again by the process an exec continues.
-    queue.set_max_waiting(
-        &token,
-        u32::try_from(settings.max_waiting).context("max-waiting does not fit a registration")?,
-    )?;
+    // decision 7), with where each comes from (task 698); written again by
+    // the process an exec continues.
+    queue.set_slot_limits(&token, settings.limits)?;
     let mut config = serde_json::to_value(settings.stall)?;
     config["supervisor"] = json!(token);
     queue.record_queue_event(STALL_CONFIG_LOADED, config)?;
@@ -517,8 +530,12 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         token,
         heartbeat,
         slots: Vec::new(),
-        parallel: settings.parallel,
-        max_waiting: settings.max_waiting,
+        parallel: settings.limits.parallel.value,
+        max_waiting: settings.limits.max_waiting.value,
+        limits: settings.limits,
+        slot_flags: settings.slot_flags,
+        supervisor_file: ports.supervisor_file.clone(),
+        supervisor_error: None,
         finished: Vec::new(),
         errors: Vec::new(),
         claiming: true,
@@ -614,6 +631,16 @@ struct Supervisor<'a> {
     parallel: usize,
     /// `--max-waiting` (ADR-0062 decision 7).
     max_waiting: usize,
+    /// `parallel` and `max_waiting` with where each comes from, as last
+    /// resolved (task 698).
+    limits: SlotLimits,
+    /// The flags given; a value not given follows `[supervisor]`.
+    slot_flags: SlotFlags,
+    /// Reads `[supervisor]` again each pass; `None` keeps `limits`.
+    supervisor_file: Option<SupervisorFile>,
+    /// The error the last read of `[supervisor]` failed with, warned of
+    /// once until it changes or a read succeeds.
+    supervisor_error: Option<String>,
     finished: Vec<TaskRun>,
     errors: Vec<RunError>,
     /// Cleared after a provisioning failure so an unavailable cmux or Git
@@ -909,6 +936,9 @@ impl Supervisor<'_> {
             // Every pass, before any claim: a change of `[conflicts]` takes
             // effect without a restart (ADR-0080).
             self.reread_conflicts()?;
+            // And `[supervisor]`: a change of `parallel` or `max_waiting`
+            // takes effect without a restart (task 698).
+            self.reread_slot_limits()?;
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             self.check_disk()?;
@@ -972,8 +1002,8 @@ impl Supervisor<'_> {
                 }
             }
             if self.claiming && !stopping {
-                self.fill_slots(options.parallel, options.sweep_interval)?;
-                self.sample_candidates(options.parallel);
+                self.fill_slots(self.parallel, options.sweep_interval)?;
+                self.sample_candidates(self.parallel);
             }
             self.poll_observer();
             self.record_session_turns(false);
