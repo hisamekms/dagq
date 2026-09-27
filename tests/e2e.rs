@@ -11,6 +11,13 @@
 //! no project runs the launchd mode now, and without a cmux socket password
 //! its preflight always stops `up`. It returns at once, printing why, unless
 //! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test always runs.
+#[path = "e2e/cleanup.rs"]
+mod cleanup;
+
+use cleanup::{
+    GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_retrying, listed_group,
+    listed_workspace, sweep_abandoned_fixtures, wait_until_not_listed, workspace_listed,
+};
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -224,39 +231,6 @@ fn cmux_executable() -> PathBuf {
         .unwrap_or_else(|| "cmux".into())
 }
 
-/// How many times [`cmux_retrying`] runs a cmux query, and how long it waits
-/// between tries. cmux can answer `ping`, `workspace list` or
-/// `workspace-group list` with a failure for a moment while other e2e tests
-/// running in parallel open and close workspaces; a few short retries ride that out, where running the e2e
-/// tests one at a time would lengthen the whole run.
-const CMUX_RETRY_ATTEMPTS: u32 = 5;
-const CMUX_RETRY_INTERVAL: Duration = Duration::from_millis(500);
-
-/// Run `cmux args` until `accept` holds of its output, up to
-/// [`CMUX_RETRY_ATTEMPTS`] times [`CMUX_RETRY_INTERVAL`] apart, and return
-/// the last output. A cmux that cannot be started at all is returned at once:
-/// that is not a transient failure.
-fn cmux_retrying(
-    cmux: &Path,
-    args: &[&str],
-    accept: impl Fn(&std::process::Output) -> bool,
-) -> std::io::Result<std::process::Output> {
-    let mut attempt = 1;
-    loop {
-        let output = Command::new(cmux).args(args).output()?;
-        if accept(&output) || attempt >= CMUX_RETRY_ATTEMPTS {
-            return Ok(output);
-        }
-        eprintln!(
-            "cmux {args:?} failed ({}), retrying ({attempt}/{CMUX_RETRY_ATTEMPTS}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        attempt += 1;
-        thread::sleep(CMUX_RETRY_INTERVAL);
-    }
-}
-
 /// Fail loudly, never skip, when cmux is missing: the test would prove nothing.
 fn preflight(cmux: &Path) -> String {
     let hint = "the e2e test needs a running cmux; put cmux on PATH or set DAGQ_E2E_CMUX";
@@ -330,6 +304,25 @@ fn status_when(env: &Env, condition: impl Fn(&Value) -> bool) -> Value {
 }
 
 fn dagq_with(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> Value {
+    checked(args, dagq_output(env, extra, args))
+}
+
+/// [`dagq_with`] for a command that opens workspaces (`up`, `plan`): every
+/// workspace its output names goes into `guard` before anything about the
+/// output is checked, so a failing command or assertion still has them
+/// closed when the test ends.
+fn dagq_opening(
+    env: &Env,
+    extra: &[(&str, &Path)],
+    args: &[&str],
+    guard: &mut WorkspaceGuard,
+) -> Value {
+    let output = dagq_output(env, extra, args);
+    guard.record_opened(&output.stdout);
+    checked(args, output)
+}
+
+fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::process::Output {
     let mut command = Command::new(BIN);
     command
         .current_dir(&env.repo)
@@ -339,91 +332,16 @@ fn dagq_with(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> Value {
     for (key, value) in extra {
         command.env(key, value);
     }
-    let output = command.output().unwrap();
+    command.output().unwrap()
+}
+
+fn checked(args: &[&str], output: std::process::Output) -> Value {
     assert!(
         output.status.success(),
         "dagq {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
-}
-
-/// The workspace's entry in `cmux --json workspace list`, while it is listed.
-fn listed_workspace(cmux: &Path, id: &str) -> Option<Value> {
-    let output = cmux_retrying(
-        cmux,
-        &["--json", "--id-format", "uuids", "workspace", "list"],
-        |output| output.status.success() && serde_json::from_slice::<Value>(&output.stdout).is_ok(),
-    )
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "cmux workspace list failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
-    list["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|w| w["id"].as_str().is_some_and(|w| w.eq_ignore_ascii_case(id)))
-        .cloned()
-}
-
-fn workspace_listed(cmux: &Path, id: &str) -> bool {
-    listed_workspace(cmux, id).is_some()
-}
-
-/// cmux confirms a `workspace close` before the workspace leaves its
-/// listing, so "gone" is waited for rather than asserted on the first look.
-fn wait_until_not_listed(cmux: &Path, id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while workspace_listed(cmux, id) {
-        assert!(
-            Instant::now() < deadline,
-            "workspace {id} is still listed 30s after it was closed"
-        );
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// Closes the workspaces the supervisor created if they are still open when
-/// the test ends, on success and on panic alike. On the happy path the
-/// supervisor has already closed them; cmux 0.64 also closes a workspace by
-/// itself once its command exits. Either way "not listed" is the expected
-/// state, not a failure.
-struct WorkspaceGuard {
-    cmux: PathBuf,
-    ids: Vec<String>,
-}
-
-impl Drop for WorkspaceGuard {
-    fn drop(&mut self) {
-        for id in &self.ids {
-            if !workspace_listed(&self.cmux, id) {
-                eprintln!("workspace {id} already closed");
-                continue;
-            }
-            // cmux refuses to close a pinned workspace (the inbox is
-            // pinned, ADR-0031).
-            let _ = Command::new(&self.cmux)
-                .args(["workspace-action", "--action", "unpin", "--workspace", id])
-                .output();
-            match Command::new(&self.cmux)
-                .args(["workspace", "close"])
-                .arg(id)
-                .output()
-            {
-                Ok(output) if output.status.success() => eprintln!("closed workspace {id}"),
-                Ok(output) => eprintln!(
-                    "closing workspace {id} failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-                Err(error) => eprintln!("closing workspace {id} failed: {error}"),
-            }
-        }
-    }
 }
 
 /// The workspace is pinned, has the sidebar color `color` (cmux lists a
@@ -442,30 +360,6 @@ fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
     assert!(status.lines().any(|line| line == pill), "{status}");
 }
 
-/// The queue's workspace group in `cmux --json workspace-group list`,
-/// found by its external ID (the queue hash).
-fn listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
-    let output = cmux_retrying(
-        cmux,
-        &["--json", "--id-format", "uuids", "workspace-group", "list"],
-        |output| output.status.success() && serde_json::from_slice::<Value>(&output.stdout).is_ok(),
-    )
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "cmux workspace-group list failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
-    list["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|group| group["external_id"] == external_id)
-        .cloned()
-}
-
 /// `cmux workspace env <id> --json`: the environment the workspace was
 /// created with.
 fn workspace_env(cmux: &Path, id: &str) -> Value {
@@ -479,36 +373,6 @@ fn workspace_env(cmux: &Path, id: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice::<Value>(&output.stdout).unwrap()["env"].clone()
-}
-
-/// Deletes the queue's workspace group and closes what is left in it (the
-/// anchor cmux generated with it) when the test ends.
-struct GroupGuard {
-    cmux: PathBuf,
-    external_id: String,
-}
-
-impl Drop for GroupGuard {
-    fn drop(&mut self) {
-        // Never panic here: a panic while the test is already unwinding
-        // aborts the whole test binary. A group left behind is swept by the
-        // next fixture.
-        let Some(group) = try_listed_group(&self.cmux, &self.external_id) else {
-            return;
-        };
-        let id = group["id"].as_str().unwrap_or_default().to_owned();
-        match Command::new(&self.cmux)
-            .args(["workspace-group", "delete", &id, "--close-workspaces"])
-            .output()
-        {
-            Ok(output) if output.status.success() => eprintln!("deleted workspace group {id}"),
-            Ok(output) => eprintln!(
-                "deleting workspace group {id} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            Err(error) => eprintln!("deleting workspace group {id} failed: {error}"),
-        }
-    }
 }
 
 /// Kills a still-running supervisor when an assertion fails mid-run.
@@ -529,270 +393,6 @@ fn reader(mut source: impl Read + Send + 'static) -> thread::JoinHandle<String> 
         source.read_to_string(&mut text).unwrap();
         text
     })
-}
-
-/// The file in a fixture's temporary directory that its test process holds an
-/// exclusive `flock` on for as long as the fixture lives. The lock goes away
-/// with the process however it ends, SIGKILL included, so a directory whose
-/// owner file can be locked by someone else belongs to a dead test.
-const OWNER_FILE: &str = "e2e-owner";
-/// A fixture directory without an owner file, left by an e2e from before the
-/// owner file existed, is swept only once it is this old.
-const UNMARKED_SWEEP_AGE: Duration = Duration::from_secs(60 * 60);
-
-/// Take ownership of a fresh fixture directory: lock the owner file under a
-/// temporary name and rename it into place, so a concurrent sweep never sees
-/// an owner file that is not yet locked.
-fn claim_fixture_dir(dir: &Path) -> fs::File {
-    let staging = dir.join(format!("{OWNER_FILE}.tmp"));
-    let mut file = fs::File::create(&staging).unwrap();
-    file.lock().unwrap();
-    use std::io::Write;
-    writeln!(file, "{}", std::process::id()).unwrap();
-    fs::rename(&staging, dir.join(OWNER_FILE)).unwrap();
-    file
-}
-
-/// Clean up what earlier e2e tests left behind when their process died before
-/// its guards and `TempDir` could drop (SIGTERM, SIGKILL): the processes
-/// running from or on their temporary directory, the cmux workspaces whose
-/// `DAGQ_QUEUE` or `E2E_SHARED` points into it, the workspace groups named
-/// after its queue hashes, and the directory itself. A directory counts as
-/// left behind only when its owner lock is free (the owner process is gone),
-/// or, without an owner file, when it has the fixture's shape and is older
-/// than [`UNMARKED_SWEEP_AGE`]. The sweep holds that lock while it works, so
-/// concurrent sweeps never take the same directory. Nothing outside those
-/// directories is touched: the production queue's workspaces carry no such
-/// env and its group has another external ID.
-fn sweep_abandoned_fixtures(cmux: &Path) {
-    let Ok(entries) = fs::read_dir(env::temp_dir()) else {
-        return;
-    };
-    let mut abandoned = Vec::new();
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !entry.file_name().to_string_lossy().starts_with(".tmp") {
-            continue;
-        }
-        if let Some(lock) = claim_abandoned(&dir) {
-            abandoned.push((dir, lock));
-        }
-    }
-    if abandoned.is_empty() {
-        return;
-    }
-    let prefixes: Vec<(PathBuf, Vec<PathBuf>)> = abandoned
-        .iter()
-        .map(|(dir, _)| {
-            let mut forms = vec![dir.clone()];
-            if let Ok(real) = dir.canonicalize()
-                && real != *dir
-            {
-                forms.push(real);
-            }
-            (dir.clone(), forms)
-        })
-        .collect();
-    let inside = |value: &str| {
-        prefixes
-            .iter()
-            .flat_map(|(_, forms)| forms)
-            .any(|form| Path::new(value).starts_with(form))
-    };
-    for (dir, _) in &abandoned {
-        eprintln!("e2e sweep: {} was left by a dead e2e", dir.display());
-    }
-    kill_processes_inside(&inside);
-    for (dir, _) in &abandoned {
-        for hash in queue_hashes(dir) {
-            delete_group(cmux, &hash);
-        }
-    }
-    close_workspaces_inside(cmux, &inside);
-    for (dir, lock) in abandoned {
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => eprintln!("e2e sweep: removed {}", dir.display()),
-            Err(error) => eprintln!("e2e sweep: removing {} failed: {error}", dir.display()),
-        }
-        drop(lock);
-    }
-}
-
-/// The locked owner file of `dir` when `dir` is a fixture directory whose
-/// owner is gone, `None` when it is live, not a fixture, or taken by another
-/// sweep.
-fn claim_abandoned(dir: &Path) -> Option<fs::File> {
-    let owner = dir.join(OWNER_FILE);
-    let file = if owner.exists() {
-        fs::File::open(&owner).ok()?
-    } else {
-        // An e2e from before the owner file: recognize the fixture by its
-        // stub agent and queue data home, and wait until it is old.
-        if !dir.join("claude-stub").is_file() || !dir.join("data").is_dir() {
-            return None;
-        }
-        let age = fs::metadata(dir).ok()?.modified().ok()?.elapsed().ok()?;
-        if age < UNMARKED_SWEEP_AGE {
-            return None;
-        }
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&owner)
-            .ok()?
-    };
-    file.try_lock().ok()?;
-    Some(file)
-}
-
-/// The queue hashes under the fixture's data home, which are the external
-/// IDs of the queues' workspace groups.
-fn queue_hashes(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir.join("data").join("dagq")) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect()
-}
-
-/// Terminate the processes an abandoned directory started: those whose
-/// program is in it (the runner copy), the stub agent (`/bin/sh
-/// <dir>/claude-stub`), and a `dagq` binary given its queue or stub
-/// (`--db`, `--claude`), like the temporary queue's supervisor. `ps` joins
-/// argv with spaces, so only these shapes are matched: a word of some other
-/// process's arguments, like a Claude prompt that quotes such a path, never
-/// makes it a target.
-fn kill_processes_inside(inside: &dyn Fn(&str) -> bool) {
-    let Ok(output) = Command::new("ps")
-        .args(["-axww", "-o", "pid=,command="])
-        .output()
-    else {
-        eprintln!("e2e sweep: ps failed; left processes alone");
-        return;
-    };
-    let me = std::process::id();
-    let mut victims = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut words = line.split_whitespace();
-        let Some(pid) = words.next().and_then(|pid| pid.parse::<u32>().ok()) else {
-            continue;
-        };
-        let argv: Vec<&str> = words.collect();
-        let program = argv.first().is_some_and(|word| inside(word));
-        let stub = argv.first() == Some(&"/bin/sh")
-            && argv
-                .get(1)
-                .is_some_and(|word| word.ends_with("/claude-stub") && inside(word));
-        let dagq = argv
-            .first()
-            .is_some_and(|word| Path::new(word).file_name() == Some("dagq".as_ref()))
-            && argv
-                .windows(2)
-                .any(|pair| matches!(pair[0], "--db" | "--claude") && inside(pair[1]));
-        if pid != me && (program || stub || dagq) {
-            eprintln!("e2e sweep: terminating process {pid}: {}", argv.join(" "));
-            victims.push(pid);
-        }
-    }
-    for pid in &victims {
-        // SAFETY: kill has no memory preconditions.
-        unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
-    }
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while victims.iter().any(|pid| pid_alive(*pid)) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
-    }
-    for pid in victims.iter().filter(|pid| pid_alive(**pid)) {
-        eprintln!("e2e sweep: killing process {pid}, still alive after SIGTERM");
-        // SAFETY: as above.
-        unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
-    }
-}
-
-fn delete_group(cmux: &Path, external_id: &str) {
-    let Some(group) = try_listed_group(cmux, external_id) else {
-        return;
-    };
-    let id = group["id"].as_str().unwrap_or_default().to_owned();
-    let name = group["name"].as_str().unwrap_or_default().to_owned();
-    match Command::new(cmux)
-        .args(["workspace-group", "delete", &id, "--close-workspaces"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            eprintln!("e2e sweep: deleted workspace group {id} {name} (queue {external_id})")
-        }
-        Ok(output) => eprintln!(
-            "e2e sweep: deleting workspace group {id} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-        Err(error) => eprintln!("e2e sweep: deleting workspace group {id} failed: {error}"),
-    }
-}
-
-/// Close each listed workspace whose `DAGQ_QUEUE` or `E2E_SHARED` points
-/// into an abandoned directory. A workspace without those variables, like
-/// every workspace of the production queue other than its runs, is skipped.
-fn close_workspaces_inside(cmux: &Path, inside: &dyn Fn(&str) -> bool) {
-    let Some(list) = cmux_json(
-        cmux,
-        &["--json", "--id-format", "uuids", "workspace", "list"],
-    ) else {
-        eprintln!("e2e sweep: cmux workspace list failed; left workspaces alone");
-        return;
-    };
-    for workspace in list["workspaces"].as_array().into_iter().flatten() {
-        let Some(id) = workspace["id"].as_str() else {
-            continue;
-        };
-        let Some(env) = cmux_json(cmux, &["workspace", "env", id, "--json"]) else {
-            continue;
-        };
-        let points_inside = ["DAGQ_QUEUE", "E2E_SHARED"]
-            .iter()
-            .any(|key| env["env"][key].as_str().is_some_and(inside));
-        if !points_inside {
-            continue;
-        }
-        let title = workspace["title"].as_str().unwrap_or_default();
-        match Command::new(cmux).args(["workspace", "close", id]).output() {
-            Ok(output) if output.status.success() => {
-                eprintln!("e2e sweep: closed workspace {id} {title}")
-            }
-            Ok(output) => eprintln!(
-                "e2e sweep: closing workspace {id} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            Err(error) => eprintln!("e2e sweep: closing workspace {id} failed: {error}"),
-        }
-    }
-}
-
-fn try_listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
-    let output = cmux_retrying(
-        cmux,
-        &["--json", "--id-format", "uuids", "workspace-group", "list"],
-        |output| output.status.success() && serde_json::from_slice::<Value>(&output.stdout).is_ok(),
-    )
-    .ok()?;
-    let list: Value = serde_json::from_slice(&output.stdout).ok()?;
-    list["groups"]
-        .as_array()?
-        .iter()
-        .find(|group| group["external_id"] == external_id)
-        .cloned()
-}
-
-fn cmux_json(cmux: &Path, args: &[&str]) -> Option<Value> {
-    let output = Command::new(cmux).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    serde_json::from_slice(&output.stdout).ok()
 }
 
 /// Disposable repository, queue and stub agent, all outside this repository.
@@ -994,13 +594,13 @@ fn supervise_once(
                 .last()
                 .and_then(|r| r["workspace_id"].as_str())
             {
+                guard.record(id);
                 uuid::Uuid::parse_str(id).expect("workspace id is a UUID");
                 eprintln!(
                     "task {task} workspace {id} registered after {:?}",
                     started.elapsed()
                 );
                 workspaces.push((task.to_string(), id.to_owned()));
-                guard.ids.push(id.to_owned());
             }
         }
         if workspaces.len() == tasks.len() && !listed_together {
@@ -1598,6 +1198,9 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
         .iter()
         .find(|e| e["kind"] == "resume_finished")
         .unwrap();
+    if let Some(id) = finished["payload"]["workspace_id"].as_str() {
+        guard.record(id);
+    }
     assert_eq!(finished["payload"]["outcome"], "resolved", "{finished}");
     assert_eq!(finished["payload"]["workspace_closed"], true, "{finished}");
     let resume_workspace = finished["payload"]["workspace_id"].as_str().unwrap();
@@ -1685,7 +1288,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     };
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
-    guard.ids.push(workspace.clone());
+    guard.record(&workspace);
     eprintln!(
         "worker of run {run_id} started after {:?}; killing supervisor {victim_pid}",
         started.elapsed()
@@ -1959,16 +1562,8 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     let started = Instant::now();
     // A supervisor that never registers is diagnosed from launchd.log,
     // which `up` names in its error; show it before failing.
-    let output = {
-        let mut command = Command::new(BIN);
-        command
-            .current_dir(&env.repo)
-            .env("XDG_DATA_HOME", &env.data_home)
-            .env("HOME", &home)
-            .env_remove("CLAUDE_CONFIG_DIR")
-            .args(up_args);
-        command.output().unwrap()
-    };
+    let output = dagq_output(env, &[("HOME", home.as_path())], &up_args);
+    workspaces.record_opened(&output.stdout);
     if !output.status.success() {
         let launchd_log = log_dir.join("launchd.log");
         eprintln!(
@@ -1995,7 +1590,6 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
             assert_eq!(first[key]["name"], format!("[{repo_name}]{key}"));
             let id = first[key]["workspace_id"].as_str().unwrap().to_owned();
             uuid::Uuid::parse_str(&id).expect("workspace id is a UUID");
-            workspaces.ids.push(id.clone());
             assert!(workspace_listed(cmux, &id));
             id
         })
@@ -2046,7 +1640,7 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     assert_eq!(status["runs"], Value::Array(vec![]));
 
     // Idempotent: nothing is started or opened twice.
-    let second = dagq_with(env, &[("HOME", home.as_path())], &up_args);
+    let second = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
     assert_eq!(second["supervisor"]["outcome"], "reused", "{second}");
     assert_eq!(second["supervisor"]["version"], VERSION, "{second}");
     assert_eq!(second["supervisor"]["pid"], pid);
@@ -2121,7 +1715,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         stub.to_str().unwrap(),
     ];
     let started = Instant::now();
-    let first = dagq_with(env, &[("HOME", home.as_path())], &up_args);
+    let first = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
     eprintln!("up --in-cmux took {:?}: {first}", started.elapsed());
     assert_eq!(first["supervisor"]["outcome"], "started", "{first}");
     assert_eq!(first["supervisor"]["mode"], "in_cmux");
@@ -2136,13 +1730,11 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         .unwrap()
         .to_owned();
     uuid::Uuid::parse_str(&supervisor_workspace).expect("workspace id is a UUID");
-    workspaces.ids.push(supervisor_workspace.clone());
     assert!(workspace_listed(cmux, &supervisor_workspace));
     let pid = u32::try_from(first["supervisor"]["pid"].as_u64().unwrap()).unwrap();
     assert!(pid_alive(pid));
     assert_eq!(first["inbox"]["outcome"], "created", "{first}");
     let inbox = first["inbox"]["workspace_id"].as_str().unwrap().to_owned();
-    workspaces.ids.push(inbox.clone());
     // `up` opens no planner (ADR-0041 decision 6); `plan` does.
     assert_eq!(first.get("planner"), None, "{first}");
 
@@ -2232,10 +1824,8 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     let deadline = Instant::now() + Duration::from_secs(180);
     let run_id = loop {
         let detail = dagq(env, &["show", &task_id, "--full"]);
-        if let Some(id) = detail["runs"][0]["workspace_id"].as_str()
-            && !workspaces.ids.iter().any(|known| known == id)
-        {
-            workspaces.ids.push(id.to_owned());
+        if let Some(id) = detail["runs"][0]["workspace_id"].as_str() {
+            workspaces.record(id);
         }
         if detail["task"]["status"] == "completed" {
             break detail["runs"][0]["id"].as_str().unwrap().to_owned();
@@ -2306,7 +1896,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
 
     // Idempotent: the live supervisor is of this binary's own version, so
     // it is reused with its mode and workspace and nothing is replaced.
-    let second = dagq_with(env, &[("HOME", home.as_path())], &up_args);
+    let second = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
     assert_eq!(second["supervisor"]["outcome"], "reused", "{second}");
     assert_eq!(second["supervisor"]["version"], VERSION, "{second}");
     assert_eq!(second["supervisor"]["mode"], "in_cmux");
@@ -2328,7 +1918,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         .output()
         .unwrap();
     assert!(unpin.status.success(), "{unpin:?}");
-    let third = dagq_with(env, &[("HOME", home.as_path())], &up_args);
+    let third = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
     assert_eq!(third["inbox"]["outcome"], "reused", "{third}");
     assert_eq!(third["warnings"], serde_json::json!([]), "{third}");
     assert_look(cmux, &inbox, "#7D6608", "dagq_role=inbox icon=tray");
@@ -2430,8 +2020,8 @@ fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
         "--plugin-dir",
         plugin_dir.to_str().unwrap(),
     ];
-    let first = dagq(env, &plan_args);
-    let second = dagq(env, &plan_args);
+    let first = dagq_opening(env, &[], &plan_args, &mut workspaces);
+    let second = dagq_opening(env, &[], &plan_args, &mut workspaces);
     eprintln!("plan: {first}\nplan: {second}");
     let repo_name = repo.file_name().unwrap().to_str().unwrap();
     let db = db.canonicalize().unwrap();
@@ -2452,7 +2042,6 @@ fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
             .unwrap()
             .to_owned();
         uuid::Uuid::parse_str(&id).expect("workspace id is a UUID");
-        workspaces.ids.push(id.clone());
         let listed = listed_workspace(cmux, &id).expect("the planner workspace is listed");
         assert_eq!(listed["title"], format!("[{repo_name}]planner#{planner}"));
         assert_eq!(listed["pinned"], false, "{listed}");
@@ -2556,13 +2145,7 @@ fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
         assert!(close.status.success(), "{close:?}");
     }
     wait_until_not_listed(cmux, &ids[0]);
-    let third = dagq(env, &plan_args);
-    workspaces.ids.push(
-        third["planner"]["workspace_id"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-    );
+    let third = dagq_opening(env, &[], &plan_args, &mut workspaces);
     assert_eq!(third["planner"]["id"], 3, "{third}");
     let states: Vec<Value> = planners(env)
         .iter()
@@ -2641,7 +2224,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     };
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
-    guard.ids.push(workspace.clone());
+    guard.record(&workspace);
     let run_dir = PathBuf::from(run["run_dir"].as_str().unwrap());
 
     let installed = dagq(
@@ -2841,7 +2424,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     };
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
-    guard.ids.push(workspace.clone());
+    guard.record(&workspace);
     let run_dir = PathBuf::from(run["run_dir"].as_str().unwrap());
 
     // A change of the runtime lands on main while the worker works.
@@ -2922,4 +2505,256 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let stderr = stderr.take().unwrap().join().unwrap();
     assert!(exit.success(), "{exit}\n{stderr}");
     assert!(!stderr.contains("could not exec"), "{stderr}");
+}
+
+/// Run `cmux args`, which must succeed, and return what it printed.
+fn cmux_ok(cmux: &Path, args: &[&str]) -> String {
+    let output = Command::new(cmux).args(args).output().unwrap();
+    assert!(output.status.success(), "cmux {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A cmux window the test opened, closed with whatever is left in it when
+/// the test ends.
+struct WindowGuard {
+    cmux: PathBuf,
+    id: String,
+    /// The workspaces the window may be closed with: the one cmux opened in
+    /// it and those the test moved there.
+    own: Vec<String>,
+}
+
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        // Workspaces opened elsewhere without `--window` (another e2e, a
+        // supervisor's run) can land in this window while it is focused:
+        // leave it open rather than close them with it.
+        let others: Vec<String> = Command::new(&self.cmux)
+            .args(["--json", "--id-format", "uuids", "workspace", "list"])
+            .args(["--window", &self.id])
+            .output()
+            .ok()
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .and_then(|list| list["workspaces"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|w| w["id"].as_str().map(str::to_owned))
+            .filter(|id| !self.own.iter().any(|own| own.eq_ignore_ascii_case(id)))
+            .collect();
+        if !others.is_empty() {
+            eprintln!(
+                "left window {} open: it holds workspaces the test did not open: {others:?}",
+                self.id
+            );
+            return;
+        }
+        match Command::new(&self.cmux)
+            .args(["close-window", "--window", &self.id])
+            .output()
+        {
+            Ok(output) if output.status.success() => eprintln!("closed window {}", self.id),
+            Ok(output) => eprintln!("closing window {} failed: {output:?}", self.id),
+            Err(error) => eprintln!("closing window {} failed: {error}", self.id),
+        }
+    }
+}
+
+/// Move `ids` to `window` and wait until its listing shows them: cmux
+/// confirms a move before its listing does.
+fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
+    for id in ids {
+        cmux_ok(
+            cmux,
+            &[
+                "move-workspace-to-window",
+                "--workspace",
+                id,
+                "--window",
+                window,
+            ],
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let in_window: Value = serde_json::from_str(&cmux_ok(
+            cmux,
+            &[
+                "--json",
+                "--id-format",
+                "uuids",
+                "workspace",
+                "list",
+                "--window",
+                window,
+            ],
+        ))
+        .unwrap();
+        let moved = |id: &&String| {
+            in_window["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["id"].as_str().unwrap().eq_ignore_ascii_case(id))
+        };
+        if ids.iter().all(moved) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "not moved to window {window}: {in_window}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Whether the sweep e2e moves its workspaces to a window of its own. It is
+/// off unless `DAGQ_E2E_WINDOWS=1`: while a window opens or closes, cmux
+/// answers `workspace list --window` for it with "TabManager not available",
+/// and the runtime's listing of every window (`planners`, `up`, the
+/// supervisor) fails on that, so a default e2e that opens a window would
+/// break the other e2e tests and runs on the host that list at that moment.
+fn window_e2e_enabled() -> bool {
+    if env::var("DAGQ_E2E_WINDOWS").as_deref() == Ok("1") {
+        return true;
+    }
+    eprintln!(
+        "the sweep e2e keeps its workspaces in this window; set DAGQ_E2E_WINDOWS=1 to \
+         move them to a new window (only when nothing else on the host lists cmux)"
+    );
+    false
+}
+
+/// What an e2e leaves in cmux when a workspace escaped its guard and the
+/// fixture's temporary directory is gone (2026-09-25: a pinned inbox and
+/// planner pointing into a removed `$TMPDIR/.tmp…`) is found by the next
+/// sweep: it unpins and closes the workspace and deletes its queue's group.
+/// A workspace of a live fixture, whose directory exists, is left alone.
+/// With `DAGQ_E2E_WINDOWS=1` both sit in another window, where
+/// `listed_workspace` and the sweep still find them.
+#[test]
+#[ignore = "needs a running cmux; run with --ignored"]
+fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gone() {
+    let fixture = fixture();
+    let cmux = &fixture.cmux;
+    // Declared first so it drops last, after the guard below has unpinned
+    // and closed the workspaces in it.
+    let mut window = window_e2e_enabled().then(|| {
+        // cmux 0.64 prints `OK <window UUID>`, `--json` or not.
+        let created = cmux_ok(cmux, &["--json", "--id-format", "uuids", "new-window"]);
+        let id = created
+            .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+            .find(|word| uuid::Uuid::parse_str(word).is_ok())
+            .unwrap_or_else(|| panic!("new-window printed no window UUID: {created}"))
+            .to_owned();
+        let own = serde_json::from_str::<Value>(&cmux_ok(
+            cmux,
+            &[
+                "--json",
+                "--id-format",
+                "uuids",
+                "workspace",
+                "list",
+                "--window",
+                &id,
+            ],
+        ))
+        .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w["id"].as_str().map(str::to_owned))
+            .collect();
+        WindowGuard {
+            cmux: cmux.clone(),
+            id,
+            own,
+        }
+    });
+    let mut guard = WorkspaceGuard {
+        cmux: cmux.clone(),
+        ids: Vec::new(),
+    };
+    // A fixture directory of a dead e2e, with its queue's group, and one
+    // workspace of each: the dead one's and the live fixture's.
+    let gone = tempfile::tempdir().unwrap();
+    let hash = format!("e2esweep{}", uuid::Uuid::new_v4().simple());
+    let _group = GroupGuard {
+        cmux: cmux.clone(),
+        external_id: hash.clone(),
+    };
+    let group: Value = serde_json::from_str(&cmux_ok(
+        cmux,
+        &[
+            "--json",
+            "--id-format",
+            "uuids",
+            "workspace-group",
+            "create",
+            "--name",
+            "[e2e-sweep]",
+            "--external-id",
+            &hash,
+        ],
+    ))
+    .unwrap();
+    let group_id = group["group"]["id"].as_str().unwrap();
+    let queue = gone
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("data/dagq")
+        .join(&hash)
+        .join("queue.db");
+    let shared = fixture._dir.path().join("data/dagq/shared");
+    let mut create = |name: &str, env: String, group: Option<&str>| {
+        let mut args = vec!["--json", "--id-format", "uuids", "workspace", "create"];
+        args.extend(["--name", name, "--env", &env, "--focus", "false"]);
+        if let Some(group) = group {
+            args.extend(["--group", group]);
+        }
+        let output = Command::new(cmux).args(&args).output().unwrap();
+        guard.record_opened(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        let created: Value = serde_json::from_slice(&output.stdout).unwrap();
+        created["workspace_id"].as_str().unwrap().to_owned()
+    };
+    let left = create(
+        "e2e-sweep-left",
+        format!("DAGQ_QUEUE={}", queue.display()),
+        Some(group_id),
+    );
+    let live = create(
+        "e2e-sweep-live",
+        format!("E2E_SHARED={}", shared.display()),
+        None,
+    );
+    for id in [&left, &live] {
+        cmux_ok(
+            cmux,
+            &["workspace-action", "--action", "pin", "--workspace", id],
+        );
+    }
+    if let Some(window) = &mut window {
+        window.own.extend([left.clone(), live.clone()]);
+        move_to_window(cmux, &[&left, &live], &window.id);
+    }
+    for id in [&left, &live] {
+        let listed = listed_workspace(cmux, id).expect("the workspace is listed");
+        assert_eq!(listed["pinned"], true, "{listed}");
+    }
+    eprintln!(
+        "{} workspaces in {} windows",
+        all_workspaces(cmux).unwrap().len(),
+        cmux_ok(cmux, &["--json", "list-windows"])
+            .matches("\"id\"")
+            .count()
+    );
+    assert!(listed_group(cmux, &hash).is_some());
+
+    drop(gone);
+    sweep_abandoned_fixtures(cmux);
+    wait_until_not_listed(cmux, &left);
+    assert_eq!(listed_group(cmux, &hash), None, "the group was not deleted");
+    let live = listed_workspace(cmux, &live).expect("the live fixture's workspace is left alone");
+    assert_eq!(live["pinned"], true, "{live}");
 }
