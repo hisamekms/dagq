@@ -62,6 +62,7 @@ pub const INTEGRATION_HELD: &str = "integration_held";
 pub const INTEGRATION_REBASED: &str = "integration_rebased";
 pub const INTEGRATION_REBASE_ABORTED: &str = "integration_rebase_aborted";
 pub const INTEGRATION_RECEIPT: &str = "integration_receipt";
+pub const INTEGRATION_RETRIED: &str = "integration_retried";
 pub const INTEGRATION_STARTED: &str = "integration_started";
 pub const JOB_RESTARTED: &str = "job_restarted";
 pub const KNOWN_DIALOG_UNANSWERED: &str = "known_dialog_unanswered";

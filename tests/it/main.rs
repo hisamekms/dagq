@@ -76,6 +76,7 @@ mod runtime_stall;
 mod runtime_stall_recovery;
 mod runtime_sweep;
 mod runtime_triage;
+mod runtime_verify_flaky;
 mod runtime_verify_retry;
 mod runtime_waiting;
 mod runtime_waiting_stages;

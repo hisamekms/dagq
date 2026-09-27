@@ -6,7 +6,8 @@
 //! the runs per version and per load band, and the time each verification
 //! command takes; and why the verification commands of `integrate` failed
 //! (their `failure`, task 467), per run and per class, with the retries of
-//! the commands that failed on the host (task 639).
+//! the commands that failed on the host (task 639) and of the landings
+//! whose failed tests were all flaky (task 768).
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -386,7 +387,10 @@ pub struct FailureClassStats {
     pub runs: usize,
     /// The retries of commands that failed so first (a class of the host,
     /// task 639), and how they ended: `passed`, or `failed` again (on the
-    /// host or in the code). Zero for the classes of the code.
+    /// host or in the code). For `flaky` (task 768), the landings done once
+    /// more (`integration_retried`): `passed` when the run landed,
+    /// `failed` when it left the landing otherwise; one still landing is
+    /// in neither. Zero for the other classes of the code.
     pub retried: usize,
     pub retry_passed: usize,
     pub retry_failed: usize,
@@ -407,8 +411,11 @@ pub(super) fn verification_failures(
         runs: BTreeSet<&'a str>,
         retried: usize,
         retry_passed: usize,
+        retry_failed: usize,
     }
     let mut by_class: BTreeMap<String, Tally> = BTreeMap::new();
+    // The runs landed once more (task 768), by the class that sent them.
+    let mut relanding: BTreeMap<&str, String> = BTreeMap::new();
     for event in events
         .iter()
         .filter(|event| event.id > after && event.id <= upto && counts(event.task_id))
@@ -419,6 +426,32 @@ pub(super) fn verification_failures(
             entry.retried += 1;
             if event.payload["exit_code"].as_i64() == Some(0) {
                 entry.retry_passed += 1;
+            } else {
+                entry.retry_failed += 1;
+            }
+        }
+        if let Some(run) = &event.run_id {
+            match event.kind.as_str() {
+                "integration_retried" => {
+                    if let Some(class) = event.payload["failure"]["class"].as_str() {
+                        by_class.entry(class.to_owned()).or_default().retried += 1;
+                        relanding.insert(run.as_str(), class.to_owned());
+                    }
+                }
+                "run_integrated" => {
+                    if let Some(class) = relanding.remove(run.as_str()) {
+                        by_class.entry(class).or_default().retry_passed += 1;
+                    }
+                }
+                "integration_deferred"
+                | "integration_held"
+                | "integration_failed"
+                | "integration_error" => {
+                    if let Some(class) = relanding.remove(run.as_str()) {
+                        by_class.entry(class).or_default().retry_failed += 1;
+                    }
+                }
+                _ => (),
             }
         }
         let Some(failure) = RunVerifyFailure::of(event) else {
@@ -438,7 +471,7 @@ pub(super) fn verification_failures(
             runs: tally.runs.len(),
             retried: tally.retried,
             retry_passed: tally.retry_passed,
-            retry_failed: tally.retried - tally.retry_passed,
+            retry_failed: tally.retry_failed,
         })
         .collect();
     classes.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.class.cmp(&b.class)));
@@ -608,6 +641,44 @@ mod tests {
         let mut track = MeasureTrack::default();
         track.observe(&events[1]);
         assert!(track.finish().verify_failures[0].retry);
+    }
+
+    /// A landing done once more for flaky tests (task 768) counts under
+    /// `flaky` as passed when the run landed, failed when it left the
+    /// landing otherwise, and in neither while it still lands.
+    #[test]
+    fn landings_done_once_more_count_under_flaky() {
+        let on = |id: i64, run: &str, kind: &str, payload: Value| {
+            let mut event = event(id, kind, payload);
+            event.run_id = Some(crate::domain::RunId::new(run).unwrap());
+            event
+        };
+        let flaky = || {
+            json!({
+                "phase": "integration", "attempt": 1, "index": 1, "command": "c", "exit_code": 100,
+                "failure": {"class": "flaky", "evidence": "FLKY-FL"},
+            })
+        };
+        let retried = || json!({"code": "verification_flaky", "failure": {"class": "flaky"}});
+        let events = [
+            on(1, "a", "verification_command", flaky()),
+            on(2, "a", "integration_retried", retried()),
+            on(3, "a", "run_integrated", json!({})),
+            on(4, "b", "verification_command", flaky()),
+            on(5, "b", "integration_retried", retried()),
+            on(6, "b", "verification_command", flaky()),
+            on(7, "b", "integration_deferred", json!({})),
+            on(8, "c", "integration_retried", retried()),
+            // Not after a landing done once more.
+            on(9, "d", "run_integrated", json!({})),
+        ];
+        let classes = verification_failures(&events, EventId::new(0), EventId::new(9), |_| true);
+        assert_eq!(
+            json!(classes),
+            json!([
+                {"class": "flaky", "count": 3, "runs": 2, "retried": 3, "retry_passed": 1, "retry_failed": 1},
+            ])
+        );
     }
 
     #[test]

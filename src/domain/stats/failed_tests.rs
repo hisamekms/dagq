@@ -5,7 +5,10 @@
 //! they last did. A test that `integrate` saw fail in [`FLAKY_RUNS`] or
 //! more runs is a flaky candidate, material for the observer: a worker's
 //! own failures are mostly its work in progress (a test it has not made
-//! pass yet), so they are counted but do not make a candidate.
+//! pass yet), so they are counted but do not make a candidate. So is, from
+//! its first failure, a test that `integrate`'s verification saw fail and
+//! pass when nextest ran it again (`verification_command.flaky_tests`,
+//! task 768).
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -33,6 +36,9 @@ pub struct FailedTestStats {
     pub runs: usize,
     /// The runs whose `integrate` named it.
     pub integrate_runs: usize,
+    /// Those of `integrate` that also named it as passed on nextest's retry
+    /// (`flaky_tests`, task 768): the FLAKY mark.
+    pub flaky: usize,
     /// The time of the last event that named it.
     pub last_failed_at: String,
     /// The `verification_command` events of `integrate` that named it, the
@@ -50,7 +56,8 @@ pub struct FailedTests {
     /// runs, the most failures, and by name.
     pub tests: Vec<FailedTestStats>,
     /// The tests of `tests` that failed at `integrate` in `flaky_runs` runs
-    /// or more.
+    /// or more, or that `integrate` saw pass on nextest's retry once
+    /// (`flaky` of 1 or more).
     pub flaky_candidates: Vec<FailedTestStats>,
 }
 
@@ -61,18 +68,31 @@ enum Source {
     Worker,
 }
 
-/// The names an event gives as failed: each name once per command.
-fn named(event: &RunEvent) -> Option<(Source, Vec<&str>)> {
+/// The names an event gives as failed: each name once per command, with
+/// the names it gives as flaky (task 768).
+fn named(event: &RunEvent) -> Option<(Source, Vec<&str>, Vec<&str>)> {
     let payload = &event.payload;
-    let (source, names) = match event.kind.as_str() {
-        "verification_command" if payload["phase"] == "integration" => {
-            (Source::Integrate, &payload["failed_tests"])
-        }
-        "session_closed" => (Source::Worker, &payload["work"]["failed_tests"]),
+    let (source, names, flaky) = match event.kind.as_str() {
+        "verification_command" if payload["phase"] == "integration" => (
+            Source::Integrate,
+            strings(&payload["failed_tests"]),
+            strings(&payload["flaky_tests"]),
+        ),
+        "session_closed" => (
+            Source::Worker,
+            strings(&payload["work"]["failed_tests"]),
+            Vec::new(),
+        ),
         _ => return None,
     };
-    let names: Vec<&str> = names.as_array()?.iter().filter_map(Value::as_str).collect();
-    (!names.is_empty()).then_some((source, names))
+    (!names.is_empty()).then_some((source, names, flaky))
+}
+
+fn strings(value: &Value) -> Vec<&str> {
+    value
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
 }
 
 /// The failed tests of the events with `after < id <= upto` whose task
@@ -90,6 +110,7 @@ pub(super) fn failed_tests(
         runs: BTreeSet<&'a str>,
         integrate_runs: BTreeSet<&'a str>,
         integrate_event_ids: Vec<EventId>,
+        flaky: usize,
         last: &'a str,
     }
     let mut by_name: BTreeMap<&str, Acc> = BTreeMap::new();
@@ -97,7 +118,7 @@ pub(super) fn failed_tests(
         .iter()
         .filter(|event| event.id > after && event.id <= upto && counts(event.task_id))
     {
-        let Some((source, names)) = named(event) else {
+        let Some((source, names, flaky)) = named(event) else {
             continue;
         };
         for name in names {
@@ -106,6 +127,9 @@ pub(super) fn failed_tests(
                 Source::Integrate => {
                     acc.integrate += 1;
                     acc.integrate_event_ids.push(event.id);
+                    if flaky.contains(&name) {
+                        acc.flaky += 1;
+                    }
                 }
                 Source::Worker => acc.worker += 1,
             }
@@ -132,6 +156,7 @@ pub(super) fn failed_tests(
             worker: acc.worker,
             runs: acc.runs.len(),
             integrate_runs: acc.integrate_runs.len(),
+            flaky: acc.flaky,
             last_failed_at: acc.last.to_owned(),
         })
         .collect();
@@ -144,7 +169,7 @@ pub(super) fn failed_tests(
     });
     let flaky_candidates = tests
         .iter()
-        .filter(|test| test.integrate_runs >= FLAKY_RUNS)
+        .filter(|test| test.integrate_runs >= FLAKY_RUNS || test.flaky > 0)
         .cloned()
         .collect();
     FailedTests {
@@ -233,18 +258,18 @@ mod tests {
                 "flaky_runs": 2,
                 "tests": [
                     {"name": "x::flaky", "failures": 2, "integrate": 2, "worker": 0, "runs": 2,
-                     "integrate_runs": 2, "last_failed_at": "2026-09-27T00:00:04.000Z",
+                     "integrate_runs": 2, "flaky": 0, "last_failed_at": "2026-09-27T00:00:04.000Z",
                      "integrate_event_ids": [4, 1]},
                     {"name": "y::broken", "failures": 3, "integrate": 1, "worker": 2, "runs": 1,
-                     "integrate_runs": 1, "last_failed_at": "2026-09-27T00:00:03.000Z",
+                     "integrate_runs": 1, "flaky": 0, "last_failed_at": "2026-09-27T00:00:03.000Z",
                      "integrate_event_ids": [1]},
                     {"name": "w::in_progress", "failures": 2, "integrate": 0, "worker": 2,
-                     "runs": 2, "integrate_runs": 0,
+                     "runs": 2, "integrate_runs": 0, "flaky": 0,
                      "last_failed_at": "2026-09-27T00:00:07.000Z", "integrate_event_ids": []},
                 ],
                 "flaky_candidates": [
                     {"name": "x::flaky", "failures": 2, "integrate": 2, "worker": 0, "runs": 2,
-                     "integrate_runs": 2, "last_failed_at": "2026-09-27T00:00:04.000Z",
+                     "integrate_runs": 2, "flaky": 0, "last_failed_at": "2026-09-27T00:00:04.000Z",
                      "integrate_event_ids": [4, 1]},
                 ],
             })
@@ -269,6 +294,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A test `integrate` saw pass on nextest's retry is a candidate from
+    /// its first failure, marked `flaky`; the other tests of the same
+    /// command are not (task 768).
+    #[test]
+    fn a_test_that_passed_on_the_retry_is_a_candidate_at_once() {
+        let mut flaky = integrate(1, "a", json!(["x::flaky", "y::broken"]), "01");
+        flaky.payload["flaky_tests"] = json!(["x::flaky"]);
+        let stats = failed_tests(&[flaky], EventId::new(0), EventId::new(1), |_| true);
+        assert_eq!(stats.tests.len(), 2);
+        assert_eq!(stats.flaky_candidates.len(), 1);
+        let candidate = &stats.flaky_candidates[0];
+        assert_eq!(candidate.name, "x::flaky");
+        assert_eq!((candidate.flaky, candidate.integrate_runs), (1, 1));
+        assert_eq!(candidate.integrate_event_ids, [EventId::new(1)]);
+        let broken = stats.tests.iter().find(|t| t.name == "y::broken").unwrap();
+        assert_eq!(broken.flaky, 0);
     }
 
     /// The evidence keeps the newest [`MAX_INTEGRATE_EVENT_IDS`] ids,

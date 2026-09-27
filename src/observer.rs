@@ -512,6 +512,7 @@ pub fn observer_prompt(
          \n\
          Reading the flaky tests:\n\
          - stats' `failed_tests.flaky_candidates` lists the tests that `integrate`'s verification saw fail in `failed_tests.flaky_runs` or more runs, \
+           or saw pass when nextest ran them again (`flaky` of 1 or more: marked FLAKY from the first failure), \
            each with its `name`, its counts and `integrate_event_ids` (the `verification_command` events of `integrate` that named it, the newest first).\n\
          - Record each candidate as a finding of kind `flaky_test` on the queue with the test's name as the subject and its `integrate_event_ids` as the evidence: \
            `{dagq} finding record --kind flaky_test --queue --subject '<name>' --summary '...' --evidence <id> ...`. \
@@ -644,6 +645,7 @@ mod tests {
         for text in [
             "`failed_tests.flaky_candidates`",
             "`integrate_event_ids`",
+            "marked FLAKY from the first failure",
             "kind `flaky_test` on the queue with the test's name as the subject",
             "`dagq finding record --kind flaky_test --queue --subject '<name>' --summary '...' --evidence <id> ...`",
             "A finding that already holds those events is not recorded again.",

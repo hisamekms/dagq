@@ -94,6 +94,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t728-1](2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md) | 信頼する制御側（supervisor・wrapper・integrator・user）と信頼しないAI actor（inbox・desk・planner・worker・jobごとのactor・observer）を分け、actorをActorRoleとTrustLevelの型で表し、状態変更をapplicationの境界でdefault denyの静的なcapabilityのpolicyで認可する。host実行は助言的でsandboxではなく、この段では各roleの今の権限を変えない | 2026-09-27 |
 | [ADR-t728-2](2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md) | 着地（rebase・再検証・squash・mainの更新・push）は信頼するIntegratorだけが行い、supervisorと人のCLIは依頼を出す。reviewのpassは着地の必要条件で、着地の実行ではない | 2026-09-27 |
 | [ADR-t728-3](2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md) | inboxは全てのaskにanswerでき、dagq-recoverの手作業も人の言葉で代行してよいが、記録では人自身の操作とinboxの代行（delegated）を区別する。人しか出せない承認（I6）の強制は後のgoalにする | 2026-09-27 |
+| [ADR-t768-1](2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md) | 着地の検証のnextestは落ちたtestを1回だけ流し直してFLAKYを見分けるが検証は失敗のままにし、落ちたtestが全てFLAKYならworkerをresumeせずに着地を1回やり直す（ADR-0076決定2をamends） | 2026-09-27 |
 
 ## 置き換え・廃止されたADR
 

@@ -6,7 +6,9 @@
 //! The marks follow cargo's, nextest's, rustfmt's and `tests/common`'s
 //! output. How a class is handled is [`FailureClass::is_environmental`]'s:
 //! integrate retries a command that failed on the host once instead of
-//! resuming the worker (task 639).
+//! resuming the worker (task 639), and lands a run whose failed tests all
+//! passed when nextest ran them again ([`FailureClass::Flaky`]) once more
+//! (task 768).
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -22,6 +24,10 @@ pub enum FailureClass {
     /// A test ran out of its time: `tests/common`'s `within`, nextest's
     /// `TIMEOUT`, or `timeout(1)`'s exit 124.
     Timeout,
+    /// Every test that failed passed when nextest ran it again (`retries`
+    /// of `.config/nextest.toml`): its `FLKY-FL` (`flaky-result = "fail"`)
+    /// or `TRY n PASS` lines name each (task 768, ADR-t768-1).
+    Flaky,
     /// The code did not compile (`error[E…]`, `could not compile`).
     BuildError,
     /// clippy denied a lint.
@@ -42,6 +48,7 @@ impl FailureClass {
             Self::DiskFull => "disk_full",
             Self::Killed => "killed",
             Self::Timeout => "timeout",
+            Self::Flaky => "flaky",
             Self::BuildError => "build_error",
             Self::Lint => "lint",
             Self::TestFailure => "test_failure",
@@ -159,6 +166,11 @@ pub fn classify(
     }) {
         return found(FailureClass::Killed, lines[at]);
     }
+    // Before the timeout: a test that ran out of time and passed when run
+    // again is flaky, as any other.
+    if let Some(evidence) = all_flaky(&text) {
+        return found(FailureClass::Flaky, evidence);
+    }
     if let Some(at) = first(&|line| {
         // `tests/common`'s `within` starts its own line with the test.
         (line.starts_with("test ")
@@ -196,7 +208,11 @@ pub fn classify(
         }
         return found(FailureClass::BuildError, lines[at]);
     }
-    if let Some(at) = first(&|line| line.starts_with("FAIL [")).or_else(|| {
+    if let Some(at) = first(&|line| {
+        // `TRY n FAIL [` under nextest's retries.
+        line.starts_with("FAIL [") || (line.starts_with("TRY ") && line.contains(" FAIL ["))
+    })
+    .or_else(|| {
         first(&|line| {
             (line.starts_with("test ") && line.ends_with(" ... FAILED"))
                 || line.starts_with("test result: FAILED")
@@ -304,6 +320,65 @@ pub fn failed_tests(log: &str) -> FailedTests {
     FailedTests { names, omitted }
 }
 
+/// The tests `log` names as passed when nextest ran them again after a
+/// failure (task 768): the last word of its `FLKY-FL n/m [` (the status of
+/// a flaky test under `flaky-result = "fail"`), `FLAKY n/m [` and `TRY n
+/// PASS [` lines, each once, in the order they appear.
+pub fn flaky_tests(log: &str) -> Vec<String> {
+    let text = strip_ansi(log);
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(name) = flaky_line(line).and_then(test_name)
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The test of a nextest status line that says it passed on a retry.
+fn flaky_line(line: &str) -> Option<&str> {
+    let (status, rest) = line.split_once(" [")?;
+    let flaky = match status.split_whitespace().collect::<Vec<_>>()[..] {
+        ["FLKY-FL" | "FLAKY", count] => count.contains('/'),
+        ["TRY", n, "PASS"] => n.chars().all(|c| c.is_ascii_digit()),
+        _ => false,
+    };
+    if !flaky {
+        return None;
+    }
+    let (_, after) = rest.split_once(']')?;
+    let words: Vec<&str> = after
+        .split_whitespace()
+        .filter(|word| !word.starts_with('(') && !word.ends_with(')'))
+        .collect();
+    // A binary and a test.
+    (words.len() >= 2).then(|| words[words.len() - 1])
+}
+
+/// The line that shows the failure flaky when every test `text` names as
+/// failed is one nextest names as passed on its retry: the first flaky
+/// status line. `None` when a failed test is not flaky, when the failure
+/// names no test, or when some names were cut off.
+fn all_flaky(text: &str) -> Option<&str> {
+    let flaky = flaky_tests(text);
+    if flaky.is_empty() {
+        return None;
+    }
+    let failed = failed_tests(text);
+    if failed.names.is_empty()
+        || failed.omitted > 0
+        || !failed.names.iter().all(|name| flaky.contains(name))
+    {
+        return None;
+    }
+    let lines = || text.lines().map(str::trim);
+    lines()
+        .find(|line| line.starts_with("FLKY-FL ") || line.starts_with("FLAKY "))
+        .or_else(|| lines().find(|line| flaky_line(line).is_some()))
+}
+
 /// A nextest status line of a failed test: `FAIL [`, `TRY 2 FAIL [`,
 /// `TIMEOUT [`, `SIGKILL [` and the other signals.
 fn nextest_failure(line: &str) -> bool {
@@ -392,6 +467,7 @@ mod tests {
             assert!(class.is_environmental(), "{class:?}");
         }
         for class in [
+            Flaky,
             BuildError,
             Lint,
             TestFailure,
@@ -651,6 +727,7 @@ TOTAL  1000  100  90.00%  20000  4100  79.50%\n";
         for class in [
             FailureClass::Killed,
             FailureClass::Timeout,
+            FailureClass::Flaky,
             FailureClass::BuildError,
             FailureClass::Lint,
             FailureClass::TestFailure,
@@ -659,6 +736,126 @@ TOTAL  1000  100  90.00%  20000  4100  79.50%\n";
             FailureClass::Unknown,
         ] {
             assert_eq!(json!(class), json!(class.as_str()));
+        }
+    }
+
+    /// nextest 0.9.146 with `retries = 1` and `flaky-result = "fail"`: a
+    /// test that failed and passed on its retry (`runtime_x::flaky`), and
+    /// one that failed both times (`runtime_x::broken`).
+    fn nextest_retried(broken: bool) -> String {
+        let mut lines = vec![
+            "────────────",
+            " Nextest run ID b7e8aa25 with nextest profile: default",
+            "    Starting 3 tests across 1 binary",
+            "  TRY 1 FAIL [   0.010s] (───) dagq::it runtime_x::flaky",
+            "  stdout ───",
+            "    running 1 test",
+            "    test runtime_x::flaky ... FAILED",
+            "",
+            "    failures:",
+            "        runtime_x::flaky",
+            "",
+            "  stderr ───",
+            "    thread 'runtime_x::flaky' (243136103) panicked at tests/it/runtime_x.rs:8:9:",
+            "    test runtime_x::flaky timed out: the run to land did not happen within 20s",
+            "  TRY 2 PASS [   0.007s] (1/3) dagq::it runtime_x::flaky",
+        ];
+        if broken {
+            lines.extend([
+                "  TRY 1 FAIL [   0.006s] (───) dagq::it runtime_x::broken",
+                "  TRY 2 FAIL [   0.006s] (2/3) dagq::it runtime_x::broken",
+            ]);
+        }
+        lines.extend([
+            "  Cancelling due to test failure: 1 test still running",
+            "────────────",
+            "     Summary [   0.017s] 3 tests run: 1 passed, 2 failed, 0 skipped",
+        ]);
+        if broken {
+            lines.push("  TRY 2 FAIL [   0.006s] (2/3) dagq::it runtime_x::broken");
+        }
+        lines.extend([
+            " FLKY-FL 2/2 [   0.007s] (1/3) dagq::it runtime_x::flaky",
+            "error: test run failed",
+            "error: process didn't exit successfully: `cargo nextest run` (exit status: 100)",
+        ]);
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn failed_tests_that_all_passed_on_their_retry_are_flaky() {
+        let log = nextest_retried(false);
+        let failure = classify(LLVM_COV, Some(1), None, &log);
+        assert_eq!(failure.class, FailureClass::Flaky);
+        assert_eq!(
+            failure.evidence,
+            "FLKY-FL 2/2 [   0.007s] (1/3) dagq::it runtime_x::flaky"
+        );
+        assert_eq!(flaky_tests(&log), ["runtime_x::flaky"]);
+        assert_eq!(failed_tests(&log).names, ["runtime_x::flaky"]);
+        // Without the summary's status (cut off), the retry's line shows it.
+        let cut = log.split("  Cancelling").next().unwrap();
+        let failure = classify(LLVM_COV, Some(1), None, cut);
+        assert_eq!(failure.class, FailureClass::Flaky);
+        assert!(failure.evidence.starts_with("TRY 2 PASS ["), "{failure:?}");
+        // `flaky-result = "pass"`'s status names it too.
+        assert_eq!(
+            flaky_tests("       FLAKY 2/2 [   0.007s] dagq::it a::b\n"),
+            ["a::b"]
+        );
+    }
+
+    #[test]
+    fn a_test_that_failed_its_retry_too_is_a_test_failure() {
+        let log = nextest_retried(true);
+        let failure = classify(LLVM_COV, Some(1), None, &log);
+        // `within`'s line belongs to the flaky test, and the broken one
+        // names no timeout: the failed tests decide.
+        assert_eq!(failure.class, FailureClass::Timeout);
+        assert_eq!(flaky_tests(&log), ["runtime_x::flaky"]);
+        assert_eq!(
+            failed_tests(&log).names,
+            ["runtime_x::flaky", "runtime_x::broken"]
+        );
+        let plain = log.replace(
+            "test runtime_x::flaky timed out: the run to land did not happen within 20s",
+            "assertion failed",
+        );
+        assert_eq!(
+            class(LLVM_COV, Some(1), None, &plain),
+            FailureClass::TestFailure
+        );
+        // A flaky line alone, without a failed test, or with names cut off.
+        assert_eq!(
+            class(
+                LLVM_COV,
+                Some(1),
+                None,
+                "  TRY 2 PASS [ 0.1s] dagq::it a::b\nboom\n"
+            ),
+            FailureClass::Unknown
+        );
+        let many: String = (0..MAX_FAILED_TESTS + 1)
+            .map(|i| {
+                format!(
+                    "  TRY 1 FAIL [ 0.1s] dagq::it t::n{i}\n  TRY 2 PASS [ 0.1s] dagq::it t::n{i}\n"
+                )
+            })
+            .collect();
+        assert_eq!(
+            class(LLVM_COV, Some(100), None, &many),
+            FailureClass::TestFailure
+        );
+        // Lines that only look like it.
+        for line in [
+            "TRY x PASS [ 0.1s] dagq::it a::b",
+            "FLKY-FL [ 0.1s] dagq::it a::b",
+            "  TRY 2 PASS [ 0.1s] a::b",
+            "PASS [ 0.1s] dagq::it a::b",
+            "TRY 2 PASS 0.1s dagq::it a::b",
+            "TRY 2 PASS [ 0.1s dagq::it a::b",
+        ] {
+            assert!(flaky_tests(line).is_empty(), "{line}");
         }
     }
 

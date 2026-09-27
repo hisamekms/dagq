@@ -69,6 +69,7 @@ reason_codes! {
     MigrationNumberTaken => "migration_number_taken": "the run adds a migration whose number main already has, and it cannot be renumbered mechanically",
     VerificationFailed => "verification_failed": "a verification command exited non-zero after the rebase (or the landing recheck's command on main with the run merged in)",
     VerificationEnvironment => "verification_environment": "a verification command failed on the host (a full disk, a kill, a timeout) and again when retried once, so the run waits for a person instead of a resume",
+    VerificationFlaky => "verification_flaky": "every test a verification command named as failed passed when nextest ran it again, so the landing is done once more instead of a resume (once per run)",
     BackendTimeout => "backend_timeout": "a cmux call timed out",
     BackendFailed => "backend_failed": "a cmux call failed",
     JobFailed => "job_failed": "a headless review or triage job failed",

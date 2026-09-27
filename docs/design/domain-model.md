@@ -346,6 +346,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `migration_number_taken` | runが足したmigrationの番号がmainで埋まっていて、機械的に振り直せない（runが足したmigrationが2つ以上か、番号をrunの他の変更が含むか、振り直しのcommitをGitが拒んだ。[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3） | `migrations`、`taken`、`next_number`、（番号を含むファイルがあれば）`referring`、（振り直しのcommitをGitが拒んだら）`commit_error` |
 | `verification_failed` | rebaseの後の検証コマンドが非0で終わった（landing recheckの`[recheck] command`がmainに載せた木で非0で終わったときも） | `index`（1始まり）、（`command` / `exit_code`は既存） |
 | `verification_environment` | 検証コマンドがhostの分類（`disk_full`・`killed`・`timeout`）で落ち、1回のやり直しでも落ちた（`disk_full`で空きが着地の閾値に足りずやり直さなかったときも）。resumeせず人に知らせる（task 639、ADR-t639-1） | `index`（1始まり） |
+| `verification_flaky` | 検証コマンドで落ちたtestが全て、nextestが流し直して通ったtest（`flaky`の分類）で、resumeせずに着地をもう1回やり直した（runごとに1回。task 768、ADR-t768-1） | `index`（1始まり） |
 | `backend_timeout` | cmuxの呼び出しがtimeoutした（adapterの`did not finish within`、cmuxの`Command timed out`） | `op`（`backend_call_failed`は既存の`op`） |
 | `backend_failed` | cmuxの呼び出しが失敗した | `op` |
 | `job_failed` | headlessのreviewかtriageのjobが失敗した | |
@@ -370,6 +371,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `integration_failed` | 書き直したreceiptが`failed` | `worker_failed` |
 | `integration_error` | mainを進める前のerror（元のstatusに戻す） | `backend_*`、なければ`other` |
 | `integration_held` | 検証コマンドがhostの分類で落ち、1回のやり直しでも落ちた（`awaiting_integration`に戻し人に知らせる。task 639） | `verification_environment`（`index`） |
+| `integration_retried` | 検証コマンドで落ちたtestが全てFLAKYで、着地を同じslotでもう1回やり直した（statusは`integrating`のまま、`last_error`は変えない。task 768） | `verification_flaky`（`index`） |
 | `integration_rebase_aborted` | 残っていたrebaseの中止 | `rebase_in_progress` |
 | `runtime_error` | supervisorのabandon（provisioning、監視、adoptやresumeの開始の失敗） | `backend_*`、なければ`other` |
 | `runtime_error` | 認証か利用上限のaskの`cancel_affected`の適用（leaseを返す。[queue hold](supervisor-lifecycle/queue-hold.md)） | `hold_canceled` |

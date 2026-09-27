@@ -1,9 +1,15 @@
 # cargo-nextest の設定（ADR-0076）。coverage の関門は `cargo llvm-cov nextest` で流す。
 # 並列度はここに書かない: integrate の検証は dagq.toml の [run.env] の
 # NEXTEST_TEST_THREADS で絞り（決定 2）、CI と人の手元は nextest の既定（CPU 数）で流す。
-# retries は既定の 0 のままにし、不安定な test を再実行で隠さない。
+# 落ちた test は 1 回だけ流し直し、流し直して通った test は FLAKY（FLKY-FL）と出すが、
+# 結果は失敗のままにして不安定な test を隠さない（ADR-t768-1 が ADR-0076 を amends）。
+# integrate は log の FLKY-FL から、落ちた test が全て FLAKY なら worker を resume せずに
+# 着地を 1 回やり直す（docs/design/supervisor-lifecycle/integrate.md）。CI・人の手元・
+# worker の stress にも同じく効く。
 
 [profile.default]
+retries = 1
+flaky-result = "fail"
 # 60 秒を超えた test を SLOW と出すだけで、打ち切らない（決定 6）。test の上限は
 # tests/common/mod.rs の within（TEST_LIMIT 600 秒・STEP_LIMIT 300 秒）が持つので、
 # terminate-after は置かず、その上限より先に nextest が test を止めることはない。

@@ -1049,100 +1049,138 @@ fn land(
         }
         verifier.run_env(run_dir)?
     };
-    // Each attempt keeps its own logs, so a second integrate of the run does
-    // not overwrite why the first one failed.
-    let attempt = next_integrate_attempt(files, run_dir);
-    let step = VerifyStep {
-        verifier,
-        load_average,
-        files,
-        run,
-        worktree,
-        run_env: &run_env,
-        attempt,
-    };
-    for (index, command) in commands.iter().enumerate() {
-        let index = index + 1;
-        let first = step.run(
-            queue,
-            index,
-            command,
-            &integrate_verify_log(run_dir, attempt, index),
-            None,
-        )?;
-        let Some(first_failure) = first.failure.clone() else {
-            continue;
+    // The landing's verification, done once more when only flaky tests
+    // failed (task 768, ADR-t768-1): a new attempt of every command on the
+    // same rebased head, in the slot it holds (main does not move meanwhile).
+    'verify: loop {
+        // Each attempt keeps its own logs, so a second integrate of the run does
+        // not overwrite why the first one failed.
+        let attempt = next_integrate_attempt(files, run_dir);
+        let step = VerifyStep {
+            verifier,
+            load_average,
+            files,
+            run,
+            worktree,
+            run_env: &run_env,
+            attempt,
         };
-        let mut last = first;
-        // A failure the host caused (a full disk, a kill, a timeout) is
-        // retried once in this attempt instead of resuming the worker, and
-        // is a person's when it fails so again (task 639, ADR-t639-1).
-        if first_failure.class.is_environmental() {
-            let short = match retry_disk {
-                Some(room) if first_failure.class == verify_failure::FailureClass::DiskFull => {
-                    disk_short(&*queue, &room.config, (room.free)())?
-                }
-                _ => None,
-            };
-            if let Some(short) = short {
-                return Ok(held(
-                    run,
-                    main,
-                    &rebased,
-                    command,
-                    index,
-                    &last,
-                    None,
-                    Some(short),
-                ));
-            }
-            let retried = step.run(
+        for (index, command) in commands.iter().enumerate() {
+            let index = index + 1;
+            let first = step.run(
                 queue,
                 index,
                 command,
-                &integrate_retry_log(run_dir, attempt, index),
-                Some(&last),
+                &integrate_verify_log(run_dir, attempt, index),
+                None,
             )?;
-            match &retried.failure {
-                None => continue,
-                Some(failure) if failure.class.is_environmental() => {
+            let Some(first_failure) = first.failure.clone() else {
+                continue;
+            };
+            let mut last = first;
+            // A failure the host caused (a full disk, a kill, a timeout) is
+            // retried once in this attempt instead of resuming the worker, and
+            // is a person's when it fails so again (task 639, ADR-t639-1).
+            if first_failure.class.is_environmental() {
+                let short = match retry_disk {
+                    Some(room) if first_failure.class == verify_failure::FailureClass::DiskFull => {
+                        disk_short(&*queue, &room.config, (room.free)())?
+                    }
+                    _ => None,
+                };
+                if let Some(short) = short {
                     return Ok(held(
                         run,
                         main,
                         &rebased,
                         command,
                         index,
-                        &retried,
-                        Some(&last),
+                        &last,
                         None,
+                        Some(short),
                     ));
                 }
-                // The code's own failure on the retry: the worker's, as
-                // any other.
-                Some(_) => last = retried,
+                let retried = step.run(
+                    queue,
+                    index,
+                    command,
+                    &integrate_retry_log(run_dir, attempt, index),
+                    Some(&last),
+                )?;
+                match &retried.failure {
+                    None => continue,
+                    Some(failure) if failure.class.is_environmental() => {
+                        return Ok(held(
+                            run,
+                            main,
+                            &rebased,
+                            command,
+                            index,
+                            &retried,
+                            Some(&last),
+                            None,
+                        ));
+                    }
+                    // The code's own failure on the retry: the worker's, as
+                    // any other.
+                    Some(_) => last = retried,
+                }
             }
+            let failure = last.failure.as_ref().unwrap_or(&first_failure);
+            // Every failed test passed on nextest's retry: the landing is done
+            // once more instead of a resume, once per run (task 768).
+            if failure.class == verify_failure::FailureClass::Flaky
+                && !queue.has_run_event(run.id(), event_kind::INTEGRATION_RETRIED)?
+            {
+                let reason = format!(
+                    "verification command {command:?} failed after the rebase onto {main} only on tests that passed when run again ({}); see {}. Verifying it once more instead of resuming the session",
+                    last.flaky_tests.join(", "),
+                    last.log.display()
+                );
+                warn!(op = "integrate", reason = %reason, "run {}: {reason}", run.id());
+                queue.record_runtime_event(
+                    run.id(),
+                    event_kind::INTEGRATION_RETRIED,
+                    Reason::new(ReasonCode::VerificationFlaky)
+                        .with("index", index)
+                        .on(json!({
+                            "main": main,
+                            "head": rebased,
+                            "attempt": attempt,
+                            "command": command,
+                            "exit_code": last.exit_code,
+                            "failure": failure.to_json(),
+                            "failed_tests": last.tests_json(),
+                            "flaky_tests": last.flaky_tests,
+                            "log_path": last.log.to_str(),
+                            "reason": reason,
+                        })),
+                )?;
+                continue 'verify;
+            }
+            return defer(
+                Reason::new(ReasonCode::VerificationFailed).with("index", index),
+                format!(
+                    "verification command {command:?} exited with {} after the rebase onto {main} ({}: {}); see {}",
+                    last.exit_code,
+                    failure.class.as_str(),
+                    failure.evidence,
+                    last.log.display()
+                ),
+                json!({
+                    "main": main,
+                    "head": rebased,
+                    "command": command,
+                    "exit_code": last.exit_code,
+                    "signal": last.signal,
+                    "failure": failure.to_json(),
+                    "failed_tests": last.tests_json(),
+                    "failed_tests_omitted": last.omitted_json(),
+                    "flaky_tests": last.flaky_tests,
+                }),
+            );
         }
-        let failure = last.failure.as_ref().unwrap_or(&first_failure);
-        return defer(
-            Reason::new(ReasonCode::VerificationFailed).with("index", index),
-            format!(
-                "verification command {command:?} exited with {} after the rebase onto {main} ({}: {}); see {}",
-                last.exit_code,
-                failure.class.as_str(),
-                failure.evidence,
-                last.log.display()
-            ),
-            json!({
-                "main": main,
-                "head": rebased,
-                "command": command,
-                "exit_code": last.exit_code,
-                "signal": last.signal,
-                "failure": failure.to_json(),
-                "failed_tests": last.tests_json(),
-                "failed_tests_omitted": last.omitted_json(),
-            }),
-        );
+        break;
     }
     // One commit on main with the rebased tree; the run's own history stays
     // reachable under refs/dagq/runs/<run-id>.
@@ -1185,6 +1223,8 @@ struct Checked {
     signal: Option<i32>,
     failure: Option<verify_failure::VerifyFailure>,
     failed_tests: Option<verify_failure::FailedTests>,
+    /// Those of the failed tests nextest ran again and saw pass (task 768).
+    flaky_tests: Vec<String>,
     log: PathBuf,
 }
 
@@ -1249,14 +1289,25 @@ impl VerifyStep<'_> {
                     failure.class,
                     verify_failure::FailureClass::TestFailure
                         | verify_failure::FailureClass::Timeout
+                        | verify_failure::FailureClass::Flaky
                 )
             })
             .map(|_| verify_failure::failed_tests(&output));
+        // The failed tests that passed on nextest's retry: the mark `stats`
+        // counts them flaky by (task 768).
+        let flaky_tests = match &failed_tests {
+            Some(failed) => verify_failure::flaky_tests(&output)
+                .into_iter()
+                .filter(|name| failed.names.contains(name))
+                .collect(),
+            None => Vec::new(),
+        };
         let checked = Checked {
             exit_code,
             signal,
             failure,
             failed_tests,
+            flaky_tests,
             log: log.to_path_buf(),
         };
         let mut payload = json!({
@@ -1269,6 +1320,7 @@ impl VerifyStep<'_> {
             "failure": checked.failure.as_ref().map(|failure| failure.to_json()),
             "failed_tests": checked.tests_json(),
             "failed_tests_omitted": checked.omitted_json(),
+            "flaky_tests": checked.flaky_tests,
             "duration_secs": duration_secs,
             "load_avg_mean": load.load_avg_mean,
             "load_avg_max": load.load_avg_max,
