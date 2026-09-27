@@ -1524,6 +1524,8 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     "mark_retracted",
     // The KPI report the supervisor wrote (ADR-0051 decision 20).
     kpi::report::REPORT_WRITTEN,
+    // The supervisor's forecast snapshots (ADR-0070 decision 3).
+    forecast::snapshot::FORECAST_RECORDED,
     // The supervisor's samples of the candidates (ADR-0051 decision 3).
     kpi::CANDIDATES_SAMPLED,
     // The breaches of the KPIs' targets and their push (ADR-0051

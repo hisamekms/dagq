@@ -514,6 +514,10 @@ enum Command {
         /// on the first pass after local midnight (ADR-0051 decision 20).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         report_daily: bool,
+        /// Record the forecast of every open task and goal as one event when a plan review
+        /// passes, on a change mark, after a landing that moved it and once a day (ADR-0070).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        forecast_snapshots: bool,
         /// Maximum number of planners the runtime opens at once for proposals plan review sent
         /// back (apart from --parallel; planners a person opened do not count).
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
@@ -1980,6 +1984,7 @@ fn execute(cli: Cli) -> Result<Value> {
             observe_interval,
             observe_daily,
             report_daily,
+            forecast_snapshots,
             runtime_planners,
             planner_timeout,
             plugin_dir,
@@ -2002,6 +2007,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 })),
                 observe_daily,
                 report_daily,
+                forecast_snapshots,
                 generators,
                 runtime_planners: usize::from(runtime_planners),
                 planner_timeout: Duration::from_secs(planner_timeout),

@@ -1412,6 +1412,22 @@ pub trait RunStore {
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>>;
     /// The newest event of the queue itself (on no run) of one of `kinds`.
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
+    /// Record a forecast snapshot (`forecast_recorded`, ADR-0070 decision
+    /// 3) unless another was recorded after `previous`; its ID, or `None`.
+    fn record_forecast(
+        &self,
+        payload: serde_json::Value,
+        previous: Option<EventId>,
+    ) -> Result<Option<EventId>>;
+    /// The events of one of `kinds` with `after < id <= upto`, oldest
+    /// first, at most `limit`.
+    fn events_of_between(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>>;
 }
 
 /// The questions the runtime and its sessions put to a person (ADR-0022).

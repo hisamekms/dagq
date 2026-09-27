@@ -47,6 +47,7 @@ mod runtime_claim_hold;
 mod runtime_cleanup;
 mod runtime_disk;
 mod runtime_evidence;
+mod runtime_forecast;
 mod runtime_handoff;
 mod runtime_integrate;
 mod runtime_observer;

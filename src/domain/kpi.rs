@@ -39,6 +39,7 @@ pub use window::{CANDIDATES_SAMPLED, WindowKpis};
 pub const BOOKKEEPING_KINDS: &[&str] = &[
     CANDIDATES_SAMPLED,
     report::REPORT_WRITTEN,
+    super::forecast::snapshot::FORECAST_RECORDED,
     push::KPI_PUSH_SENT,
     push::KPI_PUSH_FAILED,
     push::KPI_PUSH_ABANDONED,

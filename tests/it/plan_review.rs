@@ -2180,3 +2180,45 @@ fn a_plan_review_duplicate_of_a_canceled_missing_or_the_same_task_fails() {
         );
     }
 }
+
+/// A passing plan review is a trigger of a forecast snapshot (ADR-0070
+/// decision 3): after the day's snapshot at the start, the pass records one
+/// more, naming the proposal, with the tasks it readied.
+#[test]
+fn a_passing_plan_review_records_a_forecast_snapshot() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let two = add(&mut queue, "two", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[two], None);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "pass", "reasons": [], "summary": "sound", "actions": []
+    })]);
+    let backend = PlanWorkspace::default();
+    let options = SuperviseOptions {
+        forecast_snapshots: true,
+        forecast_check: Duration::ZERO,
+        host_config: Some(fx.db.with_file_name("no host-wide file.toml")),
+        ..options(1, Duration::from_secs(3600))
+    };
+    let outcome = supervise_with(&fx, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(status(&mut queue, two), TaskStatus::Ready);
+    let snapshots: Vec<Value> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "forecast_recorded")
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(snapshots.len(), 2, "{snapshots:#?}");
+    assert_eq!(snapshots[0]["triggers"][0]["trigger"], "daily");
+    assert_eq!(snapshots[0]["tasks"], json!([]));
+    assert_eq!(
+        snapshots[1]["triggers"],
+        json!([{"trigger": "plan_review", "event_id": snapshots[1]["triggers"][0]["event_id"], "proposal_id": proposal}])
+    );
+    // Ready (waiting for a draft) and forecast: no landed run gives it a
+    // time.
+    assert_eq!(snapshots[1]["tasks"][0]["id"], json!(two));
+    assert!(snapshots[1]["tasks"][0]["p50"].is_null());
+}

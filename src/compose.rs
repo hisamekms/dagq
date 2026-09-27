@@ -164,6 +164,13 @@ pub struct SuperviseOptions {
     /// (ADR-0051 decision 20): off unless asked for (`supervise
     /// --report-daily`, on by default in the CLI).
     pub report_daily: bool,
+    /// Record the forecast snapshots at their triggers (ADR-0070 decision
+    /// 3): off unless asked for (`supervise --forecast-snapshots`, on by
+    /// default in the CLI).
+    pub forecast_snapshots: bool,
+    /// How often the triggers of a snapshot are looked for; tests shorten
+    /// it.
+    pub forecast_check: Duration,
     /// The host-wide `host.toml` the supervisor reads (`[kpi]`, `[report]`,
     /// `[push]`); `None` is `$XDG_CONFIG_HOME/dagq/host.toml`. Tests set it.
     pub host_config: Option<PathBuf>,
@@ -213,6 +220,8 @@ impl SuperviseOptions {
             disk: None,
             free_space: free_disk_bytes,
             report_daily: false,
+            forecast_snapshots: false,
+            forecast_check: crate::application::supervise::FORECAST_CHECK,
             host_config: None,
             push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
@@ -372,6 +381,21 @@ pub fn supervise_with_reviewer(
     });
     let limit_checkout = main_checkout(&repository);
     let max_improvement_proposals = Arc::new(move || max_improvement_proposals(&limit_checkout));
+    let forecasts = options.forecast_snapshots.then(|| {
+        let (db, checkout) = (db.clone(), main_checkout(&repository));
+        let host_wide = options
+            .host_config
+            .clone()
+            .or_else(crate::infrastructure::kpi_config::host_wide_file);
+        crate::application::supervise::ForecastPort {
+            utc_offset: clock::local_utc_offset,
+            min_samples: Arc::new(move |now| {
+                report_setup(&db, Some(&checkout), None, host_wide.as_deref(), now)
+                    .map(|setup| setup.config.min_samples)
+            }),
+            check: options.forecast_check,
+        }
+    });
     let ports = Ports {
         queues: Arc::new(SqliteOpener {
             db: db.clone(),
@@ -400,6 +424,7 @@ pub fn supervise_with_reviewer(
         host_versions,
         reports,
         max_improvement_proposals,
+        forecasts,
         layout,
     };
     supervisor::supervise(&ports, &options.settings(stall, conflicts, disk))

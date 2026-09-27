@@ -92,6 +92,7 @@ mod disk;
 mod draft_planner;
 mod exit;
 mod finding_planner;
+mod forecast;
 mod handoff;
 mod idle;
 mod jobs;
@@ -112,6 +113,7 @@ mod triage;
 mod update;
 mod waiting;
 
+pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
@@ -273,6 +275,9 @@ pub struct Ports<'a> {
     /// `[kpi]`'s `max_improvement_proposals` of the main checkout's
     /// `dagq.toml` (ADR-0051 decision 25), read again each time.
     pub max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
+    /// Records the forecast snapshots (ADR-0070 decision 3); `None`
+    /// records none.
+    pub forecasts: Option<ForecastPort>,
     pub layout: Layout,
 }
 
@@ -494,6 +499,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         reports: ports.reports.clone(),
         max_improvement_proposals: ports.max_improvement_proposals.clone(),
         report: report::ReportWatch::default(),
+        forecasts: ports.forecasts.clone(),
+        forecast: forecast::ForecastWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
@@ -616,6 +623,10 @@ struct Supervisor<'a> {
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     /// The report job and the day the reports were last found written.
     report: report::ReportWatch,
+    /// Takes the forecast snapshots; `None` takes none.
+    forecasts: Option<ForecastPort>,
+    /// The snapshot job and where the last look for triggers left off.
+    forecast: forecast::ForecastWatch,
     /// The KPI push's messages waiting and the one being sent.
     push: push::PushWatch,
     /// The load samples of each held run's current interval (task 197).
@@ -811,6 +822,7 @@ impl Supervisor<'_> {
                         && !self.cleanup.running()
                         && !self.push.running()
                         && !self.report.running()
+                        && !self.forecast.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         let runs = self.prepare_handoff();
@@ -832,6 +844,7 @@ impl Supervisor<'_> {
                     self.draining = true;
                     self.poll_observer();
                     self.report_pass(false);
+                    self.forecast_pass(false);
                     self.push_pass(false);
                     self.tick(true);
                     thread::sleep(options.tick);
@@ -849,6 +862,9 @@ impl Supervisor<'_> {
             // nor starting plan reviews, nor updating itself.
             // Reaped on every pass, started only by a supervisor at work.
             self.report_pass(!stopping && self.claiming);
+            // Looked for by a supervisor at work only: the triggers stay in
+            // the queue for the next look (ADR-0070 decision 3).
+            self.forecast_pass(!stopping && self.claiming);
             // A message waiting is sent while the supervisor does not stop.
             self.push_pass(!stopping);
             if !stopping && self.claiming {
@@ -869,6 +885,7 @@ impl Supervisor<'_> {
                 // joined once the loop ends.
                 let job = self.observer.is_some()
                     || self.report.running()
+                    || self.forecast.running()
                     // A message being sent is bounded by the command's
                     // timeout; `--once` also waits for those still to be
                     // tried, a stop does not.

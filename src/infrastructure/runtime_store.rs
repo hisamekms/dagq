@@ -22,6 +22,7 @@ use crate::domain::{
     PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunHistory, RunId,
     RunLease, RunPaths, RunProcess, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration,
     Task, TaskAction, TaskId, TaskKind, TaskRun, event_kind,
+    forecast::snapshot::FORECAST_RECORDED,
     kpi::report::REPORT_WRITTEN,
     related::RelatedPage,
     resume::{self, ResumeCount},
@@ -863,6 +864,50 @@ impl SqliteQueue {
         }
         tx.commit()?;
         Ok(!recorded)
+    }
+
+    /// Record `forecast_recorded` (ADR-0070 decision 3) unless another
+    /// snapshot was recorded after `previous` (the latest one the caller
+    /// read, `None` for none), in one write: of two supervisors that took
+    /// a snapshot for the same triggers, one records it. `None` when
+    /// another was recorded.
+    pub fn record_forecast(
+        &self,
+        payload: serde_json::Value,
+        previous: Option<EventId>,
+    ) -> Result<Option<EventId>> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let latest: Option<EventId> = tx.query_row(
+            "SELECT MAX(id) FROM run_events WHERE kind=?1",
+            [FORECAST_RECORDED],
+            |r| r.get(0),
+        )?;
+        if latest != previous {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+            params![FORECAST_RECORDED, serde_json::to_string(&payload)?],
+        )?;
+        let id = EventId::new(tx.last_insert_rowid());
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// The events of one of `kinds` with `after < id <= upto`, oldest
+    /// first, at most `limit`.
+    pub fn events_of_between(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        let filter = EventFilter {
+            kinds: Some(kinds.iter().map(|&kind| kind.to_owned()).collect()),
+            ..EventFilter::default()
+        };
+        self.events_between(after, upto, &filter, limit)
     }
 
     /// The newest event of `kind`, on whatever task, goal or run.
@@ -3742,6 +3787,22 @@ impl RunStore for SqliteQueue {
     }
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_queue_event(self, kinds)
+    }
+    fn record_forecast(
+        &self,
+        payload: serde_json::Value,
+        previous: Option<EventId>,
+    ) -> Result<Option<EventId>> {
+        SqliteQueue::record_forecast(self, payload, previous)
+    }
+    fn events_of_between(
+        &self,
+        kinds: &[&str],
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        SqliteQueue::events_of_between(self, kinds, after, upto, limit)
     }
 }
 

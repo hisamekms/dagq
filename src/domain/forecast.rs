@@ -10,6 +10,7 @@
 //! from the run events.
 
 pub mod history;
+pub mod snapshot;
 #[cfg(test)]
 mod tests;
 
