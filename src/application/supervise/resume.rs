@@ -1369,6 +1369,13 @@ impl ResumeWatch {
                 .is_some(),
             _ => false,
         };
+        // A session idle after its receipt moved on by itself: a `stalled`
+        // ask is closed as such before the stage ends, as a revise's, even
+        // when its idle marker was written after this poll followed the ask
+        // (task 771).
+        if idle_after_receipt {
+            self.live.stall.settle(sv, run, true)?;
+        }
         // An unapproved resolved run keeps its session for
         // validation and review (ADR-0027 decision 3).
         if matches!(verdict, ResumeOutcome::Resolved) && !self.approved && idle_after_receipt {

@@ -1504,7 +1504,9 @@ fn a_request_left_in_the_input_box_gets_enter_again_not_the_text() {
 /// twice. Task 442 (ADR-0047 decision 31): the request goes to the
 /// session's recovery job (`stalled`, reason `send_unconfirmed`) and, as it
 /// escalates, becomes the `stalled` ask, not an `answer_prompt` ask; the
-/// ask closes with the stage.
+/// ask closes with the stage. Task 771: it closes as resolved by itself
+/// whether or not the poll that sees the session idle after its receipt
+/// followed the ask after the idle marker was written.
 #[test]
 fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
     let (_dir, repo, db) = fixture();
