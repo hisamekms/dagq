@@ -1422,13 +1422,13 @@ pub fn recovery_prompt(
 pub(crate) fn revise_request(
     task: &Task,
     run: &TaskRun,
-    attempt: usize,
+    round: usize,
     reasons: &[String],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let checks = local_checks(&serde_json::to_string(task.verification_commands())?);
     let mut lines = vec![format!(
-        "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {attempt} of {MAX_REVISE_ATTEMPTS}).",
+        "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {round} of {MAX_REVISE_ATTEMPTS}).",
         run.id(),
         task.id()
     )];

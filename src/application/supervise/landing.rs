@@ -284,12 +284,12 @@ impl Supervisor<'_> {
             ReviewDecision::Revise => {
                 let events = self.queue.run_events(run.id())?;
                 let history = RunHistory::from_events(&events);
-                let attempt = match decide_revise(&history) {
-                    ReviseDecision::Request { attempt } => attempt,
+                let (attempt, round) = match decide_revise(&history) {
+                    ReviseDecision::Request { attempt, round } => (attempt, round),
                     ReviseDecision::Ask => {
                         let why = format!(
                             "the review still asks for changes after {} revises",
-                            history.revise_attempts()
+                            history.round_revise_attempts()
                         );
                         return Ok(ask(Some(why), verdict, session));
                     }
@@ -303,7 +303,7 @@ impl Supervisor<'_> {
                 };
                 let task = self.queue.show(run.task_id())?.task;
                 let message = with_instruction(
-                    revise_request(&task, run, attempt, &verdict.reasons)?,
+                    revise_request(&task, run, round, &verdict.reasons)?,
                     self.verifier.language().as_ref(),
                 );
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);
@@ -345,7 +345,7 @@ impl Supervisor<'_> {
                         return Ok(ask(Some(why), verdict, session));
                     }
                 };
-                info!(run_id = %run.id(), "revise {attempt} of {MAX_REVISE_ATTEMPTS} sent to run {} in workspace {}", run.id(), live.workspace);
+                info!(run_id = %run.id(), "revise {round} of {MAX_REVISE_ATTEMPTS} (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
                 Ok(Phase::Revise(ReviseWatch::new(
                     run,
                     live,
