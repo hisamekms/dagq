@@ -32,9 +32,9 @@ Leave traffic control (duplicates, conflicts, re-wiring or parking other tasks) 
 
 Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel`, `--duplicate-of X`), or ask (`planner_question`); for a finding, `submit ... --finding N`, `finding dismiss N --reason` or `ask --finding N`. Report and stop. A person-opened planner decides a draft left undecided the same way. Details: `skills/dagq/reference/register.md`, "A runtime planner".
 
-## 4. Follow a goal, findings, KPIs
+## 4. Follow a goal, forecasts, findings, KPIs
 
-`"$DAGQ" goal list`, `goal show ID` and `graph --goal ID` show progress; report which are done, in progress or blocked. Runs waiting on a person are the inbox's. Decide the observer's findings with the person per `skills/dagq/reference/observer.md`: `findings`, then `submit ... --finding ID` or `finding dismiss ID --reason`. When a setting, the operation or the host changes (the runtime marks builds, `--parallel`, Claude and `[run.env]` itself), record `"$DAGQ" mark '<label>' --note '...'`; later judge it with `kpi --compare <mark id> --kind <kind>` (`skills/dagq/reference/kpi.md`).
+`"$DAGQ" goal list`, `goal show ID` and `graph --goal ID` show progress; report which are done, in progress or blocked. Add when it will finish from `"$DAGQ" forecast --goal ID`: p50 and p90 together, with its premises (`parallel`, kinds `substituted` by `all`, `unplanned_tasks`) and that it counts no inflow (new tasks, follow_ups), so real finishes tend to be later; a null with `reason` is said as such. Whether forecasts come true is the `forecast.*` KPIs and the daily report's forecast error section (`skills/dagq/reference/kpi.md`). Runs waiting on a person are the inbox's. Decide the observer's findings with the person per `skills/dagq/reference/observer.md`: `findings`, then `submit ... --finding ID` or `finding dismiss ID --reason`. When a setting, the operation or the host changes (the runtime marks builds, `--parallel`, Claude and `[run.env]` itself), record `"$DAGQ" mark '<label>' --note '...'`; later judge it with `kpi --compare <mark id> --kind <kind>` (`skills/dagq/reference/kpi.md`).
 
 ## 5. Close a goal
 

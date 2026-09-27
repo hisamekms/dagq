@@ -1,6 +1,6 @@
 ---
 name: dagq
-description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, close a goal after reviewing its tasks' receipts and follow_ups, adopt or reject a draft goal, decide findings, read events, run timelines and KPIs, mark a change, record or read notes, or find the dagq binary and queue database.
+description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, close a goal after reviewing its tasks' receipts and follow_ups, adopt or reject a draft goal, decide findings, read events, run timelines, KPIs and completion forecasts, mark a change, record or read notes, or find the dagq binary and queue database.
 ---
 
 # dagq: register and inspect tasks
@@ -9,7 +9,7 @@ dagq runs development tasks in cmux workspaces and isolated Git worktrees. This 
 
 A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering, submitting and closing belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, then runs and lands the queue; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal) and `reference/kpi.md` (KPIs, change marks, reports, push).
+Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal) and `reference/kpi.md` (KPIs, change marks, forecasts, reports, push).
 
 ## 1. Locate the binary and the queue
 
@@ -59,7 +59,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 
 ## 3. Inspect
 
-`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID]` (waits, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went), `observe --history`, `notes` / `note`, `stats` (time per run, goal and session kind, `alerts`), `kpi` / `mark` / `marks` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
+`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID]` (waits, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went), `observe --history`, `notes` / `note`, `stats` (time per run, goal and session kind, `alerts`), `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
 
 ## 4. Report results
 

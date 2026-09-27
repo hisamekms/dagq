@@ -1,6 +1,6 @@
-# KPIs, change marks, reports and push (ADR-0051)
+# KPIs, change marks, forecasts, reports and push (ADR-0051, ADR-0070)
 
-The KPIs are derived from the queue's events by fixed rules, never by a model: nothing is stored but the events, so `kpi` and `report` can always recompute them. All four commands below print JSON. The full rules are in `docs/design/supervisor-lifecycle/kpi.md`, `marks.md`, `report.md` and `push.md` of the dagq repository.
+The KPIs are derived from the queue's events by fixed rules, never by a model: nothing is stored but the events, so `kpi` and `report` can always recompute them. All the commands below print JSON. The full rules are in `docs/design/supervisor-lifecycle/kpi.md`, `marks.md`, `stats.md` (完了見込み), `report.md` and `push.md` of the dagq repository.
 
 ## `dagq kpi`: periods, kinds, targets
 
@@ -25,11 +25,36 @@ The KPIs are derived from the queue's events by fixed rules, never by a model: n
 - `"$DAGQ" marks [--since C] [--until C]` lists them by when they took effect: `id` (null for a derived one), `kind`, `at`, `label`, `retracted_by`, `detail` (a derived mark's `claim_event` is its ID for `--compare`).
 - `"$DAGQ" kpi --compare <mark id | claim event id | cursor> [--window 7]` compares the `--window` days before and after; `--compare A..B,C..D` two explicit windows. Read `split` (`separable: false`: marks too close together to tell apart), `confounders` (other marks before, between and after the windows: name them when you report the result), `strata` (`before` / `after` per KPI and stratum, with the same verdicts) and `summary` (per kind, `lead_time`, `phase.*`, `land_phase.*`; pick the kind with `--kind`).
 
+## `dagq forecast`: when the open work will finish
+
+```sh
+"$DAGQ" forecast                     # every open task and goal
+"$DAGQ" forecast --goal ID           # that goal and its tasks (--task ID: that task and its goal)
+"$DAGQ" forecast --parallel 2        # as if the slots were 2; --trials N (default 1000)
+```
+
+It simulates the queue (method 1): `ready` / `in_progress` tasks outside draft goals, in claim order (as `graph`), on the live supervisors' `parallel` summed, each drawing work, validate and wait to land together from one landed run of its kind (fewer than `[kpi] min_samples` runs: the whole distribution). A run in flight draws only the rest of its phase; a run waiting for a person holds no slot and adds an `ask_wait`. A goal closes when its open tasks are done plus a close delay. The same queue at the same time gives the same numbers (the seed is the time and the latest event ID). It reads only and records nothing; the observer, planners and plan review may run it.
+
+- **Output**: `method`, `at`, `seed`, `trials`; `assumptions` (`parallel`, `min_samples`, `samples` per kind and for `close_delay` / `ask_wait`, `substituted`: kinds that used `all`, `left_out`); `tasks[]` (`id`, `goal_id`, `kind`, `phase`, `waiting`, `distribution`) and `goals[]` (`id`, `open_tasks`, `unplanned_tasks`), each with `p50` / `p90` (times) and `p50_secs` / `p90_secs` (seconds from now).
+- **It is "if the current plan flows as it is"**: no inflow (new tasks, follow_up drafts, plan review sending work back) and no retries of failed runs. Real finishes run later than this, most for goals with many follow_ups. `draft` / `submitted` tasks and draft goals are out; what waits on them, and a goal with unplanned (`unplanned_tasks` > 0) or no tasks, has `p50` / `p90` null with `reason: blocked`. Other reasons: `no_samples` (no landed run yet), `no_slots` (`parallel` 0).
+- **Report it** with p50 and p90 together and its premises: `parallel`, `substituted` kinds, `unplanned_tasks`, and that inflow is not included. Never give p50 alone as a promise.
+
+## Did the forecasts come true: `forecast.*` KPIs
+
+The supervisor records a snapshot of the unfiltered forecast (`forecast_recorded`) after a plan review pass (or a concern answered `ready`), a change mark or a priority / dependency change of a forecast task, a landing that moved some p50 by 20% of its remaining time and 30 minutes or more (or between a time and null, or a new target), and once a day; `dagq forecast` itself never records one. `kpi` scores each snapshot row against its target's finish (a task `completed`, a goal closed `achieved`), in the period of the finish:
+
+- `forecast.p50_error`: actual − p50 in seconds (positive: late; the median's sign is the bias), `forecast.p50_abs_error` (lower is better), `forecast.p50_error_ratio` (error ÷ the forecast's remaining time), `forecast.p90_hit_rate` (finished by p90; about 90% is right), `forecast.late_rate` / `forecast.early_rate`.
+- Strata, whatever `--by` says: `all`, `target=task|goal`, `kind=` (tasks), `band=` (the remaining time p50 gave: `0-1h`, `1-6h`, `6-24h`, `1-3d`, `3d+`), `method=`, `marks=0` / `marks=1+` (change marks and priority or dependency changes between the snapshot and the finish). `marks=0` is the method's own error; its gap to `marks=1+` is the drift from plan changes.
+- `details.forecast`: `samples`, `with_marks`, `marks_between` (`median` / `max`), `excluded` (`canceled` tasks, `abandoned` goals, `unforecast` rows with no p50: counted, never scored). `--goal ID` keeps that goal and its tasks.
+- No target by default; a planner may add `[kpi.targets."forecast.p50_error_ratio"]` (e.g. `min = -0.25`, `max = 0.25`) and `[kpi.targets."forecast.p90_hit_rate"]` (e.g. `min = 0.75`) to `dagq.toml`, judged like any other target.
+
 ## Reports
 
-The supervisor (`supervise --report-daily`, on by default) writes, once per local day, the missing reports of the 7 days before today and of the last ISO week under `<queue dir>/reports/`: `daily/YYYY-MM-DD.{html,json}`, `weekly/YYYY-Www.{html,json}` and `index.html` (newest first). The HTML is one self-contained page (targets, trends with the marks, the KPI table, the top open findings); the JSON is `kpi --period P --at <that period>` plus `report` and `findings`. Retention is `[report] keep_daily_days` (90) and `keep_weekly_weeks` (104) of `host.toml`. Each written report records `report_written`.
+The supervisor (`supervise --report-daily`, on by default) writes, once per local day, the missing reports of the 7 days before today and of the last ISO week under `<queue dir>/reports/`: `daily/YYYY-MM-DD.{html,json}`, `weekly/YYYY-Www.{html,json}` and `index.html` (newest first). The HTML is one self-contained page (targets, trends with the marks, the forecast errors, the KPI table, the top open findings); the JSON is `kpi --period P --at <that period>` plus `report` and `findings`. Retention is `[report] keep_daily_days` (90) and `keep_weekly_weeks` (104) of `host.toml`. Each written report records `report_written`.
 
 `"$DAGQ" report [--period day|week] [--at C] [--out DIR]` writes one by hand the same way (today's and this week's are `.partial`), and prints the paths; `--print json` writes nothing. It records nothing and changes no queue state. Find the queue directory from `db` in `"$DAGQ" --resolve`.
+
+The **forecast error** section scores the targets that finished in the report's period: sample, with-marks and excluded counts, then per stratum (`all`, `target=`, `kind=`, `band=`, `marks=`, `method=`) `n`, the signed median error (+ late), the median |error|, the median ratio, p90 hit, late / early, the bias (the larger of late and early, or `even`) and the worst state of any `forecast.*` target. No samples, no table. Read a bias only with enough `n`, and `marks=0` before `marks=1+`. Push content has no forecast.
 
 ## Push to a person away from the screen
 
