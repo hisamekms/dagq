@@ -6,6 +6,7 @@
 //! and tried again on a later pass.
 
 use super::*;
+use crate::domain::language::with_instruction;
 use crate::{
     application::{
         GoalReviewApply, GoalReviewJob,
@@ -155,14 +156,17 @@ impl Supervisor<'_> {
             .into_iter()
             .map(|review| serde_json::to_value(review).map_err(Into::into))
             .collect::<Result<Vec<Value>>>()?;
-        Ok(goal_review_prompt(&GoalReviewMaterial {
-            goal: serde_json::to_value(&detail.goal)?,
-            tasks,
-            events,
-            previous,
-            gaps_in_a_row: job.gaps_in_a_row,
-            repo_root: &self.layout.repo_root,
-        }))
+        Ok(with_instruction(
+            goal_review_prompt(&GoalReviewMaterial {
+                goal: serde_json::to_value(&detail.goal)?,
+                tasks,
+                events,
+                previous,
+                gaps_in_a_row: job.gaps_in_a_row,
+                repo_root: &self.layout.repo_root,
+            }),
+            self.verifier.language().as_ref(),
+        ))
     }
 
     /// What landed for a task: its integrated run, the commit and what

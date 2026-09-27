@@ -3,6 +3,7 @@
 //! landing itself (ADR-0023, ADR-0027).
 
 use super::*;
+use crate::domain::language::with_instruction;
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
 /// ask of a run with when a later review of the run asks again: it failed
@@ -176,7 +177,10 @@ impl Supervisor<'_> {
             .context("review wrote no path")?
             .to_owned();
         let task = self.queue.show(run.task_id())?.task;
-        let prompt = review_prompt(&task, run, &path);
+        let prompt = with_instruction(
+            review_prompt(&task, run, &path),
+            self.verifier.language().as_ref(),
+        );
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             prompt.as_bytes(),
@@ -248,7 +252,10 @@ impl Supervisor<'_> {
                     return Ok(ask(Some(why), verdict, session));
                 };
                 let task = self.queue.show(run.task_id())?.task;
-                let message = revise_request(&task, run, attempt, &verdict.reasons)?;
+                let message = with_instruction(
+                    revise_request(&task, run, attempt, &verdict.reasons)?,
+                    self.verifier.language().as_ref(),
+                );
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);
                 self.files.write(
                     &run_dir.join(format!("revise-{attempt}.txt")),
@@ -450,7 +457,10 @@ impl Supervisor<'_> {
                     reason: why.clone(),
                     kind: ResumeKind::Precheck,
                 };
-                let message = resume_request(&task, run, &request, &landed)?;
+                let message = with_instruction(
+                    resume_request(&task, run, &request, &landed)?,
+                    self.verifier.language().as_ref(),
+                );
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);
                 self.files.write(
                     &run_dir.join(format!("conflict-{attempt}.txt")),

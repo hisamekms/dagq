@@ -174,6 +174,10 @@ pub struct SuperviseOptions {
     /// The host-wide `host.toml` the supervisor reads (`[kpi]`, `[report]`,
     /// `[push]`); `None` is `$XDG_CONFIG_HOME/dagq/host.toml`. Tests set it.
     pub host_config: Option<PathBuf>,
+    /// The user's `config.toml` the supervisor reads `[language]` from
+    /// (ADR-t616-2); `None` reads none. The CLI gives
+    /// `$XDG_CONFIG_HOME/dagq/config.toml`.
+    pub user_config: Option<PathBuf>,
     /// The delays before the second and the third attempt of a KPI push
     /// (ADR-0051 decision 23: 1 and 5 minutes); tests shorten them.
     pub push_retry: [Duration; 2],
@@ -223,6 +227,7 @@ impl SuperviseOptions {
             forecast_snapshots: false,
             forecast_check: crate::application::supervise::FORECAST_CHECK,
             host_config: None,
+            user_config: None,
             push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
         }
@@ -405,6 +410,7 @@ pub fn supervise_with_reviewer(
         verifier: Arc::new(ShellVerifier {
             checkout: main_checkout(&repository),
             db: db.clone(),
+            user_config: options.user_config.clone(),
         }),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
@@ -456,11 +462,18 @@ impl<'a> RecordingBackend<'a> {
 #[derive(Debug, Clone)]
 pub struct OneShot {
     pub generators: Generators,
+    /// The user's `config.toml` `doctor` and `status --role` read the
+    /// language from (ADR-t616-2); `None` reads none. The CLI gives
+    /// `$XDG_CONFIG_HOME/dagq/config.toml`.
+    pub user_config: Option<PathBuf>,
 }
 
 impl OneShot {
     pub fn new(generators: Generators) -> Self {
-        Self { generators }
+        Self {
+            generators,
+            user_config: None,
+        }
     }
 
     /// The wall clock and random UUIDs, what the binary runs with.
@@ -514,6 +527,7 @@ impl OneShot {
         let verifier = ShellVerifier {
             checkout: main_checkout(&repository),
             db: db.clone(),
+            user_config: None,
         };
         let mut integration = Integration {
             queue: &mut queue,
@@ -557,8 +571,26 @@ impl OneShot {
 
     /// [`Self::status_for`] on a queue the caller already opened, so a
     /// command opens it once.
+    /// For the inbox and a planner it adds the `language` their prompt
+    /// and the `SessionStart` hook carry (ADR-t616-2).
     pub fn status_of(&self, queue: &SqliteQueue, role: Option<SessionRole>) -> Result<Value> {
-        health::status(queue, &SystemProcesses, &*self.generators.clock, role)
+        let mut status = health::status(queue, &SystemProcesses, &*self.generators.clock, role)?;
+        if matches!(role, Some(SessionRole::Inbox | SessionRole::Planner)) {
+            status["language"] = serde_json::to_value(self.language_report(queue)?)?;
+        }
+        Ok(status)
+    }
+
+    /// The language of the checkout `queue` is bound to over the user's
+    /// (ADR-t616-2), with where it came from and any mistake.
+    fn language_report(
+        &self,
+        queue: &SqliteQueue,
+    ) -> Result<crate::infrastructure::language::LanguageReport> {
+        Ok(crate::infrastructure::language::language_report(
+            bound_checkout(queue)?.as_deref(),
+            self.user_config.as_deref(),
+        ))
     }
 
     /// `doctor`: see [`health::doctor`], with the queue's `schema` as
@@ -596,6 +628,7 @@ impl OneShot {
                 if let Some(repository) = doctor_repository(&queue)? {
                     report["repository"] = repository;
                 }
+                report["language"] = serde_json::to_value(self.language_report(&queue)?)?;
                 report
             }
         };
@@ -1127,6 +1160,10 @@ same in one step",
             runner: &options.runner,
             claude: &options.claude,
             plugin_dir: plugin_dir.as_deref(),
+            language: crate::infrastructure::language::language_for_prompt(
+                Some(&main_checkout(&repository)),
+                options.user_config.as_deref(),
+            ),
         })?;
         for error in [swept.err(), runners.err()].into_iter().flatten() {
             opened.warnings.push(format!("{error:#}"));
@@ -1197,6 +1234,9 @@ same in one step",
             inspect_repository: &inspect_repository,
             trusts_repository: &claude_trusts_repository,
             run_env_programs: &up_run_env_programs,
+            resolve_language: &|checkout, user_config| {
+                crate::infrastructure::language::resolve_language(Some(checkout), user_config)
+            },
             load_average,
         }
     }
@@ -1327,6 +1367,7 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
     ShellVerifier {
         checkout,
         db: db.to_path_buf(),
+        user_config: None,
     }
     .run_env_programs(None)
 }
@@ -1398,7 +1439,7 @@ fn max_improvement_proposals(checkout: &Path) -> Result<usize> {
 /// The KPI reports' directory in the queue's (ADR-0051 decision 20).
 pub const REPORTS_DIR: &str = "reports";
 
-fn bound_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+pub(crate) fn bound_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
     Ok(queue
         .repository_binding()?
         .map(PathBuf::from)
@@ -1514,6 +1555,9 @@ pub struct PlanOptions {
     pub claude: PathBuf,
     pub plugin_dir: Option<PathBuf>,
     pub runner: PathBuf,
+    /// The user's `config.toml` the planner's language comes from under
+    /// the repository's `dagq.toml` (ADR-t616-2); `None` reads none.
+    pub user_config: Option<PathBuf>,
 }
 
 /// `plan` on the system clock: see [`OneShot::plan`].

@@ -9,6 +9,7 @@ mod findings;
 mod goal_reviews;
 pub mod kpi_config;
 mod kpi_push;
+pub mod language;
 pub mod launchd;
 pub mod location;
 mod plan_reviews;

@@ -66,3 +66,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 Judge completion only from `show`: the run's `status`, `result_commit`, `last_error`, and the `validation_finished` event. A Stop hook, an idle session or a receipt file is not success. Summarize: task status, latest run status, branch and commit, and the next step.
 
 A goal is closed once, by the planner, after every task is `completed` or `canceled`, the drafts from receipts' `follow_ups` are decided with the user, and the receipts' `summary` meets the goal's acceptance (gaps become new tasks on it first). Read `reference/goal-close.md` before running `goal close`.
+
+## 5. Language
+
+When your prompt, a request the runtime sends you, or the status the SessionStart hook prints (`language.instruction`) names a language, write everything you address to people in it: replies, ask questions and option descriptions, goal and task titles, descriptions and context, notes, findings, verdict reasons, and receipt summaries and follow_ups (the landing commit message is built from the task title and the receipt summary). Keep code, identifiers, CLI flags, ask option values and quoted runtime output as they are. When none is named, follow the conversation and the repository's rules. The language is `[language] tag` of the repository's `dagq.toml` over the user's `$XDG_CONFIG_HOME/dagq/config.toml`; `"$DAGQ" doctor` shows it (`language`) and where it came from.

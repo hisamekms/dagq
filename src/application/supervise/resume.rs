@@ -2,6 +2,7 @@
 //! resume, the resolution request and the [`ResumeWatch`] of the session.
 
 use super::*;
+use crate::domain::language::with_instruction;
 use crate::domain::{
     ParkCause, RunEvent,
     resume::CONFLICT_ONLY_RESUME_LIMIT,
@@ -340,7 +341,10 @@ impl Supervisor<'_> {
             run,
             &request.main,
         )?;
-        let message = resume_request(&task, run, request, &landed)?;
+        let message = with_instruction(
+            resume_request(&task, run, request, &landed)?,
+            self.verifier.language().as_ref(),
+        );
         self.files.write(
             &run_dir.join(format!("resume-{attempt}.txt")),
             message.as_bytes(),

@@ -42,6 +42,7 @@ fn observe_options(mode: dagq::observer::ObserveMode) -> dagq::observer::Observe
         dry_run: false,
         timeout: Duration::from_secs(60),
         dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
+        user_config: None,
     }
 }
 
@@ -220,6 +221,27 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     assert!(prompt.contains("task 1 waits for a slot"), "{prompt}");
     assert!(prompt.contains("idle_slots"), "{prompt}");
     assert_eq!(queue_events(&db, "observe_started").len(), 3);
+    // No language set: no instruction; the user's language: its
+    // instruction closes the prompt (ADR-t616-2).
+    assert!(!prompt.contains("Language:"), "{prompt}");
+    let config = db.parent().unwrap().join("config.toml");
+    fs::write(&config, "[language]\ntag = \"ja\"\n").unwrap();
+    let dry = observe(
+        &db,
+        &failing,
+        &dagq::observer::ObserveOptions {
+            dry_run: true,
+            since: Some(EventId::new(0)),
+            user_config: Some(config),
+            ..observe_options(ObserveMode::Daily)
+        },
+    )
+    .unwrap();
+    let prompt = dry["prompt"].as_str().unwrap();
+    assert!(
+        prompt.ends_with(&dagq::domain::language::instruction("ja")),
+        "{prompt}"
+    );
 
     // An agent that cannot start is an error outcome, not a failed observe.
     let broken = observe(

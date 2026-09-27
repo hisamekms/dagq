@@ -681,7 +681,7 @@ fn hook_status(output: &Output, role: &str) -> Value {
     assert_eq!(
         header,
         format!(
-            "This session is the dagq {role} (DAGQ_ROLE={role}); follow the dagq-{role} skill of the dagq plugin. The queue status for this role (dagq status --role {role}):"
+            "This session is the dagq {role} (DAGQ_ROLE={role}); follow the dagq-{role} skill of the dagq plugin. The queue status for this role (dagq status --role {role}); when its language.instruction is set, write for people as it says:"
         )
     );
     serde_json::from_str(status).unwrap()
@@ -779,6 +779,38 @@ fn session_start_hook_prints_status_only_in_the_sessions_up_opens() {
     );
     assert!(kinds(&planner).is_empty(), "{planner}");
     assert!(planner["cursor"].is_number());
+
+    // The status the hook prints carries the language the user set, and
+    // the instruction the session follows (ADR-t616-2).
+    assert_eq!(planner["language"]["source"], "unset", "{planner}");
+    let config_home = dir.path().join("config");
+    fs::create_dir_all(config_home.join("dagq")).unwrap();
+    fs::write(
+        config_home.join("dagq/config.toml"),
+        "[language]\ntag = \"ja\"\n",
+    )
+    .unwrap();
+    let planner = hook_status(
+        &session_start(
+            &[
+                ("DAGQ_BIN", binary),
+                ("DAGQ_ROLE", "planner"),
+                ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
+            ],
+            &data_home,
+            &repo,
+        ),
+        "planner",
+    );
+    assert_eq!(planner["language"]["tag"], "ja", "{planner}");
+    assert_eq!(planner["language"]["source"], "user", "{planner}");
+    assert!(
+        planner["language"]["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("BCP 47 tag `ja`"),
+        "{planner}"
+    );
 
     // `up` names the queue in DAGQ_QUEUE, which works outside the repository.
     let db = stdout_json(&launcher(

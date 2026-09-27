@@ -23,6 +23,7 @@ use super::*;
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
 };
+use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
     IDLE_WITHOUT_RECEIPT, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS,
     ProcessInfo, RecoveryAction, SEND_UNCONFIRMED, attempts, failed_live, run_processes,
@@ -921,7 +922,10 @@ fn spawn_live(
         history: &history,
         allowed: live.allowed,
     };
-    let prompt = recovery_prompt(&task, run, attempt, &material)?;
+    let prompt = with_instruction(
+        recovery_prompt(&task, run, attempt, &material)?,
+        sv.verifier.language().as_ref(),
+    );
     start_job(sv, live.run_dir, alert, attempt, &prompt, None)
 }
 

@@ -3,6 +3,7 @@
 //! its `worker_question` asks.
 
 use super::*;
+use crate::domain::language::with_instruction;
 
 impl Supervisor<'_> {
     /// Start the validation of `run` on a thread (see [`spawn_validation`]).
@@ -100,15 +101,18 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         let inherited = self.inheritance(&run)?;
         self.files.write(
             &run_dir.join("prompt.txt"),
-            prompt(
-                &task,
-                &run,
-                goal.as_ref(),
-                &predecessors,
-                &goal_predecessors,
-                &siblings,
-                inherited.as_ref(),
-            )?
+            with_instruction(
+                prompt(
+                    &task,
+                    &run,
+                    goal.as_ref(),
+                    &predecessors,
+                    &goal_predecessors,
+                    &siblings,
+                    inherited.as_ref(),
+                )?,
+                self.verifier.language().as_ref(),
+            )
             .as_bytes(),
         )?;
         if let Some(inherited) = &inherited {

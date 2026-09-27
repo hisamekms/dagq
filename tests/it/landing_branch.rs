@@ -178,6 +178,7 @@ fn up_checks_the_landing_branch_and_plan_opens_on_master() {
         claude: fixture.options.claude.clone(),
         plugin_dir: fixture.options.plugin_dir.clone(),
         runner,
+        user_config: None,
     };
     let planned = dagq::lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
     assert_eq!(planned["planner"]["id"], 1, "{planned}");

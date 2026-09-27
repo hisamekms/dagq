@@ -37,6 +37,7 @@ use super::{
     prompt::inbox_prompt,
     recording::RecordingBackend,
 };
+use crate::domain::language::{Language, with_instruction};
 use crate::{
     VERSION,
     domain::{
@@ -115,6 +116,10 @@ pub struct UpEnvironment {
     /// Claude Code's global config, which records the folder trust of each
     /// repository (`claude_global_config`); `None` trusts nothing.
     pub claude_config: Option<PathBuf>,
+    /// The user's `config.toml` (`$XDG_CONFIG_HOME/dagq/config.toml`) the
+    /// language comes from under the repository's `dagq.toml`
+    /// (ADR-t616-2); `None` reads none.
+    pub user_config: Option<PathBuf>,
 }
 
 /// What `up` says when cmux does not admit a process from outside its
@@ -184,8 +189,16 @@ pub struct Ports<'a> {
     /// `[run.env]` of the `dagq.toml` in `checkout` names on `path`
     /// (ADR-0049 decision 9).
     pub run_env_programs: &'a dyn Fn(&Path, &Path, &str) -> Result<RunEnvCheck>,
+    /// `resolve_language(checkout, user_config)`: the language of the
+    /// `dagq.toml` in `checkout` over the user's `config.toml`, or the
+    /// mistake in either (ADR-t616-2).
+    pub resolve_language: &'a ResolveLanguage,
     pub load_average: fn() -> Option<f64>,
 }
+
+/// How `up` resolves the language: `(checkout, user_config)` to the
+/// language in force, or the mistake in either file (ADR-t616-2).
+pub type ResolveLanguage = dyn Fn(&Path, Option<&Path>) -> Result<Option<Language>>;
 
 #[derive(Debug, Clone)]
 pub struct UpOptions {
@@ -277,6 +290,10 @@ pub fn up(
     if let Some(message) = run_env.missing_message() {
         bail!("{message}; the supervisor was not started");
     }
+    // A mistake in the language is caught before anything starts; later it
+    // only leaves the prompts without the instruction (ADR-t616-2).
+    let language = (ports.resolve_language)(trust_root, environment.user_config.as_deref())
+        .map_err(|error| anyhow::anyhow!("{error:#}; the supervisor was not started"))?;
     // Every claim and landing reads the landing branch: one that does not
     // resolve would hold them all, and a configured push remote that is
     // missing would fail every push (ADR-t615-1).
@@ -377,7 +394,14 @@ pub fn up(
     let inbox = sessions.open(
         SessionRole::Inbox,
         inbox_workspace_name(&repository.root),
-        || inbox_command(&db, &options.claude, plugin_dir.as_deref()),
+        || {
+            inbox_command(
+                &db,
+                &options.claude,
+                plugin_dir.as_deref(),
+                language.as_ref(),
+            )
+        },
     )?;
 
     let mut report = json!({
@@ -388,6 +412,7 @@ pub fn up(
         "warnings": workspaces.take_warnings(),
         "doctor": open_work(queue, processes, ports.clock)?,
         "repository": landing,
+        "language": language,
     });
     // What the preflight found, only for a repository with a dagq.toml.
     if run_env.config {
@@ -1427,11 +1452,20 @@ pub fn launch_agent_spec(
 }
 
 /// The inbox workspace's command: `claude` with `inbox_prompt` as its first
-/// message. The role and queue are the workspace's own `--env` (ADR-0026),
+/// message, with the instruction of `language` (ADR-t616-2). The role and queue are the workspace's own `--env` (ADR-0026),
 /// not a prefix of this command, so a `claude` started again in that
 /// workspace still has them.
-pub fn inbox_command(db: &Path, claude: &Path, plugin_dir: Option<&Path>) -> Result<String> {
-    session_command(claude, plugin_dir, inbox_prompt(db)?)
+pub fn inbox_command(
+    db: &Path,
+    claude: &Path,
+    plugin_dir: Option<&Path>,
+    language: Option<&Language>,
+) -> Result<String> {
+    session_command(
+        claude,
+        plugin_dir,
+        with_instruction(inbox_prompt(db)?, language),
+    )
 }
 
 fn session_command(claude: &Path, plugin_dir: Option<&Path>, prompt: String) -> Result<String> {

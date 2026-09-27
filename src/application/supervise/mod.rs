@@ -24,6 +24,7 @@
 //! and the landing), `revise`, `resume`, `triage`, `adopt` and `idle` (the
 //! idle marker). The prompts and requests are in [`super::prompt`].
 
+use crate::domain::language::with_instruction;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -1829,7 +1830,10 @@ impl Supervisor<'_> {
                         slot.phase = Phase::Validating(Some(handle), Some(session));
                     }
                     ReviseOutcome::Mismatch(code, why) => {
-                        let message = revise_mismatch_request(&slot.run, &label, &why)?;
+                        let message = with_instruction(
+                            revise_mismatch_request(&slot.run, &label, &why)?,
+                            self.verifier.language().as_ref(),
+                        );
                         // Only what the session writes after this counts.
                         let sent_at = self.files.now();
                         let run = slot.run.clone();

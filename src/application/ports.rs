@@ -2111,6 +2111,12 @@ pub trait Verifier {
     fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {
         Ok(crate::domain::worker_model::WorkerTrial::default())
     }
+    /// The language AI writes in for people (`[language]` of `dagq.toml`
+    /// over the user's `config.toml`, ADR-t616-2), resolved now; `None`
+    /// when unset or unreadable, which adds no instruction to a prompt.
+    fn language(&self) -> Option<crate::domain::language::Language> {
+        None
+    }
     /// Run `command` in a shell in `cwd` with `env`, its output in `log`.
     fn run_to_log(
         &self,

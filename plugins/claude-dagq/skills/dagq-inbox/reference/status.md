@@ -38,6 +38,7 @@ Read this when a field of `status`, `watch` or `show` is unclear.
 - `status --role <inbox|planner>` keeps only the attention for that role: all of it is the inbox's (ADR-0044 decision 17), none a planner's.
 - `asks`: the open asks, each with `id`, `kind`, `question` (first 200 characters, `…` when cut), `task_id`, `run_id`, `asked_by` and `age_secs`.
 - `cursor`: the newest event id.
+- `language` (only with `--role inbox` or `--role planner`): the language to write for people in, `tag` and `source` (`repository`, `user` or `unset`), and the `instruction` to follow when one is set (the `dagq` skill's section 5).
 
 ## Runs waiting for a person (outside the slots)
 

@@ -53,7 +53,11 @@ const KPI_TABLE: &str = "kpi";
 /// `[worker.trial]`: the limited trial of the worker's model (ADR-0079
 /// decision 4).
 const WORKER_TRIAL_TABLE: &str = "worker.trial";
-const TABLES: [&str; 7] = [
+/// `[language]` (ADR-t616-2): accepted here without looking into it;
+/// [`super::language`] reads and checks it, so a mistake in it never stops
+/// a claim or a landing.
+const LANGUAGE_TABLE: &str = "language";
+const TABLES: [&str; 8] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -61,6 +65,7 @@ const TABLES: [&str; 7] = [
     DISK_TABLE,
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
+    LANGUAGE_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -144,15 +149,18 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{LANGUAGE_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
-                !seen.contains(known),
+                *known == LANGUAGE_TABLE || !seen.contains(known),
                 "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
             );
             seen.push(known);
             table = Some(known);
+            continue;
+        }
+        if table == Some(LANGUAGE_TABLE) {
             continue;
         }
         let (key, rest) = line
@@ -673,6 +681,9 @@ pub(super) fn parse_string(text: &str) -> Result<String> {
 pub struct ShellVerifier {
     pub checkout: PathBuf,
     pub db: PathBuf,
+    /// The user's `config.toml` its [`Verifier::language`] reads
+    /// (ADR-t616-2); `None` reads none.
+    pub user_config: Option<PathBuf>,
 }
 
 impl Verifier for ShellVerifier {
@@ -715,6 +726,10 @@ impl Verifier for ShellVerifier {
 
     fn worker_trial(&self) -> Result<WorkerTrial> {
         load_worker_trial(&self.checkout)
+    }
+
+    fn language(&self) -> Option<crate::domain::language::Language> {
+        super::language::language_for_prompt(Some(&self.checkout), self.user_config.as_deref())
     }
 
     fn run_to_log(
@@ -823,10 +838,22 @@ LITERAL = 'no \n escapes # here'
         let verifier = ShellVerifier {
             checkout: dir.path().to_owned(),
             db: dir.path().join("q.db"),
+            user_config: None,
         };
         assert!(verifier.worker_trial().unwrap().enabled);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[worker.trial]\nx = 1\n").unwrap();
         assert!(load_worker_trial(dir.path()).is_err());
+    }
+
+    #[test]
+    fn accepts_the_language_table_without_reading_it() {
+        // Its reader checks it (ADR-t616-2); a mistake in it never stops
+        // what reads the other tables.
+        let config =
+            parse_config("[language]\nname = 1\nnot a key\n[stall]\nsend_confirm_secs = 5\n")
+                .unwrap();
+        assert_eq!(config.stall.send_confirm_secs, 5);
+        assert!(parse_config("[language]\n[language]").is_ok());
     }
 
     #[test]
@@ -990,6 +1017,7 @@ LITERAL = 'no \n escapes # here'
         let verifier = ShellVerifier {
             checkout: dir.path().to_owned(),
             db: dir.path().join("queue.db"),
+            user_config: None,
         };
         assert_eq!(
             verifier.recheck_command().unwrap().as_deref(),
@@ -1287,6 +1315,7 @@ LITERAL = 'no \n escapes # here'
         let verifier = ShellVerifier {
             checkout: root.path().to_path_buf(),
             db: queue.path().join("queue.sqlite3"),
+            user_config: None,
         };
         assert!(!verifier.run_env_programs(None).unwrap().config);
         fs::write(

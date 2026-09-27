@@ -9,6 +9,7 @@
 //! pass.
 
 use super::*;
+use crate::domain::language::with_instruction;
 use crate::{
     application::{
         PlanReviewApply, PlanReviewJob, StatusFilter, TaskListItem, TaskQuery,
@@ -215,7 +216,7 @@ impl Supervisor<'_> {
             .iter()
             .map(|detail| self.duplicate_candidates(proposal, &detail.task))
             .collect::<Result<Vec<_>>>()?;
-        plan_review_prompt(&PlanReviewMaterial {
+        let prompt = plan_review_prompt(&PlanReviewMaterial {
             proposal,
             tasks: &tasks,
             goals: &goals,
@@ -228,7 +229,8 @@ impl Supervisor<'_> {
             hotspots: &hotspots,
             candidates: &candidates,
             repo_root: &self.layout.repo_root,
-        })
+        })?;
+        Ok(with_instruction(prompt, self.verifier.language().as_ref()))
     }
 
     /// The files each task of the proposal and each ready or in-progress
@@ -558,7 +560,10 @@ impl Supervisor<'_> {
                         continue;
                     }
                     let workspace = view.planner.workspace_id.clone().unwrap_or_default();
-                    let text = plan_revise_request(proposal.id(), &revise.reasons);
+                    let text = with_instruction(
+                        plan_revise_request(proposal.id(), &revise.reasons),
+                        self.verifier.language().as_ref(),
+                    );
                     if let Err(error) =
                         submit_input(self.cmux, self.signals, &workspace, Input::Text(&text))
                     {
@@ -679,6 +684,7 @@ impl Supervisor<'_> {
             runner: &layout.runner,
             claude: &layout.claude,
             plugin_dir: layout.plugin_dir.as_deref(),
+            language: self.verifier.language(),
         }
     }
 

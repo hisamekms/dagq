@@ -65,7 +65,7 @@ fn inbox_and_planner_prompts_name_the_queue_and_their_one_job() {
     assert!(!planner.contains("note"), "{planner}");
     assert!(!planner.contains("draft"), "{planner}");
 
-    let command = inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p"))).unwrap();
+    let command = inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p")), None).unwrap();
     assert!(command.starts_with("'/opt/claude' '"), "{command}");
     assert!(command.contains("'--' 'You are the inbox of"), "{command}");
     // A person works in the inbox: it has no settings of the runtime's, so
@@ -75,7 +75,7 @@ fn inbox_and_planner_prompts_name_the_queue_and_their_one_job() {
     assert_eq!(ROLE_ENV, "DAGQ_ROLE");
     assert_eq!(QUEUE_ENV, "DAGQ_QUEUE");
     assert!(
-        inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p")))
+        inbox_command(db, Path::new("/opt/claude"), Some(Path::new("/p")), None)
             .unwrap()
             .contains("'--plugin-dir' '/p'")
     );
@@ -90,6 +90,7 @@ fn plan_options(fixture: &Fixture) -> lifecycle::PlanOptions {
         claude: fixture.options.claude.clone(),
         plugin_dir: fixture.options.plugin_dir.clone(),
         runner,
+        user_config: None,
     }
 }
 
@@ -325,6 +326,11 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         runner: &runner,
         claude: &fixture.options.claude,
         plugin_dir: None,
+        // The language resolved for the launch (ADR-t616-2).
+        language: Some(dagq::domain::language::Language {
+            tag: "ja".into(),
+            source: dagq::domain::language::LanguageSource::User,
+        }),
     };
     let reasons = vec!["the acceptance is not testable".to_owned()];
     let opened = open_runtime_planner(
@@ -358,6 +364,10 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
     );
     assert!(
         prompt.contains(&format!("`dagq submit --proposal {}`", proposal.id())),
+        "{prompt}"
+    );
+    assert!(
+        prompt.ends_with(&dagq::domain::language::instruction("ja")),
         "{prompt}"
     );
     let tags = cmux.tags.lock().unwrap();

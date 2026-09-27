@@ -1316,7 +1316,10 @@ fn execute(cli: Cli) -> Result<Value> {
     install_telemetry(&cli.command, &location);
     // The clock and IDs of every queue and use case this command runs.
     let generators = dagq::infrastructure::clock::system();
-    let one_shot = dagq::compose::OneShot::new(generators.clone());
+    let one_shot = dagq::compose::OneShot {
+        user_config: dagq::infrastructure::language::user_config_file(),
+        ..dagq::compose::OneShot::new(generators.clone())
+    };
     // The binding is checked on every command of a repository queue; a `--db`
     // queue is bound by its first `supervise` and checked there and by `integrate`.
     let common_dir = location
@@ -2028,6 +2031,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
                 max_waiting: usize::from(max_waiting),
                 max_load: (max_load > 0.0).then_some(max_load),
+                user_config: dagq::infrastructure::language::user_config_file(),
                 ..SuperviseOptions::new(usize::from(parallel), once)
             };
             dagq::compose::supervise(
@@ -2070,6 +2074,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
                     env::var("HOME").ok().as_deref(),
                 ),
+                user_config: dagq::infrastructure::language::user_config_file(),
             };
             let options = UpOptions {
                 parallel,
@@ -2146,6 +2151,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     claude: executable(&claude)?,
                     plugin_dir,
                     runner: env::current_exe()?,
+                    user_config: dagq::infrastructure::language::user_config_file(),
                 },
             )?
         }
@@ -2329,6 +2335,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     dry_run,
                     timeout: Duration::from_secs(timeout),
                     dagq: env::current_exe()?,
+                    user_config: dagq::infrastructure::language::user_config_file(),
                 },
             )?
         }

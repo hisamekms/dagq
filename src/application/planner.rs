@@ -36,7 +36,9 @@ use super::{
 };
 use crate::domain::{
     IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState, ProposalId,
-    SessionRole, Task, sessions::RUNTIME_PLANNER,
+    SessionRole, Task,
+    language::{Language, with_instruction},
+    sessions::RUNTIME_PLANNER,
 };
 
 /// The planner's first message, which its wrapper hands the agent.
@@ -65,6 +67,9 @@ pub struct PlannerLaunch<'a> {
     pub runner: &'a Path,
     pub claude: &'a Path,
     pub plugin_dir: Option<&'a Path>,
+    /// The language every planner's prompt names (ADR-t616-2), resolved
+    /// when the launch is made; `None` names none.
+    pub language: Option<Language>,
 }
 
 /// A planner whose workspace just opened: its record, the workspace's
@@ -153,7 +158,8 @@ fn launch_planner(
     if let Some(finding) = planner.finding_id {
         name.push_str(&format!(" - finding {finding}"));
     }
-    let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, prompt);
+    let prompt = with_instruction(prompt.to_owned(), launch.language.as_ref());
+    let opened = create_workspace(launch, &workspaces, &planner, &dir, &name, &prompt);
     let workspace_id = match opened {
         Ok(id) => id,
         Err(error) => {

@@ -65,6 +65,16 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             checked_at.is_some_and(|value| value.is_u64()),
             "{command} reports checked_at as unix seconds"
         );
+        // `doctor` reports the language in force (ADR-t616-2), which comes
+        // from the user's config.toml of whoever runs the tests, so only its
+        // shape is checked; `tests/it/language.rs` checks its values.
+        if command == "doctor" {
+            let language = report.as_object_mut().unwrap().remove("language");
+            assert!(
+                language.is_some_and(|value| value["source"].is_string()),
+                "doctor reports the language"
+            );
+        }
         let mut expected = serde_json::json!({"supervisors": [], "runs": []});
         if command == "status" {
             // Nothing supervises a fresh queue; no event exists yet.

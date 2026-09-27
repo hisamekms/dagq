@@ -51,6 +51,9 @@ pub struct ObserveOptions {
     pub timeout: Duration,
     /// The `dagq` binary the agent calls; its directory goes first on PATH.
     pub dagq: PathBuf,
+    /// The user's `config.toml` the language comes from under the bound
+    /// checkout's `dagq.toml` (ADR-t616-2); `None` reads none.
+    pub user_config: Option<PathBuf>,
 }
 
 /// `<queue dir>/observer`: one directory per observation and the cursor.
@@ -150,7 +153,14 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "--db".into(),
         db.to_string_lossy().into_owned(),
     ]);
-    let prompt = observer_prompt(options.mode, &command, since, &input)?;
+    let language = crate::infrastructure::language::language_for_prompt(
+        crate::compose::bound_checkout(&queue)?.as_deref(),
+        options.user_config.as_deref(),
+    );
+    let prompt = crate::domain::language::with_instruction(
+        observer_prompt(options.mode, &command, since, &input)?,
+        language.as_ref(),
+    );
     if options.dry_run {
         return Ok(json!({
             "dry_run": true,

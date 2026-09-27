@@ -38,7 +38,7 @@ taskに`required_evidence`があれば、verification commandsの直後（4節�
 
 schemaとCLIは変えない。`tests/e2e.rs`のstubはpromptの1行目とreceipt pathの行だけを読み、`follow_ups`のないreceiptを書くので、節の追加に影響されない。
 
-言語の設定（`[language]`）が解決できるときは、receiptの契約の前に言語の指示の段落を足す。resumeとreviseの依頼文も同じ（[Language](language.md#promptへの渡し方)、ADR-t616-2。未実装）。
+言語の設定（`[language]`）が解決できるときは、promptの末尾に言語の指示の段落を足す。resumeとreviseの依頼文も同じ（[Language](language.md#promptへの渡し方)、ADR-t616-2）。
 
 ## repositoryの規則を読む順
 

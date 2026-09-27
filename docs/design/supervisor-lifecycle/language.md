@@ -22,7 +22,7 @@ related:
 
 runtimeが出す固定の文字列は英語だけで持ち（[ADR-t616-1](../../adr/2026-09-27-t616-1-runtime-fixed-strings-are-english.md)）、AIが人に向けて書く文の言語は`[language]`の設定で指定できる（[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。
 
-**実装状況**: ADR-t616-1は実装した（task 625。下の「日本語が残っていた固定の文字列」をすべて英語にした）。ADR-t616-2は未実装で、`[language]`は`dagq.toml`で未知の表としてerrorになり、利用者ごとの`config.toml`は読まれず、promptに言語の指示は入らない。
+**実装状況**: ADR-t616-1は実装した（task 625。下の「日本語が残っていた固定の文字列」をすべて英語にした）。ADR-t616-2も実装した（task 626。読むのは`src/infrastructure/language.rs`、指示の文面と足し方は`src/domain/language.rs`）。
 
 ## runtimeの固定の文字列
 
@@ -50,7 +50,7 @@ pluginのskill（`dagq-recover`の`reference/review-by-hand.md`、`dagq`の`refe
 | 置き場所 | 読むもの | 優先 |
 | --- | --- | --- |
 | repositoryの`dagq.toml`（main checkoutの作業ファイル。[Run environment](run-environment.md)と同じ） | そのqueueのsupervisor・`up`・`plan`・`doctor`・`status` | 1 |
-| 利用者ごとの`$XDG_CONFIG_HOME/dagq/config.toml`（`XDG_CONFIG_HOME`が空か無ければ`~/.config/dagq/config.toml`） | その利用者の環境で動くdagq。supervisorは自分のprocessの`XDG_CONFIG_HOME` / `HOME`で読み、in-cmux modeでもlaunchd modeでも`up`が渡したenvになる | 2 |
+| 利用者ごとの`$XDG_CONFIG_HOME/dagq/config.toml`（`XDG_CONFIG_HOME`が空か無ければ`~/.config/dagq/config.toml`） | その利用者の環境で動くdagq。supervisorは自分のprocessの`XDG_CONFIG_HOME` / `HOME`で読む。in-cmux modeでは`up`を打ったshellのenvを引き継ぐが、launchd modeのplistは`XDG_CONFIG_HOME`を渡さないので`~/.config/dagq/config.toml`になる（`XDG_CONFIG_HOME`を変えた人の`up`のpreflightとずれうる。`host.toml`と同じ）。pathはCLI（`main.rs`）が環境変数から決めて`SuperviseOptions`・`PlanOptions`・`ObserveOptions`・`UpEnvironment`・`OneShot`の`user_config`に渡し、そこが`None`なら読まない（testは明示したpathだけを読み、testを走らせる人の設定に左右されない） | 2 |
 
 | key | 型 | 既定 | 意味 |
 | --- | --- | --- | --- |
@@ -69,15 +69,15 @@ tag = "ja"
 
 ## promptへの渡し方
 
-設定が解決できたら、runtimeは次のpromptの末尾近く（receiptやverdictの契約の前）に英語の指示を1段落足す。未設定なら何も足さない。
+設定が解決できたら、runtimeは次のpromptの末尾に英語の指示を1段落足す（`with_instruction`）。未設定なら何も足さない。契約の前ではなく末尾に置くのは、どのpromptにも同じ関数で足せ、各promptの組み立てを変えずに済むため。
 
 - worker: claimの`prompt`、resumeの依頼（`resume_request`とその派生）、reviewの差し戻し（`revise_request`と、差し戻しの前提が崩れたときの`revise_mismatch_request`）
-- review job（`review_prompt`）、復旧job（`recovery_prompt`）、plan review job（`plan_review_prompt`）とそのreviseの依頼（`plan_revise_request`）
-- planner: 人が開く`planner_prompt`、runtimeが立てる`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`
-- inbox: `inbox_prompt`
+- review job（`review_prompt`）、復旧job（`recovery_prompt`）、plan review job（`plan_review_prompt`）とそのreviseの依頼（`plan_revise_request`）、goal review job（`goal_review_prompt`。goalの判定の理由も人が読む）
+- planner: 人が開く`planner_prompt`、runtimeが立てる`runtime_planner_prompt`・`draft_planner_prompt`・`finding_planner_prompt`（どれも`PlannerLaunch`の`language`を`launch_planner`が足す）
+- inbox: `inbox_prompt`（`up`の`inbox_command`）
 - observer: `observer_prompt`（`src/observer.rs`）
 
-停滞の催促やaskの答えの配送など、立ったsessionに送る短い定型文には足さない（最初のpromptが指示を持つ）。
+supervisorは`Verifier::language`（`ShellVerifier`がmain checkoutの`dagq.toml`と`user_config`を読む）で、promptを組み立てるたびに解決する。停滞の催促やaskの答えの配送など、立ったsessionに送る短い定型文には足さない（最初のpromptが指示を持つ）。
 
 指示の文面（`[language]`が`ja`のとき）:
 
@@ -85,11 +85,13 @@ tag = "ja"
 Language: write everything you address to people in the language with BCP 47 tag `ja` — your replies in this conversation, ask questions and option descriptions, task and goal titles and descriptions, context, notes, findings, verdict reasons, and receipt summaries and follow_ups (the landing commit message is built from the task title and the receipt summary). Keep code, identifiers, CLI flags, ask option values and quoted runtime output as they are.
 ```
 
-inboxとplannerの初期promptは5行以内（[Session prompts](session-prompts.md)）だが、この1行は数えない。compactionと`/clear`で初期promptが失われるので、inboxとplannerについては`status --role inbox|planner`の出力に`language`（`tag`・`source`・`instruction`）を足し、pluginの`SessionStart` hook（`session-start.sh`、[plugin-integration](../plugin-integration.md#起き直しhookadr-0016)）が出す起き直しの出力に同じ指示が入るようにする。pluginのskill（`dagq`・`dagq-planner`・`dagq-inbox`・`dagq-recover`）には「promptか起き直しの出力に言語の指示があれば、その範囲の文をその言語で書く。無ければ会話とrepositoryの規則に従う」と書く。workerには起き直しのhookが無い（`session-start.sh`はinboxとplannerだけを扱う）ので、workerは初期promptと、resume・差し戻しの依頼文に載る指示に頼る。
+inboxとplannerの初期promptは5行以内（[Session prompts](session-prompts.md)）だが、この1行は数えない。compactionと`/clear`で初期promptが失われるので、inboxとplannerについては`status --role inbox|planner`の出力に`language`（`tag`・`source`・`user_config`・`instruction`、誤りなら`error`。未設定なら`tag`と`instruction`はnull）を足し、pluginの`SessionStart` hook（`session-start.sh`、[plugin-integration](../plugin-integration.md#起き直しhookadr-0016)）が出す起き直しの出力に同じ指示が入るようにする。hookは先頭の1行で「statusの`language.instruction`があればそれに従って人に向けて書く」と指し、その後のstatusのJSONが指示の文面を持つ（shで JSONから文面を抜き出さない）。pluginのskill（`dagq`・`dagq-planner`・`dagq-inbox`・`dagq-recover`）には「promptか起き直しの出力に言語の指示があれば、その範囲の文をその言語で書く。無ければ会話とrepositoryの規則に従う」と書く（範囲と置き場所は`dagq` skillのsection 5「Language」が持ち、ほかの3つはそこを指す1文を持つ）。workerには起き直しのhookが無い（`session-start.sh`はinboxとplannerだけを扱う）ので、workerは初期promptと、resume・差し戻しの依頼文に載る指示に頼る。
 
 ## `up`と`doctor`
 
-- `up`のpreflight: `dagq.toml`の`[language]`と`config.toml`を読み、書式の誤りならsupervisorを起動せず、ファイルのpathと誤りを挙げたerrorで止まる。`up`の出力に解決した`language`を付ける。
-- `dagq.toml`の他の表を読む処理（claimのprovisioningの`[run.env]`、`integrate`の検証、supervisorの`[stall]`・`[disk]`など）は、`[language]`を既知の表として受け付けるだけで、中のkeyと値を検査しない。`[language]`の書式の誤りでprovisioningや着地を失敗させないためで、誤りを見せるのは`up`・`doctor`・promptの組み立てだけにする。
+- `up`のpreflight: `dagq.toml`の`[language]`と`config.toml`を読み、書式の誤りならsupervisorを起動せず、ファイルのpathと誤りを挙げたerrorで止まる（どちらかで決まっても両方を読むので、使われない側の誤りも止める）。`up`の出力に解決した`language`（`{"tag", "source"}`か、未設定ならnull）を付け、inboxの初期promptに指示を足す。
+- `dagq.toml`の他の表を読む処理（claimのprovisioningの`[run.env]`、`integrate`の検証、supervisorの`[stall]`・`[disk]`など）は、`[language]`を既知の表として受け付けるだけで、中のkeyと値も表の重複も検査しない。`[language]`の書式の誤りでprovisioningや着地を失敗させないためで、誤りを見せるのは`up`・`doctor`・promptの組み立てだけにする。
 - supervisorと`plan`: promptを組み立てる時点で`[language]`か`config.toml`が読めなければ指示を足さずに進み、`tracing`のwarnを出す。runもplannerも止めない。
-- `doctor`（既定の出力にも出す）: `language`の欄に`tag`（未設定ならnull）、`source`（`repository` / `user` / `unset`）、読んだ`user_config`のpath、書式の誤りがあれば`error`を出す（[doctor](doctor.md)）。
+- `doctor`（既定の出力にも出す）: `language`の欄に`tag`（未設定ならnull）、`source`（`repository` / `user` / `unset`）、読んだ`user_config`のpath、promptに足す`instruction`、書式の誤りがあれば`error`を出す（誤りのときは`source`が`unset`）（[doctor](doctor.md)）。このbinaryが読めない（migrateが要る・拒まれる）queueの`doctor`には出ない。
+
+testは`src/domain/language.rs`と`src/infrastructure/language.rs`のunit test（タグの形・優先順・誤り）、`tests/it/language.rs`（設定なし・利用者ごと・`dagq.toml`の上書きの3通りでworkerとreviewのpromptと`doctor`・`status --role inbox`）、`tests/it/lifecycle_up.rs`（preflightの誤りとinboxのprompt）、`tests/it/lifecycle_plan.rs`（runtimeのplanner）、`tests/it/runtime_observer.rs`（observer）、`tests/plugin.rs`（hookの出力）。

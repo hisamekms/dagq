@@ -71,6 +71,43 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
     );
 }
 
+/// A mistake in the language stops `up` before it starts anything; a
+/// language set is in `up`'s report and the inbox's first prompt
+/// (ADR-t616-2).
+#[test]
+fn up_refuses_a_wrong_language_and_gives_the_inbox_a_right_one() {
+    let mut fixture = fixture();
+    let config = fixture.repo.parent().unwrap().join("config.toml");
+    fs::write(&config, "[language]\ntag = 'ja_JP'\n").unwrap();
+    fixture.environment.user_config = Some(config.clone());
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(
+        error.contains("config.toml:2")
+            && error.contains("BCP 47")
+            && error.contains("the supervisor was not started"),
+        "{error}"
+    );
+    assert!(cmux.workspaces.lock().unwrap().is_empty());
+
+    fs::write(&config, "[language]\ntag = 'ja'\n").unwrap();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(
+        report["language"],
+        json!({"tag": "ja", "source": "user"}),
+        "{report}"
+    );
+    let workspaces = cmux.workspaces.lock().unwrap();
+    let inbox = &workspaces[0].3;
+    assert!(inbox.contains("You are the inbox of"), "{inbox}");
+    assert!(inbox.contains("BCP 47 tag `ja`"), "{inbox}");
+}
+
 #[test]
 fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
     let fixture = fixture();
@@ -100,6 +137,7 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         [
             "doctor",
             "inbox",
+            "language",
             "migrated",
             "pruned_supervisors",
             "repository",

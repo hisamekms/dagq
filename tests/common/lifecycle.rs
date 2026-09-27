@@ -95,6 +95,7 @@ pub fn fixture() -> Fixture {
             socket_password: None,
             current_exe: "/opt/bin/dagq".into(),
             claude_config: Some(claude_config),
+            user_config: None,
         },
         options: UpOptions {
             parallel: 2,

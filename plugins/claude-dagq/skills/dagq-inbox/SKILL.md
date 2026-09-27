@@ -11,7 +11,7 @@ Roles (ADR-0044): the **supervisor** claims, runs, validates, reviews, resumes a
 
 Only what needs a person comes here (ADR-0047). The runtime fixes known cases itself (an unsent Enter, an undelivered `/exit`, a known dialog, a resume or a stale receipt; `auto_repaired`), and the recovery job fixes what it can of the rest (failed runs, a stuck `/exit`, an unknown dialog, stuck background work). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
 
-This session holds no state of its own. After a restart, compaction or `/clear`, start again from step 1 (the plugin's SessionStart hook prints `status --role inbox`).
+This session holds no state of its own. After a restart, compaction or `/clear`, start again from step 1 (the SessionStart hook prints `status --role inbox`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
 
 ## 1. Read what waits
 
@@ -23,7 +23,7 @@ This session holds no state of its own. After a restart, compaction or `/clear`,
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --after <cursor>` in one loop of `reference/watch.md` under `run_in_background`. Never report an empty timeout (default `--timeout 600`: no `events`, cursor unchanged): a "nothing new" every ten minutes is noise. The loop watches again and ends only with `events` or `supervisors_changed`; handle them (steps 3, 4), then loop from its `cursor`. Keep exactly one watch running; never poll `status` in a loop.
+Run `"$DAGQ" watch --role inbox --after <cursor>` in one loop of `reference/watch.md` under `run_in_background`. Never report an empty timeout (no `events`, cursor unchanged). The loop watches again and ends only with `events` or `supervisors_changed`; handle them (steps 3, 4), then loop from its `cursor`. Keep exactly one watch running; never poll `status` in a loop.
 
 ## 3. Show an ask and write the answer
 
@@ -56,7 +56,7 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 - `decide the draft in a planner` (`draft_planner_exhausted`), `decide the finding in a planner` (`finding_planner_exhausted`), `check the planner` (`planner_unresponsive`), `plan review by hand` (`plan_review_failed`): tell the person, who works in a planner (`dagq-recover` section 8).
 - `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH, so it claims and lands nothing; the person installs it. It clears by itself.
 - `report the update` (`update_installed`): tell the person its `version` and `commit`.
-- `fix the push command` (`kpi_push_abandoned`): the host's KPI push command (`[push]` of `host.toml`) failed one message three times and it was given up; tell the person, who fixes the command or its service. It clears with the next push that succeeds.
+- `fix the push command` (`kpi_push_abandoned`): the KPI push command (`[push]` of `host.toml`) gave up a message after three failures; the person fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`, with the person.
 - `recover run`: the `dagq-recover` skill.

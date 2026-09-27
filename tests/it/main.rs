@@ -21,6 +21,7 @@ mod cli_version;
 mod finding_planner;
 mod goal_review;
 mod landing_branch;
+mod language;
 mod lifecycle_cmux;
 mod lifecycle_down;
 mod lifecycle_in_cmux;

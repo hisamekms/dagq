@@ -6,6 +6,7 @@
 //! (`triage_started`, `triage_finished`, `triage_failed`).
 
 use super::*;
+use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
     ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, RecoveryAction, attempts,
     current_alert, pending_request, run_processes,
@@ -281,7 +282,10 @@ impl Supervisor<'_> {
             history: &history,
             allowed: &ENDED_ACTIONS,
         };
-        let prompt = recovery_prompt(&detail.task, run, attempt, &material)?;
+        let prompt = with_instruction(
+            recovery_prompt(&detail.task, run, attempt, &material)?,
+            self.verifier.language().as_ref(),
+        );
         // The session id `triage_started` recorded (ADR-0048 decision 4).
         let session_id = events
             .iter()
