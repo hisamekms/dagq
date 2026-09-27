@@ -2490,6 +2490,13 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            // An install that kept the new binary for some supervisors
+            // reports what it did as well (ADR-t632-1).
+            if let Some(kept) = dagq::application::install::KeptBinary::of(&error) {
+                let mut stdout = io::stdout().lock();
+                let _ = serde_json::to_writer_pretty(&mut stdout, &kept.report);
+                let _ = writeln!(stdout);
+            }
             // The command's own failure, in its log file too; stderr gets
             // the error JSON below as always.
             tracing::error!(

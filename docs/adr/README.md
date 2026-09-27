@@ -86,6 +86,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t617-1](2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md) | pluginはこのrepositoryのmarketplaceからClaude Codeの公式の手順で配り、marketplaceのentryを最新のリリースのtagに固定して、pluginのversionをバイナリのリリースと合わせる | 2026-09-27 |
 | [ADR-t617-2](2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md) | runtimeが開くsessionはinstallしたpluginを使い、upとplanに--plugin-dirを付けるのはpluginを開発するとき（dagqのrepository）だけにする | 2026-09-27 |
 | [ADR-t624-1](2026-09-27-t624-1-task-kind-is-a-free-label.md) | taskのkindをdagqのrepositoryの構成の4値から、repositoryが自分で名付ける小文字の自由なlabelにし、特定のkindに頼る既定をruntimeに持たない（ADR-0051決定5・15をamends） | 2026-09-27 |
+| [ADR-t632-1](2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md) | 引き継ぎ（install・up・auto-updateのhand_offと見張り）で、binaryを前に戻すのは引き継がせた全員が失敗したときだけにし、一部の失敗では新しいbinaryを残して失敗したsupervisorを人に知らせる（ADR-0073決定13・14・15・17をamends） | 2026-09-27 |
 
 ## 置き換え・廃止されたADR
 

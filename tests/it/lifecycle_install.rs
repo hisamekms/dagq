@@ -622,6 +622,8 @@ enum Afterwards {
     Reregister,
     /// Register again the same way, then die.
     ReregisterAndDie,
+    /// Come back under the old build (the exec failed) and heartbeat on.
+    ExecFails,
 }
 
 fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, then: Afterwards) {
@@ -629,7 +631,11 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
     wait_until(processes, pid, || {
         queue.handoff_request(token).unwrap().is_some()
     });
-    queue.resume_registration(token, pid, VERSION).unwrap();
+    let version = match then {
+        Afterwards::ExecFails => "0.0.1",
+        _ => VERSION,
+    };
+    queue.resume_registration(token, pid, version).unwrap();
     let serving = match then {
         Afterwards::Reregister | Afterwards::ReregisterAndDie => {
             let again = format!("{token}-again");
@@ -756,4 +762,138 @@ fn the_update_job_brings_back_a_pid_that_registered_again_and_died() {
         .unwrap();
     assert_eq!(other["now"], "other-again", "{report}");
     assert_eq!(other["supervisor"]["state"], "restarted", "{report}");
+}
+
+/// A handoff only some supervisors take keeps the new binary for them
+/// (ADR-t632-1): the job watches the ones that took it and opens the
+/// `update_failed` ask with `kept: true`, leaving the one still running
+/// its old build as it is; when none takes it, the binary goes back.
+#[test]
+fn the_update_job_keeps_the_binary_when_only_some_take_the_handoff() {
+    let (report, calls, restarted, _) = update_two(Afterwards::Heartbeat, Afterwards::ExecFails);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "handoff", "{report}");
+    assert_eq!(report["kept"], true, "{report}");
+    assert_eq!(report["restored"]["restored"], false, "{report}");
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+    assert!(restarted.is_empty(), "{restarted:?}");
+    let supervisors = report["supervisors"].as_array().unwrap();
+    assert_eq!(supervisors.len(), 2, "{report}");
+    let auto = supervisors.iter().find(|s| s["token"] == "auto").unwrap();
+    assert_eq!(auto["error"], Value::Null, "{report}");
+    let other = supervisors.iter().find(|s| s["token"] == "other").unwrap();
+    assert!(
+        other["error"]
+            .as_str()
+            .unwrap()
+            .contains("came back as 0.0.1"),
+        "{report}"
+    );
+    assert_eq!(other["supervisor"]["state"], "running", "{report}");
+    assert!(report["ask_id"].as_i64().is_some(), "{report}");
+
+    let (report, calls, _, target) = update_two(Afterwards::ExecFails, Afterwards::ExecFails);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "install", "{report}");
+    assert_eq!(report["kept"], Value::Null, "{report}");
+    assert!(
+        calls.contains(&format!("restore {}", target.display())),
+        "{calls:?}"
+    );
+    assert_eq!(report["supervisor"]["state"], "running", "{report}");
+}
+
+/// `install` with two supervisors (ADR-t632-1): both taking the handoff is
+/// an install; one failing keeps the new binary for the other, which takes
+/// it after the failure, and fails with `kept: true` and each supervisor's
+/// outcome, withdrawing only the failed one's request; both failing puts
+/// the replaced binary back.
+#[test]
+fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
+    use dagq::application::install::{KeptBinary, Source};
+    const SECOND: u32 = 464_646;
+    let two = |first_version: &'static str, second_version: &'static str| {
+        let fixture = fixture();
+        let mut queue = handoff_supervisor(&fixture, "first", SupervisorMode::InCmux);
+        queue
+            .register_supervisor("second", SECOND, 4, "0.0.1")
+            .unwrap();
+        queue.accept_handoff("second").unwrap();
+        let binaries = FakeBinaries::new(&[], true);
+        let processes = FakeProcesses::default();
+        let no_down = || -> Result<Value> { panic!("no drain") };
+        let result = thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+                wait_until(&processes, std::process::id(), || {
+                    queue.handoff_request("first").unwrap().is_some()
+                });
+                queue
+                    .resume_registration("first", std::process::id(), first_version)
+                    .unwrap();
+            });
+            scope.spawn(|| {
+                let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+                wait_until(&processes, SECOND, || {
+                    queue.handoff_request("second").unwrap().is_some()
+                });
+                // The first one's outcome is seen before this one takes it.
+                thread::sleep(Duration::from_millis(300));
+                queue
+                    .resume_registration("second", SECOND, second_version)
+                    .unwrap();
+            });
+            install_with(
+                &fixture,
+                &binaries,
+                &processes,
+                &no_down,
+                &install_options(Source::Binary("/built/dagq".into())),
+            )
+        });
+        let requests = [
+            queue.handoff_request("first").unwrap(),
+            queue.handoff_request("second").unwrap(),
+        ];
+        (result, binaries.calls(), requests)
+    };
+
+    let (result, calls, _) = two(VERSION, VERSION);
+    let report = result.unwrap();
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(report["kept"], false, "{report}");
+    assert_eq!(report["supervisors"].as_array().unwrap().len(), 2);
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+
+    let (result, calls, requests) = two("0.0.1", VERSION);
+    let error = result.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("1 of the 2 supervisors took the handoff"),
+        "{message}"
+    );
+    assert!(message.contains("supervisor first"), "{message}");
+    assert!(message.contains("came back as 0.0.1"), "{message}");
+    assert!(message.contains("`down --force` and `up`"), "{message}");
+    assert!(message.contains("`install --rollback`"), "{message}");
+    let report = &KeptBinary::of(&error).unwrap().report;
+    assert_eq!(report["outcome"], "partially_handed_off", "{report}");
+    assert_eq!(report["kept"], true, "{report}");
+    let supervisors = report["supervisors"].as_array().unwrap();
+    let first = supervisors.iter().find(|s| s["token"] == "first").unwrap();
+    assert!(first["error"].as_str().is_some(), "{report}");
+    let second = supervisors.iter().find(|s| s["token"] == "second").unwrap();
+    assert_eq!(second["error"], Value::Null, "{report}");
+    assert_eq!(second["previous_token"], "second", "{report}");
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+    assert_eq!(requests, [None, None]);
+
+    let (result, calls, _) = two("0.0.1", "0.0.1");
+    let error = result.unwrap_err();
+    assert!(KeptBinary::of(&error).is_none());
+    let message = format!("{error:#}");
+    assert!(message.contains("is back at /opt/bin/dagq"), "{message}");
+    assert!(message.contains("supervisor first"), "{message}");
+    assert!(message.contains("supervisor second"), "{message}");
+    assert_eq!(calls.last().unwrap(), "restore /opt/bin/dagq");
 }

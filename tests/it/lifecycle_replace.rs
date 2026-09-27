@@ -650,37 +650,35 @@ fn up_reports_a_handoff_that_did_not_happen() {
         .unwrap();
     queue.request_handoff("old", "/opt/bin/dagq").unwrap();
     let registration = queue.supervisors().unwrap().remove(0);
-    let error = format!(
-        "{:#}",
-        lifecycle::hand_off(
-            &queue,
-            &processes,
-            &dagq::infrastructure::clock::SystemClock,
-            &[registration],
-            Path::new("/opt/bin/dagq"),
-            VERSION,
-            Duration::from_secs(5),
-            Duration::from_millis(20),
-        )
-        .unwrap_err()
-    );
+    let handed = lifecycle::hand_off(
+        &queue,
+        &processes,
+        &dagq::infrastructure::clock::SystemClock,
+        &[registration],
+        Path::new("/opt/bin/dagq"),
+        VERSION,
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+    )
+    .unwrap();
+    let error = handed[0].error.as_deref().unwrap();
     assert!(error.contains("stopped heartbeating"), "{error}");
     queue.deregister_supervisor("old").unwrap();
-    let error = format!(
-        "{:#}",
-        lifecycle::hand_off(
-            &queue,
-            &processes,
-            &dagq::infrastructure::clock::SystemClock,
-            &[gone_registration()],
-            Path::new("/opt/bin/dagq"),
-            VERSION,
-            Duration::from_secs(5),
-            Duration::from_millis(20),
-        )
-        .unwrap_err()
-    );
+    let handed = lifecycle::hand_off(
+        &queue,
+        &processes,
+        &dagq::infrastructure::clock::SystemClock,
+        &[gone_registration()],
+        Path::new("/opt/bin/dagq"),
+        VERSION,
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+    )
+    .unwrap();
+    let error = handed[0].error.as_deref().unwrap();
     assert!(error.contains("cannot take a handoff"), "{error}");
+    assert_eq!(handed[0].report()["error"], error);
+    assert_eq!(handed[0].report()["token"], "gone");
 }
 
 /// A supervisor whose token deregistered during the handoff but whose pid
@@ -716,8 +714,144 @@ fn a_handoff_follows_a_pid_that_registered_again_under_the_new_build() {
         .unwrap()
     });
     assert_eq!(handed.len(), 1);
-    assert_eq!(handed[0]["token"], "again");
-    assert_eq!(handed[0]["pid"], registration.pid);
+    assert_eq!(handed[0].now.as_deref(), Some("again"));
+    let report = handed[0].report();
+    assert_eq!(report["token"], "again");
+    assert_eq!(report["previous_token"], "old");
+    assert_eq!(report["pid"], registration.pid);
+    assert_eq!(report["error"], Value::Null);
+}
+
+/// Two supervisors of the queue asked to exec `/opt/bin/dagq`, the second
+/// under a pid of its own.
+fn two_handoff_supervisors(fixture: &Fixture) -> SqliteQueue {
+    let mut queue = handoff_supervisor(fixture, "first", SupervisorMode::InCmux);
+    queue
+        .register_supervisor("second", SECOND_PID, 4, "0.0.1")
+        .unwrap();
+    queue.accept_handoff("second").unwrap();
+    queue
+        .set_supervisor_mode("second", SupervisorMode::InCmux, None)
+        .unwrap();
+    queue
+}
+
+const SECOND_PID: u32 = 454_545;
+
+/// One supervisor failing the handoff does not end the wait for the others
+/// (ADR-t632-1): the first comes back under its old build at once, and the
+/// second, whose request is not withdrawn by that failure, takes it later
+/// by deregistering and registering again under the new build with the
+/// same pid. The result names what became of each, and only the failed
+/// one's request is withdrawn.
+#[test]
+fn a_handoff_waits_for_every_supervisor_past_a_failure() {
+    let fixture = fixture();
+    let queue = two_handoff_supervisors(&fixture);
+    let live = queue.supervisors().unwrap();
+    let processes = FakeProcesses::default();
+    let handed = thread::scope(|scope| {
+        scope.spawn(|| take_the_handoff(&fixture, &processes, "first", "0.0.1"));
+        scope.spawn(|| {
+            let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+            wait_until(&processes, SECOND_PID, || {
+                queue.handoff_request("second").unwrap().is_some()
+            });
+            // Long past the first one's failure, the request still stands.
+            wait_until(&processes, SECOND_PID, || {
+                queue
+                    .supervisors()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.token == "first" && r.handoff_binary.is_none())
+            });
+            thread::sleep(Duration::from_millis(300));
+            assert_eq!(
+                queue.handoff_request("second").unwrap().as_deref(),
+                Some("/opt/bin/dagq")
+            );
+            queue
+                .register_supervisor("second-again", SECOND_PID, 4, VERSION)
+                .unwrap();
+            queue.deregister_supervisor("second").unwrap();
+        });
+        lifecycle::hand_off(
+            &queue,
+            &processes,
+            &dagq::infrastructure::clock::SystemClock,
+            &live,
+            Path::new("/opt/bin/dagq"),
+            VERSION,
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+        )
+        .unwrap()
+    });
+    let first = handed
+        .iter()
+        .find(|h| h.registration.token == "first")
+        .unwrap();
+    assert!(
+        first
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("came back as 0.0.1"),
+        "{first:?}"
+    );
+    assert_eq!(first.now, None);
+    let second = handed
+        .iter()
+        .find(|h| h.registration.token == "second")
+        .unwrap();
+    assert_eq!(second.error, None, "{second:?}");
+    assert_eq!(second.now.as_deref(), Some("second-again"));
+    let error = format!("{:#}", lifecycle::handoff_failures(&handed).unwrap());
+    assert!(error.contains("supervisor first"), "{error}");
+    assert!(!error.contains("supervisor second"), "{error}");
+    assert!(lifecycle::handoff_failures(&handed[1..]).is_none());
+}
+
+/// `up` waits for every supervisor it hands over and fails naming the ones
+/// that did not take the handoff, after the others took it (ADR-t632-1).
+#[test]
+fn up_names_the_supervisors_that_did_not_take_the_handoff() {
+    let mut fixture = fixture();
+    fixture.options.in_cmux = true;
+    let queue = two_handoff_supervisors(&fixture);
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let error = thread::scope(|scope| {
+        scope.spawn(|| take_the_handoff(&fixture, &processes, "first", "0.0.1"));
+        scope.spawn(|| {
+            let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+            wait_until(&processes, SECOND_PID, || {
+                queue.handoff_request("second").unwrap().is_some()
+            });
+            thread::sleep(Duration::from_millis(300));
+            queue
+                .resume_registration("second", SECOND_PID, VERSION)
+                .unwrap();
+        });
+        format!(
+            "{:#}",
+            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+        )
+    });
+    assert!(
+        error.contains("1 of the 2 supervisors took the handoff"),
+        "{error}"
+    );
+    assert!(error.contains("supervisor first"), "{error}");
+    assert!(error.contains("came back as 0.0.1"), "{error}");
+    assert!(!error.contains("supervisor second"), "{error}");
+    assert!(error.contains("`down --force` and `up`"), "{error}");
+    let registrations = queue.supervisors().unwrap();
+    let second = registrations.iter().find(|r| r.token == "second").unwrap();
+    assert_eq!(second.binary_version.as_deref(), Some(VERSION));
+    let first = registrations.iter().find(|r| r.token == "first").unwrap();
+    assert_eq!(first.handoff_binary, None);
 }
 
 fn gone_registration() -> dagq::domain::SupervisorRegistration {

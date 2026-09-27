@@ -8,11 +8,12 @@
 //! and target (`<queue dir>/update/`, never a person's checkout), then does
 //! what `install` does ([`super::install::install`]: the check, the
 //! compatible migrations, the swap that keeps `.previous`, the handoff), and
-//! watches the supervisor that exec'd the new binary heartbeat on. A build
-//! that fails, a check that fails or a supervisor that does not come back
-//! under the new binary puts the old binary back (and starts the
-//! supervisor again when it is gone) and opens the `update_failed` ask for
-//! the inbox; a build whose migrations would break the old binary is not
+//! watches the supervisors that exec'd the new binary heartbeat on. A build
+//! that fails or a check that fails replaces nothing; when no supervisor
+//! comes back under the new binary the old binary is put back, and when
+//! only some do it stays for them (ADR-t632-1); either way a supervisor that
+//! is gone is started again and the `update_failed` ask opens for the
+//! inbox; a build whose migrations would break the old binary is not
 //! installed, and waits in the `approve_update` ask for a person to drain
 //! and install it. Every step is an `update_*` event of the queue in
 //! `run_events` (ADR-0073 decision 17, task 496), with the commit it is
@@ -345,25 +346,37 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
             poll: options.poll,
         },
     );
-    let report = match installed {
-        Ok(report) => report,
-        Err(error) => {
-            // `install` put the old binary back itself if it had replaced
-            // it; the supervisor may be gone with the new one.
-            let serving = before.as_ref().map(|before| before.token.clone());
-            let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_deref())?;
-            return failed(
-                queue,
-                options,
-                "install",
-                &error,
-                json!({"supervisor": supervisor}),
-            );
-        }
+    // An install that handed some of the supervisors over but not all kept
+    // the new binary for them (ADR-t632-1): the ones handed over are
+    // watched, and the ones that did not take it fail as a watch would.
+    let (report, refused) = match installed {
+        Ok(report) => (report, Vec::new()),
+        Err(error) => match install::KeptBinary::of(&error) {
+            Some(kept) => (kept.report.clone(), refused(&kept.report)),
+            None => {
+                // `install` put the old binary back itself if it had
+                // replaced it; the supervisor may be gone with the new one.
+                let serving = before.as_ref().map(|before| before.token.clone());
+                let supervisor = bring_back(ports, &*queue, before.as_ref(), serving.as_deref())?;
+                return failed(
+                    queue,
+                    options,
+                    "install",
+                    &error,
+                    json!({"supervisor": supervisor}),
+                );
+            }
+        },
     };
     let version = report["version"].as_str().unwrap_or_default().to_owned();
     let handed = handed_over(&report, before.as_ref());
-    let watched = watch(ports, &*queue, &handed, &version, options)?;
+    let stage = if refused.is_empty() {
+        "watch"
+    } else {
+        "handoff"
+    };
+    let mut watched = refused;
+    watched.extend(watch(ports, &*queue, &handed, &version, options)?);
     let failures: Vec<&Watched> = watched.iter().filter(|w| w.error.is_some()).collect();
     if !failures.is_empty() {
         // The binary is one file for every supervisor: it goes back only
@@ -427,7 +440,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         return failed(
             queue,
             options,
-            "watch",
+            stage,
             &error,
             json!({
                 "restored": restored,
@@ -479,12 +492,14 @@ fn stage(ports: &JobPorts, binary: &Path, staged: &Path) -> Result<String> {
 }
 
 /// The supervisors the install handed over, by token and pid: the ones
-/// its report names, or the job's own supervisor when it names none.
+/// its report names without an error, or the job's own supervisor when it
+/// names none.
 fn handed_over(report: &Value, before: Option<&SupervisorRegistration>) -> Vec<(String, u32)> {
     let handed: Vec<(String, u32)> = report["supervisors"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|supervisor| supervisor["error"].is_null())
         .filter_map(|supervisor| {
             Some((
                 supervisor["token"].as_str()?.to_owned(),
@@ -498,6 +513,28 @@ fn handed_over(report: &Value, before: Option<&SupervisorRegistration>) -> Vec<(
     before
         .map(|before| vec![(before.token.clone(), before.pid)])
         .unwrap_or_default()
+}
+
+/// The supervisors the install's report names as not having taken the
+/// handoff, each failed with its error.
+fn refused(report: &Value) -> Vec<Watched> {
+    report["supervisors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|supervisor| {
+            let error = supervisor["error"].as_str()?;
+            let token = supervisor["token"].as_str()?.to_owned();
+            Some(Watched {
+                now: token.clone(),
+                token,
+                pid: u32::try_from(supervisor["pid"].as_u64()?).ok()?,
+                first: None,
+                done: false,
+                error: Some(error.to_owned()),
+            })
+        })
+        .collect()
 }
 
 /// What the watch saw of one supervisor it handed over: the token it
@@ -709,7 +746,9 @@ fn failed(
         "check" => "The build did not pass its check, so nothing was replaced.".to_owned(),
         _ if details["kept"] == true => format!(
             "The new binary stays at {}: other supervisors run it. The ones that failed are \
-brought back with it as said below.",
+brought back with it as said below; one still running the build it had is left as it is, and \
+`down --force` and `up` start it with the new binary (or `install --rollback` puts the old binary \
+back for every supervisor).",
             options.target.display()
         ),
         _ => format!(

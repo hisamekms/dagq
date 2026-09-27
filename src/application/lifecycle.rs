@@ -814,9 +814,11 @@ fn takes_handoff(up: &Up, files: &dyn RunFiles, live: &[SupervisorRegistration])
 
 /// `up`'s replacement without a drain (ADR-0045 decision 15): every live
 /// supervisor is asked to exec this binary, and `up` reports once each of
-/// them is back under this build with its pid and token.
+/// them is back under this build with its pid and token. `up` replaces no
+/// file, so nothing is put back when one fails: it waits for every one of
+/// them and fails naming the ones that did not take it (ADR-t632-1).
 fn hand_off_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Value> {
-    let replaced = hand_off(
+    let handed = hand_off(
         up.queue,
         up.processes,
         up.clock,
@@ -826,6 +828,14 @@ fn hand_off_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Valu
         up.options.handoff_timeout,
         up.options.poll,
     )?;
+    if let Some(error) = handoff_failures(&handed) {
+        let took = handed.iter().filter(|h| h.error.is_none()).count();
+        return Err(error.context(format!(
+            "{took} of the {} supervisors took the handoff to {VERSION}; the ones that did not \
+go on with the binary they had: `down --force` and `up` start them with this one",
+            handed.len()
+        )));
+    }
     let first = &live[0];
     let previous_version = live
         .iter()
@@ -842,19 +852,63 @@ fn hand_off_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Valu
         "workspace_id": first.workspace_id,
         "plist": up.location.launch_agent,
         "log_dir": up.location.log_dir,
-        "replaced": replaced,
+        "replaced": handed.iter().map(Handed::report).collect::<Vec<_>>(),
         "supervisor_workspaces": [],
     }))
 }
 
+/// What became of one supervisor asked to exec a binary: the registration
+/// it had, and either the token it serves under now or why it did not take
+/// the handoff.
+#[derive(Debug, Clone)]
+pub struct Handed {
+    pub registration: SupervisorRegistration,
+    /// The token it took back under the new build: its own, or the one its
+    /// pid registered under again.
+    pub now: Option<String>,
+    pub error: Option<String>,
+}
+
+impl Handed {
+    /// The supervisor as the reports show it: `token` is the one it serves
+    /// under now (`previous_token` the one it was asked under) when it took
+    /// the handoff, and the one it had with the `error` when it did not.
+    pub fn report(&self) -> Value {
+        let registration = &self.registration;
+        let mut value = json!({
+            "token": self.now.as_deref().unwrap_or(&registration.token),
+            "pid": registration.pid,
+            "mode": registration.mode.map(SupervisorMode::as_str),
+            "workspace_id": registration.workspace_id,
+            "version": registration.binary_version,
+        });
+        match &self.error {
+            Some(error) => value["error"] = json!(error),
+            None => value["previous_token"] = json!(registration.token),
+        }
+        value
+    }
+}
+
+/// The failures of a handoff as one error naming each supervisor that did
+/// not take it; `None` when every one did.
+pub fn handoff_failures(handed: &[Handed]) -> Option<anyhow::Error> {
+    let errors: Vec<&str> = handed.iter().filter_map(|h| h.error.as_deref()).collect();
+    (!errors.is_empty()).then(|| anyhow::anyhow!("{}", errors.join("; ")))
+}
+
 /// Ask each supervisor in `live` to exec `binary` (ADR-0045 decision 10)
-/// and wait until every one of them has taken its registration back under
-/// `version`, with the same pid, within `timeout`. A supervisor that stops
-/// heartbeating before it did (an exec'd binary that failed to start), that
+/// and wait until each of them has either taken its registration back
+/// under `version`, with the same pid, or failed to, within one `timeout`
+/// for them all. A supervisor fails when it cannot take a handoff, stops
+/// heartbeating before it did (an exec'd binary that failed to start),
 /// deregistered without its pid registering again under `version` (which
-/// takes its place, under its new token), or that came back under another build (an exec that
-/// failed, after which the old binary goes on) is an error naming it; the
-/// ones already handed over stay so.
+/// takes its place, under its new token), came back under another build (an
+/// exec that failed, after which the old binary goes on) or is still asked
+/// at the timeout. One failing does not stop the wait for the others
+/// (ADR-t632-1): the result names what became of each, and the request of
+/// each one that failed is withdrawn. An error is only a queue that could
+/// not be read or written.
 #[allow(clippy::too_many_arguments)]
 pub fn hand_off(
     queue: &dyn Queue,
@@ -865,9 +919,16 @@ pub fn hand_off(
     version: &str,
     timeout: Duration,
     poll: Duration,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<Handed>> {
     let binary_text = path_text(binary)?;
-    let result = wait_for_handoff(
+    let cancel = |registrations: &mut dyn Iterator<Item = &SupervisorRegistration>| {
+        // A request left behind would have the supervisor exec that path
+        // later, after the caller put another binary there.
+        for registration in registrations {
+            let _ = queue.cancel_handoff(&registration.token, &binary_text);
+        }
+    };
+    match wait_for_handoff(
         queue,
         processes,
         clock,
@@ -876,15 +937,21 @@ pub fn hand_off(
         version,
         timeout,
         poll,
-    );
-    if result.is_err() {
-        // A request left behind would have the supervisor exec that path
-        // later, after the caller put another binary there.
-        for registration in live {
-            let _ = queue.cancel_handoff(&registration.token, &binary_text);
+    ) {
+        Ok(handed) => {
+            cancel(
+                &mut handed
+                    .iter()
+                    .filter(|h| h.error.is_some())
+                    .map(|h| &h.registration),
+            );
+            Ok(handed)
+        }
+        Err(error) => {
+            cancel(&mut live.iter());
+            Err(error)
         }
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -897,84 +964,106 @@ fn wait_for_handoff(
     version: &str,
     timeout: Duration,
     poll: Duration,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<Handed>> {
+    let mut handed = Vec::with_capacity(live.len());
     for registration in live {
-        ensure!(
-            queue.request_handoff(&registration.token, binary_text)?,
-            "supervisor {} (pid {}) cannot take a handoff; stop it with `down --wait` and run `up`",
-            registration.token,
-            registration.pid
-        );
+        let error = (!queue.request_handoff(&registration.token, binary_text)?).then(|| {
+            format!(
+                "supervisor {} (pid {}) cannot take a handoff; stop it with `down --wait` and \
+run `up`",
+                registration.token, registration.pid
+            )
+        });
+        handed.push(Handed {
+            registration: registration.clone(),
+            now: None,
+            error,
+        });
     }
     let deadline = Instant::now() + timeout;
-    let mut pending: Vec<&SupervisorRegistration> = live.iter().collect();
-    let mut done = Vec::new();
     loop {
         let now = clock.now();
         let registrations = queue.supervisors()?;
-        let mut waiting = Vec::new();
-        for registration in pending {
-            let name = format!(
-                "supervisor {} (pid {})",
-                registration.token, registration.pid
-            );
-            // A token that deregistered is taken back by the same pid
-            // registering again under the new build.
-            let Some(current) = registrations
-                .iter()
-                .find(|r| r.token == registration.token)
-                .or_else(|| {
-                    registrations.iter().find(|r| {
-                        r.pid == registration.pid && r.binary_version.as_deref() == Some(version)
-                    })
-                })
-            else {
-                bail!("{name} deregistered instead of taking the handoff to {binary_text}");
-            };
-            if current.handoff_binary.is_some() {
-                ensure!(
-                    fresh(current, processes, now),
-                    "{name} stopped heartbeating before it took the handoff to {binary_text}; \
-see its log, then `down --force` and `up`"
-                );
-                waiting.push(registration);
-                continue;
+        let expired = Instant::now() >= deadline;
+        for handed in handed
+            .iter_mut()
+            .filter(|h| h.now.is_none() && h.error.is_none())
+        {
+            match look_at_handoff(
+                &registrations,
+                &handed.registration,
+                processes,
+                now,
+                binary_text,
+                version,
+            ) {
+                Ok(Some(token)) => handed.now = Some(token),
+                Ok(None) if expired => {
+                    handed.error = Some(format!(
+                        "supervisor {} (pid {}) did not take the handoff to {binary_text} within \
+{}s; it still finishes its validation or landing in progress, so check `status` again",
+                        handed.registration.token,
+                        handed.registration.pid,
+                        timeout.as_secs()
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => handed.error = Some(format!("{error:#}")),
             }
-            ensure!(
-                current.pid == registration.pid
-                    && current.binary_version.as_deref() == Some(version)
-                    && fresh(current, processes, now),
-                "{name} came back as {} (pid {}) instead of {version}: the exec of {binary_text} failed \
-and it goes on with its binary; see its log",
-                current.binary_version.as_deref().unwrap_or("(unrecorded)"),
-                current.pid
-            );
-            done.push(json!({
-                "token": current.token,
-                "pid": registration.pid,
-                "mode": registration.mode.map(SupervisorMode::as_str),
-                "workspace_id": registration.workspace_id,
-                "version": registration.binary_version,
-            }));
         }
-        if waiting.is_empty() {
-            return Ok(done);
+        if handed.iter().all(|h| h.now.is_some() || h.error.is_some()) {
+            return Ok(handed);
         }
-        ensure!(
-            Instant::now() < deadline,
-            "{} supervisor(s) did not take the handoff to {binary_text} within {}s: {}; they still \
-finish their validations or landings in progress, so check `status` again",
-            waiting.len(),
-            timeout.as_secs(),
-            waiting
-                .iter()
-                .map(|r| format!("{} (pid {})", r.token, r.pid))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        pending = waiting;
         thread::sleep(poll);
     }
+}
+
+/// One look at `registration`'s handoff: the token it serves under once it
+/// took it, `None` while it is still asked, an error when it cannot take
+/// it any more.
+fn look_at_handoff(
+    registrations: &[SupervisorRegistration],
+    registration: &SupervisorRegistration,
+    processes: &dyn ProcessControl,
+    now: i64,
+    binary_text: &str,
+    version: &str,
+) -> Result<Option<String>> {
+    let name = format!(
+        "supervisor {} (pid {})",
+        registration.token, registration.pid
+    );
+    // A token that deregistered is taken back by the same pid registering
+    // again under the new build.
+    let Some(current) = registrations
+        .iter()
+        .find(|r| r.token == registration.token)
+        .or_else(|| {
+            registrations
+                .iter()
+                .find(|r| r.pid == registration.pid && r.binary_version.as_deref() == Some(version))
+        })
+    else {
+        bail!("{name} deregistered instead of taking the handoff to {binary_text}");
+    };
+    if current.handoff_binary.is_some() {
+        ensure!(
+            fresh(current, processes, now),
+            "{name} stopped heartbeating before it took the handoff to {binary_text}; see its log, \
+then `down --force` and `up`"
+        );
+        return Ok(None);
+    }
+    ensure!(
+        current.pid == registration.pid
+            && current.binary_version.as_deref() == Some(version)
+            && fresh(current, processes, now),
+        "{name} came back as {} (pid {}) instead of {version}: the exec of {binary_text} failed \
+and it goes on with its binary; see its log",
+        current.binary_version.as_deref().unwrap_or("(unrecorded)"),
+        current.pid
+    );
+    Ok(Some(current.token.clone()))
 }
 
 /// Refuse, before anything is stopped, when the queue's recorded

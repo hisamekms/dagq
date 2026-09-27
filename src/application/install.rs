@@ -3,7 +3,10 @@
 //! decisions 11–14). The new binary is built (or given), checked, the
 //! queue's compatible migrations applied with it, and put in place of the
 //! old one by a rename that keeps the old one as `<name>.previous`; then
-//! every live supervisor that takes a handoff is asked to exec it. A build
+//! every live supervisor that takes a handoff is asked to exec it. The old
+//! binary goes back only when none of them took it; when some did, it stays
+//! and the ones that did not are named in a [`KeptBinary`] error
+//! (ADR-t632-1). A build
 //! whose migrations would break the old binary goes through the drain
 //! instead, and only when asked to. `--rollback` does the same with
 //! `<name>.previous`.
@@ -11,7 +14,11 @@
 //! The binaries are built, run and moved through [`Binaries`], the queue
 //! is read through [`QueueOpener`]; [`crate::compose`] builds the adapters.
 
-use super::{Clock, ProcessControl, Queue, QueueOpener, RunFiles, lifecycle::hand_off, path_text};
+use super::{
+    Clock, ProcessControl, Queue, QueueOpener, RunFiles,
+    lifecycle::{Handed, hand_off, handoff_failures},
+    path_text,
+};
 use crate::domain::{HEARTBEAT_TIMEOUT_SECS, SupervisorMode, SupervisorRegistration};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -237,7 +244,7 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
     let handed = if takes.is_empty() {
         Vec::new()
     } else {
-        match hand_off(
+        let handed = hand_off(
             &*queue,
             ports.processes,
             ports.clock,
@@ -246,7 +253,14 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
             &version,
             options.handoff_timeout,
             options.poll,
-        ) {
+        )
+        .and_then(|handed| match handoff_failures(&handed) {
+            // The binary is one file for every supervisor: it goes back
+            // only when none of them took it (ADR-t632-1).
+            Some(error) if handed.iter().all(|h| h.error.is_some()) => Err(error),
+            _ => Ok(handed),
+        });
+        match handed {
             Ok(handed) => handed,
             Err(error) => {
                 let restored = binaries.restore(target);
@@ -265,14 +279,16 @@ put back at {} ({restore:#}); it is at {}",
             }
         }
     };
-    Ok(json!({
-        "outcome": "installed",
+    let failure = handoff_failures(&handed);
+    let report = json!({
+        "outcome": if failure.is_some() { "partially_handed_off" } else { "installed" },
         "target": target,
         "version": version,
         "previous": previous,
         "previous_version": replaced_version,
         "migrated": migrated,
-        "supervisors": handed,
+        "kept": failure.is_some(),
+        "supervisors": handed.iter().map(Handed::report).collect::<Vec<_>>(),
         // A supervisor of a binary before ADR-0045 takes no handoff;
         // `up` drains and replaces it.
         "not_handed_off": cannot
@@ -284,7 +300,54 @@ put back at {} ({restore:#}); it is at {}",
                 "next": "run `up` to drain and replace it",
             }))
             .collect::<Vec<_>>(),
-    }))
+    });
+    match failure {
+        None => Ok(report),
+        Some(error) => {
+            let took = handed.iter().filter(|h| h.error.is_none()).count();
+            Err(KeptBinary {
+                message: format!(
+                    "{:#}",
+                    error.context(format!(
+                        "{took} of the {} supervisors took the handoff to {version}, so it stays \
+at {}; the ones that did not go on as the processes of the binary they had. Run `down --force` and \
+`up` to start them with {version}, or `install --rollback` to put the binary it replaced back for \
+every supervisor",
+                        handed.len(),
+                        target.display()
+                    ))
+                ),
+                report,
+            }
+            .into())
+        }
+    }
+}
+
+/// The error of an install that put the new binary in place and handed
+/// some of the supervisors over to it, but not all (ADR-t632-1): the binary
+/// stays, and `report` is what `install` reports, with `kept: true` and each
+/// supervisor's outcome, for the command to print beside the error and for
+/// the automatic update to read.
+#[derive(Debug)]
+pub struct KeptBinary {
+    pub message: String,
+    pub report: Value,
+}
+
+impl std::fmt::Display for KeptBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for KeptBinary {}
+
+impl KeptBinary {
+    /// The [`KeptBinary`] `error` is or wraps.
+    pub fn of(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
 }
 
 /// The drain of ADR-0045 decision 14: stop the live supervisors and wait
