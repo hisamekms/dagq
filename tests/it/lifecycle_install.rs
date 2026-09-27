@@ -725,9 +725,39 @@ enum Afterwards {
     ReregisterAndDie,
     /// Come back under the old build (the exec failed) and heartbeat on.
     ExecFails,
+    /// Register again like `Reregister`, next to a stale row of the same pid
+    /// and build started before the handoff was asked for.
+    ReregisterOverStale,
+    /// Deregister instead of taking the handoff, leaving only a stale row
+    /// of the same pid and build.
+    DeregisterOverStale,
+    /// Take the handoff under its own token, then deregister without
+    /// heartbeating, leaving only a stale row of the same pid and build.
+    TakeThenDeregisterOverStale,
+}
+
+/// A row of `pid` under the new build that an earlier process of a reused
+/// pid left behind: started and last heartbeating an hour ago.
+fn stale_row(fixture: &Fixture, token: &str, pid: u32) {
+    rusqlite::Connection::open(&fixture.location.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO supervisors(token,pid,parallel,binary_version,started_at,heartbeat_at)
+             VALUES (?1,?2,2,?3,unixepoch()-3600,unixepoch()-3600)",
+            rusqlite::params![token, pid, VERSION],
+        )
+        .unwrap();
 }
 
 fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, then: Afterwards) {
+    if matches!(
+        then,
+        Afterwards::ReregisterOverStale
+            | Afterwards::DeregisterOverStale
+            | Afterwards::TakeThenDeregisterOverStale
+    ) {
+        stale_row(fixture, &format!("{token}-stale"), pid);
+    }
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     wait_until(processes, pid, || {
         queue
@@ -735,6 +765,12 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
             .unwrap()
             .is_some()
     });
+    if let Afterwards::DeregisterOverStale = then {
+        queue
+            .deregister_supervisor(&LeaseToken::new(token))
+            .unwrap();
+        return;
+    }
     let version = match then {
         Afterwards::ExecFails => "0.0.1",
         _ => VERSION,
@@ -743,7 +779,7 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
         .resume_registration(&LeaseToken::new(token), pid, version)
         .unwrap();
     let serving = match then {
-        Afterwards::Reregister | Afterwards::ReregisterAndDie => {
+        Afterwards::Reregister | Afterwards::ReregisterAndDie | Afterwards::ReregisterOverStale => {
             let again = format!("{token}-again");
             queue
                 .register_supervisor(&LeaseToken::new(&again), pid, 2, VERSION)
@@ -759,6 +795,11 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
     match then {
         Afterwards::Die | Afterwards::ReregisterAndDie => {
             processes.dead.lock().unwrap().insert(pid);
+        }
+        Afterwards::TakeThenDeregisterOverStale => {
+            queue
+                .deregister_supervisor(&LeaseToken::new(token))
+                .unwrap();
         }
         _ => {
             queue.heartbeat(&LeaseToken::new(&serving)).unwrap();
@@ -852,6 +893,70 @@ fn the_update_job_follows_a_pid_that_registered_again_under_the_new_build() {
     assert_eq!(report["outcome"], "installed", "{report}");
     assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
     assert!(restarted.is_empty());
+}
+
+/// Of two rows of the pid under the new build, the one it made after the
+/// handoff was asked for is its successor, not a stale one of a reused pid
+/// started before (task 633): both the install's wait and the watch follow
+/// it.
+#[test]
+fn the_update_job_follows_the_row_registered_after_the_handoff_over_a_stale_one() {
+    let (report, calls, restarted, _) =
+        update_two(Afterwards::Heartbeat, Afterwards::ReregisterOverStale);
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert!(calls.iter().all(|c| !c.starts_with("restore")), "{calls:?}");
+    assert!(restarted.is_empty());
+    let other = report["supervisors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["pid"] == OTHER_PID)
+        .unwrap();
+    assert_eq!(other["token"], "other-again", "{report}");
+}
+
+/// A stale row of the pid under the new build, started before the handoff
+/// was asked for, is not a successor (task 633): a supervisor that
+/// deregistered leaving only that is deregistered, both in the install's
+/// wait and in the watch.
+#[test]
+fn a_stale_row_of_the_same_pid_is_not_a_successor() {
+    let (report, _, _, _) = update_two(Afterwards::Heartbeat, Afterwards::DeregisterOverStale);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "handoff", "{report}");
+    let other = report["supervisors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["token"] == "other")
+        .unwrap();
+    assert!(
+        other["error"]
+            .as_str()
+            .unwrap()
+            .contains("deregistered instead of taking the handoff"),
+        "{report}"
+    );
+
+    let (report, _, _, _) = update_two(
+        Afterwards::Heartbeat,
+        Afterwards::TakeThenDeregisterOverStale,
+    );
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "watch", "{report}");
+    let other = report["supervisors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["token"] == "other")
+        .unwrap();
+    assert!(
+        other["error"]
+            .as_str()
+            .unwrap()
+            .contains("deregistered after it took the handoff"),
+        "{report}"
+    );
 }
 
 /// A supervisor that registered again under the new build and then died is

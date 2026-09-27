@@ -23,6 +23,7 @@
 use super::{
     Clock, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
     install::{self, Binaries, InstallOptions, Source, previous_path},
+    lifecycle,
 };
 use crate::domain::LeaseToken;
 use crate::domain::{
@@ -327,6 +328,9 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         .iter()
         .find(|registration| registration.token == options.token)
         .cloned();
+    // The handoff is asked for within the install: a registration made
+    // before it is not a handed-over supervisor's successor.
+    let handoff_from = ports.clock.now();
     let no_drain = || -> Result<Value> { bail!("the automatic update never drains") };
     let installed = install::install(
         &install::Ports {
@@ -377,7 +381,14 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         "handoff"
     };
     let mut watched = refused;
-    watched.extend(watch(ports, &*queue, &handed, &version, options)?);
+    watched.extend(watch(
+        ports,
+        &*queue,
+        &handed,
+        &version,
+        handoff_from,
+        options,
+    )?);
     let failures: Vec<&Watched> = watched.iter().filter(|w| w.error.is_some()).collect();
     if !failures.is_empty() {
         // The binary is one file for every supervisor: it goes back only
@@ -554,35 +565,19 @@ struct Watched {
     error: Option<String>,
 }
 
-/// The registration a handed-over supervisor serves under: its own token,
-/// or, once that is gone, one the same pid registered under `version`.
-fn successor<'a>(
-    registrations: &'a [SupervisorRegistration],
-    watched: &Watched,
-    version: &str,
-) -> Option<&'a SupervisorRegistration> {
-    registrations
-        .iter()
-        .find(|registration| registration.token == watched.now)
-        .or_else(|| {
-            registrations.iter().find(|registration| {
-                registration.pid == watched.pid
-                    && registration.binary_version.as_deref() == Some(version)
-            })
-        })
-}
-
 /// Wait for each supervisor in `handed` to heartbeat on under `version`
 /// after the handoff: a heartbeat later than the one it took its
 /// registration back with, within the watch timeout (ADR-0045 decision
-/// 13). A token that deregistered is followed to a registration of the same
-/// pid under `version`. Every supervisor is watched to its end, so the
-/// outcome of one does not decide another's.
+/// 13). A token that deregistered is followed to a registration the same
+/// pid made under `version` since `handoff_from` ([`lifecycle::successor`]).
+/// Every supervisor is watched to its end, so the outcome of one does not
+/// decide another's.
 fn watch(
     ports: &JobPorts,
     queue: &dyn Queue,
     handed: &[(LeaseToken, u32)],
     version: &str,
+    handoff_from: i64,
     options: &JobOptions,
 ) -> Result<Vec<Watched>> {
     let deadline = Instant::now() + options.watch_timeout;
@@ -601,7 +596,15 @@ fn watch(
         let registrations = queue.supervisors()?;
         let expired = Instant::now() >= deadline;
         for watched in watched.iter_mut().filter(|w| !w.done && w.error.is_none()) {
-            if let Err(error) = observe(ports, &registrations, watched, version, expired, options) {
+            if let Err(error) = observe(
+                ports,
+                &registrations,
+                watched,
+                version,
+                handoff_from,
+                expired,
+                options,
+            ) {
                 watched.error = Some(format!("{error:#}"));
             }
         }
@@ -619,11 +622,18 @@ fn observe(
     registrations: &[SupervisorRegistration],
     watched: &mut Watched,
     version: &str,
+    handoff_from: i64,
     expired: bool,
     options: &JobOptions,
 ) -> Result<()> {
     let token = watched.token.clone();
-    let Some(current) = successor(registrations, watched, version) else {
+    let Some(current) = lifecycle::successor(
+        registrations,
+        &watched.now,
+        watched.pid,
+        version,
+        handoff_from,
+    ) else {
         bail!("supervisor {token} deregistered after it took the handoff to {version}");
     };
     if current.token != watched.now {

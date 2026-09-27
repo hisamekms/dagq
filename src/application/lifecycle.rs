@@ -1048,6 +1048,10 @@ fn wait_for_handoff(
     timeout: Duration,
     poll: Duration,
 ) -> Result<Vec<Handed>> {
+    // A registration of the same pid counts as a successor only when it was
+    // made after the handoff was asked for: an older one is a stale row of
+    // a pid the system reused.
+    let asked_at = clock.now();
     let mut handed = Vec::with_capacity(live.len());
     for registration in live {
         let error = (!queue.request_handoff(&registration.token, binary_text)?).then(|| {
@@ -1077,6 +1081,7 @@ run `up`",
                 &handed.registration,
                 processes,
                 now,
+                asked_at,
                 binary_text,
                 version,
             ) {
@@ -1101,6 +1106,33 @@ run `up`",
     }
 }
 
+/// The registration a supervisor asked to hand off serves under: the one
+/// of its `token`, or, once that is gone, the one its `pid` made again under
+/// `version` since `asked_at` (the latest such when there are several). A
+/// row of that pid and build started before the handoff was asked for is a
+/// stale one of a reused pid, not the successor.
+pub(crate) fn successor<'a>(
+    registrations: &'a [SupervisorRegistration],
+    token: &LeaseToken,
+    pid: u32,
+    version: &str,
+    asked_at: i64,
+) -> Option<&'a SupervisorRegistration> {
+    registrations
+        .iter()
+        .find(|r| r.token == *token)
+        .or_else(|| {
+            registrations
+                .iter()
+                .filter(|r| {
+                    r.pid == pid
+                        && r.binary_version.as_deref() == Some(version)
+                        && r.started_at >= asked_at
+                })
+                .max_by_key(|r| r.started_at)
+        })
+}
+
 /// One look at `registration`'s handoff: the token it serves under once it
 /// took it, `None` while it is still asked, an error when it cannot take
 /// it any more.
@@ -1109,6 +1141,7 @@ fn look_at_handoff(
     registration: &SupervisorRegistration,
     processes: &dyn ProcessControl,
     now: i64,
+    asked_at: i64,
     binary_text: &str,
     version: &str,
 ) -> Result<Option<LeaseToken>> {
@@ -1118,15 +1151,13 @@ fn look_at_handoff(
     );
     // A token that deregistered is taken back by the same pid registering
     // again under the new build.
-    let Some(current) = registrations
-        .iter()
-        .find(|r| r.token == registration.token)
-        .or_else(|| {
-            registrations
-                .iter()
-                .find(|r| r.pid == registration.pid && r.binary_version.as_deref() == Some(version))
-        })
-    else {
+    let Some(current) = successor(
+        registrations,
+        &registration.token,
+        registration.pid,
+        version,
+        asked_at,
+    ) else {
         bail!("{name} deregistered instead of taking the handoff to {binary_text}");
     };
     if current.handoff_binary.is_some() {
