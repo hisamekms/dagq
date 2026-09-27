@@ -8,4 +8,4 @@ pub use crate::application::lifecycle::{
     UpEnvironment, UpOptions, WORKER_ROLE, hand_off, handoff_failures, inbox_command,
     launch_agent_spec, session_env, session_look, supervise_command, untrusted_repository_hint,
 };
-pub use crate::compose::{PlanOptions, down, plan, planners, up};
+pub use crate::compose::{COMMAND_TARGET, PlanOptions, down, plan, planners, up};

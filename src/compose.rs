@@ -996,7 +996,7 @@ impl OneShot {
         let repository_queue_dir = data_home()
             .ok()
             .map(|home| QueueLocation::for_repository(&repository.common_dir, &home).queue_dir);
-        rebinding::rebind(
+        let result = rebinding::rebind(
             Rebind {
                 queue: &mut queue,
                 repository: &repository,
@@ -1012,7 +1012,9 @@ impl OneShot {
                 log_dir: location.log_dir,
                 repository_queue_dir,
             },
-        )
+        );
+        trace_command("rebind", &result);
+        result
     }
 
     /// `up`: see [`lifecycle::up`]. `repo` is any checkout of the repository.
@@ -1032,16 +1034,20 @@ impl OneShot {
         };
         let migrated = self.migrate_compatible(&location.db, processes)?;
         let queues = |db: &Path| self.queues(db);
-        let mut value = lifecycle::up(
+        let result = lifecycle::up(
             &self.lifecycle_ports(cmux, launchd, processes, &queues),
             &claude,
             &queue_paths(location),
             repo,
             environment,
             options,
-        )?;
-        value["migrated"] = serde_json::to_value(migrated)?;
-        Ok(value)
+        )
+        .and_then(|mut value| {
+            value["migrated"] = serde_json::to_value(migrated)?;
+            Ok(value)
+        });
+        trace_command("up", &result);
+        result
     }
 
     /// Apply the migrations this binary knows and the queue at `db` lacks
@@ -1094,11 +1100,13 @@ same in one step",
         options: &DownOptions,
     ) -> Result<Value> {
         let queues = |db: &Path| self.queues(db);
-        lifecycle::down(
+        let result = lifecycle::down(
             &self.lifecycle_ports(cmux, launchd, processes, &queues),
             &queue_paths(location),
             options,
-        )
+        );
+        trace_command("down", &result);
+        result
     }
 
     /// `install`: replace the fixed binary and hand the queue's supervisor
@@ -1431,6 +1439,44 @@ fn inspect_repository(repo: &Path) -> Result<RepositoryPaths> {
         common_dir: repository.common_dir,
         landing,
     })
+}
+
+/// The tracing target of the record [`trace_command`] writes: under
+/// [`telemetry::FILE_ONLY_TARGET`], so the record goes to the process's
+/// JSON Lines file and not to stderr, where the command's own output is
+/// unchanged.
+///
+/// [`telemetry::FILE_ONLY_TARGET`]: crate::infrastructure::telemetry::FILE_ONLY_TARGET
+pub const COMMAND_TARGET: &str = "dagq::telemetry::command";
+
+/// Record what `rebind`, `up` or `down` did through tracing (ADR-0033
+/// decision 2), next to `rebind.jsonl`, which `rebind` keeps writing: its
+/// `outcome` (for `up`, the supervisor's and the inbox's) and its whole
+/// report as JSON, or the error that stopped it.
+fn trace_command(command: &str, result: &Result<Value>) {
+    match result {
+        Ok(report) => {
+            let outcome = report["outcome"]
+                .as_str()
+                .or_else(|| report["supervisor"]["outcome"].as_str())
+                .unwrap_or("finished");
+            let inbox = report["inbox"]["outcome"].as_str();
+            tracing::info!(
+                target: COMMAND_TARGET,
+                command,
+                outcome,
+                inbox,
+                report = %report,
+                "dagq {command} finished: {outcome}"
+            );
+        }
+        Err(error) => tracing::warn!(
+            target: COMMAND_TARGET,
+            command,
+            error = %format_args!("{error:#}"),
+            "dagq {command} failed: {error:#}"
+        ),
+    }
 }
 
 /// `up` on the system clock: see [`OneShot::up`].

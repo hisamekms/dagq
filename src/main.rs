@@ -2570,9 +2570,10 @@ fn execute(cli: Cli) -> Result<Value> {
 
 /// The subscriber of this process's progress and diagnostic events
 /// (ADR-0033): the long-running and landing processes (`supervise`,
-/// `integrate`, `observe` and the session wrapper) keep a JSON Lines file
-/// in the queue's `logs/` (a supervisor's `--log-dir` if given); every
-/// other command prints its messages on stderr only.
+/// `integrate`, `observe` and the session wrapper) and `up`, `down` and
+/// `rebind` (on a queue that exists) keep a JSON Lines file in the
+/// queue's `logs/` (a supervisor's `--log-dir` if given); every other
+/// command prints its messages on stderr only.
 fn install_telemetry(command: &Command, location: &QueueLocation) {
     use dagq::infrastructure::telemetry::Telemetry;
     let file = match command {
@@ -2585,6 +2586,16 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
         Command::Session { .. } => Some(("session", location.log_dir.clone())),
         Command::PlannerSession { .. } => Some(("planner-session", location.log_dir.clone())),
         Command::AutoUpdate { .. } => Some(("auto-update", location.log_dir.clone())),
+        // Only on a queue that exists: a `logs/` made for one that does not
+        // would leave a directory where the queue is to be moved or made.
+        Command::Up { .. } | Command::Down { .. } | Command::Rebind { .. }
+            if !location.db.is_file() =>
+        {
+            None
+        }
+        Command::Up { .. } => Some(("up", location.log_dir.clone())),
+        Command::Down { .. } => Some(("down", location.log_dir.clone())),
+        Command::Rebind { .. } => Some(("rebind", location.log_dir.clone())),
         _ => None,
     };
     let telemetry = match file {

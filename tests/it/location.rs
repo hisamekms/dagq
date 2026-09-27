@@ -515,3 +515,49 @@ fn rebind_binds_an_unbound_db_queue_to_the_repo_flag() {
     // No `repository` pointer is created for a `--db` queue.
     assert!(!db.with_file_name("repository").exists());
 }
+
+/// `rebind` records what it did through tracing in its own JSON Lines file
+/// under the queue's `logs/` (ADR-0033 decision 2, task 255), next to the
+/// `rebind.jsonl` it keeps writing, and leaves stderr as it was.
+#[test]
+fn rebind_records_what_it_did_as_json_lines_in_the_log_dir() {
+    let (dir, data_home, repo) = fixture();
+    let env = [("XDG_DATA_HOME", data_home.as_path())];
+    let db = dir.path().join("queues").join("q.db");
+    let db_text = db.to_str().unwrap();
+    ok(dir.path(), &env, &["--db", db_text, "init"]);
+    let output = invoke(
+        dir.path(),
+        &env,
+        &["--db", db_text, "rebind", "--repo", repo.to_str().unwrap()],
+    );
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let rebound: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let log_dir = db.with_file_name("logs");
+    assert!(log_dir.join("rebind.jsonl").is_file());
+    let logs: Vec<PathBuf> = fs::read_dir(&log_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            name.starts_with("rebind-") && name.ends_with(".jsonl")
+        })
+        .collect();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    let records: Vec<Value> = fs::read_to_string(&logs[0])
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[0]["message"], "dagq rebind started");
+    let record = records
+        .iter()
+        .find(|record| record["target"] == "dagq::telemetry::command")
+        .unwrap();
+    assert_eq!(record["message"], "dagq rebind finished: rebound");
+    assert_eq!(record["fields"]["command"], "rebind");
+    assert_eq!(record["fields"]["outcome"], "rebound");
+    let report: Value = serde_json::from_str(record["fields"]["report"].as_str().unwrap()).unwrap();
+    assert_eq!(report, rebound);
+}

@@ -895,6 +895,81 @@ fn up_reopens_a_closed_inbox_and_down_leaves_the_sessions_open() {
     );
 }
 
+/// `up` and `down` record what they did through tracing (ADR-0033
+/// decision 2, task 255): one record of the command's target each, with
+/// the outcome and the report, and a failed `up` with its error.
+#[test]
+fn up_and_down_record_what_they_did_through_tracing() {
+    use dagq::infrastructure::telemetry::Telemetry;
+    let mut fixture = fixture();
+    fixture.options.in_cmux = true;
+    let cmux = FakeCmux {
+        registers_supervisor_in: Some(fixture.location.db.clone()),
+        ..FakeCmux::default()
+    };
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let (telemetry, captured) = Telemetry::capture();
+    // With one dispatcher registered, tracing asks the default of the
+    // thread that first reaches a callsite; another test reaching the
+    // command's callsite first, outside any scope, would switch it off for
+    // good. A second one makes every callsite ask both.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::callsite::rebuild_interest_cache();
+    let (first, report) = telemetry.in_scope(|| {
+        let first = up(&fixture, &cmux, &launchd, &processes);
+        processes
+            .dead
+            .lock()
+            .unwrap()
+            .insert(first["supervisor"]["pid"].as_u64().unwrap() as u32);
+        let report = down(&fixture, &cmux, &launchd, &processes, false, false);
+        let mut options = fixture.options.clone();
+        options.claude = fixture._dir.path().join("missing-claude");
+        lifecycle::up(
+            &fixture.location,
+            &fixture.repo,
+            &cmux,
+            &launchd,
+            &processes,
+            &fixture.environment,
+            &options,
+        )
+        .unwrap_err();
+        (first, report)
+    });
+    let records: Vec<Value> = captured
+        .records()
+        .into_iter()
+        .filter(|record| record["target"] == lifecycle::COMMAND_TARGET)
+        .collect();
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0]["level"], "INFO");
+    assert_eq!(records[0]["message"], "dagq up finished: started");
+    assert_eq!(records[0]["fields"]["command"], "up");
+    assert_eq!(records[0]["fields"]["outcome"], "started");
+    assert_eq!(records[0]["fields"]["inbox"], "created");
+    let traced: Value =
+        serde_json::from_str(records[0]["fields"]["report"].as_str().unwrap()).unwrap();
+    assert_eq!(traced, first);
+    assert_eq!(records[1]["message"], "dagq down finished: not_running");
+    assert_eq!(records[1]["fields"]["command"], "down");
+    let traced: Value =
+        serde_json::from_str(records[1]["fields"]["report"].as_str().unwrap()).unwrap();
+    assert_eq!(traced, report);
+    assert_eq!(records[2]["level"], "WARN");
+    assert_eq!(records[2]["fields"]["command"], "up");
+    let error = records[2]["fields"]["error"].as_str().unwrap();
+    assert!(error.contains("missing-claude"), "{error}");
+    assert!(
+        records[2]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("dagq up failed: "),
+        "{records:?}"
+    );
+}
+
 /// A group cmux cannot make does not stop `up`: the workspace opens outside
 /// it and the result says why.
 #[test]
