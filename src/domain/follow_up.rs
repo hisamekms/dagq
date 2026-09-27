@@ -52,8 +52,8 @@ pub const MAX_DRAFT_PLANNERS: usize = 3;
 
 /// A follow-up this many steps from a person's judgement is not submitted
 /// by a planner of the runtime's without one (ADR-0037 decision 6, kept by
-/// ADR-0041 decision 16).
-pub const FOLLOW_UP_ASK_DEPTH: i64 = 2;
+/// ADR-0041 decision 16; raised from 2 to 3 by ADR-t808-1).
+pub const FOLLOW_UP_ASK_DEPTH: i64 = 3;
 
 /// Where a follow_up draft stands when a planner of the runtime's submits
 /// it.
@@ -99,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_follow_up_needs_a_person_for_a_closed_goal_or_depth_two() {
+    fn a_follow_up_needs_a_person_for_a_closed_goal_or_depth_three() {
         let open = FollowUpFacts {
             goal_open: true,
             depth: 1,
@@ -113,11 +113,10 @@ mod tests {
             .unwrap()
             .contains("closed")
         );
-        assert!(
-            adopt_needs_person(FollowUpFacts { depth: 2, ..open })
-                .unwrap()
-                .contains("2 steps")
-        );
+        assert_eq!(adopt_needs_person(FollowUpFacts { depth: 2, ..open }), None);
+        let why = adopt_needs_person(FollowUpFacts { depth: 3, ..open }).unwrap();
+        assert!(why.contains("3 steps"), "{why}");
+        assert!(why.contains("at most 2"), "{why}");
     }
 
     #[test]

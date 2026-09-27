@@ -617,9 +617,11 @@ fn goal_open(conn: &Connection, goal: Option<GoalId>) -> Result<bool> {
 /// What a submission does to the drafts the runtime or a job registered,
 /// inside the submit's transaction, before any task moves (ADR-0041
 /// decision 16): a planner of the runtime's may not submit a follow_up
-/// draft whose goal is closed or that is two follow-ups from a person
-/// without a person's `adopt` answer to a `planner_question` about it (the
-/// error says why). Returns what [`record_adoptions`] records afterwards.
+/// draft whose goal is closed or that is
+/// [`FOLLOW_UP_ASK_DEPTH`](crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH)
+/// or more follow-ups from a person without a person's `adopt` answer to a
+/// `planner_question` about it (the error says why). Returns what
+/// [`record_adoptions`] records afterwards.
 pub(super) fn check_adoptions(
     conn: &Connection,
     tasks: &[TaskId],
@@ -792,6 +794,81 @@ mod tests {
             })
             .unwrap()
             .ask
+    }
+
+    /// A planner of the runtime's submits a follow_up draft of an open goal
+    /// up to two follow-ups from a person, and is refused from three on or
+    /// for a draft without a goal (ADR-t808-1).
+    #[test]
+    fn a_runtime_planner_submits_follow_ups_up_to_depth_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let goal = queue
+            .add_goal(crate::domain::NewGoal {
+                title: "g".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                draft: false,
+            })
+            .unwrap()
+            .id();
+        let follow_up = |queue: &mut SqliteQueue, goal_id, depth| {
+            let task = queue
+                .add(NewTask {
+                    title: format!("depth {depth}"),
+                    description: String::new(),
+                    acceptance: String::new(),
+                    verification_commands: Vec::new(),
+                    required_evidence: Vec::new(),
+                    paths: Vec::new(),
+                    dependencies: Vec::new(),
+                    goal_dependencies: Vec::new(),
+                    priority: Default::default(),
+                    kind: None,
+                    goal_id,
+                    context: String::new(),
+                })
+                .unwrap()
+                .id();
+            queue
+                .record_draft_origin(
+                    task,
+                    DraftOrigin::FollowUp,
+                    &json!({"source_task_id": 1, "source_run_id": "r"}),
+                )
+                .unwrap();
+            queue.set_follow_up_depth(task, depth).unwrap();
+            task
+        };
+        let submit = |queue: &mut SqliteQueue, task| {
+            queue.submit(crate::domain::Submission {
+                tasks: vec![task],
+                goals: Vec::new(),
+                proposal: None,
+                owner: crate::domain::PlannerOwner {
+                    origin: PlannerOrigin::Runtime,
+                    workspace_id: None,
+                },
+            })
+        };
+        for depth in [1, 2] {
+            let task = follow_up(&mut queue, Some(goal), depth);
+            submit(&mut queue, task).unwrap();
+            assert_eq!(queue.follow_up_depth(task).unwrap(), depth);
+        }
+        let deep = follow_up(&mut queue, Some(goal), 3);
+        let error = submit(&mut queue, deep).unwrap_err().to_string();
+        assert!(error.contains("planner_question"), "{error}");
+        assert!(error.contains("3 steps"), "{error}");
+        assert_eq!(
+            read_task(&queue.conn, deep).unwrap().status(),
+            TaskStatus::Draft
+        );
+        let orphan = follow_up(&mut queue, None, 1);
+        let error = submit(&mut queue, orphan).unwrap_err().to_string();
+        assert!(error.contains("goal is closed"), "{error}");
     }
 
     #[test]

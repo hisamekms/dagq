@@ -4,8 +4,8 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: persistence
 related:
   - adr-0067
@@ -129,7 +129,7 @@ runtimeやjobが作ったdraftに立てるplanner（[ADR-0044](../adr/0044-findi
 - **対象**（`planner_drafts`）: `draft`でproposalに入っておらず（`tasks.proposal_id IS NULL`か、そのproposalが`canceled`）、`draft_origins`か（上の条件で有効な）`draft_reopens`の行があり、`closed_at`の無い`planners.draft_task_id`も、taskの（withdrawされた）proposalの閉じていないplannerも無く、`run_id`の無い`planner_question`のaskで未closeのものも、`planner_question` / 旧`follow_up`のaskでanswerが`keep_draft`のものも無く（旧`follow_up`のそれ以外のanswerは適用するものが無いので止めない）、`draft_planner_exhausted`の無いtaskをID昇順。
 - **立てる**（`open_draft_planner(draft, answer)`）: `BEGIN IMMEDIATE`で、`answer`が無ければ対象であることを、あればそのaskの行き先が`NewPlanner`であることを再検査する（外れれば`Skipped`）。`answer`が無く`draft_planner_opened`が`MAX_DRAFT_PLANNERS`（3）件あれば`draft_planner_exhausted`を書いて`Exhausted`（人のanswerは`runtime_delivers`で約束したので上限を越えて運ぶ）。それ以外は`planners`に`origin: runtime`・`draft_task_id`の行を作り、`draft_planner_opened`（`planner_id`、`attempt`、`origin`、`ask_id`、`goal_id`）を書いて`Opened`（plannerの行と`DraftTarget`）を返す。workspaceは呼び手が開く（`planner_workspace_created`）。
 - **answerの行き先**（`planner_answer_route`、`answer`も同じ判定で`runtime_delivers`を書く）: 回答済み・未closeの`planner_question`について、taskの`draft_task_id`か、taskのproposalの`proposal_id`を持つ閉じていないruntimeのplannerがあれば`Planner`、answerが`keep_draft`なら`Close`、出どころが無ければ`Person`、`draft`でproposalに無く使い切っていなければ`NewPlanner`、`draft`以外に進んでいれば`Close`、それ以外は`Person`。`planner_answers`は回答済み・未closeの`planner_question`を古い順に返し、`close_planner_answer`は`closed_at`と`planner_answer_closed`（`ask_id`、`reason`）を書く（打ち込んだものは`ask_delivered`）。`claim_planner_answer`は打ち込みの前に`BEGIN IMMEDIATE`で、askが未closeで行き先が同じplannerの`Planner`であり、同じ`ask_id`の`planner_answer_claimed`が`PLANNER_ANSWER_CLAIM_SECS`（120秒）以内に無いときだけ`planner_answer_claimed`（`ask_id`、`planner_id`、`workspace_id`、`claimed_at`）を書いて`true`を返す（task 406）。`exhausted_drafts`は`draft`のまま`draft_planner_exhausted`のあるtask（`status`のattention）。
-- **submit**（`proposals::submit`の中、同じトランザクション）: `check_adoptions`がsubmitする`draft`のtaskを見て、出どころが`follow_up`のdraftを持ち主が`runtime`のsubmitで出すとき、そのtaskへの`planner_question` / `follow_up`のaskに`adopt`のanswerが無く、goalがnullか閉じているか`follow_up_depth`が2以上ならerrorで拒否する（taskは動かない。人が一度採用した（`by: person`の`follow_up_adopted`がある）taskのreviseの出し直しは拒否しない）。`record_adoptions`は持ち主が`person`か`adopt`のanswerがあるtaskの`follow_up_depth`を0にし、出どころのあるtaskにまだ無ければ`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`）を書く。
+- **submit**（`proposals::submit`の中、同じトランザクション）: `check_adoptions`がsubmitする`draft`のtaskを見て、出どころが`follow_up`のdraftを持ち主が`runtime`のsubmitで出すとき、そのtaskへの`planner_question` / `follow_up`のaskに`adopt`のanswerが無く、goalがnullか閉じているか`follow_up_depth`が`FOLLOW_UP_ASK_DEPTH`（3、[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）以上ならerrorで拒否する（taskは動かない。人が一度採用した（`by: person`の`follow_up_adopted`がある）taskのreviseの出し直しは拒否しない）。`record_adoptions`は持ち主が`person`か`adopt`のanswerがあるtaskの`follow_up_depth`を0にし、出どころのあるtaskにまだ無ければ`follow_up_adopted`（goal_gapとreopenedは`draft_adopted`）を書く。
 
 ## findings
 

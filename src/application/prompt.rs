@@ -7,6 +7,7 @@
 //! revise, a receipt that does not match).
 
 use crate::domain::event_kind;
+use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
 use crate::domain::resume::ResumeConfig;
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -632,7 +633,7 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
          1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {id}` and submit it with `dagq submit {id}`. Plan review checks it before it becomes ready.\n\
          2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {id}` and record why with `dagq note --task {id} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {id} --duplicate-of <that task>` instead, so the queue records which task it duplicates.\n\
          3. Ask: when you cannot decide without a person (the plan's intent, its scope, whether it belongs to this goal or a new one, or verification, paths or evidence the repository does not settle; then say in the question what you propose, so the person's adopt applies it), run `dagq ask --task {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option adopt --option cancel --option keep_draft`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is and stop.\n\
-         The runtime refuses your submit of a follow_up draft whose goal is closed or that is two follow-ups from a person's judgement unless a person answered adopt: ask then.\n\
+         The runtime refuses your submit of a follow_up draft whose goal is closed or that is {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement unless a person answered adopt: ask then.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this draft. Never open the queue database directly; use the dagq CLI only.\n",
         adopt = match target.origin {
             DraftOrigin::FollowUp => format!(

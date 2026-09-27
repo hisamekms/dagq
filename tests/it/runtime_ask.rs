@@ -688,8 +688,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].task.id(), draft);
 
-    // A planner of the runtime's may not submit it: it has no goal and is
-    // two follow-ups from a person.
+    // A planner of the runtime's may not submit it: it has no goal.
     queue
         .edit_task(
             draft,

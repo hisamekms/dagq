@@ -97,6 +97,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t728-3](2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md) | inboxは全てのaskにanswerでき、dagq-recoverの手作業も人の言葉で代行してよいが、記録では人自身の操作とinboxの代行（delegated）を区別する。人しか出せない承認（I6）の強制は後のgoalにする | 2026-09-27 |
 | [ADR-t768-1](2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md) | 着地の検証のnextestは落ちたtestを1回だけ流し直してFLAKYを見分けるが検証は失敗のままにし、落ちたtestが全てFLAKYならworkerをresumeせずに着地を1回やり直す（ADR-0076決定2をamends） | 2026-09-27 |
 | [ADR-t803-1](2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md) | idle の印（Stop hook）を主な信号のまま残し、印が無いか最後の入力より古いときだけ画面から idle を推定する | 2026-09-27 |
+| [ADR-t808-1](2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md) | runtimeのplannerが人の判断を経ずにsubmitできないfollow_upの深さを2以上から3以上に上げる（ADR-0047決定16・20をamends） | 2026-09-28 |
 
 ## 置き換え・廃止されたADR
 
