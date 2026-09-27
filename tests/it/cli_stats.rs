@@ -311,6 +311,8 @@ mod stats {
         assert_eq!(x["runs"], 2);
         assert_eq!(x["integrate_runs"], 1);
         assert!(x["last_failed_at"].is_string());
+        // Task 642: the integrate event that named it, not the worker's.
+        assert_eq!(x["integrate_event_ids"].as_array().unwrap().len(), 1);
         assert_eq!(failed_tests["flaky_candidates"], json!([]));
     }
 

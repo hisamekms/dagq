@@ -480,6 +480,15 @@ pub fn observer_prompt(
          - When a threshold needs revisiting, record a finding with `--kind threshold --subject <the setting's name>` (a missed detection too, on the run), and add `--propose` when it recurs. \
            You never change the threshold yourself.\n\
          \n\
+         Reading the flaky tests:\n\
+         - stats' `failed_tests.flaky_candidates` lists the tests that `integrate`'s verification saw fail in `failed_tests.flaky_runs` or more runs, \
+           each with its `name`, its counts and `integrate_event_ids` (the `verification_command` events of `integrate` that named it, the newest first).\n\
+         - Record each candidate as a finding of kind `flaky_test` on the queue with the test's name as the subject and its `integrate_event_ids` as the evidence: \
+           `{dagq} finding record --kind flaky_test --queue --subject '<name>' --summary '...' --evidence <id> ...`. \
+           A finding that already holds those events is not recorded again.\n\
+         - A test that failed only in the worker's own sessions (`integrate_runs` below `flaky_runs`) is its work in progress, not a flaky test: no finding.\n\
+         - When a `flaky_test` finding's test is no longer a candidate and the window's `failed_tests.tests` shows no `integrate` failure of it, you may resolve the finding.\n\
+         \n\
          Reading the KPIs (`kpi` in the inputs, `{dagq} kpi` for more):\n\
          - `kpi.targets` is each target of `[kpi.targets]` judged on the days and on the weeks: `state` is `ok`, `missed` (off target fewer periods in a row than `kpi.config.breach_periods` days or `breach_weeks` weeks), \
            `breach` (off target that many judged periods in a row, `streak` of them since `breach_since`) or `not_judged` (too few samples or no value); `values` are the periods' values, the latest in progress not judged (`partial`).\n\
@@ -582,6 +591,23 @@ mod tests {
             "`--kind threshold --subject <the setting's name>`",
             "add `--propose` when it recurs",
             "You never change the threshold yourself.",
+        ] {
+            assert!(prompt.contains(text), "the prompt lacks {text:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_explains_how_to_record_the_flaky_tests() {
+        let prompt =
+            observer_prompt(ObserveMode::Hourly, "dagq", None, &json!({"stats": {}})).unwrap();
+        for text in [
+            "`failed_tests.flaky_candidates`",
+            "`integrate_event_ids`",
+            "kind `flaky_test` on the queue with the test's name as the subject",
+            "`dagq finding record --kind flaky_test --queue --subject '<name>' --summary '...' --evidence <id> ...`",
+            "A finding that already holds those events is not recorded again.",
+            "failed only in the worker's own sessions",
+            "you may resolve the finding",
         ] {
             assert!(prompt.contains(text), "the prompt lacks {text:?}");
         }

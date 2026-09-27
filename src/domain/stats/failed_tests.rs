@@ -16,6 +16,9 @@ use crate::domain::{EventId, RunEvent, TaskId};
 /// The runs whose `integrate` a test must fail in to be a flaky candidate.
 pub const FLAKY_RUNS: usize = 2;
 
+/// The `integrate` events kept per test as the evidence of its failures.
+pub const MAX_INTEGRATE_EVENT_IDS: usize = 10;
+
 /// One test's failures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailedTestStats {
@@ -32,6 +35,10 @@ pub struct FailedTestStats {
     pub integrate_runs: usize,
     /// The time of the last event that named it.
     pub last_failed_at: String,
+    /// The `verification_command` events of `integrate` that named it, the
+    /// newest first, up to [`MAX_INTEGRATE_EVENT_IDS`]: the evidence the
+    /// observer records a `flaky_test` finding with (task 642).
+    pub integrate_event_ids: Vec<EventId>,
 }
 
 /// The failed tests of the window.
@@ -82,6 +89,7 @@ pub(super) fn failed_tests(
         worker: usize,
         runs: BTreeSet<&'a str>,
         integrate_runs: BTreeSet<&'a str>,
+        integrate_event_ids: Vec<EventId>,
         last: &'a str,
     }
     let mut by_name: BTreeMap<&str, Acc> = BTreeMap::new();
@@ -95,7 +103,10 @@ pub(super) fn failed_tests(
         for name in names {
             let acc = by_name.entry(name).or_default();
             match source {
-                Source::Integrate => acc.integrate += 1,
+                Source::Integrate => {
+                    acc.integrate += 1;
+                    acc.integrate_event_ids.push(event.id);
+                }
                 Source::Worker => acc.worker += 1,
             }
             if let Some(run) = &event.run_id {
@@ -109,7 +120,12 @@ pub(super) fn failed_tests(
     }
     let mut tests: Vec<FailedTestStats> = by_name
         .into_iter()
-        .map(|(name, acc)| FailedTestStats {
+        .map(|(name, mut acc)| FailedTestStats {
+            integrate_event_ids: {
+                acc.integrate_event_ids.sort_unstable_by(|a, b| b.cmp(a));
+                acc.integrate_event_ids.truncate(MAX_INTEGRATE_EVENT_IDS);
+                acc.integrate_event_ids
+            },
             name: name.to_owned(),
             failures: acc.integrate + acc.worker,
             integrate: acc.integrate,
@@ -217,16 +233,19 @@ mod tests {
                 "flaky_runs": 2,
                 "tests": [
                     {"name": "x::flaky", "failures": 2, "integrate": 2, "worker": 0, "runs": 2,
-                     "integrate_runs": 2, "last_failed_at": "2026-09-27T00:00:04.000Z"},
+                     "integrate_runs": 2, "last_failed_at": "2026-09-27T00:00:04.000Z",
+                     "integrate_event_ids": [4, 1]},
                     {"name": "y::broken", "failures": 3, "integrate": 1, "worker": 2, "runs": 1,
-                     "integrate_runs": 1, "last_failed_at": "2026-09-27T00:00:03.000Z"},
+                     "integrate_runs": 1, "last_failed_at": "2026-09-27T00:00:03.000Z",
+                     "integrate_event_ids": [1]},
                     {"name": "w::in_progress", "failures": 2, "integrate": 0, "worker": 2,
                      "runs": 2, "integrate_runs": 0,
-                     "last_failed_at": "2026-09-27T00:00:07.000Z"},
+                     "last_failed_at": "2026-09-27T00:00:07.000Z", "integrate_event_ids": []},
                 ],
                 "flaky_candidates": [
                     {"name": "x::flaky", "failures": 2, "integrate": 2, "worker": 0, "runs": 2,
-                     "integrate_runs": 2, "last_failed_at": "2026-09-27T00:00:04.000Z"},
+                     "integrate_runs": 2, "last_failed_at": "2026-09-27T00:00:04.000Z",
+                     "integrate_event_ids": [4, 1]},
                 ],
             })
         );
@@ -236,5 +255,35 @@ mod tests {
         });
         assert_eq!(none.tests.len(), 1);
         assert!(none.flaky_candidates.is_empty());
+        // Each id points at an `integrate` event that named the test.
+        for test in &stats.tests {
+            for id in &test.integrate_event_ids {
+                let event = events.iter().find(|event| event.id == *id).unwrap();
+                assert_eq!(event.kind, "verification_command");
+                assert_eq!(event.payload["phase"], "integration");
+                assert!(
+                    event.payload["failed_tests"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(test.name))
+                );
+            }
+        }
+    }
+
+    /// The evidence keeps the newest [`MAX_INTEGRATE_EVENT_IDS`] ids,
+    /// whatever order the events come in.
+    #[test]
+    fn integrate_event_ids_are_the_newest_first_and_bounded() {
+        let events: Vec<RunEvent> = (1..=12)
+            .rev()
+            .map(|id| integrate(id, &format!("r{id}"), json!(["x::flaky"]), "01"))
+            .collect();
+        let stats = failed_tests(&events, EventId::new(0), EventId::new(12), |_| true);
+        let ids: Vec<i64> = (3..=12).rev().collect();
+        assert_eq!(
+            json!(stats.flaky_candidates[0].integrate_event_ids),
+            json!(ids)
+        );
     }
 }
