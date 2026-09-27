@@ -1099,7 +1099,15 @@ same in one step",
             .transpose()?;
         let queue = self.open(&db)?;
         let recording = RecordingBackend::over(cmux, self.queues(&db), None, load_average);
-        let opened = planner::open_person_planner(&PlannerLaunch {
+        // With no supervisor, the rows of planners whose workspace and
+        // wrapper are gone are closed here; a listing that fails is a warning.
+        let swept = planner::close_abandoned_planners(
+            &queue,
+            &recording,
+            &SystemProcesses,
+            &*self.generators.clock,
+        );
+        let mut opened = planner::open_person_planner(&PlannerLaunch {
             queue: &queue,
             cmux: &recording,
             files: &LocalRunFiles,
@@ -1111,6 +1119,9 @@ same in one step",
             claude: &options.claude,
             plugin_dir: plugin_dir.as_deref(),
         })?;
+        if let Err(error) = swept {
+            opened.warnings.push(format!("{error:#}"));
+        }
         Ok(serde_json::to_value(opened)?)
     }
 

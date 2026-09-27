@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::{
-    application::EndedRunWorkspace,
+    application::{EndedRunWorkspace, planner},
     domain::run::{RunWorkspace, run_workspaces},
 };
 
@@ -123,7 +123,9 @@ impl Supervisor<'_> {
     /// directories stay for a person.
     ///
     /// The same pass asks for the disk of the ended runs to be freed
-    /// ([`Self::clean_ended_worktrees`]), which a job does off the loop.
+    /// ([`Self::clean_ended_worktrees`]), which a job does off the loop,
+    /// and closes the rows of the planners whose workspace and wrapper are
+    /// gone ([`Self::close_abandoned_planners`]).
     pub(super) fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
         if self
             .last_sweep
@@ -133,7 +135,30 @@ impl Supervisor<'_> {
         }
         self.last_sweep = Some(Instant::now());
         self.clean_ended_worktrees(None);
+        self.close_abandoned_planners();
         self.sweep_ended_workspaces()
+    }
+    /// Close the rows of the planners, a person's included, whose workspace
+    /// cmux no longer lists and whose wrapper is done
+    /// ([`planner::close_abandoned_planners`]), so `planners` stops showing
+    /// them. A listing that fails closes nothing and is logged only.
+    fn close_abandoned_planners(&mut self) {
+        match planner::close_abandoned_planners(
+            &*self.queue,
+            self.cmux,
+            &*self.processes,
+            &*self.generators.clock,
+        ) {
+            Ok(closed) => {
+                for id in closed {
+                    self.planner_exits.retain(|(sent, _)| *sent != id);
+                    info!("planner {id}: its workspace and wrapper are gone; closed its record");
+                }
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the planners whose workspace is gone could not be closed: {error:#}");
+            }
+        }
     }
     fn sweep_ended_workspaces(&mut self) -> Result<()> {
         let candidates: Vec<EndedRunWorkspace> = self

@@ -232,6 +232,8 @@ pub struct FakeCmux {
     pub look_fails: bool,
     /// `workspace create` fails.
     pub create_fails: bool,
+    /// The listing of every window's workspaces fails.
+    pub list_fails: bool,
     /// Workspaces created so far, so a UUID is never handed out twice.
     pub created: AtomicUsize,
 }
@@ -355,6 +357,7 @@ impl WorkspaceBackend for FakeCmux {
     }
     fn listed_workspace_ids(&self) -> Result<Vec<String>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        anyhow::ensure!(!self.list_fails, "workspace list failed");
         Ok(self
             .workspaces
             .lock()

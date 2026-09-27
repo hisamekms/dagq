@@ -548,3 +548,57 @@ fn the_supervisor_closes_the_session_spans_of_gone_inbox_and_planner_workspaces(
     assert_eq!(closed[0]["session_id"], "s-plan");
     assert_eq!(closed[0]["reason"], "inferred");
 }
+
+/// Goal 54 (1): the supervisor's sweep closes the record of a planner,
+/// a person's or the runtime's, whose workspace cmux does not list and
+/// whose wrapper is dead, so `planners` stops showing it; a planner whose
+/// wrapper is alive stays, and nothing is closed while cmux cannot list its
+/// workspaces.
+#[test]
+fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone() {
+    use dagq::domain::{PlannerId, PlannerOrigin};
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let dead_pid = {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    let record = |origin, workspace: &str, pid| {
+        let planner = queue.open_planner(origin, None).unwrap();
+        queue
+            .planner_workspace_created(planner.id, workspace)
+            .unwrap();
+        queue.register_planner_wrapper(planner.id, pid).unwrap();
+        planner.id
+    };
+    let person = record(PlannerOrigin::Person, "W-PERSON", dead_pid);
+    let runtime = record(PlannerOrigin::Runtime, "W-RUNTIME", dead_pid);
+    let alive = record(PlannerOrigin::Person, "W-ALIVE", std::process::id());
+    let listed = record(PlannerOrigin::Person, "W-LISTED", dead_pid);
+    let open = || -> Vec<PlannerId> {
+        queue
+            .planners(false)
+            .unwrap()
+            .into_iter()
+            .map(|planner| planner.id)
+            .collect()
+    };
+
+    let mut failing = TestWorkspace::new(&db, false, "exit 0");
+    failing.exists_fails = true;
+    supervise_with(&db, &repo, &failing, &sweeping_options()).unwrap();
+    assert_eq!(open(), [person, runtime, alive, listed]);
+
+    let backend = TestWorkspace::new(&db, false, "exit 0");
+    backend.listed.lock().unwrap().push("w-listed".into());
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert_eq!(open(), [alive, listed]);
+    for id in [person, runtime] {
+        assert!(queue.planner(id).unwrap().closed_at.is_some());
+    }
+}

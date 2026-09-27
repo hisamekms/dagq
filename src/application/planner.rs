@@ -415,3 +415,47 @@ pub fn planner_views(
         .map(|planner| planner_view(probes, planner))
         .collect()
 }
+
+/// Close the rows of the planners whose session is over for good
+/// ([`PlannerSession::abandoned`]), a person's included: their workspace is
+/// not in cmux's one listing of all windows and their wrapper is done. The
+/// rows are read before the listing, so a workspace opened after it is not
+/// taken for gone. A listing cmux fails to give closes nothing (the error
+/// is returned): a passing failure gives no planner up. Returns the IDs
+/// closed.
+pub fn close_abandoned_planners(
+    queue: &dyn Queue,
+    cmux: &dyn WorkspaceBackend,
+    processes: &dyn ProcessControl,
+    clock: &dyn Clock,
+) -> Result<Vec<PlannerId>> {
+    let open: Vec<PlannerSession> = queue
+        .planners(false)?
+        .into_iter()
+        .filter(|planner| planner.workspace_id.is_some())
+        .collect();
+    if open.is_empty() {
+        return Ok(Vec::new());
+    }
+    let listed = cmux
+        .listed_workspace_ids()
+        .context("the planners' workspaces could not be listed")?;
+    let now = clock.now();
+    let mut closed = Vec::new();
+    for planner in open {
+        let probe = PlannerProbe {
+            now,
+            workspace_listed: planner.workspace_id.as_deref().is_some_and(|workspace| {
+                listed.iter().any(|id| id.eq_ignore_ascii_case(workspace))
+            }),
+            wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
+            idle: None,
+            working: None,
+        };
+        if planner.abandoned(&probe) {
+            queue.close_planner(planner.id, None)?;
+            closed.push(planner.id);
+        }
+    }
+    Ok(closed)
+}

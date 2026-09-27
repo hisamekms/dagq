@@ -106,6 +106,26 @@ impl PlannerSession {
     }
 }
 
+impl PlannerSession {
+    /// Whether the planner's row can be closed for good (a person's
+    /// planner included): not closed yet, its workspace recorded and not in
+    /// cmux's listing, and its wrapper done (its agent's exit recorded, its
+    /// process gone or its heartbeat older than [`HEARTBEAT_TIMEOUT_SECS`],
+    /// or never registered within [`PLANNER_STARTUP_SECS`] of the record).
+    /// A workspace not listed alone is no evidence: a wrapper still alive
+    /// keeps the row open.
+    pub fn abandoned(&self, probe: &PlannerProbe) -> bool {
+        if self.closed_at.is_some() || self.workspace_id.is_none() || probe.workspace_listed {
+            return false;
+        }
+        if self.wrapper_pid.is_none() {
+            return probe.now - self.created_at > PLANNER_STARTUP_SECS;
+        }
+        let age = self.heartbeat_at.map_or(i64::MAX, |at| probe.now - at);
+        self.exited_at.is_some() || heartbeat_stale(probe.wrapper_alive, age)
+    }
+}
+
 impl PlannerState {
     /// Whether the planner's session can still take text: it is opening,
     /// working or idle in a workspace cmux lists.
@@ -196,6 +216,61 @@ mod tests {
         );
         assert!(PlannerState::Idle.alive() && PlannerState::Working.alive());
         assert!(!PlannerState::Lost.alive());
+    }
+
+    #[test]
+    fn a_planner_is_abandoned_once_its_workspace_and_wrapper_are_gone() {
+        let gone = PlannerProbe {
+            workspace_listed: false,
+            wrapper_alive: false,
+            ..probe()
+        };
+        assert!(session().abandoned(&gone));
+        // A listed workspace, or a live wrapper, keeps the row.
+        assert!(!session().abandoned(&PlannerProbe {
+            workspace_listed: true,
+            ..gone
+        }));
+        let alive = PlannerProbe {
+            wrapper_alive: true,
+            ..gone
+        };
+        assert!(!session().abandoned(&alive));
+        // A live pid silent past the heartbeat timeout, or an exit, ends it.
+        assert!(session().abandoned(&PlannerProbe {
+            now: 100 + HEARTBEAT_TIMEOUT_SECS + 1,
+            ..alive
+        }));
+        let exited = PlannerSession {
+            exited_at: Some(105),
+            ..session()
+        };
+        assert!(exited.abandoned(&alive));
+        // A wrapper never registered is given its startup time.
+        let unregistered = PlannerSession {
+            wrapper_pid: None,
+            heartbeat_at: None,
+            ..session()
+        };
+        assert!(!unregistered.abandoned(&gone));
+        assert!(unregistered.abandoned(&PlannerProbe {
+            now: 90 + PLANNER_STARTUP_SECS + 1,
+            ..gone
+        }));
+        // Closed rows, and rows without a workspace, are not judged.
+        let closed = PlannerSession {
+            closed_at: Some(109),
+            ..session()
+        };
+        assert!(!closed.abandoned(&gone));
+        let opening = PlannerSession {
+            workspace_id: None,
+            ..unregistered
+        };
+        assert!(!opening.abandoned(&PlannerProbe {
+            now: 90 + PLANNER_STARTUP_SECS + 1,
+            ..gone
+        }));
     }
 
     #[test]

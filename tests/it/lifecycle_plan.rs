@@ -109,8 +109,11 @@ fn planners_dir(fixture: &Fixture) -> PathBuf {
 /// its workspace UUID, a title `[<repo>]planner#<id>`, the planner's role,
 /// queue, origin and ID in the workspace's environment, the queue's group,
 /// the Blue look without a pin, and a directory holding its prompt and the
-/// wrapper binary its workspace runs. A planner whose workspace a person
-/// closed is closed in the queue by the next `plan`; `up` opens none.
+/// wrapper binary its workspace runs. A workspace a person closed alone
+/// gives no record up: the next `plan` closes a planner's record only once
+/// its wrapper is done too (see
+/// `plan_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone`);
+/// `up` opens none.
 #[test]
 fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
     let fixture = fixture();
@@ -202,8 +205,9 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
     // No planner is a session workspace of `up`'s.
     assert_eq!(queue.session_workspace(SessionRole::Planner).unwrap(), None);
 
-    // A person closes the first planner; the next `plan` opens a third and
-    // gives no record up on a listing that shows one cmux window only.
+    // A person closes the first planner before its wrapper registered; the
+    // next `plan` opens a third and gives no record up on the listing
+    // alone.
     cmux.close(&first_id).unwrap();
     let third = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
     assert_eq!(third["planner"]["id"], 3, "{third}");
@@ -574,4 +578,94 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         listed["planners"][0]["workspace_id"],
         opened["planner"]["workspace_id"]
     );
+}
+
+/// A pid no process has: a child that exited and was reaped.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
+/// Goal 54 (1): `plan` closes the record of a planner, a person's
+/// included, whose workspace cmux does not list and whose wrapper is dead
+/// or exited, so `planners` stops showing it. A workspace still listed, a
+/// wrapper still alive, or a listing cmux fails to give, closes nothing.
+#[test]
+fn plan_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone() {
+    use dagq::domain::PlannerId;
+    let fixture = fixture();
+    let cmux = FakeCmux::default();
+    let options = plan_options(&fixture);
+    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let open = |cmux: &FakeCmux| {
+        let report = lifecycle::plan(&fixture.location, &fixture.repo, cmux, &options).unwrap();
+        let id = PlannerId::new(report["planner"]["id"].as_i64().unwrap());
+        (
+            id,
+            report["planner"]["workspace_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+    };
+    let (dead, dead_ws) = open(&cmux);
+    let (exited, exited_ws) = open(&cmux);
+    let (alive, alive_ws) = open(&cmux);
+    let (listed, _) = open(&cmux);
+    queue.register_planner_wrapper(dead, dead_pid()).unwrap();
+    queue
+        .register_planner_wrapper(exited, std::process::id())
+        .unwrap();
+    queue.planner_exited(exited, std::process::id(), 0).unwrap();
+    queue
+        .register_planner_wrapper(alive, std::process::id())
+        .unwrap();
+    queue.register_planner_wrapper(listed, dead_pid()).unwrap();
+    for workspace in [&dead_ws, &exited_ws, &alive_ws] {
+        cmux.close(workspace).unwrap();
+    }
+    let open_ids = || -> Vec<PlannerId> {
+        queue
+            .planners(false)
+            .unwrap()
+            .into_iter()
+            .map(|planner| planner.id)
+            .collect()
+    };
+
+    // A listing that fails closes nothing, and `plan` still opens.
+    let failing = FakeCmux {
+        list_fails: true,
+        created: 100.into(),
+        ..FakeCmux::default()
+    };
+    let report = lifecycle::plan(&fixture.location, &fixture.repo, &failing, &options).unwrap();
+    assert!(
+        report["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("workspace list failed"),
+        "{report}"
+    );
+    let unlisted = PlannerId::new(report["planner"]["id"].as_i64().unwrap());
+    queue.close_planner(unlisted, None).unwrap();
+    assert_eq!(open_ids(), [dead, exited, alive, listed]);
+
+    let (fresh, _) = open(&cmux);
+    assert_eq!(open_ids(), [alive, listed, fresh]);
+    for id in [dead, exited] {
+        let planner = queue.planner(id).unwrap();
+        assert!(planner.closed_at.is_some());
+        assert_eq!(planner.error, None);
+    }
+    let shown: Vec<i64> =
+        dagq::lifecycle::planners(&fixture.location.db, &cmux, false).unwrap()["planners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|planner| planner["id"].as_i64().unwrap())
+            .collect();
+    assert_eq!(shown, [alive, listed, fresh].map(PlannerId::as_i64));
 }
