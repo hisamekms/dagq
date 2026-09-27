@@ -1477,7 +1477,9 @@ fn waits_for(conn: &Connection, from: Node, to: Node) -> Result<bool> {
              UNION ALL
              SELECT 'task', task_id, 'goal', goal_id FROM task_goal_dependencies
              UNION ALL
-             SELECT 'goal', goal_id, 'task', id FROM tasks WHERE goal_id IS NOT NULL
+             -- A canceled task never holds its goal back (achieved allows it).
+             SELECT 'goal', goal_id, 'task', id FROM tasks
+               WHERE goal_id IS NOT NULL AND status <> 'canceled'
            ),
            reached(kind, id) AS (
              SELECT ?1, ?2
@@ -2007,7 +2009,7 @@ fn insert_goal_dependency(
 ) -> Result<()> {
     let task = read_task(conn, task_id)?;
     task::check_dependencies_editable(&task)?;
-    read_goal(conn, goal_id)?;
+    goal::check_accepts_dependents(&read_goal(conn, goal_id)?)?;
     task::check_not_own_goal(&task, goal_id)?;
     let cycle = waits_for(conn, Node::Goal(goal_id), Node::Task(task_id))?;
     task::check_goal_acyclic(task_id, goal_id, cycle)?;

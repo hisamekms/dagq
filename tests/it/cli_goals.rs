@@ -400,3 +400,43 @@ fn ready_tasks_of_a_draft_goal_do_not_raise_idle_slots() {
     ok(&db, &["ready", "3", "--bypass-review"]);
     assert!(idle(&db));
 }
+
+#[test]
+fn a_dependency_on_an_abandoned_goal_is_refused() {
+    let (_dir, db) = queue();
+    ok(&db, &["goal", "add", "dropped"]);
+    ok(&db, &["goal", "add", "done"]);
+    ok(&db, &["goal", "close", "1", "--verdict", "abandoned"]);
+    ok(&db, &["goal", "close", "2", "--verdict", "achieved"]);
+    let abandoned = "goal 1 is closed as abandoned and never releases a task that depends on it";
+    assert_eq!(
+        refused(&db, &["add", "stuck", "--depends-on-goal", "1"]),
+        abandoned
+    );
+    ok(&db, &["add", "free"]);
+    assert_eq!(
+        refused(&db, &["dependency", "add", "1", "--goal", "1"]),
+        abandoned
+    );
+    // An achieved goal still takes dependents: it has released them.
+    let added = ok(&db, &["dependency", "add", "1", "--goal", "2"]);
+    assert_eq!(added["goal_dependencies"], serde_json::json!([2]));
+}
+
+#[test]
+fn a_canceled_member_does_not_make_its_goal_wait() {
+    let (_dir, db) = queue();
+    ok(&db, &["goal", "add", "g"]);
+    // Task 2 in goal 1 depends on task 1, then is canceled: goal 1 no
+    // longer waits for task 1 through it.
+    ok(&db, &["add", "x"]);
+    ok(&db, &["add", "c", "--goal", "1", "--depends-on", "1"]);
+    let cycle = "dependency 1 -> goal 1 would create a cycle";
+    assert_eq!(
+        refused(&db, &["dependency", "add", "1", "--goal", "1"]),
+        cycle
+    );
+    ok(&db, &["cancel", "2"]);
+    let added = ok(&db, &["dependency", "add", "1", "--goal", "1"]);
+    assert_eq!(added["goal_dependencies"], serde_json::json!([1]));
+}

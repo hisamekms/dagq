@@ -274,6 +274,8 @@ pub struct DependencyGraph {
 /// directly or transitively. Only a ready task outside a draft goal passes
 /// its priority on; a draft, canceled or completed one, or one in a draft
 /// goal, is set aside or will not run, so it never raises another task.
+/// Nor does one that depends on a goal closed as abandoned: that goal never
+/// releases it, so it will never be claimed.
 pub fn effective_priority<'a>(
     own: Priority,
     waiters: impl IntoIterator<Item = &'a GraphTask>,
@@ -281,7 +283,12 @@ pub fn effective_priority<'a>(
     waiters
         .into_iter()
         .filter(|waiter| {
-            waiter.status == TaskStatus::Ready && waiter.goal_status != Some(GoalStatus::Draft)
+            waiter.status == TaskStatus::Ready
+                && waiter.goal_status != Some(GoalStatus::Draft)
+                && !waiter
+                    .goal_dependencies
+                    .iter()
+                    .any(|d| d.verdict == Some(GoalVerdict::Abandoned))
         })
         .map(|waiter| waiter.priority)
         .fold(own, Ord::max)
@@ -631,6 +638,36 @@ mod tests {
             effective_priority(Priority::Urgent, &ready),
             Priority::Urgent
         );
+    }
+
+    #[test]
+    fn a_ready_task_waiting_for_an_abandoned_goal_passes_nothing_on() {
+        let waiter = |verdict| GraphTask {
+            status: TaskStatus::Ready,
+            priority: Priority::Interrupt,
+            goal_dependencies: vec![
+                GraphGoalDependency {
+                    goal_id: GoalId::new(1),
+                    verdict: None,
+                },
+                GraphGoalDependency {
+                    goal_id: GoalId::new(2),
+                    verdict,
+                },
+            ],
+            ..task(9, None, &[])
+        };
+        assert_eq!(
+            effective_priority(Priority::Low, &[waiter(Some(GoalVerdict::Abandoned))]),
+            Priority::Low
+        );
+        // An open or achieved goal still lets the waiter lift the task.
+        for verdict in [None, Some(GoalVerdict::Achieved)] {
+            assert_eq!(
+                effective_priority(Priority::Low, &[waiter(verdict)]),
+                Priority::Interrupt
+            );
+        }
     }
 
     #[test]

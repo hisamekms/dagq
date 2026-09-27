@@ -78,8 +78,9 @@ pub struct LintInput {
 pub fn lint(input: &LintInput) -> Vec<LintViolation> {
     let members: BTreeSet<TaskId> = input.targets.iter().map(Task::id).collect();
     let mut goal_members: BTreeMap<GoalId, Vec<TaskId>> = BTreeMap::new();
+    // Like the queue's own check, a goal does not wait for a canceled task.
     for (id, node) in &input.nodes {
-        if let Some(goal_id) = node.goal_id {
+        if let Some(goal_id) = node.goal_id.filter(|_| node.status != TaskStatus::Canceled) {
             goal_members.entry(goal_id).or_default().push(*id);
         }
     }
@@ -228,8 +229,8 @@ fn duplicate_titles(targets: &[Task]) -> Vec<LintViolation> {
 
 /// Whether `start` reaches itself over the edges the queue refuses to
 /// close into a loop when a dependency is added: a task waits for its
-/// predecessors, and for every task of each goal it depends on, whatever
-/// the statuses and verdicts.
+/// predecessors, and for every task of each goal it depends on that is not
+/// canceled (`goal_members`), whatever the verdicts.
 fn in_cycle(
     start: TaskId,
     nodes: &BTreeMap<TaskId, LintNode>,
@@ -357,6 +358,9 @@ mod tests {
         plan.goals
             .insert(GoalId::new(7), Some(GoalVerdict::Achieved));
         assert_eq!(codes(&plan), [(2, LintCode::DependencyCycle)]);
+        // A canceled member does: the goal no longer waits for it.
+        plan.nodes.get_mut(&TaskId::new(4)).unwrap().status = TaskStatus::Canceled;
+        assert!(codes(&plan).is_empty());
 
         // A task that leads into a loop without being on it is not reported.
         let mut plan = input(vec![task(1, "a")], vec![]);

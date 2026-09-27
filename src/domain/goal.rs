@@ -175,6 +175,14 @@ pub fn check_accepts_tasks(goal: &Goal) -> Result<(), DomainError> {
     })
 }
 
+/// A task may depend on an open goal or one closed as achieved; one closed
+/// as abandoned never releases the task, so it would never be claimed.
+pub fn check_accepts_dependents(goal: &Goal) -> Result<(), DomainError> {
+    require(goal.verdict != Some(GoalVerdict::Abandoned), || {
+        DomainError::AbandonedGoalDependency { goal_id: goal.id }
+    })
+}
+
 /// `goal` with the fields of `edit` replaced; a title must stay non-blank
 /// and an empty `doc` clears the reference.
 pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
@@ -362,6 +370,18 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "goal 7 is closed as abandoned; create a new goal for further work"
+        );
+    }
+
+    #[test]
+    fn only_an_abandoned_goal_takes_no_dependents() {
+        check_accepts_dependents(&goal(None)).unwrap();
+        check_accepts_dependents(&goal(Some(GoalVerdict::Achieved))).unwrap();
+        assert_eq!(
+            check_accepts_dependents(&goal(Some(GoalVerdict::Abandoned)))
+                .unwrap_err()
+                .to_string(),
+            "goal 7 is closed as abandoned and never releases a task that depends on it"
         );
     }
 

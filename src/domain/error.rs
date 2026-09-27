@@ -64,6 +64,11 @@ pub enum DomainError {
     OwnGoalDependency {
         goal_id: GoalId,
     },
+    /// A dependency on a goal closed as abandoned: it never releases the
+    /// task, which would never be claimed.
+    AbandonedGoalDependency {
+        goal_id: GoalId,
+    },
     /// The goal already waits for the task, directly or not.
     GoalDependencyCycle {
         task_id: TaskId,
@@ -285,6 +290,10 @@ impl fmt::Display for DomainError {
             Self::OwnGoalDependency { goal_id } => write!(
                 f,
                 "a task cannot depend on its own goal {goal_id}; the goal already waits for it"
+            ),
+            Self::AbandonedGoalDependency { goal_id } => write!(
+                f,
+                "goal {goal_id} is closed as abandoned and never releases a task that depends on it"
             ),
             Self::GoalDependencyCycle { task_id, goal_id } => write!(
                 f,
