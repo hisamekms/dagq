@@ -52,6 +52,7 @@ mod runtime_disk;
 mod runtime_evidence;
 mod runtime_forecast;
 mod runtime_handoff;
+mod runtime_headless_jobs;
 mod runtime_integrate;
 mod runtime_observer;
 mod runtime_precheck;

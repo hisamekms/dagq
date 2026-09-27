@@ -298,7 +298,15 @@ impl Supervisor<'_> {
             .find(|e| e.kind == event_kind::TRIAGE_STARTED)
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
-        let job = start_job(self, &dir, alert, attempt, &prompt, session_id.as_deref())?;
+        let job = start_job(
+            self,
+            run.id(),
+            &dir,
+            alert,
+            attempt,
+            &prompt,
+            session_id.as_deref(),
+        )?;
         Ok(EndedRecovery {
             round,
             alert,

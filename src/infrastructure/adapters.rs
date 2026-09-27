@@ -180,6 +180,29 @@ impl ProcessControl for SystemProcesses {
         }
         Ok(processes)
     }
+
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        // `lstart` is the start to the second, in the C locale so two reads
+        // print it alike; `ps` fails for a pid that runs nothing.
+        let start = output(Command::new("ps").env("LC_ALL", "C").args([
+            "-o",
+            "lstart=",
+            "-p",
+            &pid.to_string(),
+        ]))
+        .ok()?;
+        let start = start.trim();
+        (!start.is_empty()).then(|| start.to_owned())
+    }
+
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        // Only the parents are needed: no `lsof` for the directories.
+        // SAFETY: getuid(2) has no failure and no memory effects.
+        let uid = unsafe { libc::getuid() }.to_string();
+        output(Command::new("ps").args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]))
+            .map(|listing| crate::domain::headless_job::descendants(&parse_ps(&listing), pid))
+            .unwrap_or_default()
+    }
 }
 
 /// The lines of `ps -o pid=,ppid=,etime=,time=,command=`; a line that does
@@ -2527,6 +2550,17 @@ mod tests {
         assert!(found.cpu_ms.is_some(), "{found:?}");
         let cwd = PathBuf::from(found.cwd.as_deref().unwrap());
         assert_eq!(cwd.canonicalize().unwrap(), dir);
+    }
+
+    #[test]
+    fn a_process_start_reads_the_same_until_the_pid_runs_nothing() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let first = SystemProcesses.start_identity(child.id()).unwrap();
+        assert_eq!(SystemProcesses.start_identity(child.id()), Some(first));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(SystemProcesses.start_identity(child.id()), None);
+        assert_eq!(SystemProcesses.start_identity(u32::MAX), None);
     }
 
     #[test]

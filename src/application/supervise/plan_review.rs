@@ -160,14 +160,20 @@ impl Supervisor<'_> {
                 },
             )
             .context("start the plan review")?;
-        Ok(HeadlessJob {
-            what: "plan review",
+        Ok(self.headless_job(
+            "plan review",
             child,
-            started: Instant::now(),
-            timeout: self.reviewer.review_timeout(),
             stdout,
             stderr,
-        })
+            JobSubject {
+                kind: headless_job::PLAN_REVIEW,
+                label: None,
+                run_id: None,
+                proposal_id: Some(job.proposal_id),
+                goal_id: None,
+                attempt: job.attempt,
+            },
+        ))
     }
 
     /// The plan review prompt of `proposal` from the queue as it is now.

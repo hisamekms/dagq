@@ -931,7 +931,7 @@ fn spawn_live(
         recovery_prompt(&task, run, attempt, &material)?,
         sv.verifier.language().as_ref(),
     );
-    start_job(sv, live.run_dir, alert, attempt, &prompt, None)
+    start_job(sv, run.id(), live.run_dir, alert, attempt, &prompt, None)
 }
 
 /// The worktree's `git status`, HEAD and the receipt's `commit`, for the
@@ -985,6 +985,7 @@ pub(super) fn repair_history(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<V
 /// recorded one (ADR-0048 decision 4).
 pub(super) fn start_job(
     sv: &mut Supervisor<'_>,
+    run: &RunId,
     dir: &Path,
     alert: RecoveryAlert,
     attempt: usize,
@@ -1015,14 +1016,16 @@ pub(super) fn start_job(
             },
         )
         .context("start the recovery job")?;
-    Ok(HeadlessJob {
-        what: "recovery job",
+    Ok(sv.headless_job(
+        "recovery job",
         child,
-        started: Instant::now(),
-        timeout: sv.reviewer.review_timeout(),
         stdout,
         stderr,
-    })
+        JobSubject {
+            label: Some(alert.as_str().to_owned()),
+            ..JobSubject::run(headless_job::RECOVERY, run, attempt)
+        },
+    ))
 }
 
 /// Check each action's preconditions now (ADR-0047 decision 40): only the

@@ -144,6 +144,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 
 - [Handoff](supervisor-lifecycle/handoff.md)
 
+### headless jobのプロセス（記録と引き継ぎ）
+
+- [Headless job processes](supervisor-lifecycle/headless-job-processes.md)（task 443）
+
 ### claimを控える（load average）
 
 - [claimを控える（load average）](supervisor-lifecycle/claim-hold.md)

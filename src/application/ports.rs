@@ -820,6 +820,20 @@ pub trait ProcessControl {
     fn list(&self) -> Result<Vec<crate::domain::recovery::ProcessInfo>> {
         anyhow::bail!("this process control cannot list processes")
     }
+    /// When the process `pid` started, as the system prints it, to tell a
+    /// headless job's process from another that took its pid later (task
+    /// 443); `None` when there is no such process or it cannot be read.
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        let _ = pid;
+        None
+    }
+    /// The processes `pid` started, and theirs, from [`Self::list`]; none
+    /// when the processes cannot be listed.
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        self.list()
+            .map(|all| crate::domain::headless_job::descendants(&all, pid))
+            .unwrap_or_default()
+    }
 }
 
 /// The current time, injected so a use case reads it through this port and
@@ -1963,6 +1977,56 @@ pub trait GoalReviewStore {
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;
 }
 
+/// A headless job whose process just started (task 443).
+#[derive(Debug, Clone)]
+pub struct NewHeadlessJob {
+    /// One of [`crate::domain::headless_job`]'s kinds.
+    pub kind: &'static str,
+    /// What else tells the job (the recovery job's alert).
+    pub label: Option<String>,
+    pub run_id: Option<RunId>,
+    pub proposal_id: Option<ProposalId>,
+    pub goal_id: Option<GoalId>,
+    pub attempt: usize,
+    pub pid: u32,
+    /// [`ProcessControl::start_identity`] of `pid` just after the start.
+    pub process_start: Option<String>,
+    pub supervisor_token: String,
+}
+
+/// An unfinished `headless_jobs` row of a supervisor that is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessJobRecord {
+    pub id: i64,
+    pub kind: String,
+    pub label: Option<String>,
+    pub run_id: Option<RunId>,
+    pub proposal_id: Option<ProposalId>,
+    pub goal_id: Option<GoalId>,
+    pub attempt: usize,
+    pub pid: u32,
+    pub process_start: Option<String>,
+    pub supervisor_token: String,
+    /// The pid of that supervisor's registration, when it has one left.
+    pub supervisor_pid: Option<u32>,
+    pub started_at: i64,
+}
+
+/// The processes of the supervisor's headless jobs (task 443).
+pub trait HeadlessJobStore {
+    /// Record the start of a job's process; the row's ID.
+    fn record_headless_job(&self, job: &NewHeadlessJob) -> Result<i64>;
+    /// Record that the job ended with `outcome`; whether this call ended
+    /// it (a row ended already keeps its outcome).
+    fn end_headless_job(&self, id: i64, outcome: &str) -> Result<bool>;
+    /// The unfinished rows of supervisors other than `token` that are gone
+    /// (no longer registered, or whose heartbeat is older than
+    /// [`crate::domain::HEARTBEAT_TIMEOUT_SECS`]), oldest first; with
+    /// `own`, `token`'s unfinished rows too (a process after its exec,
+    /// which knows none of them).
+    fn orphaned_headless_jobs(&self, token: &str, own: bool) -> Result<Vec<HeadlessJobRecord>>;
+}
+
 /// The queue a use case works on: its tasks and goals, its runs and its
 /// asks. A use case that needs only some of it takes those ports instead.
 pub trait Queue:
@@ -1977,6 +2041,7 @@ pub trait Queue:
     + DraftPlannerStore
     + PlanReviewStore
     + GoalReviewStore
+    + HeadlessJobStore
 {
 }
 
@@ -1992,6 +2057,7 @@ impl<
         + DraftPlannerStore
         + PlanReviewStore
         + GoalReviewStore
+        + HeadlessJobStore
         + ?Sized,
 > Queue for T
 {

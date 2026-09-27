@@ -646,6 +646,7 @@ pub mod follow_up;
 pub mod forecast;
 pub mod goal;
 pub mod goal_review;
+pub mod headless_job;
 pub mod idle_process;
 pub mod ids;
 mod input;
@@ -1518,6 +1519,8 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     queue_hold::QUEUE_HOLD_APPLIED,
     // The cleanup for the disk (task 377) is about no run.
     "auto_repaired",
+    // The stop of a gone supervisor's plan or goal review (task 443).
+    event_kind::HEADLESS_JOB_STOPPED,
     UPDATE_STARTED,
     UPDATE_BUILT,
     UPDATE_INSTALLED,

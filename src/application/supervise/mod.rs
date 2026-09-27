@@ -73,7 +73,7 @@ use crate::domain::{
     RunPaths, RunPlan, RunProcess, RunStatus, SessionRole, TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES,
     TaskAction, TaskId, TaskRun, TaskStatus, TriageState, after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
-    decide_conflict, decide_revise, event_kind, heartbeat_stale,
+    decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
     kpi::{CANDIDATES_SAMPLED, CandidatesSample},
     marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
@@ -497,6 +497,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         conflicts: settings.conflicts,
         plan_review: None,
         goal_review: None,
+        job_ends: JobEnds::default(),
+        jobs_swept: false,
         planner_exits: Vec::new(),
         handoff: None,
         exec: None,
@@ -525,6 +527,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         free: None,
         cleanup: cleanup::CleanupWatch::default(),
     };
+    // Before any job starts again: the jobs a gone supervisor left, and
+    // after an exec those the previous binary of this process started.
+    supervisor.tend_headless_jobs();
     if settings.handoff_token.is_some() {
         // A review rebuilt under an open hold ask waits for it (task 437).
         supervisor.check_queue_hold()?;
@@ -605,6 +610,12 @@ struct Supervisor<'a> {
     plan_review: Option<plan_review::PlanReviewWatch>,
     /// The goal review job running now: one at a time, queue-wide.
     goal_review: Option<goal_review::GoalReviewWatch>,
+    /// The ends of this process's headless jobs still to be written to
+    /// `headless_jobs` (task 443).
+    job_ends: JobEnds,
+    /// Whether this process looked for the jobs a gone supervisor left,
+    /// its own token's included (after an exec), already.
+    jobs_swept: bool,
     /// The runtime's planners this process asked to `/exit`, and when.
     planner_exits: Vec<(crate::domain::PlannerId, Instant)>,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
@@ -776,6 +787,8 @@ impl Supervisor<'_> {
     /// database may be unreachable), and it goes stale with the leases.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
+        // The jobs the loop stopped last (a handoff stops them all).
+        self.write_job_ends();
         // A loop that ended on an error lets the cleanup job end after its
         // current worktree, and records what it did (task 405).
         if result.is_err() {
@@ -815,6 +828,8 @@ impl Supervisor<'_> {
                 return Err(error);
             }
             let stopping = options.stop.load(Ordering::SeqCst);
+            // Before any job starts: none runs twice (task 443).
+            self.tend_headless_jobs();
             // What the cleanup job removed is recorded before the disk is
             // read (task 405).
             self.poll_cleanup(stopping || self.handoff.is_some());

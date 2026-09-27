@@ -146,18 +146,18 @@ impl Supervisor<'_> {
         Ok(match self.spawn_review(run, attempt, &session_id) {
             Ok((child, stdout, stderr)) => {
                 info!(run_id = %run.id(), "run {} review {attempt} started (session {})", run.id(), if live { "kept open" } else { "ended" });
+                let job = self.headless_job(
+                    "review",
+                    child,
+                    stdout,
+                    stderr,
+                    JobSubject::run(headless_job::REVIEW, run.id(), attempt),
+                );
                 Phase::Review(ReviewWatch {
                     session,
                     attempt,
                     retried,
-                    job: HeadlessJob {
-                        what: "review",
-                        child,
-                        started: Instant::now(),
-                        timeout: self.reviewer.review_timeout(),
-                        stdout,
-                        stderr,
-                    },
+                    job,
                 })
             }
             Err(error) => {

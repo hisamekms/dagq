@@ -7,6 +7,7 @@ pub mod draft_planners;
 mod finding_planners;
 mod findings;
 mod goal_reviews;
+mod headless_jobs;
 pub mod kpi_config;
 mod kpi_push;
 pub mod language;
