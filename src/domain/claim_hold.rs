@@ -81,6 +81,11 @@ pub const DEFAULT_MAX_LOAD: f64 = 16.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HoldReason {
+    /// An `authentication` `queue_hold` ask is open: Claude Code's login
+    /// ran out (task 437, ADR-0047 decision 42).
+    Authentication,
+    /// A `cost` `queue_hold` ask about the usage limit is open (task 437).
+    UsageLimit,
     /// The free disk space of the queue's directory is below what a run
     /// needs (task 377, [`super::disk`]).
     DiskSpace,
@@ -91,6 +96,8 @@ pub enum HoldReason {
 impl HoldReason {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Authentication => "authentication",
+            Self::UsageLimit => "usage_limit",
             Self::DiskSpace => "disk_space",
             Self::LoadAverage => "load_average",
         }
@@ -110,6 +117,21 @@ pub struct HoldInputs {
     /// The free bytes a new run (or a landing) needs; `None` holds for no
     /// disk space.
     pub needed_bytes: Option<u64>,
+    /// The open authentication or usage-limit ask that holds the queue's
+    /// work (task 437), if any.
+    pub queue_hold: Option<QueueHold>,
+}
+
+/// An open authentication or usage-limit `queue_hold` ask (ADR-0047
+/// decision 42): while it is open no new run is claimed and no headless
+/// job starts (task 437).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueHold {
+    /// [`HoldReason::Authentication`] or [`HoldReason::UsageLimit`].
+    pub reason: HoldReason,
+    pub ask_id: i64,
+    /// How many runs the ask holds.
+    pub affected: usize,
 }
 
 /// A hold on new claims: its reason, and the value that crossed the
@@ -119,14 +141,27 @@ pub struct ClaimHold {
     pub reason: HoldReason,
     pub value: f64,
     pub threshold: f64,
+    /// The `queue_hold` ask of an authentication or usage-limit hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<i64>,
 }
 
 impl ClaimHold {
-    /// The first reason that holds, or `None` when claims may go on: the
-    /// free disk space below the bytes needed (the disk fills whatever the
+    /// The first reason that holds, or `None` when claims may go on: an
+    /// open authentication or usage-limit ask (every run would stop at it;
+    /// `value` is the number of runs it holds, `threshold` 0), the free
+    /// disk space below the bytes needed (the disk fills whatever the
     /// load), then the load above `--max-load`. A value that could not be
     /// read holds nothing.
     pub fn judge(inputs: &HoldInputs) -> Option<Self> {
+        if let Some(hold) = inputs.queue_hold {
+            return Some(Self {
+                reason: hold.reason,
+                value: hold.affected as f64,
+                threshold: 0.0,
+                ask_id: Some(hold.ask_id),
+            });
+        }
         if let (Some(free), Some(needed)) = (inputs.free_bytes, inputs.needed_bytes)
             && free < needed
         {
@@ -134,6 +169,7 @@ impl ClaimHold {
                 reason: HoldReason::DiskSpace,
                 value: free as f64,
                 threshold: needed as f64,
+                ask_id: None,
             });
         }
         match (inputs.load_average, inputs.max_load) {
@@ -141,6 +177,7 @@ impl ClaimHold {
                 reason: HoldReason::LoadAverage,
                 value,
                 threshold,
+                ask_id: None,
             }),
             _ => None,
         }
@@ -148,7 +185,14 @@ impl ClaimHold {
 
     /// Why nothing is claimed, for the log and the event.
     pub fn message(&self) -> String {
+        let ask = self.ask_id.unwrap_or_default();
         match self.reason {
+            HoldReason::Authentication => format!(
+                "the authentication ask {ask} is open (Claude Code's login ran out): no new run is claimed and no headless job (review, recovery, plan review, goal review, observer) starts until a person logs in and answers it; the runs in flight keep their leases"
+            ),
+            HoldReason::UsageLimit => format!(
+                "the usage-limit ask {ask} is open (Claude Code's usage limit was reached): no new run is claimed and no headless job (review, recovery, plan review, goal review, observer) starts until a person answers it; the runs in flight keep their leases"
+            ),
             HoldReason::DiskSpace => format!(
                 "the free disk space {} of the queue's directory is below the {} a new run needs: no new run is claimed until the ended runs' worktrees are cleaned or a person frees the disk; the runs in flight go on",
                 super::disk::gib(self.value),
@@ -215,16 +259,19 @@ pub fn transition_of(
         })
         .and_then(|event| text(event, "reason"));
     match hold {
-        Some(hold) if held_reason != Some(hold.reason.as_str()) => Some((
-            kinds.held,
-            json!({
+        Some(hold) if held_reason != Some(hold.reason.as_str()) => {
+            let mut payload = json!({
                 "reason": hold.reason,
                 "value": hold.value,
                 "threshold": hold.threshold,
                 "message": hold.message_for(kinds),
                 "supervisor": token,
-            }),
-        )),
+            });
+            if let Some(ask_id) = hold.ask_id {
+                payload["ask_id"] = json!(ask_id);
+            }
+            Some((kinds.held, payload))
+        }
         // Another live supervisor's own hold is its to end.
         None if kinds.own
             && held
@@ -385,7 +432,51 @@ mod tests {
             max_load: Some(16.0),
             free_bytes: free,
             needed_bytes: needed,
+            queue_hold: None,
         })
+    }
+
+    #[test]
+    fn an_open_authentication_or_usage_limit_ask_holds_before_the_disk() {
+        let inputs = |reason| HoldInputs {
+            load_average: Some(40.0),
+            max_load: Some(16.0),
+            free_bytes: Some(1),
+            needed_bytes: Some(2),
+            queue_hold: Some(QueueHold {
+                reason,
+                ask_id: 7,
+                affected: 2,
+            }),
+        };
+        let hold = ClaimHold::judge(&inputs(HoldReason::Authentication)).unwrap();
+        assert_eq!(hold.reason, HoldReason::Authentication);
+        assert_eq!(
+            (hold.value, hold.threshold, hold.ask_id),
+            (2.0, 0.0, Some(7))
+        );
+        assert!(
+            hold.message().contains("authentication ask 7"),
+            "{}",
+            hold.message()
+        );
+        assert!(hold.message().contains("no headless job"));
+        let (kind, payload) = transition(Some(&hold), None, "s", |_| true).unwrap();
+        assert_eq!(kind, CLAIM_HELD);
+        assert_eq!(payload["reason"], json!("authentication"));
+        assert_eq!(payload["ask_id"], json!(7));
+        let limit = ClaimHold::judge(&inputs(HoldReason::UsageLimit)).unwrap();
+        assert!(
+            limit.message().contains("usage-limit ask 7"),
+            "{}",
+            limit.message()
+        );
+        assert_eq!(HoldReason::UsageLimit.as_str(), "usage_limit");
+        assert_eq!(HoldReason::Authentication.as_str(), "authentication");
+        // A disk or load hold carries no ask.
+        let (_, payload) =
+            transition(disk(Some(1), Some(2), None).as_ref(), None, "s", |_| true).unwrap();
+        assert!(payload.get("ask_id").is_none());
     }
 
     #[test]

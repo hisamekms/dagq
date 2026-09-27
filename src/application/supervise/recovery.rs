@@ -540,6 +540,11 @@ impl RecoveryWatch {
         facts: Value,
         marker: Option<(SystemTime, i64)>,
     ) -> Result<Option<(usize, Escalation)>> {
+        // A login or usage limit that holds the queue starts no recovery
+        // job (task 437): the alert is followed again once it is fixed.
+        if sv.queue_hold.is_some() {
+            return Ok(None);
+        }
         let events = sv.queue.run_events(run.id())?;
         let done = attempts(&events, alert);
         if done >= MAX_RECOVERY_ATTEMPTS {
@@ -1312,6 +1317,11 @@ impl SessionWatch {
             || (self.recovery.recheck.is_none()
                 && self.recovery.seen.is_some_and(|seen| marker <= seen))
         {
+            return Ok(());
+        }
+        // A login or usage limit that holds the queue starts no job (task
+        // 437): the alert holds on and is raised once it is fixed.
+        if sv.queue_hold.is_some() {
             return Ok(());
         }
         self.recovery.recheck = None;

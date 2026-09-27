@@ -1245,6 +1245,13 @@ impl ResumeWatch {
         // An answer to a question the session asked during the resume is
         // typed once it went idle at it: the session works again, and gets
         // the resume timeout again (ADR-0071 decision 17, as a revise's).
+        // A login or usage limit a person fixed (task 437): the session is
+        // told to go on, like an answer typed into it.
+        if let Some(typed) = self.live.continue_after_hold(sv, run)? {
+            self.live.input_at = Some(typed);
+            self.restart_clocks(&*sv.files);
+            self.start = self.live.answer_start.take();
+        }
         if let Some(typed) = self.live.deliver_answers(sv, run)? {
             self.live.input_at = Some(typed);
             self.restart_clocks(&*sv.files);

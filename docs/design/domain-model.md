@@ -354,6 +354,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `orphaned` | runの登録processが死んでいて`recover`された | |
 | `push_failed` | 着地したmainのpushが失敗した | |
 | `git_failed` | runtimeのGitコマンドが失敗した（着地したworktreeの削除） | |
+| `hold_canceled` | 人がrunを止めた認証か利用上限の`queue_hold`のaskに`cancel_affected`と答え、supervisorがrunを手放した（task 437） | |
 | `other` | どれにも当たらない。自由文が理由を持つ。増えたらコードを足す | |
 
 経路とコードの対応（`backend_*`は`application::reason_of_error`がerrorの連鎖から`RecordingBackend`の包んだcmuxの失敗（`BackendFailure`）を見つけたときで、`op`を持つ。見つからなければ表のfallback）:
@@ -368,6 +369,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `integration_error` | mainを進める前のerror（元のstatusに戻す） | `backend_*`、なければ`other` |
 | `integration_rebase_aborted` | 残っていたrebaseの中止 | `rebase_in_progress` |
 | `runtime_error` | supervisorのabandon（provisioning、監視、adoptやresumeの開始の失敗） | `backend_*`、なければ`other` |
+| `runtime_error` | 認証か利用上限のaskの`cancel_affected`の適用（leaseを返す。[queue hold](supervisor-lifecycle/queue-hold.md)） | `hold_canceled` |
 | `runtime_error` | wrapper自身のerror（leaseは残す） | `wrapper_failed` |
 | `runtime_error` | supervisorのheartbeatの失敗（各runに書き、leaseは残す） | `lease_lost` |
 | `run_recovered` | 孤児runの`recover`（supervisorの自動も手動も） | `orphaned` |

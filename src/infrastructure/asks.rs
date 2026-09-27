@@ -306,6 +306,14 @@ impl SqliteQueue {
             payload["runtime_delivers"] =
                 json!(super::goal_reviews::goal_answer_applies(&tx, &ask, text)?);
         }
+        if ask.kind == AskKind::QueueHold {
+            // The supervisor applies an option the ask offered: `done` /
+            // `cancel_affected` of an authentication or usage-limit ask
+            // (task 437), `done` / `wait` of the disk's (task 377); any
+            // other answer is a person's to read.
+            payload["runtime_delivers"] =
+                json!(crate::domain::queue_hold::applies(&ask.options, text));
+        }
         if ask.kind == AskKind::UpdateFailed {
             // The live supervisor that updates the binary retries or leaves
             // the update as answered (ADR-0045 decision 17), by the rule

@@ -13,6 +13,7 @@ related:
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
   - design-supervisor-lifecycle-disk-space
+  - design-supervisor-lifecycle-queue-hold
   - adr-0044
   - adr-0047
   - adr-0038
@@ -154,6 +155,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### 空き容量を確かめる（claimと着地の検証の前）
 
 - [空き容量を確かめる](supervisor-lifecycle/disk-space.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44、task 377）
+
+### 認証と利用上限のaskの待ちとanswer
+
+- [認証と利用上限のaskの待ちとanswer](supervisor-lifecycle/queue-hold.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定42、task 437）
 
 ### 人の答えを待つrun（slotの外の待ち）
 

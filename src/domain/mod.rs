@@ -503,6 +503,9 @@ pub fn triage_state(events: &[RunEvent]) -> TriageState {
             e.kind.as_str(),
             "resume_started" | "triage_finished" | "triage_failed"
         ) || (e.kind == "triage_decided" && e.payload["action"] == RECOVER_AGAIN)
+            // A triage that failed while a login or usage limit held the
+            // queue, started again once it is fixed (task 437).
+            || (e.kind == event_kind::JOB_RESTARTED && e.payload["job"] == "triage")
     });
     match last {
         Some(e) if e.kind == "triage_finished" && e.payload["action"] == "wait" => {
@@ -657,6 +660,7 @@ pub mod plan_review;
 pub mod planner;
 pub mod prediction;
 pub mod proposal;
+pub mod queue_hold;
 pub mod reason;
 mod receipt;
 pub mod recheck;
@@ -1509,6 +1513,9 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     claim_hold::CLAIM_RESUMED,
     claim_hold::LANDING_HELD,
     claim_hold::LANDING_RESUMED,
+    // The answer of an authentication or usage-limit ask applied (task
+    // 437).
+    queue_hold::QUEUE_HOLD_APPLIED,
     // The cleanup for the disk (task 377) is about no run.
     "auto_repaired",
     UPDATE_STARTED,
@@ -1680,8 +1687,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
             }
         }
         // An answer the supervisor applies itself: an `approve_landing` one,
-        // a triage's `decide` one, a plan review's `approve_plan` one, or
-        // that of the automatic update's failure (`update_failed`).
+        // a triage's `decide` one, a plan review's `approve_plan` one, that
+        // of the automatic update's failure (`update_failed`), or an option
+        // of a `queue_hold` ask (task 437).
         ("ask_answered", _)
             if matches!(
                 payload.get("kind").and_then(serde_json::Value::as_str),
@@ -1690,6 +1698,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
                     || kind == AskKind::ApprovePlan.as_str()
                     || kind == AskKind::ApproveGoal.as_str()
                     || kind == AskKind::UpdateFailed.as_str()
+                    || kind == AskKind::QueueHold.as_str()
             ) && payload.get("runtime_delivers") == Some(&serde_json::Value::Bool(true)) =>
         {
             None
@@ -2439,6 +2448,20 @@ mod attention_tests {
                 json!({"ask_id": 3, "kind": "update_failed", "runtime_delivers": false}),
                 Some(ReadAnswer {
                     ask_id: AskId::new(3),
+                }),
+            ),
+            // The supervisor applies an option of a queue_hold ask (task
+            // 437); a free answer is a person's to read.
+            (
+                "ask_answered",
+                json!({"ask_id": 4, "kind": "queue_hold", "runtime_delivers": true}),
+                None,
+            ),
+            (
+                "ask_answered",
+                json!({"ask_id": 4, "kind": "queue_hold", "runtime_delivers": false}),
+                Some(ReadAnswer {
+                    ask_id: AskId::new(4),
                 }),
             ),
         ];

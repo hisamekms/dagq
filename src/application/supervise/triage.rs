@@ -130,6 +130,11 @@ impl Supervisor<'_> {
     /// [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one, and a job
     /// that cannot even start fails its round right away.
     pub(super) fn triage_runs(&mut self, parallel: usize) -> Result<()> {
+        // A login or usage limit that holds the queue starts no recovery
+        // job (task 437): each would stop at it.
+        if self.queue_hold.is_some() {
+            return Ok(());
+        }
         let now = self.generators.clock.now();
         for run in self.queue.runs_to_triage()? {
             if self.used_slots() >= parallel {

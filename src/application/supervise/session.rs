@@ -466,6 +466,11 @@ impl SessionWatch {
                         {
                             self.answer_start = Some(start);
                         }
+                        // A login or usage limit a person fixed: the
+                        // session is told to go on (task 437).
+                        if let Some(typed) = self.continue_after_hold(sv, run)? {
+                            self.input_at = self.input_at.map(|_| typed);
+                        }
                         if !self.receipt_seen
                             && let Some(start) = self.watch_stall(sv, run)?
                         {
@@ -868,7 +873,7 @@ pub(super) fn raise_auth(
 }
 
 /// The question of the authentication ask; the runs it holds follow it.
-pub(super) const AUTH_QUESTION: &str = "Claude Code's login ran out: worker sessions stopped at an authentication error (`Please run /login`, an API 401). Only a person can log in again: run `claude` in a terminal, `/login`, and answer `done`; the supervisor then nudges each held run that stays idle without a receipt to go on. Answer `cancel_affected` to give the held runs up instead (the inbox recovers them; the runtime does not apply it yet). More runs that stop at the login join this ask instead of opening another.";
+pub(super) const AUTH_QUESTION: &str = "Claude Code's login ran out: worker sessions stopped at an authentication error (`Please run /login`, an API 401). Only a person can log in again: run `claude` in a terminal, `/login`, and answer `done`; the supervisor then tells each held session to go on and starts again the headless jobs that failed at the login. Answer `cancel_affected` to give the held runs up instead (the supervisor releases them as an abandon does, keeping their worktrees, and the inbox recovers them). Until then no new run is claimed and no headless job (review, recovery, plan review, goal review, observer) starts; the runs in flight keep their leases. More runs that stop at the login join this ask instead of opening another.";
 
 /// Close the run's `answer_prompt` asks nobody closed, noting each.
 pub(super) fn close_answer_prompt_asks(

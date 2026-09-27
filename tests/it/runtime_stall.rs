@@ -14,6 +14,18 @@ fn stall_options() -> SuperviseOptions {
     }
 }
 
+/// The payloads of the events of `kind`, on any run or on none.
+fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+    SqliteQueue::open(db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| event.payload)
+        .collect()
+}
+
 /// The payloads of the task-less `stall_config_loaded` events.
 fn stall_configs(db: &Path) -> Vec<Value> {
     Connection::open(db)
@@ -82,8 +94,11 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 
 /// A session idle without a receipt because its login ran out is neither
 /// nudged nor raised as `stalled`: it joins the authentication ask
-/// (ADR-0047 decision 42). Once that is answered, the idle counts again and
-/// the nudge tells the session to go on.
+/// (ADR-0047 decision 42). While it is open no new run is claimed
+/// (`claim_held`, reason `authentication`). The runtime applies the
+/// person's `done` (task 437): the session gets the fixed text to go on,
+/// with the send checked, instead of a nudge; the hold ends and the ask
+/// closes.
 #[test]
 fn an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask() {
     let (_dir, repo, db) = fixture();
@@ -121,17 +136,39 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         hold[0].reason_category,
         dagq::domain::AskReason::Authentication
     );
+    wait_until(&db, Duration::from_secs(30), |_| {
+        !queue_events(&db, "claim_held").is_empty()
+    });
+    let held = queue_events(&db, "claim_held");
+    assert_eq!(held[0]["reason"], "authentication", "{held:?}");
+    assert_eq!(held[0]["ask_id"], json!(hold[0].id), "{held:?}");
     // The error stays on the screen after the person logged in: the
-    // answered ask is not opened again, and the nudge goes out.
-    queue.answer(hold[0].id, "done").unwrap();
+    // answered ask is not opened again, and the runtime tells the session
+    // to go on.
+    let answered = queue.answer(hold[0].id, "done").unwrap();
+    assert_eq!(answered.answer.as_deref(), Some("done"));
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
-    assert_eq!(backend.texts().len(), 1);
+    let texts = backend.texts();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert_eq!(texts[0].1, dagq::domain::queue_hold::CONTINUE_TEXT);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(payloads(&detail, "auth_required").len(), 1);
-    assert_eq!(payloads(&detail, "stall_nudged").len(), 1);
+    assert_eq!(payloads(&detail, "stall_nudged").len(), 0);
+    let continued = payloads(&detail, "hold_continue_sent");
+    assert_eq!(continued.len(), 1, "{continued:?}");
+    assert_eq!(continued[0]["ask_id"], json!(hold[0].id));
+    let applied = queue_events(&db, "queue_hold_applied");
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    assert_eq!(applied[0]["answer"], "done");
+    assert_eq!(applied[0]["continued"], json!([detail.runs[0].id()]));
+    assert_eq!(queue_events(&db, "claim_resumed").len(), 1);
+    // The answer was the runtime's to apply, and it closed the ask.
+    let answered = queue_events(&db, "ask_answered");
+    assert_eq!(answered[0]["runtime_delivers"], true, "{answered:?}");
+    assert!(queue.read_ask(hold[0].id).unwrap().closed_at.is_some());
     let asks = queue
         .asks(AskQuery {
             all: true,

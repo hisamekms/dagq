@@ -102,6 +102,7 @@ mod jobs;
 mod landing;
 mod plan_review;
 mod push;
+mod queue_hold;
 mod recheck;
 mod recovery;
 mod report;
@@ -502,6 +503,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         run_env_missing: false,
         candidates: None,
         landing_unresolved: false,
+        queue_hold: None,
+        hold_continue: HashMap::new(),
         draining: false,
         update: update::UpdateWatch::default(),
         rechecks: recheck::Rechecks::default(),
@@ -523,6 +526,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         cleanup: cleanup::CleanupWatch::default(),
     };
     if settings.handoff_token.is_some() {
+        // A review rebuilt under an open hold ask waits for it (task 437).
+        supervisor.check_queue_hold()?;
         supervisor.rebuild_own_runs(previous_version.as_deref())?;
     }
     let result = supervisor.run_loop(settings);
@@ -619,6 +624,13 @@ struct Supervisor<'a> {
     /// (ADR-t615-1): nothing is claimed and no passed run lands until it
     /// does.
     landing_unresolved: bool,
+    /// The open authentication or usage-limit ask read at the top of this
+    /// pass (task 437): no new run is claimed and no headless job starts
+    /// while it holds.
+    queue_hold: Option<claim_hold::QueueHold>,
+    /// The held runs whose session gets the fixed text to go on, with the
+    /// ask a person answered `done` (task 437).
+    hold_continue: HashMap<RunId, AskId>,
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
@@ -684,6 +696,10 @@ enum Phase {
     ),
     /// The headless review of an accepted run (ADR-0023 decision 2).
     Review(ReviewWatch),
+    /// An accepted run whose review waits for the authentication or
+    /// usage-limit ask that holds the queue's jobs (task 437); its session
+    /// stays open, and the review starts once nothing holds.
+    ReviewHeld(Option<SessionRef>),
     /// The live session fixes what a `revise` verdict named (ADR-0027
     /// decision 2).
     Revise(ReviseWatch),
@@ -810,6 +826,10 @@ impl Supervisor<'_> {
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             self.check_disk()?;
+            // Every pass too: the answer of an authentication or usage-limit
+            // ask is applied and the hold read before any work starts (task
+            // 437).
+            self.check_queue_hold()?;
             self.draining = stopping || !self.claiming || self.handoff.is_some();
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
@@ -882,13 +902,18 @@ impl Supervisor<'_> {
             // A message waiting is sent while the supervisor does not stop.
             self.push_pass(!stopping);
             if !stopping && self.claiming {
-                self.start_observer_when_due(options);
+                if self.queue_hold.is_none() {
+                    self.start_observer_when_due(options);
+                }
                 self.auto_update_pass(options);
             }
             // A plan review that just readied tasks is followed by one more
             // pass, which claims them.
-            let mut progressed = self.plan_review_pass(options, !stopping && self.claiming);
-            progressed |= self.goal_review_pass(!stopping && self.claiming);
+            // A login or usage limit that holds the queue starts no job
+            // (task 437); one in progress is followed.
+            let starting = !stopping && self.claiming && self.queue_hold.is_none();
+            let mut progressed = self.plan_review_pass(options, starting);
+            progressed |= self.goal_review_pass(starting);
             if self.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space or one a triage or resume waits
@@ -1085,6 +1110,7 @@ impl Supervisor<'_> {
             max_load: self.max_load,
             free_bytes: self.free,
             needed_bytes: needed,
+            queue_hold: self.queue_hold,
         });
         self.record_hold(claim_hold::CLAIMS, hold.as_ref())
     }
@@ -1826,6 +1852,15 @@ impl Supervisor<'_> {
                         }
                     };
                 slot.run = run;
+                Ok(Step::Continue)
+            }
+            Phase::ReviewHeld(session) => {
+                if self.queue_hold.is_none() {
+                    let session = session.take();
+                    let run = self.queue.run(slot.run.id())?;
+                    slot.phase = self.start_review(&run, session)?;
+                    slot.run = run;
+                }
                 Ok(Step::Continue)
             }
             Phase::Review(watch) => {

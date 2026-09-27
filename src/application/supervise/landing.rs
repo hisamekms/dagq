@@ -83,7 +83,19 @@ impl Supervisor<'_> {
         run: &TaskRun,
         session: Option<SessionRef>,
     ) -> Result<Phase> {
+        if self.review_held(run) {
+            return Ok(Phase::ReviewHeld(session));
+        }
         self.begin_review(run, session, false)
+    }
+    /// Whether an authentication or usage-limit ask holds the queue's jobs
+    /// (task 437): the review waits for it with the session open.
+    fn review_held(&self, run: &TaskRun) -> bool {
+        let Some(hold) = self.queue_hold else {
+            return false;
+        };
+        info!(run_id = %run.id(), "run {}: its review waits for ask {} ({}), which holds the headless jobs", run.id(), hold.ask_id, hold.reason.as_str());
+        true
     }
     /// Review the run once more with the same input after review `attempt`
     /// printed no readable verdict (task 328): record `review_retried` with
@@ -96,6 +108,9 @@ impl Supervisor<'_> {
         attempt: usize,
         error: &str,
     ) -> Result<Phase> {
+        if self.review_held(run) {
+            return Ok(Phase::ReviewHeld(session));
+        }
         self.queue.record_runtime_event(
             run.id(),
             event_kind::REVIEW_RETRIED,

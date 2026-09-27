@@ -158,6 +158,13 @@ impl ReviseWatch {
         // An answer to a question the session asked during the revise is
         // typed once it went idle at it: the session works again, and gets
         // the resume timeout again (task 238).
+        // A login or usage limit a person fixed (task 437): the session is
+        // told to go on, like an answer typed into it.
+        if let Some(typed) = self.live.continue_after_hold(sv, run)? {
+            self.live.input_at = Some(typed);
+            self.sent = Instant::now();
+            self.start = self.live.answer_start.take();
+        }
         if let Some(typed) = self.live.deliver_answers(sv, run)? {
             self.live.input_at = Some(typed);
             self.sent = Instant::now();

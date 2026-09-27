@@ -56,6 +56,7 @@ mod runtime_integrate;
 mod runtime_observer;
 mod runtime_precheck;
 mod runtime_push;
+mod runtime_queue_hold;
 mod runtime_recheck;
 mod runtime_repair;
 mod runtime_report;

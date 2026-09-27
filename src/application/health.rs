@@ -982,6 +982,20 @@ pub fn attention(
                 event_kind::ASK_ANSWERED,
                 AttentionNext::ApplyingAnswer { ask_id: ask.id },
             )
+        } else if ask.kind == AskKind::QueueHold
+            && ask
+                .answer
+                .as_deref()
+                .is_some_and(|answer| crate::domain::queue_hold::applies(&ask.options, answer))
+        {
+            // The supervisor ends the hold, tells the held sessions to go
+            // on or gives them up, as the option says (task 437; the
+            // disk's `done` / `wait`, task 377).
+            (
+                "answered",
+                event_kind::ASK_ANSWERED,
+                AttentionNext::ApplyingAnswer { ask_id: ask.id },
+            )
         } else if ask.kind == AskKind::ApprovePlan && queue.applies_plan_answer(&ask)? {
             // The supervisor readies, sends back or cancels the proposal
             // (ADR-0041 decision 11).
