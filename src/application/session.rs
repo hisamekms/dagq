@@ -15,13 +15,16 @@ use std::{
 };
 
 use super::{
-    AgentProvider, Queue, RunFiles, Spawner,
+    AgentProvider, Queue, RunFiles, Spawner, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
     },
 };
-use crate::domain::{ActorContext, ReasonCode, RunId, TaskRun, worker_model::WorkerSession};
+use crate::domain::{
+    ActorContext, ReasonCode, RunId, TaskRun, run::run_workspaces, worker_model::WorkerSession,
+};
+use tracing::warn;
 
 /// How long the wrapper waits for the supervisor to record the workspace
 /// cmux started it in.
@@ -37,8 +40,62 @@ const WORKSPACE_REGISTRATION: Duration = Duration::from_secs(45);
 const EXIT_RECORD_ATTEMPTS: u32 = 3;
 const EXIT_RECORD_BACKOFF: Duration = Duration::from_millis(200);
 
+/// The cmux workspace a session wrapper runs in (`CMUX_WORKSPACE_ID`) and
+/// the backend that closes it, for a wrapper refused its session (task
+/// 806).
+pub struct OwnWorkspace<'a> {
+    pub backend: &'a dyn WorkspaceBackend,
+    pub id: String,
+}
+
+/// A wrapper refused its session (`session` names it) with `error`: the
+/// refusal is logged, and the wrapper's own workspace is closed when
+/// `recorded` says nothing records it for the session. Such a workspace is
+/// one cmux made although the create reported failing (a create that
+/// timed out, task 806), or opened for a session that ended before its
+/// wrapper started: nothing would ever find it to close it. A workspace
+/// the session records is left to whatever ends the session, and one
+/// whose record cannot be read is left too. The error says what became of
+/// the workspace.
+pub(crate) fn wrapper_refused(
+    own: Option<&OwnWorkspace<'_>>,
+    recorded: impl FnOnce(&str) -> Result<bool>,
+    session: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let Some(own) = own else {
+        warn!(session, error = %format_args!("{error:#}"), "{session} refused its wrapper, which knows no workspace of its own: {error:#}");
+        return error;
+    };
+    let workspace = own.id.as_str();
+    match recorded(workspace) {
+        Ok(true) => {
+            warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; its workspace {workspace} is the session's and is left open: {error:#}");
+            error
+        }
+        Err(read) => {
+            warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; whether it records workspace {workspace} could not be read ({read:#}), so it is left open: {error:#}");
+            error
+        }
+        Ok(false) => match own.backend.close(workspace) {
+            Ok(()) => {
+                warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; closed its workspace {workspace}, which nothing records: {error:#}");
+                error.context(format!(
+                    "{session} refused this wrapper; its workspace {workspace}, which nothing records, was closed"
+                ))
+            }
+            Err(close) => {
+                warn!(session, workspace_id = workspace, error = %format_args!("{error:#}"), "{session} refused its wrapper; its workspace {workspace}, which nothing records, could not be closed ({close:#}): {error:#}");
+                error.context(format!(
+                    "{session} refused this wrapper; its workspace {workspace}, which nothing records, could not be closed: {close:#}"
+                ))
+            }
+        },
+    }
+}
+
 /// What the wrapper works with: the queue, the agent, how it is started,
-/// the run's files, and this process's pid.
+/// the run's files, this process's pid, and the workspace it runs in.
 pub struct Session<'a> {
     pub queue: &'a mut dyn Queue,
     /// The queue's database, which the executor starts the agent on.
@@ -47,6 +104,9 @@ pub struct Session<'a> {
     pub spawner: &'a dyn Spawner,
     pub files: &'a dyn RunFiles,
     pub pid: u32,
+    /// Closed when the run refuses this wrapper and records no such
+    /// workspace ([`wrapper_refused`]); `None` outside cmux.
+    pub own_workspace: Option<OwnWorkspace<'a>>,
 }
 
 /// Wrap the agent of run `id` under the lease `token` until it exits; the
@@ -65,26 +125,26 @@ pub fn run_session(
         spawner,
         files,
         pid,
+        own_workspace,
     } = ctx;
-    let started = Instant::now();
-    // cmux may start this command before its create response reaches
-    // supervisor. A resumed run keeps the workspace of its first session.
-    let run = loop {
-        let run = queue.run(id)?;
-        if run.workspace_id().is_some() {
-            break run;
+    let run = match register(queue, id, token, pid, resume) {
+        Ok(run) => run,
+        Err(error) => {
+            let recorded = |workspace: &str| -> Result<bool> {
+                let run = queue.run(id)?;
+                let events = queue.run_events(id)?;
+                Ok(run_workspaces(&run, &events)
+                    .iter()
+                    .any(|w| w.workspace_id == workspace))
+            };
+            return Err(wrapper_refused(
+                own_workspace.as_ref(),
+                recorded,
+                &format!("run {id}"),
+                error,
+            ));
         }
-        ensure!(
-            started.elapsed() < WORKSPACE_REGISTRATION,
-            "workspace registration timed out"
-        );
-        thread::sleep(Duration::from_millis(100));
     };
-    if resume {
-        queue.register_resume_wrapper(id, token, pid)?;
-    } else {
-        queue.register_wrapper(id, token, pid)?;
-    }
     let mut child_may_be_alive = false;
     let result = drive_agent(
         queue,
@@ -114,6 +174,37 @@ pub fn run_session(
             Err(error)
         }
     }
+}
+
+/// Wait for the supervisor to record the run's workspace and register
+/// this wrapper under the run's lease; the run.
+fn register(
+    queue: &mut dyn Queue,
+    id: &RunId,
+    token: &LeaseToken,
+    pid: u32,
+    resume: bool,
+) -> Result<TaskRun> {
+    let started = Instant::now();
+    // cmux may start this command before its create response reaches
+    // supervisor. A resumed run keeps the workspace of its first session.
+    let run = loop {
+        let run = queue.run(id)?;
+        if run.workspace_id().is_some() {
+            break run;
+        }
+        ensure!(
+            started.elapsed() < WORKSPACE_REGISTRATION,
+            "workspace registration timed out"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    if resume {
+        queue.register_resume_wrapper(id, token, pid)?;
+    } else {
+        queue.register_wrapper(id, token, pid)?;
+    }
+    Ok(run)
 }
 
 /// Record the wrapper's exit with `code`, retrying a failed attempt up to

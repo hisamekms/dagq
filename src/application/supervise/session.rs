@@ -177,8 +177,23 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
                 },
             ))?
             .workspace()?;
-        self.queue
-            .workspace_created(run.id(), &self.token, &workspace)?;
+        if let Err(error) = self
+            .queue
+            .workspace_created(run.id(), &self.token, &workspace)
+        {
+            // Unrecorded, the workspace would be left open with nothing to
+            // find it by, and its wrapper is refused (task 806).
+            return Err(match self.cmux.close(&workspace) {
+                Ok(()) => error.context(format!(
+                    "the workspace {workspace} of run {} could not be recorded and was closed",
+                    run.id()
+                )),
+                Err(close) => error.context(format!(
+                    "the workspace {workspace} of run {} could not be recorded, and closing it failed: {close:#}",
+                    run.id()
+                )),
+            });
+        }
         info!(task_id = %run.task_id(), run_id = %run.id(), "task {} running in workspace {}; run {}", run.task_id(), workspace, run.id());
         Ok(SessionWatch {
             workspace,

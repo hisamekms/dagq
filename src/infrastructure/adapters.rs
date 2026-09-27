@@ -1917,6 +1917,14 @@ impl WorkspaceBackend for Cmux {
             .collect())
     }
 
+    fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
+        Ok(listed_workspaces(&self.workspace_listing()?)?
+            .into_iter()
+            .filter(|workspace| workspace.description.as_deref() == Some(description))
+            .map(|workspace| workspace.id)
+            .collect())
+    }
+
     fn create_named(
         &self,
         name: &str,

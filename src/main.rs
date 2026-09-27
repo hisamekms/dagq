@@ -992,6 +992,10 @@ enum Command {
         /// Reopen the session of a `needs_session` run the supervisor resumes.
         #[arg(long)]
         resume: bool,
+        /// The cmux a wrapper refused its session closes its own workspace
+        /// with (task 806).
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
     },
     /// Record a SessionStart (`open`) or SessionEnd (`close`) of an inbox or planner session:
     /// the plugin's hook passes its stdin, and the session's environment names its kind
@@ -1020,6 +1024,11 @@ enum Command {
         model: Option<String>,
         #[arg(long, requires = "model")]
         effort: Option<String>,
+
+        /// The cmux a wrapper refused its session closes its own workspace
+        /// with (task 806).
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
     },
 }
 
@@ -2665,12 +2674,14 @@ fn execute(cli: Cli) -> Result<Value> {
             lease,
             claude,
             resume,
+            cmux,
         } => dagq::compose::session(
             &db,
             &RunId::new(run)?,
             &LeaseToken::new(lease),
             &claude,
             resume,
+            &cmux,
         )?,
         Command::SessionEvent { event, .. } => {
             use dagq::{application::SessionRegistry, domain::sessions::SessionHook};
@@ -2691,12 +2702,14 @@ fn execute(cli: Cli) -> Result<Value> {
             plugin_dir,
             model,
             effort,
+            cmux,
         } => dagq::compose::planner_session(
             &db,
             dagq::domain::PlannerId::new(planner),
             &claude,
             plugin_dir.as_deref(),
             model.as_deref().zip(effort.as_deref()),
+            &cmux,
         )?,
     })
 }

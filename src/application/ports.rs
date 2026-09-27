@@ -739,6 +739,15 @@ pub trait WorkspaceBackend {
     /// one listing for many checks, as the supervisor's sweep of ended
     /// runs' workspaces makes.
     fn listed_workspace_ids(&self) -> Result<Vec<String>>;
+    /// The stable IDs of the workspaces cmux lists, in all its windows,
+    /// whose description is exactly `description`: a workspace a create
+    /// reported failed may have been made all the same (a create that
+    /// timed out, task 806), and its description is all that finds it. A
+    /// backend that keeps no descriptions finds none.
+    fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
+        let _ = description;
+        Ok(Vec::new())
+    }
     /// Open a workspace that is not tied to a run (the inbox and planner
     /// sessions, the in-cmux supervisor) and return its stable ID.
     fn create_named(

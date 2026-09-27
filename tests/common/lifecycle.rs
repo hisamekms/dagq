@@ -243,6 +243,9 @@ pub struct FakeCmux {
     pub look_fails: bool,
     /// `workspace create` fails.
     pub create_fails: bool,
+    /// `workspace create` reports failing although cmux makes the
+    /// workspace, as a create that timed out does (task 806).
+    pub create_times_out: bool,
     /// The listing of every window's workspaces fails.
     pub list_fails: bool,
     /// Workspaces created so far, so a UUID is never handed out twice.
@@ -377,6 +380,20 @@ impl WorkspaceBackend for FakeCmux {
             .map(|(_, _, id, _)| id.clone())
             .collect())
     }
+    fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        anyhow::ensure!(!self.list_fails, "workspace list failed");
+        let tags = self.tags.lock().unwrap();
+        Ok(self
+            .workspaces
+            .lock()
+            .unwrap()
+            .iter()
+            .zip(tags.iter())
+            .filter(|(_, tags)| tags.description.as_deref() == Some(description))
+            .map(|((_, _, id, _), _)| id.clone())
+            .collect())
+    }
     fn ensure_group(&self, external_id: &str, name: &str) -> Result<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.groups
@@ -406,6 +423,9 @@ impl WorkspaceBackend for FakeCmux {
         );
         workspaces.push((name.into(), cwd.into(), id.clone(), command.into()));
         self.tags.lock().unwrap().push(tags.clone());
+        if self.create_times_out {
+            bail!("Error: Command timed out")
+        }
         if let Some(db) = self.registers_supervisor_in.as_deref()
             && name.ends_with("]supervisor")
         {

@@ -405,12 +405,24 @@ impl Supervisor<'_> {
             ))?
             .workspace()?;
         // Every workspace of the run is recorded, so whatever ends the run
-        // finds this one to close.
-        self.queue.record_runtime_event(
+        // finds this one to close; one that cannot be is closed now (task
+        // 806).
+        if let Err(error) = self.queue.record_runtime_event(
             run.id(),
             event_kind::WORKSPACE_CREATED,
             json!({"workspace_id": workspace, "resume_attempt": attempt}),
-        )?;
+        ) {
+            return Err(match self.cmux.close(&workspace) {
+                Ok(()) => error.context(format!(
+                    "the resume workspace {workspace} of run {} could not be recorded and was closed",
+                    run.id()
+                )),
+                Err(close) => error.context(format!(
+                    "the resume workspace {workspace} of run {} could not be recorded, and closing it failed: {close:#}",
+                    run.id()
+                )),
+            });
+        }
         Ok(ResumeWatch {
             workspace: workspace.clone(),
             attempt,

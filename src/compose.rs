@@ -33,7 +33,7 @@ use crate::{
         rebind::{self as rebinding, Rebind, RebindTarget},
         recording::RecordingBackend,
         review::{self as reviewing, Review},
-        session::{self as wrapper, Session},
+        session::{self as wrapper, OwnWorkspace, Session},
         stats::{self as statistics, StatsSources, WorkspaceListing},
         supervise::{self as supervisor, Heartbeat, Layout, LoopSettings, Ports, UpdateSettings},
         update,
@@ -1669,13 +1669,16 @@ pub fn ended_run_material(
 
 /// Run from cmux, not from a pipe; stdout must remain a terminal for Claude.
 /// `resume` reopens the session of a `needs_session` run the supervisor is
-/// resuming (ADR-0019) instead of starting the worker.
+/// resuming (ADR-0019) instead of starting the worker. A wrapper the run
+/// refuses closes its own workspace (`CMUX_WORKSPACE_ID`) through `cmux`
+/// when the run records no such workspace (task 806).
 pub fn session(
     db: &Path,
     id: &RunId,
     token: &LeaseToken,
     claude: &Path,
     resume: bool,
+    cmux: &Path,
 ) -> Result<Value> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -1684,7 +1687,27 @@ pub fn session(
     let provider = ClaudeCode {
         executable: claude.into(),
     };
-    run_session(db, id, token, &provider, &LocalSpawner, resume)
+    let cmux = Cmux {
+        executable: cmux.into(),
+    };
+    run_session(
+        db,
+        id,
+        token,
+        &provider,
+        &LocalSpawner,
+        resume,
+        own_workspace(&cmux),
+    )
+}
+
+/// The workspace this wrapper runs in, from cmux's `CMUX_WORKSPACE_ID`,
+/// closed through `cmux` when its session refuses the wrapper.
+fn own_workspace(cmux: &dyn WorkspaceBackend) -> Option<OwnWorkspace<'_>> {
+    std::env::var(lifecycle::CMUX_WORKSPACE_ENV)
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| OwnWorkspace { backend: cmux, id })
 }
 
 /// The wrapper with `provider`'s agent started by `spawner`.
@@ -1695,7 +1718,7 @@ pub fn session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, spawner, false)
+    run_session(db, id, token, provider, spawner, false, None)
 }
 
 /// The wrapper of a resumed session: `session --resume`.
@@ -1706,7 +1729,22 @@ pub fn resume_session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, spawner, true)
+    run_session(db, id, token, provider, spawner, true, None)
+}
+
+/// The wrapper (`resume` for `session --resume`) running in the workspace
+/// `own`, which it closes when the run refuses it and records no such
+/// workspace (task 806).
+pub fn session_in_workspace(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    spawner: &dyn Spawner,
+    resume: bool,
+    own: OwnWorkspace<'_>,
+) -> Result<Value> {
+    run_session(db, id, token, provider, spawner, resume, Some(own))
 }
 
 fn run_session(
@@ -1716,6 +1754,7 @@ fn run_session(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
     resume: bool,
+    own_workspace: Option<OwnWorkspace<'_>>,
 ) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     let mut queue = SqliteQueue::open(db)?.with_actor(
@@ -1729,6 +1768,7 @@ fn run_session(
             spawner,
             files: &LocalRunFiles,
             pid: std::process::id(),
+            own_workspace,
         },
         id,
         token,
@@ -1783,13 +1823,16 @@ pub fn planners(db: &Path, cmux: &dyn WorkspaceBackend, all: bool) -> Result<Val
 }
 
 /// The session wrapper of a planner (`planner-session`), run from its cmux
-/// workspace: stdout must remain a terminal for Claude.
+/// workspace: stdout must remain a terminal for Claude. Refused, it closes
+/// its own workspace (`CMUX_WORKSPACE_ID`) through `cmux` when the planner
+/// records no such workspace (task 806).
 pub fn planner_session(
     db: &Path,
     id: PlannerId,
     claude: &Path,
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
+    cmux: &Path,
 ) -> Result<Value> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -1798,16 +1841,21 @@ pub fn planner_session(
     let provider = ClaudeCode {
         executable: claude.into(),
     };
-    planner_session_with_provider(db, id, &provider, plugin_dir, model)
+    let cmux = Cmux {
+        executable: cmux.into(),
+    };
+    planner_session_with_provider(db, id, &provider, plugin_dir, model, own_workspace(&cmux))
 }
 
-/// [`planner_session`] with any provider, in the working directory.
+/// [`planner_session`] with any provider, in the working directory, in the
+/// workspace `own` (`None` knows none).
 pub fn planner_session_with_provider(
     db: &Path,
     id: PlannerId,
     provider: &dyn AgentProvider,
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
+    own: Option<OwnWorkspace<'_>>,
 ) -> Result<Value> {
     let queue = SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
         crate::domain::actor::ActorRole::Wrapper,
@@ -1822,6 +1870,7 @@ pub fn planner_session_with_provider(
             spawner: &LocalSpawner,
             files: &LocalRunFiles,
             pid: std::process::id(),
+            own_workspace: own,
         },
         id,
         &planner::planner_dir(&planners_dir(db), id),

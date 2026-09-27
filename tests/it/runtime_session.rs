@@ -1709,3 +1709,87 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
     );
     assert!(!run_dir.join("prompt-submit.json.tmp").exists());
 }
+
+/// Task 806: a run's wrapper refused its session (here under a lease it
+/// does not hold) closes its own workspace when the run records no such
+/// workspace, as one cmux made although the create reported failing, for
+/// the worker's session and a resume's alike; in the workspace the run
+/// records, it leaves the workspace to whatever ends the run.
+#[test]
+fn a_refused_run_wrapper_closes_its_workspace_the_run_does_not_record() {
+    use dagq::{
+        application::session::OwnWorkspace,
+        domain::{ClaimOutcome, LeaseToken},
+        infrastructure::runtime_store::RunPlan,
+    };
+    let (_dir, _repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let base = CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base").unwrap();
+    let owner = LeaseToken::new("owner");
+    let ClaimOutcome::Claimed { run } = queue.claim_for_supervisor(&base, &owner).unwrap() else {
+        panic!("the fixture's task is claimed")
+    };
+    let dir = format!("/run/{}", run.id());
+    queue
+        .plan_run(
+            run.id(),
+            &owner,
+            &RunPlan {
+                repo_path: "/test".into(),
+                run_dir: dir.clone(),
+                branch: format!("dagq/{}", run.id()),
+                worktree_path: format!("{dir}/worktree"),
+                receipt_path: format!("{dir}/receipt.json"),
+                log_path: format!("{dir}/log"),
+            },
+        )
+        .unwrap();
+    let cmux = common::lifecycle::FakeCmux::default();
+    let open = |name: &str| {
+        cmux.create_named(name, Path::new("/"), "wrapper", &WorkspaceTags::default())
+            .unwrap()
+    };
+    let recorded = open("worker");
+    queue
+        .workspace_created(run.id(), &owner, &recorded)
+        .unwrap();
+    let provider = TestProvider {
+        script: "exit 0".into(),
+        db: db.clone(),
+    };
+    let spawner = StubSpawner { db: db.clone() };
+    let stranger = LeaseToken::new("stranger");
+    let wrapper = |workspace: &str, resume: bool| {
+        format!(
+            "{:#}",
+            dagq::compose::session_in_workspace(
+                &db,
+                run.id(),
+                &stranger,
+                &provider,
+                &spawner,
+                resume,
+                OwnWorkspace {
+                    backend: &cmux,
+                    id: workspace.to_owned(),
+                },
+            )
+            .unwrap_err()
+        )
+    };
+    for resume in [false, true] {
+        let made = open("made although its create failed");
+        let error = wrapper(&made, resume);
+        assert!(
+            error.contains(&format!(
+                "its workspace {made}, which nothing records, was closed"
+            )),
+            "{error}"
+        );
+        assert_eq!(cmux.closed.lock().unwrap().last(), Some(&made));
+    }
+    let error = wrapper(&recorded, false);
+    assert!(!error.contains("nothing records"), "{error}");
+    assert_eq!(cmux.closed.lock().unwrap().len(), 2);
+    assert!(cmux.exists(&recorded).unwrap());
+}

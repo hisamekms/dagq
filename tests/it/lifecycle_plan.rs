@@ -607,6 +607,7 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         &PlannerAgent { code: 3 },
         Some(Path::new("/plugins")),
         Some(("claude-opus-5-5", "high")),
+        None,
     )
     .unwrap();
     // The wrapper gave its agent the model and effort (ADR-0079 decision 7).
@@ -629,8 +630,9 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
     // An agent that cannot start is recorded as an exit of 127.
     let third = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
     let third_id = PlannerId::new(third["planner"]["id"].as_i64().unwrap());
-    let error = dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None, None)
-        .unwrap_err();
+    let error =
+        dagq::compose::planner_session_with_provider(&db, third_id, &NoPlanner, None, None, None)
+            .unwrap_err();
     assert!(
         format!("{error:#}").contains("no planner session"),
         "{error:#}"
@@ -644,6 +646,7 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
             &db,
             id,
             &PlannerAgent { code: 0 },
+            None,
             None,
             None
         )
@@ -842,4 +845,105 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].state, PlannerState::Working);
     assert_eq!(views[0].idle_since, None);
+}
+
+/// Task 806: a planner workspace whose create reports failing although
+/// cmux made it (a create that timed out) is found by its description
+/// (`planner=<id>`) and closed, and the record closes with the error; a
+/// wrapper that starts anyway in a workspace nothing records (its
+/// planner's record closed) closes its own workspace, while a wrapper
+/// refused in the workspace its planner records leaves it open.
+#[test]
+fn a_planner_workspace_made_although_its_create_failed_is_not_left_open() {
+    use dagq::application::session::OwnWorkspace;
+    use dagq::domain::PlannerId;
+    let fixture = fixture();
+    let cmux = FakeCmux {
+        create_times_out: true,
+        ..FakeCmux::default()
+    };
+    let options = plan_options(&fixture);
+    let error = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("Command timed out"), "{text}");
+    assert!(text.contains("although the create failed"), "{text}");
+    let made = "01234567-89ab-4def-8123-000000000000";
+    assert_eq!(*cmux.closed.lock().unwrap(), [made]);
+    assert!(cmux.workspaces.lock().unwrap().is_empty());
+    let queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let planner = queue.planner(PlannerId::new(1)).unwrap();
+    assert!(planner.closed_at.is_some());
+    assert_eq!(planner.workspace_id, None);
+    assert!(
+        planner.error.as_deref().unwrap().contains("was closed"),
+        "{:?}",
+        planner.error
+    );
+
+    // cmux made the workspace only after the listing: its wrapper, refused
+    // by the closed record, closes it.
+    let late = FakeCmux::default();
+    let own = late
+        .create_named(
+            "[repo]planner#1",
+            &fixture.repo,
+            "wrapper",
+            &WorkspaceTags::default(),
+        )
+        .unwrap();
+    let db = fixture.location.db.canonicalize().unwrap();
+    let error = dagq::compose::planner_session_with_provider(
+        &db,
+        PlannerId::new(1),
+        &NoPlanner,
+        None,
+        None,
+        Some(OwnWorkspace {
+            backend: &late,
+            id: own.clone(),
+        }),
+    )
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("already has a session or is closed"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "its workspace {own}, which nothing records, was closed"
+        )),
+        "{text}"
+    );
+    assert_eq!(*late.closed.lock().unwrap(), [own]);
+    assert_eq!(queue.planner(PlannerId::new(1)).unwrap().wrapper_pid, None);
+
+    // A second wrapper in the workspace its planner records is refused and
+    // leaves the workspace to the planner.
+    let open = FakeCmux::default();
+    let opened = lifecycle::plan(&fixture.location, &fixture.repo, &open, &options).unwrap();
+    let id = PlannerId::new(opened["planner"]["id"].as_i64().unwrap());
+    let workspace = opened["planner"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    queue.register_planner_wrapper(id, 4242).unwrap();
+    let error = dagq::compose::planner_session_with_provider(
+        &db,
+        id,
+        &NoPlanner,
+        None,
+        None,
+        Some(OwnWorkspace {
+            backend: &open,
+            id: workspace.clone(),
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        !format!("{error:#}").contains("nothing records"),
+        "{error:#}"
+    );
+    assert!(open.closed.lock().unwrap().is_empty());
+    assert_eq!(open.workspaces.lock().unwrap()[0].2, workspace);
 }

@@ -27,6 +27,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use tracing::warn;
 
 use super::{
     AgentProvider, CommandSpec, PlannerCommand, Spawned, Spawner, Streams, WorkspaceBackend,
@@ -482,6 +483,44 @@ impl<'a> HostActorExecutor<'a> {
     }
 }
 
+/// A create cmux reported failed may have made the workspace all the same
+/// (a create that timed out while cmux went on, task 806). Nothing records
+/// its UUID and its wrapper is refused, so it would be left open: the
+/// workspaces listed with `description`, which names only this run's or
+/// planner's workspace, are closed, and the create's `error` says what
+/// became of them. A listing that fails leaves the error as it was; the
+/// wrapper closes its own workspace when refused.
+fn close_unrecorded(
+    cmux: &dyn WorkspaceBackend,
+    description: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let found = match cmux.workspaces_described(description) {
+        Ok(found) => found,
+        Err(list) => {
+            warn!(description, error = %format_args!("{list:#}"), "workspaces described {description:?} could not be listed after a failed create: {list:#}");
+            return error;
+        }
+    };
+    if found.is_empty() {
+        return error;
+    }
+    let closed: Vec<String> = found
+        .into_iter()
+        .map(|id| match cmux.close(&id) {
+            Ok(()) => {
+                warn!(workspace_id = %id, description, "closed workspace {id} cmux made although its create failed");
+                format!("{id} was closed")
+            }
+            Err(close) => format!("{id} could not be closed: {close:#}"),
+        })
+        .collect();
+    error.context(format!(
+        "cmux made the workspace described {description:?} although the create failed; {}",
+        closed.join(", ")
+    ))
+}
+
 impl ActorExecutor for HostActorExecutor<'_> {
     fn backend(&self) -> ExecutorBackend {
         ExecutorBackend::Host
@@ -508,15 +547,16 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 env.extend(run_env);
                 let tags = WorkspaceTags {
                     env,
-                    description: Some(description),
+                    description: Some(description.clone()),
                     group,
                 };
                 let cmux = self.workspaces()?;
-                let id = if resume {
-                    cmux.create_resume(task, run, &wrapper, &tags)?
+                let created = if resume {
+                    cmux.create_resume(task, run, &wrapper, &tags)
                 } else {
-                    cmux.create(task, run, &wrapper, &tags)?
+                    cmux.create(task, run, &wrapper, &tags)
                 };
+                let id = created.map_err(|error| close_unrecorded(cmux, &description, error))?;
                 Ok(ActorHandle::Workspace(id))
             }
             ActorProgram::NamedWorkspace {
@@ -539,9 +579,15 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     description,
                     group,
                 };
-                let id = self
-                    .workspaces()?
-                    .create_named(name, cwd, &command, &tags)?;
+                let cmux = self.workspaces()?;
+                let id = cmux
+                    .create_named(name, cwd, &command, &tags)
+                    .map_err(|error| match (planner, &tags.description) {
+                        // Only a planner's description names one workspace
+                        // (`planner=<id>`); the inbox's is the queue's.
+                        (Some(_), Some(description)) => close_unrecorded(cmux, description, error),
+                        _ => error,
+                    })?;
                 Ok(ActorHandle::Workspace(id))
             }
             ActorProgram::SessionAgent { agent, model } => {
@@ -664,6 +710,26 @@ mod tests {
     struct Fake {
         workspaces: Mutex<Vec<(String, String, WorkspaceTags)>>,
         spawned: Mutex<Vec<CommandSpec>>,
+        /// Every create reports failing although cmux makes the workspace
+        /// (a create that timed out, task 806).
+        create_times_out: bool,
+        /// The workspaces cmux lists, as (ID, description).
+        listed: Mutex<Vec<(String, String)>>,
+        closed: Mutex<Vec<String>>,
+    }
+
+    impl Fake {
+        /// Make the workspace `id` the way cmux does, and fail the create
+        /// when it times out.
+        fn made(&self, id: &str, tags: &WorkspaceTags) -> Result<String> {
+            if !self.create_times_out {
+                return Ok(id.into());
+            }
+            let mut listed = self.listed.lock().unwrap();
+            let made = format!("{id}-{}", listed.len());
+            listed.push((made, tags.description.clone().unwrap_or_default()));
+            bail!("Error: Command timed out")
+        }
     }
 
     impl AgentProvider for Fake {
@@ -757,7 +823,7 @@ mod tests {
                 command.to_owned(),
                 tags.clone(),
             ));
-            Ok("w-run".into())
+            self.made("w-run", tags)
         }
         fn create_resume(
             &self,
@@ -771,7 +837,7 @@ mod tests {
                 command.to_owned(),
                 tags.clone(),
             ));
-            Ok("w-resume".into())
+            self.made("w-resume", tags)
         }
         fn send_text(&self, _: &str, _: &str) -> Result<()> {
             unreachable!()
@@ -782,8 +848,23 @@ mod tests {
         fn capture(&self, _: &str) -> Result<String> {
             unreachable!()
         }
-        fn close(&self, _: &str) -> Result<()> {
-            unreachable!()
+        fn close(&self, id: &str) -> Result<()> {
+            let mut listed = self.listed.lock().unwrap();
+            let before = listed.len();
+            listed.retain(|(listed, _)| listed != id);
+            ensure!(listed.len() < before, "no such workspace: {id}");
+            self.closed.lock().unwrap().push(id.to_owned());
+            Ok(())
+        }
+        fn workspaces_described(&self, description: &str) -> Result<Vec<String>> {
+            Ok(self
+                .listed
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, listed)| listed == description)
+                .map(|(id, _)| id.clone())
+                .collect())
         }
         fn set_color(&self, _: &str, _: &str) -> Result<()> {
             unreachable!()
@@ -815,7 +896,7 @@ mod tests {
                 command.to_owned(),
                 tags.clone(),
             ));
-            Ok("w-named".into())
+            self.made("w-named", tags)
         }
         fn ensure_group(&self, _: &str, _: &str) -> Result<String> {
             unreachable!()
@@ -1107,6 +1188,96 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// Task 806: a create that reports failing although cmux made the
+    /// workspace (a create that timed out) closes the workspaces listed
+    /// with the description of the run's or planner's workspace, and the
+    /// error says so; another workspace, and the inbox's, whose
+    /// description is the queue's, are left open.
+    #[test]
+    fn a_workspace_cmux_made_although_its_create_failed_is_closed() {
+        let (task, run) = claimed_run("r1");
+        let fake = Fake {
+            create_times_out: true,
+            ..Fake::default()
+        };
+        fake.listed
+            .lock()
+            .unwrap()
+            .push(("other".into(), "dagq role=worker run=r2".into()));
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_workspaces(&fake)
+            .with_provider(&fake);
+        for resume in [false, true] {
+            let error = executor
+                .spawn(ActorExecutionSpec::new(
+                    ActorContext::worker(run.id(), run.task_id()),
+                    WorkspaceAccess::Write("/w".into()),
+                    ActorProgram::RunWorkspace {
+                        task: &task,
+                        run: &run,
+                        wrapper: "wrapper".into(),
+                        resume,
+                        description: "dagq role=worker run=r1".into(),
+                        group: None,
+                        run_env: Vec::new(),
+                    },
+                ))
+                .err()
+                .unwrap();
+            let text = format!("{error:#}");
+            assert!(text.contains("Command timed out"), "{text}");
+            assert!(
+                text.contains("although the create failed") && text.contains("was closed"),
+                "{text}"
+            );
+        }
+        let planner = |planner: Option<(PlannerOrigin, PlannerId)>, description: &str| {
+            executor.spawn(ActorExecutionSpec::new(
+                match planner {
+                    Some(_) => ActorContext::instance(ActorRole::Planner, 4),
+                    None => ActorContext::new(ActorRole::Inbox, "inbox"),
+                },
+                WorkspaceAccess::Write("/repo".into()),
+                ActorProgram::NamedWorkspace {
+                    name: "[repo]planner#4",
+                    cwd: Path::new("/repo"),
+                    command: match planner {
+                        Some(_) => WorkspaceCommand::Wrapper("wrapper".into()),
+                        None => WorkspaceCommand::Agent {
+                            prompt: "p".into(),
+                            plugin_dir: None,
+                        },
+                    },
+                    planner,
+                    launch: None,
+                    description: Some(description.into()),
+                    group: None,
+                },
+            ))
+        };
+        let error = planner(
+            Some((PlannerOrigin::Runtime, PlannerId::new(4))),
+            "dagq role=planner planner=4",
+        )
+        .err()
+        .unwrap();
+        assert!(format!("{error:#}").contains("was closed"), "{error:#}");
+        let error = planner(None, "dagq role=inbox").err().unwrap();
+        assert!(!format!("{error:#}").contains("closed"), "{error:#}");
+        assert_eq!(
+            *fake.closed.lock().unwrap(),
+            ["w-run-1", "w-resume-1", "w-named-1"]
+        );
+        let listed: Vec<String> = fake
+            .listed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(listed, ["other", "w-named-1"]);
     }
 
     #[test]

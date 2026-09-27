@@ -34,6 +34,7 @@ use super::{
     naming::{planner_workspace_name, shell_join},
     path_text, planner_idle_marker,
     prompt::{planner_prompt, runtime_planner_prompt},
+    session::{OwnWorkspace, wrapper_refused},
 };
 use crate::domain::{
     ActorContext, IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState,
@@ -192,7 +193,20 @@ fn launch_planner(
             return Err(error);
         }
     };
-    queue.planner_workspace_created(planner.id, &workspace_id)?;
+    if let Err(error) = queue.planner_workspace_created(planner.id, &workspace_id) {
+        // Unrecorded, the workspace would be left open with nothing to
+        // find it by, and its wrapper is refused (task 806).
+        let error = match launch.cmux.close(&workspace_id) {
+            Ok(()) => error.context(format!(
+                "the planner workspace {workspace_id} could not be recorded and was closed"
+            )),
+            Err(close) => error.context(format!(
+                "the planner workspace {workspace_id} could not be recorded, and closing it failed: {close:#}"
+            )),
+        };
+        queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
+        return Err(error);
+    }
     let mut warnings = workspaces.take_warnings();
     if let Some((color, icon)) = session_look(SessionRole::Planner) {
         for (what, result) in [
@@ -307,6 +321,10 @@ pub struct PlannerWrapper<'a> {
     pub spawner: &'a dyn Spawner,
     pub files: &'a dyn RunFiles,
     pub pid: u32,
+    /// The workspace the wrapper runs in, closed when the planner refuses
+    /// the wrapper and records no such workspace (task 806); `None`
+    /// outside cmux.
+    pub own_workspace: Option<OwnWorkspace<'a>>,
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
@@ -329,8 +347,22 @@ pub fn run_planner_session(
         spawner,
         files,
         pid,
+        own_workspace,
     } = ctx;
-    queue.register_planner_wrapper(id, pid)?;
+    // A wrapper started for a planner already given up (its create
+    // reported failing although cmux made the workspace, task 806) closes
+    // the workspace nothing records.
+    if let Err(error) = queue.register_planner_wrapper(id, pid) {
+        let recorded = |workspace: &str| -> Result<bool> {
+            Ok(queue.planner(id)?.workspace_id.as_deref() == Some(workspace))
+        };
+        return Err(wrapper_refused(
+            own_workspace.as_ref(),
+            recorded,
+            &format!("planner {id}"),
+            error,
+        ));
+    }
     // An agent that never starts is an exit too, or the planner would look
     // lost rather than over.
     let started = queue
