@@ -29,3 +29,13 @@ RUST_TEST_THREADS = "8"
 # nextest は RUST_TEST_THREADS を読まず既定で CPU 数だけ走らせるので、RUST_TEST_THREADS と同じ値にする。
 # .config/nextest.toml には書かない（CI と人の手元の nextest まで絞られるため）。
 NEXTEST_TEST_THREADS = "8"
+
+[recheck]
+# 着地のたびに supervisor が着地待ちの run を着地後の main に載せた木で確かめる軽い検査（ADR-0068 の決定 2）。
+# merge-tree は git の衝突しか見つけないので、main の変更と合わせると compile しなくなる意味の衝突
+# （task 292 のようなもの）を着地の前に見つけて、run を resume へ回す。
+# queue dir の recheck/worktree で、CARGO_TARGET_DIR を recheck/target にして 1 本ずつ直列に走る
+# （target は 1 つで同時に使うのは 1 本だけ）。env は [run.env] が渡る。
+# 書式と流れは docs/design/supervisor-lifecycle/landing-recheck.md と run-environment.md。
+# [recheck] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 462 を含んでから足した。
+command = "cargo check --locked --all-targets"
