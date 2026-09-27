@@ -1485,7 +1485,7 @@ mod tests {
         };
         let resume = |queue: &mut SqliteQueue, attempt: usize| {
             let (_, started) = queue
-                .begin_resume(&run, "tok", &main, None)
+                .begin_resume(&run, "tok", &main, None, Default::default())
                 .unwrap()
                 .unwrap();
             assert_eq!(started, attempt);
@@ -1630,7 +1630,7 @@ mod tests {
             )
             .unwrap();
         queue
-            .begin_resume(&run, "tok", &main, None)
+            .begin_resume(&run, "tok", &main, None, Default::default())
             .unwrap()
             .unwrap();
         let before = latest(&queue.conn);
@@ -1674,7 +1674,7 @@ mod tests {
             .execute("UPDATE task_runs SET status='needs_session'", [])
             .unwrap();
         queue
-            .begin_resume(&run, "tok", &main, None)
+            .begin_resume(&run, "tok", &main, None, Default::default())
             .unwrap()
             .unwrap();
         let before = latest(&queue.conn);

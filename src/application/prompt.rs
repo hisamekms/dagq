@@ -7,7 +7,7 @@
 //! revise, a receipt that does not match).
 
 use crate::domain::event_kind;
-use crate::domain::resume::CONFLICT_ONLY_RESUME_LIMIT;
+use crate::domain::resume::ResumeConfig;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -1097,6 +1097,7 @@ pub fn ended_run_material(
     detail: &TaskDetail,
     run: &TaskRun,
     resumes: crate::domain::resume::ResumeCount,
+    config: ResumeConfig,
     dir: &Path,
 ) -> String {
     let failures = detail
@@ -1231,12 +1232,13 @@ pub fn ended_run_material(
             "This task has {failures} failed or interrupted run(s), this one included; from {TRIAGE_RETRY_FAILURES} on, the runtime does not apply retry."
         )
     };
-    let resume_rule = if resumes.exhausted() {
+    let resume_rule = if resumes.exhausted(config) {
         format!(
-            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {CONFLICT_ONLY_RESUME_LIMIT} conflict-only attempts with the conflict precheck's requests) and its resumes are used up: do not choose resume.",
+            "The run was resumed {} time(s) ({} of at most {MAX_RESUME_ATTEMPTS} counted, {} of at most {} conflict-only attempts with the conflict precheck's requests) and its resumes are used up: do not choose resume.",
             resumes.total(),
             resumes.counted,
-            resumes.conflict_attempts()
+            resumes.conflict_attempts(),
+            config.conflict_only_limit
         )
     } else {
         format!(

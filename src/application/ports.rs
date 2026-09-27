@@ -1175,6 +1175,7 @@ pub trait RunRecovery {
         token: &str,
         main: &CommitSha,
         reason: Option<&str>,
+        config: crate::domain::resume::ResumeConfig,
     ) -> Result<Option<(TaskRun, usize)>>;
     fn finish_resume(
         &mut self,
@@ -1201,6 +1202,7 @@ pub trait RunRecovery {
         id: &RunId,
         exhaustion: &Exhaustion,
         reason: &str,
+        config: crate::domain::resume::ResumeConfig,
     ) -> Result<Option<TaskRun>>;
 }
 

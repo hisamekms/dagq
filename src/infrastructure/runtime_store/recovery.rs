@@ -236,7 +236,7 @@ impl SqliteQueue {
 
     /// Take a `needs_session` run for a resume: in one transaction, check
     /// that it is still `needs_session` with resumes left (ADR-0047
-    /// decision 24: [`ResumeCount::exhausted`]), no lease but a stale one (which is replaced) and no
+    /// decision 24: [`ResumeCount::exhausted`] with `config`'s limit), no lease but a stale one (which is replaced) and no
     /// session still heartbeating, lease it to `token`, clear the previous
     /// session's process rows, make `token` its supervisor and record
     /// `resume_started` (`attempt`, the number of every resume so far and
@@ -248,6 +248,7 @@ impl SqliteQueue {
         token: &str,
         main: &CommitSha,
         reason: Option<&str>,
+        config: resume::ResumeConfig,
     ) -> Result<Option<(TaskRun, usize)>> {
         let tx = self
             .conn
@@ -258,7 +259,7 @@ impl SqliteQueue {
         };
         let events = run_events_of(&tx, id)?;
         let resumes = ResumeCount::of(&events);
-        if resumes.exhausted() {
+        if resumes.exhausted(config) {
             return Ok(None);
         }
         // A resume of a run parked only by a conflict after its review
@@ -621,7 +622,7 @@ impl SqliteQueue {
     /// End a `needs_session` run whose resumes are used up (ADR-0024's
     /// Consequences, ADR-0047 decision 24): in one transaction, check that
     /// it is still `needs_session` with its resumes used up
-    /// ([`ResumeCount::exhausted`]), the latest run of an `in_progress`
+    /// ([`ResumeCount::exhausted`] with `config`'s limit), the latest run of an `in_progress`
     /// task, and not leased but stale; make it `failed` with `reason` as
     /// `last_error`. [`Exhaustion::Recover`] records `recovery_requested`
     /// (`alert: resume_exhausted`, `by: runtime`), which the next recovery
@@ -635,6 +636,7 @@ impl SqliteQueue {
         id: &RunId,
         exhaustion: &Exhaustion,
         reason: &str,
+        config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::TRIAGE_FINISHED]))?;
@@ -664,7 +666,7 @@ impl SqliteQueue {
             )
             .optional()?
             .is_some_and(|lease| !lease_is_stale(&lease, now));
-        if !resumes.exhausted() || leased {
+        if !resumes.exhausted(config) || leased {
             return Ok(None);
         }
         // Once per task, and only for a run still parked by a conflict
@@ -919,8 +921,9 @@ impl RunRecovery for SqliteQueue {
         token: &str,
         main: &CommitSha,
         reason: Option<&str>,
+        config: resume::ResumeConfig,
     ) -> Result<Option<(TaskRun, usize)>> {
-        SqliteQueue::begin_resume(self, id, token, main, reason)
+        SqliteQueue::begin_resume(self, id, token, main, reason, config)
     }
     fn finish_resume(
         &mut self,
@@ -948,7 +951,8 @@ impl RunRecovery for SqliteQueue {
         id: &RunId,
         exhaustion: &Exhaustion,
         reason: &str,
+        config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::exhaust_resumes(self, id, exhaustion, reason)
+        SqliteQueue::exhaust_resumes(self, id, exhaustion, reason, config)
     }
 }

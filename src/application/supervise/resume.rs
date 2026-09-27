@@ -5,7 +5,6 @@ use super::*;
 use crate::domain::language::with_instruction;
 use crate::domain::{
     ParkCause, RunEvent,
-    resume::CONFLICT_ONLY_RESUME_LIMIT,
     run::{RunWorkspace, run_workspaces},
 };
 
@@ -50,7 +49,7 @@ impl Supervisor<'_> {
             }
             // Out of attempts: the run is retried with its branch carried
             // over, or a person decides, whether or not a slot is free.
-            if resumes.exhausted() {
+            if resumes.exhausted(self.resume_config) {
                 if let Err(error) = self.exhaust_resumes(&run, resumes) {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed to a person: {error:#}", run.id());
                 }
@@ -75,9 +74,13 @@ impl Supervisor<'_> {
                 self.cleanup.deferred = true;
                 continue;
             }
-            let begun = self
-                .queue
-                .begin_resume(run.id(), &self.token, &main, reason.as_deref())?;
+            let begun = self.queue.begin_resume(
+                run.id(),
+                &self.token,
+                &main,
+                reason.as_deref(),
+                self.resume_config,
+            )?;
             drop(guard);
             let Some((run, attempt)) = begun else {
                 continue;
@@ -220,7 +223,7 @@ impl Supervisor<'_> {
             return Ok(());
         }
         let last_error = run.last_error().map(str::to_owned).unwrap_or_default();
-        let resumed = resumed_text(resumes);
+        let resumed = resumed_text(resumes, self.resume_config);
         let reason = format!(
             "{resumed} and still needs a session: {}",
             tail(&last_error, 500)
@@ -236,9 +239,12 @@ impl Supervisor<'_> {
                 }
             }
         }
-        let Some(failed) = self
-            .queue
-            .exhaust_resumes(run.id(), &Exhaustion::Recover, &reason)?
+        let Some(failed) = self.queue.exhaust_resumes(
+            run.id(),
+            &Exhaustion::Recover,
+            &reason,
+            self.resume_config,
+        )?
         else {
             return Ok(());
         };
@@ -284,7 +290,10 @@ impl Supervisor<'_> {
             branch: run.branch().map(str::to_owned),
             head: head.clone(),
         };
-        let Some(failed) = self.queue.exhaust_resumes(run.id(), &exhaustion, reason)? else {
+        let Some(failed) =
+            self.queue
+                .exhaust_resumes(run.id(), &exhaustion, reason, self.resume_config)?
+        else {
             return Ok(());
         };
         info!(run_id = %failed.id(), task_id = %failed.task_id(), "run {} of task {} used up its resumes on conflicts after its review passed; the task is ready again and its next run carries {head} over", failed.id(), failed.task_id());
@@ -616,7 +625,8 @@ impl Supervisor<'_> {
                 Reason::new(ReasonCode::WorkerFailed).on(payload),
             )?,
             ResumeOutcome::Unresolved => {
-                payload["exhausted"] = json!(resumes_exhausted(&*self.queue, &id));
+                payload["exhausted"] =
+                    json!(resumes_exhausted(&*self.queue, &id, self.resume_config));
                 self.queue
                     .finish_resume(&id, &self.token, None, None, false, payload)?
             }
@@ -627,9 +637,10 @@ impl Supervisor<'_> {
 
 /// How often the run was resumed, for its used-up reason and ask: the
 /// counted resumes against [`MAX_RESUME_ATTEMPTS`], and the conflict-only
-/// ones (ADR-0047 decision 24) when there were any, with the conflict
+/// ones against `config`'s limit (ADR-0047 decision 24) when there were any, with the conflict
 /// precheck's requests that shared their limit.
-fn resumed_text(resumes: ResumeCount) -> String {
+fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
+    let limit = config.conflict_only_limit;
     if resumes.conflict_attempts() == 0 {
         format!(
             "resumed {} times (at most {MAX_RESUME_ATTEMPTS})",
@@ -637,14 +648,14 @@ fn resumed_text(resumes: ResumeCount) -> String {
         )
     } else if resumes.conflict_requests == 0 {
         format!(
-            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted, and {} of at most {CONFLICT_ONLY_RESUME_LIMIT} for conflicts only after its review passed)",
+            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted, and {} of at most {limit} for conflicts only after its review passed)",
             resumes.total(),
             resumes.counted,
             resumes.conflict_only
         )
     } else {
         format!(
-            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted) and asked {} times by the conflict precheck ({} of at most {CONFLICT_ONLY_RESUME_LIMIT} attempts for conflicts only after its review passed)",
+            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted) and asked {} times by the conflict precheck ({} of at most {limit} attempts for conflicts only after its review passed)",
             resumes.total(),
             resumes.counted,
             resumes.conflict_requests,
@@ -1203,7 +1214,7 @@ impl ResumeWatch {
                 // ask is only noted: the verdict stands without it.
                 let after = stuck_exit_after(
                     self.exit_for_silence,
-                    if resumes_exhausted(&*sv.queue, run.id()) {
+                    if resumes_exhausted(&*sv.queue, run.id(), sv.resume_config) {
                         "The run stays needs_session after its last resume attempt, and goes to its recovery job once the session exits"
                     } else {
                         "The run stays needs_session, and the supervisor resumes it again once the session exits"

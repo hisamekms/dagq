@@ -15,16 +15,34 @@ use runtime_support::*;
 /// (`retry_inherit`), whose run lands.
 #[test]
 fn precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_branch() {
+    retried_with_its_branch_past(CONFLICT_ONLY_RESUME_LIMIT, None);
+}
+
+/// `[resume] conflict_only_limit` of dagq.toml sets the limit (ADR-0047
+/// decision 24): with 2, the third conflict retries the task.
+#[test]
+fn the_conflict_only_limit_of_dagq_toml_retries_the_task_sooner() {
+    retried_with_its_branch_past(2, Some("[resume]\nconflict_only_limit = 2\n"));
+}
+
+/// The run of task 1 is asked to rebase `limit` times, then retried with
+/// its branch carried over; `config` is committed as dagq.toml first.
+fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
     let (_dir, repo, db) = fixture();
+    if let Some(config) = config {
+        fs::write(repo.join("dagq.toml"), config).unwrap();
+        git(&repo, &["add", "dagq.toml"]);
+        git(&repo, &["commit", "-q", "-m", "set the resume limit"]);
+    }
     // The first run's session rebases at each request; the retry's run
     // commits its work and waits for its /exit.
     let second = "\"$(git rev-parse --path-format=absolute --git-common-dir)/second-run\"";
     let agent = format!(
         "if [ -f {second} ]; then {IDLE_AGENT}; else touch {second}; {}; fi",
-        rebasing_agent(CONFLICT_ONLY_RESUME_LIMIT)
+        rebasing_agent(limit)
     );
     let backend = TestWorkspace::new(&db, false, &agent);
-    let mut reviews = vec![moving_main_then_pass(); CONFLICT_ONLY_RESUME_LIMIT + 1];
+    let mut reviews = vec![moving_main_then_pass(); limit + 1];
     reviews.push(verdict("pass", &[], "meets the acceptance"));
     let reviewer = TestReviewer::new(&reviews);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
@@ -46,14 +64,14 @@ fn precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_bran
     };
     let prechecks = of_first("conflict_precheck");
     let requested: Vec<&Value> = prechecks.iter().map(|p| &p["requested"]).collect();
-    let mut expected = vec![&json!(true); CONFLICT_ONLY_RESUME_LIMIT];
+    let mut expected = vec![&json!(true); limit];
     expected.push(&json!(false));
     assert_eq!(requested, expected);
-    let last = prechecks[CONFLICT_ONLY_RESUME_LIMIT];
-    assert_eq!(last["attempt"], CONFLICT_ONLY_RESUME_LIMIT + 1);
+    let last = prechecks[limit];
+    assert_eq!(last["attempt"], limit + 1);
     assert_eq!(last["exhausted"], true);
     assert!(last.get("asked").is_none(), "{last}");
-    assert_eq!(backend.texts().len(), CONFLICT_ONLY_RESUME_LIMIT);
+    assert_eq!(backend.texts().len(), limit);
     // Its landing conflicted and parked it; no resume started.
     let deferred = of_first("integration_deferred");
     assert_eq!(deferred.len(), 1, "{:?}", event_kinds(&detail));
@@ -66,17 +84,18 @@ fn precheck_conflicts_up_to_the_conflict_only_limit_retry_the_task_with_its_bran
     assert_eq!(finished[0]["action"], "retry_inherit");
     assert_eq!(finished[0]["counted_resumes"], 0);
     assert_eq!(finished[0]["conflict_only_resumes"], 0);
-    assert_eq!(finished[0]["conflict_requests"], CONFLICT_ONLY_RESUME_LIMIT);
+    assert_eq!(finished[0]["conflict_requests"], limit);
     let repaired = of_first("auto_repaired");
     assert!(
-        repaired.iter().any(|p| p["repair"] == "inherit_retry"
-            && p["conditions"]["conflict_requests"] == CONFLICT_ONLY_RESUME_LIMIT),
+        repaired.iter().any(
+            |p| p["repair"] == "inherit_retry" && p["conditions"]["conflict_requests"] == limit
+        ),
         "{repaired:?}"
     );
     let last_error = first.last_error().unwrap();
     assert!(
         last_error.starts_with(&format!(
-            "resumed 0 times (0 of at most 3 counted) and asked {CONFLICT_ONLY_RESUME_LIMIT} times by the conflict precheck ({CONFLICT_ONLY_RESUME_LIMIT} of at most {CONFLICT_ONLY_RESUME_LIMIT} attempts for conflicts only after its review passed)"
+            "resumed 0 times (0 of at most 3 counted) and asked {limit} times by the conflict precheck ({limit} of at most {limit} attempts for conflicts only after its review passed)"
         )),
         "{last_error}"
     );

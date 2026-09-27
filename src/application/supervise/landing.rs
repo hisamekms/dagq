@@ -335,7 +335,7 @@ impl Supervisor<'_> {
     /// session's rewritten receipt is validated and reviewed again. The
     /// requests are conflict-only attempts after a passed review (ADR-0047
     /// decision 24): with the run's conflict-only resumes they stop at
-    /// `CONFLICT_ONLY_RESUME_LIMIT`, and they are not counted toward
+    /// `[resume] conflict_only_limit` (`ResumeConfig`), and they are not counted toward
     /// `MAX_RESUME_ATTEMPTS`. Past the conflict-only limit, a run that can
     /// be retried with its branch carried over goes on to land without a
     /// person: a conflicting landing parks it with its resumes used up, and
@@ -408,7 +408,7 @@ impl Supervisor<'_> {
             .iter()
             .any(is_inherit_retry);
         let own_commits = head != *run.base_commit();
-        match decide_conflict(&history, !inherited && own_commits) {
+        match decide_conflict(&history, !inherited && own_commits, self.resume_config) {
             ConflictDecision::RequestRebase => {}
             ConflictDecision::Inherit => {
                 // Recorded for the reader and an adopter, which goes on
@@ -419,7 +419,7 @@ impl Supervisor<'_> {
                     event_kind::CONFLICT_PRECHECK,
                     payload,
                 )?;
-                info!(run_id = %run.id(), "run {}: {why}, after {requested} conflict requests and {} conflict-only resumes (at most {CONFLICT_ONLY_RESUME_LIMIT} in all); landing, and a conflicting landing retries the task with the run's branch carried over", run.id(), resumes.conflict_only);
+                info!(run_id = %run.id(), "run {}: {why}, after {requested} conflict requests and {} conflict-only resumes (at most {} in all); landing, and a conflicting landing retries the task with the run's branch carried over", run.id(), resumes.conflict_only, self.resume_config.conflict_only_limit);
                 return Ok(land(session));
             }
             ConflictDecision::Ask => {
@@ -435,8 +435,8 @@ impl Supervisor<'_> {
                         "its branch holds no commit to carry over"
                     };
                     format!(
-                        "{why}, after {requested} conflict requests and {} conflict-only resumes (at most {CONFLICT_ONLY_RESUME_LIMIT} in all), and {cannot}",
-                        resumes.conflict_only
+                        "{why}, after {requested} conflict requests and {} conflict-only resumes (at most {} in all), and {cannot}",
+                        resumes.conflict_only, self.resume_config.conflict_only_limit
                     )
                 };
                 // What an adopter asks, if it takes the run over before the ask.

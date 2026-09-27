@@ -57,7 +57,7 @@ use crate::{
         process::LocalSpawner,
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_kpi_settings,
-            load_stall_config,
+            load_resume_config, load_stall_config,
         },
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
@@ -158,6 +158,9 @@ pub struct SuperviseOptions {
     /// How much free disk space a claim and a landing need (task 377);
     /// `None` reads `[disk]` of the main checkout's `dagq.toml`.
     pub disk: Option<crate::domain::disk::DiskConfig>,
+    /// The limit of a run's conflict-only attempts (ADR-0047 decision
+    /// 24); `None` reads `[resume]` of the main checkout's `dagq.toml`.
+    pub resume: Option<crate::domain::resume::ResumeConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
     /// Write the KPI reports of each day and week under `<queue dir>/reports/`
@@ -222,6 +225,7 @@ impl SuperviseOptions {
             max_load: None,
             load_average,
             disk: None,
+            resume: None,
             free_space: free_disk_bytes,
             report_daily: false,
             forecast_snapshots: false,
@@ -238,6 +242,7 @@ impl SuperviseOptions {
         stall: StallConfig,
         conflicts: ConflictConfigReport,
         disk: crate::domain::disk::DiskConfig,
+        resume: crate::domain::resume::ResumeConfig,
     ) -> LoopSettings {
         LoopSettings {
             parallel: self.parallel,
@@ -258,6 +263,7 @@ impl SuperviseOptions {
             update: self.update.clone(),
             max_load: self.max_load,
             disk,
+            resume,
         }
     }
 }
@@ -317,6 +323,16 @@ pub fn supervise_with_reviewer(
         load_disk_config(&main_checkout(&repository))
             .unwrap_or_else(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "[disk] of dagq.toml not read: {error:#}; using the defaults");
+                None
+            })
+            .unwrap_or_default()
+    });
+    // The limit of the conflict-only attempts (ADR-0047 decision 24): a
+    // `[resume]` that cannot be read leaves the default, as `[disk]` does.
+    let resume = options.resume.unwrap_or_else(|| {
+        load_resume_config(&main_checkout(&repository))
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "[resume] of dagq.toml not read: {error:#}; using the defaults");
                 None
             })
             .unwrap_or_default()
@@ -434,7 +450,7 @@ pub fn supervise_with_reviewer(
         forecasts,
         layout,
     };
-    supervisor::supervise(&ports, &options.settings(stall, conflicts, disk))
+    supervisor::supervise(&ports, &options.settings(stall, conflicts, disk, resume))
 }
 
 /// The runtime's own constructor of the cmux wrapper `up`, `down` and the
@@ -1465,9 +1481,10 @@ pub fn ended_run_material(
     detail: &TaskDetail,
     run: &TaskRun,
     resumes: crate::domain::resume::ResumeCount,
+    config: crate::domain::resume::ResumeConfig,
     dir: &Path,
 ) -> String {
-    prompt::ended_run_material(&LocalRunFiles, detail, run, resumes, dir)
+    prompt::ended_run_material(&LocalRunFiles, detail, run, resumes, config, dir)
 }
 
 /// Run from cmux, not from a pipe; stdout must remain a terminal for Claude.

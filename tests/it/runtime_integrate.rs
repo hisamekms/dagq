@@ -1927,7 +1927,13 @@ fn failing_verification_command_passes_validation_and_needs_a_session_at_integra
     // The recovery job reads the latest attempt's log and names the
     // earlier one.
     let run = &detail.runs[0];
-    let prompt = runtime::ended_run_material(&detail, run, Default::default(), run_dir);
+    let prompt = runtime::ended_run_material(
+        &detail,
+        run,
+        Default::default(),
+        Default::default(),
+        run_dir,
+    );
     assert!(
         prompt.contains(&format!("Verification log {} (end)", second.display())),
         "{prompt}"

@@ -1093,7 +1093,7 @@ fn check_live(
                             .to_owned(),
                     );
                 }
-                if resumes_exhausted(&*sv.queue, run.id()) {
+                if resumes_exhausted(&*sv.queue, run.id(), sv.resume_config) {
                     return Err("resume: the run's resumes are used up".to_owned());
                 }
             }

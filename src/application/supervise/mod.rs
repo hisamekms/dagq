@@ -78,7 +78,7 @@ use crate::domain::{
     marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
-    resume::{CONFLICT_ONLY_RESUME_LIMIT, ResumeCount, inherits_on_exhaustion, is_inherit_retry},
+    resume::{ResumeConfig, ResumeCount, inherits_on_exhaustion, is_inherit_retry},
     run_env::RUN_ENV_PROGRAM_KINDS,
     stall::{BackgroundTask, STALL_CONFIG_LOADED, StallConfig},
     triage_state,
@@ -210,6 +210,9 @@ pub struct LoopSettings {
     pub max_load: Option<f64>,
     /// How much free disk space a claim and a landing need (task 377).
     pub disk: crate::domain::disk::DiskConfig,
+    /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
+    /// decision 24).
+    pub resume: ResumeConfig,
 }
 
 /// Where the supervisor works and what it starts: the queue database and
@@ -522,6 +525,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
         disk_config: settings.disk,
+        resume_config: settings.resume,
         free_space: ports.free_space,
         disk: disk::DiskWatch::default(),
         free: None,
@@ -673,6 +677,9 @@ struct Supervisor<'a> {
     /// `[disk]`: how much free disk space a claim and a landing need
     /// (task 377).
     disk_config: crate::domain::disk::DiskConfig,
+    /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
+    /// decision 24).
+    resume_config: ResumeConfig,
     /// Reads the free bytes of the file system of a path.
     free_space: fn(&Path) -> Option<u64>,
     /// The disk between passes (task 377).
@@ -1638,7 +1645,7 @@ impl Supervisor<'_> {
             "outcome": "error",
             "error": message,
             "workspace_id": workspace,
-            "exhausted": resumes_exhausted(&*self.queue, run.id()),
+            "exhausted": resumes_exhausted(&*self.queue, run.id(), self.resume_config),
         }));
         if let Err(error) =
             self.queue
@@ -2135,11 +2142,12 @@ fn stop_recovery(slot: &mut Slot) {
 }
 
 /// Whether the run's resumes are used up (ADR-0047 decision 24: its
-/// counted resumes or its conflict-only ones); unreadable counts as used up.
-fn resumes_exhausted(queue: &dyn Queue, run_id: &RunId) -> bool {
+/// counted resumes or its conflict-only ones, up to `config`'s limit);
+/// unreadable counts as used up.
+fn resumes_exhausted(queue: &dyn Queue, run_id: &RunId, config: ResumeConfig) -> bool {
     queue
         .run_events(run_id)
-        .map_or(true, |events| ResumeCount::of(&events).exhausted())
+        .map_or(true, |events| ResumeCount::of(&events).exhausted(config))
 }
 
 /// Whether the run's session wrapper is registered, has not exited and has

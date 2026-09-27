@@ -549,7 +549,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
 fn unresolved_attempt(db: &Path, run: &TaskRun, main: &str) {
     let mut queue = SqliteQueue::open(db).unwrap();
     let (_, attempt) = queue
-        .begin_resume(run.id(), "earlier", &sha(main), None)
+        .begin_resume(run.id(), "earlier", &sha(main), None, Default::default())
         .unwrap()
         .unwrap();
     assert_eq!(attempt, 1);
@@ -1784,13 +1784,25 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
     // A supervisor started a resume, its session registered, and then the
     // supervisor died: its lease goes stale while the session lives on.
     let (_, attempt) = queue
-        .begin_resume(run.id(), "dead-supervisor", &sha(&first_landed), None)
+        .begin_resume(
+            run.id(),
+            "dead-supervisor",
+            &sha(&first_landed),
+            None,
+            Default::default(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(attempt, 1);
     assert!(
         queue
-            .begin_resume(run.id(), "another", &sha(&first_landed), None)
+            .begin_resume(
+                run.id(),
+                "another",
+                &sha(&first_landed),
+                None,
+                Default::default()
+            )
             .unwrap()
             .is_none()
     );

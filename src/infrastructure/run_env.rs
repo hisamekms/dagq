@@ -8,7 +8,8 @@
 //! `command` the landing recheck runs on main's tree with a waiting run
 //! merged in (ADR-0068 decision 2). `[disk]` holds how much free disk
 //! space a claim and a landing need (ADR-0047 decision 44, task 377).
-//! `[worker.trial]` turns on the limited trial of the worker's model
+//! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
+//! decision 24). `[worker.trial]` turns on the limited trial of the worker's model
 //! (ADR-0079 decision 4). The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -26,6 +27,7 @@ use crate::{
         disk::DiskConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
+        resume::ResumeConfig,
         run_env::{RunEnvCheck, RunEnvProgram},
         stall::StallConfig,
         stats::ConflictConfig,
@@ -42,6 +44,7 @@ const STALL_TABLE: &str = "stall";
 const CONFLICTS_TABLE: &str = "conflicts";
 const RECHECK_TABLE: &str = "recheck";
 const DISK_TABLE: &str = "disk";
+const RESUME_TABLE: &str = "resume";
 /// `[repository]`: the landing branch and its push (ADR-t615-1).
 const REPOSITORY_TABLE: &str = "repository";
 /// The keys of `[repository]`.
@@ -57,12 +60,13 @@ const WORKER_TRIAL_TABLE: &str = "worker.trial";
 /// [`super::language`] reads and checks it, so a mistake in it never stops
 /// a claim or a landing.
 const LANGUAGE_TABLE: &str = "language";
-const TABLES: [&str; 8] = [
+const TABLES: [&str; 9] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
     RECHECK_TABLE,
     DISK_TABLE,
+    RESUME_TABLE,
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
     LANGUAGE_TABLE,
@@ -95,7 +99,8 @@ pub fn parse_run_env(text: &str) -> Result<Vec<(String, String)>> {
 
 /// What the file holds: `[run.env]`, `[stall]` (ADR-0043 decision 4),
 /// `[conflicts]`, `[recheck]` (ADR-0068 decision 2), `[disk]` (ADR-0047
-/// decision 44) and `[kpi]` (ADR-0051 decisions 17 and 19).
+/// decision 44), `[resume]` (ADR-0047 decision 24) and `[kpi]` (ADR-0051
+/// decisions 17 and 19).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     /// `[run.env]` as written, in file order, values unexpanded.
@@ -108,6 +113,8 @@ pub struct Config {
     pub recheck_command: Option<String>,
     /// `[disk]`, the defaults for the keys it does not set.
     pub disk: DiskConfig,
+    /// `[resume]`, the default for the key it does not set.
+    pub resume: ResumeConfig,
     /// `[kpi]` and its `[kpi.targets."<kpi>"]`; `None` without any.
     pub kpi: Option<KpiSettings>,
     /// `[repository]`: the landing branch, the push remote and whether
@@ -126,6 +133,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut stall_keys: Vec<String> = Vec::new();
     let mut conflict_keys: Vec<String> = Vec::new();
     let mut disk_keys: Vec<String> = Vec::new();
+    let mut resume_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -149,7 +157,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{LANGUAGE_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{LANGUAGE_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -283,6 +291,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
                 disk_keys.push(key.to_owned());
             }
+            Some(RESUME_TABLE) => {
+                ensure!(
+                    ResumeConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{RESUME_TABLE}]; the keys are {}",
+                    ResumeConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !resume_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let limit = parse_positive(rest.trim(), "number").with_context(with)?;
+                config.resume.conflict_only_limit = usize::try_from(limit).with_context(with)?;
+                resume_keys.push(key.to_owned());
+            }
             Some(CONFLICTS_TABLE) => {
                 ensure!(
                     ConflictConfig::KEYS.contains(&key),
@@ -314,7 +337,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -371,6 +394,20 @@ pub fn load_disk_config(root: &Path) -> Result<Option<DiskConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .disk,
+    ))
+}
+
+/// `[resume]` of the `dagq.toml` in `root` (ADR-0047 decision 24), `None`
+/// when there is no file; no table or no key is the default.
+pub fn load_resume_config(root: &Path) -> Result<Option<ResumeConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .resume,
     ))
 }
 
@@ -943,6 +980,26 @@ LITERAL = 'no \n escapes # here'
                 "[disk]\nsample_runs = 1\nsample_runs = 2",
                 "sample_runs is defined twice",
             ),
+            ("[resume]\nother = 1", "2: unknown key other in [resume]"),
+            (
+                "[resume]\nconflict_only_limit = 0",
+                "2: value of conflict_only_limit",
+            ),
+            (
+                "[resume]\nconflict_only_limit = 0",
+                "positive number, not 0",
+            ),
+            (
+                "[resume]\nconflict_only_limit = -1",
+                "positive number, not -1",
+            ),
+            ("[resume]\nconflict_only_limit = 1.5", "whole number"),
+            ("[resume]\nconflict_only_limit = ", "missing value"),
+            (
+                "[resume]\nconflict_only_limit = 1\nconflict_only_limit = 2",
+                "3: conflict_only_limit is defined twice",
+            ),
+            ("[resume]\n[resume]", "2: [resume] is defined twice"),
             ("[recheck]\nargs = 'x'", "unknown key args in [recheck]"),
             (
                 "[repository]\nremotes = 'x'",
@@ -992,6 +1049,44 @@ LITERAL = 'no \n escapes # here'
             let error = format!("{:#}", parse_run_env(text).unwrap_err());
             assert!(error.contains(message), "{text:?}: {error}");
         }
+    }
+
+    #[test]
+    fn parses_and_loads_the_resume_table() {
+        let config =
+            parse_config("[resume] # attempts\nconflict_only_limit = 8 # more\n[stall]\nsend_confirm_secs = 30\n")
+                .unwrap();
+        assert_eq!(
+            config.resume,
+            ResumeConfig {
+                conflict_only_limit: 8
+            }
+        );
+        assert_eq!(config.stall.send_confirm_secs, 30);
+        assert_eq!(parse_config("").unwrap().resume, ResumeConfig::default());
+        assert_eq!(
+            parse_config("[resume]\n").unwrap().resume,
+            ResumeConfig::default()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_resume_config(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[resume]\nconflict_only_limit = 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_resume_config(dir.path()).unwrap(),
+            Some(ResumeConfig {
+                conflict_only_limit: 2
+            })
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[resume]\nx = 1\n").unwrap();
+        let error = format!("{:#}", load_resume_config(dir.path()).unwrap_err());
+        assert!(
+            error.contains("dagq.toml:2: unknown key x in [resume]"),
+            "{error}"
+        );
     }
 
     #[test]

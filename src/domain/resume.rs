@@ -11,8 +11,32 @@ use super::{
 /// after its review passed, and the conflict precheck's requests to the
 /// live session of a passed run (ADR-0027 decision 4, task 511). Neither is
 /// one of [`MAX_RESUME_ATTEMPTS`], but a conflict that never resolves stops
-/// here (ADR-0047 decision 24's fence).
+/// here (ADR-0047 decision 24's fence). The default of
+/// [`ResumeConfig::conflict_only_limit`], which `[resume]` of `dagq.toml`
+/// sets.
 pub const CONFLICT_ONLY_RESUME_LIMIT: usize = 5;
+
+/// `[resume]` of `dagq.toml` (ADR-0047 decision 24): the limit of the
+/// conflict-only attempts of one run. The counted resumes'
+/// [`MAX_RESUME_ATTEMPTS`] is not configurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeConfig {
+    /// The conflict-only attempts one run makes at most.
+    pub conflict_only_limit: usize,
+}
+
+impl ResumeConfig {
+    /// The keys `[resume]` may set.
+    pub const KEYS: [&'static str; 1] = ["conflict_only_limit"];
+}
+
+impl Default for ResumeConfig {
+    fn default() -> Self {
+        Self {
+            conflict_only_limit: CONFLICT_ONLY_RESUME_LIMIT,
+        }
+    }
+}
 
 /// `triage_finished`'s `action` for the automatic retry that carries the
 /// run's branch over to the next run (ADR-0047 decisions 24 and 40).
@@ -129,13 +153,13 @@ pub struct ResumeCount {
     /// Resumes that count toward [`MAX_RESUME_ATTEMPTS`].
     pub counted: usize,
     /// Resumes of a run parked only by a rebase conflict after its review
-    /// passed, fenced by [`CONFLICT_ONLY_RESUME_LIMIT`].
+    /// passed, fenced by [`ResumeConfig::conflict_only_limit`].
     pub conflict_only: usize,
     /// The conflict precheck's resolution requests sent to the live
     /// session of a passed run (`conflict_precheck` with `requested: true`,
     /// but those a later one with `unsent: true` withdrew): conflicts only
     /// after a passed review, fenced with [`Self::conflict_only`] by
-    /// [`CONFLICT_ONLY_RESUME_LIMIT`].
+    /// [`ResumeConfig::conflict_only_limit`].
     pub conflict_requests: usize,
     /// Whether the run, as its events end, is parked only by a conflict
     /// ([`parked_for_conflict_only`]): its next resume would be a
@@ -170,7 +194,7 @@ impl ResumeCount {
         count
     }
 
-    /// The attempts fenced by [`CONFLICT_ONLY_RESUME_LIMIT`]: the
+    /// The attempts fenced by [`ResumeConfig::conflict_only_limit`]: the
     /// conflict-only resumes and the precheck's conflict requests.
     pub const fn conflict_attempts(self) -> usize {
         self.conflict_only + self.conflict_requests
@@ -188,15 +212,16 @@ impl ResumeCount {
 
     /// No further resume starts: the counted ones reached
     /// [`MAX_RESUME_ATTEMPTS`], the conflict-only resumes
-    /// [`CONFLICT_ONLY_RESUME_LIMIT`], or, while the run is parked only by a
+    /// `config`'s [`ResumeConfig::conflict_only_limit`], or, while the run is parked only by a
     /// conflict, the conflict-only attempts with the precheck's requests
     /// ([`Self::conflict_attempts`]) reached it. A run the requests brought
     /// to the limit that is parked for another reason (a failed
     /// verification, missing evidence) keeps its counted resumes.
-    pub const fn exhausted(self) -> bool {
+    pub const fn exhausted(self, config: ResumeConfig) -> bool {
+        let limit = config.conflict_only_limit;
         self.counted >= MAX_RESUME_ATTEMPTS
-            || self.conflict_only >= CONFLICT_ONLY_RESUME_LIMIT
-            || (self.parked_for_conflict && self.conflict_attempts() >= CONFLICT_ONLY_RESUME_LIMIT)
+            || self.conflict_only >= limit
+            || (self.parked_for_conflict && self.conflict_attempts() >= limit)
     }
 }
 
@@ -290,7 +315,7 @@ mod tests {
         );
         assert_eq!(count.total(), 2);
         assert_eq!(count.left(), MAX_RESUME_ATTEMPTS);
-        assert!(!count.exhausted());
+        assert!(!count.exhausted(ResumeConfig::default()));
         assert!(parked_for_conflict_only(&events));
         assert_eq!(
             conflict_only_basis(&events),
@@ -376,7 +401,7 @@ mod tests {
             conflict_requests: 0,
             ..Default::default()
         };
-        assert!(counted.exhausted());
+        assert!(counted.exhausted(ResumeConfig::default()));
         assert_eq!(counted.left(), 0);
         let conflicts = ResumeCount {
             counted: 0,
@@ -384,7 +409,7 @@ mod tests {
             conflict_requests: 0,
             ..Default::default()
         };
-        assert!(conflicts.exhausted());
+        assert!(conflicts.exhausted(ResumeConfig::default()));
         assert!(
             !ResumeCount {
                 counted: MAX_RESUME_ATTEMPTS - 1,
@@ -392,7 +417,45 @@ mod tests {
                 conflict_requests: 0,
                 ..Default::default()
             }
-            .exhausted()
+            .exhausted(ResumeConfig::default())
+        );
+    }
+
+    #[test]
+    fn the_conflict_only_limit_is_the_configured_one() {
+        let two = ResumeConfig {
+            conflict_only_limit: 2,
+        };
+        let one_conflict = ResumeCount {
+            conflict_only: 1,
+            ..Default::default()
+        };
+        assert!(!one_conflict.exhausted(two));
+        let two_conflicts = ResumeCount {
+            conflict_only: 2,
+            ..Default::default()
+        };
+        assert!(two_conflicts.exhausted(two));
+        assert!(!two_conflicts.exhausted(ResumeConfig::default()));
+        // The precheck's requests count toward it while parked for a
+        // conflict; the counted resumes' limit stays.
+        let requests = ResumeCount {
+            conflict_only: 1,
+            conflict_requests: 1,
+            parked_for_conflict: true,
+            ..Default::default()
+        };
+        assert!(requests.exhausted(two));
+        let counted = ResumeCount {
+            counted: MAX_RESUME_ATTEMPTS,
+            ..Default::default()
+        };
+        assert!(counted.exhausted(ResumeConfig {
+            conflict_only_limit: 100,
+        }));
+        assert_eq!(
+            ResumeConfig::default().conflict_only_limit,
+            CONFLICT_ONLY_RESUME_LIMIT
         );
     }
 
@@ -429,7 +492,7 @@ mod tests {
         let count = ResumeCount::of(&events);
         assert_eq!(count.conflict_attempts(), CONFLICT_ONLY_RESUME_LIMIT);
         assert_eq!(count.counted, 0);
-        assert!(count.exhausted());
+        assert!(count.exhausted(ResumeConfig::default()));
         // A conflict found by the landing after the requests is retried
         // with the branch carried over.
         events.push(conflict());
@@ -444,7 +507,7 @@ mod tests {
         let count = ResumeCount::of(&failed);
         assert!(!count.parked_for_conflict);
         assert_eq!(count.conflict_attempts(), CONFLICT_ONLY_RESUME_LIMIT);
-        assert!(!count.exhausted());
+        assert!(!count.exhausted(ResumeConfig::default()));
         failed.push(resume());
         assert_eq!(ResumeCount::of(&failed).counted, 1);
     }

@@ -4,8 +4,8 @@ type: design
 title: "Landing recheck"
 status: current
 created: 2026-09-26
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-27
+last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -43,7 +43,7 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 - **このsupervisorがslotに持つrun**: `landing_recheck_failed`を`action: held`（`reason`付き）で記録するだけにする。そのrunが`AwaitingSlot`で着地slotを取る直前に`park_held_by_recheck`が、最新の`landing_recheck_failed`が`held`で`main`と`head`が今のmainと`result_commit`に一致するかを見て、一致すれば`park_rechecked`（このsupervisorのtoken）でleaseを手放して`needs_session`にし、同じ内容を`action: resumed`、`repeat: true`でもう1度記録する（`lease_released`の`reason`は`landing_recheck_failed`）。mainがさらに動いていれば着地を試みる。
 - **askへの注記**: どちらの場合も、runの閉じていないask（答えの有無を問わない）のquestionの末尾に段落`Landing recheck: <reason>. …`を足し、`ask_updated`（`ask_id`、`kind`、`why: landing_recheck_failed`）を記録する（`AskStore::note_on_asks`）。askは閉じない。
 - **resumeの後**: resumeが解決して`validating`を通ったrunに閉じていない`approve_landing`のaskがあれば、reviewをやり直さず、sessionを`/exit`してworkspaceを閉じ、leaseを手放して`awaiting_integration`で答えを待つ（`AfterExit::Rest { close: true }`。`stuck_exit`のaskの文面は「waits for the answer to its approve_landing ask」）。答えは`apply_landing_answers`がこれまでどおり適用する。`integration_approved`のあるrunはreviewを経ずに着地へ進む。
-- **resumeの数え方**（ADR-0068の決定5、`domain::resume`）: `action: resumed`の`landing_recheck_failed`はparkのイベントで、code `rebase_conflict`ならreviewのverdictを問わず衝突だけのresume（`MAX_RESUME_ATTEMPTS`に数えず`CONFLICT_ONLY_RESUME_LIMIT`で止める）、`verification_failed`なら数えるresume。使い切ったときの引き継ぐretryは、reviewがpassしたかapproveされたrunだけ。
+- **resumeの数え方**（ADR-0068の決定5、`domain::resume`）: `action: resumed`の`landing_recheck_failed`はparkのイベントで、code `rebase_conflict`ならreviewのverdictを問わず衝突だけのresume（`MAX_RESUME_ATTEMPTS`に数えず`[resume] conflict_only_limit`（既定5）で止める）、`verification_failed`なら数えるresume。使い切ったときの引き継ぐretryは、reviewがpassしたかapproveされたrunだけ。
 
 ## 記録
 

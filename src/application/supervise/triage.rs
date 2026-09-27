@@ -252,7 +252,14 @@ impl Supervisor<'_> {
         let detail = self.queue.show(run.task_id())?;
         let events = self.queue.run_events(run.id())?;
         let resumes = ResumeCount::of(&events);
-        let ended = ended_run_material(&*self.files, &detail, run, resumes, &dir);
+        let ended = ended_run_material(
+            &*self.files,
+            &detail,
+            run,
+            resumes,
+            self.resume_config,
+            &dir,
+        );
         let facts = events
             .iter()
             .rev()
@@ -498,7 +505,7 @@ impl Supervisor<'_> {
             RecoveryAction::Resume { instruction } => {
                 let resumes =
                     ResumeCount::of(&self.queue.run_events(run.id()).map_err(unreadable)?);
-                if resumes.exhausted() {
+                if resumes.exhausted(self.resume_config) {
                     return Err(format!(
                         "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only)",
                         resumes.counted,
@@ -578,7 +585,8 @@ impl Supervisor<'_> {
         duration_secs: u64,
     ) -> Result<TaskRun> {
         let note = escalation.note(run, alert, attempt);
-        let exhausted = ResumeCount::of(&self.queue.run_events(run.id())?).exhausted();
+        let exhausted =
+            ResumeCount::of(&self.queue.run_events(run.id())?).exhausted(self.resume_config);
         let base = if exhausted {
             EXHAUSTED_OPTIONS
         } else {

@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::domain::resume::{CONFLICT_ONLY_RESUME_LIMIT, ResumeCount};
+use crate::domain::resume::{ResumeConfig, ResumeCount};
 use crate::domain::{
     ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
     RunEvent, RunStatus, TriageState, abandon_left_session_open, event_attention, event_kind,
@@ -451,7 +451,7 @@ pub enum ConflictDecision {
     /// Send the live session the resolution request.
     RequestRebase,
     /// The conflict-only attempts (the requests and the conflict-only
-    /// resumes) reached [`CONFLICT_ONLY_RESUME_LIMIT`] with counted
+    /// resumes) reached [`ResumeConfig::conflict_only_limit`] with counted
     /// resumes left, and the run can be retried with its branch carried
     /// over: nobody is asked, the run goes on to land, and a landing that
     /// conflicts parks it with its resumes used up, which retries it
@@ -464,16 +464,20 @@ pub enum ConflictDecision {
 }
 
 /// The precheck's requests are conflict-only attempts after a passed
-/// review: they share [`CONFLICT_ONLY_RESUME_LIMIT`] with the conflict-only
+/// review: they share [`ResumeConfig::conflict_only_limit`] (`config`) with the conflict-only
 /// resumes and are not counted toward [`MAX_RESUME_ATTEMPTS`] (ADR-0047
 /// decision 24). `inheritable` says whether the run can be retried with its
 /// branch carried over (no run of its task was, and its head holds commits
 /// on top of its base).
-pub fn decide_conflict(history: &RunHistory<'_>, inheritable: bool) -> ConflictDecision {
+pub fn decide_conflict(
+    history: &RunHistory<'_>,
+    inheritable: bool,
+    config: ResumeConfig,
+) -> ConflictDecision {
     let resumes = history.resumes();
     if resumes.counted >= MAX_RESUME_ATTEMPTS {
         ConflictDecision::Ask
-    } else if resumes.conflict_attempts() < CONFLICT_ONLY_RESUME_LIMIT {
+    } else if resumes.conflict_attempts() < config.conflict_only_limit {
         ConflictDecision::RequestRebase
     } else if inheritable {
         ConflictDecision::Inherit
@@ -700,7 +704,7 @@ mod tests {
         assert_eq!(history.resumes().counted, 0);
         assert_eq!(history.resumes().conflict_attempts(), 1);
         assert_eq!(
-            decide_conflict(&history, true),
+            decide_conflict(&history, true, ResumeConfig::default()),
             ConflictDecision::RequestRebase
         );
         // A request withdrawn before it was typed is not one.
@@ -719,7 +723,7 @@ mod tests {
         let history = RunHistory::from_events(&events);
         assert_eq!(history.resumes().counted, 1);
         assert_eq!(
-            decide_conflict(&history, true),
+            decide_conflict(&history, true, ResumeConfig::default()),
             ConflictDecision::RequestRebase
         );
         // The requests and the conflict-only resumes share their limit:
@@ -736,25 +740,40 @@ mod tests {
         let mut events = vec![pass, conflict(2), event(3, "resume_started", json!({}))];
         events.extend(
             (4..)
-                .take(CONFLICT_ONLY_RESUME_LIMIT - 2)
+                .take(crate::domain::resume::CONFLICT_ONLY_RESUME_LIMIT - 2)
                 .map(|id| precheck(id, true)),
         );
         let history = RunHistory::from_events(&events);
         assert_eq!(history.resumes().conflict_only, 1);
         assert_eq!(
             history.resumes().conflict_attempts(),
-            CONFLICT_ONLY_RESUME_LIMIT - 1
+            crate::domain::resume::CONFLICT_ONLY_RESUME_LIMIT - 1
         );
-        assert!(!history.resumes().exhausted());
+        assert!(!history.resumes().exhausted(ResumeConfig::default()));
         assert_eq!(
-            decide_conflict(&history, true),
+            decide_conflict(&history, true, ResumeConfig::default()),
             ConflictDecision::RequestRebase
         );
         events.push(precheck(10, true));
         let history = RunHistory::from_events(&events);
-        assert!(history.resumes().exhausted());
-        assert_eq!(decide_conflict(&history, true), ConflictDecision::Inherit);
-        assert_eq!(decide_conflict(&history, false), ConflictDecision::Ask);
+        assert!(history.resumes().exhausted(ResumeConfig::default()));
+        assert_eq!(
+            decide_conflict(&history, true, ResumeConfig::default()),
+            ConflictDecision::Inherit
+        );
+        assert_eq!(
+            decide_conflict(&history, false, ResumeConfig::default()),
+            ConflictDecision::Ask
+        );
+        // A higher configured limit keeps requesting.
+        let higher = ResumeConfig {
+            conflict_only_limit: crate::domain::resume::CONFLICT_ONLY_RESUME_LIMIT + 1,
+        };
+        assert!(!history.resumes().exhausted(higher));
+        assert_eq!(
+            decide_conflict(&history, true, higher),
+            ConflictDecision::RequestRebase
+        );
         // Counted resumes used up ask, whatever the conflicts.
         let events = vec![
             event(1, "resume_started", json!({})),
@@ -762,7 +781,10 @@ mod tests {
             event(3, "resume_started", json!({})),
         ];
         let history = RunHistory::from_events(&events);
-        assert_eq!(decide_conflict(&history, true), ConflictDecision::Ask);
+        assert_eq!(
+            decide_conflict(&history, true, ResumeConfig::default()),
+            ConflictDecision::Ask
+        );
     }
 
     #[test]
@@ -802,7 +824,7 @@ mod tests {
         assert_eq!(history.resumes().conflict_only, 1);
         assert_eq!(history.resumes().conflict_attempts(), 3);
         assert_eq!(
-            decide_conflict(&history, true),
+            decide_conflict(&history, true, ResumeConfig::default()),
             ConflictDecision::RequestRebase
         );
     }
