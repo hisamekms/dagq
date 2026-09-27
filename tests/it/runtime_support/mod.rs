@@ -529,6 +529,8 @@ pub struct TestWorkspace {
     pub resume_scripts: Mutex<HashMap<TaskId, String>>,
     /// `create_resume` calls: the workspace name and the command.
     pub resumes: Mutex<Vec<(String, String)>>,
+    /// The tags of every `create_resume` call.
+    pub resume_tags: Mutex<Vec<WorkspaceTags>>,
     /// `send_text` calls: the workspace and the text.
     pub texts: Mutex<Vec<(String, String)>>,
     /// `send_text` records the call and then fails, as a `cmux send` to a
@@ -587,6 +589,7 @@ impl TestWorkspace {
             send_times_out: false,
             resume_scripts: Mutex::new(HashMap::new()),
             resumes: Mutex::new(Vec::new()),
+            resume_tags: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
             text_fails: false,
             exists_fails: false,
@@ -776,6 +779,7 @@ impl WorkspaceBackend for TestWorkspace {
             dagq::infrastructure::adapters::run_workspace_name(task, run)?,
             command.into(),
         ));
+        self.resume_tags.lock().unwrap().push(tags.clone());
         let db = self.db.clone();
         let id = run.id().clone();
         let mut sessions = self.sessions.lock().unwrap();

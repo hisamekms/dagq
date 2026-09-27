@@ -66,6 +66,13 @@ impl Supervisor<'_> {
                 self.skip_resume(&run, &head, &main)?;
                 continue;
             }
+            // The session runs the worker's checks with the worker's
+            // `[run.env]`, read before the resume begins like the branch (a
+            // run without a run directory fails in `start_resume`).
+            let run_env = match run.run_dir() {
+                Some(run_dir) => self.verifier.run_env(Path::new(run_dir))?,
+                None => Vec::new(),
+            };
             let (reason, kind) = resume_reason(&*self.queue, &run)?;
             // Not while the cleanup job clears the run's worktree (task 405).
             let cleaning = self.cleanup.cleaning();
@@ -91,7 +98,7 @@ impl Supervisor<'_> {
                 reason: reason.unwrap_or_else(|| "(no reason recorded)".to_owned()),
                 kind,
             };
-            match self.start_resume(&run, attempt, &request) {
+            match self.start_resume(&run, attempt, &request, run_env) {
                 Ok(watch) => {
                     info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it) in workspace {}", run.id(), run.task_id(), resumes.counted, watch.workspace);
                     self.slots.push(Slot::new(run, Phase::Resume(watch)));
@@ -328,12 +335,14 @@ impl Supervisor<'_> {
     }
     /// Write the resolution request, refresh the runtime snapshot (the one
     /// the worker ran may predate `session --resume`) and open the resume
-    /// workspace with the same wrapper and settings as the worker's.
+    /// workspace with the same wrapper, settings and `run_env` as the
+    /// worker's.
     pub(super) fn start_resume(
         &mut self,
         run: &TaskRun,
         attempt: usize,
         request: &ResumeRequest,
+        run_env: Vec<(String, String)>,
     ) -> Result<ResumeWatch> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let worktree = Path::new(run.worktree_path().context("missing worktree")?);
@@ -375,9 +384,12 @@ impl Supervisor<'_> {
             "--resume".into(),
         ]);
         // The worker's env and group (the same session of the run) and the
-        // description `run <run-id> resume` (ADR-0028).
+        // description `run <run-id> resume` (ADR-0028), then `[run.env]`
+        // after the runtime's own names, as in the worker's workspace.
+        let mut env = self.layout.worker_env_of(run);
+        env.extend(run_env);
         let tags = WorkspaceTags {
-            env: self.layout.worker_env_of(run),
+            env,
             description: Some(resume_workspace_description(run)),
             group: self.workspace_group(),
         };

@@ -1100,8 +1100,10 @@ impl Supervisor<'_> {
         }
         self.apply_triage_answers()?;
         // Resumes and triage read the landing branch: they wait with the
-        // claims until it resolves (ADR-t615-1).
-        if self.used_slots() < parallel && !self.landing_unresolved {
+        // claims until it resolves (ADR-t615-1). A resumed session gets
+        // `[run.env]` like a claimed run, so it waits with the claims for a
+        // missing program too (task 303).
+        if self.used_slots() < parallel && !self.landing_unresolved && !self.run_env_missing {
             self.resume_parked_runs(parallel)?;
         }
         if self.used_slots() < parallel && !self.landing_unresolved {
@@ -1112,8 +1114,8 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "the workspaces and worktrees of ended runs could not all be swept: {error:#}");
         }
         // A run claimed now would fail every cargo command (ADR-0049
-        // decision 9; checked at the top of the pass); the runs in flight,
-        // their reviews and resumes go on.
+        // decision 9; checked at the top of the pass); the runs in flight
+        // and their reviews go on (resumes wait above).
         if self.run_env_missing || self.landing_unresolved {
             return Ok(());
         }

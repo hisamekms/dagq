@@ -85,6 +85,102 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
     assert_eq!(fs::read_to_string(&seen).unwrap(), line);
 }
 
+/// Task 303: the workspace a `needs_session` resume opens gets the same
+/// `[run.env]` as the worker's, after the runtime's own names.
+#[test]
+fn a_resumed_session_gets_the_run_env_too() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    // Written after the claims: only the resume can have read it.
+    fs::write(
+        repo.join("dagq.toml"),
+        "[run.env]\nSHARED = '${DAGQ_QUEUE_DIR}/target'\nRUN_TMP = \"${DAGQ_RUN_DIR}\"\n",
+    )
+    .unwrap();
+    backend.resume_script_for(
+        2,
+        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    let canonical = db.canonicalize().unwrap();
+    let queue_dir = canonical.parent().unwrap().to_str().unwrap().to_owned();
+    let tags = backend.resume_tags.lock().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(
+        tags[0].env,
+        vec![
+            ("DAGQ_ROLE".to_owned(), "worker".to_owned()),
+            (
+                "DAGQ_QUEUE".to_owned(),
+                canonical.to_str().unwrap().to_owned()
+            ),
+            ("DAGQ_ACTOR_ID".to_owned(), format!("worker:{}", run.id())),
+            ("DAGQ_RUN_ID".to_owned(), run.id().to_string()),
+            ("DAGQ_TASK_ID".to_owned(), run.task_id().to_string()),
+            ("SHARED".to_owned(), format!("{queue_dir}/target")),
+            ("RUN_TMP".to_owned(), run.run_dir().unwrap().to_owned()),
+        ]
+    );
+}
+
+/// Task 303: a resume would give its session the `[run.env]` naming a
+/// program that is missing, so it waits with the claims until it is found.
+#[test]
+fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
+    use std::os::unix::fs::PermissionsExt;
+    let (fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
+    let tool = fixture.dir.path().join("bin").join("sccache");
+    fs::write(
+        repo.join("dagq.toml"),
+        format!("[run.env]\nRUSTC_WRAPPER = '{}'\n", tool.display()),
+    )
+    .unwrap();
+    backend.resume_script_for(
+        2,
+        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(backend.resume_tags.lock().unwrap().is_empty());
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert!(payloads(&detail, "resume_started").is_empty());
+
+    fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    fs::write(&tool, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    let tags = backend.resume_tags.lock().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert!(
+        tags[0]
+            .env
+            .contains(&("RUSTC_WRAPPER".to_owned(), tool.display().to_string())),
+        "{:?}",
+        tags[0].env
+    );
+}
+
 #[test]
 fn a_broken_dagq_toml_stops_provisioning_before_the_workspace() {
     let (_dir, repo, db) = fixture();
