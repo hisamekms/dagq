@@ -357,6 +357,19 @@ impl StartCheck {
         }
     }
 
+    /// Watch `text` that a supervisor this one adopted the run from
+    /// recorded as sent at `sent_at` (task 546): it may have stopped before
+    /// typing it, and no screen after the submit was read. The wait runs
+    /// from now; a mark written after `sent_at`, or the agent at work, shows
+    /// it was typed, and an empty input box with neither has it sent once,
+    /// unless it was `resent` already.
+    pub(super) fn adopted(what: &str, text: &str, sent_at: SystemTime, resent: bool) -> Self {
+        Self {
+            resent,
+            ..Self::new(what, text, sent_at, &Submission::Submitted(None))
+        }
+    }
+
     /// Whether the screen is to be read for a sign: the check is not done,
     /// `wait` passed since the send, and none of `marks` nor the input
     /// marker `input` (unless a notice of the agent's own) was written

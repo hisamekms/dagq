@@ -2230,11 +2230,24 @@ fn conflict_requests_past_the_limit_ask_a_person() {
     );
 }
 
+/// [`fixture`] whose supervisors look for a sign of work one second after
+/// a request (`[stall].send_confirm_secs` in the main checkout's
+/// `dagq.toml`, task 546).
+fn confirming_fixture() -> (Fixture, PathBuf, PathBuf) {
+    let (dir, repo, db) = fixture();
+    fs::write(repo.join("dagq.toml"), "[stall]\nsend_confirm_secs = 1\n").unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-q", "-m", "stall"]);
+    (dir, repo, db)
+}
+
 /// Runs task 1 under a supervisor that died after it recorded a request to
-/// the live session and typed it (the test writes the text the session
-/// reads), with `events` as what it recorded after the validation, and
-/// lets another supervisor adopt the run with `reviewer`. Returns the
-/// adopted run's detail once the supervisor returns.
+/// the live session, with `events` as what it recorded after the
+/// validation, and lets another supervisor adopt the run with `reviewer`.
+/// The request's text `message` is written to its file in the run
+/// directory (`revise-1.txt` or `conflict-1.txt`, after the request's event),
+/// and with `typed` the dead supervisor typed it: the session reads it and
+/// is at work. Returns the adopted run's detail once the supervisor returns.
 fn adopt_pending_request(
     repo: &Path,
     db: &Path,
@@ -2242,6 +2255,7 @@ fn adopt_pending_request(
     reviewer: &TestReviewer,
     events: impl FnOnce(&str, i64) -> Vec<(&'static str, Value)>,
     message: impl FnOnce() -> String,
+    typed: bool,
 ) -> dagq::domain::TaskDetail {
     let run = start_run_under_dead_supervisor(repo, db, backend, "dead-supervisor");
     let idle = run.idle_marker_path().unwrap();
@@ -2265,10 +2279,24 @@ fn adopt_pending_request(
         .unwrap()
         .as_secs() as i64;
     let mut queue = SqliteQueue::open(db).unwrap();
-    for (kind, payload) in events(&head, sent_at) {
+    let events = events(&head, sent_at);
+    let file = events.iter().rev().find_map(|(kind, _)| match *kind {
+        "revise_requested" => Some("revise-1.txt"),
+        "conflict_precheck" => Some("conflict-1.txt"),
+        _ => None,
+    });
+    for (kind, payload) in events {
         queue.record_runtime_event(run.id(), kind, payload).unwrap();
     }
-    fs::write(resume_message_path(run.run_dir().unwrap()), message()).unwrap();
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let message = message();
+    if let Some(file) = file {
+        fs::write(run_dir.join(file), &message).unwrap();
+    }
+    if typed {
+        *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
+        fs::write(resume_message_path(run.run_dir().unwrap()), message).unwrap();
+    }
     age_lease(db, &run, 31);
     let outcome = supervise_reviewed(db, repo, backend, reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -2283,7 +2311,7 @@ fn adopt_pending_request(
 /// reviews, and lands the run.
 #[test]
 fn an_adopted_run_with_a_pending_conflict_request_waits_without_sending_it_again() {
-    let (_dir, repo, db) = fixture();
+    let (_dir, repo, db) = confirming_fixture();
     let seed = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &rebasing_agent(1));
     fs::write(repo.join("change.txt"), "main moved\n").unwrap();
@@ -2322,6 +2350,7 @@ fn an_adopted_run_with_a_pending_conflict_request_waits_without_sending_it_again
             ]
         },
         || format!("main is now {moved} (your base commit was {seed})."),
+        true,
     );
     let run = detail.runs[0].clone();
     assert_landed(&repo, &run, "test task", &moved);
@@ -2346,7 +2375,7 @@ fn an_adopted_run_with_a_pending_conflict_request_waits_without_sending_it_again
 /// validated, reviewed, and landed.
 #[test]
 fn an_adopted_run_with_a_pending_revise_waits_without_sending_it_again() {
-    let (_dir, repo, db) = fixture();
+    let (_dir, repo, db) = confirming_fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = TestWorkspace::new(&db, false, &revising_agent(1));
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "fixed")]);
@@ -2373,6 +2402,7 @@ fn an_adopted_run_with_a_pending_revise_waits_without_sending_it_again() {
             ]
         },
         || "dagq: the supervisor's review asks for changes (revise 1 of 2).".to_owned(),
+        true,
     );
     let run = detail.runs[0].clone();
     assert_landed(&repo, &run, "test task", &base);
@@ -2385,6 +2415,211 @@ fn an_adopted_run_with_a_pending_revise_waits_without_sending_it_again() {
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     assert_eq!(reviewer.prompts().len(), 1);
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+}
+
+/// The events of a supervisor that recorded revise request 1 at `sent_at`.
+fn pending_revise(sent_at: i64) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "validation_finished",
+            json!({"status": "awaiting_integration"}),
+        ),
+        ("review_started", json!({"attempt": 1})),
+        (
+            "review_finished",
+            json!({"verdict": "revise", "reasons": ["add a line"], "summary": "one gap", "attempt": 1}),
+        ),
+        (
+            "revise_requested",
+            json!({"attempt": 1, "reasons": ["add a line"], "sent_at": sent_at}),
+        ),
+    ]
+}
+
+const REVISE_TEXT: &str = "dagq: the supervisor's review asks for changes (revise 1 of 2).";
+
+/// A revise request recorded but never typed (the supervisor died in
+/// between) is not waited for up to the resume timeout by the supervisor
+/// that adopts the run (task 546): its session shows no sign of it within
+/// `[stall].send_confirm_secs` and its input box is empty, so the request
+/// written to `revise-1.txt` is sent once (`submit_resent`), and the
+/// session's rewritten receipt is reviewed and landed.
+#[test]
+fn an_adopted_revise_the_session_never_got_is_sent_again_and_lands() {
+    let (_dir, repo, db) = confirming_fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(&db, false, &revising_agent(1));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fixed")]);
+    let detail = adopt_pending_request(
+        &repo,
+        &db,
+        &backend,
+        &reviewer,
+        |_, sent_at| pending_revise(sent_at),
+        || REVISE_TEXT.to_owned(),
+        false,
+    );
+    let run = detail.runs[0].clone();
+    assert_landed(&repo, &run, "test task", &base);
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        format!("change by {}\nfix 1\n", run.id())
+    );
+    assert_eq!(
+        backend.texts(),
+        [(WORKSPACE_ID.to_owned(), REVISE_TEXT.to_owned())]
+    );
+    let resent = payloads(&detail, "submit_resent");
+    assert_eq!(resent.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(resent[0]["what"], "revise request");
+    assert_eq!(resent[0]["waited_secs"], 1);
+    assert!(payloads(&detail, "submit_not_started").is_empty());
+    assert_eq!(payloads(&detail, "revise_requested").len(), 1);
+    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+}
+
+/// A conflict request recorded but never typed is sent once by the
+/// supervisor that adopts the run, as a revise is (task 546): the session
+/// rebases onto the main it names, and the run is reviewed and lands.
+#[test]
+fn an_adopted_conflict_request_the_session_never_got_is_sent_again_and_lands() {
+    let (_dir, repo, db) = confirming_fixture();
+    let seed = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(&db, false, &rebasing_agent(1));
+    fs::write(repo.join("change.txt"), "main moved\n").unwrap();
+    git(&repo, &["add", "change.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main moves"]);
+    let moved = git_out(&repo, &["rev-parse", "main"]);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "still meets it")]);
+    let text = format!("main is now {moved} (your base commit was {seed}).");
+    let detail = adopt_pending_request(
+        &repo,
+        &db,
+        &backend,
+        &reviewer,
+        |head, sent_at| {
+            vec![
+                (
+                    "validation_finished",
+                    json!({"status": "awaiting_integration"}),
+                ),
+                ("review_started", json!({"attempt": 1})),
+                (
+                    "review_finished",
+                    json!({"verdict": "pass", "reasons": [], "summary": "ok", "attempt": 1}),
+                ),
+                (
+                    "conflict_precheck",
+                    json!({
+                        "code": "rebase_conflict",
+                        "main": moved,
+                        "head": head,
+                        "conflicts": ["change.txt"],
+                        "attempt": 1,
+                        "requested": true,
+                        "sent_at": sent_at,
+                    }),
+                ),
+            ]
+        },
+        || text.clone(),
+        false,
+    );
+    let run = detail.runs[0].clone();
+    assert_landed(&repo, &run, "test task", &moved);
+    assert_eq!(backend.texts(), [(WORKSPACE_ID.to_owned(), text)]);
+    let resent = payloads(&detail, "submit_resent");
+    assert_eq!(resent.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(resent[0]["what"], "conflict request");
+    assert!(payloads(&detail, "submit_not_started").is_empty());
+    assert_eq!(payloads(&detail, "conflict_precheck").len(), 1);
+    assert_eq!(payloads(&detail, "conflict_resolved").len(), 1);
+    assert_eq!(reviewer.prompts().len(), 1);
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+}
+
+/// Adopts a revise request `events` recorded that its session never gets,
+/// the session exiting once the `stalled` ask is open.
+fn adopt_lost_revise(
+    events: impl FnOnce(i64) -> Vec<(&'static str, Value)>,
+) -> (
+    Fixture,
+    PathBuf,
+    TestWorkspace,
+    TestReviewer,
+    dagq::domain::TaskDetail,
+) {
+    let (dir, repo, db) = confirming_fixture();
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
+         until \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done",
+    );
+    backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]);
+    let detail = adopt_pending_request(
+        &repo,
+        &db,
+        &backend,
+        &reviewer,
+        |_, sent_at| events(sent_at),
+        || REVISE_TEXT.to_owned(),
+        false,
+    );
+    (dir, db, backend, reviewer, detail)
+}
+
+/// A supervisor that adopts a request an earlier supervisor's check sent
+/// once more already (`submit_resent`, as after an exec handoff) does not
+/// send it again: it records `submit_not_started` (task 546).
+#[test]
+fn an_adopted_request_already_sent_again_is_not_sent_a_third_time() {
+    let (_dir, _db, backend, _reviewer, detail) = adopt_lost_revise(|sent_at| {
+        let mut events = pending_revise(sent_at);
+        events.push((
+            "submit_resent",
+            json!({"workspace_id": WORKSPACE_ID, "what": "revise request", "waited_secs": 1}),
+        ));
+        events
+    });
+    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
+    let not_started = payloads(&detail, "submit_not_started");
+    assert_eq!(not_started.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(not_started[0]["resent"], true);
+}
+
+/// An adopted request that is lost again after it is sent once more is not
+/// sent a third time: the run records `submit_not_started`, and its
+/// recovery job escalates it to the `stalled` ask in the inbox (task 546).
+/// The session here exits once that ask is open.
+#[test]
+fn an_adopted_request_lost_again_is_asked_to_the_inbox() {
+    let (_dir, db, backend, reviewer, detail) = adopt_lost_revise(pending_revise);
+    assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
+    assert_eq!(payloads(&detail, "submit_resent").len(), 1);
+    let not_started = payloads(&detail, "submit_not_started");
+    assert_eq!(not_started.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(not_started[0]["what"], "revise request");
+    assert_eq!(not_started[0]["resent"], true);
+    assert!(reviewer.prompts().is_empty(), "reviewed again");
+    let queue = SqliteQueue::open(&db).unwrap();
+    let asks = queue
+        .asks(AskQuery {
+            all: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let stalled: Vec<_> = asks.iter().filter(|a| a.kind == AskKind::Stalled).collect();
+    assert_eq!(stalled.len(), 1, "{asks:?}");
+    assert_eq!(stalled[0].run_id.as_ref(), Some(detail.runs[0].id()));
+    assert!(
+        asks.iter().any(|a| a.kind == AskKind::ApproveLanding),
+        "{asks:?}"
+    );
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
 }
 
 /// A revise request that cannot be typed is withdrawn: the
@@ -2486,6 +2721,7 @@ fn an_adopted_run_with_a_withdrawn_revise_asks_a_person_without_sending_it() {
             ]
         },
         String::new,
+        false,
     );
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(reviewer.prompts().is_empty(), "reviewed again");

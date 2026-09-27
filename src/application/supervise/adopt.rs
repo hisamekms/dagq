@@ -270,8 +270,9 @@ impl Supervisor<'_> {
     }
     /// Rebuild an adopted `awaiting_integration` run under review from its
     /// events: a `revise_requested` with nothing after it waits for the live
-    /// session again (it is recorded before it is typed, so it is never
-    /// typed a second time), and a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
+    /// session again (it is recorded before it is typed, so it is typed a
+    /// second time only when the session shows no sign of it,
+    /// [`StartCheck::adopted`]), and a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
     /// nothing after it), or an approved run not reviewed since its
     /// validation, goes on to its `/exit` without a second review and
     /// without a second `/exit` if one was already requested; anything else
@@ -294,20 +295,26 @@ impl Supervisor<'_> {
                 if let Some(live) = session.clone()
                     && session_alive(self, run.id())?
                 {
+                    let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
+                    let sent_at = adopted_sent_at(&anchor.payload);
+                    let start = self.adopted_start(
+                        run,
+                        &events,
+                        anchor.id,
+                        "revise request",
+                        &format!("revise-{attempt}.txt"),
+                        sent_at,
+                    );
                     return Ok(Phase::Revise(ReviseWatch::new(
                         run,
                         live,
-                        anchor.payload["attempt"].as_u64().unwrap_or(1) as usize,
+                        attempt,
                         Fix::Revise(
                             serde_json::from_value(anchor.payload["reasons"].clone())
                                 .unwrap_or_default(),
                         ),
-                        UNIX_EPOCH
-                            + Duration::from_secs(
-                                anchor.payload["sent_at"].as_u64().unwrap_or_default(),
-                            ),
-                        // An adopted request is not checked for a start.
-                        None,
+                        sent_at,
+                        start,
                     )?));
                 }
                 None
@@ -320,17 +327,23 @@ impl Supervisor<'_> {
                     && let Some(verdict) = passed
                     && session_alive(self, run.id())?
                 {
+                    let attempt = anchor.payload["attempt"].as_u64().unwrap_or(1) as usize;
+                    let sent_at = adopted_sent_at(&anchor.payload);
+                    let start = self.adopted_start(
+                        run,
+                        &events,
+                        anchor.id,
+                        "conflict request",
+                        &format!("conflict-{attempt}.txt"),
+                        sent_at,
+                    );
                     return Ok(Phase::Revise(ReviseWatch::new(
                         run,
                         live,
-                        anchor.payload["attempt"].as_u64().unwrap_or(1) as usize,
+                        attempt,
                         Fix::Conflict(verdict),
-                        UNIX_EPOCH
-                            + Duration::from_secs(
-                                anchor.payload["sent_at"].as_u64().unwrap_or_default(),
-                            ),
-                        // An adopted request is not checked for a start.
-                        None,
+                        sent_at,
+                        start,
                     )?));
                 }
                 None
@@ -512,6 +525,52 @@ impl Supervisor<'_> {
     /// is dead or its heartbeat is older than `HEARTBEAT_TIMEOUT_SECS`.
     pub(super) fn lease_stale(&self, lease: &RunLease, now: i64) -> bool {
         heartbeat_stale(self.processes.alive(lease.pid), now - lease.heartbeat_at)
+    }
+}
+
+/// When an adopted revise or conflict request was recorded as sent.
+fn adopted_sent_at(payload: &Value) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(payload["sent_at"].as_u64().unwrap_or_default())
+}
+
+impl Supervisor<'_> {
+    /// The start check of an adopted request (task 546): the request was
+    /// recorded before it was typed, so the supervisor adopted from may have
+    /// stopped in between. Its text is the one written to `file` in the run
+    /// directory before the record; without it the request is only waited
+    /// for, up to the resume timeout.
+    /// What the checks of earlier supervisors recorded after the request
+    /// (event `anchor`) carries over: one that sent it again leaves no
+    /// second resend, and one that recorded `submit_not_started` leaves
+    /// nothing to check (its recovery job has it).
+    fn adopted_start(
+        &self,
+        run: &TaskRun,
+        events: &[crate::domain::RunEvent],
+        anchor: EventId,
+        what: &str,
+        file: &str,
+        sent_at: SystemTime,
+    ) -> Option<StartCheck> {
+        let checked = |kind: &str| {
+            events
+                .iter()
+                .skip_while(|e| e.id != anchor)
+                .skip(1)
+                .any(|e| e.kind == kind && e.payload["what"] == what)
+        };
+        if checked(event_kind::SUBMIT_NOT_STARTED) {
+            return None;
+        }
+        let resent = checked(event_kind::SUBMIT_RESENT);
+        let path = Path::new(run.run_dir()?).join(file);
+        match self.files.read_to_string(&path) {
+            Ok(text) => Some(StartCheck::adopted(what, &text, sent_at, resent)),
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %error, "the adopted {what} of {} cannot be checked for a start: {} could not be read: {error}", run.id(), path.display());
+                None
+            }
+        }
     }
 }
 
