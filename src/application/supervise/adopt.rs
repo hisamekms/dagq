@@ -272,7 +272,9 @@ impl Supervisor<'_> {
     /// events: a `revise_requested` with nothing after it waits for the live
     /// session again (it is recorded before it is typed, so it is typed a
     /// second time only when the session shows no sign of it,
-    /// [`StartCheck::adopted`]), and a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
+    /// [`StartCheck::adopted`]), with the dialog and the recovery jobs the
+    /// previous supervisor recorded during it ([`SessionWatch::adopt`]), and
+    /// a `revise_unsent` asks a person; a verdict already recorded (`review_finished` with
     /// nothing after it), or an approved run not reviewed since its
     /// validation, goes on to its `/exit` without a second review and
     /// without a second `/exit` if one was already requested; anything else
@@ -305,7 +307,7 @@ impl Supervisor<'_> {
                         &format!("revise-{attempt}.txt"),
                         sent_at,
                     );
-                    return Ok(Phase::Revise(ReviseWatch::new(
+                    let mut watch = ReviseWatch::new(
                         run,
                         live,
                         attempt,
@@ -315,7 +317,9 @@ impl Supervisor<'_> {
                         ),
                         sent_at,
                         start,
-                    )?));
+                    )?;
+                    watch.live.adopt(&*self.queue, run)?;
+                    return Ok(Phase::Revise(watch));
                 }
                 None
             }
@@ -337,14 +341,16 @@ impl Supervisor<'_> {
                         &format!("conflict-{attempt}.txt"),
                         sent_at,
                     );
-                    return Ok(Phase::Revise(ReviseWatch::new(
+                    let mut watch = ReviseWatch::new(
                         run,
                         live,
                         attempt,
                         Fix::Conflict(verdict),
                         sent_at,
                         start,
-                    )?));
+                    )?;
+                    watch.live.adopt(&*self.queue, run)?;
+                    return Ok(Phase::Revise(watch));
                 }
                 None
             }

@@ -268,6 +268,21 @@ impl SessionWatch {
         })
     }
 
+    /// Carry over into the watch of a revise the supervisor adopted what the
+    /// previous one recorded for its session, as an adopted worker's own
+    /// session does: the dialog recorded as `prompt_waiting` and not cleared
+    /// since, so the same screen is not recorded again and the revise's end
+    /// clears it (closing its `answer_prompt` ask), and the recovery watch
+    /// rebuilt from its events ([`RecoveryWatch::adopt`]) (task 581).
+    pub(super) fn adopt(&mut self, queue: &dyn Queue, run: &TaskRun) -> Result<()> {
+        let events = queue.run_events(run.id())?;
+        self.prompt_hash = RunHistory::from_events(&events)
+            .waiting_prompt_hash()
+            .map(str::to_owned);
+        self.recovery = RecoveryWatch::adopt(queue, run)?;
+        Ok(())
+    }
+
     /// Whether the session is idle: an idle marker exists, written after
     /// the last input typed when one is known.
     fn idle(&self, sv: &Supervisor<'_>) -> bool {
