@@ -216,6 +216,7 @@ mod tests {
             context: String::new(),
             created_at: "c".into(),
             updated_at: "u".into(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         })
         .unwrap()
     }
@@ -227,6 +228,7 @@ mod tests {
             status: RunStatus::Failed,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Interactive,
             base_commit: CommitSha::try_from("b".repeat(40)).unwrap(),
             branch: Some(format!("dagq/{id}")),
             worktree_path: Some("/w".into()),

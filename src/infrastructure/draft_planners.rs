@@ -775,6 +775,8 @@ mod tests {
                 kind: None,
                 goal_id: None,
                 context: String::new(),
+                provider: None,
+                worker_mode: None,
             })
             .unwrap()
             .id()
@@ -829,6 +831,8 @@ mod tests {
                     kind: None,
                     goal_id,
                     context: String::new(),
+                    provider: None,
+                    worker_mode: None,
                 })
                 .unwrap()
                 .id();

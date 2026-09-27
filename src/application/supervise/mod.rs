@@ -48,7 +48,7 @@ use super::{
     AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
     InputSource, LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository,
     ResumeCandidate, RunFiles, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation,
-    Verifier, WorkspaceBackend,
+    Verifier, WorkerAdapters, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
         WorkspaceAccess,
@@ -90,6 +90,7 @@ use crate::domain::{
     run_env::RUN_ENV_PROGRAM_KINDS,
     stall::{BackgroundTask, STALL_CONFIG_LOADED, StallConfig},
     triage_state,
+    worker::Worker,
     worker_model::{WorkerSession, WorkerTrial},
 };
 
@@ -249,6 +250,12 @@ pub struct Layout {
     pub common_dir: PathBuf,
     /// The `claude` the run sessions start.
     pub claude: PathBuf,
+    /// The `codex` a Codex worker starts (`supervise --codex`), resolved
+    /// when it was found.
+    pub codex: PathBuf,
+    /// Each provider's executable as resolved at the start, recorded on
+    /// the registration for `status` and `doctor`.
+    pub providers: Vec<crate::domain::worker::ProviderCheck>,
     /// The runtime binary the sessions and the observer run (snapshotted
     /// into each run directory).
     pub runner: PathBuf,
@@ -283,10 +290,11 @@ pub struct Ports<'a> {
     pub remote: Arc<dyn MainRemote + Send + Sync>,
     pub verifier: Arc<dyn Verifier + Send + Sync>,
     pub cmux: &'a dyn WorkspaceBackend,
-    /// The agent of the run sessions, checked before anything is claimed.
-    pub agent: &'a dyn AgentProvider,
-    /// Reads the screen and the idle marker of that agent's sessions.
-    pub signals: &'a dyn AgentSignals,
+    /// The adapters of each worker (provider and mode) this binary runs
+    /// (ADR-t813-2): every agent is checked before anything is claimed, the
+    /// signals of Claude's interactive sessions read the run screens, and a
+    /// task whose worker has none is not claimed.
+    pub workers: WorkerAdapters<'a>,
     /// Starts the headless review and triage (ADR-0027, ADR-0024).
     pub reviewer: &'a dyn AgentProvider,
     pub spawner: &'a dyn Spawner,
@@ -424,7 +432,16 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         "keep the queue outside the worktree or under its Git common directory"
     );
     ports.cmux.preflight()?;
-    ports.agent.preflight()?;
+    // The screens and idle markers are those of the interactive sessions.
+    let interactive = ports
+        .workers
+        .get(Worker::DEFAULT)
+        .context("no adapters for the interactive Claude worker")?;
+    for worker in ports.workers.workers() {
+        if let Some(adapter) = ports.workers.get(worker) {
+            adapter.agent.preflight()?;
+        }
+    }
     let mut queue = ports.queues.open()?;
     queue.bind_repository(&path_text(&layout.common_dir)?)?;
     let parallel = u32::try_from(settings.limits.parallel.value)
@@ -473,6 +490,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     // decision 7), with where each comes from (task 698); written again by
     // the process an exec continues.
     queue.set_slot_limits(&token, settings.limits)?;
+    queue.set_supervisor_providers(&token, &layout.providers)?;
     let mut config = serde_json::to_value(settings.stall)?;
     config["supervisor"] = json!(token);
     queue.record_queue_event(STALL_CONFIG_LOADED, config)?;
@@ -513,7 +531,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         verifier: ports.verifier.clone(),
         cmux: &cmux,
         reviewer: ports.reviewer,
-        signals: ports.signals,
+        signals: interactive.signals,
+        workers: ports.workers.workers(),
         spawner: ports.spawner,
         files: ports.files.clone(),
         processes: ports.processes.clone(),
@@ -614,6 +633,9 @@ struct Supervisor<'a> {
     reviewer: &'a dyn AgentProvider,
     /// Reads the screen and the idle marker of the run sessions.
     signals: &'a dyn AgentSignals,
+    /// The workers this supervisor runs: a candidate whose worker is not
+    /// one of them is not claimed (ADR-t813-2).
+    workers: Vec<Worker>,
     spawner: &'a dyn Spawner,
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,
@@ -1165,6 +1187,7 @@ impl Supervisor<'_> {
                 &order,
                 Some(&serde_json::to_value(&attributes)?),
                 &trial,
+                &self.workers,
             )? {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => break,

@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use super::{
     CommitSha, DomainError, Provider, RunEvent, RunId, RunPaths, RunPlan, RunRecord, RunStatus,
-    Task, TaskId, TaskStatus, require,
+    Task, TaskId, TaskStatus, require, worker::WorkerMode,
 };
 
 mod history;
@@ -34,6 +34,9 @@ pub struct TaskRun {
     status: RunStatus,
     requested_provider: Provider,
     actual_provider: Provider,
+    /// The mode of its worker, as its task asked at the claim (ADR-t813-1
+    /// decision 7); a run from before the mode existed is interactive.
+    worker_mode: WorkerMode,
     base_commit: CommitSha,
     branch: Option<String>,
     worktree_path: Option<String>,
@@ -52,13 +55,13 @@ pub struct TaskRun {
 impl TaskRun {
     /// The run a supervisor starts when it claims `task` (already moved to
     /// `in_progress` by [`super::task::claim`]): `claimed`, on `base_commit`
-    /// (kept in lowercase), with `provider` requested and used, and nothing
-    /// provisioned yet.
+    /// (kept in lowercase), with the provider and mode of its task's worker
+    /// requested and used (ADR-t813-2 decision 1), and nothing provisioned
+    /// yet.
     pub fn new(
         id: RunId,
         task: &Task,
         base_commit: &CommitSha,
-        provider: Provider,
         claimed_at: String,
     ) -> Result<Self, DomainError> {
         require(task.status() == TaskStatus::InProgress, || {
@@ -71,8 +74,9 @@ impl TaskRun {
             id,
             task_id: task.id(),
             status: RunStatus::Claimed,
-            requested_provider: provider,
-            actual_provider: provider,
+            requested_provider: task.worker().provider,
+            actual_provider: task.worker().provider,
+            worker_mode: task.worker().mode,
             base_commit: CommitSha::parse(
                 base_commit.as_str().to_ascii_lowercase(),
                 "base commit",
@@ -109,6 +113,7 @@ impl TaskRun {
             status: record.status,
             requested_provider: record.requested_provider,
             actual_provider: record.actual_provider,
+            worker_mode: record.worker_mode,
             base_commit: record.base_commit,
             branch: record.branch,
             worktree_path: record.worktree_path,
@@ -142,6 +147,10 @@ impl TaskRun {
 
     pub fn actual_provider(&self) -> Provider {
         self.actual_provider
+    }
+
+    pub fn worker_mode(&self) -> WorkerMode {
+        self.worker_mode
     }
 
     pub fn base_commit(&self) -> &CommitSha {
@@ -699,6 +708,7 @@ mod tests {
             status,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Interactive,
             base_commit: CommitSha::parse(SHA, "base commit").unwrap(),
             branch: None,
             worktree_path: None,
@@ -763,31 +773,20 @@ mod tests {
                 paths: Vec::new(),
                 priority: Default::default(),
                 kind: None,
+                provider: None,
+                worker_mode: None,
             },
             "now".into(),
         )
         .unwrap();
         let base = CommitSha::parse(SHA.to_ascii_uppercase(), "base commit").unwrap();
-        let error = TaskRun::new(
-            RunId::new("r1").unwrap(),
-            &ready,
-            &base,
-            Provider::Claude,
-            "t0".into(),
-        )
-        .unwrap_err();
+        let error =
+            TaskRun::new(RunId::new("r1").unwrap(), &ready, &base, "t0".into()).unwrap_err();
         assert!(matches!(error, DomainError::RunOfUnclaimedTask { .. }));
         assert!(error.to_string().starts_with("task 3 is "));
         let ready = task::transition(ready, task::TaskAction::BypassReview, false).unwrap();
         let claimed = task::claim(ready).unwrap();
-        let run = TaskRun::new(
-            RunId::new("r1").unwrap(),
-            &claimed,
-            &base,
-            Provider::Claude,
-            "t0".into(),
-        )
-        .unwrap();
+        let run = TaskRun::new(RunId::new("r1").unwrap(), &claimed, &base, "t0".into()).unwrap();
         assert_eq!(run.status(), RunStatus::Claimed);
         assert_eq!(run.task_id(), TaskId::new(3));
         assert_eq!(run.base_commit().as_str(), SHA);

@@ -6,12 +6,12 @@ use anyhow::{Result, ensure};
 use rusqlite::{Row, params, params_from_iter, types::Value};
 use serde_json::{Map, json};
 
-use super::sqlite::SqliteQueue;
-use crate::domain::DomainError;
+use super::sqlite::{SqliteQueue, optional_enum_col};
 use crate::domain::search::{
     SearchHit, SearchKind, SearchPage, SearchQuery, SearchRef, excerpt, field_name, first_line,
     parse_terms,
 };
+use crate::domain::{DomainError, worker::Worker};
 
 /// The indexed columns, in the order of the table, and their index in it.
 const COLUMNS: [(&str, usize); 5] = [
@@ -112,7 +112,11 @@ impl SqliteQueue {
         values.push(Value::from(i64::try_from(query.limit)?));
         let sql = format!(
             "SELECT kind, ref, task_id, goal_id, run_id, status, title, description, acceptance, \
-                    context, text, {score} AS score{snippets}
+                    context, text, {score} AS score{snippets},
+                    (SELECT t.worker_provider FROM tasks t
+                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_provider,
+                    (SELECT t.worker_mode FROM tasks t
+                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_mode
              FROM search_index WHERE {filter} ORDER BY {order} LIMIT ?"
         );
         let words: Vec<String> = terms.long.iter().chain(&terms.short).cloned().collect();
@@ -232,6 +236,17 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
             .map(|(name, text)| (field_name(kind, name).to_owned(), json!(text)))
             .collect::<Map<_, _>>()
     });
+    // A task's worker, NULL columns read as Claude interactive.
+    let worker = match kind {
+        SearchKind::Task => Some(
+            Worker::resolve(
+                optional_enum_col(row, "worker_provider")?,
+                optional_enum_col(row, "worker_mode")?,
+            )
+            .unwrap_or(Worker::DEFAULT),
+        ),
+        _ => None,
+    };
     Ok(SearchHit {
         kind,
         id,
@@ -246,6 +261,8 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
         goal_id: row
             .get::<_, Option<i64>>("goal_id")?
             .filter(|_| kind != SearchKind::Goal),
+        provider: worker.map(|worker| worker.provider),
+        worker_mode: worker.map(|worker| worker.mode),
         score: if full { row.get("score")? } else { None },
         fields,
     })
@@ -273,6 +290,8 @@ mod tests {
                 goal_dependencies: Vec::new(),
                 goal_id: None,
                 context: String::new(),
+                provider: None,
+                worker_mode: None,
             })
             .unwrap()
             .id()

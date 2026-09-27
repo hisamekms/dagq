@@ -231,6 +231,7 @@ mod registration_tests {
                 max_waiting,
                 parallel_source,
                 max_waiting_source,
+                providers: None,
             };
         assert_eq!(
             registration(

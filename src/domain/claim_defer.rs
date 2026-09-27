@@ -31,7 +31,9 @@ pub const CLAIM_DEFERRAL_ENDED: &str = "claim_deferral_ended";
 /// ends whatever came before it.
 pub const DEFERRAL_KINDS: [&str; 3] = [CLAIM_DEFERRED, CLAIM_DEFERRAL_ENDED, "run_claimed"];
 
-/// The only reason so far: the files meet on a hotspot.
+/// The files meet on a hotspot. A task is also deferred while the
+/// supervisor cannot run its worker ([`super::worker::PROVIDER_UNAVAILABLE`],
+/// [`super::worker::MODE_UNAVAILABLE`]; see [`worker_deferred`]).
 pub const HOT_FILES: &str = "hot_files";
 
 /// The default of `[conflicts] defer_max_secs`: a deferral lasts at most an
@@ -132,6 +134,8 @@ pub struct Deferral {
 pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, Deferral> {
     latest
         .iter()
+        // A deferral for the worker is kept apart (`worker_deferrals_in_place`).
+        .filter(|event| text(event, "reason").is_none_or(|reason| reason == HOT_FILES))
         .filter_map(|event| {
             let task = event.task_id?;
             let since = || timestamp_millis(&event.created_at).map(|ms| ms / 1000);
@@ -252,6 +256,70 @@ pub fn left(deferral: Deferral, now: i64, token: &LeaseToken) -> Option<(&'stati
             }),
         )
     })
+}
+
+/// The deferrals for the worker in place from each task's latest
+/// [`DEFERRAL_KINDS`] event: an open `claim_deferred` of such a reason, with
+/// its reason and since when (unix seconds).
+pub fn worker_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String, i64)> {
+    latest
+        .iter()
+        .filter(|event| event.kind == CLAIM_DEFERRED)
+        .filter_map(|event| {
+            let reason = text(event, "reason")?;
+            if reason == HOT_FILES {
+                return None;
+            }
+            let since = timestamp_millis(&event.created_at)? / 1000;
+            Some((event.task_id?, (reason.to_owned(), since)))
+        })
+        .collect()
+}
+
+/// The `claim_deferred` of a task whose worker this supervisor cannot run
+/// (ADR-t813-2): `reason` from [`super::worker::unavailable`]. It lasts
+/// until the supervisor can run the worker or the task leaves the
+/// candidates; it has no limit.
+pub fn worker_deferred(
+    reason: &str,
+    worker: super::worker::Worker,
+    token: &LeaseToken,
+) -> (&'static str, Value) {
+    let message = format!(
+        "this supervisor cannot run a {} {} worker ({reason}): not claimed until one can",
+        worker.provider.as_str(),
+        worker.mode.as_str()
+    );
+    (
+        CLAIM_DEFERRED,
+        json!({
+            "reason": reason,
+            "provider": worker.provider,
+            "worker_mode": worker.mode,
+            "message": message,
+            "supervisor": token,
+        }),
+    )
+}
+
+/// The end of a deferral for the worker: `why` is `cleared` (the
+/// supervisor can run it now) or `not_candidate`.
+pub fn worker_deferral_ended(
+    reason: &str,
+    why: &str,
+    since: i64,
+    now: i64,
+    token: &LeaseToken,
+) -> (&'static str, Value) {
+    (
+        CLAIM_DEFERRAL_ENDED,
+        json!({
+            "reason": reason,
+            "why": why,
+            "deferred_secs": (now - since).max(0),
+            "supervisor": token,
+        }),
+    )
 }
 
 /// Why the claim is deferred, for the log and the event.
@@ -673,5 +741,44 @@ mod tests {
         let stats = claim_deferrals(&again, EventId::new(0), EventId::new(2), end, |_| true);
         assert_eq!(stats.by_end["superseded"].count, 1);
         assert_eq!(stats.deferred.len(), 1);
+    }
+
+    #[test]
+    fn a_deferral_for_the_worker_is_kept_apart_from_those_on_hotspots() {
+        let token = LeaseToken::new("s");
+        let worker = super::super::worker::Worker::ALL[2];
+        let (kind, payload) = worker_deferred("provider_unavailable", worker, &token);
+        assert_eq!(kind, CLAIM_DEFERRED);
+        assert_eq!(payload["provider"], "codex");
+        assert_eq!(payload["worker_mode"], "headless");
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap()
+                .contains("codex headless")
+        );
+        let latest = [
+            event(1, 1, CLAIM_DEFERRED, payload, "00:00"),
+            event(2, 2, CLAIM_DEFERRED, json!({"reason": HOT_FILES}), "00:00"),
+            // A deferral from before the reason existed is on hotspots.
+            event(3, 3, CLAIM_DEFERRED, json!({}), "00:00"),
+        ];
+        let workers = worker_deferrals_in_place(&latest);
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[&TaskId::new(1)].0, "provider_unavailable");
+        let hot = deferrals_in_place(&latest);
+        let mut tasks: Vec<i64> = hot.keys().map(|task| task.as_i64()).collect();
+        tasks.sort_unstable();
+        assert_eq!(tasks, [2, 3]);
+        let since = workers[&TaskId::new(1)].1;
+        let (kind, ended) =
+            worker_deferral_ended("provider_unavailable", "cleared", since, since + 5, &token);
+        assert_eq!(kind, CLAIM_DEFERRAL_ENDED);
+        assert_eq!(ended["why"], "cleared");
+        assert_eq!(ended["deferred_secs"], 5);
+        // Ended, it is no longer in place.
+        let latest = [event(4, 1, CLAIM_DEFERRAL_ENDED, ended, "00:05")];
+        assert!(worker_deferrals_in_place(&latest).is_empty());
+        assert!(deferrals_in_place(&latest).is_empty());
     }
 }

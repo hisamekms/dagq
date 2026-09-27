@@ -214,6 +214,11 @@ pub struct SupervisorRegistration {
     /// Where `max_waiting` comes from; `None` as for `parallel_source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_waiting_source: Option<super::slot_limits::SettingSource>,
+    /// Each provider's executable as the supervisor resolved it at its
+    /// start (ADR-t813-2), and the worker modes it runs it in; `None` for
+    /// a supervisor of an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<super::worker::ProviderCheck>>,
 }
 
 impl SupervisorRegistration {

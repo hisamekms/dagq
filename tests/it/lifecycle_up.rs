@@ -199,6 +199,9 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         fixture.options.cmux.to_str().unwrap(),
         "--claude",
         fixture.options.claude.to_str().unwrap(),
+        // Fixed like `--claude` (ADR-t813-2).
+        "--codex",
+        fixture.options.codex.to_str().unwrap(),
         // What the start mark records (ADR-0051 decision 10).
         "--mode",
         "launchd",
@@ -589,6 +592,8 @@ fn up_prunes_dead_registrations_and_keeps_live_ones_and_leases() {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue
@@ -767,6 +772,8 @@ fn up_reports_runs_that_wait_for_a_person_or_the_supervisor() {
                 goal_dependencies: Vec::new(),
                 goal_id: None,
                 context: String::new(),
+                provider: None,
+                worker_mode: None,
             })
             .unwrap();
         queue

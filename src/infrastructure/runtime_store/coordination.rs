@@ -220,6 +220,23 @@ impl SqliteQueue {
         Ok(())
     }
 
+    /// Record the executables of the supervisor `token`'s providers as it
+    /// resolved them at its start (ADR-t813-2).
+    pub fn set_supervisor_providers(
+        &self,
+        token: &LeaseToken,
+        providers: &[crate::domain::worker::ProviderCheck],
+    ) -> Result<()> {
+        ensure!(
+            self.conn.execute(
+                "UPDATE supervisors SET providers=?2 WHERE token=?1",
+                params![token, serde_json::to_string(providers)?],
+            )? == 1,
+            "supervisor {token} is no longer registered"
+        );
+        Ok(())
+    }
+
     /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
     /// (ADR-0062 decision 7) and where each comes from (task 698).
     pub fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
@@ -590,6 +607,13 @@ impl RunCoordination for SqliteQueue {
     }
     fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         SqliteQueue::set_slot_limits(self, token, limits)
+    }
+    fn set_supervisor_providers(
+        &self,
+        token: &LeaseToken,
+        providers: &[crate::domain::worker::ProviderCheck],
+    ) -> Result<()> {
+        SqliteQueue::set_supervisor_providers(self, token, providers)
     }
     fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
         SqliteQueue::holds_lease(self, id, token)

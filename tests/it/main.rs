@@ -59,6 +59,7 @@ mod runtime_candidates;
 mod runtime_claim;
 mod runtime_claim_defer;
 mod runtime_claim_hold;
+mod runtime_claim_worker;
 mod runtime_cleanup;
 mod runtime_disk;
 mod runtime_evidence;

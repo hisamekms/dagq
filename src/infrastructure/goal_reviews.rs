@@ -180,6 +180,8 @@ fn register_gaps(
                 context: format!(
                     "goal_gap: goal review {review} of goal {goal} found this missing"
                 ),
+                provider: None,
+                worker_mode: None,
             },
             stamp,
         )?;

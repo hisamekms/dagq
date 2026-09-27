@@ -1890,6 +1890,7 @@ mod tests {
             context: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         })
         .unwrap()
     }
@@ -1901,6 +1902,7 @@ mod tests {
             status,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Interactive,
             base_commit: CommitSha::try_from(SHA).unwrap(),
             branch: Some(format!("dagq/{RUN}")),
             worktree_path: Some("/runs/run/worktree".into()),
@@ -2071,6 +2073,7 @@ mod tests {
             context: "context ".repeat(80),
             created_at: String::new(),
             updated_at: String::new(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         })
         .unwrap()
     }

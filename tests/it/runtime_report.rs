@@ -219,6 +219,8 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
                 goal_dependencies: Vec::new(),
                 goal_id: None,
                 context: String::new(),
+                provider: None,
+                worker_mode: None,
             })
             .unwrap()
             .id()

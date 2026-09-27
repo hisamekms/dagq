@@ -23,13 +23,13 @@ use crate::{
         ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit, GoalId,
         GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput, LintNode,
         NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND, Predecessor,
-        Priority, Proposal, ProposalId, Provider, RunEvent, RunId, RunRecord, Submission, Task,
-        TaskAction, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun, TaskStatus,
-        TaskStatusCounts,
+        Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission, Task, TaskAction,
+        TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun, TaskStatus, TaskStatusCounts,
         actor::ActorContext,
         goal,
         scope::validate_path_globs,
         task,
+        worker::{Worker, WorkerMode},
         worker_model::{self, WorkerTrial},
     },
     infrastructure::{
@@ -863,6 +863,9 @@ impl TaskStore for SqliteQueue {
             &[],
             None,
             &WorkerTrial::default(),
+            // What every binary runs (ADR-t813-2); a supervisor claims
+            // through its table of adapters instead.
+            &[Worker::DEFAULT],
         )?;
         tx.commit()?;
         Ok(outcome)
@@ -1288,7 +1291,7 @@ impl TaskStore for SqliteQueue {
             tx.execute(
                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
                  verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
-                 kind=?8, updated_at=?9 WHERE id=?10",
+                 kind=?8, worker_provider=?11, worker_mode=?12, updated_at=?9 WHERE id=?10",
                 params![
                     new.title(),
                     new.description(),
@@ -1299,7 +1302,9 @@ impl TaskStore for SqliteQueue {
                     new.context(),
                     new.kind().map(TaskKind::as_str),
                     self.generators.clock.timestamp(),
-                    task_id
+                    task_id,
+                    new.worker().provider.as_str(),
+                    new.worker().mode.as_str(),
                 ],
             )?;
             event(
@@ -1347,7 +1352,7 @@ impl TaskStore for SqliteQueue {
 
 /// The fields `dagq edit` replaces, as the task JSON names them; `task_edited`
 /// records the ones that changed.
-const EDITABLE_TASK_FIELDS: [&str; 8] = [
+const EDITABLE_TASK_FIELDS: [&str; 10] = [
     "title",
     "description",
     "acceptance",
@@ -1356,6 +1361,8 @@ const EDITABLE_TASK_FIELDS: [&str; 8] = [
     "paths",
     "context",
     "kind",
+    "provider",
+    "worker_mode",
 ];
 
 /// Register `new` inside the caller's write transaction with
@@ -1372,13 +1379,14 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
     tx.execute(
             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
                                context, required_evidence, paths, priority, kind, created_at,
-                               updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                               updated_at, worker_provider, worker_mode)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
                 serde_json::to_string(task.paths())?, task.priority().as_i64(),
-                task.kind().map(TaskKind::as_str), task.created_at(), task.updated_at()],
+                task.kind().map(TaskKind::as_str), task.created_at(), task.updated_at(),
+                task.worker().provider.as_str(), task.worker().mode.as_str()],
         )?;
     event(
         tx,
@@ -1705,7 +1713,9 @@ fn claim_order(conn: &Connection) -> Result<Vec<TaskId>> {
 /// supervisor measured at the claim, task 197) go into `run_claimed`
 /// beside its transition, and so does the worker session `trial` chooses
 /// for the task (ADR-0079 decisions 3 and 4): chosen here, in the claim's
-/// transaction, so two claims never take the same turn of the trial.
+/// transaction, so two claims never take the same turn of the trial. A
+/// task whose worker is not one of `workers` is not claimed (ADR-t813-2):
+/// the run takes the provider and mode of its task's worker.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn claim_task(
     tx: &Connection,
@@ -1716,8 +1726,10 @@ pub(super) fn claim_task(
     order: &[TaskId],
     attributes: Option<&serde_json::Value>,
     trial: &WorkerTrial,
+    workers: &[Worker],
 ) -> Result<ClaimOutcome> {
     let mut ready = ready_tasks(tx)?;
+    ready.retain(|task| workers.contains(&task.worker()));
     if ready.is_empty() {
         return Ok(ClaimOutcome::NoReadyTask);
     }
@@ -1733,7 +1745,7 @@ pub(super) fn claim_task(
     let choice = worker_model::choose(trial, task.id(), &trial_events(tx, trial)?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
-    let run = TaskRun::new(run_id, &task, base_commit, Provider::Claude, now.clone())?;
+    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?;
     // `status='ready'` only detects a concurrent change; the domain decided the claim.
     ensure!(
         tx.execute(
@@ -1744,21 +1756,21 @@ pub(super) fn claim_task(
         task.id()
     );
     tx.execute(
-        "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,worker_mode,base_commit,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             run.id(),
             run.task_id(),
             run.status().as_str(),
             run.requested_provider().as_str(),
             run.actual_provider().as_str(),
+            run.worker_mode().as_str(),
             run.base_commit(),
             run.created_at()
         ],
     )?;
     event(tx, task.id(), Some(run.id()), event_kind::RUN_CLAIMED, {
-        let mut payload =
-            json!({"from": "ready", "to": task.status(), "provider": run.actual_provider()});
+        let mut payload = json!({"from": "ready", "to": task.status(), "provider": run.actual_provider(), "worker_mode": run.worker_mode()});
         if let (Some(payload), Some(serde_json::Value::Object(attributes))) =
             (payload.as_object_mut(), attributes)
         {
@@ -2110,6 +2122,13 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         kind: row
             .get::<_, Option<String>>("kind")?
             .and_then(|kind| kind.parse().ok()),
+        // NULL (a task from before the worker existed) is Claude,
+        // interactive; the columns' CHECK keeps any other value out.
+        worker: Worker::resolve(
+            optional_enum_col(row, "worker_provider")?,
+            optional_enum_col(row, "worker_mode")?,
+        )
+        .map_err(restore_error)?,
         status: enum_col(row, "status")?,
         goal_id: row.get("goal_id")?,
         context: row.get("context")?,
@@ -2117,6 +2136,17 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         updated_at: row.get("updated_at")?,
     })
     .map_err(restore_error)
+}
+
+/// A nullable column of a [`string_enum!`] type.
+pub(super) fn optional_enum_col<T: std::str::FromStr<Err = DomainError>>(
+    row: &Row<'_>,
+    name: &str,
+) -> rusqlite::Result<Option<T>> {
+    match row.get::<_, Option<String>>(name)? {
+        Some(_) => enum_col(row, name).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
@@ -2159,6 +2189,7 @@ pub(super) fn stored_run_row(row: &Row<'_>) -> rusqlite::Result<TaskRun> {
         status: enum_col(row, "status")?,
         requested_provider: enum_col(row, "requested_provider")?,
         actual_provider: enum_col(row, "actual_provider")?,
+        worker_mode: optional_enum_col(row, "worker_mode")?.unwrap_or(WorkerMode::Interactive),
         base_commit: row.get("base_commit")?,
         branch: row.get("branch")?,
         worktree_path: row.get("worktree_path")?,

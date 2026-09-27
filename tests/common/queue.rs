@@ -30,6 +30,8 @@ pub fn new_task(title: &str) -> NewTask {
         goal_dependencies: Vec::new(),
         goal_id: None,
         context: String::new(),
+        provider: None,
+        worker_mode: None,
     }
 }
 

@@ -24,6 +24,8 @@ fn evidence_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf) {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     assert_eq!(task.id(), TaskId::new(2));
@@ -256,6 +258,8 @@ fn scope_fixture(paths: &[&str]) -> (Fixture, PathBuf, PathBuf) {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     assert_eq!(task.id(), TaskId::new(2));

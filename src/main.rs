@@ -25,6 +25,7 @@ use dagq::{
         PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole,
         StaticPolicy, Submission, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
+        worker::WorkerMode,
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
 };
@@ -92,6 +93,9 @@ enum Command {
         /// Claude Code executable the restarted supervisor uses after a drain.
         #[arg(long)]
         claude: Option<PathBuf>,
+        /// Codex CLI the restarted supervisor's Codex workers use after a drain.
+        #[arg(long)]
+        codex: Option<PathBuf>,
         /// Plugin directory of the restarted `up` after a drain.
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
@@ -139,6 +143,13 @@ enum Command {
         /// it. Omitted: none.
         #[arg(long)]
         kind: Option<String>,
+        /// The agent the worker runs on (ADR-t813-2): claude or codex. Omitted: claude.
+        #[arg(long, value_parser = PROVIDERS)]
+        provider: Option<String>,
+        /// Run the worker non-interactively, one call per turn (ADR-t813-1). Omitted: Claude runs
+        /// in its interactive session; codex runs headless only.
+        #[arg(long)]
+        headless: bool,
     },
     /// List one page of tasks, newest first: unfinished ones unless --status or --all says otherwise.
     /// Prints {"tasks", "next", "total"}; pass `next` to --before for the following page (null: none).
@@ -313,6 +324,16 @@ enum Command {
         /// What the task changes (`add --kind`): a lowercase label.
         #[arg(long, group = "field")]
         kind: Option<String>,
+        /// The agent the worker runs on (`add --provider`): claude or codex. Without --headless or
+        /// --interactive, the worker takes that provider's default mode.
+        #[arg(long, group = "field", value_parser = PROVIDERS)]
+        provider: Option<String>,
+        /// Run the worker non-interactively (`add --headless`).
+        #[arg(long, group = "field", conflicts_with = "interactive")]
+        headless: bool,
+        /// Run the worker in the agent's interactive session (Claude only).
+        #[arg(long, group = "field")]
+        interactive: bool,
     },
     /// Give a draft or ready task another priority (`add --priority`); it takes effect at the
     /// next claim and never stops a running run.
@@ -519,6 +540,10 @@ enum Command {
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        /// Codex CLI the Codex workers start (ADR-t813-2); a bare name is resolved on PATH. When it
+        /// is not found, no task of the codex provider is claimed.
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
         /// Write this start's JSON Lines log (supervise-<UTC time>-<pid>.jsonl)
         /// into this directory (created if missing) instead of the queue's
         /// logs/; messages also go to stderr.
@@ -600,6 +625,8 @@ enum Command {
         cmux: PathBuf,
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
         /// Seconds the supervisor may take to exec the new binary.
@@ -632,6 +659,8 @@ enum Command {
         cmux: PathBuf,
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
         /// Seconds the supervisor may take to exec the new binary.
@@ -715,6 +744,11 @@ enum Command {
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        /// Codex CLI the supervisor's Codex workers start (ADR-t813-2); a bare name is resolved on
+        /// PATH and fixed on the supervisor like --claude. When it is not found, `up` goes on and
+        /// the supervisor claims no task of the codex provider.
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
         /// Have the supervisor build and install the runtime of every landing on main that changes
         /// it, in the queue's own checkout, and hand itself over to it (ADR-0045 decision 17). Kept
         /// on the registration; an `up` without it turns it off.
@@ -1079,6 +1113,9 @@ enum Command {
 const ROLES: [&str; 2] = ["inbox", "planner"];
 /// The names of the task priorities (ADR-0040 decision 4), highest first.
 const PRIORITIES: [&str; 5] = ["interrupt", "urgent", "high", "normal", "low"];
+
+/// The providers a task's worker may run on (ADR-t813-2 decision 1).
+const PROVIDERS: [&str; 2] = ["claude", "codex"];
 
 /// A `kpi --kind`: a task kind, or `unknown` for the tasks without one.
 fn parse_kpi_kind(value: &str) -> Result<String, String> {
@@ -1721,6 +1758,7 @@ fn execute(cli: Cli) -> Result<Value> {
         handoff_timeout,
         cmux,
         claude,
+        codex,
         plugin_dir,
     } = cli.command
     {
@@ -1749,6 +1787,10 @@ fn execute(cli: Cli) -> Result<Value> {
         let mut restart = vec!["--cmux".to_owned(), path_text(&cmux)?];
         if let Some(claude) = claude {
             restart.extend(["--claude".to_owned(), path_text(&executable(&claude)?)?]);
+        }
+        if let Some(codex) = codex {
+            let codex = executable(&codex).unwrap_or(codex);
+            restart.extend(["--codex".to_owned(), path_text(&codex)?]);
         }
         if let Some(plugin_dir) = plugin_dir {
             restart.extend(["--plugin-dir".to_owned(), path_text(&plugin_dir)?]);
@@ -1855,6 +1897,8 @@ fn execute(cli: Cli) -> Result<Value> {
             paths,
             priority,
             kind,
+            provider,
+            headless,
         } => serde_json::to_value(
             planning!().add(NewTask {
                 title,
@@ -1872,6 +1916,8 @@ fn execute(cli: Cli) -> Result<Value> {
                 paths,
                 priority: priority.parse()?,
                 kind: kind.map(|kind| kind.parse()).transpose()?,
+                provider: provider.map(|provider| provider.parse()).transpose()?,
+                worker_mode: headless.then_some(WorkerMode::Headless),
             })?,
         )?,
         Command::List {
@@ -2058,6 +2104,9 @@ fn execute(cli: Cli) -> Result<Value> {
             paths,
             no_paths,
             kind,
+            provider,
+            headless,
+            interactive,
         } => {
             // A list flag replaces the list; its --no- flag empties it.
             let replaced =
@@ -2076,6 +2125,12 @@ fn execute(cli: Cli) -> Result<Value> {
                     paths: replaced(paths, no_paths),
                     context,
                     kind: kind.map(|kind| kind.parse()).transpose()?,
+                    provider: provider.map(|provider| provider.parse()).transpose()?,
+                    worker_mode: match (headless, interactive) {
+                        (true, _) => Some(WorkerMode::Headless),
+                        (_, true) => Some(WorkerMode::Interactive),
+                        _ => None,
+                    },
                 },
             )?)?
         }
@@ -2373,6 +2428,7 @@ fn execute(cli: Cli) -> Result<Value> {
             once,
             cmux,
             claude,
+            codex,
             log_dir: _,
             observe_interval,
             observe_daily,
@@ -2419,6 +2475,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 max_waiting: max_waiting.map(usize::from),
                 max_load: (max_load > 0.0).then_some(max_load),
                 user_config: dagq::infrastructure::language::user_config_file(),
+                codex,
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
             dagq::compose::supervise(
@@ -2441,6 +2498,7 @@ fn execute(cli: Cli) -> Result<Value> {
             repo,
             cmux,
             claude,
+            codex,
             auto_update,
         } => {
             use dagq::application::lifecycle::{QUEUE_ENV, ROLE_ENV, UpEnvironment, UpOptions};
@@ -2473,6 +2531,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 plugin_dir,
                 cmux: executable(&cmux)?,
                 claude: executable(&claude)?,
+                codex: executable(&codex).unwrap_or(codex),
                 startup_timeout: Duration::from_secs(30),
                 handoff_timeout: Duration::from_secs(handoff_timeout),
                 auto_update,
@@ -2499,6 +2558,7 @@ fn execute(cli: Cli) -> Result<Value> {
             build_command,
             cmux,
             claude,
+            codex,
             plugin_dir,
             handoff_timeout,
             watch_timeout,
@@ -2516,6 +2576,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     build_command,
                     cmux: executable(&cmux).unwrap_or(cmux),
                     claude: executable(&claude).unwrap_or(claude),
+                    codex: executable(&codex).unwrap_or(codex),
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
@@ -2530,6 +2591,7 @@ fn execute(cli: Cli) -> Result<Value> {
             cargo,
             cmux,
             claude,
+            codex,
             plugin_dir,
             handoff_timeout,
             watch_timeout,
@@ -2546,6 +2608,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     cargo: executable(&cargo).unwrap_or(cargo),
                     cmux: executable(&cmux).unwrap_or(cmux),
                     claude: executable(&claude).unwrap_or(claude),
+                    codex: executable(&codex).unwrap_or(codex),
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
@@ -2880,22 +2943,28 @@ fn install_stop_signal() -> Result<Arc<AtomicBool>> {
 /// the registration it takes over already has `up`'s mode.
 const HANDOFF_DROPPED: [&str; 2] = ["--handoff-token", "--mode"];
 
+/// The options of `supervise` a handed-off binary may predate (`--codex`,
+/// ADR-t813-2): each is kept only when the binary takes it, as
+/// [`takes_option`] finds, so a rollback to an older binary still starts.
+const HANDOFF_OPTIONAL: [&str; 1] = ["--codex"];
+
 /// The arguments of this process with `--handoff-token <token>` in place
-/// of any it had and without `--mode`: the `supervise` the handed-off
-/// binary runs.
-fn handoff_arguments(arguments: &[OsString], token: &str) -> Vec<OsString> {
+/// of any it had and without `--mode`, nor the options of `dropped`: the
+/// `supervise` the handed-off binary runs.
+fn handoff_arguments(arguments: &[OsString], token: &str, dropped: &[&str]) -> Vec<OsString> {
     let mut kept = Vec::with_capacity(arguments.len() + 2);
     let mut skip = false;
+    let dropped: Vec<&str> = HANDOFF_DROPPED.iter().chain(dropped).copied().collect();
     for argument in arguments {
         if std::mem::take(&mut skip) {
             continue;
         }
-        if HANDOFF_DROPPED.iter().any(|option| argument == *option) {
+        if dropped.iter().any(|option| argument == *option) {
             skip = true;
             continue;
         }
         if argument.to_str().is_some_and(|text| {
-            HANDOFF_DROPPED
+            dropped
                 .iter()
                 .any(|option| text.starts_with(&format!("{option}=")))
         }) {
@@ -2906,6 +2975,18 @@ fn handoff_arguments(arguments: &[OsString], token: &str) -> Vec<OsString> {
     kept.push("--handoff-token".into());
     kept.push(token.into());
     kept
+}
+
+/// Whether `binary`'s `supervise` takes `option` (with a value): clap
+/// refuses an unknown argument before it prints the help.
+fn takes_option(binary: &str, option: &str) -> bool {
+    std::process::Command::new(binary)
+        .args(["supervise", option, "probe", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Run the command; a supervisor asked to hand off (ADR-0045 decision 10)
@@ -2923,12 +3004,23 @@ fn run(mut arguments: Vec<OsString>) -> Result<Value> {
         else {
             bail!("a handoff without a binary or a token: {value}");
         };
-        arguments = handoff_arguments(&arguments, token);
+        let dropped: Vec<&str> = HANDOFF_OPTIONAL
+            .into_iter()
+            .filter(|option| {
+                arguments.iter().any(|argument| {
+                    argument.to_str().is_some_and(|text| {
+                        text == *option || text.starts_with(&format!("{option}="))
+                    })
+                }) && !takes_option(binary, option)
+            })
+            .collect();
+        // This binary takes every option: it goes on with them when the
+        // exec fails.
+        let handed = handoff_arguments(&arguments, token, &dropped);
+        arguments = handoff_arguments(&arguments, token, &[]);
         tracing::info!("supervisor {token} execs {binary}");
         use std::os::unix::process::CommandExt;
-        let error = std::process::Command::new(binary)
-            .args(&arguments[1..])
-            .exec();
+        let error = std::process::Command::new(binary).args(&handed[1..]).exec();
         tracing::error!(
             error = %error,
             "supervisor {token} could not exec {binary}: {error}; it goes on with this binary"
@@ -3001,7 +3093,7 @@ mod tests {
         .map(OsString::from)
         .collect();
         assert_eq!(
-            handoff_arguments(&arguments, "new"),
+            handoff_arguments(&arguments, "new", &[]),
             [
                 "dagq",
                 "supervise",
@@ -3012,6 +3104,37 @@ mod tests {
             ]
             .map(OsString::from)
         );
+    }
+
+    /// An option the handed-off binary does not take (`--codex` of a
+    /// binary before it) is dropped with its value, in either spelling.
+    #[test]
+    fn a_handoff_drops_an_option_the_binary_does_not_take() {
+        let arguments: Vec<OsString> = [
+            "dagq",
+            "supervise",
+            "--codex",
+            "/bin/codex",
+            "--claude",
+            "/bin/claude",
+            "--codex=/bin/codex",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(
+            handoff_arguments(&arguments, "new", &["--codex"]),
+            [
+                "dagq",
+                "supervise",
+                "--claude",
+                "/bin/claude",
+                "--handoff-token",
+                "new"
+            ]
+            .map(OsString::from)
+        );
+        assert!(!takes_option("/nonexistent/dagq", "--codex"));
     }
 
     /// Each command a role's Claude settings deny by its policy needs only

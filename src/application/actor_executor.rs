@@ -661,7 +661,7 @@ pub fn command_line(command: &CommandSpec) -> Result<String> {
 mod tests {
     use super::*;
     use crate::application::{Exit, SupervisorEnvironment};
-    use crate::domain::{CommitSha, NewTask, Provider, task};
+    use crate::domain::{CommitSha, NewTask, task};
     use std::sync::Mutex;
 
     fn claimed_run(id: &str) -> (Task, TaskRun) {
@@ -680,6 +680,8 @@ mod tests {
                 paths: Vec::new(),
                 priority: Default::default(),
                 kind: None,
+                provider: None,
+                worker_mode: None,
             },
             "now".into(),
         )
@@ -687,14 +689,7 @@ mod tests {
         let ready = task::transition(ready, task::TaskAction::BypassReview, false).unwrap();
         let claimed = task::claim(ready).unwrap();
         let base = CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base").unwrap();
-        let run = TaskRun::new(
-            RunId::new(id).unwrap(),
-            &claimed,
-            &base,
-            Provider::Claude,
-            "t0".into(),
-        )
-        .unwrap();
+        let run = TaskRun::new(RunId::new(id).unwrap(), &claimed, &base, "t0".into()).unwrap();
         (claimed, run)
     }
 

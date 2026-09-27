@@ -17,12 +17,13 @@ use crate::domain::{
     Priority, TaskId,
     claim_defer::{
         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
-        expected_files,
+        expected_files, worker_deferral_ended, worker_deferrals_in_place, worker_deferred,
     },
     stats::{
         ConflictConfigReport,
         conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_change},
     },
+    worker::{Worker, unavailable},
 };
 
 /// How long the hotspots (and the expected files of the tasks) are reused.
@@ -42,6 +43,9 @@ pub(super) struct DeferWatch {
     in_flight: Option<(i64, Vec<InFlight>)>,
     /// The deferrals in place; `None` until read from the queue.
     deferrals: Option<HashMap<TaskId, Deferral>>,
+    /// The deferrals for a worker this supervisor cannot run (ADR-t813-2),
+    /// with their reason and since when; `None` until read from the queue.
+    worker_deferrals: Option<HashMap<TaskId, (String, i64)>>,
 }
 
 impl DeferWatch {
@@ -105,20 +109,62 @@ impl Supervisor<'_> {
     }
 
     /// The candidates of `graph` this pass may claim, in its order: those
-    /// whose files meet a run in flight on a hotspot are passed over
-    /// (ADR-0069), and the start and end of each deferral are recorded on
-    /// its task.
+    /// whose worker this supervisor cannot run (ADR-t813-2) and those whose
+    /// files meet a run in flight on a hotspot are passed over (ADR-0069),
+    /// and the start and end of each deferral are recorded on its task.
     pub(super) fn claimable(&mut self, graph: &DependencyGraph) -> Result<Vec<TaskId>> {
         let now = self.generators.clock.now();
         let max_secs = self.conflicts.config.defer_max_secs;
         let (hot, in_flight) = self.hot_in_flight(now)?;
+        let latest = if self.defer.deferrals.is_none() || self.defer.worker_deferrals.is_none() {
+            self.queue.latest_task_events(&DEFERRAL_KINDS)?
+        } else {
+            Vec::new()
+        };
         let mut deferrals = match self.defer.deferrals.take() {
             Some(deferrals) => deferrals,
-            None => deferrals_in_place(&self.queue.latest_task_events(&DEFERRAL_KINDS)?),
+            None => deferrals_in_place(&latest),
+        };
+        let mut worker_deferrals = match self.defer.worker_deferrals.take() {
+            Some(deferrals) => deferrals,
+            None => worker_deferrals_in_place(&latest),
+        };
+        // Every worker runs here: no candidate is read for its worker.
+        let workers: HashMap<TaskId, Worker> = if Worker::ALL
+            .iter()
+            .all(|worker| self.workers.contains(worker))
+        {
+            HashMap::new()
+        } else {
+            self.queue
+                .candidates()?
+                .into_iter()
+                .map(|task| (task.id(), task.worker()))
+                .collect()
         };
         let mut order = Vec::new();
         let mut events = Vec::new();
         for &id in &graph.candidates {
+            let reason = workers
+                .get(&id)
+                .and_then(|&worker| unavailable(worker, &self.workers).map(|why| (worker, why)));
+            match (reason, worker_deferrals.get(&id)) {
+                (Some(_), Some(_)) => continue,
+                (Some((worker, why)), None) => {
+                    events.push((id, worker_deferred(why, worker, &self.token)));
+                    worker_deferrals.insert(id, (why.to_owned(), now));
+                    continue;
+                }
+                (None, Some(_)) => {
+                    if let Some((why, since)) = worker_deferrals.remove(&id) {
+                        events.push((
+                            id,
+                            worker_deferral_ended(&why, "cleared", since, now, &self.token),
+                        ));
+                    }
+                }
+                (None, None) => {}
+            }
             let interrupt = graph
                 .tasks
                 .iter()
@@ -152,6 +198,17 @@ impl Supervisor<'_> {
             }
         }
         let candidates: HashSet<TaskId> = graph.candidates.iter().copied().collect();
+        worker_deferrals.retain(|id, (why, since)| {
+            if candidates.contains(id) {
+                return true;
+            }
+            events.push((
+                *id,
+                worker_deferral_ended(why, "not_candidate", *since, now, &self.token),
+            ));
+            false
+        });
+        self.defer.worker_deferrals = Some(worker_deferrals);
         deferrals.retain(|id, deferral| {
             if candidates.contains(id) {
                 return true;

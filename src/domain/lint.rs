@@ -284,6 +284,8 @@ mod tests {
                 paths: vec![],
                 priority: Default::default(),
                 kind: None,
+                provider: None,
+                worker_mode: None,
             },
             "t".into(),
         )
@@ -474,6 +476,7 @@ mod tests {
             context: task.context().into(),
             created_at: task.created_at().into(),
             updated_at: task.updated_at().into(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         };
         edit(&mut record);
         Task::restore(record).unwrap()

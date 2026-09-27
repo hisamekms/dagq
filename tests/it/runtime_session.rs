@@ -1564,6 +1564,7 @@ fn claude_stop_hook_settings_publish_the_idle_marker() {
         status: RunStatus::Starting,
         requested_provider: dagq::domain::Provider::Claude,
         actual_provider: dagq::domain::Provider::Claude,
+        worker_mode: dagq::domain::worker::WorkerMode::Interactive,
         base_commit: sha("0123456789abcdef0123456789abcdef01234567"),
         branch: Some("dagq/x".into()),
         worktree_path: Some(dir.path().to_str().unwrap().into()),

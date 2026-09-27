@@ -115,6 +115,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             plugin_dir: Some(dir.path().to_path_buf()),
             cmux,
             claude,
+            codex: "/opt/bin/codex".into(),
             startup_timeout: Duration::from_secs(5),
             handoff_timeout: Duration::from_secs(5),
             auto_update: false,

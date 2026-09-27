@@ -1251,6 +1251,7 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
             "parallel",
             "parallel_source",
             "pid",
+            "providers",
             "registered",
             "run_ids",
             "stale",

@@ -110,6 +110,8 @@ pub(crate) fn add(
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id()
@@ -1410,6 +1412,8 @@ pub(crate) fn runtime_draft(
             goal_dependencies: Vec::new(),
             goal_id: goal,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id();
@@ -2024,6 +2028,8 @@ fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance:
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id()
@@ -2203,6 +2209,8 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id()
@@ -2313,6 +2321,8 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id();

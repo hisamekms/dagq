@@ -909,6 +909,8 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 task.id(),
                 task.title()
             ),
+            provider: None,
+            worker_mode: None,
         };
         let created = match queue.add(new) {
             Ok(created) => created,
@@ -2116,6 +2118,7 @@ mod tests {
             context: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         })
         .unwrap()
     }
@@ -2131,6 +2134,7 @@ mod tests {
             status,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Interactive,
             base_commit: sha(BASE),
             branch: Some(format!("dagq/{RUN}")),
             worktree_path: Some(path_text(dir).unwrap()),

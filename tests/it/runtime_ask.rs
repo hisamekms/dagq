@@ -658,6 +658,8 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             kind: None,
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue

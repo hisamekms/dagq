@@ -935,6 +935,8 @@ mod tests {
                 goal_id: None,
                 context: String::new(),
                 kind: None,
+                provider: None,
+                worker_mode: None,
             })
             .unwrap()
             .id()

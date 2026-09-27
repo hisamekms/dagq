@@ -8,6 +8,7 @@ use super::{
     DomainError, EvidenceCheck, GoalId, NewTask, Priority, TaskEdit, TaskId, TaskKind, TaskRecord,
     TaskStatus, require,
     scope::{dedup_globs, validate_path_globs},
+    worker::Worker,
 };
 
 /// What moves a task between statuses by hand or by plan review; only a
@@ -103,6 +104,11 @@ pub struct Task {
     /// What the task changes (goal 21); null for a task registered without
     /// one, before the kind existed among them.
     kind: Option<TaskKind>,
+    /// The provider and mode its worker runs on (ADR-t813-2 decision 1,
+    /// ADR-t813-1 decision 7): Claude interactive unless it asks for
+    /// another; shown as `provider` and `worker_mode`.
+    #[serde(flatten)]
+    worker: Worker,
     status: TaskStatus,
     goal_id: Option<GoalId>,
     context: String,
@@ -120,6 +126,7 @@ impl Task {
         require_positive(id)?;
         Ok(Self {
             id,
+            worker: new.worker()?,
             required_evidence: new.required_evidence(),
             paths: dedup_globs(&new.paths),
             priority: new.priority,
@@ -157,6 +164,7 @@ impl Task {
             paths: record.paths,
             priority: record.priority,
             kind: record.kind,
+            worker: record.worker,
             status: record.status,
             goal_id: record.goal_id,
             context: record.context,
@@ -199,6 +207,10 @@ impl Task {
 
     pub fn kind(&self) -> Option<&TaskKind> {
         self.kind.as_ref()
+    }
+
+    pub fn worker(&self) -> Worker {
+        self.worker
     }
 
     pub fn status(&self) -> TaskStatus {
@@ -336,6 +348,7 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     if let Some(kind) = edit.kind {
         task.kind = Some(kind);
     }
+    task.worker = task.worker.with(edit.provider, edit.worker_mode)?;
     Ok(task)
 }
 
@@ -423,6 +436,8 @@ mod tests {
             goal_dependencies: Vec::new(),
             goal_id: Some(GoalId::new(2)),
             context: "c".into(),
+            provider: None,
+            worker_mode: None,
         }
     }
 
@@ -442,6 +457,7 @@ mod tests {
             context: String::new(),
             created_at: "c".into(),
             updated_at: "u".into(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         }
     }
 
@@ -718,6 +734,8 @@ mod tests {
                 ]),
                 paths: Some(vec!["src/**".into(), "src/**".into()]),
                 context: Some("c2".into()),
+                provider: None,
+                worker_mode: None,
             },
         )
         .unwrap();

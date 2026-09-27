@@ -139,6 +139,7 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
         status: dagq::domain::RunStatus::NeedsSession,
         requested_provider: dagq::domain::Provider::Claude,
         actual_provider: dagq::domain::Provider::Claude,
+        worker_mode: dagq::domain::worker::WorkerMode::Interactive,
         base_commit: dagq::domain::CommitSha::try_from("0".repeat(40)).unwrap(),
         repo_path: Some("/src/my-repo".into()),
         run_dir: Some(dir.path().to_string_lossy().into_owned()),
@@ -170,6 +171,7 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
                 context: String::new(),
                 created_at: String::new(),
                 updated_at: String::new(),
+                worker: dagq::domain::worker::Worker::DEFAULT,
             })
             .unwrap(),
             &run,

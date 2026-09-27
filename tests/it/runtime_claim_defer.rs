@@ -28,6 +28,8 @@ fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Prio
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue
@@ -90,6 +92,8 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id();

@@ -272,6 +272,8 @@ to wait for the next landing that changes the runtime.",
             .arg(&build_log)
             .arg("--claude")
             .arg(&layout.claude)
+            .arg("--codex")
+            .arg(&layout.codex)
             .current_dir(&layout.repo_root)
             .new_session();
         if let Some(cmux) = &options.update.cmux {

@@ -3143,6 +3143,7 @@ mod tests {
             status: RunStatus::Claimed,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Interactive,
             base_commit: CommitSha::try_from("a".repeat(40)).unwrap(),
             branch: None,
             worktree_path: None,
@@ -3174,6 +3175,7 @@ mod tests {
             context: String::new(),
             created_at: "2026-09-22 00:00:00".into(),
             updated_at: "2026-09-22 00:00:00".into(),
+            worker: crate::domain::worker::Worker::DEFAULT,
         })
         .unwrap()
     }

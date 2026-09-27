@@ -255,6 +255,7 @@ mod tests {
             status,
             requested_provider: Provider::Claude,
             actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Interactive,
             base_commit: sha(),
             branch: None,
             worktree_path: None,

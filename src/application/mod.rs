@@ -108,6 +108,10 @@ pub struct TaskListItem {
     pub priority: Priority,
     /// What the task changes; null when it was registered without a kind.
     pub kind: Option<TaskKind>,
+    /// The provider and mode of its worker (ADR-t813-2), shown as
+    /// `provider` and `worker_mode`.
+    #[serde(flatten)]
+    pub worker: crate::domain::worker::Worker,
     pub title: String,
     pub goal_id: Option<GoalId>,
     /// IDs of the direct predecessors, ascending.
@@ -165,6 +169,7 @@ impl TaskListItem {
             status: task.status(),
             priority: task.priority(),
             kind: task.kind().cloned(),
+            worker: task.worker(),
             title: task.title().to_owned(),
             goal_id: task.goal_id(),
             dependencies,
@@ -735,6 +740,7 @@ mod tests {
                 context: String::new(),
                 created_at: String::new(),
                 updated_at: String::new(),
+                worker: crate::domain::worker::Worker::DEFAULT,
             })
             .unwrap()
         };

@@ -319,6 +319,10 @@ pub struct UpOptions {
     /// the inbox workspace starts this `claude`.
     pub cmux: PathBuf,
     pub claude: PathBuf,
+    /// The Codex CLI the supervisor's Codex workers start (ADR-t813-2),
+    /// resolved when it was found; a missing one does not stop `up`: the
+    /// supervisor then claims no Codex task, and `status` says so.
+    pub codex: PathBuf,
     /// How long a started supervisor may take to register before `up` fails.
     pub startup_timeout: Duration,
     /// How long a supervisor asked to hand off may take to come back under
@@ -1547,7 +1551,8 @@ pub fn supervise_command(
 }
 
 /// `<this binary> --db <db> supervise [--parallel N] --log-dir <queue logs>
-/// --cmux <resolved> --claude <resolved> --mode <mode> [--plugin-dir <dir>]`:
+/// --cmux <resolved> --claude <resolved> --codex <resolved or given> --mode
+/// <mode> [--plugin-dir <dir>]`:
 /// what keeps a supervisor of this queue going, in either mode. The
 /// executables are absolute so neither launchd's PATH nor the terminal's
 /// decides which ones run; the plugin directory is what the planners the
@@ -1572,6 +1577,8 @@ fn supervise_arguments(
         path_text(&options.cmux)?,
         "--claude".into(),
         path_text(&options.claude)?,
+        "--codex".into(),
+        path_text(&options.codex)?,
         "--mode".into(),
         mode.as_str().into(),
     ];

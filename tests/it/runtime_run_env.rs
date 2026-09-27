@@ -30,6 +30,8 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue

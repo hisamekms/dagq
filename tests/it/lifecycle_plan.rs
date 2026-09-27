@@ -355,6 +355,8 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     let proposal = queue

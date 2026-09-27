@@ -478,6 +478,62 @@ pub trait Transcripts {
     >;
 }
 
+/// The adapters a worker of one provider in one mode runs through
+/// (ADR-0004, ADR-t813-2): the agent that starts its sessions, the signals
+/// the supervisor reads of them, and their transcripts.
+#[derive(Clone, Copy)]
+pub struct WorkerAdapter<'a> {
+    pub agent: &'a dyn AgentProvider,
+    pub signals: &'a dyn AgentSignals,
+    pub transcripts: &'a dyn Transcripts,
+}
+
+/// The table of [`WorkerAdapter`]s by worker (provider and mode) that the
+/// composition fills: a worker without an entry is one this binary cannot
+/// run, and the supervisor does not claim its tasks.
+#[derive(Clone, Default)]
+pub struct WorkerAdapters<'a> {
+    entries: Vec<(crate::domain::worker::Worker, WorkerAdapter<'a>)>,
+}
+
+impl<'a> WorkerAdapters<'a> {
+    /// The table with `adapter` for `worker`, in place of any it had.
+    pub fn with(
+        mut self,
+        worker: crate::domain::worker::Worker,
+        adapter: WorkerAdapter<'a>,
+    ) -> Self {
+        self.entries.retain(|(entry, _)| *entry != worker);
+        self.entries.push((worker, adapter));
+        self
+    }
+
+    /// The adapters of `worker`, if this binary runs it.
+    pub fn get(&self, worker: crate::domain::worker::Worker) -> Option<WorkerAdapter<'a>> {
+        self.entries
+            .iter()
+            .find(|(entry, _)| *entry == worker)
+            .map(|(_, adapter)| *adapter)
+    }
+
+    /// The workers the table runs, in the order they were added.
+    pub fn workers(&self) -> Vec<crate::domain::worker::Worker> {
+        self.entries.iter().map(|(worker, _)| *worker).collect()
+    }
+
+    /// The modes the table runs `provider` in.
+    pub fn modes(
+        &self,
+        provider: crate::domain::Provider,
+    ) -> Vec<crate::domain::worker::WorkerMode> {
+        self.entries
+            .iter()
+            .filter(|(worker, _)| worker.provider == provider)
+            .map(|(worker, _)| worker.mode)
+            .collect()
+    }
+}
+
 /// What the agent of a planner session is started with: the planner's
 /// directory (its prompt, settings, log and idle marker), the directory it
 /// works in (the repository's checkout), its first message and the plugin
@@ -1128,7 +1184,9 @@ pub trait RunTransitions {
     /// [`RunTransitions::claim_for_supervisor`], taking the first task of `order`
     /// that is still claimable, with `attributes` (an object) in its
     /// `run_claimed`, and the worker session `trial` chooses for the task
-    /// there (ADR-0079 decisions 3 and 4).
+    /// there (ADR-0079 decisions 3 and 4). Only a task whose worker is one
+    /// of `workers` is claimed (ADR-t813-2).
+    #[allow(clippy::too_many_arguments)]
     fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
@@ -1136,6 +1194,7 @@ pub trait RunTransitions {
         order: &[TaskId],
         attributes: Option<&serde_json::Value>,
         trial: &crate::domain::worker_model::WorkerTrial,
+        workers: &[crate::domain::worker::Worker],
     ) -> Result<ClaimOutcome>;
     /// Record a runtime error on the run without changing its status.
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()>;
@@ -1347,6 +1406,13 @@ pub trait RunCoordination {
         &self,
         token: &LeaseToken,
         limits: crate::domain::slot_limits::SlotLimits,
+    ) -> Result<()>;
+    /// Record the executables of the supervisor `token`'s providers as it
+    /// resolved them at its start (ADR-t813-2).
+    fn set_supervisor_providers(
+        &self,
+        token: &LeaseToken,
+        providers: &[crate::domain::worker::ProviderCheck],
     ) -> Result<()>;
     fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool>;
     fn run_leases(&self) -> Result<Vec<RunLease>>;

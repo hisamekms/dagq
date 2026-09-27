@@ -9,6 +9,8 @@ last_verified: 2026-09-28
 scope: provider
 related:
   - adr-0004
+  - adr-t813-1
+  - adr-t813-2
   - adr-0040
   - adr-0048
   - adr-0027
@@ -82,7 +84,7 @@ runtimeが起動するClaude sessionは、kindごとの区間（`session_opened`
 
 Claude providerはcmux内の通常セッションを起動し、実装、unit test、E2E、subagent review、完了レポートを実行させる。Codex providerはCodexの対応するセッション方式を使う。provider capabilityとしてinteractive、subagents、stream events、structured resultを表現する。
 
-requested providerとactual providerをTaskRunに保存する。Claudeが起動不能の場合はCodexへfallbackできるが、実装途中の一般的な失敗は自動fallbackしない。
+requested providerとactual providerと経路をTaskRunに保存する（下の[workerのproviderと経路](#workerのproviderと経路)）。
 
 
 ### transcriptと稼働時間
@@ -131,6 +133,15 @@ runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるとき�
 - **起動の意図**: worker以外のアクターのjobとplannerの区間の`session_opened`は、起動したmodel / effortと出どころ（`dagq.toml`の`[roles.<role>]`・既定・差し戻しの段上げ）の`launch`を持つ（task 580、[Actor model](supervisor-lifecycle/actor-model.md)）。既定（`source: default`）では何も渡していないので`model` / `effort`はnullで、実際の値はここで読む`session_closed`のもの
 - **読めないとき**: transcriptが読めない、またはどのmessageもmodelを持たなければ何も書かない。区間を閉じたevent・run・jobの結果は変わらず、区間は失敗にならない
 - 読み口: `stats`の`sessions.by_kind[kind].models`（[stats](supervisor-lifecycle/stats.md#claude-session)）と、plan reviewのsessionを判断したsessionとして並べる`kpi`の計画の品質（[kpi](supervisor-lifecycle/kpi.md#計画の品質)）
+
+## workerのproviderと経路
+
+workerのproviderと経路はtaskが選ぶ（[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定1、[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)の決定7。型は[domain-model](domain-model.md)の`Worker`）。指定の無いtaskはClaudeの対話の経路で、Codexは非対話の経路だけ。
+
+- **adapterの表**: compositionの`compose::worker_adapters`が、worker（providerと経路の組）ごとのadapterの組`WorkerAdapter`（`AgentProvider`・`AgentSignals`・`Transcripts`）を引く表`WorkerAdapters`（`src/application/ports.rs`）を作る。今入っているのはClaudeの対話の組（`ClaudeCode`と`ClaudeTranscripts`）だけで、非対話の経路とCodexのadapterは後続のtaskがここに足す。supervisorは起動時に表の全agentを`preflight()`し、画面とidle markerは対話のClaudeの組の`AgentSignals`で読む（表に対話のClaudeの組が無ければ起動しない）。session wrapper（`compose::session`）はrunの`actual_provider`と`worker_mode`で表を引いて、そのagentでsessionを起動する（組が無ければ起動しない）。reviewなどのheadlessのjob・observer・planner・inboxはClaudeのまま表を通らない（goal 57の制約）。
+- **claim**: supervisorは表にあるworkerのtaskだけをclaimする（`claim_for_supervisor_in_order`の`workers`）。runは`requested_provider`と`actual_provider`にtaskのprovider、`worker_mode`に経路を持ち、`run_claimed`にも`provider`と`worker_mode`が載る。`actual_provider`が`requested_provider`と違うのは使えないproviderからの切り替え（ADR-t813-2の決定2）の後で、切り替えは後続のtask。表に無いworkerのtaskはclaimせず、`claim_deferred`（理由`provider_unavailable`: そのproviderの組が無い / `mode_unavailable`: providerの組はあるがその経路の組が無い）を1回だけ記録する（[claim-defer](supervisor-lifecycle/claim-defer.md#workerを動かせないtask)）。
+- **実行ファイル**: `supervise --claude PATH`（既定`claude`）と`--codex PATH`（既定`codex`）。`up`はどちらも実体のpathに解決してsupervisorの引数に固定する（`--claude`と同じ理由。AGENTS.mdの「起動と停止」）。`codex`が見つからなくても`up`とsupervisorは止まらず、与えたpathのまま渡し、supervisorはCodexのtaskをclaimしない。supervisorは起動とexecの引き継ぎのたびに、providerごとの`ProviderCheck`（`provider`、解決した`executable`（見つからなければ与えたpath）、`found`、見つからない理由`error`、この表で動かせる経路`modes`）を登録の`providers`に書き、`status`と`doctor`の`supervisors[].providers`が出す。`doctor`はほかに、その場のPATHで`claude`と`codex`を解決した`providers`を出す。execの引き継ぎはsupervisorの引数をそのまま渡し、引き継ぎ先のbinaryが`--codex`を知らなければ（それより前のbinaryへの`install --rollback`）、`supervise --codex probe --help`で確かめて`--codex`を外す（`HANDOFF_OPTIONAL`）。自動更新のjobとdrainの起動し直し（`install --codex`）も`--codex`を渡す。
+- **folder trust**: `~/.claude.json`を読むtrustのpreflight（`up`の`trusts_repository`。下の[Trust prompt](#trust-prompt)）は、Claudeの対話のsession（inboxと対話のworker）のためのもので、非対話の経路とCodexのworkerには当たらない。
 
 ## Trust prompt
 

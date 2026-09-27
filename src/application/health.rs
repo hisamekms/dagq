@@ -186,6 +186,12 @@ pub struct SupervisorHealth {
     /// It updates its own binary on every landing that changes the runtime
     /// (ADR-0045 decision 17).
     pub auto_update: bool,
+    /// Each worker provider's executable as the supervisor resolved it
+    /// (`supervise --claude` / `--codex`), whether it was found and the
+    /// worker modes it runs it in (ADR-t813-2); absent for a lease holder
+    /// or a registration of an older binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<crate::domain::worker::ProviderCheck>>,
     pub started_at: Option<i64>,
     pub heartbeat_at: i64,
     pub heartbeat_age_secs: i64,
@@ -208,6 +214,7 @@ impl SupervisorHealth {
             "max_waiting": self.max_waiting,
             "max_waiting_source": self.max_waiting_source,
             "auto_update": self.auto_update,
+            "providers": self.providers,
             "heartbeat_age_secs": self.heartbeat_age_secs,
             "stale": self.stale,
             "run_ids": self.run_ids,
@@ -595,6 +602,7 @@ pub fn supervisors(
             parallel_source: registration.and_then(|r| r.parallel_source),
             max_waiting: registration.and_then(|r| r.max_waiting),
             max_waiting_source: registration.and_then(|r| r.max_waiting_source),
+            providers: registration.and_then(|r| r.providers.clone()),
             auto_update: registration.is_some_and(|r| r.auto_update),
             started_at: registration.map(|r| r.started_at),
             heartbeat_at,
@@ -1233,6 +1241,7 @@ mod tests {
             max_waiting: None,
             parallel_source: None,
             max_waiting_source: None,
+            providers: None,
             binary_version: Some("1.0.0".into()),
         }
     }

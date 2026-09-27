@@ -48,6 +48,8 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue
@@ -926,6 +928,7 @@ fn gone_registration() -> dagq::domain::SupervisorRegistration {
         max_waiting: None,
         parallel_source: None,
         max_waiting_source: None,
+        providers: None,
     }
 }
 
@@ -997,6 +1000,10 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP INDEX planners_by_finding;
              ALTER TABLE planners DROP COLUMN finding_id;
              ALTER TABLE proposals DROP COLUMN owner_actor_id;
+             ALTER TABLE tasks DROP COLUMN worker_provider;
+             ALTER TABLE tasks DROP COLUMN worker_mode;
+             ALTER TABLE task_runs DROP COLUMN worker_mode;
+             ALTER TABLE supervisors DROP COLUMN providers;
              PRAGMA user_version = 30;",
         )
         .unwrap();
@@ -1069,6 +1076,10 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP INDEX planners_by_finding;
              ALTER TABLE planners DROP COLUMN finding_id;
              ALTER TABLE proposals DROP COLUMN owner_actor_id;
+             ALTER TABLE tasks DROP COLUMN worker_provider;
+             ALTER TABLE tasks DROP COLUMN worker_mode;
+             ALTER TABLE task_runs DROP COLUMN worker_mode;
+             ALTER TABLE supervisors DROP COLUMN providers;
              PRAGMA user_version = {};",
             auto_update - 1
         ))

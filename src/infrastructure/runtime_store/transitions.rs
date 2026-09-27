@@ -4,7 +4,8 @@
 use super::*;
 
 impl SqliteQueue {
-    /// Reserve the next dependency-ready task for this supervisor: the run,
+    /// Reserve the next dependency-ready task of the interactive Claude
+    /// worker for this supervisor: the run,
     /// its `supervisor_token` and its lease row are created in one transaction,
     /// so a claimed run never exists without an owner. Concurrent supervisors
     /// on the same queue take different tasks.
@@ -13,13 +14,20 @@ impl SqliteQueue {
         base_commit: &CommitSha,
         token: &LeaseToken,
     ) -> Result<ClaimOutcome> {
-        self.claim_for_supervisor_in_order(base_commit, token, &[], None, &WorkerTrial::default())
+        self.claim_for_supervisor_in_order(
+            base_commit,
+            token,
+            &[],
+            None,
+            &WorkerTrial::default(),
+            &[Worker::DEFAULT],
+        )
     }
 
     /// [`Self::claim_for_supervisor`], taking the first task of `order` that
     /// is still claimable (the lowest-ID candidate when none is), with
     /// `attributes` in its `run_claimed` and the worker session `trial`
-    /// chooses for the task.
+    /// chooses for the task; only a task whose worker is one of `workers`.
     pub fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
@@ -27,6 +35,7 @@ impl SqliteQueue {
         order: &[TaskId],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
+        workers: &[Worker],
     ) -> Result<ClaimOutcome> {
         let tx = self
             .conn
@@ -42,6 +51,7 @@ impl SqliteQueue {
             order,
             attributes,
             trial,
+            workers,
         )?;
         if let ClaimOutcome::Claimed { run } = &outcome {
             tx.execute(
@@ -850,6 +860,7 @@ impl RunTransitions for SqliteQueue {
         order: &[TaskId],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
+        workers: &[Worker],
     ) -> Result<ClaimOutcome> {
         SqliteQueue::claim_for_supervisor_in_order(
             self,
@@ -858,6 +869,7 @@ impl RunTransitions for SqliteQueue {
             order,
             attributes,
             trial,
+            workers,
         )
     }
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {

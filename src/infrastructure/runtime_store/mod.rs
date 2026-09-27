@@ -28,6 +28,7 @@ use crate::application::{
 };
 use crate::domain::LeaseToken;
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
+use crate::domain::worker::Worker;
 use crate::domain::worker_model::{WorkerSession, WorkerTrial};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
@@ -294,6 +295,10 @@ fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
         max_waiting: r.get("max_waiting")?,
         parallel_source: source(r, "parallel_source")?,
         max_waiting_source: source(r, "max_waiting_source")?,
+        // Unreadable JSON (another binary's shape) reads as none.
+        providers: r
+            .get::<_, Option<String>>("providers")?
+            .and_then(|json| serde_json::from_str(&json).ok()),
     })
 }
 

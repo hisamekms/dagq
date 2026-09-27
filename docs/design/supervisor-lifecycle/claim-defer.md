@@ -4,11 +4,12 @@ type: design
 title: "claimを控える（衝突の多いファイル）"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - adr-0080
+  - adr-t813-2
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
   - design-supervisor-lifecycle-claim-hold
@@ -43,9 +44,20 @@ hotspotが無いか、進行中のrunがどのhotspotも触らなければ、候
 
 supervisorは控えの状態（taskごとの始まりと上限を過ぎたか）を持ち、起動して最初の判定で、taskごとの最新の`claim_deferred` / `claim_deferral_ended` / `run_claimed`（`latest_task_events`）から組み立て直す。最新が`claim_deferred`なら控えの途中、`claim_deferral_ended`の`why: expired`なら上限を過ぎた控え、それ以外は控えていない。supervisorが入れ替わっても上限は最初の`claim_deferred`から数える。
 
+## workerを動かせないtask
+
+supervisorは、自分のadapterの表（[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)）に無いworker（providerと経路の組）のtaskもclaimせずに飛ばす（ADR-t813-2。task 814）。hotspotの判定より先に、`Queue::candidates`のtaskの`worker`を`domain::worker::unavailable`にかける（表に全workerがあるときは読まない）。
+
+- 理由は`provider_unavailable`（そのproviderの組が無い。今はCodex）か`mode_unavailable`（providerの組はあるがその経路の組が無い。今はClaudeの非対話）。最初に飛ばしたときだけ`claim_deferred`（`domain::claim_defer::worker_deferred`）を書く
+- 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。表にそのworkerが入ったsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimし、候補から外れたtaskは`why: not_candidate`で終える
+- 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
+- 同じpassで`claim_for_supervisor_in_order`にも表のworkerの一覧を渡し、順に無いtaskを取る後戻りでも表に無いworkerのtaskは取らない
+
+使えないproviderからもう一方へ切り替えるフォールバック（ADR-t813-2の決定2・6）は後続のtaskで、今は控えるだけ。
+
 ## 記録
 
-- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る
+- `claim_deferred`（taskのevent）: `reason: hot_files`、`files`（重なったhotspot）、`runs`（`[{run_id, task_id}]`、重なった進行中のrun）、`max_secs`、`message`、`supervisor`。supervisorのlogにwarnで出る。workerを動かせないtaskの`claim_deferred`は`reason`（`provider_unavailable` / `mode_unavailable`）、`provider`、`worker_mode`、`message`、`supervisor`
 - `claim_deferral_ended`（taskのevent）: `reason`、`why`（`cleared` / `expired` / `not_candidate`）、`deferred_secs`、`supervisor`。logにinfoで出る
 
 ## `status`と`stats`

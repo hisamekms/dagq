@@ -101,6 +101,8 @@ fn draft_at(
             goal_dependencies: Vec::new(),
             goal_id: Some(goal),
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap()
         .id()

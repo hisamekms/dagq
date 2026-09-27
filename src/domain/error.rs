@@ -172,6 +172,12 @@ pub enum DomainError {
     InvalidTaskKind {
         kind: String,
     },
+    /// A worker provider that has no such mode (ADR-t813-1 decision 7:
+    /// Codex runs headless only).
+    WorkerModeUnsupported {
+        provider: super::Provider,
+        mode: super::worker::WorkerMode,
+    },
     /// A finding status change its status does not allow.
     FindingNotInStatus {
         finding_id: FindingId,
@@ -441,6 +447,12 @@ impl fmt::Display for DomainError {
             Self::InvalidTaskKind { kind } => write!(
                 f,
                 "task kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes, other than \"unknown\" and \"all\""
+            ),
+            Self::WorkerModeUnsupported { provider, mode } => write!(
+                f,
+                "the {} worker has no {} mode (codex runs headless only)",
+                provider.as_str(),
+                mode.as_str()
             ),
             Self::FindingNotInStatus {
                 finding_id,

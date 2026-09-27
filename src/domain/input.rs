@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, Provider,
     RunId, RunStatus, TaskId, TaskKind, TaskStatus, require, scope,
+    worker::{Worker, WorkerMode},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,9 +38,21 @@ pub struct NewTask {
     /// What the task changes (goal 21); none when the registrant did not say.
     #[serde(default)]
     pub kind: Option<TaskKind>,
+    /// The worker's provider (ADR-t813-2 decision 1); none is Claude.
+    #[serde(default)]
+    pub provider: Option<Provider>,
+    /// The worker's mode (ADR-t813-1 decision 7); none is the provider's
+    /// default (interactive for Claude, headless for Codex).
+    #[serde(default)]
+    pub worker_mode: Option<WorkerMode>,
 }
 
 impl NewTask {
+    /// The worker the task asks for.
+    pub fn worker(&self) -> Result<Worker, DomainError> {
+        Worker::resolve(self.provider, self.worker_mode)
+    }
+
     /// The required checks in the order given, each once.
     pub fn required_evidence(&self) -> Vec<EvidenceCheck> {
         let mut checks = Vec::new();
@@ -82,6 +95,7 @@ impl NewTask {
         {
             return Err(DomainError::OwnGoalDependency { goal_id });
         }
+        self.worker()?;
         scope::validate_path_globs(&self.paths)
     }
 }
@@ -142,6 +156,12 @@ pub struct TaskEdit {
     pub context: Option<String>,
     #[serde(default)]
     pub kind: Option<TaskKind>,
+    /// A new provider of the worker; without `worker_mode`, it runs in
+    /// that provider's default mode.
+    #[serde(default)]
+    pub provider: Option<Provider>,
+    #[serde(default)]
+    pub worker_mode: Option<WorkerMode>,
 }
 
 impl TaskEdit {
@@ -154,6 +174,8 @@ impl TaskEdit {
             && self.paths.is_none()
             && self.context.is_none()
             && self.kind.is_none()
+            && self.provider.is_none()
+            && self.worker_mode.is_none()
     }
 
     /// The rules of [`NewTask::validate`] for the fields it replaces.
@@ -189,6 +211,7 @@ pub struct TaskRecord {
     pub paths: Vec<String>,
     pub priority: Priority,
     pub kind: Option<TaskKind>,
+    pub worker: Worker,
     pub status: TaskStatus,
     pub goal_id: Option<GoalId>,
     pub context: String,
@@ -220,6 +243,7 @@ pub struct RunRecord {
     pub status: RunStatus,
     pub requested_provider: Provider,
     pub actual_provider: Provider,
+    pub worker_mode: WorkerMode,
     pub base_commit: CommitSha,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,

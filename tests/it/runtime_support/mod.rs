@@ -210,6 +210,8 @@ pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[Task
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue
@@ -1577,6 +1579,8 @@ pub fn awaiting_run() -> (Fixture, PathBuf, PathBuf, TaskRun) {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         })
         .unwrap();
     queue

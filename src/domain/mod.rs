@@ -155,7 +155,12 @@ string_enum!(RunStatus {
     Interrupted => "interrupted",
 });
 
-string_enum!(Provider { Claude => "claude" });
+// The agent a worker session runs on (ADR-0004, ADR-t813-2 decision 1):
+// a task chooses one, `claude` when it names none.
+string_enum!(Provider {
+    Claude => "claude",
+    Codex => "codex",
+});
 
 // How `up` started a supervisor (ADR-0011). `Launchd` is the resident
 // LaunchAgent; `InCmux` is the fallback that runs `supervise` inside the cmux
@@ -745,6 +750,7 @@ pub mod validation;
 pub mod verify_failure;
 mod views;
 pub mod waiting;
+pub mod worker;
 pub mod worker_model;
 pub mod worktime;
 
@@ -1341,6 +1347,8 @@ mod tests {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         };
         assert_eq!(
             task.validate().unwrap_err().to_string(),
@@ -1375,6 +1383,8 @@ mod tests {
             goal_dependencies: Vec::new(),
             goal_id: None,
             context: String::new(),
+            provider: None,
+            worker_mode: None,
         };
         assert_eq!(
             task.required_evidence(),
@@ -3022,6 +3032,7 @@ mod attention_tests {
             max_waiting: None,
             parallel_source: None,
             max_waiting_source: None,
+            providers: None,
             binary_version: None,
         };
         let fresh =

@@ -3,7 +3,7 @@ use crate::common;
 use common::cli::*;
 
 use dagq::infrastructure::sqlite::SqliteQueue;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[test]
 fn cli_persists_across_processes_and_reports_dependency_errors_as_json() {
@@ -94,6 +94,23 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             assert!(
                 d2.is_some_and(|value| value.get("tala").is_some()),
                 "doctor reports d2"
+            );
+            // Where `claude` and `codex` resolve depends on the host's PATH
+            // too (ADR-t813-2); only which providers and modes are checked.
+            let providers = report.as_object_mut().unwrap().remove("providers");
+            let providers = providers.expect("doctor reports the providers");
+            let named: Vec<(&str, &serde_json::Value)> = providers
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|check| (check["provider"].as_str().unwrap(), &check["modes"]))
+                .collect();
+            assert_eq!(
+                named,
+                [
+                    ("claude", &serde_json::json!(["interactive"])),
+                    ("codex", &serde_json::json!([]))
+                ]
             );
         }
         let mut expected = serde_json::json!({"supervisors": [], "runs": []});
@@ -390,6 +407,83 @@ fn kind_is_added_shown_listed_and_edited_before_ready() {
     for dagq_layout in ["migrations/", "plugin's skills", "docs, plugin, runtime"] {
         assert!(!help.contains(dagq_layout), "{dagq_layout}: {help}");
     }
+}
+
+/// `add --provider` and `--headless` store the task's worker (ADR-t813-2
+/// decision 1, ADR-t813-1 decision 7), which `show`, `list` and `search`
+/// print; a task that names none runs Claude interactively, Codex runs
+/// headless only, and `edit` changes the worker while the task is a draft.
+#[test]
+fn the_worker_provider_and_mode_are_added_shown_and_edited() {
+    let (_dir, db) = queue();
+    let plain = ok(&db, &["add", "plain worker"]);
+    assert_eq!(
+        (&plain["provider"], &plain["worker_mode"]),
+        (&json!("claude"), &json!("interactive"))
+    );
+    let codex = ok(&db, &["add", "codex worker", "--provider", "codex"]);
+    assert_eq!(
+        (&codex["provider"], &codex["worker_mode"]),
+        (&json!("codex"), &json!("headless"))
+    );
+    let id = codex["id"].to_string();
+    let shown = &ok(&db, &["show", &id])["task"];
+    assert_eq!(
+        (&shown["provider"], &shown["worker_mode"]),
+        (&json!("codex"), &json!("headless"))
+    );
+    let listed = ok(&db, &["list"]);
+    let item = listed["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == codex["id"])
+        .unwrap();
+    assert_eq!(item["provider"], "codex");
+    assert_eq!(item["worker_mode"], "headless");
+    let found = ok(&db, &["search", "codex worker"]);
+    assert_eq!(found["hits"][0]["provider"], "codex", "{found}");
+    assert_eq!(found["hits"][0]["worker_mode"], "headless", "{found}");
+    let headless = ok(&db, &["add", "headless claude", "--headless"]);
+    assert_eq!(
+        (&headless["provider"], &headless["worker_mode"]),
+        (&json!("claude"), &json!("headless"))
+    );
+    // Codex has no interactive mode.
+    assert_eq!(
+        refused(&db, &["edit", &id, "--interactive"]),
+        "the codex worker has no interactive mode (codex runs headless only)"
+    );
+    // A new provider without a mode takes that provider's default.
+    let edited = ok(&db, &["edit", &id, "--provider", "claude"]);
+    assert_eq!(
+        (&edited["provider"], &edited["worker_mode"]),
+        (&json!("claude"), &json!("interactive"))
+    );
+    let event = ok(&db, &["show", &id, "--full"])["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["kind"] == "task_edited")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        event["payload"]["from"],
+        json!({"provider": "codex", "worker_mode": "headless"})
+    );
+    assert_eq!(
+        event["payload"]["to"],
+        json!({"provider": "claude", "worker_mode": "interactive"})
+    );
+    let edited = ok(&db, &["edit", &id, "--headless"]);
+    assert_eq!(edited["worker_mode"], "headless");
+    let output = invoke(&db, &["add", "bad", "--provider", "gemini"]);
+    assert!(!output.status.success());
+    ok(&db, &["ready", &id, "--bypass-review"]);
+    assert_eq!(
+        refused(&db, &["edit", &id, "--provider", "codex"]),
+        format!("task {id} is ready; only a draft or submitted task can be edited")
+    );
 }
 
 /// `add --priority` and `set-priority` take the level names only; `show`,

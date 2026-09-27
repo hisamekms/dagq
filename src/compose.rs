@@ -21,7 +21,8 @@ use std::{
 use crate::{
     application::{
         AgentProvider, Generators, LaunchAgent, MainRemote, ProcessControl, QueueOpener,
-        Repository, RunFiles, Spawner, Verifier, WorkspaceBackend, health,
+        Repository, RunFiles, Spawner, Verifier, WorkerAdapter, WorkerAdapters, WorkspaceBackend,
+        health,
         install::{self as installation, Binaries, InstallOptions},
         integrate::{self as integration, IntegrateTarget, Integration, Integrator},
         lifecycle::{
@@ -39,16 +40,17 @@ use crate::{
         update,
     },
     domain::{
-        IntegrationOutcome, NewAsk, PlannerId, RunId, SessionRole, SupervisorMode,
+        IntegrationOutcome, NewAsk, PlannerId, Provider, RunId, SessionRole, SupervisorMode,
         SupervisorRegistration, TaskDetail, TaskId, TaskRun,
         slot_limits::{SlotFlags, SlotLimits, SupervisorConfig},
         stall::StallConfig,
         stats::{ConflictConfigReport, StatsQuery},
+        worker::{ProviderCheck, Worker},
     },
     infrastructure::{
         adapters::{
             ClaudeCode, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT,
-            claude_trusts_repository, free_disk_bytes, host_versions, load_average,
+            claude_trusts_repository, executable, free_disk_bytes, host_versions, load_average,
             main_checkout_of, path_text,
         },
         binaries::LocalBinaries,
@@ -65,6 +67,7 @@ use crate::{
         run_files::LocalRunFiles,
         runtime_store::SqliteOpener,
         sqlite::{ReadOnlyQueue, SqliteQueue},
+        transcripts::ClaudeTranscripts,
     },
 };
 
@@ -93,6 +96,8 @@ pub struct AutoUpdateJob {
     /// What an in-cmux supervisor started again uses.
     pub cmux: PathBuf,
     pub claude: PathBuf,
+    /// The Codex CLI of the supervisor that started the job (ADR-t813-2).
+    pub codex: PathBuf,
     pub plugin_dir: Option<PathBuf>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
@@ -100,12 +105,19 @@ pub struct AutoUpdateJob {
 
 /// The arguments of the `up` that starts an in-cmux supervisor again after
 /// an update's job, beside `--db`, `--in-cmux` and its own flags.
-fn restart_arguments(cmux: &Path, claude: &Path, plugin_dir: Option<&Path>) -> Result<Vec<String>> {
+fn restart_arguments(
+    cmux: &Path,
+    claude: &Path,
+    codex: &Path,
+    plugin_dir: Option<&Path>,
+) -> Result<Vec<String>> {
     let mut arguments = vec![
         "--cmux".to_owned(),
         path_text(cmux)?,
         "--claude".to_owned(),
         path_text(claude)?,
+        "--codex".to_owned(),
+        path_text(codex)?,
     ];
     if let Some(dir) = plugin_dir {
         arguments.extend(["--plugin-dir".to_owned(), path_text(dir)?]);
@@ -175,6 +187,8 @@ pub struct ReleaseUpdateJob {
     /// What an in-cmux supervisor started again uses.
     pub cmux: PathBuf,
     pub claude: PathBuf,
+    /// The Codex CLI of the supervisor that started the job (ADR-t813-2).
+    pub codex: PathBuf,
     pub plugin_dir: Option<PathBuf>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
@@ -284,6 +298,10 @@ pub struct SuperviseOptions {
     /// The build identifier the release check takes as the supervisor's;
     /// `None` is this binary's. Tests set it (a release build looks).
     pub release_current: Option<String>,
+    /// The Codex CLI a Codex worker starts (`supervise --codex`, ADR-t813-2):
+    /// resolved on PATH when found; a supervisor without it runs no Codex
+    /// worker.
+    pub codex: PathBuf,
 }
 
 /// The index [`SuperviseOptions::release_index`] gives the release check.
@@ -344,6 +362,7 @@ impl SuperviseOptions {
             files: None,
             release_index: None,
             release_current: None,
+            codex: PathBuf::from("codex"),
         }
     }
 
@@ -486,6 +505,12 @@ pub fn supervise_with_reviewer(
     });
     let pid = std::process::id();
     let generators = options.generators.clone();
+    let agent = ClaudeCode {
+        executable: claude.into(),
+    };
+    let transcripts = ClaudeTranscripts::from_env();
+    let workers = worker_adapters(&agent, &transcripts);
+    let codex = executable(&options.codex).unwrap_or_else(|_| options.codex.clone());
     let layout = Layout {
         runs_dir: runs_dir(&db),
         queue_hash: QueueLocation::explicit(&db).hash(),
@@ -493,6 +518,8 @@ pub fn supervise_with_reviewer(
         main_checkout: main_checkout.clone(),
         common_dir: repository.common_dir.clone(),
         claude: claude.into(),
+        codex: codex.clone(),
+        providers: provider_checks(claude, &codex, &workers),
         runner: runner.into(),
         pid,
         version: crate::VERSION.to_owned(),
@@ -519,9 +546,6 @@ pub fn supervise_with_reviewer(
         plan_reviews_dir: plan_reviews_dir(&db),
         goal_reviews_dir: goal_reviews_dir(&db),
         db: db.clone(),
-    };
-    let agent = ClaudeCode {
-        executable: claude.into(),
     };
     let review_db = db.clone();
     let review_material = move |task_id: TaskId| review(&review_db, task_id);
@@ -632,8 +656,7 @@ pub fn supervise_with_reviewer(
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),
         cmux,
-        agent: &agent,
-        signals: &agent,
+        workers,
         reviewer,
         spawner: &LocalSpawner,
         files: options.files.as_ref().map_or_else(
@@ -913,6 +936,20 @@ impl OneShot {
         // What `graph --format svg` draws with (ADR-0077 decision 4).
         report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(
             std::env::var_os("PATH").as_deref(),
+        ))?;
+        // The worker providers `claude` and `codex` resolve to on this PATH
+        // and the modes this binary runs them in (ADR-t813-2); what each
+        // supervisor fixed is on its entry in `supervisors`.
+        let (claude, transcripts) = (
+            ClaudeCode {
+                executable: PathBuf::from("claude"),
+            },
+            ClaudeTranscripts::from_env(),
+        );
+        report["providers"] = serde_json::to_value(provider_checks(
+            Path::new("claude"),
+            Path::new("codex"),
+            &worker_adapters(&claude, &transcripts),
         ))?;
         Ok(report)
     }
@@ -1323,8 +1360,12 @@ same in one step",
             .canonicalize()
             .context("queue must already be initialized")?;
         let queues = |db: &Path| self.queues(db);
-        let restart_arguments =
-            restart_arguments(&job.cmux, &job.claude, job.plugin_dir.as_deref())?;
+        let restart_arguments = restart_arguments(
+            &job.cmux,
+            &job.claude,
+            &job.codex,
+            job.plugin_dir.as_deref(),
+        )?;
         let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
         update::run(
             &update::JobPorts {
@@ -1368,8 +1409,12 @@ same in one step",
             .canonicalize()
             .context("queue must already be initialized")?;
         let queues = |db: &Path| self.queues(db);
-        let restart_arguments =
-            restart_arguments(&job.cmux, &job.claude, job.plugin_dir.as_deref())?;
+        let restart_arguments = restart_arguments(
+            &job.cmux,
+            &job.claude,
+            &job.codex,
+            job.plugin_dir.as_deref(),
+        )?;
         let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
         update::run_release(
             &update::JobPorts {
@@ -1925,6 +1970,49 @@ fn bound_main_checkout(queue: &SqliteQueue) -> Result<Option<Result<PathBuf>>> {
         .map(|common_dir| main_checkout_of(Path::new(&common_dir))))
 }
 
+/// The adapters of each worker this binary runs (ADR-t813-2), by provider
+/// and mode: Claude Code's interactive session for now. The non-interactive
+/// mode and the Codex worker are added here as they are built.
+pub fn worker_adapters<'a>(
+    claude: &'a ClaudeCode,
+    transcripts: &'a ClaudeTranscripts,
+) -> WorkerAdapters<'a> {
+    WorkerAdapters::default().with(
+        Worker::DEFAULT,
+        WorkerAdapter {
+            agent: claude,
+            signals: claude,
+            transcripts,
+        },
+    )
+}
+
+/// Each provider's executable as `claude` and `codex` resolve, with the
+/// modes `workers` runs it in: what a supervisor records on its
+/// registration and `doctor` shows.
+pub fn provider_checks(
+    claude: &Path,
+    codex: &Path,
+    workers: &WorkerAdapters<'_>,
+) -> Vec<ProviderCheck> {
+    [(Provider::Claude, claude), (Provider::Codex, codex)]
+        .into_iter()
+        .map(|(provider, path)| {
+            let resolved = executable(path);
+            ProviderCheck {
+                provider,
+                executable: resolved.as_ref().map_or_else(
+                    |_| path.display().to_string(),
+                    |path| path.display().to_string(),
+                ),
+                found: resolved.is_ok(),
+                error: resolved.err().map(|error| format!("{error:#}")),
+                modes: workers.modes(provider),
+            }
+        })
+        .collect()
+}
+
 /// What the recovery job of a run that ended reads about it (see
 /// [`prompt::ended_run_material`]), its files read from `dir`.
 pub fn ended_run_material(
@@ -1957,6 +2045,19 @@ pub fn session(
     let provider = ClaudeCode {
         executable: claude.into(),
     };
+    let transcripts = ClaudeTranscripts::from_env();
+    let workers = worker_adapters(&provider, &transcripts);
+    // The run's worker picks the adapters (ADR-t813-2); the supervisor
+    // claims no task whose worker this binary has none for.
+    let run = SqliteQueue::open(db)?.run(id)?;
+    let worker = Worker::new(run.actual_provider(), run.worker_mode())?;
+    let adapter = workers.get(worker).with_context(|| {
+        format!(
+            "run {id}: this binary has no adapters for a {} {} worker",
+            worker.provider.as_str(),
+            worker.mode.as_str()
+        )
+    })?;
     let cmux = Cmux {
         executable: cmux.into(),
     };
@@ -1964,7 +2065,7 @@ pub fn session(
         db,
         id,
         token,
-        &provider,
+        adapter.agent,
         &LocalSpawner,
         resume,
         own_workspace(&cmux),
