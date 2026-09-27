@@ -465,3 +465,84 @@ fn goal_answered(queue: &mut SqliteQueue, task: TaskId) -> Value {
         .unwrap()
         .payload
 }
+
+/// Goal review is an actor of its own, the goal-review-job (ADR-t728-1):
+/// its verdict is data the supervisor applies and records as its own, at
+/// the job's request. An output it cannot read, or one with a field it
+/// does not know (the verdict, a criterion or a gap), closes nothing and
+/// registers nothing: the goal waits for a person (`goal review by hand`).
+#[test]
+fn a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed() {
+    for (broken, expected) in [
+        (json!("no verdict here"), "printed no verdict JSON"),
+        (
+            json!({"verdict": "achieved", "summary": "done", "close": true}),
+            "unknown field `close`",
+        ),
+        (
+            json!({"verdict": "achieved", "criteria": [
+                {"criterion": "(1)", "met": true, "evidence": [], "override": true}]}),
+            "unknown field `override`",
+        ),
+        (
+            json!({"verdict": "gaps", "gaps": [{"title": "docs", "priority": "urgent"}]}),
+            "unknown field `priority`",
+        ),
+    ] {
+        let fx = fixture();
+        let (goal, _) = goal_done(&fx);
+        supervise(&fx, &StubReviewer::new(&[broken]));
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        let detail = queue.show_goal(goal).unwrap();
+        assert!(!detail.closed, "{expected}");
+        assert!(
+            !detail
+                .events
+                .iter()
+                .any(|e| e.kind == "goal_review_finished" || e.kind == "goal_closed"),
+            "{expected}"
+        );
+        let failed = goal_events(&mut queue, goal, "goal_review_failed");
+        assert_eq!(failed.len(), 1, "{expected}");
+        let error = failed[0]["error"].as_str().unwrap();
+        assert!(error.contains(expected), "{error}");
+        assert_eq!(failed[0]["reason_category"], "recovery_failed");
+        assert_eq!(queue.goal_review_holds().unwrap().len(), 1, "{expected}");
+        let status = dagq::runtime::status(&fx.db).unwrap();
+        assert!(
+            status["attention"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["kind"] == "goal_review_failed" && a["next"] == "goal review by hand"),
+            "{status}"
+        );
+        // No gap became a draft of the goal.
+        assert_eq!(queue.show_goal(goal).unwrap().tasks.len(), 2, "{expected}");
+    }
+
+    let fx = fixture();
+    let (goal, _) = goal_done(&fx);
+    supervise(
+        &fx,
+        &StubReviewer::new(&[json!({"verdict": "achieved", "summary": "done"})]),
+    );
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let detail = queue.show_goal(goal).unwrap();
+    assert!(detail.closed);
+    let supervisor = format!("supervisor:{}", std::process::id());
+    let job = format!("goal-review-job:{goal}:1");
+    for kind in ["goal_review_finished", "goal_closed"] {
+        let event = detail
+            .events
+            .iter()
+            .find(|e| e.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind}"));
+        let actor = event.actor.clone().expect("an actor");
+        assert_eq!(
+            (actor.role.as_str(), actor.id.as_str(), actor.requested_by),
+            ("supervisor", supervisor.as_str(), Some(job.clone())),
+            "{kind}"
+        );
+    }
+}

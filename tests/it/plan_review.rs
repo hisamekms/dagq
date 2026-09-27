@@ -2608,3 +2608,94 @@ fn a_passing_plan_review_records_a_forecast_snapshot() {
     assert_eq!(snapshots[1]["tasks"][0]["id"], json!(two));
     assert!(snapshots[1]["tasks"][0]["p50"].is_null());
 }
+
+/// Plan review is an actor of its own, the plan-review-job (ADR-t728-1):
+/// the supervisor applies its verdict as data and records the events as
+/// its own, at the job's request. An output the runtime cannot read, or
+/// one with a field or an action it does not know, readies nothing: the
+/// proposal waits for a person (`plan review by hand`).
+#[test]
+fn a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed() {
+    let fx = fixture();
+    let backend = PlanWorkspace::default();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let supervisor = format!("supervisor:{}", std::process::id());
+    for (title, broken, expected) in [
+        (
+            "unreadable",
+            json!("no verdict here"),
+            "printed no verdict JSON",
+        ),
+        (
+            "unknown field",
+            json!({"verdict": "pass", "reasons": [], "summary": "ok", "ready": true}),
+            "unknown field `ready`",
+        ),
+        (
+            "unknown action",
+            json!({"verdict": "pass", "reasons": [], "summary": "ok",
+                   "actions": [{"action": "land", "task_id": 1}]}),
+            "unknown variant `land`",
+        ),
+    ] {
+        let task = add(&mut queue, title, &[TaskId::new(1)], Priority::Normal);
+        submit(&mut queue, &[task], None);
+        supervise(&fx, &backend, &StubReviewer::new(&[broken]));
+        assert_eq!(status(&mut queue, task), TaskStatus::Submitted, "{title}");
+        let kinds: Vec<String> = queue
+            .show(task)
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(
+            !kinds.iter().any(|k| k == "plan_review_finished"),
+            "{title}: {kinds:?}"
+        );
+        let failed = events(&mut queue, task, "plan_review_failed");
+        assert_eq!(failed.len(), 1, "{title}");
+        let error = failed[0]["error"].as_str().unwrap();
+        assert!(error.contains(expected), "{title}: {error}");
+        let attention = runtime::status(&fx.db).unwrap()["attention"].clone();
+        assert!(
+            attention
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["kind"] == "plan_review_failed"
+                    && a["task_id"] == json!(task)
+                    && a["next"] == "plan review by hand"),
+            "{title}: {attention}"
+        );
+    }
+
+    // A readable concern is applied: the verdict and the ask it opens are
+    // the supervisor's, requested by the job; the ask's asker stays.
+    let task = add(&mut queue, "doubtful", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let concern = StubReviewer::new(&[json!({
+        "verdict": "concern", "reasons": ["needs a person"], "summary": "doubtful"
+    })]);
+    supervise(&fx, &backend, &concern);
+    assert_eq!(status(&mut queue, task), TaskStatus::Submitted);
+    let job = format!("plan-review-job:{proposal}:1");
+    let detail = queue.show(task).unwrap();
+    for kind in ["plan_review_finished", "ask_opened"] {
+        let event = detail
+            .events
+            .iter()
+            .find(|e| e.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind}"));
+        let actor = event.actor.clone().expect("an actor");
+        assert_eq!(
+            (actor.role.as_str(), actor.id.as_str(), actor.requested_by),
+            ("supervisor", supervisor.as_str(), Some(job.clone())),
+            "{kind}"
+        );
+    }
+    let asks = queue.asks(Default::default()).unwrap();
+    let ask = asks.iter().find(|a| a.task_id == Some(task)).unwrap();
+    assert_eq!(ask.kind, AskKind::ApprovePlan);
+    assert_eq!(ask.asked_by, "plan_review");
+}

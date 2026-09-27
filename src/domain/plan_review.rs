@@ -76,7 +76,12 @@ pub struct PlanReviewVerdict {
     /// The weight of each submitted task of the proposal (ADR-0079
     /// decision 2), kept raw: a shape that does not hold is checked by
     /// [`super::prediction::parse_predictions`] and only leaves the
-    /// predictions unrecorded, never the verdict failed.
+    /// predictions unrecorded, never the verdict failed. It is not typed
+    /// here on purpose: a typed field would fail the whole verdict, and so
+    /// the review, on a malformed estimate that ADR-0079 decision 2 says
+    /// changes nothing. The raw value maps to no transition: the runtime
+    /// reads it only through `parse_predictions`, into typed
+    /// predictions, to record the estimates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predictions: Option<serde_json::Value>,
 }
@@ -218,6 +223,27 @@ mod tests {
             let error = PlanReviewVerdict::parse(broken).unwrap_err();
             assert!(error.starts_with("the plan review printed no verdict JSON"));
         }
+    }
+
+    #[test]
+    fn a_verdict_with_an_unknown_field_or_action_is_refused_but_its_predictions_are_raw() {
+        for stdout in [
+            r#"{"verdict":"pass","reasons":[],"summary":"ok","ready":true}"#,
+            r#"{"verdict":"pass","reasons":[],"summary":"ok","actions":[{"action":"land","task_id":1}]}"#,
+            r#"{"verdict":"pass","reasons":[],"summary":"ok","reopen":[{"task_id":1,"reason":"x","now":true}]}"#,
+            r#"{"verdict":"pass","reasons":[],"summary":"ok","actions":[{"action":"lower_priority","task_id":1,"priority":"low","why":"x"}]}"#,
+            "no json",
+        ] {
+            assert!(PlanReviewVerdict::parse(stdout).is_err(), "{stdout}");
+        }
+        // Predictions of any shape leave the verdict readable: they are
+        // checked apart from it (ADR-0079 decision 2).
+        let verdict = PlanReviewVerdict::parse(
+            r#"{"verdict":"pass","reasons":[],"summary":"ok","predictions":"S"}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.verdict, PlanReviewDecision::Pass);
+        assert_eq!(verdict.predictions, Some(serde_json::json!("S")));
     }
 
     #[test]

@@ -71,3 +71,22 @@ queueに書かれるeventは全て、書いたactorを`run_events`の列`actor_r
 - 着地（supervisorの中の`integrate`）はintegratorの文脈ができるまで（ADR-t728-2の後のtask）supervisorのactorで記録する。人が打つ`integrate`はその人（`user`）など呼び出し元になる。
 - review・recovery（終わったrunと生きているrun）・plan review・goal reviewのverdictをsupervisorが適用する間（`Supervisor::for_job`）、書かれるeventはactorがsupervisorのまま、`requested_by`にjobのactor id（`review-job:<run>:<attempt>`など、上の表と同じ）を持つ。portでは`RunLog::request_as`。入れ子にはせず、抜けるときに`None`に戻す。生きているrunのrecovery jobのverdictが適用されずにescalateするとき（`recovery_finished`とaskの作成は`apply_live`の外で書かれる）と、review passの後に別のthreadで行う着地のeventは`requested_by`を持たない。
 - 読み方: `RunEvent.actor`（`role`・`id`・`requested_by`）。migrationより前の行と古いバイナリが書いた行は`None`で、JSONでは`actor`の欄が無い。`events --full`と`show --full`は`actor`を出し、`show`の要約のeventも`actor`を持つ。`events`の要約（`--full`なし）と`watch`は変えない。secretやpromptの全文は入れない（入るのはroleとidだけ）。
+
+### headlessのjobのverdictと遷移
+
+review・recovery・plan review・goal reviewのjobは、それぞれ`review-job`・`recovery-job`・`plan-review-job`・`goal-review-job`のactorで（1つのroleにまとめない）、出力は型付きのverdict（`ReviewVerdict`・`RecoveryVerdict`・`PlanReviewVerdict`・`GoalReviewVerdict`）として読むデータにすぎない。遷移を決めるのはverdictを受けたsupervisorのRustのコードで（ADR-t728-1、ADR-t728-2の決定3）、写像は次のとおり決定的。
+
+| job | verdict | supervisorが行うこと |
+| --- | --- | --- |
+| review-job | `pass` | 衝突の事前検査のあと、sessionの`/exit`を待って着地の段（`AfterExit::Land`）へ進めるだけ。着地の関数は呼ばない。着地は別のthreadの`land_integrating`が、rebase後の検証コマンドを含む自分の検査を通したときだけ行い、落ちればrunは`needs_session`になる |
+| review-job | `revise` / `concern` | 生きているsessionへの差し戻し（`revise`の上限を使い切ったか、sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask |
+| recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
+| recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
+| plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`actions`は`pass`のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用する。`pass`では改善のproposalの`high`以上のtaskを`normal`に下げる（KPIの`max_improvement_proposals`） |
+| goal-review-job | `achieved` / `gaps` / `ask` | goalを閉じる・gapをdraftにする・`approve_goal`のask（`gaps`の連続が上限を超えたら`ask`） |
+
+- 未知の欄を拒む: 4つのverdictと入れ子の型（reviewのverdict、recoveryのaction、plan reviewのaction・`reopen`、goal reviewの`criteria`・`gaps`）は`#[serde(deny_unknown_fields)]`で、未知の欄・未知のactionを含む出力は読めない出力として扱う。
+- 例外は`PlanReviewVerdict`の`predictions`で、`serde_json::Value`のまま持つ。型にするとtaskの重さの見積もりの形が崩れただけでverdict全体が読めず、plan reviewが失敗するが、見積もりは記録するだけで遷移を変えない（ADR-0079決定2）ため。supervisorは`parse_predictions`で型付きの`TaskWeightPrediction`にしてから記録し、読めなければ記録しないだけで、生の値から遷移を決めない。
+- 壊れた出力はfail closed: 読めないverdictで何かが着地・retry・`ready`・goalのcloseになることはない。reviewは1回だけ同じ入力で再review（`review_retried`）し、それも読めなければ`review_failed`と`approve_landing`のask。recoveryは`triage_failed`（`triage by hand`）か生きているrunの`recovery_failed`（`recover by hand`）。plan reviewは`plan_review_failed`（`plan review by hand`）でproposalは`submitted`のまま。goal reviewは`goal_review_failed`（`goal review by hand`）でgoalは開いたまま。
+- 記録: verdictを適用したeventは上の「eventのactor」のとおりactorがsupervisor、`requested_by`がjobのactor id。例外として、reviewの`concern`（と差し戻せない`revise`）の`approve_landing`のaskは`AfterExit::Ask`でsessionの`/exit`の後に`for_job`の外で開くので、その`ask_opened`は`requested_by`を持たない。jobの失敗のeventはjobの依頼ではないので`requested_by`を持たない（どのjobかはpayloadの`attempt`で分かる）。jobが開くaskの`asked_by`（`plan_review`・`goal_review`など）は変えない。
+- test: `tests/it/runtime_job_verdicts.rs`（reviewのpassが検証の落ちるrunを着地させないこと、reviewと終わったrunのrecoveryの壊れた出力）、`tests/it/plan_review.rs`と`tests/it/goal_review.rs`の`..._applied_at_its_jobs_request_and_a_broken_one_fails_closed`。

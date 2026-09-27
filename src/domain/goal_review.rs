@@ -19,6 +19,7 @@ string_enum!(GoalReviewDecision {
 /// One item of the goal's acceptance and whether it is met, with where the
 /// job saw it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoalCriterion {
     pub criterion: String,
     pub met: bool,
@@ -29,6 +30,7 @@ pub struct GoalCriterion {
 /// Something the goal still lacks, registered as a draft task of the goal
 /// with the origin `goal_gap`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoalGap {
     pub title: String,
     #[serde(default)]
@@ -38,8 +40,12 @@ pub struct GoalGap {
     pub criterion: String,
 }
 
-/// What the headless goal review prints on stdout: one JSON object.
+/// What the headless goal review prints on stdout: one JSON object. A
+/// field it does not know is refused, as the other jobs' verdicts are
+/// (ADR-t728-1): the output is data, and a shape the runtime does not
+/// read fails the review closed rather than being half applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoalReviewVerdict {
     pub verdict: GoalReviewDecision,
     #[serde(default)]
@@ -194,6 +200,18 @@ mod tests {
         assert_eq!(verdict.verdict, GoalReviewDecision::Achieved);
         assert_eq!(verdict.criteria[0].evidence, ["task 3"]);
         assert!(GoalReviewVerdict::parse("no json").is_err());
+    }
+
+    #[test]
+    fn a_verdict_with_an_unknown_field_is_refused() {
+        for stdout in [
+            r#"{"verdict":"achieved","summary":"done","close":true}"#,
+            r#"{"verdict":"achieved","criteria":[{"criterion":"(1)","met":true,"override":1}]}"#,
+            r#"{"verdict":"gaps","gaps":[{"title":"docs","priority":"high"}]}"#,
+        ] {
+            let error = GoalReviewVerdict::parse(stdout).unwrap_err();
+            assert!(error.contains("unknown field"), "{stdout}: {error}");
+        }
     }
 
     #[test]
