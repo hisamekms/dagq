@@ -143,10 +143,12 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
 }
 
 /// Task 182 to the end: the session takes the nudge and stops again with
-/// its background work still running, so one `stalled` ask opens with the
-/// background work and the screen. `wait` closes it and counts again, so
-/// a second one opens without a second nudge; `intervene` leaves it to a
-/// person and no third one follows. The receipt closes the answered ask.
+/// its background work still running, so its recovery job looks at it
+/// first (task 442, ADR-0047 decision 30) and, as it escalates, one
+/// `stalled` ask opens with the background work, the screen and the job's
+/// diagnosis. `wait` closes it and counts again, so a second one opens
+/// without a second nudge or job; `intervene` leaves it to a person and no
+/// third one follows. The receipt closes the answered ask.
 #[test]
 fn a_session_idle_after_its_nudge_gets_one_stalled_ask_and_its_answers_are_applied() {
     let (_dir, repo, db) = fixture();
@@ -174,11 +176,17 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     assert_eq!(first.run_id.as_ref(), Some(run.id()));
     assert_eq!(first.asked_by, "supervisor");
     assert_eq!(first.options, ["wait", "intervene", "propose"]);
+    assert_eq!(
+        first.reason_category,
+        dagq::domain::AskReason::RecoveryFailed
+    );
     for part in [
         "idle_without_receipt",
         "- cargo test (b1): cargo test",
         "? for shortcuts",
         "`intervene`",
+        "the recovery job could not repair it",
+        "Diagnosis: the test provider does not repair",
     ] {
         assert!(first.question.contains(part), "{part}: {}", first.question);
     }
@@ -223,6 +231,23 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     assert_eq!(closed.answer.as_deref(), Some("intervene"));
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(payloads(&detail, "stall_nudged").len(), 1);
+    // The job came before the first ask, and none before the ask after
+    // `wait`.
+    let requested = payloads(&detail, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["alert"], "stalled");
+    assert_eq!(requested[0]["reason"], "idle_without_receipt");
+    assert_eq!(requested[0]["attempt"], 1);
+    assert_eq!(requested[0]["background_tasks"][0]["command"], "cargo test");
+    let kinds = event_kinds(&detail);
+    assert!(
+        position(&kinds, "recovery_requested") < position(&kinds, "ask_opened"),
+        "{kinds:?}"
+    );
+    let finished = payloads(&detail, "recovery_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["ask_id"], json!(first.id));
+    assert_eq!(finished[0]["reason"], "idle_without_receipt");
     let resolved: Vec<(&Value, &Value, &Value)> = payloads(&detail, "stall_resolved")
         .into_iter()
         .map(|p| (&p["detection"], &p["outcome"], &p["threshold_secs"]))
@@ -231,6 +256,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         resolved,
         [
             (&json!("nudge"), &json!("escalated"), &json!(1)),
+            (&json!("recovery"), &json!("escalated"), &json!(1)),
             (&json!("ask"), &json!("answered_wait"), &json!(1)),
             (&json!("ask"), &json!("answered_intervene"), &json!(1)),
         ]
@@ -406,6 +432,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     assert_eq!(
         outcomes,
         [
+            &json!("escalated"),
             &json!("escalated"),
             &json!("answered_wait"),
             &json!("resolved_by_itself")

@@ -60,6 +60,7 @@ mod runtime_run_env;
 mod runtime_session;
 mod runtime_stale_receipt;
 mod runtime_stall;
+mod runtime_stall_recovery;
 mod runtime_sweep;
 mod runtime_triage;
 mod runtime_waiting;

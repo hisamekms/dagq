@@ -380,6 +380,17 @@ pub fn park_after_recheck(mut run: TaskRun, reason: String) -> Result<TaskRun, D
     Ok(run)
 }
 
+/// Park a running run whose live session a recovery job's `resume` sends
+/// back to a session of its own (ADR-0047 decision 40, task 442): it
+/// becomes `needs_session` with `reason` as `last_error`, and its session is
+/// asked to exit.
+pub fn park_live(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(&run, &[RunStatus::Running], "park a live session")?;
+    run.status = RunStatus::NeedsSession;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
 /// A runtime error on the run: `message` becomes `last_error` and the
 /// status stays, whether or not its supervisor lets it go.
 pub fn abandon(mut run: TaskRun, message: String) -> Result<TaskRun, DomainError> {
@@ -879,6 +890,13 @@ mod tests {
         let parked = park_after_recheck(run(RunStatus::AwaitingIntegration), "r".into()).unwrap();
         assert_eq!(parked.status(), RunStatus::NeedsSession);
         assert_eq!(parked.last_error(), Some("r"));
+        refused(
+            park_live(run(RunStatus::Validating), "r".into()),
+            RunStatus::Validating,
+        );
+        let parked = park_live(run(RunStatus::Running), "live".into()).unwrap();
+        assert_eq!(parked.status(), RunStatus::NeedsSession);
+        assert_eq!(parked.last_error(), Some("live"));
         refused(
             decide_landing(
                 run(RunStatus::AwaitingIntegration),

@@ -289,6 +289,7 @@ impl Supervisor<'_> {
             }
             if let Phase::Session(watch) = &mut slot.phase {
                 watch.stall.ended(self, &run)?;
+                watch.end_sends(self, &run)?;
             }
             self.end_wait(slot, WaitCause::SessionExited, None)?;
             return Ok(Step::Continue);

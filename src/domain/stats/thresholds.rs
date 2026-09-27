@@ -5,14 +5,19 @@
 //! miss). Everything is derived again from `run_events`.
 //!
 //! - The receipt-less idle (`idle_without_receipt_secs`): each
-//!   `stall_nudged` (detection `nudge`) and each `stalled` ask's
-//!   `ask_opened` (detection `ask`), ended by the `stall_resolved` the
-//!   supervisor records for it.
+//!   `stall_nudged` (detection `nudge`), each recovery job of the
+//!   `stalled` alert of reason `idle_without_receipt` (its
+//!   `recovery_requested`, detection `recovery`, ADR-0047 decision 30) and
+//!   each `stalled` ask's `ask_opened` (detection `ask`), ended by the
+//!   `stall_resolved` the supervisor records for it.
 //! - The check that a sent text was taken (`send_confirm_secs`, task 285's
 //!   events): each `submit_retried` of a text (`enter_retry`), each
-//!   `submit_resent` (`resend`), and each `answer_prompt` ask opened right
-//!   after a `submit_unconfirmed` of a text or a `submit_not_started`
-//!   (`ask`), ended by the events after it.
+//!   `submit_resent` (`resend`), each recovery job of the `stalled` alert
+//!   of reason `send_unconfirmed` (`recovery`, decision 31) and the
+//!   `stalled` ask it escalated to (`ask`), ended by their
+//!   `stall_resolved`; before the recovery job, the `answer_prompt` ask
+//!   opened right after a `submit_unconfirmed` of a text or a
+//!   `submit_not_started` (`ask`), ended by the events after it.
 //! - `background_alert_secs` (`long_background`): the `stalled` asks the
 //!   recovery job raised (ADR-0047 decision 40), whose `stall_resolved`
 //!   names this threshold; a repair it applied is `auto_repaired`, not a
@@ -46,7 +51,7 @@ pub struct Detection {
     pub run_id: RunId,
     /// The setting it is judged by.
     pub threshold: &'static str,
-    /// `nudge`, `ask`, `enter_retry` or `resend`.
+    /// `nudge`, `recovery`, `ask`, `enter_retry` or `resend`.
     pub detection: &'static str,
     /// The value of the setting it was made with, when recorded.
     pub threshold_secs: Option<i64>,
@@ -221,6 +226,25 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                         resolved_by(&mut nudge, end);
                     }
                     found.push(nudge);
+                }
+                "recovery_requested" if text(event, "alert") == Some("stalled") => {
+                    let threshold = if text(event, "reason") == Some("send_unconfirmed") {
+                        SEND
+                    } else {
+                        IDLE
+                    };
+                    let mut job = detection(threshold, "recovery");
+                    job.threshold_secs = int(event, "threshold_secs");
+                    job.detected_after_secs =
+                        int(event, "idle_secs").or_else(|| int(event, "waited_secs"));
+                    if let Some(end) = later.iter().find(|e| {
+                        e.kind == "stall_resolved"
+                            && text(e, "detection") == Some("recovery")
+                            && e.payload.get("attempt") == event.payload.get("attempt")
+                    }) {
+                        resolved_by(&mut job, end);
+                    }
+                    found.push(job);
                 }
                 "ask_opened" if text(event, "kind") == Some("stalled") => {
                     let id = event.payload.get("ask_id");
@@ -687,6 +711,49 @@ mod tests {
             (Some(1200), Some(1250))
         );
         assert_eq!(found[2].detected_after_secs, None);
+    }
+
+    /// Task 442 (ADR-0047 decisions 30 and 31): a `stalled` recovery job is
+    /// a detection of the threshold of its reason, ended by the
+    /// `stall_resolved` of its attempt; another alert's job is not one.
+    #[test]
+    fn a_stalled_recovery_job_is_a_detection_of_its_reason() {
+        let events = numbered(vec![
+            (
+                R1,
+                "recovery_requested",
+                json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1, "idle_secs": 1250, "threshold_secs": 1200}),
+                T,
+            ),
+            (
+                R1,
+                "stall_resolved",
+                resolved("recovery", "resolved_by_recovery", json!({"attempt": 1})),
+                T + 60,
+            ),
+            (
+                R1,
+                "recovery_requested",
+                json!({"alert": "stalled", "reason": "send_unconfirmed", "attempt": 2, "waited_secs": 60, "threshold_secs": 60}),
+                T + 100,
+            ),
+            (
+                R1,
+                "recovery_requested",
+                json!({"alert": "long_background", "attempt": 1}),
+                T + 200,
+            ),
+        ]);
+        assert_eq!(
+            outcomes(&events, T + 300),
+            [
+                (IDLE, "recovery", "resolved_by_recovery".to_owned()),
+                (SEND, "recovery", PENDING.to_owned()),
+            ]
+        );
+        let found = detections(&events, (T + 300) * 1000);
+        assert_eq!(found[1].detected_after_secs, Some(60));
+        assert_eq!(found[1].threshold_secs, Some(60));
     }
 
     /// Task 205's shape: a text the Enter did or did not submit.

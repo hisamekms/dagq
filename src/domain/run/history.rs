@@ -23,7 +23,7 @@ pub struct RunHistory<'a> {
 /// The events that park a run for a session with a reason of their own
 /// (the landing or validation, or a person's `send_back`), and the
 /// triage's resume.
-const PARKING: [&str; 7] = [
+const PARKING: [&str; 8] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -31,6 +31,7 @@ const PARKING: [&str; 7] = [
     event_kind::LANDING_DECIDED,
     event_kind::TRIAGE_FINISHED,
     event_kind::TRIAGE_DECIDED,
+    event_kind::RECOVERY_PARKED,
 ];
 
 /// The first five of [`PARKING`] and any landing recheck failure: what
@@ -209,15 +210,18 @@ impl<'a> RunHistory<'a> {
     /// `landing_decided` / `triage_finished` / `triage_decided`, or a
     /// landing recheck that resumed it ([`recheck::parks`]), and what kind
     /// of request that makes. A landing deferred for missing evidence names
-    /// the `checks`, one deferred for its scope the paths; the triage's
-    /// resume asks for its `instruction`.
+    /// the `checks`, one deferred for its scope the paths; the recovery
+    /// job's resume (of a run that ended, or of a live session parked by
+    /// it) asks for its `instruction`.
     pub fn last_park(&self) -> Option<Park<'a>> {
         let event = self
             .events
             .iter()
             .rev()
             .find(|e| PARKING.contains(&e.kind.as_str()) || recheck::parks(e))?;
-        let key = if event.kind == event_kind::TRIAGE_FINISHED {
+        let key = if event.kind == event_kind::TRIAGE_FINISHED
+            || event.kind == event_kind::RECOVERY_PARKED
+        {
             "instruction"
         } else {
             "reason"
@@ -234,6 +238,7 @@ impl<'a> RunHistory<'a> {
             ParkCause::SentBack
         } else if event.kind == event_kind::TRIAGE_FINISHED
             || event.kind == event_kind::TRIAGE_DECIDED
+            || event.kind == event_kind::RECOVERY_PARKED
         {
             ParkCause::Triage
         } else if event.kind == event_kind::LANDING_RECHECK_FAILED {
@@ -639,6 +644,18 @@ mod tests {
             after_validation(Failed, false, false),
             AfterValidation::Rest { close: false }
         );
+    }
+
+    #[test]
+    fn a_live_session_parked_by_its_recovery_job_asks_for_the_instruction() {
+        let events = vec![event(
+            1,
+            "recovery_parked",
+            json!({"reason": "parked", "instruction": "rerun the tests"}),
+        )];
+        let park = RunHistory::from_events(&events).last_park().unwrap();
+        assert_eq!(park.cause, ParkCause::Triage);
+        assert_eq!(park.reason, Some("rerun the tests"));
     }
 
     #[test]

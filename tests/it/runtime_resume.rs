@@ -1479,8 +1479,11 @@ fn a_request_left_in_the_input_box_gets_enter_again_not_the_text() {
 }
 
 /// Task 285: a request still in the input box after the Enters sent again
-/// is recorded and raised to the inbox as an `answer_prompt` ask; `/exit`
-/// left there gets Enter again too but is never typed twice.
+/// is recorded; `/exit` left there gets Enter again too but is never typed
+/// twice. Task 442 (ADR-0047 decision 31): the request goes to the
+/// session's recovery job (`stalled`, reason `send_unconfirmed`) and, as it
+/// escalates, becomes the `stalled` ask, not an `answer_prompt` ask; the
+/// ask closes with the stage.
 #[test]
 fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
     let (_dir, repo, db) = fixture();
@@ -1488,10 +1491,11 @@ fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.swallowed_enters.store(1000, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    // The fake session still reads the request, so the run resolves.
+    // The fake session still reads the request, so the run resolves, once
+    // the ask is open.
     backend.resume_script_for(
         2,
-        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; until \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
@@ -1514,16 +1518,50 @@ fn a_request_stuck_in_the_input_box_is_asked_to_the_inbox() {
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
     let asks = other_asks(&mut queue, true);
     assert_eq!(asks.len(), 1, "{asks:?}");
-    assert_eq!(asks[0].kind, AskKind::AnswerPrompt);
+    assert_eq!(asks[0].kind, AskKind::Stalled);
     assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
-    assert!(
-        asks[0].question.contains(
-            "resolution request the supervisor typed stays in the input box after 4 Enters"
-        ),
-        "{}",
-        asks[0].question
+    assert_eq!(
+        asks[0].reason_category,
+        dagq::domain::AskReason::RecoveryFailed
     );
+    for part in [
+        "resolution request the supervisor typed stays in the input box after 4 Enters",
+        "reason: send_unconfirmed",
+        "the recovery job could not repair it",
+    ] {
+        assert!(
+            asks[0].question.contains(part),
+            "{part}: {}",
+            asks[0].question
+        );
+    }
+    assert_eq!(asks[0].options[..2], ["wait", "intervene"]);
     assert!(asks[0].closed_at.is_some());
+    // The job came first, for the text and not for the /exit.
+    let requested = payloads(&detail, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["alert"], "stalled");
+    assert_eq!(requested[0]["reason"], "send_unconfirmed");
+    assert_eq!(requested[0]["event"], "submit_unconfirmed");
+    assert_eq!(requested[0]["send"], "resolution request");
+    assert_eq!(
+        requested[0]["evidence"],
+        json!([requested[0]["send_event"]])
+    );
+    let kinds = event_kinds(&detail);
+    let asked = kinds.iter().rposition(|k| *k == "ask_opened").unwrap();
+    assert!(position(&kinds, "recovery_requested") < asked, "{kinds:?}");
+    let resolved: Vec<(&Value, &Value)> = payloads(&detail, "stall_resolved")
+        .into_iter()
+        .map(|p| (&p["detection"], &p["outcome"]))
+        .collect();
+    assert_eq!(
+        resolved,
+        [
+            (&json!("recovery"), &json!("escalated")),
+            (&json!("ask"), &json!("resolved_by_itself")),
+        ]
+    );
 }
 
 /// Task 285: a request the session never got (typed into a box that lost
@@ -1562,7 +1600,8 @@ fn a_lost_request_is_sent_again_after_no_sign_of_work() {
 }
 
 /// Task 285: a request lost twice is not sent a third time: the run
-/// records `submit_not_started` and asks the inbox.
+/// records `submit_not_started`, and (task 442) its recovery job escalates
+/// it to the `stalled` ask.
 #[test]
 fn a_request_lost_twice_is_asked_to_the_inbox() {
     let (_dir, repo, db) = fixture();
@@ -1572,8 +1611,12 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
     backend.resume_timeout = Duration::from_secs(4);
     backend.dropped_texts.store(usize::MAX, Ordering::SeqCst);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    // It never gets the request, and exits at the /exit of the resume timeout.
-    backend.resume_script_for(2, "await_exit");
+    // It never gets the request, and exits at the /exit of the resume
+    // timeout, once the ask is open.
+    backend.resume_script_for(
+        2,
+        "until \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done; await_exit",
+    );
     let options = SuperviseOptions {
         stall: Some(dagq::domain::stall::StallConfig {
             send_confirm_secs: 1,
@@ -1600,9 +1643,25 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
         })
         .unwrap()
         .into_iter()
-        .filter(|a| a.kind == AskKind::AnswerPrompt)
+        .filter(|a| a.kind == AskKind::Stalled)
         .collect::<Vec<_>>();
     assert_eq!(asks.len(), resumes, "{asks:?}");
+    assert!(
+        !other_asks(&mut queue, true)
+            .iter()
+            .any(|a| a.kind == AskKind::AnswerPrompt)
+    );
+    // One job per resume, the three of the alert.
+    let requested: Vec<&Value> = payloads(&detail, "recovery_requested")
+        .into_iter()
+        .filter(|p| p["alert"] == "stalled")
+        .collect();
+    assert_eq!(requested.len(), resumes, "{requested:?}");
+    assert!(
+        requested
+            .iter()
+            .all(|p| p["reason"] == "send_unconfirmed" && p["event"] == "submit_not_started")
+    );
     assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
     // Each closes once its session exited.
     assert!(asks.iter().all(|a| a.closed_at.is_some()));

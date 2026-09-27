@@ -304,8 +304,11 @@ impl SessionWatch {
             sv.queue
                 .record_runtime_event(run.id(), event_kind::RECEIPT_OBSERVED, payload)?;
             info!(run_id = %run.id(), "receipt received for {}; waiting for the session to go idle (or a person's /exit)", run.id());
+            // A send it had not taken ends with the receipt.
+            self.watch_sends(sv, run)?;
         }
         self.stall.settle(sv, run, self.receipt_seen)?;
+        self.stop_idle_job(sv, run, true);
         let wrapper = processes.iter().find(|p| p.role == "wrapper");
         // A session that already ended (on its own, by a person's /exit,
         // or before this supervisor adopted the run) is not asked to exit.
@@ -378,6 +381,7 @@ impl SessionWatch {
                 }
                 close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
                 self.stall.ended(sv, run)?;
+                self.end_sends(sv, run)?;
                 if let Some(nudge) = &mut self.stale {
                     nudge.settle(sv, run, SESSION_PHASE, None, "run_ended")?;
                 }
@@ -407,9 +411,13 @@ impl SessionWatch {
                     info!(run_id = %run.id(), "exit requested for {} after its wrapper went silent; waiting for session exit", run.id());
                     self.exit_requested = Some(Instant::now());
                     self.exit_for_silence = true;
-                    // Background work and idle processes are followed
-                    // only before the /exit.
-                    for alert in [RecoveryAlert::LongBackground, RecoveryAlert::IdleProcess] {
+                    // Background work, idle processes and a stall are
+                    // followed only before the /exit.
+                    for alert in [
+                        RecoveryAlert::LongBackground,
+                        RecoveryAlert::IdleProcess,
+                        RecoveryAlert::Stalled,
+                    ] {
                         self.recovery
                             .stop_for(sv, run, Some(alert), "exit_requested");
                     }
@@ -431,16 +439,23 @@ impl SessionWatch {
                         {
                             start.poll(sv, run, &self.workspace, &self.idle_marker)?;
                         }
+                        // A send it did not take before its receipt goes to
+                        // its recovery job (ADR-0047 decision 31); a request
+                        // to rewrite a stale receipt ends at its own timeout.
                         if !self.receipt_seen
-                            && let Some(start) = self.stall.poll(
-                                sv,
-                                run,
-                                &self.workspace,
-                                &self.idle_marker,
-                                self.prompt_hash.is_some(),
-                            )?
+                            && let Some((_, start)) = self.watch_sends(sv, run)?
                         {
                             self.answer_start = Some(start);
+                        }
+                        if !self.receipt_seen
+                            && let Some(start) = self.watch_stall(sv, run)?
+                        {
+                            self.answer_start = Some(start);
+                        }
+                        // A recovery job's `resume` parks the run for a
+                        // session of its own (task 442).
+                        if let Some(instruction) = self.stall.take_park() {
+                            return self.park_for_resume(sv, run, &instruction).map(Some);
                         }
                         self.watch_background(sv, run)?;
                         self.watch_idle_processes(sv, run)?;

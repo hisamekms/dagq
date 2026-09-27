@@ -117,6 +117,12 @@ impl ReviseWatch {
             // attention any more.
             self.live.clear_prompt(sv, run)?;
             self.live.recovery.stop(sv, run);
+            // A `stalled` ask of a send it did not take ends with it.
+            match outcome {
+                Some(ReviseOutcome::Rewritten(_)) => self.live.stall.settle(sv, run, true)?,
+                _ => self.live.stall.ended(sv, run)?,
+            }
+            self.live.end_sends(sv, run)?;
         }
         Ok(outcome)
     }
@@ -166,6 +172,13 @@ impl ReviseWatch {
         if let Some(start) = &mut self.start {
             let workspace = self.session.workspace.clone();
             start.poll(sv, run, &workspace, &run.idle_marker_path()?)?;
+        }
+        // A request or an answer it did not take goes to its recovery job
+        // (ADR-0047 decision 31); an instruction the job typed is input.
+        if let Some((typed, start)) = self.live.watch_sends(sv, run)? {
+            self.live.input_at = Some(typed);
+            self.sent = Instant::now();
+            self.start = Some(start);
         }
         // A session stopped at its own question waits for its answer, however
         // long a person takes: it neither went idle without rewriting the

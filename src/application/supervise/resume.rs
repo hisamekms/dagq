@@ -872,6 +872,8 @@ impl ResumeWatch {
             exit_typed: false,
             at_prompt: false,
             lands: false,
+            park: false,
+            ask_on_failure: false,
         };
         if let LiveStep::Escalate(attempt, escalation) =
             self.live
@@ -888,7 +890,10 @@ impl ResumeWatch {
     fn end_live(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
         self.live.clear_prompt(sv, run)?;
         self.live.recovery.stop(sv, run);
-        Ok(())
+        // A `stalled` ask of a send it did not take ends with the stage,
+        // and so does the send's detection.
+        self.live.stall.ended(sv, run)?;
+        self.live.end_sends(sv, run)
     }
 
     /// Start the stage's clocks again (ADR-0071 decision 15): the resume
@@ -1082,6 +1087,8 @@ impl ResumeWatch {
             // Nobody needs to send anything to a session that exited.
             self.recovery.stop(sv, run);
             self.live.recovery.stop(sv, run);
+            self.live.stall.ended(sv, run)?;
+            self.live.end_sends(sv, run)?;
             self.live.prompt_hash = None;
             close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
             if let Some(nudge) = &mut self.stale {
@@ -1155,6 +1162,8 @@ impl ResumeWatch {
                     exit_typed: self.exit_typed,
                     at_prompt: false,
                     lands: false,
+                    park: false,
+                    ask_on_failure: false,
                 };
                 let (timeout, attempt) = (sv.cmux.exit_timeout().as_secs(), self.attempt);
                 let step = self
@@ -1237,6 +1246,13 @@ impl ResumeWatch {
         }
         if let Some(start) = &mut self.start {
             start.poll(sv, run, &self.workspace, &self.idle_marker)?;
+        }
+        // A request or an answer it did not take goes to its recovery job
+        // (ADR-0047 decision 31); an instruction the job typed is input.
+        if let Some((typed, start)) = self.live.watch_sends(sv, run)? {
+            self.live.input_at = Some(typed);
+            self.restart_clocks(&*sv.files);
+            self.start = Some(start);
         }
         // A session stopped at its own question waits for its answer,
         // however long a person takes: it neither went idle without a

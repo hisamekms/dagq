@@ -1,9 +1,12 @@
 //! What the supervisor types into a live session, and whether it got there
 //! (task 285): the Enter a long paste swallowed is sent again without the
-//! text, a text still in the input box after that is raised to the inbox,
-//! and a session that shows no sign of work after a request or an answer
-//! ([`StartCheck`]) is sent it again or raised. Every `send_text` and
-//! `send_exit` of the supervisor goes through [`submit`].
+//! text, a text still in the input box after that is recorded
+//! (`submit_unconfirmed`), and a session that shows no sign of work after a
+//! request or an answer ([`StartCheck`]) is sent it again or recorded
+//! (`submit_not_started`). Either goes to the session's recovery job as the
+//! `stalled` alert (ADR-0047 decision 31, `stall_recovery.rs`) before any
+//! ask. Every `send_text` and `send_exit` of the supervisor goes through
+//! [`submit`].
 
 use super::*;
 
@@ -144,11 +147,11 @@ fn exit_unsent_on(signals: &dyn AgentSignals, screen: &str) -> bool {
 
 /// [`submit_input`] into `run`'s session, `what` naming the input in the
 /// records. Enters sent again are recorded as `submit_retried`; an input
-/// still in the box as `submit_unconfirmed`, and a text also raised as an
-/// `answer_prompt` ask to the inbox (a `/exit` becomes the `stuck_exit` ask
-/// of its exit timeout). An error is only a failed typing: the input was
-/// typed once it returns, so a record or an ask that fails after it is
-/// only noted.
+/// still in the box as `submit_unconfirmed`, which for a text the session's
+/// watch hands to its recovery job (a `/exit` becomes the `stuck_exit`
+/// alert of its exit timeout). An error is only a failed typing: the input
+/// was typed once it returns, so a record that fails after it is only
+/// noted.
 pub(super) fn submit(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
@@ -205,22 +208,16 @@ pub(super) fn submit(
             }),
         );
         warn!(run_id = %run.id(), "{what} is still in the input box of workspace {workspace} after {retries} Enters");
-        if let Input::Text(_) = input {
-            let situation = format!(
-                "the {what} the supervisor typed stays in the input box after {} Enters, not submitted",
-                retries + 1
-            );
-            ask_unsubmitted(sv, run, workspace, &situation, &excerpt);
-        }
     }
     Ok(submission)
 }
 
-/// Raise a session that did not take what the supervisor sent as an
-/// `answer_prompt` ask to the inbox, the way a dialog is (the open ask of
-/// the run is not registered twice). The runtime sends nothing more: the
+/// Raise a resumed session whose input box never got ready for its request
+/// as an `answer_prompt` ask to the inbox, the way a dialog is (the open ask
+/// of the run is not registered twice). The runtime sends nothing more: the
 /// person has the key or text sent, and the ask closes itself once the
-/// session exits. A failed ask is only noted.
+/// session exits. A failed ask is only noted. A send the session did not
+/// take is not asked here: it goes to its recovery job first.
 pub(super) fn ask_unsubmitted(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
@@ -323,8 +320,9 @@ fn taken_marks(run: &TaskRun, idle_marker: &Path) -> Vec<PathBuf> {
 /// after it, the agent at work, or its transcript changed. With none after
 /// [`confirm_wait`], a text the input box lost is sent once more
 /// (`submit_resent`); otherwise, or when that is lost too, the run records
-/// `submit_not_started` and the inbox is asked, instead of waiting out the
-/// resume timeout.
+/// `submit_not_started` (as for a dialog that came up) and the session's
+/// recovery job looks at it (the `stalled` alert), instead of waiting out
+/// the resume timeout.
 #[derive(Debug, Clone)]
 pub(super) struct StartCheck {
     what: String,
@@ -334,7 +332,8 @@ pub(super) struct StartCheck {
     sent_at: SystemTime,
     submitted: Option<String>,
     resent: bool,
-    /// A sign was seen, or the inbox was asked: nothing more to check.
+    /// A sign was seen, or `submit_not_started` was recorded: nothing more
+    /// to check.
     done: bool,
 }
 
@@ -418,11 +417,19 @@ impl StartCheck {
             StartSign::Started => self.done = true,
             StartSign::Dialog(kind) => {
                 self.done = true;
-                let situation = format!(
-                    "a {kind} dialog came up after the supervisor sent the {}",
-                    self.what
-                );
-                ask_unsubmitted(sv, run, workspace, &situation, &excerpt);
+                sv.queue.record_runtime_event(
+                    run.id(),
+                    "submit_not_started",
+                    json!({
+                        "workspace_id": workspace,
+                        "what": self.what,
+                        "waited_secs": wait.as_secs(),
+                        "resent": self.resent,
+                        "dialog": kind,
+                        "excerpt": excerpt,
+                    }),
+                )?;
+                warn!(run_id = %run.id(), "a {kind} dialog came up in the session of {} after the {}; its recovery job looks at it", run.id(), self.what);
             }
             StartSign::Lost if !self.resent => {
                 sv.queue.record_runtime_event(
@@ -455,14 +462,7 @@ impl StartCheck {
                         "excerpt": excerpt,
                     }),
                 )?;
-                warn!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s; asking the inbox", run.id(), self.what, wait.as_secs());
-                let situation = format!(
-                    "the session showed no sign of work within {}s of the {} the supervisor sent{}",
-                    wait.as_secs(),
-                    self.what,
-                    if self.resent { " twice" } else { "" }
-                );
-                ask_unsubmitted(sv, run, workspace, &situation, &excerpt);
+                warn!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s; its recovery job looks at it", run.id(), self.what, wait.as_secs());
             }
         }
         Ok(())

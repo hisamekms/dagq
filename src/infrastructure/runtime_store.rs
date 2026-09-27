@@ -1448,6 +1448,37 @@ impl SqliteQueue {
         Ok(run.relocated(&self.runs_dir))
     }
 
+    /// Park a running run leased to `token` whose live session a recovery
+    /// job's `resume` sends back to a session of its own (task 442): it
+    /// becomes `needs_session` with `reason` as `last_error`, recorded as
+    /// `recovery_parked` with `payload`, the status and the reason. The
+    /// lease stays: the supervisor asks the session to exit first.
+    pub fn park_live(
+        &mut self,
+        id: &RunId,
+        token: &str,
+        reason: &str,
+        mut payload: serde_json::Value,
+    ) -> Result<TaskRun> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        let run = apply(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            Some(token),
+            || "run is not running under this supervisor".to_owned(),
+            |run| run::park_live(run, reason.to_owned()),
+        )?;
+        payload["status"] = json!(run.status());
+        payload["reason"] = json!(reason);
+        run_event(&tx, id, crate::domain::event_kind::RECOVERY_PARKED, payload)?;
+        tx.commit()?;
+        Ok(run.relocated(&self.runs_dir))
+    }
+
     /// Park a run awaiting integration that the landing recheck found no
     /// longer landing on main (ADR-0068 decision 3): it becomes
     /// `needs_session` with `reason` as `last_error`, recorded as
@@ -3475,6 +3506,15 @@ impl RunStore for SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
         SqliteQueue::decide_landing(self, id, status, reason, payload)
+    }
+    fn park_live(
+        &mut self,
+        id: &RunId,
+        token: &str,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun> {
+        SqliteQueue::park_live(self, id, token, reason, payload)
     }
     fn park_rechecked(
         &mut self,

@@ -86,6 +86,7 @@ pub const PUSH_SKIPPED: &str = "push_skipped";
 pub const RECEIPT_OBSERVED: &str = "receipt_observed";
 pub const RECOVERY_FAILED: &str = "recovery_failed";
 pub const RECOVERY_FINISHED: &str = "recovery_finished";
+pub const RECOVERY_PARKED: &str = "recovery_parked";
 pub const RECOVERY_REQUESTED: &str = "recovery_requested";
 pub const RESUME_FINISHED: &str = "resume_finished";
 pub const RESUME_SKIPPED: &str = "resume_skipped";

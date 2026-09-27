@@ -1,7 +1,10 @@
-//! A worker's session idle without a receipt (ADR-0043 decision 1): the
-//! [`StallWatch`] of the first session nudges it once and, if it stays
-//! idle, raises it to the inbox as a `stalled` ask, recording how each
-//! detection ended (`stall_resolved`, decision 3).
+//! A worker's session idle without a receipt (ADR-0043 decision 1, ADR-0047
+//! decision 30): the [`StallWatch`] of the first session nudges it once
+//! and, if it stays idle, hands it to a recovery job (`stalled`, reason
+//! `idle_without_receipt`); only when the job does not repair it is it
+//! raised to the inbox as a `stalled` ask. How each detection ended is
+//! recorded (`stall_resolved`, decision 32). The watch also follows the
+//! `stalled` ask a recovery job of another alert escalated to.
 //!
 //! The input marker the agent's hook writes as the session takes an input
 //! counts as its last input next to the texts the supervisor typed, and a
@@ -15,6 +18,7 @@
 //! the `approve_landing` ask), and at the resume timeout otherwise.
 
 use super::*;
+use crate::domain::recovery::{IDLE_WITHOUT_RECEIPT, SEND_UNCONFIRMED, attempts};
 
 /// The setting the idle detections are judged by.
 pub(super) const IDLE_THRESHOLD: &str = "idle_without_receipt_secs";
@@ -22,9 +26,25 @@ pub(super) const IDLE_THRESHOLD: &str = "idle_without_receipt_secs";
 /// The setting the `long_background` alert is judged by.
 pub(super) const BACKGROUND_THRESHOLD: &str = "background_alert_secs";
 
+/// The setting the checks that a sent text was taken are judged by (the
+/// `stalled` alert of reason `send_unconfirmed`).
+pub(super) const SEND_THRESHOLD: &str = "send_confirm_secs";
+
 /// The options of a `stalled` ask: leave the session alone and ask again
 /// if it stays idle, or have a person step in.
 pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "intervene"];
+
+/// The options of a `stalled` ask: [`STALLED_OPTIONS`], then those of the
+/// recovery job's `note`, each once (ADR-0047 decision 40).
+pub(super) fn stalled_options(note: Option<&Note>) -> Vec<String> {
+    let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
+    for option in note.map(|note| note.options.as_slice()).unwrap_or_default() {
+        if !options.contains(option) {
+            options.push(option.clone());
+        }
+    }
+    options
+}
 
 /// The answers the runtime writes into a `stalled` ask it closes.
 pub(super) const STALL_MOVED_CLOSED: &str = "the session moved on; closed by the runtime";
@@ -56,6 +76,20 @@ struct Nudge {
     detected_after_secs: i64,
     /// Its `stall_resolved` is recorded.
     settled: bool,
+}
+
+/// The recovery job of this phase's idle after its nudge (ADR-0047
+/// decision 30) whose end is not recorded yet.
+#[derive(Debug, Clone, Copy)]
+struct Recovering {
+    attempt: usize,
+    /// When it was requested, on the files' wall clock.
+    at: SystemTime,
+    /// How long the session had been idle then.
+    detected_after_secs: i64,
+    /// When its repair was applied: the session moving after this is the
+    /// repair's doing.
+    repaired_at: Option<SystemTime>,
 }
 
 /// The `stalled` ask of this phase that nobody closed.
@@ -102,6 +136,26 @@ pub(super) struct StallWatch {
     /// After `intervene` (or an ask a person closed), no ask until the
     /// session ends a turn after this.
     held: Option<SystemTime>,
+    /// The recovery job of the idle after the nudge, until its end is
+    /// recorded.
+    /// Boxed: rarely set, and the watch is part of every session's phase.
+    recovering: Option<Box<Recovering>>,
+    /// A recovery job's repair (other than `wait`) restarts the count here.
+    recovered_from: Option<SystemTime>,
+    /// A recovery job's `resume` repair (task 442), with its instruction:
+    /// the session's watch parks the run as `needs_session`.
+    park: Option<String>,
+    /// The last observation followed the idle's recovery job: one that
+    /// did not (a dialog, a question, a hold or an input came first) leaves
+    /// the job nobody to act on, so the session's watch stops it.
+    followed: bool,
+}
+
+/// The idle the watch hands to a recovery job, and how the watch reaches
+/// it: the session's recovery and what it offers the job.
+pub(super) struct StallRecovery<'a, 'b> {
+    pub(super) recovery: &'a mut RecoveryWatch,
+    pub(super) live: &'a Live<'b>,
 }
 
 /// Seconds from `from` to `to`, zero when `to` is earlier.
@@ -205,6 +259,65 @@ impl StallWatch {
         // A person stepped in on an ask closed since.
         watch.held = latest_outcome("answered_intervene");
         watch.wait_from = latest_outcome("answered_wait");
+        // An instruction a recovery job had typed is an input too, and its
+        // repair restarted the count.
+        let idle_job = |e: &&crate::domain::RunEvent| {
+            e.payload["alert"] == RecoveryAlert::Stalled.as_str()
+                && e.payload["reason"] == IDLE_WITHOUT_RECEIPT
+        };
+        for at in events
+            .iter()
+            .filter(|e| e.kind == "auto_repaired" && e.payload["repair"] == "send_instruction")
+            .filter_map(at_event)
+        {
+            watch.input_sent(at, None);
+        }
+        let repaired = |e: &crate::domain::RunEvent| {
+            e.payload["applied"]
+                .as_array()
+                .is_some_and(|applied| applied.iter().any(|a| a != "wait"))
+        };
+        watch.recovered_from = events
+            .iter()
+            .filter(idle_job)
+            .rfind(|e| e.kind == "recovery_finished" && repaired(e))
+            .and_then(at_event);
+        // The idle's recovery job the previous supervisor requested and
+        // whose end is not recorded: a job it left running is gone (the
+        // adopter starts another, counted as one more), and the session
+        // moving on ends it as this watch's own would.
+        if let Some(requested) = events
+            .iter()
+            .filter(idle_job)
+            .rfind(|e| e.kind == "recovery_requested")
+        {
+            let attempt = requested.payload["attempt"].as_u64().unwrap_or(0) as usize;
+            let of_attempt = |e: &&crate::domain::RunEvent| {
+                e.payload["attempt"].as_u64() == Some(attempt as u64)
+            };
+            let ended = events.iter().filter(of_attempt).any(|e| {
+                e.kind == "stall_resolved"
+                    && e.payload["phase"] == PHASE
+                    && e.payload["detection"] == "recovery"
+            });
+            if !ended {
+                let applied = events.iter().filter(idle_job).filter(of_attempt).find(|e| {
+                    e.kind == "recovery_finished"
+                        && e.payload["applied"]
+                            .as_array()
+                            .is_some_and(|a| a.iter().any(|a| a != "wait"))
+                });
+                watch.recovering = Some(Box::new(Recovering {
+                    attempt,
+                    at: at_event(requested).unwrap_or(UNIX_EPOCH),
+                    detected_after_secs: requested.payload["idle_secs"].as_i64().unwrap_or(0),
+                    repaired_at: applied.and_then(at_event),
+                }));
+            }
+            if let Some(nudge) = &mut watch.nudge {
+                nudge.settled = true;
+            }
+        }
         // Times in the ask are whole seconds: a marker in the same second
         // is taken as older. The latest ask closed without its outcome
         // recorded was closed while no supervisor watched: its `wait`
@@ -238,8 +351,11 @@ impl StallWatch {
                     Some(e) if e.payload["alert"] == RecoveryAlert::IdleProcess.as_str() => {
                         IDLE_PROCESS_THRESHOLD
                     }
-                    Some(_) => BACKGROUND_THRESHOLD,
-                    None => IDLE_THRESHOLD,
+                    Some(e) if e.payload["alert"] == RecoveryAlert::LongBackground.as_str() => {
+                        BACKGROUND_THRESHOLD
+                    }
+                    Some(e) if e.payload["reason"] == SEND_UNCONFIRMED => SEND_THRESHOLD,
+                    _ => IDLE_THRESHOLD,
                 },
             });
             if applied {
@@ -378,7 +494,7 @@ impl StallWatch {
 
     /// Record how a detection ended, once.
     #[allow(clippy::too_many_arguments)]
-    fn resolved(
+    pub(super) fn resolved(
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
         detection: &str,
@@ -388,26 +504,165 @@ impl StallWatch {
         outcome: &str,
     ) -> Result<()> {
         let threshold = ask.map_or(IDLE_THRESHOLD, |(_, threshold)| threshold);
-        let mut payload = json!({
+        let payload = Self::resolved_payload(
+            sv,
+            detection,
+            threshold,
+            detected_after_secs,
+            detected_at,
+            outcome,
+        );
+        Self::record_resolved(sv, run, payload, ask.map(|(id, _)| id), detection, outcome)
+    }
+
+    /// The payload of a `stall_resolved`.
+    pub(super) fn resolved_payload(
+        sv: &Supervisor<'_>,
+        detection: &str,
+        threshold: &'static str,
+        detected_after_secs: i64,
+        detected_at: SystemTime,
+        outcome: &str,
+    ) -> Value {
+        json!({
             "phase": PHASE,
             "detection": detection,
             "threshold": threshold,
             "threshold_secs": match threshold {
                 BACKGROUND_THRESHOLD => sv.stall.background_alert_secs,
                 IDLE_PROCESS_THRESHOLD => sv.stall.idle_process_secs,
+                SEND_THRESHOLD => sv.stall.send_confirm_secs,
                 _ => sv.stall.idle_without_receipt_secs,
             },
             "detected_after_secs": detected_after_secs,
             "outcome": outcome,
             "resolved_after_secs": secs_between(detected_at, sv.files.now()),
-        });
-        if let Some((id, _)) = ask {
+        })
+    }
+
+    /// Record `payload` as `stall_resolved`, naming the ask when there is
+    /// one.
+    pub(super) fn record_resolved(
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        mut payload: Value,
+        ask: Option<AskId>,
+        detection: &str,
+        outcome: &str,
+    ) -> Result<()> {
+        if let Some(id) = ask {
             payload["ask_id"] = json!(id);
         }
         sv.queue
             .record_runtime_event(run.id(), event_kind::STALL_RESOLVED, payload)?;
         info!(run_id = %run.id(), "stall of {} ({detection}) ended: {outcome}", run.id());
         Ok(())
+    }
+
+    /// Whether a recovery job of the idle waits for its end to be recorded:
+    /// the job may run only then.
+    pub(super) fn recovering(&self) -> bool {
+        self.recovering.is_some()
+    }
+
+    /// Whether the last observation followed the idle's recovery job.
+    pub(super) fn followed(&self) -> bool {
+        self.followed
+    }
+
+    /// A recovery job chose `resume` with `instruction`: the session's
+    /// watch parks the run on its next step.
+    pub(super) fn request_park(&mut self, instruction: String) {
+        self.park = Some(instruction);
+    }
+
+    /// The `resume` a recovery job chose, once.
+    pub(super) fn take_park(&mut self) -> Option<String> {
+        self.park.take()
+    }
+
+    /// The run is parked for a session of its own by the idle's recovery
+    /// job: the job's detection ended with its repair.
+    pub(super) fn parked(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+        self.recovery_resolved(sv, run, "resolved_by_recovery")
+    }
+
+    /// The recovery job `attempt` of the idle started: a job before it, and
+    /// the nudge, went on to it.
+    fn recovery_started(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        attempt: usize,
+        idle_secs: i64,
+        now: SystemTime,
+    ) -> Result<()> {
+        self.recovery_resolved(sv, run, "escalated")?;
+        self.nudge_escalated(sv, run)?;
+        self.recovering = Some(Box::new(Recovering {
+            attempt,
+            at: now,
+            detected_after_secs: idle_secs,
+            repaired_at: None,
+        }));
+        Ok(())
+    }
+
+    /// The nudge not settled yet went on to the next detection.
+    fn nudge_escalated(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+        if let Some(nudge) = &mut self.nudge
+            && !nudge.settled
+        {
+            nudge.settled = true;
+            let nudge = *nudge;
+            Self::resolved(
+                sv,
+                run,
+                "nudge",
+                None,
+                nudge.detected_after_secs,
+                nudge.at,
+                "escalated",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Record how the idle's recovery job ended (`detection: recovery`),
+    /// once.
+    fn recovery_resolved(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        outcome: &str,
+    ) -> Result<()> {
+        let Some(recovering) = self.recovering.take() else {
+            return Ok(());
+        };
+        let mut payload = Self::resolved_payload(
+            sv,
+            "recovery",
+            IDLE_THRESHOLD,
+            recovering.detected_after_secs,
+            recovering.at,
+            outcome,
+        );
+        payload["attempt"] = json!(recovering.attempt);
+        Self::record_resolved(sv, run, payload, None, "recovery", outcome)
+    }
+
+    /// The outcome of the idle's recovery job once the session moved: the
+    /// repair's doing when one was applied.
+    fn moved_outcome(&self) -> &'static str {
+        if self
+            .recovering
+            .as_ref()
+            .is_some_and(|r| r.repaired_at.is_some())
+        {
+            "resolved_by_recovery"
+        } else {
+            "resolved_by_itself"
+        }
     }
 
     /// The session wrote its receipt (`receipt`) or asked a
@@ -419,12 +674,15 @@ impl StallWatch {
         run: &TaskRun,
         receipt: bool,
     ) -> Result<()> {
-        if self.nudge.is_none_or(|n| n.settled) && self.asked.is_none() {
+        if self.nudge.is_none_or(|n| n.settled) && self.asked.is_none() && self.recovering.is_none()
+        {
             return Ok(());
         }
         if !receipt && !sv.queue.has_unclosed_worker_question(run.id())? {
             return Ok(());
         }
+        let outcome = self.moved_outcome();
+        self.recovery_resolved(sv, run, outcome)?;
         if let Some(nudge) = &mut self.nudge
             && !nudge.settled
         {
@@ -460,6 +718,7 @@ impl StallWatch {
                 "run_ended",
             )?;
         }
+        self.recovery_resolved(sv, run, "run_ended")?;
         self.close(sv, run, STALL_EXITED_CLOSED, "run_ended")
     }
 
@@ -503,14 +762,16 @@ impl StallWatch {
         workspace: &str,
         idle_marker: &Path,
         dialog: bool,
+        recovery: StallRecovery<'_, '_>,
     ) -> Result<Option<StartCheck>> {
-        self.observe(sv, run, workspace, idle_marker, dialog, false)
+        self.observe(sv, run, workspace, idle_marker, dialog, Some(recovery))
     }
 
     /// The same observation for a run that waits for a person outside
     /// its slot (ADR-0062 decision 6): the `stalled` ask is followed and
     /// its answer applied, and one more ask opens after a `wait`, but
-    /// nothing is sent to the session (no nudge, no key to a dialog).
+    /// nothing is sent to the session (no nudge, no key to a dialog) and no
+    /// recovery job starts.
     pub(super) fn poll_quiet(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -519,10 +780,12 @@ impl StallWatch {
         idle_marker: &Path,
         dialog: bool,
     ) -> Result<()> {
-        self.observe(sv, run, workspace, idle_marker, dialog, true)
+        self.observe(sv, run, workspace, idle_marker, dialog, None)
             .map(|_| ())
     }
 
+    /// One observation; `recovery` is `None` for a run out of its slot,
+    /// which is sent nothing.
     fn observe(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -530,8 +793,9 @@ impl StallWatch {
         workspace: &str,
         idle_marker: &Path,
         dialog: bool,
-        quiet: bool,
+        recovery: Option<StallRecovery<'_, '_>>,
     ) -> Result<Option<StartCheck>> {
+        self.followed = false;
         let now = sv.files.now();
         let idle = IdleMarker::read(&*sv.files, sv.signals, idle_marker)?;
         let marker = idle.as_ref().map(IdleMarker::modified);
@@ -547,6 +811,16 @@ impl StallWatch {
                 }
             }
             None => self.prime_input = false,
+        }
+        // The session moved since the idle's recovery job started (or since
+        // its repair): the job's detection ended, and a job still running
+        // is stopped by the session's watch ([`Self::recovering`]).
+        if let Some(recovering) = self.recovering.as_deref() {
+            let since = recovering.repaired_at.unwrap_or(recovering.at);
+            if marker.is_some_and(|m| m > since) || self.taken.is_some_and(|t| t > since) {
+                let outcome = self.moved_outcome();
+                self.recovery_resolved(sv, run, outcome)?;
+            }
         }
         if self.asked.is_some() {
             self.watch_ask(sv, run, marker, now)?;
@@ -570,7 +844,10 @@ impl StallWatch {
         // agent is at work.
         let open_input = self.taken.filter(|at| modified <= *at);
         let start = open_input.unwrap_or(modified);
-        let from = self.wait_from.map_or(start, |at| at.max(start));
+        let from = [self.wait_from, self.recovered_from]
+            .into_iter()
+            .flatten()
+            .fold(start, SystemTime::max);
         let threshold = sv.stall.idle_without_receipt_secs;
         if secs_between(from, now) < threshold {
             return Ok(None);
@@ -589,17 +866,19 @@ impl StallWatch {
             return Ok(None);
         }
         let idle_secs = secs_between(start, now);
-        if quiet {
-            // Nothing is typed: a stall before its nudge waits for the slot.
+        let Some(recovery) = recovery else {
+            // Nothing is typed and no job starts: a stall before its
+            // nudge, or one for a recovery job, waits for the slot. After a
+            // person's `wait` the ask follows straight away.
             let Some(nudge) = self.nudge else {
                 return Ok(None);
             };
-            if open_input.is_some() {
+            if open_input.is_some() || self.wait_from.is_none() {
                 return Ok(None);
             }
-            self.open_ask(sv, run, workspace, &idle, idle_secs, nudge, now)?;
+            self.open_ask(sv, run, workspace, &idle, idle_secs, nudge, now, None)?;
             return Ok(None);
-        }
+        };
         let screen = sv.cmux.capture(workspace);
         if open_input.is_some() && screen.as_ref().ok().is_none_or(|s| sv.signals.working(s)) {
             return Ok(None);
@@ -617,8 +896,132 @@ impl StallWatch {
         }
         match self.nudge {
             None => self.send_nudge(sv, run, workspace, &idle, idle_secs, now),
-            Some(nudge) => {
-                self.open_ask(sv, run, workspace, &idle, idle_secs, nudge, now)?;
+            // A person answered `wait` to the ask the stall came to: asked
+            // again, without another job (ADR-0047 decision 30).
+            Some(nudge) if self.wait_from.is_some() => {
+                self.open_ask(sv, run, workspace, &idle, idle_secs, nudge, now, None)?;
+                Ok(None)
+            }
+            Some(nudge) => self.recover(sv, run, workspace, &idle, idle_secs, nudge, now, recovery),
+        }
+    }
+
+    /// The session stays idle without a receipt after its nudge: its
+    /// recovery job (`stalled`, reason `idle_without_receipt`, ADR-0047
+    /// decision 30), and the `stalled` ask once the job does not repair
+    /// it: an escalation, low confidence, a repair whose preconditions no
+    /// longer hold, a failed job (with `reason_category: recovery_failed`)
+    /// or the alert past its attempts. A `resume` repair asks the session's
+    /// watch to park the run ([`Self::take_park`]). Returns an instruction
+    /// the repair typed, for the check that it was taken.
+    #[allow(clippy::too_many_arguments)]
+    fn recover(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+        idle: &IdleMarker,
+        idle_secs: i64,
+        nudge: Nudge,
+        now: SystemTime,
+        stall: StallRecovery<'_, '_>,
+    ) -> Result<Option<StartCheck>> {
+        self.followed = true;
+        let reason = Some(IDLE_WITHOUT_RECEIPT);
+        let StallRecovery { recovery, live } = stall;
+        // The nudge is the evidence of the alert.
+        let evidence: Vec<EventId> = if recovery
+            .running_for(RecoveryAlert::Stalled, reason)
+            .is_none()
+        {
+            sv.queue
+                .run_events(run.id())?
+                .iter()
+                .rev()
+                .find(|e| e.kind == "stall_nudged" && e.payload["phase"] == PHASE)
+                .map(|e| e.id)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let facts = json!({
+            "phase": PHASE,
+            "idle_secs": idle_secs,
+            "threshold": IDLE_THRESHOLD,
+            "threshold_secs": sv.stall.idle_without_receipt_secs,
+            "nudged_secs_ago": secs_between(nudge.at, now),
+            "background_running": idle.background_running(),
+            "background_tasks": idle.background_tasks(),
+            "evidence": evidence,
+        });
+        let step = recovery.follow_for(sv, run, live, RecoveryAlert::Stalled, reason, || facts)?;
+        if let Some(attempt) = recovery.running_for(RecoveryAlert::Stalled, reason)
+            && self
+                .recovering
+                .as_ref()
+                .is_none_or(|r| r.attempt != attempt)
+        {
+            info!(run_id = %run.id(), "run {} stays idle without a receipt {idle_secs}s after its nudge; recovery job {attempt} looks at it", run.id());
+            self.recovery_started(sv, run, attempt, idle_secs, now)?;
+        }
+        match step {
+            LiveStep::Pending => Ok(None),
+            // Not reached for this alert (its failed job is escalated to
+            // the ask, `Live::ask_on_failure`); kept so a job failure
+            // recorded as the attention still ends once the session moves.
+            LiveStep::Failed => {
+                if self.recovering.is_none() {
+                    let attempt = attempts(&sv.queue.run_events(run.id())?, RecoveryAlert::Stalled);
+                    self.recovery_started(sv, run, attempt, idle_secs, now)?;
+                }
+                Ok(None)
+            }
+            LiveStep::Repaired(applied) => {
+                // A `wait` repairs nothing: the session moving after it
+                // moved by itself.
+                if applied.names.iter().any(|name| *name != "wait") {
+                    if let Some(recovering) = &mut self.recovering {
+                        recovering.repaired_at = Some(now);
+                    }
+                    self.recovered_from = Some(now);
+                }
+                if let Some(instruction) = applied.resume {
+                    self.park = Some(instruction);
+                }
+                Ok(applied.sent.map(|(text, sent_at, submission)| {
+                    self.input_sent(sent_at, Some(&text));
+                    StartCheck::new("recovery instruction", &text, sent_at, &submission)
+                }))
+            }
+            LiveStep::Escalate(attempt, escalation) => {
+                let note = escalation.note(run, RecoveryAlert::Stalled, attempt);
+                let extra = json!({"reason": IDLE_WITHOUT_RECEIPT});
+                // A `stalled` ask another alert opened meanwhile already
+                // has a person looking.
+                if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
+                    escalation.record(
+                        sv,
+                        run,
+                        RecoveryAlert::Stalled,
+                        attempt,
+                        &note,
+                        None,
+                        extra,
+                    )?;
+                    return Ok(None);
+                }
+                let id =
+                    self.open_ask(sv, run, workspace, idle, idle_secs, nudge, now, Some(&note))?;
+                escalation.record(
+                    sv,
+                    run,
+                    RecoveryAlert::Stalled,
+                    attempt,
+                    &note,
+                    Some(id),
+                    extra,
+                )?;
                 Ok(None)
             }
         }
@@ -669,7 +1072,9 @@ impl StallWatch {
     }
 
     /// Raise the session, still idle without a receipt after its nudge, as
-    /// a `stalled` ask to the inbox.
+    /// a `stalled` ask to the inbox: with the recovery job's `note` when
+    /// the job did not repair it (its options added, its reason category),
+    /// without after a person's `wait`.
     #[allow(clippy::too_many_arguments)]
     fn open_ask(
         &mut self,
@@ -680,7 +1085,8 @@ impl StallWatch {
         idle_secs: i64,
         nudge: Nudge,
         now: SystemTime,
-    ) -> Result<()> {
+        note: Option<&Note>,
+    ) -> Result<AskId> {
         let background = match idle.background_tasks() {
             [] if idle.background_running() => {
                 "background work was running (not listed)".to_owned()
@@ -696,13 +1102,17 @@ impl StallWatch {
             Ok(screen) => sv.signals.screen_excerpt(&screen),
             Err(error) => format!("(the screen could not be read: {error:#})"),
         };
+        let recovered = note.map_or_else(String::new, |note| {
+            format!(" And {}.\n{}\n", note.why, note.text)
+        });
         let question = format!(
-            "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), although the supervisor nudged it {nudged}s ago to write its receipt, ask a worker_question or say what it waits for. Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
+            "The session of run {run_id} (task {task_id}) in workspace {workspace} has been idle without a receipt for {idle_secs}s (reason: idle_without_receipt, phase: {PHASE}), although the supervisor nudged it {nudged}s ago to write its receipt, ask a worker_question or say what it waits for.{recovered} Answer `wait` to leave the session alone (the supervisor asks again if it stays idle for another {threshold}s), or `intervene` to step in yourself (read the screen, stop or check its background work, type an instruction, or stop the run and recover it; see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\nBackground tasks when it stopped:\n{background}\n\nLast lines of the screen:\n{screen}",
             run_id = run.id(),
             task_id = run.task_id(),
             nudged = secs_between(nudge.at, now),
             threshold = sv.stall.idle_without_receipt_secs,
         );
+        let options = stalled_options(note);
         let outcome = ask::ask(
             &mut *sv.queue,
             &sv.layout.repo_root,
@@ -711,15 +1121,16 @@ impl StallWatch {
                 task_id: Some(run.task_id()),
                 run_id: Some(run.id().clone()),
                 question,
-                options: STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
+                options,
                 asked_by: SessionRole::Supervisor.as_str().into(),
-                reason_category: AskReason::RecoveryFailed,
+                reason_category: note.map_or(AskReason::RecoveryFailed, |note| note.category),
                 finding_id: None,
             },
             sv.cmux,
         )?;
         let id = AskId::new(outcome["id"].as_i64().context("ask returned no id")?);
         warn!(ask_id = %id, run_id = %run.id(), "run {} stays idle without a receipt after its nudge; stalled ask {id} (notified: {})", run.id(), outcome["notified"]);
+        self.recovery_resolved(sv, run, "escalated")?;
         self.asked = Some(Asked {
             id,
             at: now,
@@ -742,7 +1153,24 @@ impl StallWatch {
                 "escalated",
             )?;
         }
-        Ok(())
+        Ok(id)
+    }
+
+    /// Follow the `stalled` ask a recovery job of a session in a revise or
+    /// a resume escalated to (their watch runs no idle detection):
+    /// close it once the session moves on and apply its answer.
+    pub(super) fn follow_ask(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        idle_marker: &Path,
+    ) -> Result<()> {
+        if self.asked.is_none() {
+            return Ok(());
+        }
+        let marker = sv.files.modified(idle_marker).ok();
+        let now = sv.files.now();
+        self.watch_ask(sv, run, marker, now)
     }
 
     /// Follow the `stalled` ask: close it when the session ended a turn
@@ -767,7 +1195,10 @@ impl StallWatch {
             let wait = stalled_ask(&*sv.queue, run.id(), Some(asked.id))?
                 .is_some_and(|ask| answered_wait(ask.answer.as_deref()));
             if wait {
-                self.wait_from = Some(now);
+                // A `wait` on a send not taken does not stand for the idle.
+                if asked.threshold != SEND_THRESHOLD {
+                    self.wait_from = Some(now);
+                }
             } else {
                 self.held = Some(now);
             }
@@ -813,7 +1244,9 @@ impl StallWatch {
                     "answered_wait",
                 )?;
                 self.asked = None;
-                self.wait_from = Some(now);
+                if asked.threshold != SEND_THRESHOLD {
+                    self.wait_from = Some(now);
+                }
                 info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered wait; counting its idle again", ask.id, run.id());
             }
             Some(_) => {

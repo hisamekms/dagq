@@ -1223,6 +1223,18 @@ pub trait RunStore {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
+    /// Park a running run leased to `token` whose live session a recovery
+    /// job's `resume` sends back to a session of its own (task 442): it
+    /// becomes `needs_session` with `reason`, recorded as
+    /// `recovery_parked` with `payload`; the lease stays for the session's
+    /// exit.
+    fn park_live(
+        &mut self,
+        id: &RunId,
+        token: &str,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// Park a run awaiting integration that the landing recheck found no
     /// longer landing on main (ADR-0068 decision 3), leased to `token` or
     /// to nobody; `None` when it is not so any more.

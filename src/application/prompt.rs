@@ -1362,7 +1362,8 @@ pub fn recovery_prompt(
                 "the session did not exit after the supervisor's /exit (or the /exit never reached it), and the runtime's own repairs did not apply.",
             RecoveryAlert::PromptWaiting =>
                 "the session waits at a dialog the runtime does not answer by itself.",
-            RecoveryAlert::Stalled => "the session looks stuck.",
+            RecoveryAlert::Stalled =>
+                "the session looks stuck: it stays idle without a receipt after the supervisor nudged it (reason idle_without_receipt), or it did not take a text the supervisor typed, which stays in its input box, showed no sign of work or brought up a dialog (reason send_unconfirmed). The alert facts say which. An instruction goes only into a session idle at its prompt, never over a text still in its input box. resume applies only to a run in its first session: the run is parked for a session of its own and this session is asked to /exit, which waits for background work it still runs, so stop what hangs with stop_processes in the same verdict.",
             RecoveryAlert::IdleProcess =>
                 "processes of the run (listed in the alert facts with how long they have used almost no CPU time) are alive but have not made progress for longer than the threshold; the session may be waiting for them.",
         },

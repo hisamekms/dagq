@@ -55,6 +55,28 @@ pub const STUCK_EXIT_ACTIONS: [&str; 4] = [
 /// The actions for a session held by a dialog (`prompt_waiting`).
 pub const PROMPT_WAITING_ACTIONS: [&str; 3] = ["answer_known_dialog", "stop_processes", "wait"];
 
+/// The actions for a session that looks stuck (`stalled`, ADR-0047
+/// decisions 30 and 31): an instruction only while it is idle at its
+/// prompt, a known dialog only under its rule, and `resume` (the run is
+/// parked for a session of its own) only for a run in its first session
+/// with resumes left.
+pub const STALLED_ACTIONS: [&str; 5] = [
+    "send_instruction",
+    "stop_processes",
+    "answer_known_dialog",
+    "resume",
+    "wait",
+];
+
+/// Why a session raised the `stalled` alert (`recovery_requested`'s
+/// `reason`): idle without a receipt after its nudge (decision 30).
+pub const IDLE_WITHOUT_RECEIPT: &str = "idle_without_receipt";
+
+/// The other reason of a `stalled` alert: a text the supervisor typed was
+/// not taken (`submit_unconfirmed` of a text, `submit_not_started`,
+/// decision 31).
+pub const SEND_UNCONFIRMED: &str = "send_unconfirmed";
+
 impl RecoveryAlert {
     /// The alert of a run that ended `failed` or `interrupted` without a
     /// pending request of its own (`resume_exhausted` records one).
@@ -113,7 +135,9 @@ pub fn current_alert(events: &[RunEvent]) -> Option<RecoveryAlert> {
 /// The events after which a live session's failed recovery job
 /// (`recovery_failed`) no longer waits for a person: the session ended or
 /// was closed, the run was given up, or (for its own alert) what raised the
-/// alert went away.
+/// alert went away: a `stalled` session wrote its receipt, or the
+/// supervisor recorded how the stalled detection ended (`stall_resolved`
+/// of `detection: recovery`, once the session moved on).
 fn clears(event: &RunEvent, alert: &str) -> bool {
     matches!(
         event.kind.as_str(),
@@ -124,6 +148,9 @@ fn clears(event: &RunEvent, alert: &str) -> bool {
             | "runtime_error"
     ) || (alert == RecoveryAlert::PromptWaiting.as_str() && event.kind == "prompt_cleared")
         || (alert == RecoveryAlert::LongBackground.as_str() && event.kind == "receipt_observed")
+        || (alert == RecoveryAlert::Stalled.as_str()
+            && (event.kind == "receipt_observed"
+                || (event.kind == "stall_resolved" && event.payload["detection"] == "recovery")))
 }
 
 /// The latest `recovery_failed` of a live session (of `alert`, or any)
@@ -465,6 +492,22 @@ mod tests {
         other.push(event("prompt_cleared", serde_json::json!({})));
         assert!(failed_live(&other, None).is_some());
         let mut received = vec![failed("long_background")];
+        received.push(event("receipt_observed", serde_json::json!({})));
+        assert!(failed_live(&received, None).is_none());
+        // A stalled session that moved on clears its failed job; the end
+        // of another detection does not.
+        let mut stalled = vec![failed("stalled")];
+        stalled.push(event(
+            "stall_resolved",
+            serde_json::json!({"detection": "nudge"}),
+        ));
+        assert!(failed_live(&stalled, None).is_some());
+        stalled.push(event(
+            "stall_resolved",
+            serde_json::json!({"detection": "recovery"}),
+        ));
+        assert!(failed_live(&stalled, None).is_none());
+        let mut received = vec![failed("stalled")];
         received.push(event("receipt_observed", serde_json::json!({})));
         assert!(failed_live(&received, None).is_none());
     }

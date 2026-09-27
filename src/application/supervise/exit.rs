@@ -250,6 +250,8 @@ impl ExitWatch {
             exit_typed: false,
             at_prompt: false,
             lands: false,
+            park: false,
+            ask_on_failure: false,
         };
         if let LiveStep::Escalate(attempt, escalation) =
             self.recovery.watch_idle(sv, run, &live, EXIT_WAIT_PHASE)?
@@ -279,6 +281,8 @@ impl ExitWatch {
             exit_typed: self.requested.is_some() && self.unsent.is_none(),
             at_prompt: false,
             lands,
+            park: false,
+            ask_on_failure: false,
         };
         let timeout = sv.cmux.exit_timeout().as_secs();
         let unsent = self.unsent.clone();

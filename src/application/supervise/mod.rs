@@ -106,6 +106,7 @@ mod revise;
 mod session;
 mod stale;
 mod stall;
+mod stall_recovery;
 mod sweep;
 mod triage;
 mod update;
@@ -1654,6 +1655,21 @@ impl Supervisor<'_> {
                 let Some(run) = watch.poll(self, &slot.run)? else {
                     return Ok(Step::Continue);
                 };
+                // Parked by its recovery job's `resume` (task 442): the
+                // session is asked to exit and its workspace closed, as for
+                // a run parked by validation, and the lease goes.
+                if run.status() == RunStatus::NeedsSession {
+                    let session = SessionRef {
+                        workspace: watch.workspace.clone(),
+                        resume: None,
+                    };
+                    slot.run = run;
+                    slot.phase = Phase::Exiting(ExitWatch::new(
+                        Some(session),
+                        AfterExit::Rest { close: true },
+                    ));
+                    return Ok(Step::Continue);
+                }
                 if run.status() != RunStatus::Validating {
                     self.queue.release_lease(run.id(), &self.token)?;
                     return Ok(Step::Done(Box::new(run)));
