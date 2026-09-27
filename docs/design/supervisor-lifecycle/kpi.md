@@ -14,6 +14,7 @@ related:
   - design-supervisor-lifecycle-marks
   - design-supervisor-lifecycle-run-environment
   - adr-0051
+  - adr-0070
   - adr-t624-1
   - adr-0049
   - adr-0048
@@ -65,11 +66,23 @@ related:
 | `drafts_per_landing` | 「改善」群（task 611）。runtimeやjobが登録したdraftの`task_created` ÷ `run_integrated`（`landings`）。登録と着地をそれぞれのeventの時刻で期間に入れ、着地が0ならnull。`n`は着地の数（`min_samples`で判定する率）。良い向きは小さい。出どころ（`follow_up` / `goal_gap`）ごとの内訳は`details.drafts.by_origin.<origin>.drafts_per_landing` | `all` |
 | `draft_backlog` | 「改善」群（task 611）。期間の終わりの時点で`draft`のままの、runtimeやjobが登録したdraftの数（`value`。数えるKPI）と、そのうち最も古いものの`task_created`からの経過秒（`max`。`candidates`と同じく`median` / `p90` / `min`はnull）。良い向きは小さい。期間の`registered` / `adopted` / `canceled` / `kept_draft`・`inflow_per_outflow`・最も古いdraftのtaskと、出どころごとの同じ数は`details.drafts` | `all` |
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
+| `forecast.p50_error` / `forecast.p50_abs_error` / `forecast.p50_error_ratio` / `forecast.p90_hit_rate` / `forecast.late_rate` / `forecast.early_rate` | 完了見込みの答え合わせ（下の[完了見込みの答え合わせ](#完了見込みの答え合わせ)） | 答え合わせの層 |
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` | 計画の品質（下の[計画の品質](#計画の品質)） | 計画の層 |
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
 - `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（期間に重なる`candidates_sampled`が無い。supervisorはclaimのpassごとに標本を数え、値が変わったときと起動・引き継ぎの直後の最初のpassで記録する（[`supervise`](supervise.md)の5のcandidatesの標本）ので、supervisorの動いていた期間には標本がある。記録を始める前の期間と、supervisorが1度も動いていない期間に出る）、`improvement_proposals`の`not_recorded`。
 - `--goal`はそのgoalのtaskのrun・ask・findingだけを数える（`slot_usage`の分母はqueue全体のまま）。
+
+### 完了見込みの答え合わせ
+
+[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定4の指標（task 476）。supervisorが記録した見込みのsnapshot（`forecast_recorded`。[stats](stats.md#完了見込み)）を、読むときにeventから実績と照合する（何も記録しない）。照合は`domain::forecast::score::score`（純粋関数）で、`kpi`の`Context`が全eventから1度だけ作り、期間ごとに完了の時刻で切る。
+
+- **標本**: snapshotと対象の組。snapshotの`tasks[]` / `goals[]`の各行について、そのsnapshotのeventより後の最初の終わり（taskは`to`が`completed`か`canceled`の`task_status_changed`、goalは`goal_closed`）を探す。`completed`とachievedの`goal_closed`が実績で、その時刻の期間に入る。`canceled`のtask（`canceled`）、abandonedで閉じたgoal（`abandoned`）、終わったがsnapshotがp50を出していなかった行（`unforecast`）は標本にせず、終わった時刻の期間で`details.forecast.excluded`に数だけ出す。まだ終わっていない対象は数えない。
+- **誤差**: 実績の秒 = 終わりの時刻 − snapshotの`at_secs`。p50の誤差 = 実績の秒 − `p50_secs`（正なら遅れ）。比 = 誤差 ÷ `p50_secs`（`p50_secs`が0ならnull）。p90の的中 = 実績の秒 ≤ `p90_secs`（`p90_secs`が無ければ数えない）。
+- **KPI**: `forecast.p50_error`（誤差の秒の分布。中央値の符号が偏りの向き）、`forecast.p50_abs_error`（誤差の絶対値の秒の分布。良い向きは小さい）、`forecast.p50_error_ratio`（比の分布）、`forecast.p90_hit_rate`（的中の割合）、`forecast.late_rate` / `forecast.early_rate`（誤差が正 / 負の標本の割合。偏りの向き）。絶対値の誤差の他は良い向きを持たず、ADR-0070の決定4どおり目標の範囲（比は0の近く、的中率は90%の近く）で判定する（`[kpi.targets]`はplannerが書く。runtimeは既定の目標を持たない）。
+- **層**: `all`、`target=task|goal`、`kind=<label>`（taskだけ。今のtaskの`kind`、nullは`unknown`）、`band=`（snapshotのp50が与えた残り時間`p50_secs`の帯: `0-1h` / `1-6h` / `6-24h` / `1-3d` / `3d+`）、`method=<n>`（snapshotの`method`）、`marks=0` / `marks=1+`（snapshotと終わりの間の変更の印の数）。`--by`によらず全部を出す。`all`は標本が0でも出す。
+- **変更の印の数**: snapshotの後で終わりの時刻まで（その時刻を含む）の、[変更の印](marks.md)（記録する印と導く印。取り消された印と`mark_retracted`自体は除く）と、そのsnapshotが見込みに入れていたtaskの`task_priority_changed` / `dependency_added` / `dependency_removed` / `goal_dependency_added` / `goal_dependency_removed`の数。「snapshotの後」は、eventのある印ではそのsnapshotがきっかけを読んだ`triggers_through`より後のevent（同じ秒にsnapshotを起こした印は見込みに入っているので数えない）、eventの無い導く印と`triggers_through`の無いsnapshotでは`at_secs`より後の時刻。`marks=0`の層が見積もり方法の誤差、`marks=1+`との差が計画の変更によるずれ。`details.forecast`に`samples`（標本の数）、`with_marks`（印のある標本の数）、`marks_between`（印の数の`median` / `max`）、`excluded`（`canceled` / `abandoned` / `unforecast`の数）を出す。
+- `--goal`はそのgoalのtaskの標本とそのgoal自身の標本だけを数える。
 
 ### 計画の品質
 

@@ -89,6 +89,7 @@ pub fn render_html(report: &Report) -> String {
     trend(&mut page, &report.kpi.periods);
     marks(&mut page, &report.kpi.periods);
     if let Some(latest) = latest {
+        forecast(&mut page, latest, &report.kpi.targets);
         kpis(&mut page, latest);
     }
     findings(&mut page, report);
@@ -384,6 +385,92 @@ fn kpis(page: &mut String, period: &PeriodKpis) {
     page.push_str("</table></div></details>");
 }
 
+/// The forecast's errors of the period (ADR-0070 decision 4): per
+/// stratum, the p50's error, the p90's hits, which way the p50 leaned, and
+/// the worst state of a target on them.
+fn forecast(page: &mut String, period: &PeriodKpis, targets: &[TargetReport]) {
+    let kpis = &period.window.kpis;
+    let Some(errors) = kpis.get("forecast.p50_error") else {
+        return;
+    };
+    let details = period.window.details.get("forecast");
+    let count = |path: &[&str]| {
+        let mut value = details;
+        for key in path {
+            value = value.and_then(|v| v.get(key));
+        }
+        value.and_then(serde_json::Value::as_u64).unwrap_or(0)
+    };
+    let _ = write!(
+        page,
+        "<h2>Forecast error</h2><p class=\"meta\">{} sample(s): each snapshot of a task completed or a goal achieved in {}, against when it finished; {} with a change mark between. Left out: {} canceled, {} abandoned, {} with no p50.</p>",
+        count(&["samples"]),
+        esc(&period.label),
+        count(&["with_marks"]),
+        count(&["excluded", "canceled"]),
+        count(&["excluded", "abandoned"]),
+        count(&["excluded", "unforecast"]),
+    );
+    if errors.get(ALL).is_none_or(|m| m.n == 0) {
+        return;
+    }
+    let order = |stratum: &str| {
+        ["all", "target=", "kind=", "band=", "marks=", "method="]
+            .iter()
+            .position(|prefix| stratum.starts_with(prefix))
+            .unwrap_or(6)
+    };
+    let mut strata: Vec<&String> = errors.keys().collect();
+    strata.sort_by_key(|stratum| (order(stratum), stratum.as_str()));
+    let rank = |state: &str| match state {
+        "breach" => 0,
+        "missed" => 1,
+        "not_judged" => 2,
+        _ => 3,
+    };
+    page.push_str("<div class=\"scroll\"><table><tr><th>stratum</th><th class=\"num\">n</th><th class=\"num\">p50 error</th><th class=\"num\">|p50 error|</th><th class=\"num\">error / remaining</th><th class=\"num\">p90 hit</th><th class=\"num\">late</th><th class=\"num\">early</th><th>bias</th><th>target</th></tr>");
+    for stratum in strata {
+        let get = |kpi: &str| kpis.get(kpi).and_then(|s| s.get(stratum.as_str()));
+        let median = |kpi: &str| get(kpi).and_then(|m| m.median);
+        let rate = |kpi: &str| get(kpi).and_then(|m| m.value);
+        let bias = match (rate("forecast.late_rate"), rate("forecast.early_rate")) {
+            (Some(late), Some(early)) if late > early => "late",
+            (Some(late), Some(early)) if early > late => "early",
+            (Some(_), Some(_)) => "even",
+            _ => "—",
+        };
+        let state = targets
+            .iter()
+            .filter(|t| t.kpi.starts_with("forecast.") && t.stratum == *stratum)
+            .map(|t| t.state)
+            .min_by_key(|state| rank(state))
+            .unwrap_or("");
+        let _ = write!(
+            page,
+            "<tr{}><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{bias}</td><td class=\"state-{state}\">{state}</td></tr>",
+            if state.is_empty() {
+                String::new()
+            } else {
+                format!(" class=\"{}\"", esc(state))
+            },
+            esc(stratum),
+            get("forecast.p50_error").map_or(0, |m| m.n),
+            delta("forecast.p50_error", median("forecast.p50_error")),
+            value("forecast.p50_abs_error", median("forecast.p50_abs_error")),
+            delta(
+                "forecast.p50_error_ratio",
+                median("forecast.p50_error_ratio")
+            )
+            .replace(" pt", "%"),
+            value("forecast.p90_hit_rate", rate("forecast.p90_hit_rate")),
+            value("forecast.late_rate", rate("forecast.late_rate")),
+            value("forecast.early_rate", rate("forecast.early_rate")),
+            state = esc(state),
+        );
+    }
+    page.push_str("</table></div>");
+}
+
 fn findings(page: &mut String, report: &Report) {
     let _ = write!(
         page,
@@ -445,13 +532,21 @@ enum Unit {
 
 fn unit(kpi: &str) -> Unit {
     let durations = ["phase.", "land_phase.", "verify_command.", "session_open."];
-    if kpi.ends_with("_rate") || kpi == "slot_usage" || kpi.starts_with("session_active_ratio.") {
+    if kpi.ends_with("_rate")
+        || matches!(kpi, "slot_usage" | "forecast.p50_error_ratio")
+        || kpi.starts_with("session_active_ratio.")
+    {
         Unit::Ratio
     } else if durations.iter().any(|prefix| kpi.starts_with(prefix))
         || kpi.starts_with("session_active.")
         || matches!(
             kpi,
-            "lead_time" | "ask_wait" | "ask_apply_wait" | "finding_resolve_time"
+            "lead_time"
+                | "ask_wait"
+                | "ask_apply_wait"
+                | "finding_resolve_time"
+                | "forecast.p50_error"
+                | "forecast.p50_abs_error"
         )
     {
         Unit::Secs
@@ -543,6 +638,10 @@ mod tests {
         assert_eq!(value("session_active_ratio.planner", Some(0.5)), "50.0%");
         assert_eq!(value("slot_usage", Some(1.0)), "100.0%");
         assert_eq!(value("landings", Some(12.0)), "12");
+        assert_eq!(value("forecast.p50_abs_error", Some(5400.0)), "1h 30m");
+        assert_eq!(value("forecast.p90_hit_rate", Some(0.75)), "75.0%");
+        assert_eq!(delta("forecast.p50_error", Some(-1800.0)), "-30m 00s");
+        assert_eq!(delta("forecast.p50_error_ratio", Some(0.25)), "+25.0 pt");
         assert_eq!(value("max_load_avg", Some(3.456)), "3.46");
         assert_eq!(value("landings", None), "—");
         assert_eq!(delta("phase.work", Some(-65.0)), "-1m 05s");

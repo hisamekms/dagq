@@ -12,6 +12,7 @@ use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskId, TaskKind,
     event_attention,
+    forecast::score::{self, Scoring, Target},
     marks::{self, Mark},
     plan_quality::plan_quality,
     stats::{
@@ -77,6 +78,9 @@ pub(super) struct Context<'a> {
     occupancy: Vec<Occupancy>,
     pub marks: Vec<Mark>,
     pub min_samples: usize,
+    /// The forecast snapshots scored against the finishes (ADR-0070
+    /// decision 4).
+    forecast: Scoring,
 }
 
 fn event_ms(event: &RunEvent) -> Option<i64> {
@@ -267,7 +271,9 @@ impl<'a> Context<'a> {
             occupancy,
             marks: marks::marks(events, None, None),
             min_samples: input.config.min_samples,
+            forecast: Scoring::default(),
         };
+        context.forecast = score::score(events, &context.marks);
         let everything = context.stats(None, None);
         let times: HashMap<EventId, i64> = events
             .iter()
@@ -635,6 +641,8 @@ impl<'a> Context<'a> {
             ),
         );
 
+        details.insert("forecast", self.forecast_kpis(start, end, &mut put));
+
         let breakdown = &stats.overall.land_phases;
         let tail: i64 = breakdown.phases.iter().map(|phase| phase.tail_total).sum();
         let share: BTreeMap<&str, Option<f64>> = PHASES
@@ -665,6 +673,106 @@ impl<'a> Context<'a> {
             details,
             unavailable,
         }
+    }
+
+    /// The forecast's errors (ADR-0070 decision 4) over the snapshots of
+    /// the targets that finished in the window, into `put`: `all`, by
+    /// `target`, by the task's `kind`, by the `band` of the remaining time
+    /// the p50 gave, by `method`, and by the change marks between the
+    /// snapshot and the finish (`marks=0` is the method's own error). The
+    /// counts of the rows left out and of the marks go to the details.
+    fn forecast_kpis(
+        &self,
+        start: i64,
+        end: i64,
+        put: &mut impl FnMut(&str, &str, Measure),
+    ) -> Value {
+        let counts = |target: Target| match target {
+            Target::Task(task) => self.counts(Some(task)),
+            Target::Goal(goal) => self.goal_id.is_none_or(|wanted| wanted == goal),
+        };
+        let finished = |ms: i64| ms > start && ms <= end;
+        let mut groups: BTreeMap<String, Vec<&score::Sample>> = BTreeMap::new();
+        groups.insert(ALL.to_owned(), Vec::new());
+        for sample in self
+            .forecast
+            .samples
+            .iter()
+            .filter(|sample| finished(sample.finished_ms) && counts(sample.target))
+        {
+            let mut keys = vec![
+                ALL.to_owned(),
+                format!("target={}", sample.target.as_str()),
+                format!("band={}", sample.band()),
+                format!("method={}", sample.method),
+                format!("marks={}", if sample.marks == 0 { "0" } else { "1+" }),
+            ];
+            if let Target::Task(task) = sample.target {
+                keys.push(format!("kind={}", self.kind_of(Some(task))));
+            }
+            for key in keys {
+                groups.entry(key).or_default().push(sample);
+            }
+        }
+        for (stratum, samples) in &groups {
+            let errors = || samples.iter().map(|sample| sample.error_secs());
+            put("forecast.p50_error", stratum, Measure::secs(errors()));
+            put(
+                "forecast.p50_abs_error",
+                stratum,
+                Measure::secs(errors().map(i64::abs)),
+            );
+            put(
+                "forecast.p50_error_ratio",
+                stratum,
+                Measure::spread(samples.iter().filter_map(|sample| sample.error_ratio())),
+            );
+            let hits: Vec<bool> = samples.iter().filter_map(|s| s.p90_hit()).collect();
+            put(
+                "forecast.p90_hit_rate",
+                stratum,
+                Measure::ratio(
+                    float(hits.iter().filter(|hit| **hit).count() as i64),
+                    hits.len(),
+                ),
+            );
+            put(
+                "forecast.late_rate",
+                stratum,
+                Measure::ratio(
+                    float(errors().filter(|e| *e > 0).count() as i64),
+                    samples.len(),
+                ),
+            );
+            put(
+                "forecast.early_rate",
+                stratum,
+                Measure::ratio(
+                    float(errors().filter(|e| *e < 0).count() as i64),
+                    samples.len(),
+                ),
+            );
+        }
+        let mut excluded: BTreeMap<&str, usize> = ["canceled", "abandoned", "unforecast"]
+            .into_iter()
+            .map(|reason| (reason, 0))
+            .collect();
+        for (_, _, reason) in self
+            .forecast
+            .excluded
+            .iter()
+            .filter(|(target, ms, _)| finished(*ms) && counts(*target))
+        {
+            *excluded.entry(reason.as_str()).or_default() += 1;
+        }
+        let all = &groups[ALL];
+        let marks = Measure::secs(all.iter().map(|sample| sample.marks as i64));
+        serde_json::json!({
+            "samples": all.len(),
+            "excluded": excluded,
+            "with_marks": all.iter().filter(|sample| sample.marks > 0).count(),
+            "marks_between": {"median": marks.median, "max": marks.max},
+        })
     }
 
     /// The KPIs a run carries, over `runs` (all finished in the window).

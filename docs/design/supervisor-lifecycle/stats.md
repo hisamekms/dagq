@@ -197,7 +197,7 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 
 ## 完了見込み
 
-[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。見込みの計算と`dagq forecast`はtask 474で、snapshotの記録はtask 475で実装した。答え合わせはまだ実装していない。goal 40の後続taskが持つ。
+[ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定（task 473）。見込みの計算と`dagq forecast`はtask 474で、snapshotの記録はtask 475で、答え合わせはtask 476で実装した。observerの`forecast`のfindingは未実装。
 
 - **見込み**（実装済み、`method` 1）: `domain::forecast::forecast`（純粋関数）が、open なtask（`ready` / `in_progress`。`draft`のgoalのtaskを除く）とopen なgoal（`draft`でなく閉じていない）の完了のp50 / p90をsimulationで出す。`application::forecast`がqueueを読んで入力を組み立てる。
   - **入力**: 依存は`graph`の`ready_after`（未完了の前のtaskと、achievedで閉じていないgoal）。見込みに入らないtask（`draft` / `submitted`）やgoal（`draft`、abandonedで閉じた）を待つtaskは終わらない。claimの順は`graph`と同じ`ClaimRank`（効く優先度、`unblocks`、ID。`domain`に移した）を今の時点で固定して使う。slotは生きているsupervisorの`parallel`の合計（`stats`の空きslotと同じ判定。`--parallel N`で置き換えられる）。
@@ -218,7 +218,7 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
   - **1つだけ記録する**: `SqliteQueue::record_forecast`が、きっかけを見た時点の最新の`forecast_recorded`がまだ最新であるときだけ、1つのIMMEDIATEのtransactionで書く。同時に見た2つのsupervisorのうち1つだけが記録する。
   - **drainと失敗**: 見るのはclaimしているsupervisorだけで、停止・引き継ぎ・claimを止めたdrainの周回では新しく見ない（走っているjobは回収する）。きっかけはqueueのeventに残るので、次のprocessか他のsupervisorが拾う。引き継ぎのexecと`--once`の終わりは走っているjobを待つ。読み取りか計算が失敗したら（`[kpi]`の設定が読めないなど）ログに書き、10分後にもう一度見る。claimと着地は止めない。
   - **設定**: `supervise --forecast-snapshots`（既定true。ライブラリの`SuperviseOptions::forecast_snapshots`は既定false）。`min_samples`は`dagq forecast`と同じ`[kpi]`を記録のたびに読み直す。KPIの記帳のevent（[Observer](observer.md)の`BOOKKEEPING_KINDS`）なのでobserverを起こさない。
-- **答え合わせ**（予定）: taskの`completed`とgoalの`achieved`の時点で、その対象のsnapshotすべてに実績を当てる。p50の誤差（秒と、見込みの残り時間に対する比）の中央値と偏りの向き、p90の的中率、残り時間の帯ごと・taskの種類ごと・`method`ごとの誤差、snapshotから完了までの変更の印の数（0の標本だけの誤差も）をeventから導き、[`kpi`](kpi.md)のKPIとして完了の時刻で期間に入れる。
+- **答え合わせ**（実装済み、task 476）: taskの`completed`とgoalの`achieved`の時点で、その対象のsnapshotすべてに実績を当てる。p50の誤差（秒と、見込みの残り時間に対する比）の中央値と偏りの向き（遅れ・早いの割合）、p90の的中率、残り時間の帯ごと・taskの種類ごと・`method`ごとの誤差、snapshotから完了までの変更の印の数（`marks=0`の標本だけの誤差も）を`domain::forecast::score`がeventから導き、[`kpi`](kpi.md#完了見込みの答え合わせ)の`forecast.*`のKPIとして完了の時刻で期間に入れる。`stats`の出力には足さない。日次レポートに見込みの誤差の欄がある（[レポート](report.md)）。
 
 初めの値（ADR-0070。調整はADRを置き換えずにここを直す）:
 

@@ -460,6 +460,12 @@ pub fn direction(kpi: &str) -> Option<Direction> {
         | "candidates"
         | "plan.follow_up_adoption_rate" => None,
         _ if kpi.starts_with("session_active") => None,
+        // The forecast's errors (ADR-0070 decision 4): only the size of
+        // the error is better lower; the ratio and the rates have a target
+        // range instead.
+        _ if kpi.starts_with("forecast.") => {
+            (kpi == "forecast.p50_abs_error").then_some(Direction::Lower)
+        }
         _ if kpi.starts_with("session_open.") => {
             (kpi == "session_open.worker").then_some(Direction::Lower)
         }

@@ -107,6 +107,25 @@ fn events() -> Events {
         json!({"label": "parallel <4> & 3", "at": marks::utc_text((MONDAY + DAY + 12 * HOUR) * 1000)}),
         MONDAY + DAY + 12 * HOUR,
     ));
+    // Wednesday noon's forecast snapshot gives task 4 (Thursday's landing)
+    // 20 hours; it completes 2 hours later than that.
+    let snapshot = MONDAY + 2 * DAY + 12 * HOUR;
+    events.push(event(
+        0,
+        None,
+        None,
+        "forecast_recorded",
+        json!({"at_secs": snapshot, "method": 1, "tasks": [{"id": 4, "p50_secs": 20 * HOUR, "p90_secs": 30 * HOUR}], "goals": []}),
+        snapshot,
+    ));
+    events.push(event(
+        0,
+        Some(4),
+        None,
+        "task_status_changed",
+        json!({"from": "in_progress", "to": "completed"}),
+        MONDAY + 3 * DAY + 10 * HOUR + 700,
+    ));
     events.sort_by_key(|event| event.created_at.clone());
     for (index, event) in events.iter_mut().enumerate() {
         event.id = EventId::new(i64::try_from(index).unwrap() + 1);
@@ -145,13 +164,22 @@ fn finding(id: i64, summary: &str) -> Finding {
 pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
     let (events, kinds, goals) = events();
     let settings = KpiSettings {
-        targets: vec![Target {
-            kpi: "landings".into(),
-            kind: None,
-            stat: None,
-            min: Some(2.0),
-            max: None,
-        }],
+        targets: vec![
+            Target {
+                kpi: "landings".into(),
+                kind: None,
+                stat: None,
+                min: Some(2.0),
+                max: None,
+            },
+            Target {
+                kpi: "forecast.p90_hit_rate".into(),
+                kind: None,
+                stat: None,
+                min: Some(0.75),
+                max: None,
+            },
+        ],
         ..KpiSettings::default()
     };
     let config = KpiConfig::merge(Some(&settings), None);
@@ -197,7 +225,13 @@ fn a_report_carries_the_kpis_the_header_and_the_top_findings() {
     assert_eq!(json["period"], "day");
     assert_eq!(json["periods"].as_array().unwrap().len(), 7);
     assert_eq!(json["periods"][6]["kpis"]["landings"]["all"]["value"], 1.0);
-    assert_eq!(json["targets"][0]["state"], "breach");
+    let landings = json["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|target| target["kpi"] == "landings")
+        .unwrap();
+    assert_eq!(landings["state"], "breach");
     assert_eq!(json["findings"][0]["impact"], "high");
     assert_eq!(
         report.file_name(Period::Day).path("html"),
@@ -220,6 +254,47 @@ fn a_report_carries_the_kpis_the_header_and_the_top_findings() {
     );
     let targets = html.find("<h2>Targets</h2>").unwrap();
     assert!(targets < html.find("<h2>Trend</h2>").unwrap());
+}
+
+/// The page shows the period's forecast errors per stratum, which way the
+/// p50 leaned, and the state of a target on them.
+#[test]
+fn a_report_shows_the_forecast_error() {
+    let thursday = MONDAY + 3 * DAY + 12 * HOUR;
+    let report = report(MONDAY + 4 * DAY + 12 * HOUR, thursday, Period::Day);
+    let json = serde_json::to_value(&report).unwrap();
+    let thursday = &json["periods"][6];
+    assert_eq!(
+        thursday["kpis"]["forecast.p90_hit_rate"]["all"]["value"],
+        1.0
+    );
+    assert_eq!(thursday["details"]["forecast"]["samples"], 1);
+    let html = render_html(&report);
+    let section = &html[html.find("<h2>Forecast error</h2>").unwrap()..];
+    let section = &section[..section.find("</table>").unwrap()];
+    assert!(section.contains("1 sample(s)"), "{section}");
+    assert!(section.contains("<td>kind=runtime</td>"), "{section}");
+    assert!(section.contains("<td>marks=0</td>"), "{section}");
+    // 2 hours 11 minutes late, a tenth of the 20 hours given.
+    assert!(section.contains("+2h 11m"), "{section}");
+    assert!(section.contains("+11.0%"), "{section}");
+    assert!(section.contains("<td>late</td>"), "{section}");
+    // One sample is too few to judge the target on it.
+    assert!(
+        section.contains("<td class=\"state-not_judged\">not_judged</td>"),
+        "{section}"
+    );
+    assert!(section.contains("<tr><td>target=task</td>"), "{section}");
+    // Without a sample, the section says so and has no table.
+    let monday = MONDAY + 12 * HOUR;
+    let html = render_html(&super::tests::report(
+        MONDAY + DAY + 12 * HOUR,
+        monday,
+        Period::Day,
+    ));
+    let section = &html[html.find("<h2>Forecast error</h2>").unwrap()..];
+    assert!(section.starts_with("<h2>Forecast error</h2><p class=\"meta\">0 sample(s)"));
+    assert!(!section[..section.find("<h2>KPIs of").unwrap()].contains("<table>"));
 }
 
 /// Today's report is partial, and its files say so.

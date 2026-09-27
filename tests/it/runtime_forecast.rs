@@ -149,6 +149,36 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     );
     assert_eq!(ids(&recorded[2], "tasks"), Vec::<i64>::new());
     assert_eq!(ids(&recorded[2], "goals"), [goal.as_i64()]);
+
+    // `kpi` scores the snapshots against the finishes (ADR-0070 decision
+    // 4): the landing's snapshot of task 2 is the one sample; the day's
+    // gave neither task a p50, so both of its rows are left out.
+    let config = dir.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .env("XDG_CONFIG_HOME", &config)
+        .env_remove("DAGQ_ROLE")
+        .arg("--db")
+        .arg(&db)
+        .args(["kpi", "--last", "1"])
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let today = &report["periods"][0];
+    let forecast = &today["details"]["forecast"];
+    assert_eq!(forecast["samples"], 1, "{forecast}");
+    assert_eq!(forecast["excluded"]["unforecast"], 2, "{forecast}");
+    let kpis = &today["kpis"];
+    assert_eq!(kpis["forecast.p50_error"]["all"]["n"], 1, "{kpis}");
+    assert_eq!(kpis["forecast.p50_error"]["target=task"]["n"], 1);
+    assert_eq!(kpis["forecast.p50_error"]["marks=0"]["n"], 1);
+    assert_eq!(kpis["forecast.p90_hit_rate"]["all"]["n"], 1);
+    assert!(kpis["forecast.late_rate"]["all"]["value"].is_number());
 }
 
 /// A snapshot that cannot be computed (the host's settings do not read)

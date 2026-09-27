@@ -1430,3 +1430,115 @@ fn the_drafts_per_landing_and_the_backlog_are_stats_draft_flow() {
     assert_eq!(state("draft_backlog"), ("missed", 2));
     assert_eq!(state("drafts_per_landing"), ("ok", 0));
 }
+
+/// The forecast's errors (ADR-0070 decision 4): every snapshot of a target
+/// that finished in the period is a sample in the period it finished,
+/// split by target, kind, band, method and whether a change mark came
+/// between; a canceled task is only counted.
+#[test]
+fn scores_the_forecast_snapshots_in_the_period_they_finished() {
+    let mut queue = Queue::default();
+    let runtime = Some("runtime".parse::<TaskKind>().unwrap());
+    let docs = Some("docs".parse::<TaskKind>().unwrap());
+    queue.kinds.insert(TaskId::new(1), runtime);
+    queue.kinds.insert(TaskId::new(2), docs);
+    let snapshot = |queue: &mut Queue, secs: i64, tasks: Value, goals: Value| {
+        queue.queue_event(
+            "forecast_recorded",
+            json!({"at_secs": secs, "method": 1, "tasks": tasks, "goals": goals}),
+            secs,
+        );
+    };
+    let row = |id: i64, p50: i64, p90: i64| json!({"id": id, "p50_secs": p50, "p90_secs": p90});
+    let status = |queue: &mut Queue, task: i64, to: &str, secs: i64| {
+        queue.push(
+            Some(task),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": to}),
+            secs,
+        );
+    };
+    snapshot(
+        &mut queue,
+        MONDAY + HOUR,
+        json!([
+            row(1, 2 * HOUR, 4 * HOUR),
+            row(2, HOUR, HOUR),
+            row(3, HOUR, HOUR)
+        ]),
+        json!([row(7, 10 * HOUR, 11 * HOUR)]),
+    );
+    queue.queue_event(
+        marks::MARK_RECORDED,
+        json!({"label": "parallel 3"}),
+        MONDAY + 2 * HOUR,
+    );
+    snapshot(
+        &mut queue,
+        MONDAY + 3 * HOUR,
+        json!([row(1, HOUR / 2, 2 * HOUR)]),
+        json!([]),
+    );
+    status(&mut queue, 1, "completed", MONDAY + 4 * HOUR);
+    status(&mut queue, 3, "canceled", MONDAY + 5 * HOUR);
+    queue.queue_event(
+        "goal_closed",
+        json!({"verdict": "achieved"}),
+        MONDAY + 13 * HOUR,
+    );
+    queue.events.last_mut().unwrap().goal_id = Some(GoalId::new(7));
+    status(&mut queue, 2, "completed", MONDAY + DAY + 2 * HOUR);
+    let query = KpiQuery {
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + 12 * HOUR, &KpiConfig::default(), &query);
+    let monday = &result.periods[0];
+    assert_eq!(monday.label, "2026-09-21");
+    // Task 1 an hour late, then 30 minutes; the goal 2 hours late and past
+    // its p90.
+    let error = measure(monday, "forecast.p50_error", ALL);
+    assert_eq!((error.n, error.median), (3, Some(3600.0)));
+    let ratio = measure(monday, "forecast.p50_error_ratio", ALL);
+    assert_eq!((ratio.median, ratio.max), (Some(0.5), Some(1.0)));
+    assert_eq!(
+        measure(monday, "forecast.p90_hit_rate", ALL).value,
+        Some(0.667)
+    );
+    assert_eq!(measure(monday, "forecast.late_rate", ALL).value, Some(1.0));
+    assert_eq!(measure(monday, "forecast.early_rate", ALL).value, Some(0.0));
+    assert_eq!(measure(monday, "forecast.p50_error", "target=goal").n, 1);
+    assert_eq!(measure(monday, "forecast.p50_error", "kind=runtime").n, 2);
+    assert_eq!(measure(monday, "forecast.p50_error", "band=0-1h").n, 1);
+    assert_eq!(measure(monday, "forecast.p50_error", "method=1").n, 3);
+    // Only the second snapshot of task 1 had no mark before the finish.
+    let unmarked = measure(monday, "forecast.p50_error", "marks=0");
+    assert_eq!((unmarked.n, unmarked.median), (1, Some(1800.0)));
+    assert_eq!(measure(monday, "forecast.p50_error", "marks=1+").n, 2);
+    let details = &monday.window.details["forecast"];
+    assert_eq!(details["samples"], 3);
+    assert_eq!(details["with_marks"], 2);
+    assert_eq!(details["excluded"]["canceled"], 1);
+    assert_eq!(details["marks_between"]["max"], 1.0);
+    // Task 2 finished the next day, a day late.
+    let tuesday = &result.periods[1];
+    let error = measure(tuesday, "forecast.p50_abs_error", "kind=docs");
+    assert_eq!((error.n, error.median), (1, Some(24.0 * 3600.0)));
+    assert_eq!(
+        measure(tuesday, "forecast.p90_hit_rate", ALL).value,
+        Some(0.0)
+    );
+    assert_eq!(direction("forecast.p50_abs_error"), Some(Direction::Lower));
+    assert_eq!(direction("forecast.p90_hit_rate"), None);
+    // A goal's filter keeps its own samples only.
+    let goal = queue.kpi(
+        MONDAY + DAY + 12 * HOUR,
+        &KpiConfig::default(),
+        &KpiQuery {
+            goal_id: Some(GoalId::new(7)),
+            ..query
+        },
+    );
+    assert_eq!(measure(&goal.periods[0], "forecast.p50_error", ALL).n, 1);
+}
