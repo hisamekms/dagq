@@ -1316,10 +1316,22 @@ same in one step",
             .context("queue must already be initialized")?;
         let repository = GitRepository::inspect(repo)?;
         cmux.preflight()?;
-        ClaudeCode {
+        let claude = ClaudeCode {
             executable: options.claude.clone(),
+        };
+        claude.preflight()?;
+        // Without --plugin-dir the planner loads the plugin the user
+        // installed (ADR-t617-2 decisions 1, 4).
+        if options.plugin_dir.is_none() {
+            lifecycle::require_installed_plugin(
+                &claude,
+                &options.claude,
+                &repository.root,
+                "planner",
+                "plan",
+            )
+            .map_err(|error| anyhow::anyhow!("{error:#}; no planner was opened"))?;
         }
-        .preflight()?;
         let plugin_dir = options
             .plugin_dir
             .as_deref()

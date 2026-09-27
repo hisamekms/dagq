@@ -21,8 +21,14 @@ pub struct LocalBinaries;
 /// Run `binary` with `arguments`; its stdout when it exits 0, or an error
 /// with what it wrote to stderr.
 fn output(binary: &Path, arguments: &[&str]) -> Result<String> {
+    output_with(binary, arguments, &[])
+}
+
+/// [`output`] with `envs` added to its environment.
+fn output_with(binary: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Result<String> {
     let output = Command::new(binary)
         .args(arguments)
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("run {}", binary.display()))?;
@@ -162,9 +168,17 @@ impl Binaries for LocalBinaries {
             .with_context(|| format!("move {} back to {}", previous.display(), target.display()))
     }
 
+    /// Every binary run here is the `up` that starts a supervisor again, so
+    /// it runs as the runtime's restart (`UP_RESTART_ENV`).
     fn run(&self, binary: &Path, arguments: &[String]) -> Result<Value> {
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        json_output(binary, &arguments)
+        let text = output_with(
+            binary,
+            &arguments,
+            &[(crate::application::lifecycle::UP_RESTART_ENV, "1")],
+        )?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("read what {} printed", binary.display()))
     }
 
     fn checkout(&self, repository: &Path, checkout: &Path, commit: &str) -> Result<()> {

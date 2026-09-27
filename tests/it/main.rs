@@ -26,6 +26,7 @@ mod cli_tasks;
 mod cli_version;
 mod finding_planner;
 mod goal_review;
+mod installed_plugin;
 mod landing_branch;
 mod language;
 mod lifecycle_cmux;

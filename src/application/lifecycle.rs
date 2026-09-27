@@ -140,7 +140,17 @@ pub struct UpEnvironment {
     /// language comes from under the repository's `dagq.toml`
     /// (ADR-t616-2); `None` reads none.
     pub user_config: Option<PathBuf>,
+    /// The runtime runs this `up` to start a supervisor again after an
+    /// `install --allow-breaking` drain or an automatic update
+    /// ([`UP_RESTART_ENV`]): it does not check the installed plugin, as a
+    /// handoff does not (ADR-t617-2 decision 1).
+    pub restart: bool,
 }
+
+/// Set by the runtime in the environment of the `up` it runs to start a
+/// supervisor again ([`UpEnvironment::restart`]); a binary that does not
+/// know it ignores it.
+pub const UP_RESTART_ENV: &str = "DAGQ_UP_RESTART";
 
 /// What `up` says when cmux does not admit a process from outside its
 /// terminals. The remedies are the operator's: cmux's CLI takes the password
@@ -163,6 +173,62 @@ once in {root} and accept \"Yes, I trust this folder\", then run `up` again; {co
 record projects[\"{root}\"].hasTrustDialogAccepted = true",
         root = root.display(),
         config = config.map_or_else(|| "~/.claude.json".into(), |c| c.display().to_string()),
+    )
+}
+
+/// The plugin whose skills the inbox's and the planners' prompts name.
+pub const DAGQ_PLUGIN: &str = "claude-dagq";
+/// The official commands that install [`DAGQ_PLUGIN`] (ADR-t617-1).
+pub const PLUGIN_INSTALL_COMMANDS: [&str; 2] = [
+    "claude plugin marketplace add hisamekms/dagq",
+    "claude plugin install claude-dagq@dagq",
+];
+
+/// Make sure the `claude` at `executable` (`agent`) loads [`DAGQ_PLUGIN`]
+/// in sessions started in `cwd`, before `dagq <command>` opens the
+/// `session` there without `--plugin-dir` (ADR-t617-2 decision 4): a
+/// session without it has none of the skills its prompt names. Anything
+/// but an enabled install, a failed or unreadable listing included, is an
+/// error that says how to install it.
+pub fn require_installed_plugin(
+    agent: &dyn AgentProvider,
+    executable: &Path,
+    cwd: &Path,
+    session: &str,
+    command: &str,
+) -> Result<()> {
+    let enable;
+    let reason = match agent.installed_plugin(cwd, DAGQ_PLUGIN) {
+        Ok(super::PluginState::Enabled) => return Ok(()),
+        Ok(super::PluginState::Disabled(ids)) => {
+            enable = format!(
+                " (or enable it with {})",
+                ids.iter()
+                    .map(|id| format!("`claude plugin enable {id}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            );
+            format!("the {DAGQ_PLUGIN} plugin is installed but disabled")
+        }
+        Ok(super::PluginState::Missing) => {
+            enable = String::new();
+            format!("the {DAGQ_PLUGIN} plugin is not installed")
+        }
+        Err(error) => {
+            enable = String::new();
+            format!(
+                "whether the {DAGQ_PLUGIN} plugin is installed could not be checked ({})",
+                format!("{error:#}").trim()
+            )
+        }
+    };
+    bail!(
+        "{reason} in the Claude Code at {claude}, so the {session} session would start without \
+the dagq skills its prompt names. Install it with `{add}` and `{install}`{enable}, then run \
+`dagq {command}` again; to use a plugin checkout instead, pass --plugin-dir",
+        claude = executable.display(),
+        add = PLUGIN_INSTALL_COMMANDS[0],
+        install = PLUGIN_INSTALL_COMMANDS[1],
     )
 }
 
@@ -267,7 +333,7 @@ pub struct UpOptions {
     pub poll: Duration,
 }
 
-/// Ensure the supervisor and the inbox workspace exist and report the queue's open work. Preflight first (cmux, claude, Claude Code's trust of
+/// Ensure the supervisor and the inbox workspace exist and report the queue's open work. Preflight first (cmux, claude, the installed plugin without `--plugin-dir`, Claude Code's trust of
 /// the repository root, an initialized queue, the repository), then prune registrations whose process is gone, start
 /// the agent only when no live registration of this binary's version
 /// remains (after proving that cmux admits a process with the agent's
@@ -299,6 +365,13 @@ pub fn up(
     let repository = (ports.inspect_repository)(repo)?;
     cmux.preflight()?;
     claude.preflight()?;
+    // Without --plugin-dir the inbox loads the plugin the user installed
+    // (ADR-t617-2 decisions 1, 4). A restart by the runtime is not a
+    // person's `up`, and starts what ran before.
+    if options.plugin_dir.is_none() && !environment.restart {
+        require_installed_plugin(claude, &options.claude, &repository.root, "inbox", "up")
+            .map_err(|error| anyhow::anyhow!("{error:#}; the supervisor was not started"))?;
+    }
     // Claude Code keys trust by the main checkout even for a linked
     // worktree, and `up` may run from any worktree of the repository; the
     // supervisor reads every setting from its `dagq.toml`.

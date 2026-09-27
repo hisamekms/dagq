@@ -60,6 +60,12 @@ if [ "${1:-}" = "--version" ]; then
   printf 'claude-stub 0.0.0\n'
   exit 0
 fi
+if [ "${1:-}" = plugin ] && [ "${2:-}" = list ]; then
+  # `up` and `plan` without --plugin-dir check the installed plugin
+  # (ADR-t617-2 decision 4).
+  printf '[{"id":"claude-dagq@dagq","version":"0.0.0","scope":"user","enabled":true}]\n'
+  exit 0
+fi
 session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir= model= effort=
 while [ $# -gt 0 ]; do
   case "$1" in

@@ -71,7 +71,14 @@ pub fn fixture() -> Fixture {
     location.prepare().unwrap();
     SqliteQueue::init(&db).unwrap();
     let claude = dir.path().join("claude-stub");
-    fs::write(&claude, "#!/bin/sh\nprintf 'claude-stub 0.0.0\\n'\n").unwrap();
+    // `plugin list --json` prints `<stub>.plugins` (see `list_plugins`),
+    // and fails when there is none.
+    fs::write(
+        &claude,
+        "#!/bin/sh\nif [ \"$1\" = plugin ]; then printf '%s\\n' \"$*\" > \"$0.plugin-args\"; \
+pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.0\\n'\n",
+    )
+    .unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
     let cmux = dir.path().join("cmux-stub");
@@ -97,6 +104,7 @@ pub fn fixture() -> Fixture {
             current_exe: "/opt/bin/dagq".into(),
             claude_config: Some(claude_config),
             user_config: None,
+            restart: false,
         },
         options: UpOptions {
             parallel: Some(2),
@@ -114,6 +122,13 @@ pub fn fixture() -> Fixture {
         },
         _dir: dir,
     }
+}
+
+/// Have the fixture's `claude` print `listed` for `plugin list --json`.
+pub fn list_plugins(fixture: &Fixture, listed: &str) {
+    let mut path = fixture.options.claude.clone().into_os_string();
+    path.push(".plugins");
+    fs::write(path, listed).unwrap();
 }
 
 /// Records installs and uninstalls; an install registers a supervisor with

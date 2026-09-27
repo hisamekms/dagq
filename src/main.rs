@@ -2400,6 +2400,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     env::var("HOME").ok().as_deref(),
                 ),
                 user_config: dagq::infrastructure::language::user_config_file(),
+                restart: env::var_os(dagq::lifecycle::UP_RESTART_ENV).is_some(),
             };
             let options = UpOptions {
                 parallel,

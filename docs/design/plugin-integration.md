@@ -4,8 +4,8 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: distribution
 related:
   - adr-0005
@@ -188,9 +188,23 @@ claude plugin install claude-dagq@dagq
 - `release.yml`はtagの`Cargo.toml`の`[package].version`と`plugin.json`の`version`がtagの`X.Y.Z`と一致することを検査し、違えばbuildの前に止まる（実装済み: `scripts/check-plugin-version.sh --tag`。上の「tagとversionの一致規則」）。
 - `-dev`を外してversionを`X.Y.Z`にするリリースの変更で、entryの`ref`をこれから打つ`vX.Y.Z`に書き換え、着地したらすぐにtagをpushする（release skillの手順）。`release.yml`はtagの`marketplace.json`のentryの`ref`がそのtagであることも検査する（実装済み。リリースのversionでは`ref`が無いと落ちるので、`v0.4.0`のリリースの変更でentryを書き換えないとreleaseが止まる）。切り替えは次のリリース（`v0.4.0`）から。
 - 利用者の更新はバイナリの`cargo install --locked dagq`とpluginの`claude plugin update claude-dagq@dagq`の組。launcherのmajor.minorの警告は残す（launcherのエラーと警告の案内はこの組に揃え済み。上の「launcher」）。
-- `up`・`plan`は`--plugin-dir`が無ければ`claude`に何も足さず、installしたpluginを使う。skillは`$CLAUDE_PLUGIN_ROOT`を`--plugin-dir`に渡さず、repositoryの指示が指定するpathがあるときだけ付ける。`--plugin-dir`が無く`claude-dagq`がinstallされて有効なことを確かめられなければ、`up`・`plan`はsessionを開く前に止めてinstallのコマンドを案内する（確かめ方は実装のtaskで決める）。dagqのrepositoryはAGENTS.mdのとおり`--plugin-dir <repository>/plugins/claude-dagq`を付け、`--plugin-dir`のpluginが同じ名前のinstall済みのpluginより優先される。
+- `up`・`plan`は`--plugin-dir`が無ければ`claude`に何も足さず、installしたpluginを使う。skillは`$CLAUDE_PLUGIN_ROOT`を`--plugin-dir`に渡さず、repositoryの指示が指定するpathがあるときだけ付ける（skillの変更は未実装）。`--plugin-dir`が無く`claude-dagq`がinstallされて有効なことを確かめられなければ、`up`・`plan`はsessionを開く前に止めてinstallのコマンドを案内する（ADR-t617-2の決定4。実装済み: 下の「installしたpluginの確認」）。dagqのrepositoryはAGENTS.mdのとおり`--plugin-dir <repository>/plugins/claude-dagq`を付け、`--plugin-dir`のpluginが同じ名前のinstall済みのpluginより優先される。
 - Anthropicのdirectoryと公式のmarketplace（`claude-plugins-official`）には出さない。
 - 外部のprojectのリリースの更新は、バイナリを入れ替えた後にinstallしたpluginも同じリリースへ上げる（[ADR-t618-2](../adr/2026-09-27-t618-2-plugin-follows-the-release-update.md)、[Release update](supervisor-lifecycle/release-update.md)。未実装）。
+
+### installしたpluginの確認
+
+[ADR-t617-2](../adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)の決定4。`--plugin-dir`を付けない`dagq up`と`dagq plan`は、inboxとplannerのsessionが読むinstall済みの`claude-dagq`を、sessionもsupervisorも開く前に確かめる。`--plugin-dir`を付けたときは確かめない（そのpluginが同じ名前のinstall済みのpluginより優先されるため）。runtimeが立てるplannerと`install`の引き継ぎは確かめない（supervisorに渡された`--plugin-dir`だけを使う、今までの振る舞いのまま）。runtimeがsupervisorを起動し直すために打つ`up`（`install --allow-breaking`のdrainの後と、自動更新の後のin-cmuxのsupervisor）も確かめない。runtimeは`LocalBinaries::run`でその`up`の環境に`DAGQ_UP_RESTART=1`（`lifecycle::UP_RESTART_ENV`）を置き、`up`はそれを`UpEnvironment::restart`として読む（envにしたのは、知らない古いバイナリが無視できるから）。
+
+- 確かめ方: `up`・`plan`の`--claude`（なければPATHの`claude`）で`claude plugin list --json`を、sessionが開くrepositoryのroot（`up`のinboxと`plan`のplannerのcwd。project scopeのpluginもそこで数える）で実行する。出力は`[{"id": "<plugin>@<marketplace>", "version": ..., "scope": "user", "enabled": true, "installPath": ...}]`の配列（Claude Code 2.1.283で確認）で、`id`の`@`の前が`claude-dagq`のentryのどれかが`enabled: true`なら有効とする（marketplaceとscopeは問わない）。portは`AgentProvider::installed_plugin`（結果は`PluginState`の`Enabled` / `Disabled` / `Missing`）、Claude Codeの実装は`ClaudeCode::installed_plugin`と出力の読み取りの`adapters::plugin_state`、判定と文言は`lifecycle::require_installed_plugin`。
+- 止まるとき: 未install（`claude-dagq`のentryが無い）、無効（entryがあるがどれも`enabled: false`）、コマンドの失敗（起動できない・非0・時間切れ）、出力を読めない（JSONの配列でない、`id`か`enabled`の無いentry）。どれも非0で止まり、errorは次の形の英語:
+
+```text
+<reason> in the Claude Code at <claude>, so the <inbox|planner> session would start without the dagq skills its prompt names. Install it with `claude plugin marketplace add hisamekms/dagq` and `claude plugin install claude-dagq@dagq`[ (or enable it with `claude plugin enable <id>`)], then run `dagq <up|plan>` again; to use a plugin checkout instead, pass --plugin-dir
+```
+
+  `<reason>`は`the claude-dagq plugin is not installed`・`the claude-dagq plugin is installed but disabled`（このときだけ`claude plugin enable <id>`の案内が付く）・`whether the claude-dagq plugin is installed could not be checked (<error>)`。`up`は末尾に`; the supervisor was not started`、`plan`は`; no planner was opened`を付ける。installのコマンドは`lifecycle::PLUGIN_INSTALL_COMMANDS`（上の「marketplace」の公式の手順）。
+- test: `tests/it/installed_plugin.rs`が、fixtureのstubの`claude`（`tests/common/lifecycle.rs`。`plugin list`に`<stub>.plugins`を出し、無ければ失敗する）で、有効ならsupervisorとinbox・plannerが開き、上の4つの場合は何も開かずに文言どおり止まり、`--plugin-dir`を付けたときと`DAGQ_UP_RESTART`の`up`では`plugin list`を呼ばないことを確かめる。e2eのstubの`claude`（`tests/e2e.rs`）は`plugin list`に有効な`claude-dagq`を返す。
 
 ### 読み込みと検証
 

@@ -331,9 +331,28 @@ pub trait QueueOpener: Send + Sync {
     fn open(&self) -> Result<Box<dyn Queue + Send>>;
 }
 
+/// Whether an agent's sessions load a plugin (ADR-t617-2 decision 4), as
+/// [`AgentProvider::installed_plugin`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginState {
+    /// Installed and enabled.
+    Enabled,
+    /// Installed, but disabled: the IDs it is installed under.
+    Disabled(Vec<String>),
+    /// Not installed.
+    Missing,
+}
+
 /// Provider-specific CLI construction is kept outside supervisor orchestration.
 pub trait AgentProvider {
     fn preflight(&self) -> Result<()>;
+    /// Whether the agent's sessions started in `cwd` load the plugin
+    /// `name` without a `--plugin-dir` (ADR-t617-2 decision 4); an error
+    /// when it cannot tell. A provider without plugins cannot tell.
+    fn installed_plugin(&self, cwd: &std::path::Path, name: &str) -> Result<PluginState> {
+        let _ = (cwd, name);
+        anyhow::bail!("this provider has no plugins")
+    }
     fn command(&self, run: &crate::domain::TaskRun, prompt: &str) -> Result<CommandSpec>;
     /// The same session reopened for a `needs_session` run (ADR-0019): the
     /// run's own settings and idle marker, without a prompt; the supervisor

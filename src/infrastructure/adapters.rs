@@ -1,7 +1,7 @@
 use crate::{
     application::{
-        AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, ProcessControl,
-        Repository, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
+        AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, PluginState,
+        ProcessControl, Repository, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
         actor_executor::{AgentSettings, agent_settings},
         stats::WorkspaceListing,
     },
@@ -2357,6 +2357,33 @@ pub fn workspace_handle(raw: &str) -> Result<&str> {
     Ok(handle)
 }
 
+/// What `claude plugin list --json` (an array of `{"id":
+/// "<plugin>@<marketplace>", "enabled": bool, ...}`) says of the plugin
+/// `name`: enabled when any entry of it is.
+pub fn plugin_state(listed: &str, name: &str) -> Result<PluginState> {
+    let entries: Vec<Value> = serde_json::from_str(listed)
+        .with_context(|| format!("the plugin list is not a JSON array: {}", listed.trim()))?;
+    let mut disabled = Vec::new();
+    for entry in &entries {
+        let id = entry["id"]
+            .as_str()
+            .with_context(|| format!("a plugin without an id: {entry}"))?;
+        if id.split_once('@').map_or(id, |(plugin, _)| plugin) != name {
+            continue;
+        }
+        match entry["enabled"].as_bool() {
+            Some(true) => return Ok(PluginState::Enabled),
+            Some(false) => disabled.push(id.to_owned()),
+            None => bail!("the plugin {id} has no enabled flag: {entry}"),
+        }
+    }
+    Ok(if disabled.is_empty() {
+        PluginState::Missing
+    } else {
+        PluginState::Disabled(disabled)
+    })
+}
+
 pub struct ClaudeCode {
     pub executable: PathBuf,
 }
@@ -2365,6 +2392,18 @@ impl AgentProvider for ClaudeCode {
     fn preflight(&self) -> Result<()> {
         output(Command::new(&self.executable).arg("--version"))?;
         Ok(())
+    }
+
+    /// `claude plugin list --json` in `cwd` (a project's plugins count
+    /// where its sessions start): `name` is enabled when an entry
+    /// `<name>@<marketplace>` has `enabled: true`.
+    fn installed_plugin(&self, cwd: &Path, name: &str) -> Result<PluginState> {
+        let listed = output(
+            Command::new(&self.executable)
+                .args(["plugin", "list", "--json"])
+                .current_dir(cwd),
+        )?;
+        plugin_state(&listed, name)
     }
 
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
