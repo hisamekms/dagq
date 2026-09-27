@@ -15,7 +15,7 @@ Three layers (ADR-0047): the runtime fixes what fixed rules prove safe (`auto_re
 "$DAGQ" doctor --full
 ```
 
-Explain what is still alive: the supervisors, each unfinished run's lease, processes and `blockers` (`recoverable: true` when empty). `reference/doctor.md` lists the fields and the common cases. A `running` or `validating` run whose wrapper is alive under a stale lease is adopted by the next supervisor: start one (`up`, section 5) instead of recovering it.
+It shows the supervisors, each unfinished run's lease, processes and `blockers` (`recoverable: true` when empty); `reference/doctor.md` has the fields and common cases. A `running` or `validating` run whose wrapper is alive under a stale lease is adopted by the next supervisor: start one (`up`, section 5) instead of recovering it.
 
 ## 2. Stop what is still running
 
@@ -29,11 +29,11 @@ Attention `recover run` (`kind` `runtime_error`): an unfinished run without a le
 "$DAGQ" recover RUN_ID
 ```
 
-The run becomes `interrupted` (an `integrating` one `awaiting_integration`), other runs are untouched, and the worktree, workspace and run directory are kept. The next supervisor's recovery job takes it; start one (`up`) rather than deciding yourself.
+The run becomes `interrupted` (an `integrating` one `awaiting_integration`); its worktree, workspace and run directory are kept. The next supervisor's recovery job takes it; start one (`up`) rather than deciding yourself.
 
 ## 4. Triage by hand, and recover by hand
 
-Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged, so no plan review; a task to change goes to a planner, `dagq plan`), `cancel ID` drops it. Its workspaces stay open until then (the supervisor closes them after), so read the screen first. Close one by hand (`cmux workspace close <workspace_id>`) only while no supervisor runs.
+Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `failed` / `interrupted` (or `resume_exhausted`) run could not start, timed out, printed no verdict, or its verdict could not be applied; the run stays as it is and is not tried again. Read `last_error` and the run directory's `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err`, and bring the choice to the person. On their answer: `"$DAGQ" ready ID` runs the task again as a new run (unchanged, so no plan review; a task to change goes to a planner, `dagq plan`), `cancel ID` drops it. Its workspaces stay open until then, so read the screen first; close one by hand only while no supervisor runs.
 
 Attention `recover by hand` (`kind` `recovery_failed`): a live run's recovery job failed (`last_error` its error); the session is untouched and the job does not run again for that alert. Read the screen with the person and carry out what they decide as in section 7. It clears once the session exits.
 
@@ -55,7 +55,7 @@ Attention `review by hand` (`review_failed`: the supervisor's headless review fa
 
 ## 7. A run's session: dialogs, stalls, stuck exits, undelivered answers
 
-A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (`reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
+A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (also for an `answer_prompt` with no options, `input_not_ready`, and a `stalled` `send_unconfirmed`: send Enter or the text; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
 
 ## 8. Bypass plan review, and a failed plan review
 
