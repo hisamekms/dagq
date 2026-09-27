@@ -346,6 +346,7 @@ fn event(id: i64, run: &str, task: i64, kind: &str, at: &str, payload: Value) ->
         kind: kind.to_owned(),
         payload,
         created_at: at.to_owned(),
+        actor: None,
     }
 }
 

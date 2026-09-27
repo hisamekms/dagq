@@ -347,6 +347,7 @@ mod tests {
             kind: kind.to_owned(),
             payload: payload.clone(),
             created_at: String::new(),
+            actor: None,
         }
     }
 

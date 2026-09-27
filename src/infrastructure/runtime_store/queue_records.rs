@@ -45,7 +45,8 @@ impl SqliteQueue {
         )?;
         if !recorded {
             tx.execute(
-                "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+                "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+             VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
                 params![REPORT_WRITTEN, serde_json::to_string(&payload)?],
             )?;
         }
@@ -73,7 +74,8 @@ impl SqliteQueue {
             return Ok(None);
         }
         tx.execute(
-            "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+            "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+             VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
             params![FORECAST_RECORDED, serde_json::to_string(&payload)?],
         )?;
         let id = EventId::new(tx.last_insert_rowid());

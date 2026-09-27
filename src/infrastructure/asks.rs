@@ -905,7 +905,8 @@ fn ask_event(
 ) -> Result<()> {
     check_event_target(kind, task_id, None)?;
     conn.execute(
-        "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES (?1,?2,?3,?4)",
+        "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
+         VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![task_id, run_id, kind, serde_json::to_string(&payload)?],
     )?;
     Ok(())

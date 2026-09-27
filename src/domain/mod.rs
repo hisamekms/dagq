@@ -742,7 +742,7 @@ pub use run::{
 };
 pub use task::{Task, TaskAction};
 pub use views::{
-    ClaimOutcome, EventFilter, GoalDetail, GoalPredecessor, GoalSummary, GoalTask,
+    ClaimOutcome, EventActor, EventFilter, GoalDetail, GoalPredecessor, GoalSummary, GoalTask,
     IntegrationOutcome, Predecessor, RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess,
     SupervisorRegistration, TaskDetail, TaskStatusCounts,
 };
@@ -2706,6 +2706,7 @@ mod attention_tests {
             kind: kind.into(),
             payload: serde_json::json!({}),
             created_at: String::new(),
+            actor: None,
         };
         assert_eq!(triage_state(&[]), TriageState::Pending);
         let mut again = event(10, "triage_decided");
@@ -2739,6 +2740,7 @@ mod attention_tests {
             kind: kind.into(),
             payload,
             created_at: String::new(),
+            actor: None,
         };
         let waiting = RunStatus::AwaitingIntegration;
         assert!(session_takes_answers(RunStatus::Running, &[], 0));

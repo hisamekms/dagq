@@ -1428,11 +1428,35 @@ fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
     Ok(())
 }
 
+/// Who the events this command writes record (ADR-t728-1 decision 4): the
+/// caller, except the processes of the control plane the runtime starts in
+/// an actor's environment: the supervisor, and the session wrappers and
+/// hooks, whose events are the wrapper's rather than the session's.
+fn event_actor(actor: &ActorContext, command: &Command) -> ActorContext {
+    match command {
+        Command::Supervise { .. } => {
+            ActorContext::instance(ActorRole::Supervisor, std::process::id())
+        }
+        Command::Session { run, .. } => ActorContext::instance(ActorRole::Wrapper, run),
+        Command::PlannerSession { planner, .. } => {
+            ActorContext::instance(ActorRole::Wrapper, format_args!("planner:{planner}"))
+        }
+        // Named like the wrapper of its session: the run's, or the id of
+        // an inbox or planner session.
+        Command::SessionEvent { .. } => match actor.run_id() {
+            Some(run) => ActorContext::instance(ActorRole::Wrapper, run),
+            None => ActorContext::instance(ActorRole::Wrapper, actor.actor_id()),
+        },
+        _ => actor.clone(),
+    }
+}
+
 fn execute(cli: Cli) -> Result<Value> {
     // Who runs the command (ADR-t728-1 decision 4): no `DAGQ_ROLE` is the
     // user, and a value that is no role stops it before anything is read.
     let actor = ActorContext::from_env(|name| env::var(name).ok())?;
     check_access(&actor, &cli.command)?;
+    dagq::infrastructure::event_actor::set_process_actor(event_actor(&actor, &cli.command));
     let cwd = env::current_dir().context("working directory is unavailable")?;
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
     let db = location.db.clone();

@@ -1058,6 +1058,7 @@ mod tests {
             kind: kind.into(),
             payload,
             created_at: String::new(),
+            actor: None,
         };
         let mut open = record(RunStatus::Failed);
         open.workspace_id = Some("ws".into());

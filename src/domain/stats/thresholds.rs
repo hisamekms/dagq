@@ -630,6 +630,7 @@ mod tests {
             created_at: crate::application::timestamp(
                 std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
             ),
+            actor: None,
         }
     }
 

@@ -155,6 +155,7 @@ mod tests {
             kind: LANDING_RECHECK_FAILED.to_owned(),
             payload,
             created_at: String::new(),
+            actor: None,
         }
     }
 

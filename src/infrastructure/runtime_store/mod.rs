@@ -392,12 +392,17 @@ pub(super) fn processes_for_task(conn: &Connection, task_id: TaskId) -> Result<V
 pub struct SqliteOpener {
     pub db: std::path::PathBuf,
     pub generators: crate::application::Generators,
+    /// The actor the events of each connection record; `None` is the
+    /// process's (ADR-t728-1 decision 4).
+    pub actor: Option<crate::domain::actor::ActorContext>,
 }
 
 impl crate::application::QueueOpener for SqliteOpener {
     fn open(&self) -> Result<Box<dyn crate::application::Queue + Send>> {
-        Ok(Box::new(
-            SqliteQueue::open(&self.db)?.with_generators(self.generators.clone()),
-        ))
+        let mut queue = SqliteQueue::open(&self.db)?.with_generators(self.generators.clone());
+        if let Some(actor) = &self.actor {
+            queue = queue.with_actor(actor.clone());
+        }
+        Ok(Box::new(queue))
     }
 }

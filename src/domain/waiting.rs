@@ -373,6 +373,7 @@ mod tests {
             kind: kind.into(),
             payload,
             created_at: at.into(),
+            actor: None,
         }
     }
 

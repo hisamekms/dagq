@@ -169,3 +169,93 @@ fn the_records_keep_the_writer_they_had() {
         ok(&db, &["ask", "close", &asked["id"].to_string()]);
     }
 }
+
+/// Every event records the actor that wrote it (task 730): the user of a
+/// plain terminal, a worker's ask, an observer's finding and a planner's
+/// goal, each with its role and actor id, which `events --full` and `show`
+/// print; a row written before the queue recorded actors reads without one.
+#[test]
+fn every_event_records_its_actor() {
+    let (_dir, db) = queue();
+    let run = |env: &[(&str, &str)], args: &[&str]| {
+        let output = invoke_with(env, &db, args);
+        assert!(
+            output.status.success(),
+            "{env:?} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(&[], &["add", "first"]);
+    let worker = [
+        ("DAGQ_ROLE", "worker"),
+        ("DAGQ_ACTOR_ID", "worker:r1"),
+        ("DAGQ_RUN_ID", "r1"),
+        ("DAGQ_TASK_ID", "1"),
+    ];
+    run(&worker, &ask_args("which way?"));
+    let observer = [("DAGQ_ROLE", "observer"), ("DAGQ_ACTOR_ID", "observer:s1")];
+    run(
+        &observer,
+        &[
+            "finding",
+            "record",
+            "--kind",
+            "stall",
+            "--task",
+            "1",
+            "--summary",
+            "waits",
+        ],
+    );
+    // A session from before the actor id is named by its role.
+    run(&[("DAGQ_ROLE", "planner")], &["goal", "add", "a goal"]);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO run_events(kind,payload) VALUES ('older_event','{}')",
+            [],
+        )
+        .unwrap();
+
+    let events = ok(&db, &["events", "--after", "0", "--all", "--full"])["events"].clone();
+    let actor_of = |kind: &str| {
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind} in {events}"))["actor"]
+            .clone()
+    };
+    assert_eq!(
+        actor_of("task_created"),
+        serde_json::json!({"role": "user", "id": "user"})
+    );
+    assert_eq!(
+        actor_of("ask_opened"),
+        serde_json::json!({"role": "worker", "id": "worker:r1"})
+    );
+    assert_eq!(
+        actor_of("finding_recorded"),
+        serde_json::json!({"role": "observer", "id": "observer:s1"})
+    );
+    assert_eq!(
+        actor_of("goal_created"),
+        serde_json::json!({"role": "planner", "id": "planner"})
+    );
+    assert!(actor_of("older_event").is_null());
+    // The compact form stays as it was.
+    let compact = ok(&db, &["events", "--after", "0", "--all"])["events"].clone();
+    assert!(compact[0].get("actor").is_none(), "{compact}");
+    // `show` prints the actor of the task's events.
+    let shown = ok(&db, &["show", "1"]);
+    let task_events = shown["events"].as_array().unwrap();
+    assert_eq!(task_events[0]["kind"], "task_created");
+    assert_eq!(task_events[0]["actor"]["role"], "user");
+    assert!(
+        task_events
+            .iter()
+            .any(|event| event["actor"]["id"] == "worker:r1"),
+        "{shown}"
+    );
+}

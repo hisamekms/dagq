@@ -6,8 +6,8 @@
 //! and tried again on a later pass.
 
 use super::*;
+use crate::domain::ActorContext;
 use crate::domain::language::with_instruction;
-use crate::domain::{ActorContext, ActorRole};
 use crate::{
     application::{
         GoalReviewApply, GoalReviewJob,
@@ -100,10 +100,10 @@ impl Supervisor<'_> {
         let mut command =
             self.reviewer
                 .headless_command(&self.layout.repo_root, &prompt, PLAN_REVIEW_TOOLS)?;
-        command.envs(self.layout.job_env(&ActorContext::instance(
-            ActorRole::GoalReviewJob,
-            format_args!("{}:{}", job.goal_id, job.attempt),
-        )));
+        command.envs(
+            self.layout
+                .job_env(&ActorContext::goal_review_job(job.goal_id, job.attempt)),
+        );
         let child = self
             .spawner
             .spawn(
@@ -220,7 +220,12 @@ impl Supervisor<'_> {
         let applied = outcome
             .and_then(|stdout| GoalReviewVerdict::parse(&stdout))
             .map_err(|error| anyhow!(error))
-            .and_then(|verdict| self.apply_goal_verdict(&watch.job, verdict, duration_secs));
+            .and_then(|verdict| {
+                let job = ActorContext::goal_review_job(watch.job.goal_id, watch.job.attempt);
+                self.for_job(&job, |sv| {
+                    sv.apply_goal_verdict(&watch.job, verdict, duration_secs)
+                })
+            });
         if let Err(error) = applied {
             self.fail_goal_review(&watch.job, &format!("{error:#}"), duration_secs);
         }

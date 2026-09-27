@@ -709,13 +709,17 @@ impl RunLog for SqliteQueue {
     ) -> Result<Vec<RunEvent>> {
         SqliteQueue::events_of_between(self, kinds, after, upto, limit)
     }
+    fn request_as(&self, requester: Option<&crate::domain::actor::ActorContext>) {
+        self.actors.request(requester);
+    }
 }
 
 /// Insert an event of the queue itself in the open transaction `tx`, with
 /// the session span it opens or closes; its id.
 pub(super) fn queue_event(tx: &Connection, kind: &str, payload: &Value) -> Result<EventId> {
     tx.execute(
-        "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+        "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+         VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind, serde_json::to_string(payload)?],
     )?;
     let id = EventId::new(tx.last_insert_rowid());

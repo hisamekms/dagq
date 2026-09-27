@@ -453,6 +453,7 @@ mod tests {
             kind: event_kind::RESUME_FINISHED.to_owned(),
             payload: json!({}),
             created_at: String::new(),
+            actor: None,
         }
     }
 

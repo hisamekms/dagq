@@ -20,6 +20,7 @@
 //! `triage.rs`, with the same verdict.
 
 use super::*;
+use crate::domain::ActorContext;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
@@ -29,7 +30,6 @@ use crate::domain::recovery::{
     IDLE_WITHOUT_RECEIPT, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, PROMPT_WAITING_ACTIONS,
     ProcessInfo, RecoveryAction, SEND_UNCONFIRMED, attempts, failed_live, run_processes,
 };
-use crate::domain::{ActorContext, ActorRole};
 
 /// The actions a recovery job may choose for a running session's
 /// `long_background` alert.
@@ -1026,10 +1026,10 @@ pub(super) fn start_job(
         sv.reviewer.assign_session_id(&mut command, session_id);
     }
     sv.reviewer.apply_launch(&mut command, launch);
-    command.envs(sv.layout.job_env(&ActorContext::instance(
-        ActorRole::RecoveryJob,
-        format_args!("{run}:{}:{attempt}", alert.as_str()),
-    )));
+    command.envs(
+        sv.layout
+            .job_env(&ActorContext::recovery_job(run, alert.as_str(), attempt)),
+    );
     let child = sv
         .spawner
         .spawn(
@@ -1134,6 +1134,18 @@ fn check_live(
 /// every action holds now, each recorded as `auto_repaired`, and
 /// `recovery_finished`; otherwise the escalation.
 pub(super) fn apply_live(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    live: &Live<'_>,
+    job: &RecoveryJob,
+    verdict: RecoveryVerdict,
+) -> Result<std::result::Result<Applied, Escalation>> {
+    let actor = ActorContext::recovery_job(run.id(), job.alert.as_str(), job.attempt);
+    sv.for_job(&actor, |sv| apply_live_verdict(sv, run, live, job, verdict))
+}
+
+/// [`apply_live`] with the job recorded as the requester.
+fn apply_live_verdict(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,
     live: &Live<'_>,

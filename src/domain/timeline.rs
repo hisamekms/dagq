@@ -315,6 +315,7 @@ mod tests {
                 kind: (*kind).to_owned(),
                 payload: payload.clone(),
                 created_at: format!("2026-09-24T{at}Z"),
+                actor: None,
             })
             .collect()
     }

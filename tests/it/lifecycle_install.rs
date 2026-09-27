@@ -105,6 +105,7 @@ fn install_with(
         std::sync::Arc::new(dagq::infrastructure::runtime_store::SqliteOpener {
             db: db.to_owned(),
             generators: dagq::infrastructure::clock::system(),
+            actor: None,
         })
     };
     dagq::application::install::install(
@@ -451,6 +452,7 @@ fn run_update_job(
         std::sync::Arc::new(dagq::infrastructure::runtime_store::SqliteOpener {
             db: db.to_owned(),
             generators: dagq::infrastructure::clock::system(),
+            actor: None,
         })
     };
     let restart = |registration: &dagq::domain::SupervisorRegistration| -> Result<Value> {

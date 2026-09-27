@@ -112,7 +112,8 @@ impl SqliteQueue {
             payload["day"] = json!(push_day.map(|(day, _)| day));
         }
         tx.execute(
-            "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+            "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+             VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
             params![kind, serde_json::to_string(&payload)?],
         )?;
         tx.commit()?;
@@ -136,7 +137,8 @@ impl SqliteQueue {
         let record = latest.as_deref() != Some(KPI_PUSH_ABANDONED);
         if record {
             tx.execute(
-                "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+                "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+             VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
                 params![KPI_PUSH_ABANDONED, serde_json::to_string(&payload)?],
             )?;
         }

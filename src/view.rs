@@ -145,6 +145,10 @@ fn event_gist(event: &RunEvent) -> Value {
     if let Some(run_id) = &event.run_id {
         compact.insert("run_id".into(), json!(run_id));
     }
+    // Who wrote it (ADR-t728-1 decision 4); none on an older row.
+    if let Some(actor) = &event.actor {
+        compact.insert("actor".into(), json!(actor));
+    }
     if let Value::Object(payload) = &event.payload {
         let mut gist = pick(payload, &EVENT_GIST);
         if !gist.is_empty() {
@@ -248,6 +252,7 @@ mod tests {
             kind: format!("kind{id}"),
             payload,
             created_at: format!("t{id}"),
+            actor: None,
         }
     }
 
@@ -287,6 +292,11 @@ mod tests {
                 })
                 .chain([RunEvent {
                     run_id: None,
+                    actor: Some(crate::domain::EventActor {
+                        role: "supervisor".into(),
+                        id: "supervisor:9".into(),
+                        requested_by: Some("review-job:b:1".into()),
+                    }),
                     ..event(13, json!({"path": "/p"}))
                 }])
                 .collect(),
@@ -322,7 +332,9 @@ mod tests {
         );
         assert_eq!(
             events[2],
-            json!({"id": 13, "kind": "kind13", "created_at": "t13"})
+            json!({"id": 13, "kind": "kind13", "created_at": "t13",
+                   "actor": {"role": "supervisor", "id": "supervisor:9",
+                             "requested_by": "review-job:b:1"}})
         );
     }
 

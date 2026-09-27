@@ -48,6 +48,7 @@ fn event(
         kind: kind.to_owned(),
         payload,
         created_at: marks::utc_text(secs * 1000),
+        actor: None,
     }
 }
 

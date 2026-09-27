@@ -351,7 +351,9 @@ pub fn supervise_with_reviewer(
         version: crate::VERSION.to_owned(),
         worker_env: session_env(SessionRole::Worker, &db)?,
         job_base_env: vec![(QUEUE_ENV.to_owned(), path_text(&db)?)],
-        // The observe command runs as the user; its agent is the observer.
+        // The observe command's environment drops the supervisor's actor
+        // variables, and the supervisor sets its own when it starts it
+        // (`supervisor:<pid>`); its agent is the observer.
         observer_env_remove: [
             ROLE_ENV,
             crate::domain::actor::ACTOR_ID_ENV,
@@ -432,9 +434,14 @@ pub fn supervise_with_reviewer(
         }
     });
     let ports = Ports {
+        // The supervisor's own transitions (ADR-t728-1 decision 4).
         queues: Arc::new(SqliteOpener {
             db: db.clone(),
             generators: generators.clone(),
+            actor: Some(crate::domain::actor::ActorContext::instance(
+                crate::domain::actor::ActorRole::Supervisor,
+                pid,
+            )),
         }),
         verifier: Arc::new(ShellVerifier {
             checkout: main_checkout(&repository),
@@ -478,6 +485,7 @@ impl<'a> RecordingBackend<'a> {
             Arc::new(SqliteOpener {
                 db,
                 generators: clock::system(),
+                actor: None,
             }),
             token,
             load_average,
@@ -611,6 +619,7 @@ impl OneShot {
             Arc::new(SqliteOpener {
                 db: db.clone(),
                 generators: self.generators.clone(),
+                actor: None,
             }),
             begun.token.clone(),
         );
@@ -1288,6 +1297,7 @@ same in one step",
         Arc::new(SqliteOpener {
             db: db.to_path_buf(),
             generators: self.generators.clone(),
+            actor: None,
         })
     }
 
@@ -1593,7 +1603,10 @@ fn run_session(
     spawner: &dyn Spawner,
     resume: bool,
 ) -> Result<Value> {
-    let mut queue = SqliteQueue::open(db)?;
+    // The wrapper's events are its own, not the worker's (ADR-t728-1).
+    let mut queue = SqliteQueue::open(db)?.with_actor(
+        crate::domain::actor::ActorContext::instance(crate::domain::actor::ActorRole::Wrapper, id),
+    );
     wrapper::run_session(
         Session {
             queue: &mut queue,
@@ -1681,7 +1694,10 @@ pub fn planner_session_with_provider(
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
 ) -> Result<Value> {
-    let queue = SqliteQueue::open(db)?;
+    let queue = SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
+        crate::domain::actor::ActorRole::Wrapper,
+        format_args!("planner:{id}"),
+    ));
     let cwd = std::env::current_dir().context("working directory is unavailable")?;
     planner::run_planner_session(
         PlannerWrapper {

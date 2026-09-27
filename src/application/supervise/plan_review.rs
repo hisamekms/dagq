@@ -9,8 +9,8 @@
 //! pass.
 
 use super::*;
+use crate::domain::ActorContext;
 use crate::domain::language::with_instruction;
-use crate::domain::{ActorContext, ActorRole};
 use crate::{
     application::{
         PlanReviewApply, PlanReviewJob, StatusFilter, TaskListItem, TaskQuery,
@@ -155,10 +155,10 @@ impl Supervisor<'_> {
         self.reviewer
             .assign_session_id(&mut command, &job.session_id);
         self.reviewer.apply_launch(&mut command, launch);
-        command.envs(self.layout.job_env(&ActorContext::instance(
-            ActorRole::PlanReviewJob,
-            format_args!("{}:{}", job.proposal_id, job.attempt),
-        )));
+        command.envs(
+            self.layout
+                .job_env(&ActorContext::plan_review_job(job.proposal_id, job.attempt)),
+        );
         let child = self
             .spawner
             .spawn(
@@ -380,7 +380,10 @@ impl Supervisor<'_> {
             .and_then(|stdout| PlanReviewVerdict::parse(&stdout))
             .map_err(|error| anyhow!(error))
             .and_then(|verdict| {
-                self.apply_plan_verdict(&watch.job, watch.revise_count, verdict, duration_secs)
+                let job = ActorContext::plan_review_job(watch.job.proposal_id, watch.job.attempt);
+                self.for_job(&job, |sv| {
+                    sv.apply_plan_verdict(&watch.job, watch.revise_count, verdict, duration_secs)
+                })
             });
         if let Err(error) = applied {
             self.fail_plan_review(&watch.job, &format!("{error:#}"), duration_secs);

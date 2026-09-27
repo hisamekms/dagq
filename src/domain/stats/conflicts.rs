@@ -402,6 +402,7 @@ mod tests {
             kind: kind.to_owned(),
             payload,
             created_at: at(secs),
+            actor: None,
         }
     }
 

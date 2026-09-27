@@ -260,6 +260,12 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The supervisor as an actor: `supervisor:<pid>`, what its own events
+    /// and the commands it starts for itself record.
+    pub fn supervisor_actor(&self) -> ActorContext {
+        ActorContext::instance(crate::domain::ActorRole::Supervisor, self.pid)
+    }
+
     /// The environment of a headless job: the queue, and the job's role
     /// and actor id (ADR-t728-1 decision 4). The CLI knows the job by its
     /// role and allows it only reads of this queue.
@@ -1488,6 +1494,9 @@ impl Supervisor<'_> {
         for name in &self.layout.observer_env_remove {
             command.env_remove(name);
         }
+        // The observe command is the supervisor's; its agent is the
+        // observer (ADR-t728-1 decision 4).
+        command.envs(self.layout.supervisor_actor().env());
         if mode == ObserveMode::Daily {
             command.arg("--daily");
         }
@@ -1500,6 +1509,19 @@ impl Supervisor<'_> {
                 warn!(error = %format_args!("{error:#}"), "observer ({}) could not start: {error:#}", mode.as_str())
             }
         }
+    }
+    /// Apply what the headless job `job` returned: the events written
+    /// meanwhile record the supervisor as their actor and the job as
+    /// `requested_by` (ADR-t728-1 decision 1, task 730).
+    pub(super) fn for_job<T>(
+        &mut self,
+        job: &ActorContext,
+        apply: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.queue.request_as(Some(job));
+        let result = apply(self);
+        self.queue.request_as(None);
+        result
     }
     /// Close the review span of `run` when its job ended without a verdict
     /// or could not start: `review_failed` waits for the session's `/exit`,
@@ -1841,7 +1863,10 @@ impl Supervisor<'_> {
                 let run = self.queue.run(slot.run.id())?;
                 let acted = match outcome {
                     Ok(verdict) => {
-                        self.act_on_recovery(&run, round, alert, attempt, duration_secs, verdict)
+                        let job = ActorContext::recovery_job(run.id(), alert.as_str(), attempt);
+                        self.for_job(&job, |sv| {
+                            sv.act_on_recovery(&run, round, alert, attempt, duration_secs, verdict)
+                        })
                     }
                     Err(error) => Err(anyhow!("{error}")),
                 };
@@ -1954,19 +1979,22 @@ impl Supervisor<'_> {
                 let run = self.queue.run(slot.run.id())?;
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
-                        self.queue.record_runtime_event(
-                            run.id(),
-                            event_kind::REVIEW_FINISHED,
-                            json!({
-                                "verdict": verdict.verdict,
-                                "reasons": verdict.reasons,
-                                "summary": verdict.summary,
-                                "duration_secs": duration_secs,
-                                "attempt": attempt,
-                            }),
-                        )?;
-                        info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
-                        self.act_on_verdict(&run, session, verdict)?
+                        let job = ActorContext::review_job(run.id(), attempt);
+                        self.for_job(&job, |sv| {
+                            sv.queue.record_runtime_event(
+                                run.id(),
+                                event_kind::REVIEW_FINISHED,
+                                json!({
+                                    "verdict": verdict.verdict,
+                                    "reasons": verdict.reasons,
+                                    "summary": verdict.summary,
+                                    "duration_secs": duration_secs,
+                                    "attempt": attempt,
+                                }),
+                            )?;
+                            info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
+                            sv.act_on_verdict(&run, session, verdict)
+                        })?
                     }
                     ReviewEnd::Unreadable(error) if !watch.retried => {
                         self.retry_review(&run, session, attempt, &error)?

@@ -25,13 +25,16 @@ use crate::{
         NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND, Predecessor,
         Priority, Proposal, ProposalId, Provider, RunEvent, RunId, RunRecord, Submission, Task,
         TaskAction, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun, TaskStatus,
-        TaskStatusCounts, goal,
+        TaskStatusCounts,
+        actor::ActorContext,
+        goal,
         scope::validate_path_globs,
         task,
         worker_model::{self, WorkerTrial},
     },
     infrastructure::{
         clock,
+        event_actor::{EventActors, event_actor, process_actor},
         location::runs_dir,
         proposals,
         schema::{self, BINARY_SCHEMA, MIGRATIONS},
@@ -75,6 +78,9 @@ pub struct SqliteQueue {
     /// Where every time the queue writes and every run ID it creates come
     /// from; the system clock and random UUIDs unless a test fixes them.
     pub(super) generators: Generators,
+    /// Who the events written through this connection record
+    /// (ADR-t728-1 decision 4).
+    pub(super) actors: EventActors,
 }
 
 impl SqliteQueue {
@@ -162,10 +168,12 @@ impl SqliteQueue {
             .run_to_completion(i32::MAX, Duration::from_millis(10), None)
             .context("copy the queue into memory")?;
         memory.pragma_update(None, "foreign_keys", true)?;
+        let actors = EventActors::attach(&memory, queue.actors.get())?;
         let mut copy = Self {
             conn: memory,
             runs_dir: queue.runs_dir.clone(),
             generators: queue.generators.clone(),
+            actors,
         };
         copy.apply(state.version, None)?;
         Ok((schema, ReadOnlyQueue::Readable(copy)))
@@ -260,6 +268,18 @@ impl SqliteQueue {
         &self.generators
     }
 
+    /// The queue writing its events as `actor` instead of the process's
+    /// actor ([`process_actor`]).
+    pub fn with_actor(self, actor: ActorContext) -> Self {
+        self.actors.set(actor);
+        self
+    }
+
+    /// The actor this queue's events record.
+    pub fn actor(&self) -> ActorContext {
+        self.actors.get()
+    }
+
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -282,10 +302,12 @@ impl SqliteQueue {
         // Canonical, like the paths `supervise` plans under, so a relative or
         // symlinked `--db` still names the queue's real `runs/`.
         let db = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let actors = EventActors::attach(&conn, process_actor())?;
         Ok(Self {
             conn,
             runs_dir: runs_dir(&db),
             generators: clock::system(),
+            actors,
         })
     }
 
@@ -1540,7 +1562,8 @@ pub(super) fn goal_event(
     payload: serde_json::Value,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO run_events(goal_id,kind,payload) VALUES (?1,?2,?3)",
+        "INSERT INTO run_events(goal_id,kind,payload,actor_role,actor_id,requested_by)
+         VALUES (?1,?2,?3,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![goal_id, kind, serde_json::to_string(&payload)?],
     )?;
     Ok(())
@@ -2022,7 +2045,8 @@ pub(super) fn event(
     payload: serde_json::Value,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES (?1,?2,?3,?4)",
+        "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
+         VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![task_id, run_id, kind, serde_json::to_string(&payload)?],
     )?;
     // The Claude session spans this event starts or ends (ADR-0048).
@@ -2151,5 +2175,6 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
         kind: row.get("kind")?,
         payload: json_col(row, "payload")?,
         created_at: row.get("created_at")?,
+        actor: event_actor(row)?,
     })
 }

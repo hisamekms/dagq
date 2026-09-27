@@ -137,6 +137,7 @@ mod tests {
             kind: kind.to_owned(),
             payload,
             created_at: String::new(),
+            actor: None,
         }
     }
 

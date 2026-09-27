@@ -143,6 +143,35 @@ impl ActorContext {
         Self::instance(ActorRole::Worker, run).with_run(run.clone(), task)
     }
 
+    /// The review job `attempt` of `run`.
+    pub fn review_job(run: &RunId, attempt: impl std::fmt::Display) -> Self {
+        Self::instance(ActorRole::ReviewJob, format_args!("{run}:{attempt}"))
+    }
+
+    /// The recovery job `attempt` of `alert` on `run`.
+    pub fn recovery_job(run: &RunId, alert: &str, attempt: impl std::fmt::Display) -> Self {
+        Self::instance(
+            ActorRole::RecoveryJob,
+            format_args!("{run}:{alert}:{attempt}"),
+        )
+    }
+
+    /// The plan review `attempt` of a proposal.
+    pub fn plan_review_job(
+        proposal: impl std::fmt::Display,
+        attempt: impl std::fmt::Display,
+    ) -> Self {
+        Self::instance(
+            ActorRole::PlanReviewJob,
+            format_args!("{proposal}:{attempt}"),
+        )
+    }
+
+    /// The goal review `attempt` of a goal.
+    pub fn goal_review_job(goal: impl std::fmt::Display, attempt: impl std::fmt::Display) -> Self {
+        Self::instance(ActorRole::GoalReviewJob, format_args!("{goal}:{attempt}"))
+    }
+
     pub fn with_run(mut self, run: RunId, task: TaskId) -> Self {
         self.run_id = Some(run);
         self.task_id = Some(task);

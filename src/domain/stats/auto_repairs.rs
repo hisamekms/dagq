@@ -103,6 +103,7 @@ mod tests {
             kind: kind.to_owned(),
             payload,
             created_at: at.to_owned(),
+            actor: None,
         }
     }
 

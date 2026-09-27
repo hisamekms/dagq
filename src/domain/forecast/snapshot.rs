@@ -362,6 +362,7 @@ mod tests {
             kind: kind.into(),
             payload,
             created_at: String::new(),
+            actor: None,
         }
     }
 

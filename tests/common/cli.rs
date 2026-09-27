@@ -29,6 +29,15 @@ pub fn invoke(db: &Path, args: &[&str]) -> Output {
 /// comes first on PATH, so `ask` never notifies the person running the
 /// tests; it appends its arguments to [`notifications`] instead.
 pub fn invoke_as(role: Option<&str>, db: &Path, args: &[&str]) -> Output {
+    match role {
+        Some(role) => invoke_with(&[("DAGQ_ROLE", role)], db, args),
+        None => invoke_with(&[], db, args),
+    }
+}
+
+/// [`invoke_as`] with the actor's variables (`DAGQ_ROLE`, `DAGQ_ACTOR_ID`,
+/// `DAGQ_RUN_ID`, `DAGQ_TASK_ID`) that `env` sets, and no other.
+pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     let bin = db.parent().unwrap().join("bin");
     if !bin.join("cmux").exists() {
         use std::os::unix::fs::PermissionsExt;
@@ -55,9 +64,7 @@ pub fn invoke_as(role: Option<&str>, db: &Path, args: &[&str]) -> Output {
         .env_remove("DAGQ_ACTOR_ID")
         .env_remove("DAGQ_RUN_ID")
         .env_remove("DAGQ_TASK_ID");
-    if let Some(role) = role {
-        command.env("DAGQ_ROLE", role);
-    }
+    command.envs(env.iter().copied());
     command
         .arg("--db")
         .arg(db)

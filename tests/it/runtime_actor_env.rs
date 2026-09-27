@@ -60,4 +60,60 @@ fn the_review_and_the_recovery_job_run_as_their_own_actors() {
         assert_eq!(env("DAGQ_RUN_ID"), Some(run.id().to_string()));
         assert_eq!(env("DAGQ_TASK_ID").as_deref(), Some("1"));
     }
+    drop(tags);
+
+    // The events record their actor (task 730): the supervisor's own
+    // transitions and its landing as the supervisor, the verdicts it
+    // applied with the job that returned them as the requester.
+    let supervisor = format!("supervisor:{}", std::process::id());
+    let actor = |kind: &str, run: &TaskRun| {
+        let event = detail
+            .events
+            .iter()
+            .find(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+            .unwrap_or_else(|| panic!("no {kind} of {}", run.id()));
+        let actor = event.actor.clone().expect("an actor");
+        (actor.role, actor.id, actor.requested_by)
+    };
+    for (kind, run) in [
+        ("run_claimed", failed),
+        ("run_claimed", landed),
+        ("run_integrated", landed),
+    ] {
+        assert_eq!(
+            actor(kind, run),
+            ("supervisor".to_owned(), supervisor.clone(), None),
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        actor("recovery_finished", failed),
+        (
+            "supervisor".to_owned(),
+            supervisor.clone(),
+            Some(format!("recovery-job:{}:failed:1", failed.id()))
+        )
+    );
+    // The session wrapper's events are the wrapper's, not the worker's.
+    assert_eq!(
+        actor("wrapper_started", landed),
+        (
+            "wrapper".to_owned(),
+            format!("wrapper:{}", landed.id()),
+            None
+        )
+    );
+    assert!(
+        detail.events.iter().all(|e| e.actor.is_some()),
+        "{:?}",
+        detail.events
+    );
+    assert_eq!(
+        actor("review_finished", landed),
+        (
+            "supervisor".to_owned(),
+            supervisor.clone(),
+            Some(format!("review-job:{}:1", landed.id()))
+        )
+    );
 }

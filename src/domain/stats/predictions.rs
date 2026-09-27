@@ -168,6 +168,7 @@ mod tests {
             kind: kind.to_owned(),
             payload,
             created_at: "2027-01-15T08:00:00.000Z".to_owned(),
+            actor: None,
         }
     }
 

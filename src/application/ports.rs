@@ -1433,6 +1433,11 @@ pub trait RunLog {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>>;
+    /// Record `requester`, a headless job whose verdict the caller
+    /// applies, as `requested_by` on the events written until it is
+    /// cleared with `None` (ADR-t728-1 decision 1, task 730). A store that
+    /// records no actors ignores it.
+    fn request_as(&self, _requester: Option<&crate::domain::actor::ActorContext>) {}
 }
 
 /// What reports read and record of the queue as a whole: the written

@@ -95,6 +95,22 @@ pub struct RunEvent {
     pub kind: String,
     pub payload: serde_json::Value,
     pub created_at: String,
+    /// Who wrote it (ADR-t728-1 decision 4); `None` for an event written
+    /// before the queue recorded actors, or by an older binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<EventActor>,
+}
+
+/// The actor recorded on an event: its role as ADR-t728-1 decision 2
+/// spells it (read as text, so a role of a newer binary still reads), its
+/// id, and the id of the headless job whose verdict the supervisor applied
+/// when the event came of one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventActor {
+    pub role: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
 }
 
 /// Which run events `events` reads (ADR-0044 decision 22): every field

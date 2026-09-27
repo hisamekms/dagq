@@ -299,6 +299,7 @@ mod tests {
             kind: kind.to_owned(),
             payload,
             created_at: format!("2026-09-26T00:{:02}:{:02}.000Z", secs / 60, secs % 60),
+            actor: None,
         }
     }
 

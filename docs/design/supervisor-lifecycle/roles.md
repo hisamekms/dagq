@@ -59,3 +59,14 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 - `DAGQ_ACTOR_ID`が無ければ（それより前に開いたsession）actor idは`DAGQ_ROLE`の値。
 - 4つのjob（と`reviewer`）は今までのreviewerと同じ読み取りだけの制限を受け、状態を変えるコマンドは`reviewer may not change queue state`で拒まれる。observerの制限（findingの記録・解決と、findingに紐づく`blocked`のaskだけ）も変わらない。判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
 - noteの`by`・markの`by`・findingの`recorded_by`と状態変更の`by`・askの`asked_by`は`ActorContext::written_by`（roleの名前、userは`human`）、answerの`answered_by`は`ActorContext::answered_by`（roleの名前、userは`person`）から作り、書かれる値は型を入れる前と同じ。
+
+### eventのactor
+
+queueに書かれるeventは全て、書いたactorを`run_events`の列`actor_role`・`actor_id`と、headless jobのverdictを適用したときの依頼元`requested_by`に持つ（ADR-t728-1の決定4、task 730。列は[SQLite persistence](../persistence.md)の`0044_event_actors.sql`）。askの`asked_by`やanswerの`answered_by`とは別の欄で、それらの値は変えない（改名はgoal 48のtask 502）。
+
+- 仕組み: `SqliteQueue`の接続ごとに`EventActors`（`src/infrastructure/event_actor.rs`）がactorを持ち、SQLの関数`dagq_actor_role()`・`dagq_actor_id()`・`dagq_requested_by()`として登録する。`INSERT INTO run_events`は全てこの関数で列を埋めるので、書く場所にactorを渡さず、登録の無い接続での挿入は失敗する。
+- 既定のactorはプロセスのactor（`set_process_actor`。`main`がコマンドの前に1回決める）で、決めていなければ（ライブラリを直接使うtest）`user`。`SqliteQueue::with_actor`と`SqliteOpener.actor`で接続ごとに変えられる。
+- プロセスのactorは呼び出し元の`ActorContext`（`DAGQ_ROLE`が無ければ`user`）。例外は制御側のプロセスで、`supervise`は`supervisor:<pid>`、runのsession wrapper（`session`）は`wrapper:<run id>`、plannerのwrapper（`planner-session`）は`wrapper:planner:<planner id>`、session hook（`session-event`）はworkerのsessionなら`wrapper:<run id>`、それ以外は`wrapper:<sessionのactor id>`（plannerなら`wrapper:planner:<id>`でwrapperと同じ）。supervisorが起動する`observe`と`auto-update`には`supervisor:<pid>`の環境を渡すので、そのeventもsupervisorになる（observerのagentは`observer:<session id>`のまま）。
+- 着地（supervisorの中の`integrate`）はintegratorの文脈ができるまで（ADR-t728-2の後のtask）supervisorのactorで記録する。人が打つ`integrate`はその人（`user`）など呼び出し元になる。
+- review・recovery（終わったrunと生きているrun）・plan review・goal reviewのverdictをsupervisorが適用する間（`Supervisor::for_job`）、書かれるeventはactorがsupervisorのまま、`requested_by`にjobのactor id（`review-job:<run>:<attempt>`など、上の表と同じ）を持つ。portでは`RunLog::request_as`。入れ子にはせず、抜けるときに`None`に戻す。生きているrunのrecovery jobのverdictが適用されずにescalateするとき（`recovery_finished`とaskの作成は`apply_live`の外で書かれる）と、review passの後に別のthreadで行う着地のeventは`requested_by`を持たない。
+- 読み方: `RunEvent.actor`（`role`・`id`・`requested_by`）。migrationより前の行と古いバイナリが書いた行は`None`で、JSONでは`actor`の欄が無い。`events --full`と`show --full`は`actor`を出し、`show`の要約のeventも`actor`を持つ。`events`の要約（`--full`なし）と`watch`は変えない。secretやpromptの全文は入れない（入るのはroleとidだけ）。
