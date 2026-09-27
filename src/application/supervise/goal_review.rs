@@ -97,23 +97,29 @@ impl Supervisor<'_> {
             .write(&job.dir.join("prompt.txt"), prompt.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
-        let mut command =
-            self.reviewer
-                .headless_command(&self.layout.repo_root, &prompt, PLAN_REVIEW_TOOLS)?;
-        command.envs(
-            self.layout
-                .job_env(&ActorContext::goal_review_job(job.goal_id, job.attempt)),
-        );
         let child = self
-            .spawner
-            .spawn(
-                &command,
-                Streams::Files {
-                    stdout: &stdout,
-                    stderr: &stderr,
+            .actors()
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::goal_review_job(job.goal_id, job.attempt),
+                WorkspaceAccess::Read(self.layout.repo_root.clone()),
+                ActorProgram::Headless {
+                    program: HeadlessProgram::Job {
+                        cwd: &self.layout.repo_root,
+                        prompt: &prompt,
+                        allowed_tools: PLAN_REVIEW_TOOLS,
+                    },
+                    session_id: None,
+                    launch: None,
+                    without_mcp: false,
+                    env: Vec::new(),
+                    streams: Streams::Files {
+                        stdout: &stdout,
+                        stderr: &stderr,
+                    },
                 },
-            )
-            .context("start the goal review")?;
+            ))
+            .context("start the goal review")?
+            .process()?;
         Ok(self.headless_job(
             "goal review",
             child,

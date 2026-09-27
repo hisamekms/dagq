@@ -386,14 +386,24 @@ impl Supervisor<'_> {
         // The worker's env and group (the same session of the run) and the
         // description `run <run-id> resume` (ADR-0028), then `[run.env]`
         // after the runtime's own names, as in the worker's workspace.
-        let mut env = self.layout.worker_env_of(run);
-        env.extend(run_env);
-        let tags = WorkspaceTags {
-            env,
-            description: Some(resume_workspace_description(run)),
-            group: self.workspace_group(),
-        };
-        let workspace = self.cmux.create_resume(&task, run, &command, &tags)?;
+        let workspace = self
+            .actors()
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::worker(run.id(), run.task_id()),
+                WorkspaceAccess::Write(PathBuf::from(
+                    run.worktree_path().context("missing worktree")?,
+                )),
+                ActorProgram::RunWorkspace {
+                    task: &task,
+                    run,
+                    wrapper: command,
+                    resume: true,
+                    description: resume_workspace_description(run),
+                    group: self.workspace_group(),
+                    run_env,
+                },
+            ))?
+            .workspace()?;
         // Every workspace of the run is recorded, so whatever ends the run
         // finds this one to close.
         self.queue.record_runtime_event(

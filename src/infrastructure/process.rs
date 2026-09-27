@@ -68,6 +68,13 @@ impl Spawner for LocalSpawner {
                     .stdout(fs::File::create(stdout)?)
                     .stderr(fs::File::create(stderr)?);
             }
+            Streams::Log(log) => {
+                let log = fs::File::create(log)?;
+                command
+                    .stdin(Stdio::null())
+                    .stdout(log.try_clone()?)
+                    .stderr(log);
+            }
         }
         Ok(Box::new(LocalChild(command.spawn()?)))
     }
@@ -163,5 +170,20 @@ mod tests {
         let fields = fs::read_to_string(&out).unwrap();
         let pgid = fields.split_whitespace().last().unwrap();
         assert_eq!(pgid, pid.to_string(), "{fields}");
+    }
+
+    #[test]
+    fn a_log_takes_both_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("output.log");
+        let mut spec = CommandSpec::new("/bin/sh");
+        spec.args(["-c", "echo out; echo err >&2"]);
+        let exit = LocalSpawner
+            .spawn(&spec, Streams::Log(&log))
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert!(exit.success);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "out\nerr\n");
     }
 }

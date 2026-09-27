@@ -12,7 +12,6 @@ use crate::domain::event_kind;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -21,7 +20,14 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::{
-    application::{AgentProvider, ProcessControl, TaskStore, dependency_graph},
+    application::{
+        AgentProvider, ProcessControl, Streams, TaskStore,
+        actor_executor::{
+            ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
+            WorkspaceAccess,
+        },
+        dependency_graph,
+    },
     domain::{
         ActorContext, ActorRole, EventId, FindingQuery, NoteQuery, RunEvent,
         actor_model::{ActorLaunch, ModelRole},
@@ -30,9 +36,10 @@ use crate::{
     infrastructure::{
         adapters::{SystemProcesses, shell_join},
         asks::AskQuery,
+        process::LocalSpawner,
         sqlite::SqliteQueue,
     },
-    lifecycle::{OBSERVER_ROLE, QUEUE_ENV},
+    lifecycle::OBSERVER_ROLE,
 };
 
 /// Observations `observe --history` lists by default.
@@ -407,10 +414,10 @@ fn observer_launch(checkout: Option<&Path>) -> ActorLaunch {
     }
 }
 
-/// The role and actor id the observer's agent runs under (ADR-t728-1
-/// decision 4): `observer`, one actor per session.
-fn agent_env(session_id: &str) -> Vec<(String, String)> {
-    ActorContext::instance(ActorRole::Observer, session_id).env()
+/// The actor the observer's agent runs as (ADR-t728-1 decision 4):
+/// `observer`, one actor per session.
+fn observer_actor(session_id: &str) -> ActorContext {
+    ActorContext::instance(ActorRole::Observer, session_id)
 }
 
 /// Start the agent in `dir` with its output in `output.log`, and wait for
@@ -426,30 +433,44 @@ fn run_agent(
     launch: &ActorLaunch,
     options: &ObserveOptions,
 ) -> Result<Option<i32>> {
-    let log = fs::File::create(dir.join("output.log"))?;
-    let mut spec = provider.headless_command(dir, prompt, ALLOWED_TOOLS)?;
-    provider.assign_session_id(&mut spec, session_id);
-    provider.apply_launch(&mut spec, launch);
-    provider.without_mcp(&mut spec);
-    let mut command = crate::infrastructure::process::command(&spec);
+    let log = dir.join("output.log");
     let mut path = std::env::var_os("PATH").unwrap_or_default();
     if let Some(bin) = options.dagq.parent() {
         let mut paths = vec![bin.to_path_buf()];
         paths.extend(std::env::split_paths(&path));
         path = std::env::join_paths(paths)?;
     }
-    command
-        .envs(agent_env(session_id))
-        .env(QUEUE_ENV, db)
-        .env("PATH", path)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    let mut child = command.spawn().context("start the observer agent")?;
+    let path = path
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("PATH is not UTF-8"))?;
+    let mut child = HostActorExecutor::new(db)
+        .with_provider(provider)
+        .with_spawner(&LocalSpawner)
+        .spawn(
+            ActorExecutionSpec::new(
+                observer_actor(session_id),
+                WorkspaceAccess::Scratch(dir.to_path_buf()),
+                ActorProgram::Headless {
+                    program: HeadlessProgram::Job {
+                        cwd: dir,
+                        prompt,
+                        allowed_tools: ALLOWED_TOOLS,
+                    },
+                    session_id: Some(session_id),
+                    launch: Some(launch),
+                    without_mcp: true,
+                    env: vec![("PATH".to_owned(), path)],
+                    streams: Streams::Log(&log),
+                },
+            )
+            .with_timeout(options.timeout),
+        )
+        .context("start the observer agent")?
+        .process()?;
     let deadline = Instant::now() + options.timeout;
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(status.code());
+            return Ok(status.code);
         }
         if Instant::now() >= deadline {
             // Listed before the kill: once the agent is gone, its children
@@ -563,7 +584,7 @@ mod tests {
     #[test]
     fn the_agent_runs_as_the_observer_with_its_actor_id() {
         assert_eq!(
-            agent_env("s1"),
+            observer_actor("s1").env(),
             [
                 ("DAGQ_ROLE".to_owned(), "observer".to_owned()),
                 ("DAGQ_ACTOR_ID".to_owned(), "observer:s1".to_owned()),

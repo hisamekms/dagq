@@ -2,10 +2,11 @@ use crate::{
     application::{
         AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, ProcessControl,
         Repository, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
+        actor_executor::{AgentSettings, agent_settings},
         stats::WorkspaceListing,
     },
     domain::{
-        CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
+        ActorRole, CommitSha, Task, TaskId, TaskRun,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
         recovery::ProcessInfo,
@@ -2265,11 +2266,11 @@ impl AgentProvider for ClaudeCode {
     fn command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        fs::write(
+        write_settings(
             &settings,
-            runtime_session_settings(&run.idle_marker_path()?)?,
-        )
-        .with_context(|| format!("write {}", settings.display()))?;
+            agent_settings(ActorRole::Worker, None),
+            &run.idle_marker_path()?,
+        )?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2291,11 +2292,11 @@ impl AgentProvider for ClaudeCode {
     fn resume_command(&self, run: &TaskRun) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-settings.json");
-        fs::write(
+        write_settings(
             &settings,
-            runtime_session_settings(&run.idle_marker_path()?)?,
-        )
-        .with_context(|| format!("write {}", settings.display()))?;
+            agent_settings(ActorRole::Worker, None),
+            &run.idle_marker_path()?,
+        )?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2317,12 +2318,11 @@ impl AgentProvider for ClaudeCode {
     /// suggestions off; a person's planner keeps them.
     fn planner_command(&self, planner: &PlannerCommand<'_>) -> Result<CommandSpec> {
         let settings = planner.dir.join("claude-settings.json");
-        let marker = planner.idle_marker();
-        let text = match planner.origin {
-            PlannerOrigin::Runtime => runtime_session_settings(&marker)?,
-            PlannerOrigin::Person => stop_hook_settings(&marker)?,
-        };
-        fs::write(&settings, text).with_context(|| format!("write {}", settings.display()))?;
+        write_settings(
+            &settings,
+            agent_settings(ActorRole::Planner, Some(planner.origin)),
+            &planner.idle_marker(),
+        )?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(planner.cwd)
@@ -2363,8 +2363,12 @@ impl AgentProvider for ClaudeCode {
     fn review_command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-review-settings.json");
-        fs::write(&settings, review_settings()?)
-            .with_context(|| format!("write {}", settings.display()))?;
+        write_settings(
+            &settings,
+            agent_settings(ActorRole::ReviewJob, None),
+            // The review has no hook to write a marker with.
+            run_dir,
+        )?;
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
@@ -2385,6 +2389,17 @@ impl AgentProvider for ClaudeCode {
             .arg(prompt);
         Ok(command)
     }
+    /// `claude [--plugin-dir <dir>] -- <prompt>`: the inbox's workspace
+    /// keeps its role and queue in its own environment (ADR-0026), so a
+    /// `claude` started again there still has them.
+    fn inbox_command(&self, prompt: &str, plugin_dir: Option<&Path>) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(&self.executable);
+        if let Some(dir) = plugin_dir {
+            command.arg("--plugin-dir").arg(dir);
+        }
+        command.arg("--").arg(prompt);
+        Ok(command)
+    }
     /// `--model <model> --effort <effort>` among the options, before the
     /// prompt.
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
@@ -2400,6 +2415,20 @@ impl AgentProvider for ClaudeCode {
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["--strict-mcp-config"]);
     }
+}
+
+/// Write the settings `settings` of an agent whose idle marker is
+/// `idle_marker` to `path`: the one place the role's settings
+/// ([`agent_settings`]) become Claude Code's. Settings of none write
+/// nothing.
+fn write_settings(path: &Path, settings: AgentSettings, idle_marker: &Path) -> Result<()> {
+    let text = match settings {
+        AgentSettings::None => return Ok(()),
+        AgentSettings::Review => review_settings()?,
+        AgentSettings::Session { suggestions: true } => stop_hook_settings(idle_marker)?,
+        AgentSettings::Session { suggestions: false } => runtime_session_settings(idle_marker)?,
+    };
+    fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
 /// Settings of the headless review: no hooks, and the same `autoMode`
@@ -2530,7 +2559,9 @@ pub const SIGNAL_BY_NAME_DENIED: [&str; 2] = ["Bash(pkill:*)", "Bash(killall:*)"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{PlannerId, ProposalId, Provider, RunId, RunStatus, SessionRole};
+    use crate::domain::{
+        PlannerId, PlannerOrigin, ProposalId, Provider, RunId, RunStatus, SessionRole,
+    };
 
     #[test]
     fn ps_and_lsof_listings_are_read() {

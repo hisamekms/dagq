@@ -149,26 +149,29 @@ impl Supervisor<'_> {
             .write(&job.dir.join("prompt.txt"), prompt.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
-        let mut command =
-            self.reviewer
-                .headless_command(&self.layout.repo_root, &prompt, PLAN_REVIEW_TOOLS)?;
-        self.reviewer
-            .assign_session_id(&mut command, &job.session_id);
-        self.reviewer.apply_launch(&mut command, launch);
-        command.envs(
-            self.layout
-                .job_env(&ActorContext::plan_review_job(job.proposal_id, job.attempt)),
-        );
         let child = self
-            .spawner
-            .spawn(
-                &command,
-                Streams::Files {
-                    stdout: &stdout,
-                    stderr: &stderr,
+            .actors()
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::plan_review_job(job.proposal_id, job.attempt),
+                WorkspaceAccess::Read(self.layout.repo_root.clone()),
+                ActorProgram::Headless {
+                    program: HeadlessProgram::Job {
+                        cwd: &self.layout.repo_root,
+                        prompt: &prompt,
+                        allowed_tools: PLAN_REVIEW_TOOLS,
+                    },
+                    session_id: Some(&job.session_id),
+                    launch: Some(launch),
+                    without_mcp: false,
+                    env: Vec::new(),
+                    streams: Streams::Files {
+                        stdout: &stdout,
+                        stderr: &stderr,
+                    },
                 },
-            )
-            .context("start the plan review")?;
+            ))
+            .context("start the plan review")?
+            .process()?;
         Ok(self.headless_job(
             "plan review",
             child,

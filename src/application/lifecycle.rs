@@ -29,6 +29,10 @@
 use super::{
     AgentProvider, Clock, DetachedRefusal, LaunchAgent, ProcessControl, Queue, QueueOpener,
     RunFiles, SOCKET_PASSWORD_ENV, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
+    actor_executor::{
+        ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
+        WorkspaceCommand, actor_env,
+    },
     naming::{
         inbox_workspace_name, shell_join, supervisor_workspace_name, workspace_description,
         workspace_group_name,
@@ -42,7 +46,7 @@ use crate::domain::language::{Language, with_instruction};
 use crate::{
     VERSION,
     domain::{
-        ActorRole, HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode,
+        ActorContext, ActorRole, HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode,
         SupervisorRegistration, marks::SUPERVISOR_STOPPED, recovery::ProcessInfo,
         run_env::RunEnvCheck,
     },
@@ -210,6 +214,8 @@ pub struct Ports<'a> {
     /// mistake in either (ADR-t616-2).
     pub resolve_language: &'a ResolveLanguage,
     pub load_average: fn() -> Option<f64>,
+    /// The agent of the sessions `up` opens (the inbox), given `--claude`.
+    pub agent: &'a dyn Fn(&Path) -> Box<dyn AgentProvider>,
 }
 
 /// How `up` resolves the language: `(checkout, user_config)` to the
@@ -422,19 +428,14 @@ pub fn up(
         files: ports.files,
         db: &db,
         root: &repository.root,
+        agent: &*(ports.agent)(&options.claude),
+        plugin_dir: plugin_dir.as_deref(),
     };
     let retired_sessions = queue.forget_retired_session_workspaces()?;
     let inbox = sessions.open(
         SessionRole::Inbox,
         inbox_workspace_name(&repository.root),
-        || {
-            inbox_command(
-                &db,
-                &options.claude,
-                plugin_dir.as_deref(),
-                language.as_ref(),
-            )
-        },
+        || inbox_session_prompt(&db, language.as_ref()),
     )?;
 
     let mut report = json!({
@@ -480,14 +481,19 @@ struct Sessions<'a> {
     files: &'a dyn RunFiles,
     db: &'a Path,
     root: &'a Path,
+    /// The agent of the sessions, on `up`'s `--claude`.
+    agent: &'a dyn AgentProvider,
+    plugin_dir: Option<&'a Path>,
 }
 
 impl Sessions<'_> {
+    /// Open the workspace of `role`'s agent with `prompt` as its first
+    /// message, through the actor executor like every AI actor.
     fn open(
         &self,
         role: SessionRole,
         name: String,
-        command: impl FnOnce() -> Result<String>,
+        prompt: impl FnOnce() -> Result<String>,
     ) -> Result<Value> {
         let inside = self.environment.role.as_deref() == Some(role.as_str())
             && self
@@ -511,7 +517,26 @@ impl Sessions<'_> {
             self.mark(role, &id);
             return Ok(json!({"outcome": "reused", "workspace_id": id, "name": name}));
         }
-        let id = cmux.create_named(&name, self.root, &command()?, &self.workspaces.tags(role)?)?;
+        let id = HostActorExecutor::new(self.db)
+            .with_workspaces(cmux)
+            .with_provider(self.agent)
+            .spawn(ActorExecutionSpec::new(
+                session_actor(role),
+                WorkspaceAccess::Write(self.root.to_path_buf()),
+                ActorProgram::NamedWorkspace {
+                    name: &name,
+                    cwd: self.root,
+                    command: WorkspaceCommand::Agent {
+                        prompt: prompt()?,
+                        plugin_dir: self.plugin_dir,
+                    },
+                    planner: None,
+                    launch: None,
+                    description: self.workspaces.description(role),
+                    group: self.workspaces.group(),
+                },
+            ))?
+            .workspace()?;
         self.queue.register_session_workspace(role, &id)?;
         self.mark(role, &id);
         Ok(json!({"outcome": "created", "workspace_id": id, "name": name}))
@@ -561,16 +586,10 @@ pub fn session_look(role: SessionRole) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// `DAGQ_ROLE=<role>`, `DAGQ_QUEUE=<db>` and the actor id: the
-/// environment every workspace of the queue at `db` is opened with
-/// (ADR-0026, ADR-t728-1 decision 4). The id is the role's until the
-/// caller names the one actor (a planner, a run's worker).
-pub fn session_env(role: SessionRole, db: &Path) -> Result<Vec<(String, String)>> {
-    Ok(vec![
-        (ROLE_ENV.to_owned(), role.as_str().to_owned()),
-        (QUEUE_ENV.to_owned(), path_text(db)?),
-        (ACTOR_ID_ENV.to_owned(), role.as_str().to_owned()),
-    ])
+/// The actor of the session `role` has a single workspace for (the inbox,
+/// the in-cmux supervisor): its id is the role's name.
+pub fn session_actor(role: SessionRole) -> ActorContext {
+    ActorContext::new(role.actor_role(), role.as_str())
 }
 
 /// What every workspace `up` opens for a queue carries (ADR-0026): its role
@@ -605,23 +624,21 @@ impl<'a> QueueWorkspaces<'a> {
         }
     }
 
-    /// The tags of a workspace of `role` that belongs to no run.
-    /// The inbox and a planner also carry the kind of their session span.
+    /// The tags of a workspace of `role` that belongs to no run: the
+    /// in-cmux supervisor's, which is not an AI actor the executor starts,
+    /// with the environment every actor's workspace has
+    /// ([`actor_env`]), its actor id being the role's.
     pub fn tags(&self, role: SessionRole) -> Result<WorkspaceTags> {
-        let mut env = session_env(role, self.db)?;
-        let kind = match role {
-            SessionRole::Inbox => Some(crate::domain::sessions::INBOX),
-            SessionRole::Planner => Some(crate::domain::sessions::PLANNER),
-            _ => None,
-        };
-        if let Some(kind) = kind {
-            env.push((SESSION_KIND_ENV.to_owned(), kind.to_owned()));
-        }
         Ok(WorkspaceTags {
-            env,
-            description: Some(workspace_description(role, &self.hash, None, None)),
+            env: actor_env(self.db, &session_actor(role), None, None)?,
+            description: self.description(role),
             group: self.group(),
         })
+    }
+
+    /// The description line of a workspace of `role` that belongs to no run.
+    pub fn description(&self, role: SessionRole) -> Option<String> {
+        Some(workspace_description(role, &self.hash, None, None))
     }
 
     /// What cmux refused so far (the group), for the caller's result.
@@ -629,7 +646,8 @@ impl<'a> QueueWorkspaces<'a> {
         self.warnings.take()
     }
 
-    fn group(&self) -> Option<String> {
+    /// The queue's workspace group, made on the first ask.
+    pub fn group(&self) -> Option<String> {
         self.group
             .get_or_init(
                 || match self.cmux.ensure_group(&self.hash, &self.group_name) {
@@ -1530,32 +1548,12 @@ pub fn launch_agent_spec(
     })
 }
 
-/// The inbox workspace's command: `claude` with `inbox_prompt` as its first
-/// message, with the instruction of `language` (ADR-t616-2). The role and queue are the workspace's own `--env` (ADR-0026),
-/// not a prefix of this command, so a `claude` started again in that
-/// workspace still has them.
-pub fn inbox_command(
-    db: &Path,
-    claude: &Path,
-    plugin_dir: Option<&Path>,
-    language: Option<&Language>,
-) -> Result<String> {
-    session_command(
-        claude,
-        plugin_dir,
-        with_instruction(inbox_prompt(db)?, language),
-    )
-}
-
-fn session_command(claude: &Path, plugin_dir: Option<&Path>, prompt: String) -> Result<String> {
-    let mut argv = vec![path_text(claude)?];
-    if let Some(dir) = plugin_dir {
-        argv.push("--plugin-dir".into());
-        argv.push(path_text(dir)?);
-    }
-    argv.push("--".into());
-    argv.push(prompt);
-    Ok(shell_join(&argv))
+/// The inbox's first message: `inbox_prompt` with the instruction of
+/// `language` (ADR-t616-2). The role and queue are the workspace's own
+/// `--env` (ADR-0026), not a prefix of its command, so a `claude` started
+/// again in that workspace still has them.
+pub fn inbox_session_prompt(db: &Path, language: Option<&Language>) -> Result<String> {
+    Ok(with_instruction(inbox_prompt(db)?, language))
 }
 
 /// What a person looks at first after `up`: unfinished runs with whether their

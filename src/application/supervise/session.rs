@@ -15,6 +15,15 @@ impl Supervisor<'_> {
             run,
         )
     }
+    /// The executor every AI actor the supervisor starts goes through: its
+    /// workspaces through cmux, its agents through the review provider and
+    /// the spawner, on the queue's environment.
+    pub(super) fn actors(&self) -> HostActorExecutor<'_> {
+        HostActorExecutor::new(&self.layout.db)
+            .with_workspaces(self.cmux)
+            .with_provider(self.reviewer)
+            .with_spawner(self.spawner)
+    }
     /// Plan paths, create the run directory, worktree and workspace. Any
     /// error leaves what was created for inspection.
     /// The queue's workspace group, asked for with every run workspace:
@@ -147,19 +156,27 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             "--claude".into(),
             path_text(&self.layout.claude)?,
         ]);
-        let mut env = self.layout.worker_env_of(&run);
-        env.extend(run_env);
-        let tags = WorkspaceTags {
-            env,
-            description: Some(workspace_description(
-                SessionRole::Worker,
-                &self.layout.queue_hash,
-                Some(run.id()),
-                Some(run.task_id()),
-            )),
-            group: self.workspace_group(),
-        };
-        let workspace = self.cmux.create(&task, &run, &command, &tags)?;
+        let workspace = self
+            .actors()
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::worker(run.id(), run.task_id()),
+                WorkspaceAccess::Write(paths.worktree.clone()),
+                ActorProgram::RunWorkspace {
+                    task: &task,
+                    run: &run,
+                    wrapper: command,
+                    resume: false,
+                    description: workspace_description(
+                        SessionRole::Worker,
+                        &self.layout.queue_hash,
+                        Some(run.id()),
+                        Some(run.task_id()),
+                    ),
+                    group: self.workspace_group(),
+                    run_env,
+                },
+            ))?
+            .workspace()?;
         self.queue
             .workspace_created(run.id(), &self.token, &workspace)?;
         info!(task_id = %run.task_id(), run_id = %run.id(), "task {} running in workspace {}; run {}", run.task_id(), workspace, run.id());

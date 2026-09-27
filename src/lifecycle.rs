@@ -5,7 +5,7 @@
 pub use crate::application::lifecycle::{
     DETACHED_CMUX_HINT, DownOptions, Handed, INBOX_ROLE, LAUNCHD_LOG_NAME, OBSERVER_ROLE,
     PLANNER_ROLE, QUEUE_ENV, QueueWorkspaces, REVIEWER_ROLE, ROLE_ENV, ROLE_STATUS_KEY,
-    UpEnvironment, UpOptions, WORKER_ROLE, hand_off, handoff_failures, inbox_command,
-    launch_agent_spec, session_env, session_look, supervise_command, untrusted_repository_hint,
+    UpEnvironment, UpOptions, WORKER_ROLE, hand_off, handoff_failures, launch_agent_spec,
+    session_look, supervise_command, untrusted_repository_hint,
 };
-pub use crate::compose::{COMMAND_TARGET, PlanOptions, down, plan, planners, up};
+pub use crate::compose::{COMMAND_TARGET, PlanOptions, down, inbox_command, plan, planners, up};

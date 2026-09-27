@@ -9,13 +9,19 @@ use crate::domain::LeaseToken;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 
-use super::{AgentProvider, Queue, RunFiles, Spawner, Streams};
-use crate::domain::{ReasonCode, RunId, TaskRun, worker_model::WorkerSession};
+use super::{
+    AgentProvider, Queue, RunFiles, Spawner,
+    actor_executor::{
+        ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
+        WorkspaceAccess,
+    },
+};
+use crate::domain::{ActorContext, ReasonCode, RunId, TaskRun, worker_model::WorkerSession};
 
 /// How long the wrapper waits for the supervisor to record the workspace
 /// cmux started it in.
@@ -35,6 +41,8 @@ const EXIT_RECORD_BACKOFF: Duration = Duration::from_millis(200);
 /// the run's files, and this process's pid.
 pub struct Session<'a> {
     pub queue: &'a mut dyn Queue,
+    /// The queue's database, which the executor starts the agent on.
+    pub db: &'a Path,
     pub provider: &'a dyn AgentProvider,
     pub spawner: &'a dyn Spawner,
     pub files: &'a dyn RunFiles,
@@ -52,6 +60,7 @@ pub fn run_session(
 ) -> Result<Value> {
     let Session {
         queue,
+        db,
         provider,
         spawner,
         files,
@@ -79,6 +88,7 @@ pub fn run_session(
     let mut child_may_be_alive = false;
     let result = drive_agent(
         queue,
+        db,
         &run,
         provider,
         spawner,
@@ -152,6 +162,7 @@ fn retry_exit_record(
 #[allow(clippy::too_many_arguments)]
 fn drive_agent(
     queue: &mut dyn Queue,
+    db: &Path,
     run: &TaskRun,
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
@@ -160,20 +171,34 @@ fn drive_agent(
     resume: bool,
     child_may_be_alive: &mut bool,
 ) -> Result<i32> {
-    let mut command = if resume {
-        provider.resume_command(run)?
+    let prompt = if resume {
+        None
     } else {
         let prompt_path =
             Path::new(run.run_dir().context("missing run directory")?).join("prompt.txt");
-        provider.command(run, &files.read_to_string(&prompt_path)?)?
+        Some(files.read_to_string(&prompt_path)?)
+    };
+    let agent = match &prompt {
+        None => SessionAgent::Resume { run },
+        Some(prompt) => SessionAgent::Worker { run, prompt },
     };
     // The model and effort the claim chose (ADR-0079 decision 3); a resume
     // keeps them.
     let session = WorkerSession::of_run(&queue.run_events(run.id())?);
-    provider.select_model(&mut command, &session.model, &session.effort);
-    let mut child = spawner
-        .spawn(&command, Streams::Inherit)
-        .context("launch agent")?;
+    let mut child = HostActorExecutor::new(db)
+        .with_provider(provider)
+        .with_spawner(spawner)
+        .spawn(ActorExecutionSpec::new(
+            ActorContext::worker(run.id(), run.task_id()),
+            WorkspaceAccess::Write(PathBuf::from(
+                run.worktree_path().context("missing worktree")?,
+            )),
+            ActorProgram::SessionAgent {
+                agent,
+                model: Some((&session.model, &session.effort)),
+            },
+        ))?
+        .process()?;
     *child_may_be_alive = true;
     let registered = if resume {
         queue.register_resume_agent(run.id(), pid, child.id())

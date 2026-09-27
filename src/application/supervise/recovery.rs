@@ -1021,25 +1021,29 @@ pub(super) fn start_job(
     )?;
     let stdout = dir.join(job_file(alert, attempt, "out"));
     let stderr = dir.join(job_file(alert, attempt, "err"));
-    let mut command = sv.reviewer.headless_command(dir, prompt, TRIAGE_TOOLS)?;
-    if let Some(session_id) = session_id {
-        sv.reviewer.assign_session_id(&mut command, session_id);
-    }
-    sv.reviewer.apply_launch(&mut command, launch);
-    command.envs(
-        sv.layout
-            .job_env(&ActorContext::recovery_job(run, alert.as_str(), attempt)),
-    );
     let child = sv
-        .spawner
-        .spawn(
-            &command,
-            Streams::Files {
-                stdout: &stdout,
-                stderr: &stderr,
+        .actors()
+        .spawn(ActorExecutionSpec::new(
+            ActorContext::recovery_job(run, alert.as_str(), attempt),
+            WorkspaceAccess::Scratch(dir.to_path_buf()),
+            ActorProgram::Headless {
+                program: HeadlessProgram::Job {
+                    cwd: dir,
+                    prompt,
+                    allowed_tools: TRIAGE_TOOLS,
+                },
+                session_id,
+                launch: Some(launch),
+                without_mcp: false,
+                env: Vec::new(),
+                streams: Streams::Files {
+                    stdout: &stdout,
+                    stderr: &stderr,
+                },
             },
-        )
-        .context("start the recovery job")?;
+        ))
+        .context("start the recovery job")?
+        .process()?;
     Ok(sv.headless_job(
         "recovery job",
         child,

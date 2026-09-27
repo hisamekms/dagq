@@ -220,29 +220,37 @@ impl Supervisor<'_> {
         )?;
         let stdout = run_dir.join(format!("review-{attempt}.out"));
         let stderr = run_dir.join(format!("review-{attempt}.err"));
-        let mut command = self.reviewer.review_command(run, &prompt)?;
-        self.reviewer.assign_session_id(&mut command, session_id);
-        self.reviewer.apply_launch(&mut command, launch);
-        // The repository's [run.env] reaches the review too (ADR-0023
-        // decision 3).
-        command
-            .envs(self.verifier.run_env(&run_dir)?)
-            // Like the observer's job: the CLI knows the review by its role
-            // and allows it only reads of this queue.
-            .envs(
-                self.layout
-                    .job_env(&ActorContext::review_job(run.id(), attempt)),
-            );
+        // Like the observer's job: the CLI knows the review by its role and
+        // allows it only reads of this queue.
         let child = self
-            .spawner
+            .actors()
             .spawn(
-                &command,
-                Streams::Files {
-                    stdout: &stdout,
-                    stderr: &stderr,
-                },
+                ActorExecutionSpec::new(
+                    ActorContext::review_job(run.id(), attempt),
+                    WorkspaceAccess::Read(PathBuf::from(
+                        run.worktree_path().context("missing worktree")?,
+                    )),
+                    ActorProgram::Headless {
+                        program: HeadlessProgram::Review {
+                            run,
+                            prompt: &prompt,
+                        },
+                        session_id: Some(session_id),
+                        launch: Some(launch),
+                        without_mcp: false,
+                        // The repository's [run.env] reaches the review too
+                        // (ADR-0023 decision 3).
+                        env: self.verifier.run_env(&run_dir)?,
+                        streams: Streams::Files {
+                            stdout: &stdout,
+                            stderr: &stderr,
+                        },
+                    },
+                )
+                .with_timeout(self.reviewer.review_timeout()),
             )
-            .context("start the review")?;
+            .context("start the review")?
+            .process()?;
         Ok((child, stdout, stderr))
     }
     /// Move on from a verdict: `pass` exits the session and lands; `revise`

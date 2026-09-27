@@ -6,6 +6,7 @@
 //! `stats` the reads behind the run and goal times. The query types and
 //! the dependency view of `list` and `graph` stay here.
 
+pub mod actor_executor;
 pub mod ask;
 pub mod commands;
 pub mod diagram;

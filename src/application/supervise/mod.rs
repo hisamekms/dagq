@@ -48,7 +48,12 @@ use super::{
     AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
     InputSource, LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository,
     ResumeCandidate, RunFiles, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation,
-    Verifier, WorkspaceBackend, WorkspaceTags, ask, dependency_graph,
+    Verifier, WorkspaceBackend,
+    actor_executor::{
+        ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
+        WorkspaceAccess,
+    },
+    ask, dependency_graph,
     health::{lease_health, run_health},
     integrate::{self as integration, Integration, check_receipt},
     naming::{
@@ -246,12 +251,6 @@ pub struct Layout {
     /// This process and its binary's version, recorded on the registration.
     pub pid: u32,
     pub version: String,
-    /// `DAGQ_ROLE` / `DAGQ_QUEUE` of a worker's workspace;
-    /// [`Layout::worker_env_of`] names the run's worker.
-    pub worker_env: Vec<(String, String)>,
-    /// The queue a headless job runs against; [`Layout::job_env`] adds the
-    /// job's actor.
-    pub job_base_env: Vec<(String, String)>,
     /// Variables the observer's process does not inherit (its role and
     /// actor).
     pub observer_env_remove: Vec<String>,
@@ -270,22 +269,6 @@ impl Layout {
     /// and the commands it starts for itself record.
     pub fn supervisor_actor(&self) -> ActorContext {
         ActorContext::instance(crate::domain::ActorRole::Supervisor, self.pid)
-    }
-
-    /// The environment of a headless job: the queue, and the job's role
-    /// and actor id (ADR-t728-1 decision 4). The CLI knows the job by its
-    /// role and allows it only reads of this queue.
-    pub fn job_env(&self, actor: &ActorContext) -> Vec<(String, String)> {
-        crate::domain::actor::with_actor(self.job_base_env.clone(), actor)
-    }
-
-    /// The environment of the worker workspace of `run` (and of its
-    /// resume): the worker's role, queue, actor id, run and task.
-    pub fn worker_env_of(&self, run: &TaskRun) -> Vec<(String, String)> {
-        crate::domain::actor::with_actor(
-            self.worker_env.clone(),
-            &ActorContext::worker(run.id(), run.task_id()),
-        )
     }
 }
 

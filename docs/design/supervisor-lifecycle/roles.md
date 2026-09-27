@@ -47,7 +47,19 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 | goal review job | goalのgoal review | `goal-review-job` | `goal-review-job:<goal id>:<attempt>` | |
 | observer | `dagq observe`が起動するagent | `observer` | `observer:<session id>` | |
 
-どれも`DAGQ_QUEUE`も持つ。`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`は`[run.env]`で上書きできない（`DAGQ_`の予約）。
+どれも`DAGQ_QUEUE`も持つ。`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`は`[run.env]`で上書きできない（`DAGQ_`の予約）。環境は`actor_env`（`src/application/actor_executor.rs`）の1か所で作り、順は`DAGQ_ROLE`・`DAGQ_QUEUE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`、inboxとplannerのsessionの区間の種類`DAGQ_SESSION_KIND`、plannerの`DAGQ_PLANNER_ORIGIN`・`DAGQ_PLANNER_ID`・`DAGQ_LAUNCH`で、workerのworkspaceはその後に`[run.env]`を足す。headlessのjobは呼び出し元の変数（reviewの`[run.env]`、observerの`PATH`）の後にこれを足すので、actorの変数は上書きされない。in-cmuxのsupervisorのworkspaceもAI actorではないが同じ形の環境を持つ。
+
+### actorの起動（ActorExecutor）
+
+runtimeが起動するAI actorは全て`ActorExecutor::spawn(ActorExecutionSpec) -> ActorHandle`を通る（goal 55、task 737。`src/application/actor_executor.rs`）。
+
+- `ActorExecutionSpec`: `actor`（`ActorContext`。roleとactor id、workerならrunとtask）、`capabilities`（roleの`grants`。[Authorization](../authorization.md)）、`workspace`（`Write`・`Read`・`Scratch`とそのpath）、`resources`（`timeout`）、`program`（何を起動するか）。`run_id()`・`task_id()`はactorのものか、programのrunのもの。
+- `program`: `RunWorkspace`（workerとresumeのworkspaceでsession wrapperを動かす）、`NamedWorkspace`（inboxのagent、plannerのwrapper）、`SessionAgent`（session wrapperがworkspaceの中で起動するworker・resume・plannerのagent）、`Headless`（review・recovery・plan review・goal reviewのjobとobserverのagent。`HeadlessProgram::Review`と`Job`）。
+- `spawn`はまず`ActorExecutionSpec::check`で整合を確かめ、合わなければ起動しない（fail closed）: roleの`TrustLevel`が`UntrustedAgent`でない（`user`・`supervisor`・`wrapper`・`integrator`）、programがroleのものでない（`RunWorkspace`はworker、inboxのagentはinbox、`Review`はreview-jobなど）、`capabilities`がroleの`grants`と違う、workerのactorのrunとprogramのrunが違う。
+- `ActorHandle`: workspaceのUUID（`Workspace`）かプロセス（`Process`）。
+- `HostActorExecutor`がただ1つのbackend（`backend()`は`host`、`enforcement()`は`advisory`）。cmuxの`WorkspaceBackend`、`AgentProvider`（Claude Code）、`Spawner`の上に作り、呼び出し元が持つ部品だけを渡す（supervisorは全部、`up`はcmuxとinboxのprovider、plannerを開くところはcmux、session wrapperはproviderとspawner、`observe`はproviderと`LocalSpawner`）。要る部品の無いprogramは拒む。hostではspecは記録と整合の検査だけで隔離ではなく、プロセスはこのユーザーにできることを全てできる（ADR-t728-1の決定6）。`resources.timeout`もhostではsupervisorのtimerとobserverのdeadlineが守る。sandboxのbackend（goal 38）は同じspecを強制する側になる。
+- Claudeのsettingsは`agent_settings(role, planner origin)`の1か所でroleから決まる: workerとruntimeが立てたplannerはsession（`Stop` hook・`UserPromptSubmit` hook・`permissions.deny`、サジェストなし）、人のplannerはサジェストありのsession、review jobはreviewの設定（hookなし）、inbox・recovery・plan review・goal reviewのjobとobserverはdagqの設定を書かない。Claude Code adapterはこれをファイルに書くだけ（[Agent provider lifecycle](../provider-lifecycle.md)）。
+- executorの外でClaudeを起動するのはtestのstubだけ。executorの外で起動するもの（`up --in-cmux`のsupervisorのworkspace、session wrapper自身、supervisorが起動する`observe`と`auto-update`のコマンド）はAI actorではなく、信頼する制御側。
 
 ### CLIでの解釈
 

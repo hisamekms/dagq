@@ -241,6 +241,9 @@ pub enum Streams<'a> {
     Null,
     /// No input; stdout and stderr to these files, created or truncated.
     Files { stdout: &'a Path, stderr: &'a Path },
+    /// No input; stdout and stderr both to this one file, created or
+    /// truncated (the observer's `output.log`).
+    Log(&'a Path),
 }
 
 /// How a process ended: `description` as the operating system words it
@@ -377,6 +380,18 @@ pub trait AgentProvider {
     /// idle marker. The runtime wires stdin, stdout and stderr, waits at
     /// most [`AgentProvider::review_timeout`] and reads stdout.
     fn review_command(&self, run: &crate::domain::TaskRun, prompt: &str) -> Result<CommandSpec>;
+    /// The agent of the inbox (ADR-0022): an interactive agent with
+    /// `prompt` as its first message that loads `plugin_dir`, run as the
+    /// command of its workspace, with no settings of dagq's (a person works
+    /// in it). A provider without one refuses.
+    fn inbox_command(
+        &self,
+        prompt: &str,
+        plugin_dir: Option<&std::path::Path>,
+    ) -> Result<CommandSpec> {
+        let _ = (prompt, plugin_dir);
+        anyhow::bail!("this provider has no inbox session")
+    }
     /// Start the worker session `command` (from [`AgentProvider::command`]
     /// or [`AgentProvider::resume_command`]) with `model` at `effort`
     /// (ADR-0079 decision 3): given explicitly, so neither the provider's

@@ -25,11 +25,12 @@ use tracing::warn;
 
 use super::{
     AgentProvider, AgentSignals, Clock, PlannerCommand, ProcessControl, Queue, RunFiles, Spawner,
-    Streams, WorkspaceBackend,
-    lifecycle::{
-        PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, QueueWorkspaces, ROLE_STATUS_KEY, SESSION_KIND_ENV,
-        session_look,
+    WorkspaceBackend,
+    actor_executor::{
+        ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
+        WorkspaceAccess, WorkspaceCommand,
     },
+    lifecycle::{QueueWorkspaces, ROLE_STATUS_KEY, session_look},
     naming::{planner_workspace_name, shell_join},
     path_text, planner_idle_marker,
     prompt::{planner_prompt, runtime_planner_prompt},
@@ -37,10 +38,8 @@ use super::{
 use crate::domain::{
     ActorContext, IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState,
     ProposalId, SessionRole, Task,
-    actor::set_env,
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
     language::{Language, with_instruction},
-    sessions::{LAUNCH_ENV, RUNTIME_PLANNER},
 };
 
 /// The planner's first message, which its wrapper hands the agent.
@@ -277,37 +276,33 @@ fn create_workspace(
             effort.to_owned(),
         ]);
     }
-    let mut tags = workspaces.tags(SessionRole::Planner)?;
-    if planner.origin == PlannerOrigin::Runtime {
-        for (key, value) in &mut tags.env {
-            if key == SESSION_KIND_ENV {
-                *value = RUNTIME_PLANNER.to_owned();
-            }
-        }
-    }
-    tags.env.push((
-        PLANNER_ORIGIN_ENV.to_owned(),
-        planner.origin.as_str().to_owned(),
-    ));
-    tags.env
-        .push((PLANNER_ID_ENV.to_owned(), planner.id.to_string()));
-    let named = ActorContext::instance(crate::domain::ActorRole::Planner, planner.id);
-    for (name, value) in named.env() {
-        set_env(&mut tags.env, &name, value);
-    }
-    tags.env
-        .push((LAUNCH_ENV.to_owned(), actor.to_value().to_string()));
-    if let Some(description) = &mut tags.description {
+    let mut description = workspaces.description(SessionRole::Planner);
+    if let Some(description) = &mut description {
         description.push_str(&format!(" planner={}", planner.id));
     }
-    launch
-        .cmux
-        .create_named(name, launch.repo_root, &shell_join(&argv), &tags)
+    HostActorExecutor::new(launch.db)
+        .with_workspaces(launch.cmux)
+        .spawn(ActorExecutionSpec::new(
+            ActorContext::instance(crate::domain::ActorRole::Planner, planner.id),
+            WorkspaceAccess::Write(launch.repo_root.to_path_buf()),
+            ActorProgram::NamedWorkspace {
+                name,
+                cwd: launch.repo_root,
+                command: WorkspaceCommand::Wrapper(shell_join(&argv)),
+                planner: Some((planner.origin, planner.id)),
+                launch: Some(actor),
+                description,
+                group: workspaces.group(),
+            },
+        ))?
+        .workspace()
 }
 
 /// What the planner's session wrapper works with, as the run's does.
 pub struct PlannerWrapper<'a> {
     pub queue: &'a dyn Queue,
+    /// The queue's database, which the executor starts the agent on.
+    pub db: &'a Path,
     pub provider: &'a dyn AgentProvider,
     pub spawner: &'a dyn Spawner,
     pub files: &'a dyn RunFiles,
@@ -329,6 +324,7 @@ pub fn run_planner_session(
 ) -> Result<Value> {
     let PlannerWrapper {
         queue,
+        db: queue_path,
         provider,
         spawner,
         files,
@@ -344,22 +340,24 @@ pub fn run_planner_session(
             Ok((planner.origin, prompt))
         })
         .and_then(|(origin, prompt)| {
-            let mut command = provider.planner_command(&PlannerCommand {
-                origin,
-                dir,
-                cwd,
-                prompt: &prompt,
-                plugin_dir,
-            })?;
-            if let Some((model, effort)) = model {
-                provider.select_model(&mut command, model, effort);
-            }
-            Ok(command)
-        })
-        .and_then(|command| {
-            spawner
-                .spawn(&command, Streams::Inherit)
-                .context("launch agent")
+            HostActorExecutor::new(queue_path)
+                .with_provider(provider)
+                .with_spawner(spawner)
+                .spawn(ActorExecutionSpec::new(
+                    ActorContext::instance(crate::domain::ActorRole::Planner, id),
+                    WorkspaceAccess::Write(cwd.to_path_buf()),
+                    ActorProgram::SessionAgent {
+                        agent: SessionAgent::Planner(PlannerCommand {
+                            origin,
+                            dir,
+                            cwd,
+                            prompt: &prompt,
+                            plugin_dir,
+                        }),
+                        model,
+                    },
+                ))?
+                .process()
         });
     let mut child = match started {
         Ok(child) => child,

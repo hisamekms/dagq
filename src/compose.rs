@@ -25,8 +25,8 @@ use crate::{
         install::{self as installation, Binaries, InstallOptions},
         integrate::{self as integration, IntegrateTarget, Integration},
         lifecycle::{
-            self, DownOptions, Ports as LifecyclePorts, QUEUE_ENV, QueuePaths, ROLE_ENV,
-            RepositoryPaths, UpEnvironment, UpOptions, session_env,
+            self, DownOptions, Ports as LifecyclePorts, QueuePaths, ROLE_ENV, RepositoryPaths,
+            UpEnvironment, UpOptions,
         },
         planner::{self, PlannerLaunch, PlannerProbes, PlannerWrapper},
         prompt,
@@ -388,8 +388,6 @@ pub fn supervise_with_reviewer(
         runner: runner.into(),
         pid,
         version: crate::VERSION.to_owned(),
-        worker_env: session_env(SessionRole::Worker, &db)?,
-        job_base_env: vec![(QUEUE_ENV.to_owned(), path_text(&db)?)],
         // The observe command's environment drops the supervisor's actor
         // variables, and the supervisor sets its own when it starts it
         // (`supervisor:<pid>`); its agent is the observer.
@@ -1376,8 +1374,30 @@ same in one step",
                 crate::infrastructure::language::resolve_language(Some(checkout), user_config)
             },
             load_average,
+            agent: &|claude| {
+                Box::new(ClaudeCode {
+                    executable: claude.to_owned(),
+                })
+            },
         }
     }
+}
+
+/// The inbox workspace's command as `up` opens it: `claude` with the
+/// inbox's prompt (see [`lifecycle::inbox_session_prompt`]) and the plugin
+/// directory, made by the provider the executor starts the inbox with.
+pub fn inbox_command(
+    db: &Path,
+    claude: &Path,
+    plugin_dir: Option<&Path>,
+    language: Option<&crate::domain::language::Language>,
+) -> Result<String> {
+    let prompt = lifecycle::inbox_session_prompt(db, language)?;
+    let command = ClaudeCode {
+        executable: claude.to_owned(),
+    }
+    .inbox_command(&prompt, plugin_dir)?;
+    crate::application::actor_executor::command_line(&command)
 }
 
 /// `integrate` on the system clock and IDs: see [`OneShot::integrate`].
@@ -1705,6 +1725,7 @@ fn run_session(
     wrapper::run_session(
         Session {
             queue: &mut queue,
+            db,
             provider,
             spawner,
             files: &LocalRunFiles,
@@ -1797,6 +1818,7 @@ pub fn planner_session_with_provider(
     planner::run_planner_session(
         PlannerWrapper {
             queue: &queue,
+            db,
             provider,
             spawner: &LocalSpawner,
             files: &LocalRunFiles,

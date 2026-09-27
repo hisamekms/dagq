@@ -485,8 +485,8 @@ impl StartCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::SupervisorEnvironment;
     use crate::application::{Queue, QueueOpener};
+    use crate::application::{SupervisorEnvironment, WorkspaceTags};
     use crate::domain::{Task, TaskRun};
     use std::sync::{
         Mutex,
