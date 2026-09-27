@@ -5,8 +5,8 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalVerdict, NewGoal, TaskStatus,
-    TaskStatusCounts, require,
+    DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalVerdict, NewGoal, TaskId,
+    TaskStatus, TaskStatusCounts, require,
 };
 
 impl GoalVerdict {
@@ -246,6 +246,36 @@ pub fn close(
     Ok(goal)
 }
 
+/// A task of a closed goal that is left unfinished (`draft`, `submitted`
+/// or `ready`: approve withheld it, or the goal was abandoned) while other
+/// tasks wait on it, directly or through other unfinished tasks (task
+/// 421). It never completes, so its dependents are never claimed. The
+/// runtime tells the inbox and does not hold the dependents: removing the
+/// dependency, cancelling or taking the task up again is the plan's call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StrandedDependency {
+    pub task_id: TaskId,
+    pub goal_id: GoalId,
+    pub verdict: GoalVerdict,
+    /// The `ready` and `submitted` tasks of open goals (or of none) that
+    /// wait on it, by ID.
+    pub waiting: Vec<TaskId>,
+}
+
+impl StrandedDependency {
+    /// What the inbox shows: the task, its goal and who waits.
+    pub fn summary(&self) -> String {
+        let waiting: Vec<String> = self.waiting.iter().map(ToString::to_string).collect();
+        format!(
+            "task {} of goal {} (closed {}) will not complete; tasks {} wait on it",
+            self.task_id,
+            self.goal_id,
+            self.verdict.as_str(),
+            waiting.join(", ")
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +298,20 @@ mod tests {
 
     fn goal(verdict: Option<GoalVerdict>) -> Goal {
         Goal::restore(record(GoalStatus::Open, verdict)).unwrap()
+    }
+
+    #[test]
+    fn a_stranded_dependency_names_its_task_goal_and_waiting_tasks() {
+        let stranded = StrandedDependency {
+            task_id: TaskId::new(3),
+            goal_id: GoalId::new(7),
+            verdict: GoalVerdict::Abandoned,
+            waiting: vec![TaskId::new(5), TaskId::new(8)],
+        };
+        assert_eq!(
+            stranded.summary(),
+            "task 3 of goal 7 (closed abandoned) will not complete; tasks 5, 8 wait on it"
+        );
     }
 
     #[test]

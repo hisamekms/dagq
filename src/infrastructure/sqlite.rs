@@ -1510,7 +1510,8 @@ pub(super) fn next_id(conn: &Connection, table: &str) -> Result<i64> {
 
 /// Close `goal_id` with `verdict` as `goal close` does, recording
 /// `goal_closed` with the task counts and the fields of `extra` (who closed
-/// it and why, for a goal review).
+/// it and why, for a goal review), and `dependency_stranded` on each task
+/// an `abandoned` close leaves that others wait on.
 pub(super) fn close_goal_in(
     conn: &Connection,
     goal_id: GoalId,
@@ -1538,7 +1539,13 @@ pub(super) fn close_goal_in(
     if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
         payload.extend(extra.clone());
     }
-    goal_event(conn, goal_id, event_kind::GOAL_CLOSED, payload)
+    goal_event(conn, goal_id, event_kind::GOAL_CLOSED, payload)?;
+    // `abandoned` leaves unstarted tasks as they are; one another goal's
+    // task waits on is told to the inbox (task 421).
+    if verdict == GoalVerdict::Abandoned {
+        super::stranded::record_abandoned(conn, goal_id)?;
+    }
+    Ok(())
 }
 
 fn task_counts(conn: &Connection, goal_id: GoalId) -> Result<TaskStatusCounts> {

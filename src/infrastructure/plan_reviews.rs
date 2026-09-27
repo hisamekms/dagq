@@ -1082,6 +1082,10 @@ impl PlanReviewStore for SqliteQueue {
         }
     }
 
+    fn stranded_dependencies(&self) -> Result<Vec<crate::domain::StrandedDependency>> {
+        SqliteQueue::stranded_dependencies(self)
+    }
+
     fn plan_review_holds(&self) -> Result<Vec<PlanReviewHold>> {
         let rows: Vec<(ProposalId, bool, Option<String>)> = self
             .conn

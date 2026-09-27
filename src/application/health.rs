@@ -882,6 +882,23 @@ pub fn attention(
             next: AttentionNext::DecideFinding,
         });
     }
+    // A task of a closed goal that will not complete strands the tasks
+    // waiting on it until a person's planner decides them (task 421); it is
+    // shown on that task, once however many wait.
+    for stranded in queue.stranded_dependencies()? {
+        attention.push(Attention {
+            run_id: None,
+            task_id: Some(stranded.task_id),
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "stranded".into(),
+            kind: event_kind::DEPENDENCY_STRANDED.into(),
+            last_error: Some(truncate_reason(&stranded.summary())),
+            last_error_code: None,
+            next: AttentionNext::DecideWaiting,
+        });
+    }
     for hold in queue.plan_review_holds()? {
         let (status, next) = match hold.kind {
             event_kind::PLAN_REVIEW_FAILED => ("submitted", AttentionNext::PlanReviewByHand),

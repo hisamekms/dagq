@@ -27,6 +27,10 @@ pub const CONFLICT_RECEIPT_REJECTED: &str = "conflict_receipt_rejected";
 pub const CONFLICT_RESOLVED: &str = "conflict_resolved";
 pub const DEPENDENCY_ADDED: &str = "dependency_added";
 pub const DEPENDENCY_REMOVED: &str = "dependency_removed";
+/// A task of a closed goal that will not complete has tasks waiting on it
+/// (task 421): on that task, with `goal_id`, `verdict`, `waiting` and
+/// `cause` (`approve_withheld` or `goal_abandoned`). The inbox's attention.
+pub const DEPENDENCY_STRANDED: &str = "dependency_stranded";
 pub const DRAFT_ADOPTED: &str = "draft_adopted";
 pub const DRAFT_PLANNER_EXHAUSTED: &str = "draft_planner_exhausted";
 pub const DRAFT_PLANNER_OPENED: &str = "draft_planner_opened";

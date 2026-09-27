@@ -747,7 +747,7 @@ pub use finding::{
     NewFinding, PROPOSE_OPTION, improvement_running,
 };
 pub use follow_up::{DraftOrigin, DraftTarget, MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS};
-pub use goal::Goal;
+pub use goal::{Goal, StrandedDependency};
 pub use ids::{
     AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RunId, TaskId,
 };
@@ -1444,6 +1444,11 @@ pub enum AttentionNext {
     /// and none decided it (`finding_planner_exhausted`, ADR-0044 decision
     /// 19): a person decides it in a planner of theirs.
     DecideFinding,
+    /// A task of a closed goal will not complete while other tasks wait on
+    /// it (`dependency_stranded`, task 421): a person decides in a planner
+    /// whether to remove the dependency, cancel the waiting tasks or take
+    /// the task up again. It ends once nothing waits on such a task.
+    DecideWaiting,
     /// A program `[run.env]` names is not found on the supervisor's PATH
     /// (`run_env_program_missing`, ADR-0049 decision 9): a person installs
     /// it or has a task take it out of `dagq.toml`; the supervisor claims
@@ -1505,6 +1510,7 @@ impl fmt::Display for AttentionNext {
             Self::CheckPlanner => f.write_str("check the planner"),
             Self::DecideDraft => f.write_str("decide the draft in a planner"),
             Self::DecideFinding => f.write_str("decide the finding in a planner"),
+            Self::DecideWaiting => f.write_str("decide the waiting tasks in a planner"),
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
             Self::FixPush => f.write_str("fix the push command"),
@@ -1539,6 +1545,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "goal_review_failed",
     "planner_unresponsive",
     "draft_planner_exhausted",
+    event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
     UPDATE_INSTALLED,
     kpi::push::KPI_PUSH_ABANDONED,
@@ -1772,6 +1779,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
         ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
+        (event_kind::DEPENDENCY_STRANDED, _) => Some(AttentionNext::DecideWaiting),
         ("push_failed", _) => Some(AttentionNext::PushMain),
         // A verification command failed on the host again after its retry
         // (task 639): the run waits for a person, not a resume.
@@ -2652,6 +2660,11 @@ mod attention_tests {
             ),
             ("update_started", json!({"commit": "abc"}), None),
             (
+                "dependency_stranded",
+                json!({"goal_id": 2, "verdict": "abandoned", "waiting": [5]}),
+                Some(DecideWaiting),
+            ),
+            (
                 "update_failed",
                 json!({"stage": "build", "ask_id": 3}),
                 None,
@@ -2708,6 +2721,10 @@ mod attention_tests {
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(FixPush.to_string(), "fix the push command");
+        assert_eq!(
+            DecideWaiting.to_string(),
+            "decide the waiting tasks in a planner"
+        );
         assert_eq!(
             DeliveringAnswer {
                 ask_id: AskId::new(2)

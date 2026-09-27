@@ -20,9 +20,9 @@ use crate::domain::{
     GoalPredecessor, GoalSummary, GoalVerdict, LeaseToken, LintInput, NewAsk, NewGoal, NewNote,
     NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
     PlannerId, PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason,
-    RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, Submission,
-    SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit, TaskId,
-    TaskKind, TaskRun, TaskStatus,
+    RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, StrandedDependency,
+    Submission, SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit,
+    TaskId, TaskKind, TaskRun, TaskStatus,
     goal_review::{GoalReviewDecision, GoalReviewVerdict},
     related::RelatedPage,
     search::{SearchPage, SearchQuery},
@@ -1961,6 +1961,9 @@ pub trait PlanReviewStore {
     fn applies_plan_answer(&self, ask: &Ask) -> Result<bool>;
     /// The proposals held for a person outside an ask.
     fn plan_review_holds(&self) -> Result<Vec<PlanReviewHold>>;
+    /// The tasks of closed goals left unfinished that other tasks wait on
+    /// (task 421), held for a person outside an ask.
+    fn stranded_dependencies(&self) -> Result<Vec<StrandedDependency>>;
     /// Asks a person answered, newest first, at most `limit`: the
     /// precedents plan review may cite.
     fn answered_asks(&self, limit: usize) -> Result<Vec<Ask>>;

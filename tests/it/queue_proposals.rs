@@ -4,8 +4,9 @@ use crate::common;
 use dagq::{
     application::{StatusFilter, TaskQuery, TaskStore, dependency_graph},
     domain::{
-        ClaimOutcome, GoalId, GoalVerdict, NewGoal, PlannerOrigin, PlannerOwner, ProposalId,
-        ProposalStatus, Submission, TaskAction, TaskEdit, TaskId, TaskStatus,
+        ClaimOutcome, GoalId, GoalVerdict, NewGoal, NewTask, PlannerOrigin, PlannerOwner,
+        ProposalId, ProposalStatus, SessionRole, Submission, TaskAction, TaskEdit, TaskId,
+        TaskStatus,
     },
     infrastructure::sqlite::SqliteQueue,
 };
@@ -326,6 +327,223 @@ fn approving_a_proposal_withholds_the_tasks_of_a_closed_goal() {
             && e.payload
                 == serde_json::json!({"proposal_id": 1, "goal_id": goal, "verdict": "abandoned"})
     }));
+}
+
+fn stranded_events(queue: &mut SqliteQueue, id: TaskId) -> Vec<serde_json::Value> {
+    queue
+        .show(id)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == "dependency_stranded")
+        .map(|e| e.payload)
+        .collect()
+}
+
+fn stranded_attention(db: &std::path::Path) -> Vec<serde_json::Value> {
+    dagq::runtime::status_for(db, Some(SessionRole::Inbox)).unwrap()["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["kind"] == "dependency_stranded")
+        .cloned()
+        .collect()
+}
+
+/// Abandoning a goal whose unstarted task other goals' tasks wait on,
+/// directly or not, tells the inbox once (task 421): approving the
+/// proposal afterwards withholds the task but finds the same strand, and
+/// `status` shows it on that task until nothing waits on it any more. The
+/// waiting tasks stay ready: holding them is the plan's call.
+#[test]
+fn abandoning_a_goal_tells_the_inbox_of_the_tasks_waiting_on_its_task() {
+    let (dir, mut queue) = fixture();
+    let db = dir.path().join("queue.db");
+    let goal = queue.add_goal(new_goal("dropped")).unwrap().id();
+    let mut in_goal = new_task("in goal");
+    in_goal.goal_id = Some(goal);
+    let a = queue.add(in_goal).unwrap().id();
+    let b = queue
+        .add(NewTask {
+            dependencies: vec![a],
+            ..new_task("waits on a")
+        })
+        .unwrap()
+        .id();
+    let c = queue
+        .add(NewTask {
+            dependencies: vec![b],
+            ..new_task("waits on b")
+        })
+        .unwrap()
+        .id();
+    let gone = queue
+        .add(NewTask {
+            dependencies: vec![a],
+            ..new_task("canceled")
+        })
+        .unwrap()
+        .id();
+    queue.transition(gone, TaskAction::Cancel).unwrap();
+    let proposal = queue.submit(submission(&[a, b, c], &[], None)).unwrap();
+    assert!(stranded_attention(&db).is_empty());
+
+    queue.close_goal(goal, GoalVerdict::Abandoned).unwrap();
+    let told = serde_json::json!({
+        "goal_id": goal, "verdict": "abandoned", "waiting": [b, c], "cause": "goal_abandoned"
+    });
+    assert_eq!(stranded_events(&mut queue, a), std::slice::from_ref(&told));
+
+    queue.approve_proposal(proposal.id()).unwrap();
+    assert_eq!(status_of(&mut queue, a), TaskStatus::Draft);
+    assert_eq!(status_of(&mut queue, b), TaskStatus::Ready);
+    assert_eq!(status_of(&mut queue, c), TaskStatus::Ready);
+    assert_eq!(stranded_events(&mut queue, a), [told]);
+    let attention = stranded_attention(&db);
+    assert_eq!(attention.len(), 1, "{attention:?}");
+    assert_eq!(attention[0]["task_id"], a.as_i64());
+    assert_eq!(
+        attention[0]["next"],
+        "decide the waiting tasks in a planner"
+    );
+    assert_eq!(
+        attention[0]["last_error"],
+        format!(
+            "task {a} of goal {goal} (closed abandoned) will not complete; tasks {b}, {c} wait on it"
+        )
+    );
+    let events = dagq::watch::events(&db, dagq::domain::EventId::new(0), 100, false).unwrap();
+    assert!(
+        events["events"].as_array().unwrap().iter().any(|e| {
+            e["kind"] == "dependency_stranded"
+                && e["next"] == "decide the waiting tasks in a planner"
+        }),
+        "{events}"
+    );
+
+    // Canceling what waits ends it.
+    queue.transition(c, TaskAction::Cancel).unwrap();
+    assert_eq!(stranded_attention(&db).len(), 1);
+    queue.transition(b, TaskAction::Cancel).unwrap();
+    assert!(stranded_attention(&db).is_empty());
+}
+
+/// A task approve withholds because its goal closed meanwhile tells the
+/// inbox of the tasks waiting on it (task 421); readying those afterwards
+/// tells nothing new.
+#[test]
+fn a_withheld_task_tells_the_inbox_of_the_tasks_waiting_on_it() {
+    let (dir, mut queue) = fixture();
+    let db = dir.path().join("queue.db");
+    let goal = queue.add_goal(new_goal("dropped")).unwrap().id();
+    let mut in_goal = new_task("in goal");
+    in_goal.goal_id = Some(goal);
+    let a = queue.add(in_goal).unwrap().id();
+    let b = queue
+        .add(NewTask {
+            dependencies: vec![a],
+            ..new_task("waits on a")
+        })
+        .unwrap()
+        .id();
+    let first = queue.submit(submission(&[a], &[], None)).unwrap();
+    // Nothing waits yet: b is a draft.
+    queue.close_goal(goal, GoalVerdict::Abandoned).unwrap();
+    assert!(stranded_events(&mut queue, a).is_empty());
+    let second = queue.submit(submission(&[b], &[], None)).unwrap();
+
+    queue.approve_proposal(first.id()).unwrap();
+    assert_eq!(status_of(&mut queue, a), TaskStatus::Draft);
+    let told = serde_json::json!({
+        "goal_id": goal, "verdict": "abandoned", "waiting": [b],
+        "cause": "approve_withheld", "proposal_id": first.id()
+    });
+    assert_eq!(stranded_events(&mut queue, a), std::slice::from_ref(&told));
+    queue.approve_proposal(second.id()).unwrap();
+    assert_eq!(status_of(&mut queue, b), TaskStatus::Ready);
+    assert_eq!(stranded_events(&mut queue, a), [told]);
+    assert_eq!(stranded_attention(&db).len(), 1);
+}
+
+/// A draft of another goal that waited on the abandoned goal's task when
+/// the close found nothing waiting tells the inbox once approve readies it
+/// (task 421): the waiting tasks changed.
+#[test]
+fn readying_a_task_that_waits_on_a_stranded_task_tells_the_inbox() {
+    let (dir, mut queue) = fixture();
+    let db = dir.path().join("queue.db");
+    let goal = queue.add_goal(new_goal("dropped")).unwrap().id();
+    let other = queue.add_goal(new_goal("other")).unwrap().id();
+    let a = queue
+        .add(NewTask {
+            goal_id: Some(goal),
+            ..new_task("in goal")
+        })
+        .unwrap()
+        .id();
+    let b = queue
+        .add(NewTask {
+            goal_id: Some(other),
+            dependencies: vec![a],
+            ..new_task("waits on a")
+        })
+        .unwrap()
+        .id();
+    queue.close_goal(goal, GoalVerdict::Abandoned).unwrap();
+    assert!(stranded_events(&mut queue, a).is_empty());
+    assert!(stranded_attention(&db).is_empty());
+
+    let proposal = queue.submit(submission(&[b], &[], None)).unwrap();
+    queue.approve_proposal(proposal.id()).unwrap();
+    assert_eq!(status_of(&mut queue, b), TaskStatus::Ready);
+    assert_eq!(
+        stranded_events(&mut queue, a),
+        [serde_json::json!({
+            "goal_id": goal, "verdict": "abandoned", "waiting": [b],
+            "cause": "approve_readied", "proposal_id": proposal.id()
+        })]
+    );
+    assert_eq!(stranded_attention(&db).len(), 1);
+}
+
+/// A chain of unfinished tasks in the abandoned goal strands what waits on
+/// it once, at the chain's root (task 421).
+#[test]
+fn a_chain_in_an_abandoned_goal_is_told_once_at_its_root() {
+    let (dir, mut queue) = fixture();
+    let db = dir.path().join("queue.db");
+    let goal = queue.add_goal(new_goal("dropped")).unwrap().id();
+    let root = queue
+        .add(NewTask {
+            goal_id: Some(goal),
+            ..new_task("root")
+        })
+        .unwrap()
+        .id();
+    let next = queue
+        .add(NewTask {
+            goal_id: Some(goal),
+            dependencies: vec![root],
+            ..new_task("next")
+        })
+        .unwrap()
+        .id();
+    let waiting = queue
+        .add(NewTask {
+            dependencies: vec![next],
+            ..new_task("waits")
+        })
+        .unwrap()
+        .id();
+    queue
+        .submit(submission(&[root, next, waiting], &[], None))
+        .unwrap();
+    queue.close_goal(goal, GoalVerdict::Abandoned).unwrap();
+    assert_eq!(stranded_events(&mut queue, root).len(), 1);
+    assert!(stranded_events(&mut queue, next).is_empty());
+    let attention = stranded_attention(&db);
+    assert_eq!(attention.len(), 1, "{attention:?}");
+    assert_eq!(attention[0]["task_id"], root.as_i64());
 }
 
 #[test]

@@ -33,5 +33,6 @@ pub mod search;
 mod sessions;
 pub mod sql_ids;
 pub mod sqlite;
+mod stranded;
 pub mod telemetry;
 pub mod transcripts;

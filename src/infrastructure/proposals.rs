@@ -166,10 +166,14 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
 /// goals open, in the caller's transaction. A submitted task whose goal was
 /// closed meanwhile (`abandoned` leaves unstarted tasks as they are) does
 /// not become ready: it returns to `draft`, recording `approve_withheld`,
-/// so a closed goal's task is never claimed.
+/// so a closed goal's task is never claimed. A withheld task that others
+/// wait on records `dependency_stranded` for the inbox (task 421), once
+/// every member has its status, and so does a strand a task made `ready`
+/// waits on (the draft of another goal an abandoned close did not count).
 pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Proposal> {
     let accepted = proposal::accept(read(conn, id)?, now.into())?;
     save(conn, &accepted)?;
+    let (mut withheld, mut readied) = (Vec::new(), Vec::new());
     for &task_id in accepted.task_ids() {
         if status(conn, task_id)? != TaskStatus::Submitted {
             continue;
@@ -184,11 +188,29 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
                     event_kind::APPROVE_WITHHELD,
                     json!({"proposal_id": id, "goal_id": goal_id, "verdict": verdict}),
                 )?;
+                withheld.push(task_id);
             }
             None => {
                 transition_task(conn, task_id, TaskAction::Approve, now)?;
+                readied.push(task_id);
             }
         }
+    }
+    for task_id in withheld {
+        super::stranded::record(
+            conn,
+            task_id,
+            event_kind::APPROVE_WITHHELD,
+            json!({"proposal_id": id}),
+        )?;
+    }
+    for task_id in readied {
+        super::stranded::record_upstream(
+            conn,
+            task_id,
+            super::stranded::APPROVE_READIED,
+            json!({"proposal_id": id}),
+        )?;
     }
     for &goal_id in accepted.goal_ids() {
         let draft = read_goal(conn, goal_id)?;
