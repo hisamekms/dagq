@@ -625,6 +625,20 @@ impl SqliteQueue {
         self.close_runtime_asks(run_id, AskKind::Stalled, answer)
     }
 
+    /// Close every `stalled` ask of the run nobody closed, with `answer`,
+    /// and end each stalled detection of the run with no end recorded
+    /// (`stall_resolved` of outcome `run_ended`, once): the run ended with
+    /// no watch of its own to end them (the sweep).
+    pub fn end_stalled_detections(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let closed = super::runtime_store::end_stalled_detections(&tx, run_id, answer, now)?;
+        tx.commit()?;
+        Ok(closed)
+    }
+
     /// Close every `approve_landing` ask of the run nobody closed, the way
     /// [`Self::close_stuck_exit_asks`] does: a later review of the run
     /// asks afresh (task 328, task 425) or the run was integrated
@@ -748,43 +762,8 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let unclosed: Vec<Ask> = tx
-            .prepare(
-                "SELECT * FROM asks WHERE (run_id=?1 OR (run_id IS NULL AND task_id=?3))
-                 AND kind=?2 AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map(params![run_id, kind.as_str(), task_id], ask_row)?
-            .collect::<rusqlite::Result<_>>()?;
         let now = self.generators.clock.now();
-        let mut closed = Vec::with_capacity(unclosed.len());
-        for ask in unclosed {
-            if ask.is_open() {
-                let mut payload =
-                    json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
-                write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
-                ask_event(
-                    &tx,
-                    ask.task_id,
-                    ask.run_id.as_ref(),
-                    event_kind::ASK_ANSWERED,
-                    payload,
-                )?;
-            } else {
-                // An answer given before is applied by this close.
-                ask_event(
-                    &tx,
-                    ask.task_id,
-                    ask.run_id.as_ref(),
-                    event_kind::ASK_CLOSED,
-                    json!({"ask_id": ask.id, "kind": ask.kind}),
-                )?;
-            }
-            tx.execute(
-                "UPDATE asks SET closed_at=?2 WHERE id=?1",
-                params![ask.id, now],
-            )?;
-            closed.push(read_ask(&tx, ask.id)?);
-        }
+        let closed = close_asks_in(&tx, run_id, task_id, kind, answer, now)?;
         tx.commit()?;
         Ok(closed)
     }
@@ -792,6 +771,55 @@ impl SqliteQueue {
     pub fn read_ask(&self, id: AskId) -> Result<Ask> {
         read_ask(&self.conn, id)
     }
+}
+
+/// [`SqliteQueue::close_asks_of`] inside the caller's write transaction,
+/// at `now`: an open ask gets `answer` from the runtime (`ask_answered`
+/// with `runtime_closed: true`), an answered one `ask_closed`.
+pub(super) fn close_asks_in(
+    tx: &Connection,
+    run_id: &RunId,
+    task_id: Option<TaskId>,
+    kind: AskKind,
+    answer: &str,
+    now: i64,
+) -> Result<Vec<Ask>> {
+    let unclosed: Vec<Ask> = tx
+        .prepare(
+            "SELECT * FROM asks WHERE (run_id=?1 OR (run_id IS NULL AND task_id=?3))
+             AND kind=?2 AND closed_at IS NULL ORDER BY id",
+        )?
+        .query_map(params![run_id, kind.as_str(), task_id], ask_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut closed = Vec::with_capacity(unclosed.len());
+    for ask in unclosed {
+        if ask.is_open() {
+            let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
+            write_answer(tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
+            ask_event(
+                tx,
+                ask.task_id,
+                ask.run_id.as_ref(),
+                event_kind::ASK_ANSWERED,
+                payload,
+            )?;
+        } else {
+            // An answer given before is applied by this close.
+            ask_event(
+                tx,
+                ask.task_id,
+                ask.run_id.as_ref(),
+                event_kind::ASK_CLOSED,
+                json!({"ask_id": ask.id, "kind": ask.kind}),
+            )?;
+        }
+        tx.execute(
+            "UPDATE asks SET closed_at=?2 WHERE id=?1",
+            params![ask.id, now],
+        )?;
+        closed.push(read_ask(tx, ask.id)?);
+    }
+    Ok(closed)
 }
 
 /// Register `ask` inside the caller's write transaction, or return the open

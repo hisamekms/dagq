@@ -62,7 +62,8 @@ impl Supervisor<'_> {
     /// is recorded ([`run_workspaces`]). A close records `workspace_closed`
     /// (`by` the closer); a cmux failure records `cleanup_failed` and the
     /// others go on. A `stuck_exit` ask of the run is closed with its
-    /// workspace, and its `answer_prompt` and `stalled` asks in any case.
+    /// workspace, and its `answer_prompt` and `stalled` asks in any case;
+    /// its stalled detections with no end get `stall_resolved` (`run_ended`).
     pub(super) fn close_open_workspaces(
         &mut self,
         run: &TaskRun,
@@ -106,7 +107,8 @@ impl Supervisor<'_> {
         // for an answer any more, nor is its session stalled.
         self.queue
             .close_answer_prompt_asks(run.id(), closer.answer())?;
-        self.queue.close_stalled_asks(run.id(), closer.answer())?;
+        self.queue
+            .end_stalled_detections(run.id(), closer.answer())?;
         Ok(())
     }
     /// Close what cmux still lists of the workspaces of ended runs the
@@ -117,7 +119,8 @@ impl Supervisor<'_> {
     /// the recorded closes; a workspace it does not list gets no event. A
     /// close records `workspace_closed` (`by: supervisor`, `reason`
     /// `superseded` or `ended`) and closes the run's `stuck_exit`,
-    /// `answer_prompt` and `stalled` asks; a cmux failure records
+    /// `answer_prompt` and `stalled` asks, ending its stalled detections
+    /// with no end (`stall_resolved`, `run_ended`); a cmux failure records
     /// `cleanup_failed` (once per workspace and process; the close is
     /// retried on every sweep) and the others go on. Worktrees, branches and run
     /// directories stay for a person.
@@ -240,7 +243,7 @@ impl Supervisor<'_> {
             let answer = "the run ended; the runtime closed its workspace";
             self.queue.close_stuck_exit_asks(&run_id, answer)?;
             self.queue.close_answer_prompt_asks(&run_id, answer)?;
-            self.queue.close_stalled_asks(&run_id, answer)?;
+            self.queue.end_stalled_detections(&run_id, answer)?;
         }
         Ok(())
     }

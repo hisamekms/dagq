@@ -104,6 +104,13 @@ impl AskStore for SqliteQueue {
     ) -> Result<Vec<crate::domain::Ask>> {
         SqliteQueue::close_stalled_asks(self, run_id, answer)
     }
+    fn end_stalled_detections(
+        &mut self,
+        run_id: &RunId,
+        answer: &str,
+    ) -> Result<Vec<crate::domain::Ask>> {
+        SqliteQueue::end_stalled_detections(self, run_id, answer)
+    }
     fn note_on_asks(
         &mut self,
         run_id: &RunId,

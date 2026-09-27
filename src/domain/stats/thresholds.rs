@@ -415,6 +415,120 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
     found
 }
 
+/// The `stall_resolved` payloads (outcome `run_ended`) that end the stalled
+/// detections of one run's `events` (ascending id) with no end recorded,
+/// the run being taken out of its session at `now_ms` without the watch
+/// that made them (`recover`, the supervisor's abandon, the sweep; ADR-0047
+/// decisions 30 and 32): each `stall_nudged` with no `stall_resolved` of
+/// its phase's nudge after it, each recovery job of the `stalled` alert
+/// with no end of its attempt (and send), and each `stalled` ask with no
+/// end naming it. A detection that has its end gets none again.
+pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
+    let resolved = |later: &[RunEvent], detection: &str, same: &dyn Fn(&RunEvent) -> bool| {
+        later.iter().any(|e| {
+            e.kind == "stall_resolved" && text(e, "detection") == Some(detection) && same(e)
+        })
+    };
+    let mut ends = Vec::new();
+    for (i, event) in events.iter().enumerate() {
+        let later = &events[i + 1..];
+        let end = |phase: Option<&Value>,
+                   detection: &str,
+                   threshold: &str,
+                   threshold_secs: Option<i64>,
+                   detected_after: Option<i64>| {
+            serde_json::json!({
+                "phase": phase.cloned().unwrap_or_else(|| Value::from("session")),
+                "detection": detection,
+                "threshold": threshold,
+                "threshold_secs": threshold_secs,
+                "detected_after_secs": detected_after.unwrap_or(0),
+                "outcome": "run_ended",
+                "resolved_after_secs": secs(at(event), Some(now_ms)).unwrap_or(0).max(0),
+            })
+        };
+        match event.kind.as_str() {
+            "stall_nudged" => {
+                let phase = event.payload.get("phase");
+                if !resolved(later, "nudge", &|e| e.payload.get("phase") == phase) {
+                    ends.push(end(
+                        phase,
+                        "nudge",
+                        IDLE,
+                        int(event, "threshold_secs"),
+                        int(event, "idle_secs"),
+                    ));
+                }
+            }
+            "recovery_requested" if text(event, "alert") == Some("stalled") => {
+                let attempt = event.payload.get("attempt");
+                let send = event.payload.get("send_event");
+                if resolved(later, "recovery", &|e| {
+                    e.payload.get("attempt") == attempt && e.payload.get("send_event") == send
+                }) {
+                    continue;
+                }
+                let threshold = if text(event, "reason") == Some("send_unconfirmed") {
+                    SEND
+                } else {
+                    IDLE
+                };
+                let mut payload = end(
+                    None,
+                    "recovery",
+                    threshold,
+                    int(event, "threshold_secs"),
+                    int(event, "idle_secs").or_else(|| int(event, "waited_secs")),
+                );
+                payload["attempt"] = attempt.cloned().unwrap_or(Value::Null);
+                if let Some(send) = send {
+                    payload["send_event"] = send.clone();
+                    payload["reason"] = Value::from("send_unconfirmed");
+                }
+                ends.push(payload);
+            }
+            "ask_opened" if text(event, "kind") == Some("stalled") => {
+                let id = event.payload.get("ask_id");
+                if resolved(later, "ask", &|e| e.payload.get("ask_id") == id) {
+                    continue;
+                }
+                // The recovery job that escalated to it tells the setting,
+                // and its request the value and the idle time.
+                let finished = events
+                    .iter()
+                    .find(|e| e.kind == "recovery_finished" && e.payload.get("ask_id") == id);
+                let threshold = match finished.and_then(|e| text(e, "alert")) {
+                    Some("idle_process") => IDLE_PROCESS,
+                    Some("long_background") => BACKGROUND,
+                    _ if finished.and_then(|e| text(e, "reason")) == Some("send_unconfirmed") => {
+                        SEND
+                    }
+                    _ => IDLE,
+                };
+                let requested = finished.and_then(|finished| {
+                    events.iter().rev().find(|e| {
+                        e.kind == "recovery_requested"
+                            && e.payload.get("alert") == finished.payload.get("alert")
+                            && e.payload.get("attempt") == finished.payload.get("attempt")
+                            && e.payload.get("reason") == finished.payload.get("reason")
+                    })
+                });
+                let mut payload = end(
+                    None,
+                    "ask",
+                    threshold,
+                    requested.and_then(|e| int(e, "threshold_secs")),
+                    requested.and_then(|e| int(e, "idle_secs").or_else(|| int(e, "waited_secs"))),
+                );
+                payload["ask_id"] = id.cloned().unwrap_or(Value::Null);
+                ends.push(payload);
+            }
+            _ => {}
+        }
+    }
+    ends
+}
+
 /// Take the value and the idle time an `idle_process` job was started
 /// with from its `recovery_requested` (the same `attempt`, among
 /// `before`) for the detection its `finished` escalated to. None when
@@ -672,6 +786,74 @@ mod tests {
 
     fn stalled(id: i64) -> Value {
         json!({"ask_id": id, "kind": "stalled", "asked_by": "supervisor"})
+    }
+
+    /// A run taken out of its session ends what has no end: the job of a
+    /// send (with its send), and an `idle_process` job's ask (with the
+    /// job's value), not the nudge and the idle job that ended already;
+    /// with those ends recorded, nothing is left.
+    #[test]
+    fn a_run_ended_ends_each_detection_with_no_end_once() {
+        let send = json!({"alert": "stalled", "reason": "send_unconfirmed", "attempt": 1,
+                          "send_event": 7, "waited_secs": 70, "threshold_secs": 60});
+        let idle_job = json!({"alert": "idle_process", "attempt": 1, "threshold_secs": 1800,
+                              "idle_secs": 1900});
+        let mut events = numbered(vec![
+            (R1, "stall_nudged", nudged(), T),
+            (
+                R1,
+                "stall_resolved",
+                resolved("nudge", "escalated", json!({})),
+                T + 10,
+            ),
+            (
+                R1,
+                "recovery_requested",
+                json!({"alert": "stalled",
+                "reason": "idle_without_receipt", "attempt": 1}),
+                T + 10,
+            ),
+            (
+                R1,
+                "stall_resolved",
+                resolved("recovery", "escalated", json!({"attempt": 1})),
+                T + 20,
+            ),
+            (R1, "recovery_requested", send, T + 30),
+            (R1, "recovery_requested", idle_job, T + 40),
+            (R1, "ask_opened", stalled(9), T + 50),
+            (
+                R1,
+                "recovery_finished",
+                json!({"alert": "idle_process", "attempt": 1,
+                "ask_id": 9}),
+                T + 50,
+            ),
+        ]);
+        let ends = run_ended_resolutions(&events, (T + 100) * 1000);
+        assert_eq!(ends.len(), 2, "{ends:?}");
+        assert_eq!(ends[0]["detection"], "recovery");
+        assert_eq!(ends[0]["threshold"], SEND);
+        assert_eq!(ends[0]["threshold_secs"], 60);
+        assert_eq!(ends[0]["detected_after_secs"], 70);
+        assert_eq!(ends[0]["send_event"], 7);
+        assert_eq!(ends[0]["reason"], "send_unconfirmed");
+        assert_eq!(ends[0]["resolved_after_secs"], 70);
+        assert_eq!(ends[1]["detection"], "ask");
+        assert_eq!(ends[1]["ask_id"], 9);
+        assert_eq!(ends[1]["threshold"], IDLE_PROCESS);
+        assert_eq!(ends[1]["threshold_secs"], 1800);
+        assert_eq!(ends[1]["detected_after_secs"], 1900);
+        assert!(ends.iter().all(|end| end["outcome"] == "run_ended"));
+        for (i, end) in ends.into_iter().enumerate() {
+            events.push(event(20 + i as i64, R1, "stall_resolved", end, T + 100));
+        }
+        assert!(run_ended_resolutions(&events, (T + 200) * 1000).is_empty());
+        let outcomes = outcomes(&events, T + 200);
+        assert!(
+            outcomes.iter().all(|(_, _, outcome)| outcome != PENDING),
+            "{outcomes:?}"
+        );
     }
 
     /// Task 182's shape: the nudge ends the stall, or escalates to an ask

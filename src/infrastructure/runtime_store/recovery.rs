@@ -202,6 +202,8 @@ impl SqliteQueue {
         report["lease_deleted"] = json!(leases_deleted == 1);
         Reason::new(ReasonCode::Orphaned).apply_to(&mut report);
         run_event(&tx, id, event_kind::RUN_RECOVERED, report)?;
+        // No session of it is stalled any more (ADR-0047 decision 30).
+        end_stalled_detections(&tx, id, STALL_RECOVERED_CLOSED, self.generators.clock.now())?;
         // The task stays in_progress; a retry is an explicit `ready` and a new run.
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))

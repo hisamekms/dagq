@@ -99,6 +99,8 @@ impl SqliteQueue {
             event_kind::RUNTIME_ERROR,
             reason.on(abandon_payload(message, released == 1, session)),
         )?;
+        // Nobody watches its session any more (ADR-0047 decision 30).
+        end_stalled_detections(&tx, id, STALL_ABANDONED_CLOSED, self.generators.clock.now())?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }

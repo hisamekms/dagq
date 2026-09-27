@@ -180,6 +180,14 @@ fn record_events(conn: &Connection, id: &RunId, events: Vec<run::NewRunEvent>) -
     Ok(())
 }
 
+/// The answer the runtime writes into a `stalled` ask it closes as the run
+/// is recovered.
+pub const STALL_RECOVERED_CLOSED: &str = "the run was recovered; closed by the runtime";
+
+/// The answer the runtime writes into a `stalled` ask it closes as the
+/// supervisor abandons the run.
+pub const STALL_ABANDONED_CLOSED: &str = "the supervisor gave up on the run; closed by the runtime";
+
 /// The file in a run's directory that keeps why the domain refused a
 /// transition of the run: one `[<unix seconds>] <message>: <DomainError>`
 /// line per refusal, `<message>` being the error the operation returned.
@@ -310,6 +318,39 @@ fn run_event(conn: &Connection, id: &RunId, kind: &str, payload: serde_json::Val
             r.get(0)
         })?;
     event(conn, task_id, Some(id), kind, payload)
+}
+
+/// End the run's stalled detections inside the caller's transaction, the
+/// run being taken out of its session by no watch of its own (`recover`,
+/// the supervisor's abandon, the sweep; ADR-0047 decisions 30 and 32):
+/// its `stalled` asks nobody closed are closed with `answer` (an open one
+/// answered by the runtime, `runtime_closed: true`), and each detection
+/// with no end recorded gets its `stall_resolved` of outcome `run_ended`,
+/// once: one already ended by the watch or an earlier close gets none.
+pub(super) fn end_stalled_detections(
+    tx: &Connection,
+    id: &RunId,
+    answer: &str,
+    now: i64,
+) -> Result<Vec<crate::domain::Ask>> {
+    // Events are stamped by SQLite's clock, so their ages are too.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let ends =
+        crate::domain::stats::thresholds::run_ended_resolutions(&run_events_of(tx, id)?, now_ms);
+    let closed = crate::infrastructure::asks::close_asks_in(
+        tx,
+        id,
+        None,
+        crate::domain::AskKind::Stalled,
+        answer,
+        now,
+    )?;
+    for end in ends {
+        run_event(tx, id, event_kind::STALL_RESOLVED, end)?;
+    }
+    Ok(closed)
 }
 
 /// Lease a `needs_session` run to `token` for a resume or its skip, inside
