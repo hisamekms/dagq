@@ -1,0 +1,39 @@
+# A `stalled` ask: `wait`, `intervene`, and stepping in
+
+Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7). The rules are ADR-0043 decision 1 and ADR-0047 decision 40; the runtime's side is in `docs/design/supervisor-lifecycle/idle-without-receipt.md`.
+
+## Where the ask comes from
+
+The supervisor watches a worker's first session (`phase: session`; a resumed session or a send-back ends its own stage instead). When the session has ended its turn (an idle marker newer than the last text the supervisor typed and the last input it took) with no receipt, no unclosed `worker_question` or `answer_prompt`, no dialog on screen and no login hold, for `[stall].idle_without_receipt_secs` of `dagq.toml` (default 1200 seconds), it types one nudge into the session (`stall_nudged`): write the receipt, ask a `worker_question`, or say what the background work it waits for is. Background work still `running` counts as idle. Only if the session took the nudge, ended another turn and stays idle as long again does it open the `stalled` ask (a nudge that could not be typed at all goes to the ask on the next poll) (`asked_by` `supervisor`, `reason_category` `recovery_failed`). There is one nudge per session, and one open `stalled` ask per run.
+
+Its question names the run, the task, the workspace, `reason: idle_without_receipt`, `phase: session`, how long the session has been idle and how long ago it was nudged, then lists the background tasks the session left running when it stopped (`- <description> (<id>): <command>`, or that none was running, or that some ran unlisted), and ends with the last lines of the screen.
+
+A recovery job that escalates a live run's `long_background` (background work running over `[stall].background_alert_secs`) or `idle_process` (a process of the run using almost no CPU time over `[stall].idle_process_secs`) alert opens a `stalled` ask too (`alert: long_background` / `alert: idle_process` in its question, with the job's diagnosis, its `reason_category`, and any option it added after `wait` / `intervene`). It is answered and closed the same way. Every `stalled` ask also offers `propose`.
+
+While it is open the run usually holds no `--parallel` slot (`status`'s `waiting`).
+
+## The options and who applies them
+
+- **`wait`**: leave the session alone. While a supervisor holds the run (`running`, a fresh lease), the attention is `applying the answer of ask <id> (runtime)`: the supervisor closes the ask itself (`stall_resolved`, `outcome: answered_wait`) and counts the idle again from then. If the session stays idle another threshold, it opens a new `stalled` ask without nudging again. With no supervisor holding the run the attention is `read the answer of ask <id> and close it`: `"$DAGQ" ask close <id>`; the next supervisor counts again from the close.
+- **`propose`** (or `propose: <why>`): the runtime records a finding for the stall and has a planner of its own propose a remedy; the session is left alone as for `wait`. It shows `read the answer of ask <id> and close it` until the supervisor closes it at its next look; with no supervisor holding the run, `ask close <id>` (read as `wait`).
+- **`intervene`** (or any other text): a person steps in. The ask stays answered and unclosed (`read the answer of ask <id> and close it`), the supervisor records `answered_intervene` and opens no new `stalled` ask until the session ends a turn after the answer. Carry out the steps below.
+
+Whatever the answer, the supervisor closes the ask itself (`the session moved on; closed by the runtime`) once the session ends a new turn after it was opened (or, after `intervene`, after the answer), the receipt arrives or a `worker_question` opens, with `the session exited; closed by the runtime` once the session exits, and with `the run was triaged; closed by the runtime` when its recovery job takes the ended run. An unanswered ask it closes this way makes `answer` report it is not open. `recover` does not close it.
+
+## Stepping in (`intervene`)
+
+Take `workspace_id`, `worktree_path` and the run `id` from `"$DAGQ" show ID` (`--full` for `run_dir`). Never edit the worktree, commit, merge or push for the run, and never signal processes yourself.
+
+1. **Read the screen**: `cmux read-screen --workspace <workspace_id> --lines 60`. See what the session last said: waiting on a background task, a question it wrote to the terminal instead of asking, a failure it gave up on, or a dialog (then it is an `answer_prompt` case: `reference/session.md`).
+2. **Check the background work** the question listed: `"$DAGQ" doctor --full` shows the run's processes (read only). A test or build still making progress may only need time: tell the person and, on their word, `ask close <id>`; no new `stalled` ask opens until the session ends a turn after the close, and the idle is counted again from that turn. One that hangs is stopped by the session itself: type an instruction naming the task (below), never `kill` / `pkill` by name.
+3. **Type an instruction** the person gave or approved, for example "stop the background task <id>, then commit and write the receipt" or "ask your question with `dagq ask --run <run-id> --kind worker_question`":
+
+   ```sh
+   cmux send --workspace <workspace_id> "<instruction>"
+   cmux send-key --workspace <workspace_id> enter
+   cmux read-screen --workspace <workspace_id> --lines 20   # the text left the input line and the session works
+   ```
+
+   If the text still sits in the input line, send `enter` once more. The supervisor takes this input as a person's and closes the ask once the session ends that turn.
+4. **Stop the run, if the person says so**: type `/exit` and `enter` in the workspace (answer a "Background work is running" confirmation with the person's choice). The session exits without a receipt, the supervisor closes the ask, the run is validated, fails for the missing receipt and goes to the recovery job (`triaging (runtime)`); nothing more to do. Without a supervisor, `up`: it recovers the run once the session's processes are gone (or `"$DAGQ" recover RUN_ID`, section 3, on the person's word). A supervisor holding the lease refuses `recover`; `down --force` only on the person's explicit word.
+5. **Close the ask**: after the instruction was taken or the run stopped, `"$DAGQ" ask close <id>`. If the supervisor closed it first (the session moved on or exited), there is nothing to close. A person's close counts as `intervene`: no new `stalled` ask until the session ends a turn after it.

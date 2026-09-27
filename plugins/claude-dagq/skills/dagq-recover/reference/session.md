@@ -1,4 +1,4 @@
-# A run's session: dialogs, stuck exits and undelivered answers
+# A run's session: dialogs, stalls, stuck exits and undelivered answers
 
 Read this to carry out, on the person's word, an answer that has to reach a run's Claude session in its cmux workspace (the `dagq-recover` skill, section 7). A run's session works only in its own worktree; never edit that worktree, merge or push for it, and never `recover` a run whose session only waits at a dialog.
 
@@ -31,6 +31,10 @@ A worker's `worker_question` is answered by the person in the inbox; the supervi
 ## A `stuck_exit` ask
 
 The answer `exit` is carried out as `reference/stuck-exit.md` says; `wait` needs only `ask close <id>`.
+
+## A `stalled` ask
+
+A session idle without a receipt after the supervisor's one nudge, or a `long_background` / `idle_process` alert its recovery job escalated. The supervisor applies and closes `wait` itself, and closes the ask once the session moves on or exits. `intervene` is carried out as `reference/stalled.md` says: read the screen, check the background work, type the person's instruction or `/exit` the session, then `ask close <id>`.
 
 ## `recover by hand` (a live run's recovery job failed)
 
