@@ -100,13 +100,7 @@ impl SqliteQueue {
         // the busy timeout, when another supervisor wrote at the same time.
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
-            params![kind, serde_json::to_string(&payload)?],
-        )?;
-        let id = EventId::new(tx.last_insert_rowid());
-        // The observer's session span (ADR-0048).
-        crate::infrastructure::sessions::follow(&tx, id, None, None, kind, &payload)?;
+        let id = queue_event(&tx, kind, &payload)?;
         tx.commit()?;
         Ok(id)
     }
@@ -715,4 +709,17 @@ impl RunLog for SqliteQueue {
     ) -> Result<Vec<RunEvent>> {
         SqliteQueue::events_of_between(self, kinds, after, upto, limit)
     }
+}
+
+/// Insert an event of the queue itself in the open transaction `tx`, with
+/// the session span it opens or closes; its id.
+pub(super) fn queue_event(tx: &Connection, kind: &str, payload: &Value) -> Result<EventId> {
+    tx.execute(
+        "INSERT INTO run_events(kind,payload) VALUES (?1,?2)",
+        params![kind, serde_json::to_string(payload)?],
+    )?;
+    let id = EventId::new(tx.last_insert_rowid());
+    // The observer's session span (ADR-0048).
+    crate::infrastructure::sessions::follow(tx, id, None, None, kind, payload)?;
+    Ok(id)
 }

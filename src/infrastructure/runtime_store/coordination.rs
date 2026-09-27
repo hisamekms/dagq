@@ -97,6 +97,38 @@ impl SqliteQueue {
             == 1)
     }
 
+    /// Remove the registration of `token` and record the queue event of
+    /// `kind` whose payload `stopped` builds from the row as it was, in one
+    /// transaction: the stop of a supervisor that did not remove its own is
+    /// recorded exactly when its row goes, and a failed record keeps the
+    /// row for the next prune. `false`, recording nothing, when the row is
+    /// already gone.
+    pub fn prune_supervisor(
+        &self,
+        token: &str,
+        kind: &str,
+        stopped: &dyn Fn(&SupervisorRegistration) -> Value,
+    ) -> Result<bool> {
+        crate::domain::check_event_target(kind, None, None)?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let Some(registration) = tx
+            .query_row(
+                "SELECT * FROM supervisors WHERE token=?1",
+                [token],
+                supervisor_row,
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        tx.execute("DELETE FROM supervisors WHERE token=?1", [token])?;
+        // No session span is closed by a supervisor's stop, so there are no
+        // transcripts to read before the write, as `record_queue_event` does.
+        super::run_log::queue_event(&tx, kind, &stopped(&registration))?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Mark the registration of `token` as one that takes a handoff
     /// (ADR-0045 decision 10): its process execs another binary when asked.
     pub fn accept_handoff(&self, token: &str) -> Result<()> {
@@ -504,6 +536,14 @@ impl RunCoordination for SqliteQueue {
     fn deregister_supervisor(&self, token: &str) -> Result<bool> {
         SqliteQueue::deregister_supervisor(self, token)
     }
+    fn prune_supervisor(
+        &self,
+        token: &str,
+        kind: &str,
+        stopped: &dyn Fn(&SupervisorRegistration) -> Value,
+    ) -> Result<bool> {
+        SqliteQueue::prune_supervisor(self, token, kind, stopped)
+    }
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
         SqliteQueue::supervisors(self)
     }
@@ -596,5 +636,95 @@ impl RunCoordination for SqliteQueue {
     }
     fn backend_slots(&self, token: Option<&str>) -> Result<(i64, Option<i64>)> {
         SqliteQueue::backend_slots(self, token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STOPPED: &str = crate::domain::marks::SUPERVISOR_STOPPED;
+
+    fn stopped(removed: &SupervisorRegistration) -> Value {
+        json!({"supervisor": removed.token, "last_heartbeat_at": removed.heartbeat_at})
+    }
+
+    fn stops(queue: &SqliteQueue) -> Vec<Value> {
+        queue
+            .conn
+            .prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
+            .unwrap()
+            .query_map([STOPPED], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+            .collect()
+    }
+
+    fn registered(queue: &SqliteQueue) -> Vec<String> {
+        queue
+            .supervisors()
+            .unwrap()
+            .into_iter()
+            .map(|registration| registration.token)
+            .collect()
+    }
+
+    #[test]
+    fn pruning_removes_the_row_and_records_its_stop_from_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let registration = queue.register_supervisor("dead", 1, 1, "0.0.1").unwrap();
+        queue
+            .register_supervisor("live", std::process::id(), 1, "0.0.1")
+            .unwrap();
+
+        assert!(queue.prune_supervisor("dead", STOPPED, &stopped).unwrap());
+
+        assert_eq!(registered(&queue), ["live"]);
+        assert_eq!(
+            stops(&queue),
+            [json!({"supervisor": "dead", "last_heartbeat_at": registration.heartbeat_at})]
+        );
+    }
+
+    #[test]
+    fn pruning_a_row_already_gone_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+
+        assert!(!queue.prune_supervisor("gone", STOPPED, &stopped).unwrap());
+
+        assert!(stops(&queue).is_empty());
+    }
+
+    #[test]
+    fn a_failed_record_keeps_the_row_for_the_next_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        queue.register_supervisor("dead", 1, 1, "0.0.1").unwrap();
+        // Fail every insert of an event, after the row's delete in the
+        // same transaction.
+        queue
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_events BEFORE INSERT ON run_events
+                 BEGIN SELECT RAISE(ABORT, 'record failed'); END",
+            )
+            .unwrap();
+
+        let error = queue
+            .prune_supervisor("dead", STOPPED, &stopped)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("record failed"), "{error:#}");
+        assert!(queue.conn.is_autocommit());
+        assert_eq!(registered(&queue), ["dead"]);
+        queue
+            .conn
+            .execute_batch("DROP TRIGGER fail_events")
+            .unwrap();
+        assert!(queue.prune_supervisor("dead", STOPPED, &stopped).unwrap());
+        assert!(registered(&queue).is_empty());
+        assert_eq!(stops(&queue).len(), 1);
     }
 }

@@ -1248,6 +1248,15 @@ pub trait RunCoordination {
     ) -> Result<SupervisorRegistration>;
     /// Whether a registration under `token` was removed.
     fn deregister_supervisor(&self, token: &str) -> Result<bool>;
+    /// Remove the registration under `token` and record the queue event of
+    /// `kind` with the payload `stopped` builds from the removed row, in one
+    /// transaction; `false`, recording nothing, when there was no row.
+    fn prune_supervisor(
+        &self,
+        token: &str,
+        kind: &str,
+        stopped: &dyn Fn(&SupervisorRegistration) -> serde_json::Value,
+    ) -> Result<bool>;
     /// Every registered supervisor, oldest first, alive or not.
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
     fn release_lease(&mut self, id: &RunId, token: &str) -> Result<()>;

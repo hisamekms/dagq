@@ -1356,26 +1356,20 @@ pub fn auto_update_refused(checkout: &Path) -> String {
 /// (dead, killed, or gone silent), and record its stop (ADR-0051 decision
 /// 10) with the row's last heartbeat, which `kpi` ends its life at: the
 /// process could not record its own, and the row that kept the heartbeat
-/// is gone after this. A row the process removed meanwhile (it recorded
-/// its own stop) is not recorded again. The heartbeat is read again, as
-/// `registration` may be from before a drain.
+/// is gone after this. Both are one transaction, so a failed record keeps
+/// the row for the next `up` or `down` to prune again. A row the process
+/// removed meanwhile (it recorded its own stop) is not recorded again. The
+/// heartbeat is read from the row as it is removed, as `registration` may
+/// be from before a drain.
 fn prune_supervisor(queue: &dyn Queue, registration: &SupervisorRegistration) -> Result<()> {
-    let registration = queue
-        .supervisors()?
-        .into_iter()
-        .find(|current| current.token == registration.token)
-        .unwrap_or_else(|| registration.clone());
-    if queue.deregister_supervisor(&registration.token)? {
-        queue.record_queue_event(
-            SUPERVISOR_STOPPED,
-            json!({
-                "supervisor": registration.token,
-                "dagq_version": registration.binary_version,
-                "outcome": "pruned",
-                "last_heartbeat_at": registration.heartbeat_at,
-            }),
-        )?;
-    }
+    queue.prune_supervisor(&registration.token, SUPERVISOR_STOPPED, &|removed| {
+        json!({
+            "supervisor": removed.token,
+            "dagq_version": removed.binary_version,
+            "outcome": "pruned",
+            "last_heartbeat_at": removed.heartbeat_at,
+        })
+    })?;
     Ok(())
 }
 
