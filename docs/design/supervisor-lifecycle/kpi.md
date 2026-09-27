@@ -58,7 +58,7 @@ related:
 | `asks_per_landing` | 期間の`ask_opened` ÷ `landings`。taskのあるaskは種類でも分ける。理由ごとは`details.asks_by_reason_category` | `all`と`kind=` |
 | `attentions_per_landing` | 期間の`event_attention`がattentionと判定するevent ÷ `landings` | `all` |
 | `ask_wait` / `ask_apply_wait` | 人が答えたaskの`ask_opened`→最初の`ask_answered` / →答えを適用したevent（task 468）。`stats`の`asks.times`と同じく、答え（適用）の時刻でその期間に入れる（ADR-0051の決定1の「askは`ask_opened`の時刻」は数（`asks_per_landing`）に当て、待ちは終わった時点で数える） | `all` |
-| `backend_failures_per_run` | 期間の`backend_call_failed` ÷ 終わったrun。`op`ごとは`details.backend_failures_by_op` | `all` |
+| `backend_failures_per_run` | 期間の`backend_call_failed` ÷ 終わったrun（retryで吸収した試行も使い切った失敗も数える）。`op`ごとは`details.backend_failures_by_op`。[stats](stats.md)の`backend_failures`と同じ読み分けで、retryの後の試行（`retry_after_ms`がnullでない）は`details.backend_failures_retried`、使い切った失敗（`retry_after_ms`がnullか無い）は`details.backend_failures_exhausted`に、それぞれ`{"count", "by_op"}`（statsの`retried` / `retried_by_op`と`exhausted` / `exhausted_by_op`）で出る。2つの`count`の和は`backend_failures_per_run`の分子 | `all` |
 | `max_load_avg` | 期間のclaim時のload averageと`backend_call_failed`の`load_avg`の最大（`value`）と、claim時の分布 | `all` |
 | `auto_repairs` | 期間の`auto_repaired`の数。`layer`ごとは`details.auto_repairs_by_layer` | `all` |
 | `verify_command.<コマンド>` | `integrate`の検証コマンドごとの秒 | `all` |

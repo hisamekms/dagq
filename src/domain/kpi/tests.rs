@@ -1542,3 +1542,47 @@ fn scores_the_forecast_snapshots_in_the_period_they_finished() {
     );
     assert_eq!(measure(&goal.periods[0], "forecast.p50_error", ALL).n, 1);
 }
+
+/// The details split the backend failures, as `stats` does, into the
+/// attempts a retry took up and the calls that gave up, per `op` too;
+/// `backend_failures_per_run` still counts them all.
+#[test]
+fn details_split_the_backend_failures_into_retried_and_exhausted() {
+    let mut queue = Queue::default();
+    let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, HOUR));
+    let failed = |queue: &mut Queue, op: &str, retry: Option<Value>, at: i64| {
+        let mut payload = json!({"op": op, "attempt": 1, "max_attempts": 3});
+        if let Some(retry) = retry {
+            payload["retry_after_ms"] = retry;
+        }
+        queue.push(Some(1), None, "backend_call_failed", payload, at);
+    };
+    failed(&mut queue, "capture", Some(json!(2000)), landed - 300);
+    failed(&mut queue, "capture", Some(Value::Null), landed - 200);
+    failed(&mut queue, "send_text", Some(json!(4000)), landed - 150);
+    // Before task 326: no retry_after_ms at all.
+    failed(&mut queue, "close", None, landed - 120);
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+    let day = result.periods.last().unwrap();
+    assert_eq!(
+        measure(day, "backend_failures_per_run", ALL).value,
+        Some(4.0)
+    );
+    let details = &day.window.details;
+    assert_eq!(
+        details["backend_failures_by_op"],
+        json!({"capture": 2, "send_text": 1, "close": 1})
+    );
+    assert_eq!(
+        details["backend_failures_retried"],
+        json!({"count": 2, "by_op": {"capture": 1, "send_text": 1}})
+    );
+    assert_eq!(
+        details["backend_failures_exhausted"],
+        json!({"count": 2, "by_op": {"capture": 1, "close": 1}})
+    );
+}

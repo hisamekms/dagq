@@ -665,6 +665,15 @@ impl<'a> Context<'a> {
             "backend_failures_by_op",
             json(&stats.backend_failures.by_op),
         );
+        let failures = &stats.backend_failures;
+        details.insert(
+            "backend_failures_retried",
+            serde_json::json!({"count": failures.retried, "by_op": failures.retried_by_op}),
+        );
+        details.insert(
+            "backend_failures_exhausted",
+            serde_json::json!({"count": failures.exhausted, "by_op": failures.exhausted_by_op}),
+        );
         details.insert("auto_repairs_by_layer", json(&stats.auto_repairs.by_layer));
 
         WindowKpis {
