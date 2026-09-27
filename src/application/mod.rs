@@ -7,6 +7,7 @@
 //! the dependency view of `list` and `graph` stay here.
 
 pub mod ask;
+pub mod commands;
 pub mod diagram;
 pub mod forecast;
 pub mod health;

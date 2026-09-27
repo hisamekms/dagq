@@ -168,6 +168,23 @@ impl Resource {
     pub const fn run(id: RunId) -> Self {
         Self::Run { id, task: None }
     }
+
+    /// The resource as a refusal records it (`authorization_denied`): its
+    /// kind, its id, and the status or owner the rule was given.
+    pub fn record(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Queue => json!({"kind": "queue"}),
+            Self::Goal(id) => json!({"kind": "goal", "id": id}),
+            Self::Task { id, status } => json!({"kind": "task", "id": id, "status": status}),
+            Self::Run { id, task } => json!({"kind": "run", "id": id, "task": task}),
+            Self::Ask { id, run } => json!({"kind": "ask", "id": id, "run": run}),
+            Self::Proposal { id, owner } => json!({"kind": "proposal", "id": id, "owner": owner}),
+            Self::Finding(id) => json!({"kind": "finding", "id": id}),
+            Self::Planner(id) => json!({"kind": "planner", "id": id}),
+            Self::Unresolved => json!({"kind": "unresolved"}),
+        }
+    }
 }
 
 /// Why a request was refused. It names no id or text of the resource.
@@ -181,6 +198,17 @@ pub enum DenyReason {
     Resource,
 }
 
+impl DenyReason {
+    /// The reason as the error and the record name it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotGranted => "not granted",
+            Self::Reserved => "reserved",
+            Self::Resource => "not on this resource",
+        }
+    }
+}
+
 /// A refused request: the role and the capability, nothing else of the
 /// actor (its id may carry a session id) or of the resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,16 +220,12 @@ pub struct AuthorizationError {
 
 impl fmt::Display for AuthorizationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let why = match self.reason {
-            DenyReason::NotGranted => "not granted",
-            DenyReason::Reserved => "reserved",
-            DenyReason::Resource => "not on this resource",
-        };
         write!(
             f,
-            "{} may not {} ({why})",
+            "{} may not {} ({})",
             self.role.as_str(),
-            self.capability
+            self.capability,
+            self.reason.as_str()
         )
     }
 }

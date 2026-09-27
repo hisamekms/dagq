@@ -358,8 +358,11 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     assert!(status.contains("goal review by hand"), "{status}");
     assert!(status.contains("goal_review_failed"), "{status}");
 
-    // `goal review ID` rearms it; the next review closes it.
+    // `goal review ID` rearms it; the next review closes it. A person
+    // does, not the actor of the session running the tests.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .env_remove("DAGQ_ROLE")
+        .env_remove("DAGQ_ACTOR_ID")
         .args([
             "--db",
             fx.db.to_str().unwrap(),

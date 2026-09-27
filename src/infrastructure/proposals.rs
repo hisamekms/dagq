@@ -119,9 +119,11 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
     save(conn, &submitted)?;
     let id = submitted.id();
     // A submission starts plan review afresh: no hold, no revise pending.
+    // Its owner is the actor that submits (task 732): the connection's.
     conn.execute(
         "UPDATE proposals SET review_hold=NULL, revise_reasons=NULL, revise_sent_at=NULL,
-             revise_planner_id=NULL, unresponsive_at=NULL WHERE id=?1",
+             revise_planner_id=NULL, unresponsive_at=NULL, owner_actor_id=dagq_actor_id()
+         WHERE id=?1",
         [id],
     )?;
     for &task_id in &tasks {
@@ -356,6 +358,24 @@ pub(super) fn list(conn: &Connection, all: bool) -> Result<Vec<Proposal>> {
         .query_map([all], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     ids.into_iter().map(|id| read(conn, id)).collect()
+}
+
+/// The actor id of the planner that owns proposal `id`: while plan review
+/// has sent it back to a planner (`revise_planner_id`, a planner of the
+/// runtime's when its owner had closed, or one given a reopened proposal),
+/// that planner's; otherwise the actor that submitted it last, `None` for
+/// one submitted before the queue recorded it. A missing proposal is an
+/// error.
+pub(super) fn owner_actor(conn: &Connection, id: ProposalId) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT CASE WHEN status='revising' AND revise_planner_id IS NOT NULL
+                     THEN 'planner:' || revise_planner_id ELSE owner_actor_id END
+         FROM proposals WHERE id=?1",
+        [id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .with_context(|| format!("proposal {id} does not exist"))
 }
 
 pub(super) fn read(conn: &Connection, id: ProposalId) -> Result<Proposal> {

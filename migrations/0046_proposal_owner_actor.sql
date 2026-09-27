@@ -1,0 +1,11 @@
+-- dagq-schema: compatible
+-- The actor id of the planner that owns a proposal (ADR-t728-1 decision 5,
+-- task 732): `proposal withdraw` from a planner is allowed on its own
+-- proposal only. A submission writes the submitting actor's id (such as
+-- `planner:7`), a resubmission after a revise the new owner's. Proposals
+-- submitted before this migration leave it NULL, and a planner may not
+-- withdraw them (fail closed); the user and the inbox still may. An older
+-- binary leaves it as it was (NULL, or the owner a newer binary wrote). An
+-- addition only: an older binary reads the table by column name and never
+-- writes it.
+ALTER TABLE proposals ADD COLUMN owner_actor_id TEXT;

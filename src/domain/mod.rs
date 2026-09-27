@@ -1501,6 +1501,8 @@ pub const UPDATE_EVENT_KINDS: &[&str] = &[
 /// the write port checks them now (ADR-0073 decision 22).
 pub const QUEUE_EVENT_KINDS: &[&str] = &[
     "backend_call_failed",
+    // A command the authorizer refused (ADR-t728-1 decision 5).
+    event_kind::AUTHORIZATION_DENIED,
     "observe_started",
     "observe_finished",
     "ask_opened",

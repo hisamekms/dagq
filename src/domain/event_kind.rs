@@ -15,6 +15,9 @@ pub const ASK_DELIVERY_FAILED: &str = "ask_delivery_failed";
 pub const ASK_OPENED: &str = "ask_opened";
 pub const ASK_UPDATED: &str = "ask_updated";
 pub const AUTH_REQUIRED: &str = "auth_required";
+/// A state-changing command the [`super::Authorizer`] refused (ADR-t728-1
+/// decision 5): a queue event whose actor is the refused caller.
+pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
 pub const AUTO_REPAIRED: &str = "auto_repaired";
 pub const BACKEND_CALL_FAILED: &str = "backend_call_failed";
 pub const BUILD_OUTPUTS_REMOVED: &str = "build_outputs_removed";

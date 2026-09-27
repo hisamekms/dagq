@@ -16,15 +16,13 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 use dagq::{
-    application::{
-        GoalReviewStore, StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph,
-    },
+    application::{StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph},
     domain::{
-        ActorContext, ActorRole, AskId, AskKind, AskReason, Authorizer, Capability, EventId,
-        FindingId, FindingQuery, FindingStatus, FindingTarget, GoalEdit, GoalId, GoalVerdict,
-        NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget, PlannerId,
-        PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole, StaticPolicy,
-        Submission, TaskAction, TaskEdit, TaskId, TaskKind, TaskStatus,
+        ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Authorizer,
+        Capability, EventId, FindingId, FindingQuery, FindingStatus, FindingTarget, GoalEdit,
+        GoalId, GoalVerdict, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget,
+        PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole,
+        StaticPolicy, Submission, TaskEdit, TaskId, TaskKind, TaskStatus,
         search::{self, SearchQuery},
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
@@ -1408,30 +1406,72 @@ fn finding_target(
     })
 }
 
+/// The planning commands, which the application authorizes for every
+/// role before it changes the queue, with the owners and statuses read
+/// from it, and records what it refuses (task 732).
+fn authorized_in_application(command: &Command) -> bool {
+    match command {
+        Command::Add { .. }
+        | Command::Edit { .. }
+        | Command::Submit { .. }
+        | Command::Draft { .. }
+        | Command::Ready { .. }
+        | Command::Cancel { .. }
+        | Command::Dependency { .. }
+        | Command::SetGoal { .. }
+        | Command::SetPaths { .. }
+        | Command::SetPriority { .. }
+        | Command::Proposal {
+            command: ProposalCommand::Withdraw { .. },
+        } => true,
+        Command::Goal { command } => {
+            !matches!(command, GoalCommand::List | GoalCommand::Show { .. })
+        }
+        _ => false,
+    }
+}
+
 /// The limits of the observer (ADR-0044 decision 4) and of the
 /// supervisor's headless jobs (ADR-0027, each job by its own role and the
-/// legacy `reviewer` as a review job), by the [`StaticPolicy`]. The other
-/// roles are not checked here yet: later tasks of goal 55 move the check
-/// to the application layer, where the owners are known. The refusal keeps
-/// the message these roles always got.
+/// legacy `reviewer` as a review job), by the [`StaticPolicy`], on the
+/// commands the application does not authorize yet. The other roles are
+/// not checked here: later tasks of goal 55 move the rest of the commands
+/// to the application layer, where the owners are known.
 fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
     let role = actor.role();
-    let denied = if role == ActorRole::Observer {
-        OBSERVER_DENIED
-    } else if role.is_headless_job() {
-        REVIEWER_DENIED
-    } else {
+    if !(role == ActorRole::Observer || role.is_headless_job())
+        || authorized_in_application(command)
+    {
         return Ok(());
-    };
+    }
     for (capability, resource) in requests(command) {
-        if StaticPolicy
-            .authorize(actor, capability, &resource)
-            .is_err()
-        {
-            bail!(denied);
-        }
+        StaticPolicy.authorize(actor, capability, &resource)?;
     }
     Ok(())
+}
+
+/// The error JSON of a failed command. A refusal carries what was refused
+/// (`denied`: the role, the capability and why), and keeps the message the
+/// observer and the headless jobs always got.
+fn error_json(error: &anyhow::Error) -> Value {
+    let Some(denied) = error.downcast_ref::<AuthorizationError>() else {
+        return json!({"error": format!("{error:#}")});
+    };
+    let message = if denied.role == ActorRole::Observer {
+        OBSERVER_DENIED.to_owned()
+    } else if denied.role.is_headless_job() {
+        REVIEWER_DENIED.to_owned()
+    } else {
+        denied.to_string()
+    };
+    json!({
+        "error": message,
+        "denied": {
+            "role": denied.role,
+            "capability": denied.capability,
+            "reason": denied.reason.as_str(),
+        },
+    })
 }
 
 /// Who the events this command writes record (ADR-t728-1 decision 4): the
@@ -1606,6 +1646,13 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Some(common_dir) = &common_dir {
         queue.assert_repository(common_dir)?;
     }
+    // The planning commands run as the caller through the application,
+    // which authorizes each before it changes the queue (task 732).
+    macro_rules! planning {
+        () => {
+            dagq::application::commands::planning::Planning::new(&mut queue, &actor, &StaticPolicy)
+        };
+    }
     Ok(match cli.command {
         Command::Init
         | Command::Locate
@@ -1629,7 +1676,7 @@ fn execute(cli: Cli) -> Result<Value> {
             priority,
             kind,
         } => serde_json::to_value(
-            queue.add(NewTask {
+            planning!().add(NewTask {
                 title,
                 description,
                 acceptance,
@@ -1684,12 +1731,7 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         }
         Command::Ready { id, bypass_review } => {
-            let action = if bypass_review {
-                TaskAction::BypassReview
-            } else {
-                TaskAction::Ready
-            };
-            serde_json::to_value(queue.transition(TaskId::new(id), action)?)?
+            serde_json::to_value(planning!().ready(TaskId::new(id), bypass_review)?)?
         }
         Command::Submit {
             tasks,
@@ -1703,7 +1745,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 _ => PlannerOrigin::Person,
             };
             serde_json::to_value(
-                queue.submit_linking(
+                planning!().submit(
                     Submission {
                         tasks: tasks.into_iter().map(TaskId::new).collect(),
                         goals: goals.into_iter().map(GoalId::new).collect(),
@@ -1735,51 +1777,33 @@ fn execute(cli: Cli) -> Result<Value> {
                 serde_json::to_value(queue.show_proposal(ProposalId::new(id))?)?
             }
             ProposalCommand::Withdraw { id } => {
-                serde_json::to_value(queue.withdraw_proposal(ProposalId::new(id))?)?
+                serde_json::to_value(planning!().withdraw(ProposalId::new(id))?)?
             }
         },
-        Command::Draft { id } => {
-            serde_json::to_value(queue.transition(TaskId::new(id), TaskAction::Draft)?)?
-        }
-        Command::Cancel { id, duplicate_of } => serde_json::to_value(match duplicate_of {
-            Some(target) => queue.cancel_duplicate(TaskId::new(id), TaskId::new(target))?,
-            None => queue.transition(TaskId::new(id), TaskAction::Cancel)?,
-        })?,
+        Command::Draft { id } => serde_json::to_value(planning!().draft(TaskId::new(id))?)?,
+        Command::Cancel { id, duplicate_of } => serde_json::to_value(
+            planning!().cancel(TaskId::new(id), duplicate_of.map(TaskId::new))?,
+        )?,
         Command::Dependency { command } => {
-            let id =
-                match command {
-                    DependencyCommand::Add {
-                        task,
-                        predecessor,
-                        goal,
-                    } => {
-                        match (predecessor, goal) {
-                            (_, Some(goal)) => {
-                                queue.add_goal_dependency(TaskId::new(task), GoalId::new(goal))?
-                            }
-                            (Some(predecessor), None) => {
-                                queue.add_dependency(TaskId::new(task), TaskId::new(predecessor))?
-                            }
-                            (None, None) => unreachable!("clap requires a predecessor or --goal"),
-                        }
-                        task
-                    }
-                    DependencyCommand::Remove {
-                        task,
-                        predecessor,
-                        goal,
-                    } => {
-                        match (predecessor, goal) {
-                            (_, Some(goal)) => queue
-                                .remove_goal_dependency(TaskId::new(task), GoalId::new(goal))?,
-                            (Some(predecessor), None) => queue
-                                .remove_dependency(TaskId::new(task), TaskId::new(predecessor))?,
-                            (None, None) => unreachable!("clap requires a predecessor or --goal"),
-                        }
-                        task
-                    }
-                };
-            serde_json::to_value(queue.show(TaskId::new(id))?)?
+            use dagq::application::commands::planning::Dependency;
+            // clap requires a predecessor or --goal; --goal wins.
+            let on = |predecessor: Option<i64>, goal: Option<i64>| match (predecessor, goal) {
+                (_, Some(goal)) => Dependency::Goal(GoalId::new(goal)),
+                (Some(predecessor), None) => Dependency::Task(TaskId::new(predecessor)),
+                (None, None) => unreachable!("clap requires a predecessor or --goal"),
+            };
+            serde_json::to_value(match command {
+                DependencyCommand::Add {
+                    task,
+                    predecessor,
+                    goal,
+                } => planning!().add_dependency(TaskId::new(task), on(predecessor, goal))?,
+                DependencyCommand::Remove {
+                    task,
+                    predecessor,
+                    goal,
+                } => planning!().remove_dependency(TaskId::new(task), on(predecessor, goal))?,
+            })?
         }
         Command::Goal { command } => match command {
             GoalCommand::Add {
@@ -1789,7 +1813,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 constraints,
                 doc,
                 draft,
-            } => serde_json::to_value(queue.add_goal(NewGoal {
+            } => serde_json::to_value(planning!().add_goal(NewGoal {
                 title,
                 description,
                 acceptance,
@@ -1797,7 +1821,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 doc,
                 draft,
             })?)?,
-            GoalCommand::Ready { id } => serde_json::to_value(queue.ready_goal(GoalId::new(id))?)?,
+            GoalCommand::Ready { id } => {
+                serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
+            }
             GoalCommand::List => serde_json::to_value(queue.list_goals()?)?,
             GoalCommand::Show { id, full } => {
                 let detail = queue.show_goal(GoalId::new(id))?;
@@ -1814,7 +1840,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 acceptance,
                 constraints,
                 doc,
-            } => serde_json::to_value(queue.edit_goal(
+            } => serde_json::to_value(planning!().edit_goal(
                 GoalId::new(id),
                 GoalEdit {
                     title,
@@ -1825,20 +1851,20 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?)?,
             GoalCommand::Close { id, verdict } => serde_json::to_value(
-                queue.close_goal(GoalId::new(id), verdict.parse::<GoalVerdict>()?)?,
+                planning!().close_goal(GoalId::new(id), verdict.parse::<GoalVerdict>()?)?,
             )?,
-            GoalCommand::Review { id } => queue.rearm_goal_review(GoalId::new(id))?,
+            GoalCommand::Review { id } => planning!().review_goal(GoalId::new(id))?,
         },
         Command::SetGoal {
             task,
             goal,
             none: _,
-        } => serde_json::to_value(queue.set_goal(TaskId::new(task), goal.map(GoalId::new))?)?,
+        } => serde_json::to_value(planning!().set_goal(TaskId::new(task), goal.map(GoalId::new))?)?,
         Command::SetPaths {
             task,
             paths,
             none: _,
-        } => serde_json::to_value(queue.set_paths(TaskId::new(task), paths)?)?,
+        } => serde_json::to_value(planning!().set_paths(TaskId::new(task), paths)?)?,
         Command::Edit {
             task,
             title,
@@ -1859,7 +1885,7 @@ fn execute(cli: Cli) -> Result<Value> {
             let required_evidence = replaced(required_evidence, no_evidence)
                 .map(|names| names.iter().map(|name| name.parse()).collect())
                 .transpose()?;
-            serde_json::to_value(queue.edit_task(
+            serde_json::to_value(planning!().edit(
                 TaskId::new(task),
                 TaskEdit {
                     title,
@@ -1874,7 +1900,7 @@ fn execute(cli: Cli) -> Result<Value> {
             )?)?
         }
         Command::SetPriority { task, level } => {
-            serde_json::to_value(queue.set_priority(TaskId::new(task), level.parse()?)?)?
+            serde_json::to_value(planning!().set_priority(TaskId::new(task), level.parse()?)?)?
         }
         Command::Note {
             task,
@@ -2737,7 +2763,7 @@ fn main() -> ExitCode {
                 error = %format_args!("{error:#}"),
                 "dagq exited with an error: {error:#}"
             );
-            eprintln!("{}", json!({"error": format!("{error:#}")}));
+            eprintln!("{}", error_json(&error));
             ExitCode::FAILURE
         }
     }

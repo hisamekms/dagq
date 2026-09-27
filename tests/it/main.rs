@@ -11,6 +11,7 @@ mod runtime_support;
 
 mod actor_model;
 mod cli_actor;
+mod cli_authorization;
 mod cli_forecast;
 mod cli_goals;
 mod cli_graph;

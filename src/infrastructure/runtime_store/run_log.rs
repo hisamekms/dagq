@@ -291,8 +291,9 @@ impl SqliteQueue {
 
     /// How many events after `after` the observer did not write itself
     /// (ADR-0044): every event but `observe_started` / `observe_finished`,
-    /// the findings and asks `role` wrote, the session events of its own
-    /// spans (`span_kind`), and the KPIs' bookkeeping
+    /// the findings and asks `role` wrote, the commands of `role` the
+    /// authorizer refused, the session events of its own spans
+    /// (`span_kind`), and the KPIs' bookkeeping
     /// ([`crate::domain::kpi::BOOKKEEPING_KINDS`], ADR-0051 decision 24).
     pub fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
         let mut ignored = vec![event_kind::OBSERVE_STARTED, event_kind::OBSERVE_FINISHED];
@@ -305,12 +306,14 @@ impl SqliteQueue {
                OR (kind IN ('{}','{}','{}')
                    AND json_extract(payload,'$.by') IS ?1)
                OR (kind='{}' AND json_extract(payload,'$.asked_by') IS ?1)
+               OR (kind='{}' AND actor_role IS ?1)
                OR (kind IN ('{}','{}','{}')
                    AND json_extract(payload,'$.kind') IS ?2))",
                 event_kind::FINDING_RECORDED,
                 event_kind::FINDING_UPDATED,
                 event_kind::FINDING_STATUS_CHANGED,
                 event_kind::ASK_OPENED,
+                event_kind::AUTHORIZATION_DENIED,
                 event_kind::SESSION_OPENED,
                 event_kind::SESSION_CLOSED,
                 event_kind::SESSION_TURNS

@@ -342,10 +342,15 @@ fn dagq_opening(
 
 fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::process::Output {
     let mut command = Command::new(BIN);
+    // A person's commands, not the actor's of the session running the tests.
     command
         .current_dir(&env.repo)
         .env("XDG_DATA_HOME", &env.data_home)
         .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("DAGQ_ROLE")
+        .env_remove("DAGQ_ACTOR_ID")
+        .env_remove("DAGQ_RUN_ID")
+        .env_remove("DAGQ_TASK_ID")
         .args(args);
     for (key, value) in extra {
         command.env(key, value);

@@ -495,10 +495,10 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         assert!(!output.status.success(), "{args:?} was allowed");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(
-            error,
-            serde_json::json!({"error": "observer may not change queue state"}),
+            error["error"], "observer may not change queue state",
             "{args:?}"
         );
+        assert!(error["denied"]["capability"].is_string(), "{error}");
     };
     for args in [
         &["ready", "1", "--bypass-review"][..],
@@ -1055,10 +1055,10 @@ fn reviewer_may_only_read_the_queue() {
         assert!(!output.status.success(), "{args:?} was allowed");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(
-            error,
-            serde_json::json!({"error": "reviewer may not change queue state"}),
+            error["error"], "reviewer may not change queue state",
             "{args:?}"
         );
+        assert!(error["denied"]["capability"].is_string(), "{error}");
     }
     for args in [
         &["list"][..],

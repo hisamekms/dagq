@@ -59,7 +59,7 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
 
 ## Resource
 
-`Queue`・`Goal`・`Task`（idと、分かれば状態）・`Run`（idと、分かればtask）・`Ask`（idと、分かればrun）・`Proposal`（idと、分かれば出したplannerのactor id）・`Finding`・`Planner`・`Unresolved`（読めなかったid）。CLIの写しは引数にあるものだけを入れ、持ち主と状態は`None`のまま渡す。持ち主をqueueから読んで埋めるのは、判定をapplicationの層に移す後続のtask（埋めないままplannerに強制すると、状態の分からないtaskとproposalの操作が全て拒まれる）。
+`Queue`・`Goal`・`Task`（idと、分かれば状態）・`Run`（idと、分かればtask）・`Ask`（idと、分かればrun）・`Proposal`（idと、分かれば出したplannerのactor id）・`Finding`・`Planner`・`Unresolved`（読めなかったid）。CLIの写し（`requests`）は引数にあるものだけを入れ、持ち主と状態は`None`のまま渡す。計画系のコマンドはapplicationの層（下の[適用の範囲](#適用の範囲)）がqueueからtaskの状態とproposalの持ち主を読んで埋めてから判定する。proposalの持ち主は`proposals.owner_actor_id`（`0046_proposal_owner_actor.sql`）で、`submit`（新しいproposalと、差し戻しの後の出し直し）が出したactorのid（`planner:<id>`など）を書く。plan reviewが人を待つproposalをそのまま出し直す`submit --proposal`は持ち主を変えない（古いバイナリの出し直しも列を書かない）。plan reviewが差し戻して`revising`のproposalは、reviseを送ったplanner（`revise_planner_id`。持ち主が閉じていたときにruntimeが立てたplannerや、reopenしたproposalを受け取ったplanner）を持ち主とする。migrationより前に出したproposalは`NULL`で、plannerは取り下げられない（fail closed。userとinboxは取り下げられる）。`DAGQ_ACTOR_ID`より前に開いたplannerのid `planner`（roleの名前だけでactorを名指さない）は、どのproposalの持ち主にもならない。
 
 ## Policy
 
@@ -83,4 +83,26 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
 
 ## 適用の範囲
 
-今CLIで判定を強制するのは、observerと4つのjob（と旧値`reviewer`）だけで、`src/main.rs`の`check_access`が`requests`の全てを`StaticPolicy`に通す。拒むときのerrorは今までどおり`observer may not change queue state`と`reviewer may not change queue state`。observerに許すもの（読み取り、`watch`、`finding record` / `finding resolve`、findingに紐づく`ask --kind blocked`）とjobに許すもの（読み取りだけ）は、以前の`observer_access` / `reviewer_access`の一覧と同じ。ほかのroleの判定と、状態を変える全てのコマンドをapplicationの層でmutationの前に通すことは、goal 55の後続のtaskが行う。
+### 計画系のコマンド（application）
+
+計画系のコマンド（`add`・`edit`・`submit`・`draft`・`ready`（`--bypass-review`を含む）・`cancel`・`dependency add/remove`・`goal add/edit/ready/close/review`・`set-goal`・`set-paths`・`set-priority`・`proposal withdraw`）は、`src/application/commands/planning.rs`の`Planning`が全てのroleについて判定してからstoreを呼ぶ（task 732）。CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらのコマンドでstoreの変更を直接呼ばない。`Planning`は呼び出し元の`ActorContext`・`Authorizer`（`StaticPolicy`）・port `PlanningStore`（`SqliteQueue`が`src/infrastructure/planning.rs`で実装する）を受け取り、コマンドごとに次のcapabilityとresourceを問う。
+
+| コマンド | capability | resource |
+| --- | --- | --- |
+| `add` | `task.write` | `--goal`のgoal、無ければqueue |
+| `edit` `set-goal` `set-paths` `set-priority` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
+| `ready` / `ready --bypass-review` | `task.ready` / `task.ready_bypass_review` | task（状態） |
+| `cancel`（`--duplicate-of`を含む） | `task.cancel` | task（状態） |
+| `submit` / `submit --proposal ID` | `proposal.submit` | queue / proposal（持ち主） |
+| `proposal withdraw` | `proposal.withdraw` | proposal（持ち主） |
+| `goal add` / `goal edit` / `goal ready` / `goal close` / `goal review` | `goal.write` / `goal.write` / `goal.ready` / `goal.close` / `goal.review_request` | queue / goal |
+
+policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
+
+拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（`not granted`・`reserved`・`not on this resource`）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
+
+CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、`error`はobserverなら`observer may not change queue state`、4つのjob（と`reviewer`）なら`reviewer may not change queue state`（今までの文言）、それ以外は`<role> may not <capability> (<reason>)`。
+
+### ほかのコマンド（CLIの入口）
+
+計画系以外のコマンドは、今もobserverと4つのjob（と旧値`reviewer`）だけを`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す（記録はしない）。observerに許すもの（読み取り、`watch`、`finding record` / `finding resolve`、findingに紐づく`ask --kind blocked`）とjobに許すもの（読み取りだけ）は、以前の`observer_access` / `reviewer_access`の一覧と同じ。ほかのroleの判定と、ask系・runtimeの操作系のコマンドをapplicationの層でmutationの前に通すことは、goal 55の後続のtaskが行う。

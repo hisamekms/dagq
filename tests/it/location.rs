@@ -41,11 +41,16 @@ fn repository(dir: &Path, name: &str) -> PathBuf {
 
 /// Run the binary from `cwd` with a controlled environment; `env` overrides
 /// `XDG_DATA_HOME`/`HOME` (both removed first) so no real queue is touched.
+/// It runs as the user, not as the actor of the session running the tests.
 fn invoke(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command
         .env_remove("XDG_DATA_HOME")
         .env_remove("HOME")
+        .env_remove("DAGQ_ROLE")
+        .env_remove("DAGQ_ACTOR_ID")
+        .env_remove("DAGQ_RUN_ID")
+        .env_remove("DAGQ_TASK_ID")
         .current_dir(cwd)
         .args(args);
     for (key, value) in env {
