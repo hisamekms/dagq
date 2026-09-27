@@ -89,7 +89,7 @@ crates.ioは追加の経路で、GitHub Releaseのartifactは上のとおり変�
 
 packageは`Cargo.toml`の`include`で`src/`、`migrations/`（`include_str!`で埋め込む）、`Cargo.toml`、`Cargo.lock`、`README.md`、`LICENSE`に絞る。`cargo publish --dry-run --locked`で確かめる。
 
-利用者は`cargo install --locked dagq`でsourceからbuildする（Rust 1.93以上とCコンパイラ。対応はmacOS Apple Siliconだけで変わらない）。入る場所は`~/.cargo/bin/dagq`なので、`~/.local/bin/dagq`と併用せずPATH上の`dagq`を1つにする。更新は同じ`cargo install --locked dagq`で上書きしてから`dagq up`（version違いのsupervisorを入れ替える）。
+利用者は`cargo install --locked dagq`でsourceからbuildする（Rust 1.98以上とCコンパイラ。対応はmacOS Apple Siliconだけで変わらない）。入る場所は`~/.cargo/bin/dagq`なので、`~/.local/bin/dagq`と併用せずPATH上の`dagq`を1つにする。更新は同じ`cargo install --locked dagq`で上書きしてから`dagq up`（version違いのsupervisorを入れ替える）。
 
 リリースは`Cargo.toml`と`plugin.json`のversionを上げてmainに着地し、`v<version>`のtagをpushすると、GitHub Releaseとcrates.ioの両方に出る。Trusted Publisherは既存のcrateにしか登録できないので、最初の1回はユーザーが手で`cargo publish`し、crates.ioでrepository `hisamekms/dagq`、workflow `release.yml`、environmentなしを登録する（手順はADR-0030の決定5）。
 
