@@ -8,6 +8,11 @@
 //! names the test and what it waited for, rather than leaving
 //! `cargo test | tail` hanging. Every test binary that uses it exits then,
 //! since the stuck thread cannot be stopped from outside.
+//!
+//! Exiting that way skips every `Drop`, so what a guard would clean up
+//! outside the process (the e2e tests' cmux workspace group, a supervisor
+//! they started) is registered with [`on_timeout`] too: the monitor runs
+//! those hooks, each within its own limit, before it exits (task 440).
 #![allow(dead_code)]
 
 pub mod cli;
@@ -20,7 +25,8 @@ use std::{
     process::{self, Command, ExitStatus, Output},
     sync::{
         LazyLock, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -52,6 +58,87 @@ static OPEN: LazyLock<Mutex<HashMap<u64, Open>>> = LazyLock::new(|| {
     Mutex::new(HashMap::new())
 });
 static NEXT: AtomicU64 = AtomicU64::new(0);
+/// Set once a wait is past its limit, while the monitor runs the hooks.
+static TIMING_OUT: AtomicBool = AtomicBool::new(false);
+/// The name of the threads the hooks run on.
+const CLEANUP_THREAD: &str = "timeout cleanup";
+
+struct Hook {
+    what: String,
+    limit: Duration,
+    run: Box<dyn FnOnce() + Send>,
+}
+
+static HOOKS: LazyLock<Mutex<HashMap<u64, Hook>>> = LazyLock::new(Default::default);
+
+fn hooks() -> MutexGuard<'static, HashMap<u64, Hook>> {
+    HOOKS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A cleanup [`on_timeout`] registered; dropping it, once the guard it
+/// stands in for has cleaned up by itself, unregisters it.
+#[must_use = "the cleanup is registered only while this is held"]
+pub struct Cleanup(u64);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        hooks().remove(&self.0);
+    }
+}
+
+/// Have `hook` run if a wait times out while the returned [`Cleanup`] is
+/// held, before the process exits. Hooks run newest first, as drops would,
+/// each on its own thread; one still running after `limit` is reported and
+/// left behind, so a stuck hook cannot keep the process from exiting.
+pub fn on_timeout(
+    limit: Duration,
+    what: impl Into<String>,
+    hook: impl FnOnce() + Send + 'static,
+) -> Cleanup {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    hooks().insert(
+        id,
+        Hook {
+            what: what.into(),
+            limit,
+            run: Box::new(hook),
+        },
+    );
+    Cleanup(id)
+}
+
+/// Run every registered hook, newest first, each within its limit.
+fn run_hooks() {
+    let mut pending: Vec<_> = hooks().drain().collect();
+    pending.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+    for (_, hook) in pending {
+        report(&format!("cleaning up before the exit: {}\n", hook.what));
+        let (done, finished) = mpsc::channel();
+        let run = hook.run;
+        let spawned = thread::Builder::new()
+            .name(CLEANUP_THREAD.into())
+            .spawn(move || {
+                run();
+                let _ = done.send(());
+            });
+        let outcome = match spawned {
+            Err(error) => format!("could not start: {error}"),
+            Ok(_) => match finished.recv_timeout(hook.limit) {
+                Ok(()) => "done".to_owned(),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    format!("did not finish within {:?}", hook.limit)
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => "panicked".to_owned(),
+            },
+        };
+        report(&format!("  cleanup {} {outcome}\n", hook.what));
+    }
+}
+
+/// Straight to the process's stderr: the test harness captures only
+/// `print!`/`eprint!`, and the process ends before it would print.
+fn report(text: &str) {
+    let _ = std::io::stderr().lock().write_all(text.as_bytes());
+}
 
 fn open() -> MutexGuard<'static, HashMap<u64, Open>> {
     OPEN.lock().unwrap_or_else(PoisonError::into_inner)
@@ -62,6 +149,15 @@ fn open() -> MutexGuard<'static, HashMap<u64, Open>> {
 pub struct Waiting(u64);
 impl Drop for Waiting {
     fn drop(&mut self) {
+        // Once the monitor is cleaning up for a timeout, a test thread
+        // whose wait ends meanwhile (the cleanup may be what ends it) stops
+        // here: were it to go on and finish the last test, the harness
+        // would exit with its own code before the monitor exits 101.
+        if TIMING_OUT.load(Ordering::SeqCst) && thread::current().name() != Some(CLEANUP_THREAD) {
+            loop {
+                thread::park();
+            }
+        }
         open().remove(&self.0);
     }
 }
@@ -120,33 +216,41 @@ fn exits(command: &Command) -> String {
 fn monitor() {
     loop {
         thread::sleep(Duration::from_millis(250));
-        let open = open();
-        let Some(late) = open
-            .values()
-            .find(|wait| wait.started.elapsed() >= wait.limit)
-        else {
+        let late = late_report(&open());
+        let Some(late) = late else {
             continue;
         };
-        // Straight to the process's stderr: the test harness captures only
-        // `print!`/`eprint!`, and the process ends before it would print.
-        let mut report = format!(
-            "\ntest {} timed out: {} did not happen within {:?}\n",
-            late.test, late.what, late.limit
-        );
-        let mut others: Vec<_> = open
-            .values()
-            .filter(|wait| !std::ptr::eq(*wait, late))
-            .collect();
-        others.sort_by_key(|wait| wait.started);
-        for wait in others {
-            report += &format!(
-                "  also waiting: test {} for {} (for {:?})\n",
-                wait.test,
-                wait.what,
-                wait.started.elapsed()
-            );
-        }
-        let _ = std::io::stderr().lock().write_all(report.as_bytes());
+        report(&late);
+        // The lock on the open waits is released: a hook may time its own
+        // commands with [`within`].
+        TIMING_OUT.store(true, Ordering::SeqCst);
+        run_hooks();
         process::exit(TIMED_OUT);
     }
+}
+
+/// The report of a wait past its limit, and of every other open wait, if
+/// one is past its limit.
+fn late_report(open: &HashMap<u64, Open>) -> Option<String> {
+    let late = open
+        .values()
+        .find(|wait| wait.started.elapsed() >= wait.limit)?;
+    let mut report = format!(
+        "\ntest {} timed out: {} did not happen within {:?}\n",
+        late.test, late.what, late.limit
+    );
+    let mut others: Vec<_> = open
+        .values()
+        .filter(|wait| !std::ptr::eq(*wait, late))
+        .collect();
+    others.sort_by_key(|wait| wait.started);
+    for wait in others {
+        report += &format!(
+            "  also waiting: test {} for {} (for {:?})\n",
+            wait.test,
+            wait.what,
+            wait.started.elapsed()
+        );
+    }
+    Some(report)
 }

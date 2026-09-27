@@ -13,11 +13,13 @@
 //! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test always runs.
 #[path = "e2e/cleanup.rs"]
 mod cleanup;
+mod common;
 
 use cleanup::{
     GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_retrying, listed_group,
     listed_workspace, sweep_abandoned_fixtures, wait_until_not_listed, workspace_listed,
 };
+use common::{Bounded, Cleanup, Waiting};
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -38,6 +40,14 @@ const SUPERVISE_TIMEOUT: Duration = Duration::from_secs(180);
 /// e2e tests running in parallel, other runs) must not hold back the claims
 /// a test waits for.
 const NO_LOAD_HOLD: [&str; 2] = ["--max-load", "0"];
+/// A whole e2e test, which the fixture holds: well above the longest test's
+/// own deadlines (a few supervise passes of [`SUPERVISE_TIMEOUT`] each), so
+/// those fail first with their own message. The waits inside a test are
+/// timed with [`common::STEP_LIMIT`].
+const TEST_LIMIT: Duration = Duration::from_secs(1800);
+/// How long the timeout cleanup of a fixture's cmux group or of a supervisor
+/// the test started may take before the test binary exits without it.
+const CLEANUP_LIMIT: Duration = Duration::from_secs(60);
 
 /// Stand-in for Claude Code. It accepts the argv the Claude adapter builds and
 /// follows the prompt: work in the cwd worktree, commit, publish the receipt by
@@ -251,7 +261,10 @@ fn preflight(cmux: &Path) -> String {
         String::from_utf8_lossy(&ping.stdout),
         String::from_utf8_lossy(&ping.stderr)
     );
-    let version = Command::new(cmux).arg("--version").output().unwrap();
+    let version = Command::new(cmux)
+        .arg("--version")
+        .bounded_output()
+        .unwrap();
     String::from_utf8_lossy(&version.stdout).trim().to_owned()
 }
 
@@ -260,7 +273,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .arg("-C")
         .arg(repo)
         .args(args)
-        .output()
+        .bounded_output()
         .unwrap();
     assert!(
         result.status.success(),
@@ -337,7 +350,7 @@ fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::proces
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output().unwrap()
+    command.bounded_output().unwrap()
 }
 
 fn checked(args: &[&str], output: std::process::Output) -> Value {
@@ -358,7 +371,7 @@ fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
     assert_eq!(listed["custom_color"], color, "{listed}");
     let status = Command::new(cmux)
         .args(["list-status", "--workspace", id])
-        .output()
+        .bounded_output()
         .unwrap();
     assert!(status.status.success(), "{status:?}");
     let status = String::from_utf8_lossy(&status.stdout);
@@ -370,7 +383,7 @@ fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
 fn workspace_env(cmux: &Path, id: &str) -> Value {
     let output = Command::new(cmux)
         .args(["workspace", "env", id, "--json"])
-        .output()
+        .bounded_output()
         .unwrap();
     assert!(
         output.status.success(),
@@ -380,8 +393,27 @@ fn workspace_env(cmux: &Path, id: &str) -> Value {
     serde_json::from_slice::<Value>(&output.stdout).unwrap()["env"].clone()
 }
 
-/// Kills a still-running supervisor when an assertion fails mid-run.
-struct ChildGuard(Child);
+/// Kills a still-running supervisor when an assertion fails mid-run, and
+/// when a wait times out and the test binary exits without unwinding.
+struct ChildGuard(Child, Option<Cleanup>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        let pid = child.id();
+        let cleanup = common::on_timeout(CLEANUP_LIMIT, format!("kill process {pid}"), move || {
+            // SAFETY: kill(2) takes no pointers. The hook is unregistered
+            // once the test reaps the child or the guard drops.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        });
+        Self(child, Some(cleanup))
+    }
+
+    /// The child was waited for: its pid is no longer ours to kill on a
+    /// timeout.
+    fn reaped(&mut self) {
+        self.1 = None;
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -390,6 +422,12 @@ impl Drop for ChildGuard {
             let _ = self.0.wait();
         }
     }
+}
+
+/// Join a thread the test started, within [`common::STEP_LIMIT`].
+fn joined<T>(handle: thread::JoinHandle<T>, what: &str) -> T {
+    let _waiting = common::within(common::STEP_LIMIT, format!("{what} to return"));
+    handle.join().unwrap()
 }
 
 fn reader(mut source: impl Read + Send + 'static) -> thread::JoinHandle<String> {
@@ -413,9 +451,11 @@ struct Fixture {
     /// Held for the fixture's lifetime, and dropped after `_dir` is gone;
     /// see [`OWNER_FILE`].
     _owner: fs::File,
+    _test: Waiting,
 }
 
 fn fixture() -> Fixture {
+    let test = common::within(TEST_LIMIT, "the test to finish");
     let cmux = cmux_executable();
     let cmux_version = preflight(&cmux);
     eprintln!("cmux: {cmux_version}");
@@ -453,17 +493,16 @@ fn fixture() -> Fixture {
     Fixture {
         // A repository queue's directory is named after the queue hash,
         // which is the external ID of its workspace group.
-        group: GroupGuard {
-            cmux: cmux.clone(),
-            external_id: db
-                .parent()
+        group: GroupGuard::new(
+            cmux.clone(),
+            db.parent()
                 .unwrap()
                 .file_name()
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .to_owned(),
-        },
+        ),
         _dir: dir,
         cmux,
         repo,
@@ -472,6 +511,7 @@ fn fixture() -> Fixture {
         db,
         env,
         _owner: owner,
+        _test: test,
     }
 }
 
@@ -557,7 +597,7 @@ fn supervise_once(
     guard: &mut WorkspaceGuard,
 ) -> Pass {
     let started = Instant::now();
-    let mut child = ChildGuard(
+    let mut child = ChildGuard::new(
         Command::new(BIN)
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
@@ -582,6 +622,7 @@ fn supervise_once(
     let mut listings = Vec::new();
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
+            child.reaped();
             break status;
         }
         assert!(
@@ -621,8 +662,8 @@ fn supervise_once(
         thread::sleep(Duration::from_millis(200));
     };
     let supervise_took = started.elapsed();
-    let stdout = stdout.join().unwrap();
-    let stderr = stderr.join().unwrap();
+    let stdout = joined(stdout, "the supervisor's stdout reader");
+    let stderr = joined(stderr, "the supervisor's stderr reader");
     eprintln!("supervise finished in {supervise_took:?}\n{stderr}");
     assert!(status.success(), "supervise failed ({status}): {stderr}");
     let outcome: Value = serde_json::from_str(&stdout).unwrap();
@@ -1010,7 +1051,7 @@ fn a_worker_question_is_answered_through_the_worker_terminal() {
         })
     };
     let pass = supervise_once(&fixture, &[], &[&task_id], &mut guard);
-    let ask_id = answerer.join().unwrap();
+    let ask_id = joined(answerer, "the answering thread");
     assert_eq!(
         pass.outcome["errors"],
         Value::Array(vec![]),
@@ -1260,7 +1301,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     };
 
     // A resident supervisor starts the run; it is killed once the worker runs.
-    let mut victim = ChildGuard(
+    let mut victim = ChildGuard::new(
         Command::new(BIN)
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
@@ -1305,9 +1346,10 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     );
     victim.0.kill().unwrap();
     victim.0.wait().unwrap();
+    victim.reaped();
     eprintln!(
         "killed supervisor stderr:\n{}",
-        victim_stderr.join().unwrap()
+        joined(victim_stderr, "the killed supervisor's stderr reader")
     );
     assert!(!pid_alive(victim_pid));
 
@@ -1449,7 +1491,7 @@ impl AgentGuard {
     fn loaded(&self) -> bool {
         Command::new("launchctl")
             .args(["print", &format!("gui/{}/{}", uid(), self.label)])
-            .output()
+            .bounded_output()
             .unwrap()
             .status
             .success()
@@ -1461,7 +1503,7 @@ impl Drop for AgentGuard {
         if self.loaded() {
             let output = Command::new("launchctl")
                 .args(["bootout", &format!("gui/{}/{}", uid(), self.label)])
-                .output()
+                .bounded_output()
                 .unwrap();
             eprintln!(
                 "booted out {} ({}): {}",
@@ -1501,7 +1543,7 @@ fn uid() -> u32 {
 fn pid_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
-        .output()
+        .bounded_output()
         .is_ok_and(|output| output.status.success())
 }
 
@@ -1780,7 +1822,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     // A person renames the inbox workspace; `up` still knows it.
     let rename = Command::new(cmux)
         .args(["workspace", "rename", &inbox, "--title", "renamed by hand"])
-        .output()
+        .bounded_output()
         .unwrap();
     assert!(rename.status.success(), "{rename:?}");
 
@@ -1789,7 +1831,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     assert!(
         !Command::new("launchctl")
             .args(["print", &format!("gui/{}/{label}", uid())])
-            .output()
+            .bounded_output()
             .unwrap()
             .status
             .success(),
@@ -1925,7 +1967,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
             "--workspace",
             &inbox,
         ])
-        .output()
+        .bounded_output()
         .unwrap();
     assert!(unpin.status.success(), "{unpin:?}");
     let third = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
@@ -1944,7 +1986,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
             "--workspace",
             &supervisor_workspace,
         ])
-        .output()
+        .bounded_output()
         .unwrap();
     assert!(pin.status.success(), "{pin:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1954,7 +1996,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     }
     let refused = Command::new(cmux)
         .args(["workspace", "close", &supervisor_workspace])
-        .output()
+        .bounded_output()
         .unwrap();
     eprintln!("cmux workspace close of a pinned workspace: {refused:?}");
     assert!(!refused.status.success(), "{refused:?}");
@@ -1991,7 +2033,7 @@ fn send_exit(cmux: &Path, workspace: &str) {
         &["send", "--workspace", workspace, "--", "/exit"][..],
         &["send-key", "--workspace", workspace, "--", "enter"],
     ] {
-        let output = Command::new(cmux).args(args).output().unwrap();
+        let output = Command::new(cmux).args(args).bounded_output().unwrap();
         assert!(output.status.success(), "{args:?}: {output:?}");
     }
 }
@@ -2150,7 +2192,7 @@ fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
     if workspace_listed(cmux, &ids[0]) {
         let close = Command::new(cmux)
             .args(["workspace", "close", &ids[0]])
-            .output()
+            .bounded_output()
             .unwrap();
         assert!(close.status.success(), "{close:?}");
     }
@@ -2196,7 +2238,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     fs::copy(BIN, &fixed).unwrap();
     let fixed_text = fixed.to_str().unwrap();
-    let mut supervisor = ChildGuard(
+    let mut supervisor = ChildGuard::new(
         Command::new(&fixed)
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
@@ -2275,7 +2317,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let landed = loop {
         if started.elapsed() >= SUPERVISE_TIMEOUT * 2 {
             let _ = supervisor.0.kill();
-            let log = stderr.take().unwrap().join().unwrap();
+            let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
             panic!("the run did not land; supervisor stderr:\n{log}");
         }
         let detail = dagq(env, &["show", &task_id, "--full"]);
@@ -2322,12 +2364,13 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let deadline = Instant::now() + Duration::from_secs(30);
     let exit = loop {
         if let Some(exit) = supervisor.0.try_wait().unwrap() {
+            supervisor.reaped();
             break exit;
         }
         assert!(Instant::now() < deadline, "the supervisor did not stop");
         thread::sleep(Duration::from_millis(200));
     };
-    let stderr = stderr.take().unwrap().join().unwrap();
+    let stderr = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
     eprintln!("supervisor stderr:\n{stderr}");
     assert!(exit.success(), "{exit}");
     assert_eq!(
@@ -2382,7 +2425,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let build = format!(
         "mkdir -p \"$CARGO_TARGET_DIR/release\" && cp '{BIN}' \"$CARGO_TARGET_DIR/release/dagq\""
     );
-    let mut supervisor = ChildGuard(
+    let mut supervisor = ChildGuard::new(
         Command::new(&fixed)
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
@@ -2447,7 +2490,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     while !installed(&landed) {
         if started.elapsed() >= SUPERVISE_TIMEOUT {
             let _ = supervisor.0.kill();
-            let log = stderr.take().unwrap().join().unwrap();
+            let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
             panic!(
                 "{landed} was not installed: {:?}\nsupervisor stderr:\n{log}",
                 updates()
@@ -2473,7 +2516,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let detail = loop {
         if started.elapsed() >= SUPERVISE_TIMEOUT * 2 {
             let _ = supervisor.0.kill();
-            let log = stderr.take().unwrap().join().unwrap();
+            let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
             panic!("the run did not land; supervisor stderr:\n{log}");
         }
         let detail = dagq(env, &["show", &task_id, "--full"]);
@@ -2507,19 +2550,20 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let deadline = Instant::now() + Duration::from_secs(30);
     let exit = loop {
         if let Some(exit) = supervisor.0.try_wait().unwrap() {
+            supervisor.reaped();
             break exit;
         }
         assert!(Instant::now() < deadline, "the supervisor did not stop");
         thread::sleep(Duration::from_millis(200));
     };
-    let stderr = stderr.take().unwrap().join().unwrap();
+    let stderr = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
     assert!(exit.success(), "{exit}\n{stderr}");
     assert!(!stderr.contains("could not exec"), "{stderr}");
 }
 
 /// Run `cmux args`, which must succeed, and return what it printed.
 fn cmux_ok(cmux: &Path, args: &[&str]) -> String {
-    let output = Command::new(cmux).args(args).output().unwrap();
+    let output = Command::new(cmux).args(args).bounded_output().unwrap();
     assert!(output.status.success(), "cmux {args:?}: {output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
@@ -2542,7 +2586,7 @@ impl Drop for WindowGuard {
         let others: Vec<String> = Command::new(&self.cmux)
             .args(["--json", "--id-format", "uuids", "workspace", "list"])
             .args(["--window", &self.id])
-            .output()
+            .bounded_output()
             .ok()
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
             .and_then(|list| list["workspaces"].as_array().cloned())
@@ -2560,7 +2604,7 @@ impl Drop for WindowGuard {
         }
         match Command::new(&self.cmux)
             .args(["close-window", "--window", &self.id])
-            .output()
+            .bounded_output()
         {
             Ok(output) if output.status.success() => eprintln!("closed window {}", self.id),
             Ok(output) => eprintln!("closing window {} failed: {output:?}", self.id),
@@ -2688,10 +2732,7 @@ fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gon
     // workspace of each: the dead one's and the live fixture's.
     let gone = tempfile::tempdir().unwrap();
     let hash = format!("e2esweep{}", uuid::Uuid::new_v4().simple());
-    let _group = GroupGuard {
-        cmux: cmux.clone(),
-        external_id: hash.clone(),
-    };
+    let _group = GroupGuard::new(cmux.clone(), hash.clone());
     let group: Value = serde_json::from_str(&cmux_ok(
         cmux,
         &[
@@ -2722,7 +2763,7 @@ fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gon
         if let Some(group) = group {
             args.extend(["--group", group]);
         }
-        let output = Command::new(cmux).args(&args).output().unwrap();
+        let output = Command::new(cmux).args(&args).bounded_output().unwrap();
         guard.record_opened(&output.stdout);
         assert!(output.status.success(), "{output:?}");
         let created: Value = serde_json::from_slice(&output.stdout).unwrap();

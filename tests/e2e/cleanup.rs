@@ -2,7 +2,8 @@
 //! the guards that close a test's workspaces and group when it ends, the
 //! listing of every cmux window's workspaces they look at, and the sweep that
 //! cleans up after earlier e2e processes that died before their guards ran.
-use super::pid_alive;
+use super::{CLEANUP_LIMIT, pid_alive};
+use crate::common::{self, Bounded, Cleanup};
 use anyhow::{Context, bail};
 use dagq::infrastructure::adapters::merged_workspace_listing;
 use serde_json::Value;
@@ -33,7 +34,7 @@ pub(crate) fn cmux_retrying(
 ) -> std::io::Result<std::process::Output> {
     let mut attempt = 1;
     loop {
-        let output = Command::new(cmux).args(args).output()?;
+        let output = Command::new(cmux).args(args).bounded_output()?;
         if accept(&output) || attempt >= CMUX_RETRY_ATTEMPTS {
             return Ok(output);
         }
@@ -103,7 +104,7 @@ fn merged_listing(cmux: &Path) -> anyhow::Result<Value> {
             "--window",
             window,
         ];
-        let output = Command::new(cmux).args(args).output()?;
+        let output = Command::new(cmux).args(args).bounded_output()?;
         if !output.status.success() {
             bail!(
                 "cmux {args:?} failed ({}): {}",
@@ -151,8 +152,11 @@ pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
 fn close_workspace(cmux: &Path, id: &str, who: &str) {
     let _ = Command::new(cmux)
         .args(["workspace-action", "--action", "unpin", "--workspace", id])
-        .output();
-    match Command::new(cmux).args(["workspace", "close", id]).output() {
+        .bounded_output();
+    match Command::new(cmux)
+        .args(["workspace", "close", id])
+        .bounded_output()
+    {
         Ok(output) if output.status.success() => eprintln!("{who}closed workspace {id}"),
         Ok(output) => eprintln!(
             "{who}closing workspace {id} failed: {}",
@@ -273,10 +277,30 @@ pub(crate) fn listed_group(cmux: &Path, external_id: &str) -> Option<Value> {
 }
 
 /// Deletes the queue's workspace group and closes what is left in it (the
-/// anchor cmux generated with it) when the test ends.
+/// anchor cmux generated with it) when the test ends, and when a wait times
+/// out and the test binary exits without unwinding (task 440).
 pub(crate) struct GroupGuard {
     pub(crate) cmux: PathBuf,
     pub(crate) external_id: String,
+    _on_timeout: Cleanup,
+}
+
+impl GroupGuard {
+    pub(crate) fn new(cmux: PathBuf, external_id: String) -> Self {
+        let on_timeout = {
+            let (cmux, external_id) = (cmux.clone(), external_id.clone());
+            common::on_timeout(
+                CLEANUP_LIMIT,
+                format!("delete the workspace group of queue {external_id}"),
+                move || delete_group(&cmux, &external_id, ""),
+            )
+        };
+        Self {
+            cmux,
+            external_id,
+            _on_timeout: on_timeout,
+        }
+    }
 }
 
 impl Drop for GroupGuard {
@@ -284,21 +308,7 @@ impl Drop for GroupGuard {
         // Never panic here: a panic while the test is already unwinding
         // aborts the whole test binary. A group left behind is swept by the
         // next fixture.
-        let Some(group) = try_listed_group(&self.cmux, &self.external_id) else {
-            return;
-        };
-        let id = group["id"].as_str().unwrap_or_default().to_owned();
-        match Command::new(&self.cmux)
-            .args(["workspace-group", "delete", &id, "--close-workspaces"])
-            .output()
-        {
-            Ok(output) if output.status.success() => eprintln!("deleted workspace group {id}"),
-            Ok(output) => eprintln!(
-                "deleting workspace group {id} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            Err(error) => eprintln!("deleting workspace group {id} failed: {error}"),
-        }
+        delete_group(&self.cmux, &self.external_id, "");
     }
 }
 
@@ -387,12 +397,12 @@ pub(crate) fn sweep_abandoned_fixtures(cmux: &Path) {
     }
     for (dir, _) in &abandoned {
         for hash in queue_hashes(dir) {
-            delete_group(cmux, &hash);
+            delete_group(cmux, &hash, "e2e sweep: ");
         }
     }
     let left_behind = |value: &str| inside(value) || in_vanished_temp_dir(value, &temp_roots);
     for hash in close_workspaces_left_behind(cmux, &left_behind) {
-        delete_group(cmux, &hash);
+        delete_group(cmux, &hash, "e2e sweep: ");
     }
     for (dir, lock) in abandoned {
         match fs::remove_dir_all(&dir) {
@@ -484,7 +494,7 @@ fn queue_hashes(dir: &Path) -> Vec<String> {
 fn kill_processes_inside(inside: &dyn Fn(&str) -> bool) {
     let Ok(output) = Command::new("ps")
         .args(["-axww", "-o", "pid=,command="])
-        .output()
+        .bounded_output()
     else {
         eprintln!("e2e sweep: ps failed; left processes alone");
         return;
@@ -528,7 +538,9 @@ fn kill_processes_inside(inside: &dyn Fn(&str) -> bool) {
     }
 }
 
-fn delete_group(cmux: &Path, external_id: &str) {
+/// Delete the workspace group of queue `external_id` with what is left in
+/// it, if cmux lists it, reporting the outcome on stderr under `who`.
+fn delete_group(cmux: &Path, external_id: &str, who: &str) {
     let Some(group) = try_listed_group(cmux, external_id) else {
         return;
     };
@@ -536,16 +548,16 @@ fn delete_group(cmux: &Path, external_id: &str) {
     let name = group["name"].as_str().unwrap_or_default().to_owned();
     match Command::new(cmux)
         .args(["workspace-group", "delete", &id, "--close-workspaces"])
-        .output()
+        .bounded_output()
     {
         Ok(output) if output.status.success() => {
-            eprintln!("e2e sweep: deleted workspace group {id} {name} (queue {external_id})")
+            eprintln!("{who}deleted workspace group {id} {name} (queue {external_id})")
         }
         Ok(output) => eprintln!(
-            "e2e sweep: deleting workspace group {id} failed: {}",
+            "{who}deleting workspace group {id} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ),
-        Err(error) => eprintln!("e2e sweep: deleting workspace group {id} failed: {error}"),
+        Err(error) => eprintln!("{who}deleting workspace group {id} failed: {error}"),
     }
 }
 
@@ -609,7 +621,7 @@ pub(crate) fn try_listed_group(cmux: &Path, external_id: &str) -> Option<Value> 
 }
 
 fn cmux_json(cmux: &Path, args: &[&str]) -> Option<Value> {
-    let output = Command::new(cmux).args(args).output().ok()?;
+    let output = Command::new(cmux).args(args).bounded_output().ok()?;
     if !output.status.success() {
         return None;
     }

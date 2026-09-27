@@ -277,6 +277,83 @@ fn a_wait_past_its_limit_fails_with_the_test_and_the_condition() {
     );
 }
 
+/// Only when [`a_timed_out_wait_runs_the_cleanups_before_the_exit`] runs
+/// it: a wait that never ends, with cleanups registered for its timeout.
+#[test]
+#[ignore = "run by a_timed_out_wait_runs_the_cleanups_before_the_exit"]
+fn deadline_cleanup_probe() {
+    let Some(dir) = std::env::var_os("DAGQ_DEADLINE_CLEANUP_PROBE") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let cleaned = dir.join("cleaned");
+    let _cleanup = common::on_timeout(common::STEP_LIMIT, "the probe's marker", move || {
+        std::fs::write(cleaned, "cleaned\n").unwrap()
+    });
+    let unregistered = dir.join("unregistered");
+    drop(common::on_timeout(
+        common::STEP_LIMIT,
+        "an unregistered cleanup",
+        move || std::fs::write(unregistered, "ran\n").unwrap(),
+    ));
+    // Newest first: this one runs, and is given up on, before the marker.
+    let _stuck = common::on_timeout(
+        std::time::Duration::from_millis(300),
+        "a stuck cleanup",
+        || loop {
+            std::thread::park();
+        },
+    );
+    let _waiting = common::within(
+        std::time::Duration::from_millis(300),
+        "the probe's condition to hold",
+    );
+    loop {
+        std::thread::park();
+    }
+}
+
+/// A wait past its limit runs the cleanups registered for it before the
+/// test binary exits, newest first and each within its own limit, so one
+/// that is stuck does not keep the binary from exiting (task 440).
+#[test]
+fn a_timed_out_wait_runs_the_cleanups_before_the_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cli_version::deadline_cleanup_probe",
+            "--ignored",
+            "--test-threads",
+            "2",
+        ])
+        .env("DAGQ_DEADLINE_CLEANUP_PROBE", dir.path())
+        .bounded_output()
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    assert_eq!(output.status.code(), Some(common::TIMED_OUT), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let at = |line: &str| {
+        stderr
+            .find(line)
+            .unwrap_or_else(|| panic!("no {line:?} in {stderr}"))
+    };
+    let timed_out = at("test cli_version::deadline_cleanup_probe timed out: \
+         the probe's condition to hold did not happen within 300ms");
+    let stuck = at("cleaning up before the exit: a stuck cleanup\n");
+    let given_up = at("cleanup a stuck cleanup did not finish within 300ms\n");
+    let marker = at("cleaning up before the exit: the probe's marker\n");
+    let done = at("cleanup the probe's marker done\n");
+    assert!(timed_out < stuck && stuck < given_up && given_up < marker && marker < done);
+    assert!(!stderr.contains("an unregistered cleanup"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("cleaned")).unwrap(),
+        "cleaned\n"
+    );
+    assert!(!dir.path().join("unregistered").exists());
+}
+
 /// `install` puts a binary in place by a rename that keeps the old one as
 /// `<name>.previous`, and hands a running supervisor over to it (ADR-0045
 /// decisions 10, 11, 14): the supervisor process execs the new file under
