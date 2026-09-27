@@ -128,6 +128,12 @@ use self::{
 /// session spans still open (ADR-0048 decision 8).
 pub const SESSION_TURNS_INTERVAL: Duration = Duration::from_secs(600);
 
+/// The snapshot of the binary a run's session wrapper runs from, in the
+/// run directory: copied for each session (a resume copies it again) so
+/// rebuilding the binary does not change a running one, and removed once
+/// the run ended and nobody leases it ([`cleanup`]).
+pub(super) const RUN_RUNNER_FILE: &str = "runner";
+
 /// How far back the daily observation reads.
 pub const DAILY_WINDOW_SECS: i64 = 24 * 60 * 60;
 

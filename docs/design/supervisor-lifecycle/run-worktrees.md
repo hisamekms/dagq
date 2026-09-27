@@ -20,6 +20,8 @@ related:
   - worktreeのディレクトリがもう無いのにbranch `dagq/<run-id>`が残っていれば、`git worktree prune`（Gitはpruneするまで消えたworktreeを覚えていて、そこにcheckoutされたbranchを消させない）の後に`git branch -D`で消し、`worktree_removed`（`bytes: 0`、`worktree_missing: true`、他の欄は同じ）を記録する。branchが無ければ何もしない（task 405。branchの一覧は1回の掃除で1回だけ読む）
 - **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物（`target/`と`llvm-cov-target/`。`cargo llvm-cov`は既定で`target/llvm-cov-target`に作る）だけを消す。Gitがその下のfileをtrackしていれば消さず、linkはたどらない。`build_outputs_removed`（`paths`、`bytes`、`by: supervisor`）を記録する。ソース、commit、run_dirは残る。triageを待つrunも対象で、resumeされたら作り直す。worktreeが無ければ何もしない
 
+- **runの`runner`**（task 696、goal 54の(3)）: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し。1個約9MB）を消す。対象のrunはslotに無く生きているleaseも無いので、そのsessionのwrapperを走らせるものは居ない。resumeはleaseを取ってから写し直すので、消した後のresumeも動く。jobが通り過ぎるまでrunは予約されているので、loopがその間にleaseを取って写した`runner`を消すことはない。`needs_session`でresumeを待つrun（taskがまだ終わっていないもの）は対象外で、`runner`は残る。eventは記録せず（logの1行だけ）、`bytes`にも数えない。失敗はlogだけで、次の掃除で再び試す。worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す
+
 `bytes`は消したものがディスクで占めていた量（blocks × 512、hard linkは1回だけ数える）。どちらのeventも人の手の代わりにruntimeが直したもので、goal 34の自動修正の件数に数える。
 
 空き容量がclaimか着地の検証に足りないときも、supervisorは同じ掃除と`git worktree prune`を走らせ、何か消えれば`auto_repaired`（`repair: disk_cleanup`）を記録する（[空き容量を確かめる](disk-space.md)、task 377）。その閾値は直近の`build_outputs_removed`の`bytes`の最大値から決める。

@@ -501,6 +501,7 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
     assert_eq!(state(false), [(PlannerState::Opening, true, false)]);
 
     // The wrapper runs the agent, which goes idle and exits.
+    assert!(planners.join("1/runner").is_file());
     let db = fixture.location.db.canonicalize().unwrap();
     let result = dagq::compose::planner_session_with_provider(
         &db,
@@ -517,6 +518,10 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
     assert!(planner.heartbeat_at.is_some());
     assert!(planners.join("1/idle.json").is_file());
     assert_eq!(state(false), [(PlannerState::Exited, false, false)]);
+    // Task 696: its exit recorded, the wrapper removed its runner and left
+    // the rest of the directory.
+    assert!(!planners.join("1/runner").exists());
+    assert!(planners.join("1/prompt.txt").is_file());
     // An agent that cannot start is recorded as an exit of 127.
     let third = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
     let third_id = PlannerId::new(third["planner"]["id"].as_i64().unwrap());
@@ -527,6 +532,7 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
         "{error:#}"
     );
     assert_eq!(queue.planner(third_id).unwrap().exit_code, Some(127));
+    assert!(!planners.join(format!("{third_id}/runner")).exists());
     queue.close_planner(third_id, None).unwrap();
     // One session per planner.
     assert!(
@@ -668,4 +674,15 @@ fn plan_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone() {
             .map(|planner| planner["id"].as_i64().unwrap())
             .collect();
     assert_eq!(shown, [alive, listed, fresh].map(PlannerId::as_i64));
+    // Task 696: the runners of the planners whose wrapper is done went,
+    // their row closed or not; a live wrapper's, and one not registered
+    // within its startup time yet, stay with the rest of the directory.
+    let dir = |id: PlannerId| planners_dir(&fixture).join(id.to_string());
+    for id in [dead, exited, listed] {
+        assert!(!dir(id).join("runner").exists(), "planner {id}");
+        assert!(dir(id).join("prompt.txt").is_file());
+    }
+    for id in [alive, fresh, unlisted] {
+        assert!(dir(id).join("runner").is_file(), "planner {id}");
+    }
 }

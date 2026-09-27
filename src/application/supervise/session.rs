@@ -121,7 +121,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         }
         // A running wrapper must not change when the development binary is rebuilt.
         self.files
-            .copy(&self.layout.runner, &run_dir.join("runner"))
+            .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         let git_output = self.repository.create_worktree(&run)?;
         self.files
@@ -132,7 +132,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
         let command = shell_join(&[
-            path_text(&run_dir.join("runner"))?,
+            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
             "--db".into(),
             path_text(&self.layout.db)?,
             "session".into(),

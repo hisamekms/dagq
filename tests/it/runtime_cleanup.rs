@@ -1,6 +1,7 @@
 //! Runtime tests: the cleanup of ended runs' worktrees off the supervisor's
 //! loop, the branches of worktrees already gone, and worktrees a rebind
-//! left pointing at an old repository (task 405).
+//! left pointing at an old repository (task 405), and the runners of
+//! ended runs (task 696).
 use crate::{common, runtime_support};
 
 use dagq::{application::RunFiles, runtime::RunFilesPort};
@@ -242,11 +243,22 @@ fn a_run_leased_during_the_cleanup_keeps_its_worktree() {
     let runs: Vec<TaskRun> = (1..=2)
         .map(|task| queue.show(TaskId::new(task)).unwrap().runs[0].clone())
         .collect();
-    // Both build again.
+    // Task 696: the runners of the ended runs went with their build outputs.
+    let runner = |run: &TaskRun| Path::new(run.run_dir().unwrap()).join("runner");
+    for run in &runs {
+        assert!(!runner(run).exists());
+        assert!(
+            Path::new(run.run_dir().unwrap())
+                .join("receipt.json")
+                .is_file()
+        );
+    }
+    // Both build again, and have a runner again.
     for run in &runs {
         let dir = Path::new(run.worktree_path().unwrap()).join("target/debug");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("again"), "x").unwrap();
+        fs::write(runner(run), "binary").unwrap();
     }
     let files = GatedFiles::default();
     let options = files.options(sweeping_options());
@@ -278,6 +290,9 @@ fn a_run_leased_during_the_cleanup_keeps_its_worktree() {
     );
     let kept = Path::new(leased.worktree_path().unwrap()).join("target/debug/again");
     assert!(kept.is_file());
+    // The leased run's runner is kept; the other's is gone.
+    assert!(runner(leased).is_file());
+    assert!(!runner(cleaned).exists());
     assert_eq!(
         payloads_of(&queue, leased, "build_outputs_removed").len(),
         1

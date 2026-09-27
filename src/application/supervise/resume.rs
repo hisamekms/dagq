@@ -346,10 +346,10 @@ impl Supervisor<'_> {
             message.as_bytes(),
         )?;
         self.files
-            .copy(&self.layout.runner, &run_dir.join("runner"))
+            .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         let command = shell_join(&[
-            path_text(&run_dir.join("runner"))?,
+            path_text(&run_dir.join(RUN_RUNNER_FILE))?,
             "--db".into(),
             path_text(&self.layout.db)?,
             "session".into(),

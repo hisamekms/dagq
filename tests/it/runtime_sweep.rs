@@ -602,3 +602,60 @@ fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone
         assert!(queue.planner(id).unwrap().closed_at.is_some());
     }
 }
+
+/// Task 696: the supervisor's sweep removes the runner of every planner
+/// whose wrapper is done (its exit recorded, or its process dead), whether
+/// its row is closed or still open, and keeps the runner of a live wrapper,
+/// a closed row's included, and the rest of each directory.
+#[test]
+fn the_sweep_removes_the_runners_of_planners_whose_wrapper_is_done() {
+    use dagq::{domain::PlannerOrigin, infrastructure::location::planners_dir};
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let dead_pid = {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    };
+    let alive_pid = std::process::id();
+    let record = |workspace: &str, pid| {
+        let planner = queue.open_planner(PlannerOrigin::Person, None).unwrap();
+        queue
+            .planner_workspace_created(planner.id, workspace)
+            .unwrap();
+        queue.register_planner_wrapper(planner.id, pid).unwrap();
+        let dir = planners_dir(&db).join(planner.id.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner"), "binary").unwrap();
+        fs::write(dir.join("prompt.txt"), "prompt").unwrap();
+        (planner.id, dir)
+    };
+    let (exited, exited_dir) = record("W-EXITED", alive_pid);
+    queue.planner_exited(exited, alive_pid, 0).unwrap();
+    // Listed, so its row stays open.
+    let (_, dead_dir) = record("W-DEAD", dead_pid);
+    let (closed, closed_dir) = record("W-CLOSED", alive_pid);
+    queue.close_planner(closed, None).unwrap();
+    let (_, alive_dir) = record("W-ALIVE", alive_pid);
+
+    let backend = TestWorkspace::new(&db, false, "exit 0");
+    backend
+        .listed
+        .lock()
+        .unwrap()
+        .extend(["w-dead".into(), "w-alive".into()]);
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    for dir in [&exited_dir, &dead_dir] {
+        assert!(!dir.join("runner").exists(), "{}", dir.display());
+    }
+    for dir in [&closed_dir, &alive_dir] {
+        assert!(dir.join("runner").is_file(), "{}", dir.display());
+    }
+    for dir in [&exited_dir, &dead_dir, &closed_dir, &alive_dir] {
+        assert!(dir.join("prompt.txt").is_file());
+    }
+}

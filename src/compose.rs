@@ -1108,6 +1108,14 @@ same in one step",
             &SystemProcesses,
             &*self.generators.clock,
         );
+        // And the runners of the planners nothing runs any more go.
+        let runners = planner::remove_unused_planner_runners(
+            &queue,
+            &SystemProcesses,
+            &LocalRunFiles,
+            &*self.generators.clock,
+            &planners_dir(&db),
+        );
         let mut opened = planner::open_person_planner(&PlannerLaunch {
             queue: &queue,
             cmux: &recording,
@@ -1120,7 +1128,7 @@ same in one step",
             claude: &options.claude,
             plugin_dir: plugin_dir.as_deref(),
         })?;
-        if let Err(error) = swept {
+        for error in [swept.err(), runners.err()].into_iter().flatten() {
             opened.warnings.push(format!("{error:#}"));
         }
         Ok(serde_json::to_value(opened)?)

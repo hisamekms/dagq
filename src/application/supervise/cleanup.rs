@@ -348,6 +348,7 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
             }
         };
         let result = if still {
+            remove_run_runner(ports, &candidate);
             clean_worktree(ports, &candidate, &mut branches, &mut pruned)
         } else {
             Ok(None)
@@ -371,6 +372,27 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
         warn!(error = %format_args!("{error:#}"), "git worktree prune failed: {error:#}");
     }
     outcomes
+}
+
+/// Remove the runner (the binary snapshot its session wrapper ran from)
+/// of an ended run nobody leases: no session of it runs, and a resume,
+/// which needs the lease, copies it again. The run stays reserved while
+/// this runs, so the loop cannot lease it and copy one in between. A
+/// failure is logged and retried on the next cleanup.
+fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) {
+    let runner = ports
+        .runs_dir
+        .join(candidate.run_id.as_str())
+        .join(RUN_RUNNER_FILE);
+    match crate::application::planner::remove_runner(&*ports.files, &runner) {
+        Ok(true) => {
+            info!(run_id = %candidate.run_id, "run {} is {}; removed its runner", candidate.run_id, candidate.status.as_str());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            warn!(run_id = %candidate.run_id, error = %format_args!("{error:#}"), "run {}: its runner could not be removed: {error:#}", candidate.run_id);
+        }
+    }
 }
 
 /// Clean one ended run's worktree ([`Supervisor::clean_ended_worktrees`]).

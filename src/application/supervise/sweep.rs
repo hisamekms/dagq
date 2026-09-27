@@ -124,8 +124,10 @@ impl Supervisor<'_> {
     ///
     /// The same pass asks for the disk of the ended runs to be freed
     /// ([`Self::clean_ended_worktrees`]), which a job does off the loop,
-    /// and closes the rows of the planners whose workspace and wrapper are
-    /// gone ([`Self::close_abandoned_planners`]).
+    /// closes the rows of the planners whose workspace and wrapper are
+    /// gone ([`Self::close_abandoned_planners`]), and removes the runners
+    /// of the planners nothing runs any more
+    /// ([`Self::remove_unused_planner_runners`]).
     pub(super) fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
         if self
             .last_sweep
@@ -136,7 +138,28 @@ impl Supervisor<'_> {
         self.last_sweep = Some(Instant::now());
         self.clean_ended_worktrees(None);
         self.close_abandoned_planners();
+        self.remove_unused_planner_runners();
         self.sweep_ended_workspaces()
+    }
+    /// Remove the runners (the binary snapshots) of the planners whose
+    /// wrapper is done ([`planner::remove_unused_planner_runners`]); a
+    /// failure is logged only, and retried on the next sweep.
+    fn remove_unused_planner_runners(&mut self) {
+        match planner::remove_unused_planner_runners(
+            &*self.queue,
+            &*self.processes,
+            &*self.files,
+            &*self.generators.clock,
+            &self.layout.planners_dir,
+        ) {
+            Ok(removed) if !removed.is_empty() => {
+                info!("removed the runners of {} ended planners", removed.len());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the runners of ended planners could not be removed: {error:#}");
+            }
+        }
     }
     /// Close the rows of the planners, a person's included, whose workspace
     /// cmux no longer lists and whose wrapper is done

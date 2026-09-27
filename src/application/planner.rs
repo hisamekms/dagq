@@ -297,6 +297,7 @@ pub fn run_planner_session(
         Ok(child) => child,
         Err(error) => {
             let _ = queue.planner_exited(id, pid, 127);
+            drop_own_runner(files, id, dir);
             return Err(error);
         }
     };
@@ -304,6 +305,7 @@ pub fn run_planner_session(
         let _ = child.kill();
         let _ = child.wait();
         let _ = queue.planner_exited(id, pid, 127);
+        drop_own_runner(files, id, dir);
         return Err(error);
     }
     let code = loop {
@@ -313,6 +315,7 @@ pub fn run_planner_session(
             Err(error) => {
                 let _ = child.kill();
                 let _ = queue.planner_exited(id, pid, 127);
+                drop_own_runner(files, id, dir);
                 return Err(error);
             }
         }
@@ -323,7 +326,27 @@ pub fn run_planner_session(
         thread::sleep(provider.wait_interval());
     };
     queue.planner_exited(id, pid, code)?;
+    drop_own_runner(files, id, dir);
     Ok(json!({"planner_id": id, "exit_code": code}))
+}
+
+/// Remove the runner the wrapper of planner `id` runs from, once its exit
+/// is recorded: nothing runs it again (a planner is never reopened), and
+/// the process keeps its image. A failure is logged; the supervisor's
+/// sweep ([`remove_unused_planner_runners`]) retries it.
+fn drop_own_runner(files: &dyn RunFiles, id: PlannerId, dir: &Path) {
+    if let Err(error) = remove_runner(files, &dir.join(PLANNER_RUNNER_FILE)) {
+        warn!(planner_id = %id, error = %format_args!("{error:#}"), "planner {id}: its runner could not be removed: {error:#}");
+    }
+}
+
+/// Remove the runner at `path`; whether there was one.
+pub(crate) fn remove_runner(files: &dyn RunFiles, path: &Path) -> Result<bool> {
+    match files.remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 /// A planner with how it stands now: its state, whether it is alive, and
@@ -458,4 +481,49 @@ pub fn close_abandoned_planners(
         }
     }
     Ok(closed)
+}
+
+/// Remove the runner of every planner, closed or not, that nothing runs
+/// any more ([`PlannerSession::runner_unused`]: its exit recorded, its
+/// wrapper dead or silent, or never registered in time), for the planners
+/// left before their wrapper removed its own, or whose wrapper did not end
+/// cleanly. A live wrapper's runner is kept. Every removal is tried; the
+/// first failure is returned after them. Returns the IDs whose runner went.
+pub fn remove_unused_planner_runners(
+    queue: &dyn Queue,
+    processes: &dyn ProcessControl,
+    files: &dyn RunFiles,
+    clock: &dyn Clock,
+    planners_dir: &Path,
+) -> Result<Vec<PlannerId>> {
+    let now = clock.now();
+    let mut removed = Vec::new();
+    let mut failure = None;
+    for planner in queue.planners(true)? {
+        let runner = planner_dir(planners_dir, planner.id).join(PLANNER_RUNNER_FILE);
+        if !files.exists(&runner) {
+            continue;
+        }
+        let probe = PlannerProbe {
+            now,
+            workspace_listed: false,
+            wrapper_alive: planner.wrapper_pid.is_some_and(|pid| processes.alive(pid)),
+            idle: None,
+            working: None,
+        };
+        if !planner.runner_unused(&probe) {
+            continue;
+        }
+        match remove_runner(files, &runner) {
+            Ok(true) => removed.push(planner.id),
+            Ok(false) => {}
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(removed),
+    }
 }

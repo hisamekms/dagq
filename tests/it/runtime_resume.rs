@@ -252,9 +252,14 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
         "resuming (runtime)"
     );
 
+    // Task 696: a parked run keeps its runner for the resume, which copies
+    // it again anyway: one gone before is there for each resumed session.
+    let run_dir = Path::new(run.run_dir().unwrap());
+    assert!(run_dir.join("runner").is_file());
+    fs::remove_file(run_dir.join("runner")).unwrap();
     backend.resume_script_for(
         2,
-        "await_message; mark=\"$(dirname \"$RECEIPT\")/attempted\"; if [ -f \"$mark\" ]; then resolve; else : > \"$mark\"; fi; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        "await_message; dir=\"$(dirname \"$RECEIPT\")\"; [ -f \"$dir/runner\" ] && echo x >> \"$dir/runner-seen\"; mark=\"$dir/attempted\"; if [ -f \"$mark\" ]; then resolve; else : > \"$mark\"; fi; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let cursor = queue.latest_event_id().unwrap().as_i64();
     let outcome = supervise(&db, &repo, &backend).unwrap();
@@ -341,10 +346,17 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
             "run_integrated",
         ]
     );
+    // Each resumed session found the runner; once the run landed, it went
+    // with nothing running it, and the run directory stays.
+    assert_eq!(
+        fs::read_to_string(run_dir.join("runner-seen")).unwrap(),
+        "x\nx\n"
+    );
+    assert!(!run_dir.join("runner").exists());
+    assert!(run_dir.join("receipt.json").is_file());
     // Same wrapper and runtime snapshot as the worker, under the resume name.
     let resumes = backend.resumes.lock().unwrap().clone();
     assert_eq!(resumes.len(), 2);
-    let run_dir = Path::new(run.run_dir().unwrap());
     for (name, command) in &resumes {
         assert_eq!(name, "[repo's directory]worker#2 - second");
         assert!(

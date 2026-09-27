@@ -126,6 +126,27 @@ impl PlannerSession {
     }
 }
 
+impl PlannerSession {
+    /// Whether nothing runs the planner's wrapper binary (its `runner`)
+    /// any more, so the snapshot can go: its agent's exit is recorded, its
+    /// wrapper's process is gone or its heartbeat older than
+    /// [`HEARTBEAT_TIMEOUT_SECS`], or it never registered within
+    /// [`PLANNER_STARTUP_SECS`] of the record and its row is closed (its
+    /// workspace never opened, or cmux no longer lists it: a slow shell
+    /// in a workspace still open may yet run the runner). A closed row
+    /// alone is no evidence: a wrapper still alive keeps its runner.
+    pub fn runner_unused(&self, probe: &PlannerProbe) -> bool {
+        if self.exited_at.is_some() {
+            return true;
+        }
+        if self.wrapper_pid.is_none() {
+            return self.closed_at.is_some() && probe.now - self.created_at > PLANNER_STARTUP_SECS;
+        }
+        let age = self.heartbeat_at.map_or(i64::MAX, |at| probe.now - at);
+        heartbeat_stale(probe.wrapper_alive, age)
+    }
+}
+
 impl PlannerState {
     /// Whether the planner's session can still take text: it is opening,
     /// working or idle in a workspace cmux lists.
@@ -271,6 +292,52 @@ mod tests {
             now: 90 + PLANNER_STARTUP_SECS + 1,
             ..gone
         }));
+    }
+
+    #[test]
+    fn a_planner_runner_is_unused_once_its_wrapper_is_done() {
+        // A live wrapper keeps its runner, closed or not, workspace or not.
+        assert!(!session().runner_unused(&probe()));
+        let closed = PlannerSession {
+            closed_at: Some(109),
+            ..session()
+        };
+        assert!(!closed.runner_unused(&PlannerProbe {
+            workspace_listed: false,
+            ..probe()
+        }));
+        // An exit, a dead wrapper or a silent one frees it.
+        let exited = PlannerSession {
+            exited_at: Some(108),
+            ..session()
+        };
+        assert!(exited.runner_unused(&probe()));
+        assert!(closed.runner_unused(&PlannerProbe {
+            wrapper_alive: false,
+            ..probe()
+        }));
+        assert!(session().runner_unused(&PlannerProbe {
+            now: 100 + HEARTBEAT_TIMEOUT_SECS + 1,
+            ..probe()
+        }));
+        // A wrapper never registered is given its startup time, and then
+        // only a closed row frees it: an open workspace may start late.
+        let unregistered = PlannerSession {
+            wrapper_pid: None,
+            heartbeat_at: None,
+            ..session()
+        };
+        let late = PlannerProbe {
+            now: 90 + PLANNER_STARTUP_SECS + 1,
+            ..probe()
+        };
+        assert!(!unregistered.runner_unused(&late));
+        let given_up = PlannerSession {
+            closed_at: Some(109),
+            ..unregistered.clone()
+        };
+        assert!(!given_up.runner_unused(&probe()));
+        assert!(given_up.runner_unused(&late));
     }
 
     #[test]

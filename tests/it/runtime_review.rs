@@ -2880,10 +2880,12 @@ fn a_dialog_while_revising_is_recorded_as_prompt_waiting() {
 
     // Someone answers the dialog: the screen goes back to work.
     *backend.screen.lock().unwrap() = WORK_SCREEN.into();
+    // `prompt_cleared` is recorded before the ask is closed, in its own
+    // write: wait for both.
     wait_until(&db, Duration::from_secs(30), |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"prompt_cleared")
+            && queue.read_ask(asks[0].id).unwrap().closed_at.is_some()
     });
-    assert!(queue.read_ask(asks[0].id).unwrap().closed_at.is_some());
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     fs::write(
         exit_request_path(run.run_dir().unwrap()).with_extension("go"),
