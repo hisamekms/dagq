@@ -466,11 +466,20 @@ enum Command {
     /// predecessors, then `{"goal": ID}` for goals not closed as achieved), the tasks it blocks
     /// directly (including those waiting for its open goal) and how many it releases transitively
     /// (`unblocks`), its `priority` and the `effective_priority` it inherits from the ready tasks
-    /// waiting for it; `candidates` in claim order and the `critical` chain.
+    /// waiting for it; `candidates` in claim order and the `critical` chain. With `--format d2`
+    /// or `svg`, the near-term dependency diagram instead (ADR-0077): the d2 source, or the SVG the
+    /// host's `d2 --layout=tala` draws from it.
     Graph {
         /// Only this goal's tasks and candidates; counts still span every goal.
         #[arg(long = "goal")]
         goal_id: Option<i64>,
+        /// `json` (the dependency view), `d2` (the diagram's source) or `svg` (drawn by d2 and TALA
+        /// from PATH).
+        #[arg(long, default_value = "json", value_parser = ["json", "d2", "svg"])]
+        format: String,
+        /// Write the d2 source or the SVG to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Run and monitor tasks in parallel until interrupted. Run this in a dedicated terminal.
     Supervise {
@@ -1187,7 +1196,7 @@ fn reads_only(command: &Command) -> bool {
             | Command::List { .. }
             | Command::Show { .. }
             | Command::Candidates
-            | Command::Graph { .. }
+            | Command::Graph { out: None, .. }
             | Command::Status { .. }
             | Command::Asks { .. }
             | Command::Events { .. }
@@ -1239,7 +1248,7 @@ fn observer_access(command: &Command) -> ObserverAccess {
         | Command::List { .. }
         | Command::Show { .. }
         | Command::Candidates
-        | Command::Graph { .. }
+        | Command::Graph { out: None, .. }
         | Command::Status { .. }
         | Command::Asks { .. }
         | Command::Events { .. }
@@ -1441,8 +1450,10 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::Doctor { full } = cli.command {
         return one_shot.doctor(&db, full, common_dir.as_deref());
     }
-    // `report` writes files but no queue state.
-    let mut queue = if reads_only(&cli.command) || matches!(cli.command, Command::Report { .. }) {
+    // `report` and `graph --out` write files but no queue state.
+    let mut queue = if reads_only(&cli.command)
+        || matches!(cli.command, Command::Report { .. } | Command::Graph { .. })
+    {
         SqliteQueue::open_read_only(&db)?
     } else {
         SqliteQueue::open(&db)?
@@ -1882,10 +1893,47 @@ fn execute(cli: Cli) -> Result<Value> {
             let graph = dependency_graph(queue.graph_input()?, None);
             serde_json::to_value(claim_candidates(queue.candidates()?, &graph))?
         }
-        Command::Graph { goal_id } => serde_json::to_value(dependency_graph(
-            queue.graph_input()?,
-            goal_id.map(GoalId::new),
-        ))?,
+        Command::Graph {
+            goal_id,
+            format,
+            out,
+        } => {
+            let graph = dependency_graph(queue.graph_input()?, goal_id.map(GoalId::new));
+            if format == "json" {
+                anyhow::ensure!(out.is_none(), "--out needs --format d2 or svg");
+                serde_json::to_value(graph)?
+            } else {
+                let titles = queue
+                    .list_goals()?
+                    .into_iter()
+                    .map(|goal| (goal.id, goal.title))
+                    .collect();
+                let diagram = dagq::application::diagram::near_term(&graph, &titles);
+                let source = diagram.to_d2();
+                let text = if format == "svg" {
+                    dagq::infrastructure::d2::render_svg(
+                        &source,
+                        env::var_os("PATH").as_deref(),
+                        dagq::infrastructure::d2::RENDER_TIMEOUT,
+                    )?
+                } else {
+                    source
+                };
+                match out {
+                    Some(out) => {
+                        let out = cwd.join(out);
+                        std::fs::write(&out, &text)
+                            .with_context(|| format!("write {}", out.display()))?;
+                        json!({
+                            "format": format,
+                            "out": out,
+                            "tasks": diagram.task_ids(),
+                        })
+                    }
+                    None => json!({ RAW_STDOUT: text }),
+                }
+            }
+        }
         Command::Status { role: r } => one_shot.status_of(&queue, parse_role(r)?)?,
         Command::Ask {
             command: Some(AskCommand::Close { id }),
@@ -2493,9 +2541,22 @@ fn run(mut arguments: Vec<OsString>) -> Result<Value> {
     }
 }
 
+/// The one key of a command's value that is printed as is instead of as
+/// JSON: `graph --format d2|svg` without `--out`.
+const RAW_STDOUT: &str = "__dagq_raw_stdout";
+
 fn main() -> ExitCode {
     let result = run(env::args_os().collect()).and_then(|value| {
         let mut stdout = io::stdout().lock();
+        if let Some(text) = value
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .and_then(|object| object.get(RAW_STDOUT))
+            .and_then(Value::as_str)
+        {
+            stdout.write_all(text.as_bytes())?;
+            return Ok(());
+        }
         serde_json::to_writer_pretty(&mut stdout, &value)?;
         writeln!(stdout)?;
         Ok(())

@@ -74,6 +74,13 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
                 language.is_some_and(|value| value["source"].is_string()),
                 "doctor reports the language"
             );
+            // Where d2 and TALA resolve depends on the host's PATH
+            // (ADR-0077); `tests/it/cli_graph.rs` checks the values.
+            let d2 = report.as_object_mut().unwrap().remove("d2");
+            assert!(
+                d2.is_some_and(|value| value.get("tala").is_some()),
+                "doctor reports d2"
+            );
         }
         let mut expected = serde_json::json!({"supervisors": [], "runs": []});
         if command == "status" {

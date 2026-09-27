@@ -3,6 +3,7 @@ pub mod asks;
 pub mod binaries;
 pub mod claude;
 pub mod clock;
+pub mod d2;
 pub mod draft_planners;
 mod finding_planners;
 mod findings;

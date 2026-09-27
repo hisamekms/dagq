@@ -11,6 +11,7 @@ mod runtime_support;
 
 mod cli_forecast;
 mod cli_goals;
+mod cli_graph;
 mod cli_kpi;
 mod cli_proposals;
 mod cli_read;

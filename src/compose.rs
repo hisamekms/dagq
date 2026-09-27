@@ -649,6 +649,10 @@ impl OneShot {
             }
         };
         report["schema"] = serde_json::to_value(schema)?;
+        // What `graph --format svg` draws with (ADR-0077 decision 4).
+        report["d2"] = serde_json::to_value(crate::infrastructure::d2::Tools::on(
+            std::env::var_os("PATH").as_deref(),
+        ))?;
         Ok(report)
     }
 
