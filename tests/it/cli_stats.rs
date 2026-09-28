@@ -499,6 +499,11 @@ mod stats {
                 Some(Value::Null)
             );
         }
+        // ADR-t947-1: its only review passed.
+        assert_eq!(
+            first.as_object_mut().unwrap().remove("review_reasons"),
+            Some(json!([]))
+        );
         assert_eq!(
             first,
             json!({

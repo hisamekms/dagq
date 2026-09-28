@@ -4,7 +4,7 @@ type: design
 title: "Receipt and session exit"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
+updated: 2026-09-29
 last_verified: 2026-09-28
 scope: runtime
 related:
@@ -66,7 +66,7 @@ ADR-0047の決定25、task 555（`ExitRetry`、`application::supervise::exit_ret
 
 ## follow_upsの分類コード（未実装）
 
-[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、receiptの`follow_ups`の要素は`{"title", "description"}`のままで、この節は予定の形を書く。一覧はtask 951の分析（[follow-up-kinds](../../plans/follow-up-kinds.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード未実装)）と同じ種類の問題の名前を揃えた。
+[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、receiptの`follow_ups`の要素は`{"title", "description"}`のままで、この節は予定の形を書く。一覧はtask 951の分析（[follow-up-kinds](../../plans/follow-up-kinds.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
 
 - **receiptの形**: `follow_ups`の各要素に`category`（コード1つ）を足す: `{"title", "description", "category"}`。taskの`--kind`（repositoryが名付けるlabel）と混ざらないよう、欄名は`kind`にしない。`category`の無い要素と一覧に無い値もreceiptの受理を変えない（validationは拒まない）。
 - **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md)の10）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けは`unlabeled`、一覧に無い値はそのまま）。runtimeのplannerとの突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計未実装)。

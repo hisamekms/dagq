@@ -90,17 +90,19 @@ pub struct Reopen {
 /// `precedents` name asks a person answered before about the same kind of
 /// finding, which the runtime quotes to the planner or the person;
 /// `predictions` are recorded, whatever their shape, apart from the rest.
+/// Each item of `reasons` is a text, or a text with its reason codes
+/// (ADR-t947-1), as the run review's: `reasons` keeps the texts and
+/// `reason_codes` each item's codes, empty for an item without them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "PrintedPlanReviewVerdict")]
 pub struct PlanReviewVerdict {
     pub verdict: PlanReviewDecision,
     pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reason_codes: Vec<Vec<String>>,
     pub summary: String,
-    #[serde(default)]
     pub actions: Vec<PlanReviewAction>,
-    #[serde(default)]
     pub reopen: Vec<Reopen>,
-    #[serde(default)]
     pub precedents: Vec<AskId>,
     /// The weight of each submitted task of the proposal (ADR-0079
     /// decision 2), kept raw: a shape that does not hold is checked by
@@ -111,11 +113,49 @@ pub struct PlanReviewVerdict {
     /// changes nothing. The raw value maps to no transition: the runtime
     /// reads it only through `parse_predictions`, into typed
     /// predictions, to record the estimates.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub predictions: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrintedPlanReviewVerdict {
+    verdict: PlanReviewDecision,
+    reasons: Vec<super::review_reason::PrintedReason>,
+    summary: String,
+    #[serde(default)]
+    actions: Vec<PlanReviewAction>,
+    #[serde(default)]
+    reopen: Vec<Reopen>,
+    #[serde(default)]
+    precedents: Vec<AskId>,
+    #[serde(default)]
+    predictions: Option<serde_json::Value>,
+}
+
+impl From<PrintedPlanReviewVerdict> for PlanReviewVerdict {
+    fn from(printed: PrintedPlanReviewVerdict) -> Self {
+        let (reasons, reason_codes) = super::review_reason::split(printed.reasons);
+        Self {
+            verdict: printed.verdict,
+            reasons,
+            reason_codes,
+            summary: printed.summary,
+            actions: printed.actions,
+            reopen: printed.reopen,
+            precedents: printed.precedents,
+            predictions: printed.predictions,
+        }
+    }
+}
+
 impl PlanReviewVerdict {
+    /// The codes `plan_review_finished` records for each reason,
+    /// `unlabeled` for one without them.
+    pub fn recorded_codes(&self) -> Vec<Vec<String>> {
+        super::review_reason::recorded(&self.reason_codes, self.reasons.len())
+    }
+
     /// The verdict in the job's stdout, found the way the run review's is.
     pub fn parse(stdout: &str) -> Result<Self, String> {
         parse_json_object(stdout)

@@ -2267,3 +2267,59 @@ fn cpu_per_landing_and_load_per_core_read_the_host_records() {
             .contains_key("cpu_per_landing")
     );
 }
+
+/// The review verdicts that sent runs back per primary code (ADR-t947-1
+/// decision 5): `review.sendback_rate` over the runs reviewed, all of
+/// them, per `code=` and per `kind=`.
+#[test]
+fn review_sendback_rate_is_split_by_code_and_kind() {
+    let mut queue = Queue::default();
+    let tuesday = MONDAY + DAY + 10 * HOUR;
+    let runtime = Some("runtime".parse::<TaskKind>().unwrap());
+    let docs = Some("docs".parse::<TaskKind>().unwrap());
+    let runs = [
+        (1, runtime.clone(), Some("adr_conflict")),
+        (2, runtime, None),
+        (3, docs, Some("test_gap")),
+    ];
+    for (task, kind, code) in runs {
+        let claimed = tuesday + task * HOUR;
+        queue.run(&Run::new(task, kind, claimed, 600));
+        let id = format!("{task:08x}-0000-4000-8000-{claimed:012x}");
+        let payload = match code {
+            Some(code) => json!({"verdict": "concern", "reasons": ["x"],
+                                 "reason_codes": [[code]], "primary_code": code}),
+            None => json!({"verdict": "pass", "reasons": []}),
+        };
+        queue.push(
+            Some(task),
+            Some(&id),
+            "review_finished",
+            payload,
+            claimed + 620,
+        );
+    }
+    let kpi = queue.kpi(
+        MONDAY + 2 * DAY + HOUR,
+        &KpiConfig::default(),
+        &KpiQuery {
+            last: 2,
+            ..KpiQuery::default()
+        },
+    );
+    let day = &kpi.periods[0];
+    let value = |stratum: &str| {
+        let measure = measure(day, "review.sendback_rate", stratum);
+        (measure.n, measure.value)
+    };
+    assert_eq!(value(ALL), (3, Some(0.667)));
+    assert_eq!(value("code=adr_conflict"), (3, Some(0.333)));
+    assert_eq!(value("code=test_gap"), (3, Some(0.333)));
+    assert_eq!(value("kind=runtime"), (2, Some(0.5)));
+    assert_eq!(value("kind=docs"), (1, Some(1.0)));
+    assert_eq!(direction("review.sendback_rate"), Some(Direction::Lower));
+    assert_eq!(
+        day.window.details["review_reasons"]["review"]["sent_back"],
+        2
+    );
+}

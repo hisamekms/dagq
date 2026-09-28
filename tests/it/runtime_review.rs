@@ -407,7 +407,7 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
     for expected in [
         format!("Read the review material at {}", review_md.display()),
         "Acceptance criteria of the task:\nworks".to_owned(),
-        r#"{"verdict": "pass" | "revise" | "concern", "reasons": [string], "summary": string}"#
+        r#"{"verdict": "pass" | "revise" | "concern", "reasons": [{"text": string, "codes": [string]}], "summary": string}"#
             .to_owned(),
         "- revise: findings the worker can fix without a person's judgment".to_owned(),
         "- concern: findings that need a person's judgment".to_owned(),

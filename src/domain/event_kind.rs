@@ -129,6 +129,7 @@ event_kinds! {
     PlanReviewDiscarded => "plan_review_discarded",
     PlanReviewFailed => "plan_review_failed",
     PlanReviewFinished => "plan_review_finished",
+    PlanReviewOutcome => "plan_review_outcome",
     PlanReviewStarted => "plan_review_started",
     PlanReviseLost => "plan_revise_lost",
     PlanReviseSent => "plan_revise_sent",
@@ -164,6 +165,7 @@ event_kinds! {
     ReviewBypassed => "review_bypassed",
     ReviewFailed => "review_failed",
     ReviewFinished => "review_finished",
+    ReviewOutcome => "review_outcome",
     ReviewRetried => "review_retried",
     ReviewStarted => "review_started",
     ReviseFinished => "revise_finished",
@@ -478,6 +480,9 @@ pub const PLAN_DECIDED: &str = EventKind::PlanDecided.as_str();
 pub const PLAN_REVIEW_DISCARDED: &str = EventKind::PlanReviewDiscarded.as_str();
 pub const PLAN_REVIEW_FAILED: &str = EventKind::PlanReviewFailed.as_str();
 pub const PLAN_REVIEW_FINISHED: &str = EventKind::PlanReviewFinished.as_str();
+/// What a person's answer to the `approve_plan` ask of a concern says of
+/// plan review's findings (ADR-t947-1 decision 4).
+pub const PLAN_REVIEW_OUTCOME: &str = EventKind::PlanReviewOutcome.as_str();
 pub const PLAN_REVIEW_STARTED: &str = EventKind::PlanReviewStarted.as_str();
 pub const PLAN_REVISE_LOST: &str = EventKind::PlanReviseLost.as_str();
 pub const PLAN_REVISE_SENT: &str = EventKind::PlanReviseSent.as_str();
@@ -532,6 +537,9 @@ pub const RELEASE_CHECK_FAILED: &str = EventKind::ReleaseCheckFailed.as_str();
 pub const REVIEW_BYPASSED: &str = EventKind::ReviewBypassed.as_str();
 pub const REVIEW_FAILED: &str = EventKind::ReviewFailed.as_str();
 pub const REVIEW_FINISHED: &str = EventKind::ReviewFinished.as_str();
+/// What a person's answer to the `approve_landing` ask of a concern says
+/// of the review's findings (ADR-t947-1 decision 4).
+pub const REVIEW_OUTCOME: &str = EventKind::ReviewOutcome.as_str();
 pub const REVIEW_RETRIED: &str = EventKind::ReviewRetried.as_str();
 pub const REVIEW_STARTED: &str = EventKind::ReviewStarted.as_str();
 pub const REVISE_FINISHED: &str = EventKind::ReviseFinished.as_str();
@@ -723,6 +731,7 @@ mod tests {
             (EventKind::PlanReviewDiscarded, "plan_review_discarded"),
             (EventKind::PlanReviewFailed, "plan_review_failed"),
             (EventKind::PlanReviewFinished, "plan_review_finished"),
+            (EventKind::PlanReviewOutcome, "plan_review_outcome"),
             (EventKind::PlanReviewStarted, "plan_review_started"),
             (EventKind::PlanReviseLost, "plan_revise_lost"),
             (EventKind::PlanReviseSent, "plan_revise_sent"),
@@ -758,6 +767,7 @@ mod tests {
             (EventKind::ReviewBypassed, "review_bypassed"),
             (EventKind::ReviewFailed, "review_failed"),
             (EventKind::ReviewFinished, "review_finished"),
+            (EventKind::ReviewOutcome, "review_outcome"),
             (EventKind::ReviewRetried, "review_retried"),
             (EventKind::ReviewStarted, "review_started"),
             (EventKind::ReviseFinished, "revise_finished"),

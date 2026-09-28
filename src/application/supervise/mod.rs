@@ -2179,6 +2179,8 @@ impl Supervisor<'_> {
                                 json!({
                                     "verdict": verdict.verdict,
                                     "reasons": verdict.reasons,
+                                    "reason_codes": verdict.recorded_codes(),
+                                    "primary_code": verdict.primary_code(),
                                     "summary": verdict.summary,
                                     "duration_secs": duration_secs,
                                     "attempt": attempt,

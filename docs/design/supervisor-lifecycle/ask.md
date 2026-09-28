@@ -4,7 +4,7 @@ type: design
 title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
+updated: 2026-09-29
 last_verified: 2026-09-28
 scope: runtime
 related:
@@ -29,7 +29,7 @@ related:
 
 ## worker_questionの分類コード（未実装）
 
-[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、`ask`はこの欄を持たない。一覧はtask 950の分析（[worker-question-topics](../../plans/worker-question-topics.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード未実装)）と同じ種類の問題の名前を揃えた。
+[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、`ask`はこの欄を持たない。一覧はtask 950の分析（[worker-question-topics](../../plans/worker-question-topics.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
 
 - **CLI**: `dagq ask --kind worker_question --because <scope|discard> --topic <code> [--topic <code>]...`。`--topic`は1つ以上必須で、先頭が主、残りが副。一覧に無い値は拒まずにそのまま記録する。`worker_question`以外のkindに`--topic`を付けたら拒む（ADR-t947-2決定6）。
 - **記録**: `ask_opened`のpayloadと`asks`の出力に`topics`（配列、先頭が主）を載せる。`reason_category`（上の「人が要る理由」）とは別の欄で、一方から他方を推さず、食い違っても拒まない。`topics`の無い過去のaskは`unlabeled`として数える。
@@ -37,7 +37,7 @@ related:
 
 | コード | 定義 | task 950の例 | `reason_category`の目安 |
 |---|---|---|---|
-| `adr_conflict` | taskの受け入れ条件かdescription、またはそれを満たす唯一のやり方が、acceptedのADR・design・人の決定（goalのconstraints、AGENTS.mdのユーザー決定）と食い違い、両方は満たせない（[Review](review.md#差し戻しの分類コード未実装)と同じ定義） | task 392: ADR-0040決定3の「dagq.tomlを置かない」を変える | `scope` |
+| `adr_conflict` | taskの受け入れ条件かdescription、またはそれを満たす唯一のやり方が、acceptedのADR・design・人の決定（goalのconstraints、AGENTS.mdのユーザー決定）と食い違い、両方は満たせない（[Review](review.md#差し戻しの分類コード)と同じ定義） | task 392: ADR-0040決定3の「dagq.tomlを置かない」を変える | `scope` |
 | `acceptance_conflict` | 同じtaskの受け入れ条件どうし、または条件とdescriptionが両立しない | task 128: newtype化と「tests/cli.rsを変更なしで通す」 | `scope` |
 | `acceptance_infeasible` | 条件が、調べた事実（ツールの挙動・再現しない現象・権限）のためにそのままでは満たせない | task 770: hangを再現できず「原因の特定」を満たせない | `scope` |
 | `out_of_scope_change` | 条件を満たすのに、taskのpaths・description・verifyに無い変更が要る | task 252: tests/plugin.rsがpathsの外 | `scope` |

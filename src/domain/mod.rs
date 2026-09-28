@@ -422,16 +422,54 @@ string_enum!(ReviewDecision {
     Concern => "concern",
 });
 
-/// What the headless review prints on stdout: one JSON object.
+/// What the headless review prints on stdout: one JSON object. Each item
+/// of its `reasons` is a text, or a text with its reason codes
+/// (ADR-t947-1): `reasons` keeps the texts and `reason_codes` each item's
+/// codes, empty for an item without them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "PrintedReviewVerdict")]
 pub struct ReviewVerdict {
     pub verdict: ReviewDecision,
     pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reason_codes: Vec<Vec<String>>,
     pub summary: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrintedReviewVerdict {
+    verdict: ReviewDecision,
+    reasons: Vec<review_reason::PrintedReason>,
+    summary: String,
+}
+
+impl From<PrintedReviewVerdict> for ReviewVerdict {
+    fn from(printed: PrintedReviewVerdict) -> Self {
+        let (reasons, reason_codes) = review_reason::split(printed.reasons);
+        Self {
+            verdict: printed.verdict,
+            reasons,
+            reason_codes,
+            summary: printed.summary,
+        }
+    }
+}
+
 impl ReviewVerdict {
+    /// The codes `review_finished` records for each reason, `unlabeled`
+    /// for one without them.
+    pub fn recorded_codes(&self) -> Vec<Vec<String>> {
+        review_reason::recorded(&self.reason_codes, self.reasons.len())
+    }
+
+    /// The verdict's primary code (ADR-t947-1 decision 1): none for a
+    /// pass.
+    pub fn primary_code(&self) -> Option<String> {
+        (self.verdict != ReviewDecision::Pass)
+            .then(|| review_reason::primary(&self.recorded_codes()))
+    }
+
     /// The verdict in the review's stdout: the whole text, or else the
     /// outermost `{...}` in it (a model may wrap the object in a fence or
     /// a sentence).
@@ -749,6 +787,7 @@ pub mod recovery;
 pub mod related;
 pub mod release_update;
 pub mod resume;
+pub mod review_reason;
 pub mod run;
 pub mod run_env;
 pub mod scope;
@@ -2877,6 +2916,49 @@ mod attention_tests {
             let error = ReviewVerdict::parse(bad).unwrap_err();
             assert!(error.contains("no verdict JSON"), "{bad}: {error}");
         }
+    }
+
+    /// The reasons carry reason codes (ADR-t947-1): the texts stay in
+    /// `reasons`, an item without codes is unlabeled, a code outside the
+    /// list is kept, and a pass has no primary code.
+    #[test]
+    fn review_verdict_reasons_carry_their_codes_in_either_form() {
+        let verdict = ReviewVerdict::parse(
+            r#"{"verdict":"concern","reasons":[{"text":"a","codes":["adr_conflict","test_gap"]},"b",{"text":"c","codes":["new_code"]}],"summary":"s"}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.reasons, ["a", "b", "c"]);
+        assert_eq!(
+            verdict.recorded_codes(),
+            [
+                vec!["adr_conflict".to_owned(), "test_gap".to_owned()],
+                vec![review_reason::UNLABELED.to_owned()],
+                vec!["new_code".to_owned()]
+            ]
+        );
+        assert_eq!(verdict.primary_code().as_deref(), Some("adr_conflict"));
+        let old =
+            ReviewVerdict::parse(r#"{"verdict":"revise","reasons":[],"summary":"s"}"#).unwrap();
+        assert_eq!(
+            old.primary_code().as_deref(),
+            Some(review_reason::UNLABELED)
+        );
+        let pass =
+            ReviewVerdict::parse(r#"{"verdict":"pass","reasons":[],"summary":"ok"}"#).unwrap();
+        assert_eq!(pass.primary_code(), None);
+        // Serialized, the codes sit next to the texts.
+        let value = serde_json::to_value(&verdict).unwrap();
+        assert_eq!(value["reasons"], json!(["a", "b", "c"]));
+        assert_eq!(value["reason_codes"][1], json!([]));
+        // A malformed label never fails the verdict (ADR-t947-1 decision 3).
+        let loose = ReviewVerdict::parse(
+            r#"{"verdict":"revise","reasons":[{"text":"a","codes":{"x":1},"severity":"high"}],"summary":"s"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loose.primary_code().as_deref(),
+            Some(review_reason::UNLABELED)
+        );
     }
 
     #[test]

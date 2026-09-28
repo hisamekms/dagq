@@ -795,6 +795,48 @@ impl<'a> Context<'a> {
                 Measure::ratio(float(quality.tasks_reworked as i64), quality.tasks_run),
             );
         }
+        // The verdicts that sent the work back per primary code
+        // (ADR-t947-1 decision 5): the runs reviewed, all of them, per code
+        // and per kind of task; the plan reviews' revises per code over the
+        // same reviews as `plan.revise_rate`'s `all`.
+        let reasons = &stats.review_reasons;
+        let reviewed = usize::try_from(reasons.review.reviewed).unwrap_or(0);
+        put(
+            "review.sendback_rate",
+            ALL,
+            Measure::ratio(float(reasons.review.sent_back), reviewed),
+        );
+        for (code, sent_back) in &reasons.review.by_code {
+            put(
+                "review.sendback_rate",
+                &format!("code={code}"),
+                Measure::ratio(float(sent_back.subjects), reviewed),
+            );
+        }
+        if axes.contains(&Axis::Kind) {
+            for kind in &reasons.review.by_kind {
+                put(
+                    "review.sendback_rate",
+                    &format!(
+                        "kind={}",
+                        kind.kind.as_ref().map_or(UNKNOWN, TaskKind::as_str)
+                    ),
+                    Measure::ratio(
+                        float(kind.sent_back),
+                        usize::try_from(kind.reviewed).unwrap_or(0),
+                    ),
+                );
+            }
+        }
+        let plan_reviews = usize::try_from(reasons.plan_review.verdicts).unwrap_or(0);
+        for (code, sent_back) in &reasons.plan_review.by_code {
+            put(
+                "plan.revise_rate",
+                &format!("code={code}"),
+                Measure::ratio(float(sent_back.revise), plan_reviews),
+            );
+        }
+        details.insert("review_reasons", json(reasons));
         // The follow-ups adopted as `stats`' `draft_flow` counts them
         // (task 470): whose plan rejected one is not recorded.
         let follow_ups = stats

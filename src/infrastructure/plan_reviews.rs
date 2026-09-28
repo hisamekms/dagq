@@ -33,7 +33,7 @@ use crate::{
         TaskAction, TaskId, TaskStatus,
         plan_quality::{self, ProposalFeatures},
         plan_review::{PlanReviewOutcome, ReviewHold},
-        prediction, proposal,
+        prediction, proposal, review_reason,
         sessions::SESSION_CLOSED,
         task,
     },
@@ -716,6 +716,9 @@ impl PlanReviewStore for SqliteQueue {
                 "decision": apply.decision,
                 "overridden": apply.overridden,
                 "reasons": apply.verdict.reasons,
+                "reason_codes": apply.verdict.recorded_codes(),
+                "primary_code": (apply.decision != PlanReviewDecision::Pass)
+                    .then(|| review_reason::primary(&apply.verdict.recorded_codes())),
                 "summary": apply.verdict.summary,
                 "actions": apply.verdict.actions,
                 "reopened": applied.reopened,
@@ -1118,6 +1121,7 @@ impl PlanReviewStore for SqliteQueue {
             }
         };
         close(&tx)?;
+        record_plan_outcome(&tx, proposal_id, ask_id, &text)?;
         event(
             &tx,
             anchor(&tx, proposal_id)?,
@@ -1257,6 +1261,57 @@ fn candidates(conn: &Connection) -> Result<Vec<PlanReviewCandidate>> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Record what a person's answer to the `approve_plan` ask of a concern
+/// says of plan review's findings (ADR-t947-1 decision 4): a
+/// `plan_review_outcome` on the proposal's latest review with a verdict,
+/// when that review was the concern, with its codes (a `send_back` carries
+/// them on).
+fn record_plan_outcome(
+    conn: &Connection,
+    proposal_id: ProposalId,
+    ask_id: AskId,
+    answer: &str,
+) -> Result<()> {
+    let Some(outcome) = review_reason::answer_outcome(answer) else {
+        return Ok(());
+    };
+    let latest: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT id, outcome, verdict FROM plan_reviews WHERE proposal_id=?1
+             AND verdict IS NOT NULL ORDER BY id DESC LIMIT 1",
+            [proposal_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((plan_review_id, decided, verdict)) = latest else {
+        return Ok(());
+    };
+    if decided != PlanReviewOutcome::Concern.as_str() {
+        return Ok(());
+    }
+    // The row keeps the verdict as the runtime read it: the texts in
+    // `reasons` and the codes in `reason_codes`, absent before the codes.
+    let verdict: Value = serde_json::from_str(&verdict)?;
+    let printed: Vec<Vec<String>> =
+        serde_json::from_value(verdict["reason_codes"].clone()).unwrap_or_default();
+    let reasons = verdict["reasons"].as_array().map_or(0, Vec::len);
+    let codes = review_reason::recorded(&printed, reasons);
+    event(
+        conn,
+        anchor(conn, proposal_id)?,
+        None,
+        EventKind::PlanReviewOutcome,
+        json!({
+            "proposal_id": proposal_id,
+            "plan_review_id": plan_review_id,
+            "ask_id": ask_id,
+            "outcome": outcome,
+            "reason_codes": codes,
+            "primary_code": review_reason::primary(&codes),
+        }),
+    )
 }
 
 /// The reasons of the proposal's latest finished review with a verdict.

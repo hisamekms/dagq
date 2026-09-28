@@ -26,6 +26,7 @@ pub mod measures;
 pub mod predictions;
 pub mod providers;
 pub mod retries;
+pub mod review_reasons;
 pub mod sessions;
 pub mod thresholds;
 pub mod tokens;
@@ -245,6 +246,10 @@ pub struct RunStats {
     pub prediction: Option<RunPrediction>,
     /// What it turned out to be, to read next to `prediction`.
     pub actual: RunActual,
+    /// Its review verdicts that sent it back (`revise` / `concern`), with
+    /// their reason codes and what the answer to their ask made of them
+    /// (ADR-t947-1).
+    pub review_reasons: Vec<review_reasons::RunReviewReason>,
     /// Each of its spans, for the per-goal summaries.
     #[serde(skip)]
     pub session_spans: Vec<sessions::RunSpan>,
@@ -435,6 +440,9 @@ pub struct Stats {
     pub reason_codes: ReasonCodes,
     /// The tasks canceled as duplicates in the same window as `backend_failures`.
     pub duplicate_cancels: DuplicateCancels,
+    /// The review and plan review verdicts recorded in the same window as
+    /// `backend_failures`, per reason code (ADR-t947-1 decision 5).
+    pub review_reasons: review_reasons::ReviewReasons,
     /// The runs not finished yet that look stalled now (ADR-0043 decision
     /// 5), whatever `--since` says; with `--goal`, only that goal's.
     pub running_alerts: Vec<RunningAlert>,
@@ -774,7 +782,27 @@ pub fn stats(
     }
 
     let spans = sessions::spans(events);
+    let mut reviews: HashMap<&str, Vec<RunEvent>> = HashMap::new();
+    for event in events.iter().filter(|event| {
+        matches!(
+            event.kind.as_str(),
+            super::event_kind::REVIEW_FINISHED
+                | super::event_kind::REVISE_REQUESTED
+                | super::event_kind::REVISE_FINISHED
+                | super::event_kind::REVIEW_OUTCOME
+        )
+    }) {
+        if let Some(run_id) = &event.run_id {
+            reviews
+                .entry(run_id.as_str())
+                .or_default()
+                .push(event.clone());
+        }
+    }
     for track in &mut finished {
+        if let Some(run_events) = reviews.get(track.stats.run_id.as_str()) {
+            track.stats.review_reasons = review_reasons::per_run(run_events);
+        }
         let run_spans = sessions::run_spans(&spans, &track.stats.run_id, now * 1000);
         track.stats.sessions = sessions::per_run(&run_spans);
         track.stats.work_breakdown =
@@ -907,6 +935,7 @@ pub fn stats(
     let backend_failures = backend_failures(events, window_start, next_cursor, counts);
     let reason_codes = reason_codes(events, window_start, next_cursor, counts);
     let duplicate_cancels = duplicate_cancels(events, window_start, next_cursor, counts);
+    let review_reasons = review_reasons::review_reasons(events, window_start, next_cursor, counts);
     let landing_rechecks = landing_rechecks(events, window_start, next_cursor, counts);
     // The window ends now unless it stops at an earlier event.
     let window_end = match events.iter().find(|event| event.id == next_cursor) {
@@ -1078,6 +1107,7 @@ pub fn stats(
         backend_failures,
         reason_codes,
         duplicate_cancels,
+        review_reasons,
         running_alerts,
         workspace_check,
         stall_config: live.config.clone(),
@@ -1592,6 +1622,8 @@ pub fn with_kinds(stats: &mut Stats, kinds: &HashMap<TaskId, Option<TaskKind>>) 
             intervals: intervals(runs),
         })
         .collect();
+    stats.review_reasons.review.with_kinds(kinds);
+    stats.review_reasons.plan_review.with_kinds(kinds);
 }
 
 /// Give each run of `stats` its areas from `areas` (none for a run it
@@ -1709,6 +1741,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     tokens: None,
                     prediction: None,
                     actual: RunActual::default(),
+                    review_reasons: Vec::new(),
                     session_spans: Vec::new(),
                 },
                 claimed: None,

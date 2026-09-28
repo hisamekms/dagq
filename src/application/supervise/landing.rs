@@ -7,6 +7,7 @@ use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
+use crate::domain::review_reason;
 use crate::domain::worker_model::{self, Escalation};
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
@@ -847,6 +848,7 @@ impl Supervisor<'_> {
         ask_id: AskId,
         answer: &str,
     ) -> Result<()> {
+        self.record_review_outcome(run, ask_id, answer)?;
         let payload = json!({"ask_id": ask_id, "answer": answer});
         match answer {
             "land" => {
@@ -901,6 +903,54 @@ impl Supervisor<'_> {
                 self.clean_task_worktrees(run.task_id());
             }
         }
+        Ok(())
+    }
+}
+
+impl Supervisor<'_> {
+    /// Record what a person's answer to an `approve_landing` ask says of
+    /// the review's findings (ADR-t947-1 decision 4): a `review_outcome`
+    /// on the run's latest review, once per ask, when that review gave a
+    /// verdict that sent the run back. The ask of a failed review, or of a
+    /// pass whose conflict a person decides, records none.
+    fn record_review_outcome(&self, run: &TaskRun, ask_id: AskId, answer: &str) -> Result<()> {
+        let Some(outcome) = review_reason::answer_outcome(answer) else {
+            return Ok(());
+        };
+        let events = self.queue.run_events(run.id())?;
+        let recorded = events
+            .iter()
+            .any(|e| e.kind == event_kind::REVIEW_OUTCOME && e.payload["ask_id"] == json!(ask_id));
+        let review = events.iter().rev().find(|e| {
+            matches!(
+                e.kind.as_str(),
+                event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED
+            )
+        });
+        let Some(review) = review.filter(|review| {
+            !recorded
+                && review.kind == event_kind::REVIEW_FINISHED
+                && review.payload["verdict"] != ReviewDecision::Pass.as_str()
+        }) else {
+            return Ok(());
+        };
+        // A verdict recorded before the codes has each reason unlabeled.
+        let codes: Vec<Vec<String>> =
+            serde_json::from_value(review.payload["reason_codes"].clone()).unwrap_or_else(|_| {
+                let reasons = review.payload["reasons"].as_array().map_or(0, Vec::len);
+                review_reason::recorded(&[], reasons.max(1))
+            });
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ReviewOutcome,
+            json!({
+                "attempt": review.payload["attempt"],
+                "ask_id": ask_id,
+                "outcome": outcome,
+                "reason_codes": codes,
+                "primary_code": review_reason::primary(&codes),
+            }),
+        )?;
         Ok(())
     }
 }

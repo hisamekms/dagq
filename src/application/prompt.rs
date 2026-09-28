@@ -9,6 +9,7 @@
 use crate::domain::event_kind;
 use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
 use crate::domain::resume::ResumeConfig;
+use crate::domain::review_reason;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -1363,13 +1364,26 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
          - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
          - revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
          - concern: findings that need a person's judgment: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call.\n\n\
+         {codes}\
          Answer with one JSON object and nothing else, matching this schema:\n\
-         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [string], \"summary\": string}}\n\
+         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string}}\n\
          reasons lists each finding (empty for pass); summary is one or two sentences.\n",
         run_id = run.id(),
         task_id = task.id(),
         title = task.title(),
         acceptance = or_none(task.acceptance()),
+        codes = reason_codes_section(review_reason::REVIEW_CODES),
+    )
+}
+
+/// How a review job labels each finding (ADR-t947-1): the codes, their
+/// definitions heaviest first, and how the primary one is chosen.
+fn reason_codes_section(codes: &[(&str, &str)]) -> String {
+    format!(
+        "Give each finding one or more reason codes, the main one first: when a finding fits two, the one whose fix needs the heavier judgment (the list is heaviest first); other when none fits, explained in the text. \
+         Put first the finding that decides the verdict; a note that would not stop it is never first. \
+         The codes are recorded for statistics only and change nothing of how the verdict is applied. The codes:\n{}\n\n",
+        review_reason::prompt_lines(codes)
     )
 }
 
@@ -2106,8 +2120,9 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
          size is S, M or L; nature is mechanical, implementation, design_judgment or investigation; uncertainty is 0 to 1 (1 the least certain); \
          expected_output_tokens is the output tokens (thinking included) of one worker run: a small one about 5000, a large one about 250000, the median about 35000; \
          rework_probability is 0 to 1, the chance the run is resumed or review answers revise or concern; reason is one sentence. The estimate is recorded only and changes nothing of the verdict.\n\n\
+         {codes}\
          Answer with one JSON object and nothing else, matching this schema:\n\
-         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [string], \"summary\": string, \
+         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \
          \"actions\": [{{\"action\": \"add_dependency\", \"task_id\": int, \"depends_on\": int}} | {{\"action\": \"lower_priority\", \"task_id\": int, \"priority\": \"low\" | \"normal\" | \"high\" | \"urgent\"}} | {{\"action\": \"cancel_duplicate\", \"task_id\": int, \"duplicate_of\": int}}], \
          \"reopen\": [{{\"task_id\": int, \"reason\": string}}], \"precedents\": [int], \
          \"predictions\": [{{\"task_id\": int, \"size\": \"S\" | \"M\" | \"L\", \"nature\": \"mechanical\" | \"implementation\" | \"design_judgment\" | \"investigation\", \"uncertainty\": number, \"expected_output_tokens\": int, \"rework_probability\": number, \"reason\": string}}]}}\n\
@@ -2118,6 +2133,7 @@ pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<String> {
         revises = proposal.revise_count(),
         max = MAX_PLAN_REVISES,
         most = DUPLICATE_CANDIDATES,
+        codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES),
     ))
 }
 
