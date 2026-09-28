@@ -45,13 +45,13 @@ A goal has no verification commands; a goal-level check is a final task dependin
 
 ### Register the tasks
 
-Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--kind` (docs, plugin, runtime, ci); what each means is in `reference/register.md`, the combinations per kind in `reference/scope.md`.
+Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` (the kind of change; the values are the repository's `[tasks] changes`, their meaning its rules). `--kind` is still accepted but is going away: give it to no new task. What each means is in `reference/register.md`, the combinations per changed target in `reference/scope.md`.
 
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \
   --description "..." --acceptance "..." --context "..." \
   --verify "cargo fmt --all --check" --verify "cargo test --locked" \
-  --evidence e2e --kind runtime --depends-on 3
+  --evidence e2e --change feature --depends-on 3
 "$DAGQ" lint ID...               # the fixed rules; each violation {code, task_id, reason}
 "$DAGQ" submit ID...             # or --goal GOAL; prints the proposal
 "$DAGQ" candidates

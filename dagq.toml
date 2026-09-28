@@ -55,10 +55,31 @@ command = "cargo check --locked --all-targets"
 # 固定バイナリが task 941 を含んでから足した。
 runtime_planners = 2
 
+[tasks]
+# task が宣言する変更の種類（change）の値の集合（ADR-t980-1、task 983。書式は
+# docs/design/supervisor-lifecycle/run-environment.md、各値の意味と選び方は AGENTS.md の「テストの制約」）。
+# 書いてあるので add と edit は集合の外の --change を拒み、lint と submit は change の無い task を止める。
+# [tasks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 982 を含んでから足した。
+changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
+
+[areas]
+# stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
+# 書式と求め方は docs/design/supervisor-lifecycle/kpi.md の「area」）。glob は --paths と同じ規則で重なってよく、
+# どこにも当たらないファイルは other に数える。保存しないので、直せば過去の全 run がその基準で分類し直される。
+# [areas] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 981 を含んでから足した。
+runtime = ["src/**", "build.rs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+migrations = ["migrations/**"]
+broker = ["crates/**"]
+tests = ["tests/**"]
+plugin = ["plugins/**", ".claude-plugin/**"]
+ci = ["scripts/**", ".github/**", ".config/**"]
+docs = ["docs/**", "*.md"]
+config = ["dagq.toml"]
+
 # KPI の目標（ADR-0051 の決定 17・19。書式は docs/design/supervisor-lifecycle/kpi.md の「目標」）。
 # ここには host に依らない repository の方針だけを書く。phase.* や max_load_avg のように host の性能で
 # 決まる目標は host.toml に書く。[kpi] の min_samples・breach_periods・breach_weeks・
-# max_improvement_proposals は既定のまま書かない。層はどれも all（kind を省く）、stat は率・値の既定（value）。
+# max_improvement_proposals は既定のまま書かない。層はどれも all（kind・change・area を省く）、stat は率・値の既定（value）。
 # 目標は 2026-09-26 に人と planner が ask 112 で決めた（planner の推奨を人が adopt し、inbox 経由の補足で
 # first_pass_rate と asks_per_landing を緩めた）。「実績」は決めたときの 2026-W39 途中、all、n≈240 の値。
 # [kpi] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 430 を含んでから足した。

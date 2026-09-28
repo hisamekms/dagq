@@ -22,7 +22,7 @@ Split the goal into tasks, each one session in one worktree. Collect per task:
 - `--paths GLOB` (repeatable) limits what a task may change: a run changing more parks (`scope_violation`).
 - `--change CHANGE`: the kind of change the task makes (a lowercase label, ADR-t980-1). When the repository's `dagq.toml` lists `[tasks] changes`, give one of them: `add` / `edit` refuse another value, and `lint` (`missing_change`) and `submit` refuse a task without one. Without the list it is optional.
 
-Pick `--verify`, `--paths`, `--evidence`, `--kind` (docs, plugin, runtime, ci) and the files named per `reference/scope.md`.
+Pick `--verify`, `--paths`, `--evidence`, `--change` and the files named per `reference/scope.md`. `--kind LABEL` still exists but is going away (ADR-t980-1): give it to no new task; `--change` and the area (read from the landed diff) replace it.
 
 ## From draft to ready
 
