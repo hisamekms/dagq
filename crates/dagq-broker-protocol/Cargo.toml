@@ -13,7 +13,9 @@ keywords = ["dagq", "broker", "protocol"]
 categories = ["development-tools"]
 
 # Only serde and what signing needs (ADR-t827-1 decision 2): dagq depends on
-# this crate and must not take the HTTP stack with it.
+# this crate and must not take the HTTP stack with it. HMAC and base64url are
+# small functions of its own over sha2.
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"

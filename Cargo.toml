@@ -30,6 +30,9 @@ include = ["/build.rs", "/src/**", "/migrations/**", "/Cargo.toml", "/Cargo.lock
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+# The broker's protocol only, for its tokens: no HTTP stack (ADR-t827-1).
+dagq-broker-protocol = { version = "=0.4.0-dev", path = "crates/dagq-broker-protocol" }
+getrandom = "0.4"
 libc = "0.2"
 rusqlite = { version = "0.40", features = ["backup", "bundled", "functions"] }
 serde = { version = "1.0", features = ["derive"] }

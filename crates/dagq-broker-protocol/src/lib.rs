@@ -18,12 +18,16 @@ pub mod git;
 mod operation;
 pub mod process;
 mod request_id;
+mod token;
 
 pub use capability::{BrokerCapability, UnknownCapability};
 pub use claims::{BrokerRole, Committer, TokenClaims};
 pub use error::{BrokerError, ErrorBody, ErrorCode};
 pub use operation::Operation;
 pub use request_id::BrokerRequestId;
+pub use token::{
+    BrokerSessionToken, KEY_LEN, SigningKey, TOKEN_PREFIX, TokenError, check_active, sign, verify,
+};
 
 use serde::{Deserialize, Serialize};
 

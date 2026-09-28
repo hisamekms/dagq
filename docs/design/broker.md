@@ -53,14 +53,15 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 
 | crate | 種類 | 中身 | 依存（増える主なもの） | crates.io |
 | --- | --- | --- | --- | --- |
-| `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`（今）、`sha2`・`hmac`（`sign` / `verify`を足すtaskで。base64urlは自前の小さな関数） | publishする（最初） |
+| `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`・`sha2`（HMACとbase64urlは自前の小さな関数。`hmac` crateは足さない） | publishする（最初） |
 | `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（同期の小さなserver。例: `tiny_http`）、fs・process・gitのbackend、tokenの検証、audit | protocol・HTTPのserver | publishする（最後。releaseのimageの材料） |
 | `dagq-broker-client`（`crates/dagq-broker-client`） | lib + bin `dagq-broker-client` | HTTPのclient（例: `ureq`、TLSなし）、subcommand `mcp`（stdioのMCP server。JSON-RPCは`serde_json`で自前）、診断のCLI | protocol・HTTPのclient | publishする（dagqの後） |
 
 - `dagq`は`dagq-broker-protocol`だけに依存し（`version = "=<同じ版>"`と`path`）、HTTPの依存を持たない。brokerのhealthは`dagq-broker-client health --json`を子プロセスで呼んで見る（ADR-t827-1決定2）
 - 版は全crateで1つ。rootの`[package] version`は継承にせず文字どおりに書き（`scripts/check-plugin-version.sh`が`[package]`のversionを読むため）、`crates/`の各crateも同じ値を書く。一致は`check-plugin-version.sh`に検査を足して守る
 - tokioなどのasync runtimeは入れない（最小のmachineでのbuildを軽く保つ）
-- 今（task 828）: protocolの型（下の「protocolの型」）と、serverとclientの骨組み（`dagq-broker --version`・`dagq-broker health`（healthの応答のJSONを出す）、`dagq-broker-client --version`）。未知の引数はexit 2。HTTP・token・backend・MCPは後のtaskが足す。serverとclientの`--version`はまだ`CARGO_PKG_VERSION`で、dagqのbuild識別子（`X.Y.Z-dev+<commit>`）にそろえるのは後のtask。dagqはまだprotocolに依存しない（tokenの発行を足すtaskで依存する）
+- 今（task 828）: protocolの型（下の「protocolの型」）と、serverとclientの骨組み（`dagq-broker --version`・`dagq-broker health`（healthの応答のJSONを出す）、`dagq-broker-client --version`）。未知の引数はexit 2。HTTP・token・backend・MCPは後のtaskが足す。serverとclientの`--version`はまだ`CARGO_PKG_VERSION`で、dagqのbuild識別子（`X.Y.Z-dev+<commit>`）にそろえるのは後のtask。
+- task 829: protocolに`token`（`sign` / `verify` / `check_active`、`SigningKey`・`BrokerSessionToken`・`TokenError`、`TokenClaims::require` / `confine`）、dagqに`src/infrastructure/broker_token.rs`（`ensure_key`・`issue_run_token`・`broker_grants`）。dagqはprotocolに依存する（`=<同じ版>`と`path`）。claimでの発行・token fileと有効な印の書き込み・失効はhost workerの統合のtaskが足す
 
 ### protocolの型
 
@@ -183,6 +184,15 @@ resolver = "3"
 - 失効: runの終わり（`integrated`・`failed`・`canceled`・leaseの喪失・`recover`）とresumeの発行し直しで印を消し、`<queue dir>/broker/tokens/<run id>`と`<run dir>/broker/`を消す。supervisorは起動時に、終わったrunの印を掃除する。supervisorが止まっている間に終わったrunの印は、次の起動の掃除か期限まで残る（その間そのtokenは使える）
 - event: runのevent `broker_token_issued`（`jti`・`capabilities`・`exp`）と`broker_token_revoked`（`jti`・`reason`）。tokenの値は残さない
 - 未知のcapabilityを含むtokenは全体を拒む（fail closed）
+
+### 実装（protocolとdagq）
+
+- protocolの`sign(key, claims)`は`encode`のbyte列から上の書式を作る。`verify(key, token, now)`は、書式（`dagq1.`・2つの部分・paddingの無いbase64url。余りのbitが0でない符号も拒む）→署名（claimsを読む前に、定数時間で比べる）→claimsの読み（未知の欄・capability・roleと、英数字と`-`でない`jti`）→`v`→期限（`now >= exp`で期限切れ）の順に見て、どれかで失敗すれば`TokenError`を返す。`TokenError::code()`は`BadKey`・`Malformed`・`BadSignature`・`BadClaims`・`UnsupportedVersion`・`Expired`・`Revoked`を`unauthorized`、`CapabilityDenied`を`capability_denied`、`WorkspaceViolation`を`workspace_violation`にする
+- 失効の受け側は`check_active(claims, <active dir>)`: `<active dir>/<jti>`があり中身（前後の空白を除く）がclaimsの`run_id`のときだけ通し、それ以外は`Revoked`
+- 要求ごとの判定: `TokenClaims::require(capability)`（無ければ`CapabilityDenied`）と`TokenClaims::confine(path)`（相対はworkspaceから、絶対はworkspaceの下だけ。`..`はどこでも拒み、別のrunのworktreeも外になる。字面の判定だけで、symlinkはserverが解く）
+- `SigningKey`（32 byte）と`BrokerSessionToken`の`Debug`は`<redacted>`で、`Display`を持たない。tokenの値は`BrokerSessionToken::expose`（token fileと`Authorization`のためだけ）からしか出ない。`TokenError`の文言は理由だけで、token・署名・鍵を含まない
+- dagqの`ensure_key(queue dir)`は`<queue dir>/broker/key`を読み、無ければ`getrandom`の32 byteを同じdirの一時ファイル（mode 0600、`create_new`）に書き、`hard_link`で置く（読み手が半端な鍵を見ず、同時に作った2つのsupervisorは先に置かれた鍵にそろう）。modeが0600でなければ0600に絞り、長さが違えばpathだけを名指すerrorにする（人が消して作り直す）
+- dagqの`issue_run_token(key, actor, workspace, committer, now)`はworkerのactor（runとtaskを持つ）だけに発行し、workspaceは絶対パスをcanonicalにし、`jti`はuuid v4、`branch`は`dagq/<run id>`、capabilityは`broker_grants(role)`（workerは5つ、他のroleは空）、`exp = iat + TOKEN_TTL_SECS`（12時間）。返す`IssuedToken`はclaimsとtokenを持ち、eventにはclaimsの`jti`・`capabilities`・`exp`だけを書く
 
 ## mountと閉じ込め
 
