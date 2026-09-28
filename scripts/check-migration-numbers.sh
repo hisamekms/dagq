@@ -11,6 +11,12 @@
 # (decision 3). A clone without such a tag (a shallow clone, a checkout that
 # did not fetch tags) says so and passes this part.
 #
+# It also refuses a CHECK constraint in a migration numbered after the one
+# that dropped them all, migrations/NNNN_no_check_constraints.sql
+# (ADR-t876-1): until the schema is stable the rules live in the domain and
+# the write port, not in the queue. SQL comments are not read; the released
+# migrations and the ones up to that file are not checked.
+#
 # Usage: sh scripts/check-migration-numbers.sh [--release vX.Y.Z]
 #   --release TAG  compare with the latest release tag before TAG instead of
 #                  the latest one (release.yml, which runs on TAG itself).
@@ -20,8 +26,9 @@
 # script's own location, so the result does not depend on the cwd.
 #
 # Exit 0 when the numbers are fine and the released migrations are unchanged,
-# 1 when a file is misnamed, a number is shared or missing, or a released
-# migration was changed, renamed or removed (the offending files go to
+# 1 when a file is misnamed, a number is shared or missing, a migration after
+# the one that dropped the CHECKs has one, or a released migration was
+# changed, renamed or removed (the offending files go to
 # stderr), 2 when migrations/ is not found or the arguments are wrong.
 set -eu
 
@@ -95,6 +102,25 @@ for n in $(printf '%s\n' "$numbers" | uniq); do
     expected=$((value + 1))
   fi
 done
+
+# No CHECK after the migration that dropped them all (ADR-t876-1).
+dropped=$(ls migrations/[0-9][0-9][0-9][0-9]_no_check_constraints.sql 2>/dev/null | head -n 1)
+if [ -z "$dropped" ]; then
+  echo "check-migration-numbers: migrations/NNNN_no_check_constraints.sql not found; cannot check for CHECK constraints" >&2
+  status=1
+else
+  last=$(basename "$dropped" | cut -c1-4 | sed 's/^0*//')
+  for f in migrations/[0-9][0-9][0-9][0-9]_?*.sql; do
+    [ -e "$f" ] || continue
+    n=$(basename "$f" | cut -c1-4 | sed 's/^0*//')
+    [ "${n:-0}" -gt "$last" ] || continue
+    lines=$(sed 's/--.*$//' "$f" | grep -n -i -w 'check' | cut -d: -f1 | tr '\n' ' ' || true)
+    if [ -n "$lines" ]; then
+      echo "check-migration-numbers: $f has a CHECK constraint (line ${lines% }); the queue has none after $dropped (ADR-t876-1), so keep the rule in the domain and the write port" >&2
+      status=1
+    fi
+  done
+fi
 
 # Released migrations (ADR-t614-2).
 

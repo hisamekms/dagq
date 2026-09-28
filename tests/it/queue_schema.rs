@@ -417,3 +417,97 @@ fn the_rows_the_ports_write_keep_the_check_rules() {
         assert_eq!(count(broken), 0, "{broken}");
     }
 }
+
+#[test]
+fn the_latest_schema_has_no_check_constraint() {
+    // ADR-t876-1: the rules live in the domain and the write port.
+    let (dir, queue) = fixture();
+    assert_eq!(queue.schema_version().unwrap(), SqliteQueue::SCHEMA_VERSION);
+    drop(queue);
+    let conn = Connection::open(dir.path().join("queue.db")).unwrap();
+    let objects: Vec<(String, String)> = conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(objects.iter().any(|(name, _)| name == "tasks"));
+    let checked: Vec<&str> = objects
+        .iter()
+        // The word, as scripts/check-migration-numbers.sh reads it: a
+        // column such as `check_at` is not a CHECK.
+        .filter(|(_, sql)| {
+            sql.to_uppercase()
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|word| word == "CHECK")
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(checked.is_empty(), "CHECK left in {checked:?}");
+}
+
+/// `scripts/check-migration-numbers.sh` refuses, by name, a CHECK in a
+/// migration after the one that dropped them all, and passes one without
+/// (ADR-t876-1). Run on a copy outside the repository, so it finds no tag.
+#[test]
+fn the_migration_check_refuses_a_check_after_they_were_dropped() {
+    use common::Bounded;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(copy.path().join("scripts")).unwrap();
+    std::fs::create_dir_all(copy.path().join("migrations")).unwrap();
+    std::fs::copy(
+        root.join("scripts/check-migration-numbers.sh"),
+        copy.path().join("scripts/check-migration-numbers.sh"),
+    )
+    .unwrap();
+    for entry in std::fs::read_dir(root.join("migrations")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(
+            entry.path(),
+            copy.path().join("migrations").join(entry.file_name()),
+        )
+        .unwrap();
+    }
+    let next = format!("{:04}_later.sql", SqliteQueue::SCHEMA_VERSION + 1);
+    let run = |migration: &str| {
+        std::fs::write(copy.path().join("migrations").join(&next), migration).unwrap();
+        std::process::Command::new("sh")
+            .arg(copy.path().join("scripts/check-migration-numbers.sh"))
+            .current_dir(copy.path())
+            .bounded_output()
+            .unwrap()
+    };
+    // A comment and a name with the word in it are not a CHECK.
+    let passed = run("-- dagq-schema: compatible\n-- no CHECK here\n\
+                      CREATE TABLE later (x TEXT NOT NULL, check_at INTEGER);\n");
+    assert!(
+        passed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&passed.stderr)
+    );
+    let refused = run("-- dagq-schema: compatible\n\
+                       CREATE TABLE later (x TEXT NOT NULL,\n  y INTEGER Check (y > 0));\n");
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "migrations/{next} has a CHECK constraint (line 3)"
+        )),
+        "{stderr}"
+    );
+    // The migrations up to the one that dropped them are not read.
+    std::fs::remove_file(copy.path().join("migrations").join(&next)).unwrap();
+    let dropped = MIGRATIONS
+        .iter()
+        .position(|m| m.contains("CREATE TABLE asks_v50"))
+        .unwrap();
+    assert!(MIGRATIONS[..dropped].iter().any(|m| m.contains("CHECK (")));
+    let output = std::process::Command::new("sh")
+        .arg(copy.path().join("scripts/check-migration-numbers.sh"))
+        .current_dir(copy.path())
+        .bounded_output()
+        .unwrap();
+    assert!(output.status.success());
+}

@@ -306,13 +306,6 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
     let raw = Connection::open(&path).unwrap();
     raw.execute("UPDATE supervisors SET heartbeat_at=0 WHERE token='sv'", [])
         .unwrap();
-    assert!(
-        raw.execute(
-            "INSERT INTO supervisors(token,pid,parallel) VALUES ('bad',1,0)",
-            []
-        )
-        .is_err()
-    );
     drop(raw);
     assert_eq!(queue.heartbeat(&LeaseToken::new("sv")).unwrap(), 0); // No lease, still refreshed.
     let listed = queue.supervisors().unwrap();
@@ -342,11 +335,13 @@ fn migration_to_v7_adds_the_supervisor_registry_and_keeps_leases() {
             .set_supervisor_mode(&LeaseToken::new("nobody"), SupervisorMode::Launchd, None)
             .is_err()
     );
+    // A mode outside the domain's fails the read (ADR-t876-1).
     let raw = Connection::open(&path).unwrap();
-    assert!(
-        raw.execute("UPDATE supervisors SET mode='by-hand' WHERE token='sv'", [])
-            .is_err()
-    );
+    raw.execute("UPDATE supervisors SET mode='by-hand' WHERE token='sv'", [])
+        .unwrap();
+    assert!(queue.supervisors().is_err());
+    raw.execute("UPDATE supervisors SET mode='launchd' WHERE token='sv'", [])
+        .unwrap();
     drop(raw);
 
     // A registration a pre-0010 binary wrote has no version at all, which
@@ -507,20 +502,12 @@ fn migration_from_v6_adds_goals_and_keeps_tasks_runs_and_events() {
         [],
     )
     .unwrap();
-    for (kind, reason, accepted) in [
-        ("queue_hold", "scope", true),
-        ("blocked", "cost", true),
-        ("blocked", "bogus", false),
-    ] {
-        assert_eq!(
-            raw.execute(
-                "INSERT INTO asks(kind,question,asked_by,reason_category) VALUES (?1,'x','observer',?2)",
-                [kind, reason]
-            )
-            .is_ok(),
-            accepted,
-            "{kind} {reason}"
-        );
+    for (kind, reason) in [("queue_hold", "scope"), ("blocked", "cost")] {
+        raw.execute(
+            "INSERT INTO asks(kind,question,asked_by,reason_category) VALUES (?1,'x','observer',?2)",
+            [kind, reason],
+        )
+        .unwrap();
     }
     assert!(
         raw.execute(
@@ -536,24 +523,9 @@ fn migration_from_v6_adds_goals_and_keeps_tasks_runs_and_events() {
         [],
     )
     .unwrap();
-    assert!(
-        raw.execute(
-            "INSERT INTO run_events(run_id,kind,payload) VALUES ('run-landed','backend_call_failed','{}')",
-            []
-        )
-        .is_err()
-    );
-    assert!(
-        raw.execute(
-            "INSERT INTO run_events(goal_id,run_id,kind,payload) VALUES (1,'run-landed','x','{}')",
-            []
-        )
-        .is_err()
-    );
-    assert!(
-        raw.execute("UPDATE goals SET verdict='achieved' WHERE id=1", [])
-            .is_err()
-    );
+    // The reason's values, an event's run without its task and a verdict
+    // without its close were CHECKs until ADR-t876-1; the domain and the
+    // write port keep them now (docs/design/persistence.md).
 }
 
 #[test]
@@ -602,11 +574,11 @@ fn goals_of_a_version_12_queue_migrate_as_open() {
     assert_eq!(goal.status(), GoalStatus::Open);
     assert_eq!(queue.list_goals().unwrap()[0].status, GoalStatus::Open);
     assert_eq!(queue.candidates().unwrap()[0].id(), TaskId::new(1));
+    // A status outside the domain's fails the read (ADR-t876-1).
     let raw = Connection::open(&path).unwrap();
-    assert!(
-        raw.execute("UPDATE goals SET status='closed' WHERE id=1", [])
-            .is_err()
-    );
+    raw.execute("UPDATE goals SET status='closed' WHERE id=1", [])
+        .unwrap();
+    assert!(queue.show_goal(GoalId::new(1)).is_err());
 }
 
 #[test]
@@ -678,14 +650,14 @@ fn migration_to_v21_keeps_drafts_and_the_task_id_sequence() {
     // The deleted task's ID is never handed out again.
     assert_eq!(queue.add(new_task("new")).unwrap().id(), TaskId::new(5));
     let raw = Connection::open(&path).unwrap();
-    assert!(
-        raw.execute(
-            "INSERT INTO tasks(title,description,acceptance,verification_commands,status)
-             VALUES ('x','','','[]','bogus')",
-            []
-        )
-        .is_err()
-    );
+    // A status outside the domain's fails the read (ADR-t876-1).
+    raw.execute(
+        "INSERT INTO tasks(id,title,description,acceptance,verification_commands,status)
+         VALUES (6,'x','','','[]','bogus')",
+        [],
+    )
+    .unwrap();
+    assert!(queue.show(TaskId::new(6)).is_err());
     let violations: i64 = raw
         .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
@@ -1293,4 +1265,241 @@ fn migration_opening_the_run_providers_keeps_runs_and_takes_a_codex_run() {
         .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
         .unwrap();
     assert!(floor > open as i64, "breaking: the floor rises to {floor}");
+}
+
+/// Every row of every table (its rowid first where it has one, apart from
+/// sqlite_sequence, whose rows move), sorted, as text: what a table rebuild
+/// must keep.
+fn all_rows(conn: &Connection) -> Vec<(String, Vec<String>)> {
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    tables
+        .into_iter()
+        .map(|table| {
+            let all = format!("SELECT * FROM \"{table}\"");
+            let mut statement = if table == "sqlite_sequence" {
+                conn.prepare(&all)
+            } else {
+                conn.prepare(&format!("SELECT rowid, * FROM \"{table}\""))
+                    .or_else(|_| conn.prepare(&all))
+            }
+            .unwrap();
+            let width = statement.column_count();
+            let mut rows: Vec<String> = statement
+                .query_map([], |r| {
+                    (0..width)
+                        .map(|i| {
+                            r.get::<_, rusqlite::types::Value>(i)
+                                .map(|v| format!("{v:?}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|values| values.join("|"))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            rows.sort();
+            (table, rows)
+        })
+        .collect()
+}
+
+/// The columns, foreign keys and indexes of every table, and the SQL of
+/// every index and trigger: the schema apart from each table's own SQL.
+fn structure(conn: &Connection) -> Vec<String> {
+    let text = |sql: &str| -> Vec<String> {
+        let mut statement = conn.prepare(sql).unwrap();
+        let width = statement.column_count();
+        statement
+            .query_map([], |r| {
+                (0..width)
+                    .map(|i| {
+                        r.get::<_, rusqlite::types::Value>(i)
+                            .map(|v| format!("{v:?}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|values| values.join("|"))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let mut out = text(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master
+         WHERE type IN ('index', 'trigger', 'view') ORDER BY name",
+    );
+    for table in text("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name") {
+        let table = table.trim_start_matches("Text(\"").trim_end_matches("\")");
+        out.push(format!("== {table}"));
+        out.extend(text(&format!(
+            "SELECT * FROM pragma_table_info('{table}') ORDER BY cid"
+        )));
+        out.extend(text(&format!(
+            "SELECT * FROM pragma_foreign_key_list('{table}') ORDER BY id, seq"
+        )));
+        out.extend(text(&format!(
+            "SELECT name, \"unique\", origin, partial FROM pragma_index_list('{table}')
+             ORDER BY name"
+        )));
+    }
+    out
+}
+
+#[test]
+fn migration_dropping_every_check_keeps_rows_ids_indexes_triggers_and_keys() {
+    // ADR-t876-1, found by what it creates so a renumbering on landing does
+    // not move it.
+    let open = MIGRATIONS
+        .iter()
+        .position(|m| m.contains("CREATE TABLE asks_v50"))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..open] {
+        raw.execute_batch(migration).unwrap();
+    }
+    // A row in every table that had a CHECK, with ids that are not 1, and a
+    // deleted ask so the sequence runs ahead of the rows.
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {open};
+         UPDATE schema_floor SET floor = {floor};
+         INSERT INTO queue_repository(singleton, git_common_dir) VALUES (1, '/repo/.git');
+         INSERT INTO proposals(id,status,owner_origin,submitted_at,created_at,updated_at,review_hold)
+         VALUES (2,'submitted','person','2026-09-02','2026-09-02','2026-09-02','concern');
+         INSERT INTO goals(id,title,status,proposal_id,closed_at,verdict)
+         VALUES (5,'g','open',2,'2026-09-03','achieved');
+         INSERT INTO tasks(id,title,description,acceptance,verification_commands,status,updated_at,
+                           goal_id,priority,worker_provider,worker_mode)
+         VALUES (1,'first','d','a','[\"cargo test\"]','in_progress','2026-09-02T00:00:00.000Z',
+                 5,3,'codex','headless'),
+                (3,'third','d','a','[]','draft','2026-09-02T00:00:00.000Z',NULL,1,NULL,NULL);
+         INSERT INTO task_dependencies(task_id, predecessor_id) VALUES (3, 1);
+         INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+         VALUES ('run-1',1,'running','claude','claude','{BASE}');
+         INSERT INTO run_processes(run_id,role,pid,heartbeat_at) VALUES ('run-1','agent',42,7);
+         INSERT INTO supervisors(token,pid,parallel,mode,providers)
+         VALUES ('tok',11,3,'in_cmux','[\"claude\"]');
+         INSERT INTO planners(id,origin,proposal_id,workspace_id,created_at,draft_task_id)
+         VALUES (4,'person',2,'ws-1',1,3);
+         INSERT INTO plan_reviews(id,proposal_id,attempt,supervisor_token,started_at,finished_at,
+                                  outcome,verdict)
+         VALUES (3,2,1,'tok',1,2,'pass','{{}}');
+         INSERT INTO draft_origins(task_id,origin,material,created_at)
+         VALUES (3,'follow_up','{{\"from\":1}}',1);
+         INSERT INTO findings(id,kind,target,task_id,run_id,summary,first_seen_at,last_seen_at,
+                              evidence,recorded_by,updated_at)
+         VALUES (6,'stall','run',1,'run-1','stuck',1,2,'[40]','observer',2);
+         INSERT INTO binary_updates(id,kind,payload) VALUES (2,'installed','{{}}');
+         INSERT INTO asks(id,kind,task_id,run_id,question,asked_by,reason_category,
+                          answer,answered_at,answered_by,option_index,finding_id)
+         VALUES (7,'worker_question',1,'run-1','which?','worker','scope','a',5,'inbox',0,6);
+         INSERT INTO asks(id,kind,question,asked_by,reason_category)
+         VALUES (12,'blocked','gone','observer','scope');
+         DELETE FROM asks WHERE id = 12;
+         INSERT INTO run_events(id,task_id,run_id,kind,payload)
+         VALUES (40,1,'run-1','observation','{{\"text\":\"a note to find\"}}');
+         INSERT INTO run_events(id,task_id,run_id,kind,payload)
+         VALUES (41,1,'run-1','run_integrated','{{\"result_commit\":\"{BASE}\",\"message\":\"landed\"}}');
+         INSERT INTO draft_reopens(task_id,material,created_at) VALUES (3,'{{}}',1);
+         INSERT INTO goal_reviews(id,goal_id,attempt,supervisor_token,fingerprint,started_at)
+         VALUES (2,5,1,'tok','fp',1);
+         INSERT INTO headless_jobs(id,kind,run_id,attempt,pid,supervisor_token,started_at)
+         VALUES (8,'review','run-1',0,99,'tok',1);",
+        floor = floor_for(open as i64),
+    ))
+    .unwrap();
+    let checked = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE sql LIKE '%CHECK%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(checked(&raw) > 0);
+    let rows = all_rows(&raw);
+    let before = structure(&raw);
+    // Every table that had a CHECK holds a row.
+    for table in [
+        "tasks",
+        "task_dependencies",
+        "queue_repository",
+        "run_processes",
+        "supervisors",
+        "goals",
+        "proposals",
+        "planners",
+        "plan_reviews",
+        "draft_origins",
+        "findings",
+        "binary_updates",
+        "asks",
+        "run_events",
+        "draft_reopens",
+        "goal_reviews",
+        "headless_jobs",
+        "landed_commits",
+    ] {
+        let (_, table_rows) = rows.iter().find(|(name, _)| name == table).unwrap();
+        assert!(!table_rows.is_empty(), "{table}");
+    }
+
+    SqliteQueue::migrate(&path, None, 0).unwrap();
+    assert_eq!(checked(&raw), 0);
+    // Rows, ids, rowids and the AUTOINCREMENT sequences are kept; only the
+    // floor rises (breaking).
+    let floor_row = |rows: &[(String, Vec<String>)]| {
+        rows.iter()
+            .filter(|(name, _)| name != "schema_floor")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let after = all_rows(&raw);
+    assert_eq!(floor_row(&after), floor_row(&rows));
+    let floor: i64 = raw
+        .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
+        .unwrap();
+    assert!(floor > open as i64, "breaking: the floor rises to {floor}");
+    // Columns, NOT NULL, DEFAULT, keys, indexes and triggers are the same.
+    assert_eq!(structure(&raw), before);
+    let violations: i64 = raw
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
+
+    // The triggers still index, and the next id follows the deleted ask.
+    let mut queue = SqliteQueue::open(&path).unwrap();
+    assert_eq!(queue.show(TaskId::new(1)).unwrap().runs.len(), 1);
+    raw.execute("UPDATE tasks SET title = 'renamed first' WHERE id = 1", [])
+        .unwrap();
+    let title: String = raw
+        .query_row("SELECT title FROM search_index WHERE rowid = 4", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(title, "renamed first");
+    raw.execute(
+        "INSERT INTO asks(kind,task_id,question,asked_by,reason_category)
+         VALUES ('decide',1,'next?','supervisor','scope')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(raw.last_insert_rowid(), 13);
+    // The foreign keys still hold once enforced.
+    raw.pragma_update(None, "foreign_keys", true).unwrap();
+    assert!(
+        raw.execute(
+            "INSERT INTO task_dependencies(task_id, predecessor_id) VALUES (3, 99)",
+            []
+        )
+        .is_err()
+    );
 }

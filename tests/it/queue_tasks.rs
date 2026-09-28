@@ -213,7 +213,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
 /// ready task only, recording `task_priority_changed` when it changes; the
 /// column refuses anything outside 0..=4 (ADR-0040 decision 4).
 #[test]
-fn priority_is_stored_changed_while_editable_and_checked_by_the_schema() {
+fn priority_is_stored_changed_while_editable_and_checked_on_read() {
     let (dir, mut queue) = fixture();
     let mut spec = new_task("urgent");
     spec.priority = Priority::Urgent;
@@ -253,12 +253,11 @@ fn priority_is_stored_changed_while_editable_and_checked_by_the_schema() {
     assert!(queue.set_priority(TaskId::new(99), Priority::Low).is_err());
 
     let raw = Connection::open(dir.path().join("queue.db")).unwrap();
+    // A priority outside the domain's fails the read (ADR-t876-1).
     for value in [-1, 5] {
-        let error = raw
-            .execute("UPDATE tasks SET priority=?1 WHERE id=1", [value])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("CHECK constraint failed"), "{error}");
+        raw.execute("UPDATE tasks SET priority=?1 WHERE id=1", [value])
+            .unwrap();
+        assert!(queue.show(task.id()).is_err(), "{value}");
     }
     raw.execute("UPDATE tasks SET priority=4 WHERE id=1", [])
         .unwrap();
