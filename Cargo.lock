@@ -178,6 +178,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dagq-broker"
+version = "0.4.0-dev"
+dependencies = [
+ "dagq-broker-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "dagq-broker-client"
+version = "0.4.0-dev"
+dependencies = [
+ "dagq-broker-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "dagq-broker-protocol"
+version = "0.4.0-dev"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

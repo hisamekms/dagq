@@ -5,6 +5,11 @@
 # - Always: the `version` of plugins/claude-dagq/.claude-plugin/plugin.json is
 #   the `[package].version` of Cargo.toml (decision 3; on main both are
 #   X.Y.Z-dev, in a release both are X.Y.Z).
+# - Always: every crate of the workspace under crates/ (crates/*/Cargo.toml)
+#   has the same `[package].version` as Cargo.toml, and a dependency on one
+#   of them (in Cargo.toml or crates/*/Cargo.toml) pins that version exactly (`version = "=X.Y.Z"`), since
+#   the crates are published and released as one version (ADR-t827-1
+#   decision 8).
 # - Always: the claude-dagq entry of .claude-plugin/marketplace.json has one of
 #   two forms. Either the source is the relative path "./plugins/claude-dagq"
 #   (the form before the first pinned release, decision 6), or it is
@@ -88,6 +93,26 @@ if [ "$plugin_version" != "$crate_version" ]; then
   echo "check-plugin-version: $plugin_json has version $plugin_version but $cargo_toml has $crate_version" >&2
   status=1
 fi
+
+for manifest in "$cargo_toml" crates/*/Cargo.toml; do
+  [ -f "$manifest" ] || continue
+  member_version=$(awk -F '"' '/^\[package\]/ { p = 1; next }
+                               /^\[/ { p = 0 }
+                               p && /^version *= */ { print $2; exit }' "$manifest")
+  if [ "$member_version" != "$crate_version" ]; then
+    echo "check-plugin-version: $manifest has version ${member_version:-none} but $cargo_toml has $crate_version" >&2
+    status=1
+  fi
+  # `dagq-broker... = { version = "..." ... }` and `dagq-broker... = "..."`;
+  # a dependency written as a [dependencies.<name>] table is not read.
+  for pinned in $(sed -n -e 's/^\(dagq-broker[a-z-]*\) *= *{.*version *= *"\([^"]*\)".*/\1=\2/p' \
+                         -e 's/^\(dagq-broker[a-z-]*\) *= *"\([^"]*\)".*/\1=\2/p' "$manifest"); do
+    if [ "${pinned#*=}" != "=$crate_version" ]; then
+      echo "check-plugin-version: $manifest depends on ${pinned%%=*} version ${pinned#*=} but needs =$crate_version" >&2
+      status=1
+    fi
+  done
+done
 
 if [ -n "$tag" ]; then
   tag_version=${tag#v}
@@ -187,7 +212,7 @@ case $marketplace_status in
 esac
 
 if [ "$status" -eq 0 ]; then
-  echo "check-plugin-version: $cargo_toml and $plugin_json have version $crate_version, and the $marketplace_json entry agrees"
+  echo "check-plugin-version: $cargo_toml, crates/*/Cargo.toml and $plugin_json have version $crate_version, and the $marketplace_json entry agrees"
 fi
 
 exit "$status"

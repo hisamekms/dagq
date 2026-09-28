@@ -52,13 +52,17 @@ pub const UPDATE_ASKER: &str = "supervisor";
 
 /// The paths whose change makes a landing change the runtime, relative to
 /// the repository root: a directory ends with `/`. `build.rs` embeds the
-/// build identifier.
+/// build identifier. `crates/` holds the broker's crates, whose client and
+/// image source ship with dagq's build, and `rust-toolchain.toml` names the
+/// Rust of the broker's image (ADR-t827-1 decision 4).
 pub const RUNTIME_PATHS: &[&str] = &[
     "src/",
     "migrations/",
+    "crates/",
     "Cargo.toml",
     "Cargo.lock",
     "build.rs",
+    "rust-toolchain.toml",
 ];
 
 /// Whether any of `paths` (repository-relative) is part of the runtime.
@@ -280,7 +284,7 @@ pub struct JobOptions {
     pub paths: UpdatePaths,
     /// Where the build's output is appended.
     pub log: PathBuf,
-    /// A shell command in place of `cargo build --release --locked`
+    /// A shell command in place of `cargo build --release --locked -p dagq`
     /// (tests), run in the checkout with `CARGO_TARGET_DIR` set.
     pub build_command: Option<String>,
     /// The `up` arguments the question of a breaking build hands a person,
@@ -1256,7 +1260,15 @@ mod tests {
         assert!(changes_runtime(&paths(&["migrations/0032_x.sql"])));
         assert!(changes_runtime(&paths(&["Cargo.lock"])));
         assert!(changes_runtime(&paths(&["build.rs"])));
+        assert!(changes_runtime(&paths(&[
+            "crates/dagq-broker-protocol/src/lib.rs"
+        ])));
+        assert!(changes_runtime(&paths(&["rust-toolchain.toml"])));
         assert!(!changes_runtime(&paths(&["docs/src/a.md", "README.md"])));
+        assert!(!changes_runtime(&paths(&[
+            "docs/crates/a.md",
+            "cratesx/a.rs"
+        ])));
         assert!(!changes_runtime(&paths(&["srcs/a.rs", "Cargo.toml.bak"])));
         assert!(!changes_runtime(&[]));
     }

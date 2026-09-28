@@ -14,7 +14,7 @@ Follow the repository instructions first; for this repository:
 | --- | --- | --- | --- | --- |
 | Docs only (ADRs included) | `docs` | `'docs/**'`, `'*.md'` | `'cargo fmt --all --check'` (or none) | none |
 | Plugin docs and skills | `plugin` | `'plugins/**'`, `'docs/**'`, `'*.md'` | `'cargo test --locked --test plugin'` (`tests/plugin.rs` checks the skills) | none |
-| Runtime (`src/`, `tests/`, `migrations/`) | `runtime` | none | fmt, clippy, `cargo llvm-cov nextest --locked --fail-under-lines 80` (it runs every test, so no separate `cargo test`) | `e2e` |
+| Runtime (`src/`, `tests/`, `migrations/`) | `runtime` | none | fmt, clippy, `cargo llvm-cov nextest --locked --workspace --fail-under-lines 80` (it runs every test, so no separate `cargo test`) | `e2e` |
 | Scripts and CI | `ci` | as the repository says | as the repository says | none |
 
 A task that mixes kinds takes the verification and the `--kind` of the heaviest kind. `--kind` decides no check; it records what the task changes so `show`, `list` and `stats` (`kinds`: runs and median times per kind) need not guess from the title. Change it with `edit TASK --kind KIND` while the task is `draft` or `submitted`. A task without one (every task registered before the kind existed) shows `kind: null`.

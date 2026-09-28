@@ -1,7 +1,8 @@
-//! [`Binaries`] on this machine: `cargo build --release --locked` in a
-//! checkout, a binary run as a child process for its version, a throwaway
-//! queue and its migrations, and the replacement of a file by a rename in
-//! its directory (ADR-0045 decisions 11, 12).
+//! [`Binaries`] on this machine: `cargo build --release --locked -p dagq` in
+//! a checkout (dagq alone, not the workspace's other members), a binary run
+//! as a child process for its version, a throwaway queue and its migrations,
+//! and the replacement of a file by a rename in its directory (ADR-0045
+//! decisions 11, 12).
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
@@ -56,7 +57,7 @@ fn text(path: &Path) -> Result<&str> {
 impl Binaries for LocalBinaries {
     fn build(&self, checkout: &Path) -> Result<PathBuf> {
         let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .args(["build", "--release", "--locked"])
+            .args(["build", "--release", "--locked", "-p", "dagq"])
             .current_dir(checkout)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -247,7 +248,7 @@ impl Binaries for LocalBinaries {
             None => {
                 let mut cargo =
                     Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-                cargo.args(["build", "--release", "--locked"]);
+                cargo.args(["build", "--release", "--locked", "-p", "dagq"]);
                 cargo
             }
         };

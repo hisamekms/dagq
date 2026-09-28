@@ -361,7 +361,7 @@ Every change runs these four:
 cargo fmt --all --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
-cargo llvm-cov nextest --locked --fail-under-lines 80
+cargo llvm-cov nextest --locked --workspace --fail-under-lines 80
 ```
 
 GitHub Actions runs the same checks on a macOS runner for every push to `main` and every pull request ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), without a separate `cargo test` step: `cargo llvm-cov nextest` runs the same test binaries (the unit tests in `src/lib.rs`, the integration tests in the one binary `tests/it`, and `tests/e2e.rs` and `tests/plugin.rs` ([ADR-0078](docs/adr/0078-one-integration-test-binary.md)); the crate has no doctests), each test in its own process and in parallel across binaries, and fails if any test fails, so running both would only run every test twice ([ADR-0076](docs/adr/0076-run-the-coverage-gate-tests-with-nextest.md); `.config/nextest.toml` only marks tests over 60 seconds as slow). For the same reason, a task whose `verification_commands` include the coverage gate does not also list `cargo test --locked`.

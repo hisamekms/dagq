@@ -27,7 +27,8 @@ fn main() {
         // Registered before anything can fail, so a build that fell back to
         // `unknown` is looked at again once the sources change rather than
         // kept until build.rs itself does.
-        for path in ["src", "Cargo.toml", "Cargo.lock"] {
+        // crates/ is part of what a build of dagq ships (ADR-t827-1).
+        for path in ["src", "crates", "Cargo.toml", "Cargo.lock"] {
             println!("cargo:rerun-if-changed={path}");
         }
         let state = git_state(&manifest_dir);

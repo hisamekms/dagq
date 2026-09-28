@@ -53,13 +53,30 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 
 | crate | 種類 | 中身 | 依存（増える主なもの） | crates.io |
 | --- | --- | --- | --- | --- |
-| `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`・`sha2`・`hmac`（base64urlは自前の小さな関数） | publishする（最初） |
+| `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`（今）、`sha2`・`hmac`（`sign` / `verify`を足すtaskで。base64urlは自前の小さな関数） | publishする（最初） |
 | `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（同期の小さなserver。例: `tiny_http`）、fs・process・gitのbackend、tokenの検証、audit | protocol・HTTPのserver | publishする（最後。releaseのimageの材料） |
 | `dagq-broker-client`（`crates/dagq-broker-client`） | lib + bin `dagq-broker-client` | HTTPのclient（例: `ureq`、TLSなし）、subcommand `mcp`（stdioのMCP server。JSON-RPCは`serde_json`で自前）、診断のCLI | protocol・HTTPのclient | publishする（dagqの後） |
 
 - `dagq`は`dagq-broker-protocol`だけに依存し（`version = "=<同じ版>"`と`path`）、HTTPの依存を持たない。brokerのhealthは`dagq-broker-client health --json`を子プロセスで呼んで見る（ADR-t827-1決定2）
 - 版は全crateで1つ。rootの`[package] version`は継承にせず文字どおりに書き（`scripts/check-plugin-version.sh`が`[package]`のversionを読むため）、`crates/`の各crateも同じ値を書く。一致は`check-plugin-version.sh`に検査を足して守る
 - tokioなどのasync runtimeは入れない（最小のmachineでのbuildを軽く保つ）
+- 今（task 828）: protocolの型（下の「protocolの型」）と、serverとclientの骨組み（`dagq-broker --version`・`dagq-broker health`（healthの応答のJSONを出す）、`dagq-broker-client --version`）。未知の引数はexit 2。HTTP・token・backend・MCPは後のtaskが足す。serverとclientの`--version`はまだ`CARGO_PKG_VERSION`で、dagqのbuild識別子（`X.Y.Z-dev+<commit>`）にそろえるのは後のtask。dagqはまだprotocolに依存しない（tokenの発行を足すtaskで依存する）
+
+### protocolの型
+
+`dagq-broker-protocol`の型は全て`#[serde(deny_unknown_fields)]`で、未知の欄・capability・error code・roleを読むと失敗する（fail closed）。serializeは欄の宣言の順で、集合と表は`BTreeSet` / `BTreeMap`でkeyの順なので、同じ値は同じbyte列になる（`encode` / `decode`。claimsの署名はこのbyte列に対して行う）。testは各型の正確なJSONを固定する。
+
+| 型 | wire |
+| --- | --- |
+| `BrokerCapability` | `"fs.read"`・`"fs.write"`・`"process.exec"`・`"git.read"`・`"git.write"`（この順） |
+| `TokenClaims` | 上の「token」の欄の順。`role`は`BrokerRole`（`"worker"`だけ）、`committer`は`Committer {name, email}`、`capabilities`は`BTreeSet<BrokerCapability>`、`task_id`・`iat`・`exp`は整数 |
+| `BrokerRequestId` | 文字列そのまま（serverが作るuuid） |
+| `ErrorCode` / `BrokerError` / `ErrorBody` | 下の「error」の7つのcodeとHTTP status、`{"error":{"code","message","request_id"}}` |
+| `Operation` | 下の表のmethodとpathとcapability、auditの`op`の名前（`fs.list`・`git.status`など） |
+| `HealthResponse` | `{"status":"ok","build","protocol"}` |
+| `fs::{Read,List,Write,Edit}{Request,Response}` | 下の表の欄。`offset` / `limit`は無ければ省く。`create_dirs` / `replace_all`は既定`false`で常に出す。`List`の`entries`は`{name, kind, size}`で`kind`は`file` / `dir` / `symlink` / `other` |
+| `process::{ExecRequest,ExecResponse}` | `env`は`BTreeMap`で空なら省く。`stdin` / `timeout_secs`は無ければ省く。`exit_code`はsignalで終わったとき`null` |
+| `git::*` | `status`の応答は`{branch, entries:[{path, status}]}`（`branch`はdetachedで`null`、`status`はporcelainの2文字）。`diff`の要求は`staged`（常に出す）と`paths`（空なら省く）。`log`の`commits`は`{commit, author, time, subject}`。`add`の応答と`status`の要求は`{}` |
 
 ### workspaceと検証
 
@@ -70,12 +87,14 @@ default-members = [".", "crates/dagq-broker-protocol", "crates/dagq-broker", "cr
 resolver = "3"
 ```
 
-- `default-members`でrootの`cargo test --locked`・`cargo clippy --locked --all-targets -- -D warnings`・`cargo llvm-cov nextest --locked --fail-under-lines 80`が全crateを覆う。関門のコマンドに`--workspace`は足さない（ADR-t827-1決定3）。workspaceを作るtaskは、llvm-covのreportに`crates/`のファイルが載ることと、workerの手元のコマンド（`cargo test --locked --test it <module>::`、`--lib <module>`）が他のcrateで失敗しないことを確かめる。3つのcrateは全てlibを持つので`--lib`は通る。`--test it`がdagq以外のcrateで拒まれるなら、AGENTS.mdのworkerのコマンドに`-p dagq`を足す。reportに載らなければ関門を弱めずに止めて人に聞く
+- `default-members`でrootの`cargo test --locked`・`cargo clippy --locked --all-targets -- -D warnings`・`cargo nextest run`が全crateを覆う。workerの手元の`cargo test --locked --test it <module>::`と`--lib <module>`は`-p`なしで通る（task 828で確かめた。`--test it`はdagqのtestだけを選び、`--lib`は全crateのunit testからfilterに合うものを選ぶ）。brokerのcrateのtestは`-p <crate>`で絞る
+- coverageの関門は`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`（ADR-t828-1がADR-t827-1決定3をamends）。cargo-llvm-cov（0.9.1）はrootがpackageのworkspaceで`-p`も`--workspace`も無いと`default-members`を見ずroot package（dagq）だけをreportに入れるので、`--workspace`で全crateを80%に数える。登録済みのtaskの旧コマンド（`--workspace`なし）はdagqのcoverageと全crateのtestの成否を見て、brokerのcrateの行は数えない
 - 新しいcrateのtestは各crateの`src/`のunit testと`crates/<crate>/tests/`に置く。serverのtestは`CARGO_BIN_EXE_dagq-broker`をhostのプロセスとして`--bind 127.0.0.1:0`と一時のdirで起こし、podmanなしでcoverageに数える。podmanを要るtest（containerの起動・mount・LANで待ち受けないことの確認）は`#[ignore]`で、e2eと同じく関門とCIに数えない
-- `scripts/check-test-file-lines.sh`は今`tests/`の下だけを見る。`crates/*/tests/`を対象に足すかはworkspaceを作るtaskが決める
-- CI（`ci.yml`）のコマンドはそのまま。CIはmacOSだけなので、serverのLinux（musl）の経路とContainerfileはCIではbuildもtestもされない。serverのコードはOSに依らない部分（tokenの検証・閉じ込め・exec・audit）をmacOSのtestで覆い、Linuxだけの部分（`openat2`など）は`cfg`で分けてpodmanを要る`#[ignore]`のtestとスモークで確かめる
+- `scripts/check-test-file-lines.sh`は`tests/`と`crates/*/tests/`の下の`.rs`を見る（task 828）
+- CI（`ci.yml`）のcoverageの関門は上の`--workspace`の形で、他のコマンドはそのまま。CIはmacOSだけなので、serverのLinux（musl）の経路とContainerfileはCIではbuildもtestもされない。serverのコードはOSに依らない部分（tokenの検証・閉じ込め・exec・audit）をmacOSのtestで覆い、Linuxだけの部分（`openat2`など）は`cfg`で分けてpodmanを要る`#[ignore]`のtestとスモークで確かめる
 - dagqのpodmanを呼ぶ部分（`broker::ensure`）はpodmanのコマンドをportの後ろに置き、判定（machine・image・containerの状態からの次の一手、lock、版の比較）をstubのportでunit testする。実物のpodmanを呼ぶadapterだけが`#[ignore]`のtestになる
-- releaseの`cargo build --release --locked --target`は全default membersを作るので、`-p dagq -p dagq-broker-client`に絞る。`cargo publish --locked`は`-p`で4つのcrateを順に打つ
+- releaseの`cargo build --release --locked --target`は全default membersを作るので、`-p dagq -p dagq-broker-client`に絞る。`cargo publish --locked`は`-p`で4つのcrateを順に打ち、crates.ioに同じ版があるcrateは飛ばす（`release.yml`）。Trusted Publisherは既にあるcrateにしか登録できないので、brokerの3つのcrateの最初のpublishは人がAPI tokenで手で行い、それぞれにTrusted Publisherを登録する（`.claude/skills/release`）
+- `install`とauto-updateのbuildは今`cargo build --release --locked -p dagq`（dagqだけ。`src/infrastructure/binaries.rs`）で、clientを一緒にbuildして置くのは下の「配布と版」のtask
 
 ### runtimeのパス
 

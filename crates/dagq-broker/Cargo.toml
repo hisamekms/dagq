@@ -1,0 +1,15 @@
+[package]
+name = "dagq-broker"
+version = "0.4.0-dev"
+edition = "2024"
+rust-version = "1.98"
+description = "The dagq resource broker: fs, process and git on behalf of a run, behind a per-run token"
+license = "MIT"
+repository = "https://github.com/hisamekms/dagq"
+homepage = "https://github.com/hisamekms/dagq"
+keywords = ["dagq", "broker"]
+categories = ["development-tools"]
+
+[dependencies]
+dagq-broker-protocol = { version = "=0.4.0-dev", path = "../dagq-broker-protocol" }
+serde_json = "1.0"

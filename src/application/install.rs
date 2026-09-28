@@ -76,8 +76,9 @@ pub trait Binaries {
         bail!("these binaries cannot check a commit out")
     }
     /// Build `checkout` for release into `target_dir`, running `command`
-    /// (a shell command) in place of `cargo build --release --locked` when
-    /// given, with what it prints appended to `log`; the binary built.
+    /// (a shell command) in place of `cargo build --release --locked -p
+    /// dagq` when given, with what it prints appended to `log`; the binary
+    /// built.
     fn build_into(
         &self,
         checkout: &Path,

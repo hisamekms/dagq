@@ -62,7 +62,7 @@ enum Command {
     /// rename that keeps the old one as <name>.previous, and ask the supervisor to exec it. A
     /// failed handoff puts the old binary back.
     Install {
-        /// A checkout to build (`cargo build --release --locked`), or a built binary. Default:
+        /// A checkout to build (`cargo build --release --locked -p dagq`), or a built binary. Default:
         /// build the main checkout of the repository of the working directory.
         #[arg(long, conflicts_with_all = ["rollback", "release"])]
         from: Option<PathBuf>,
@@ -602,7 +602,7 @@ enum Command {
         /// Seconds between two looks at main for the automatic update.
         #[arg(long, default_value_t = 30)]
         update_interval: u64,
-        /// A shell command the automatic update runs in place of `cargo build --release --locked`
+        /// A shell command the automatic update runs in place of `cargo build --release --locked -p dagq`
         /// (tests); it must leave the binary at $CARGO_TARGET_DIR/release/dagq.
         #[arg(long, hide = true)]
         update_build_command: Option<String>,

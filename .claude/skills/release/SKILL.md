@@ -5,7 +5,7 @@ description: dagq 自身のリリース手順。version を上げる、tag v* �
 
 # dagq をリリースする
 
-根拠は [README の Release 節](../../../README.md#release) と [ADR-0030](../../../docs/adr/0030-publish-to-crates-io-on-tag-push-with-trusted-publishing.md)。tag `vX.Y.Z` の push で `.github/workflows/release.yml` が、tag と `Cargo.toml` の version の一致を検査し、`aarch64-apple-darwin` のバイナリを build して GitHub Release に添付し、同じ version を crates.io に publish する（crates.io に既にあれば skip）。
+根拠は [README の Release 節](../../../README.md#release) と [ADR-0030](../../../docs/adr/0030-publish-to-crates-io-on-tag-push-with-trusted-publishing.md)。tag `vX.Y.Z` の push で `.github/workflows/release.yml` が、tag と `Cargo.toml` の version の一致を検査し、`aarch64-apple-darwin` の `dagq` と `dagq-broker-client` のバイナリを build して GitHub Release に添付し、workspace の 4 つの crate を同じ version で `dagq-broker-protocol` → `dagq` → `dagq-broker-client` → `dagq-broker` の順に crates.io に publish する（crate ごとに、crates.io に既にあれば skip。[ADR-t827-1](../../../docs/adr/2026-09-28-t827-1-broker-crates-binaries-and-version-alignment.md) 決定 8）。4 つの crate の version は `Cargo.toml` と `crates/*/Cargo.toml` の `[package]` の `version` と、crate 間の依存の `version = "=X.Y.Z"` をそろえ、`scripts/check-plugin-version.sh` が一致を検査する。
 
 main の version はリリースの直後に次の開発版 `X.Y.Z-dev` へ上げてあり（今は `0.4.0-dev`）、main のビルドは `dagq --version` で build 識別子 `X.Y.Z-dev+<commit>`（worktree が dirty なら `.dirty` が付く）を名乗る。リリースは `-dev` を外した `X.Y.Z` で、build 識別子も `X.Y.Z` だけになる（[ADR-0073](../../../docs/adr/0073-kind-additions-are-compatible.md) 決定 1・2。ADR-0045 を置き換えた。`build.rs` が埋め込む）。
 
@@ -19,15 +19,15 @@ git switch main && git pull --ff-only
 git status --porcelain            # 何も出ないこと（clean）
 git rev-parse HEAD origin/main    # 2 行が同じこと
 gh run list --branch main --workflow ci.yml --limit 5   # 最新の main の run が success
-cargo publish --dry-run --locked  # package の作成と build が通ること
+cargo publish --dry-run --locked -p dagq  # dagq の package の作成と build が通ること
 ```
 
 - `gh run list` の先頭が main の HEAD の commit で `completed success` でなければリリースしない（`gh run view <run-id> --log-failed` で原因を見る）
-- `cargo publish --dry-run --locked` は PATH の `dagq`（`~/.local/bin/dagq`）とは無関係に、package の中身（`build.rs`・`src/`・`migrations/`・`Cargo.toml`・`Cargo.lock`・`README.md`・`LICENSE`）だけで build できるかを見る。`cargo package --list --locked` で中身を確かめられる
+- `cargo publish --dry-run --locked -p dagq` は PATH の `dagq`（`~/.local/bin/dagq`）とは無関係に、package の中身（`build.rs`・`src/`・`migrations/`・`Cargo.toml`・`Cargo.lock`・`README.md`・`LICENSE`）だけで build できるかを見る。`cargo package --list --locked` で中身を確かめられる
 
 ## 2. `-dev` を外して version を確定する
 
-`Cargo.toml` の `[package]` の `version` と `plugins/claude-dagq/.claude-plugin/plugin.json` の `"version"` を同じ `X.Y.Z` にし（main の `X.Y.Z-dev` から `-dev` を外す。上げる桁を変えるなら、ここで `-dev` の数字と違う `X.Y.Z` にしてよい）、`Cargo.lock` を更新する。tag は `-dev` の無い commit に打つ（`release.yml` は tag と `Cargo.toml` の version の一致を検査するので、`-dev` が残っていれば落ちる）。
+`Cargo.toml` と `crates/*/Cargo.toml` の `[package]` の `version`、`crates/*/Cargo.toml` の `dagq-broker-protocol` への依存の `version = "=X.Y.Z"`、`plugins/claude-dagq/.claude-plugin/plugin.json` の `"version"` を同じ `X.Y.Z` にし（main の `X.Y.Z-dev` から `-dev` を外す。上げる桁を変えるなら、ここで `-dev` の数字と違う `X.Y.Z` にしてよい）、`Cargo.lock` を更新する。tag は `-dev` の無い commit に打つ（`release.yml` は tag と `Cargo.toml` の version の一致を検査するので、`-dev` が残っていれば落ちる）。
 
 worker が task の worktree で行う:
 
@@ -74,13 +74,15 @@ gh run list --workflow release.yml --limit 3     # tag vX.Y.Z の run を探す
 gh run watch <run-id> --exit-status              # 完了まで待つ。失敗なら非 0
 gh run view <run-id>                             # すべての step が成功していること
 gh release view vX.Y.Z --json assets --jq '.assets[].name'
-# dagq-vX.Y.Z-aarch64-apple-darwin.tar.gz と SHA256SUMS の 2 つが出ること
+# dagq-vX.Y.Z-aarch64-apple-darwin.tar.gz、dagq-broker-client-vX.Y.Z-aarch64-apple-darwin.tar.gz と SHA256SUMS の 3 つが出ること
 curl -sS -A 'dagq-release (https://github.com/hisamekms/dagq)' \
   https://crates.io/api/v1/crates/dagq | jq -r '.crate.max_version'
 # X.Y.Z が出ること
 ```
 
-crates.io の API は User-Agent の無い request を拒むので `-A` を付ける。
+crates.io の API は User-Agent の無い request を拒むので `-A` を付ける。`dagq-broker-protocol`・`dagq-broker-client`・`dagq-broker` も同じ URL の形で `max_version` を見る。
+
+**broker の crate の最初の publish**: Trusted Publisher は crates.io に既にある crate にしか登録できないので、`dagq-broker-protocol`・`dagq-broker-client`・`dagq-broker` を含む最初のリリースでは、tag の push の前に人が API token でこの 3 つを手で publish し（`cargo publish --locked -p dagq-broker-protocol` を先に）、それぞれに `dagq` と同じ Trusted Publisher を登録する。そうしないと `Publish to crates.io` が `dagq-broker-protocol` で落ちる（GitHub Release は出る。登録してから `gh run rerun <run-id> --failed`）。
 
 ## 5. 初回の自動 publish の確認（Trusted Publishing に切り替えて最初のリリースだけ）
 
