@@ -1086,6 +1086,13 @@ pub trait ProcessControl {
         let _ = pid;
         None
     }
+    /// When the process `pid` started, in unix seconds, to tell an inbox
+    /// watch's process from another that took its pid later (task 927);
+    /// `None` when there is no such process or its start cannot be read.
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        let _ = pid;
+        None
+    }
     /// The processes `pid` started, and theirs, from [`Self::list`]; none
     /// when the processes cannot be listed.
     fn descendants(&self, pid: u32) -> Vec<u32> {

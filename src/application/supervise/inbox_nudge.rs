@@ -132,8 +132,9 @@ impl Supervisor<'_> {
 
     fn nudge_inbox(&mut self) -> Result<()> {
         let now = self.generators.clock.now();
-        let watcher = inbox_watcher::judge(
+        let watcher = inbox_watcher::judge_with(
             &inbox_watcher::read(&*self.files, &inbox_watcher::dir(&self.layout.db)),
+            &*self.processes,
             now,
         );
         if watcher.state == WatcherState::Alive {

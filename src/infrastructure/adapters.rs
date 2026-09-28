@@ -32,7 +32,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::application::naming::repository_name;
@@ -201,6 +201,10 @@ impl ProcessControl for SystemProcesses {
         (!start.is_empty()).then(|| start.to_owned())
     }
 
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        process_started_at(pid)
+    }
+
     fn descendants(&self, pid: u32) -> Vec<u32> {
         // Only the parents are needed: no `lsof` for the directories.
         // SAFETY: getuid(2) has no failure and no memory effects.
@@ -209,6 +213,18 @@ impl ProcessControl for SystemProcesses {
             .map(|listing| crate::domain::headless_job::descendants(&parse_ps(&listing), pid))
             .unwrap_or_default()
     }
+}
+
+/// When the process `pid` started, in unix seconds on the system clock:
+/// the time before `ps` runs less the age `ps -o etime=` prints, so up to
+/// a second late (the age is whole seconds) and early by however long `ps`
+/// took to start on a loaded host. `None` when `ps` finds no such process
+/// or its output does not read.
+pub fn process_started_at(pid: u32) -> Option<i64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let age = output(Command::new("ps").args(["-o", "etime=", "-p", &pid.to_string()])).ok()?;
+    let age = i64::try_from(parse_etime(age.trim())?).ok()?;
+    Some(i64::try_from(now).ok()? - age)
 }
 
 /// The lines of `ps -o pid=,ppid=,etime=,time=,command=`; a line that does
@@ -3032,6 +3048,24 @@ mod tests {
         let _ = child.wait();
         assert_eq!(SystemProcesses.start_identity(child.id()), None);
         assert_eq!(SystemProcesses.start_identity(u32::MAX), None);
+    }
+
+    #[test]
+    fn a_process_started_at_is_about_when_it_was_spawned_until_it_runs_nothing() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let started = SystemProcesses.started_at(child.id()).unwrap();
+        assert!(
+            (before - 2..=before + 5).contains(&started),
+            "{started} against {before}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(SystemProcesses.started_at(child.id()), None);
+        assert_eq!(SystemProcesses.started_at(u32::MAX), None);
     }
 
     #[test]

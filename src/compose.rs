@@ -994,12 +994,14 @@ impl OneShot {
     }
 
     /// Whether the inbox has a watcher now (ADR-t906-1), from the records
-    /// the inbox's watches left under the queue's directory.
+    /// the inbox's watches left under the queue's directory and the
+    /// processes under their pids (task 927).
     fn inbox_watcher(&self, db: &Path) -> Value {
-        crate::application::inbox_watcher::judge(
+        crate::application::inbox_watcher::judge_with(
             &crate::infrastructure::inbox_watchers::read(
                 &crate::infrastructure::inbox_watchers::dir(db),
             ),
+            &SystemProcesses,
             self.generators.clock.now(),
         )
         .to_json()

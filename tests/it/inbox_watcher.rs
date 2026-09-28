@@ -244,3 +244,40 @@ fn a_running_watch_with_a_stale_heartbeat_is_absent() {
     let _waiting = common::within(common::STEP_LIMIT, "the killed watch to exit");
     child.wait().unwrap();
 }
+
+#[test]
+fn a_watch_killed_without_writing_its_end_is_not_watching_before_its_heartbeat_goes_stale() {
+    let (dir, db) = queue();
+    let mut child = spawn_watch(&db, "120");
+    watcher_until(&db, "the watch to be watching", |w| w["watching"] == 1);
+    // SIGKILL, the way Claude Code's /clear or KillShell stops it: no end
+    // is written. The test's own child, by its handle, reaped at once.
+    child.kill().unwrap();
+    {
+        let _waiting = common::within(common::STEP_LIMIT, "the killed watch to exit");
+        child.wait().unwrap();
+    }
+    let records = dagq::infrastructure::inbox_watchers::read(&dir.path().join("inbox-watchers"));
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].ended_at, None, "{records:?}");
+    let watcher = ok(&db, &["status", "--role", "inbox"])["inbox_watcher"].clone();
+    let judged = now();
+    // Its heartbeat is still inside the limit (unless a loaded host took
+    // longer than the limit to get here, which the rest still holds for),
+    // yet it is not watching, and with no grace the inbox is absent since
+    // the last heartbeat.
+    if judged - records[0].heartbeat_at > records[0].stale_after_secs() {
+        eprintln!("the heartbeat went stale before the status: {records:?} at {judged}");
+    }
+    assert_eq!(watcher["watching"], 0, "{watcher}");
+    assert_eq!(watcher["state"], "absent", "{watcher}");
+    assert_eq!(
+        watcher["last_seen_at"], records[0].heartbeat_at,
+        "{watcher}"
+    );
+    assert_eq!(
+        ok(&db, &["doctor"])["inbox_watcher"]["watching"],
+        0,
+        "the doctor judges the same"
+    );
+}

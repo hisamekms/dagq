@@ -175,9 +175,12 @@ impl Inbox {
         let dir = self.fx.db.parent().unwrap().join("inbox-watchers");
         fs::create_dir_all(&dir).unwrap();
         let now = now() + at;
+        // This test's own process, with its real start: a record whose pid
+        // runs nothing or another process is not watching (task 927).
+        let pid = std::process::id();
         let record = WatcherRecord {
-            pid: 1,
-            started_at: now,
+            pid,
+            started_at: dagq::infrastructure::adapters::process_started_at(pid).unwrap(),
             heartbeat_at: now,
             ended_at: None,
             timeout_secs: None,

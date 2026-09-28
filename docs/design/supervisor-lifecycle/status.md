@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -40,4 +40,4 @@ related:
 
 `status --role <inbox|planner>`は`attention`をそのroleに宛てたものだけにする（省略時は全部）。attentionはすべてinbox宛て（`domain::ATTENTION_ROLE`、ADR-0044の決定17）で、`--role inbox`は全部、`--role planner`は空になる。`asks`はroleに関わらずopenなask（未回答でcloseされていないもの）の一覧で、各項目は`id`、`kind`、`question`（先頭200文字。切ったときは末尾に`…`）、`task_id`、`run_id`、`asked_by`、`age_secs`（登録からの秒数）。
 
-`status`（`--role`なし）と`status --role inbox`は`inbox_watcher`も返す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）: `{state（alive / absent）, watching, last_seen_at, absent_secs, grace_secs}`。`watch --role inbox`がqueueのディレクトリの`inbox-watchers/`に残した記録を`application::inbox_watcher::judge`で判定したもので、processではなくheartbeatの新しさで決まる（`--until-attention`のtimeoutの無いwatchはheartbeatだけで判定する。閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）。`--role planner`は返さない。入口は`OneShot::status_of`で、時刻は`OneShot`の`Clock`（testはfakeのclockを渡す）。pluginのStop hookは`watching`が0のinboxのturnの終わりを止める（[plugin integration](../plugin-integration.md)）。
+`status`（`--role`なし）と`status --role inbox`は`inbox_watcher`も返す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）: `{state（alive / absent）, watching, last_seen_at, absent_secs, grace_secs}`。`watch --role inbox`がqueueのディレクトリの`inbox-watchers/`に残した記録を`application::inbox_watcher::judge`で判定したもので、heartbeatの新しさで決まり、記録のpidのprocessが居ない・開始時刻が合わない記録はheartbeatが新しくても数えない（task 927。`--until-attention`のtimeoutの無いwatchはheartbeatだけで判定する。閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）。`--role planner`は返さない。入口は`OneShot::status_of`で、時刻は`OneShot`の`Clock`（testはfakeのclockを渡す）。pluginのStop hookは`watching`が0のinboxのturnの終わりを止める（[plugin integration](../plugin-integration.md)）。
