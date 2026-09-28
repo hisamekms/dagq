@@ -14,6 +14,7 @@ Read this when a field of `status`, `watch` or `show` is unclear.
   - `watching`: the watches with a fresh heartbeat now (not older than three `--interval`s plus 10 seconds, and not past their own `--timeout`; a `--until-attention` watch has none and counts by its heartbeat alone). `0` means no watch is running: start the watch of `watch.md`. The Stop hook blocks your turn while it is `0`, once; start the watch, then end the turn.
   - `state`: `alive` while a watch is watching or one returned less than `grace_secs` (120) ago (the gap while you report and start the next one); `absent` otherwise. A watch that hangs or cannot read the queue counts as absent though its process is there.
   - `last_seen_at` (unix seconds; `null` if no watch ever ran) and `absent_secs` (only while `absent`): how long the inbox has gone unwatched. Tell the person when it was long: asks opened meanwhile reached nobody.
+  - While it is `absent` and an ask has waited 5 minutes, the supervisor types one line into this inbox (`dagq: N open ask(s) wait for the inbox and no ... watch ... is running`) when your screen is idle and your input box empty; once more 10 minutes later, then it notifies the person. On that line, run `status --role inbox`, then start the watch as `watch.md` says, and show the open asks.
 - `waiting`: the runs outside the slots (below), one entry each.
 - `runs`: unfinished runs with their leases and `worktree_path`.
 - `attention`: each with `run_id`, `task_id`, `status`, `kind` (the run event that brought it there), `last_error` and a fixed `next`:

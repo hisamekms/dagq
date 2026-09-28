@@ -300,6 +300,9 @@ impl PlanWorkspace {
     pub(crate) fn opened(&self) -> Vec<(String, String)> {
         self.opened.lock().unwrap().clone()
     }
+    pub(crate) fn notifications(&self) -> Vec<(String, String)> {
+        self.notifications.lock().unwrap().clone()
+    }
 }
 
 impl WorkspaceBackend for PlanWorkspace {

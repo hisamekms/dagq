@@ -4,8 +4,8 @@ type: design
 title: "人への通知（`cmux notify`）"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -21,4 +21,4 @@ related:
 
 supervisorはrunの遷移を通知しない。ADR-0016の契約(3)はattentionのたびに当時の常駐sessionのworkspaceへ送るとしていたが、ADR-0022の決定5でrunの遷移（`awaiting_integration`・`needs_session`・`failed`・`exit_request_timed_out`など）は通知しないことになった。`exit_request_timed_out`で人に届くのは、supervisorが作る`stuck_exit`のaskの通知（上記のaskの経路の1回）で、遷移の通知ではない。`integrate`の`push_failed`（task 70）も通知しない。inboxはattentionを`watch`で受ける。
 
-`cmux notify`は人への知らせで、inboxのClaudeのsessionを起こさない。inboxが起きるのは`watch --role inbox`の終了だけなので、watchが張られていないあいだに開いたaskは人に届かない（2026-09-28に約3時間）。これを[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)の3層で防ぐ: watcherの生存の記録と`status` / `doctor`の`inbox_watcher`（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが開いているときにsupervisorがidleのinboxの画面へ1行の知らせを打ち込むこと（後続のtask 907で実装。まだ無い）。
+`cmux notify`は人への知らせで、inboxのClaudeのsessionを起こさない。inboxが起きるのは`watch --role inbox`の終了だけなので、watchが張られていないあいだに開いたaskは人に届かない（2026-09-28に約3時間）。これを[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)の3層で防ぐ: watcherの生存の記録と`status` / `doctor`の`inbox_watcher`（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが開いているときにsupervisorがidleのinboxの画面へ1行の知らせを打ち込むこと（[inboxへの知らせ](notification-route.md#supervisorによるinboxへの知らせadr-t906-1)）。その知らせを2回打っても（2回目を打てないまま間隔の2倍たったときも）watcherが戻らなければ、supervisorはinboxのworkspaceへ`cmux notify`（title `[<repo>] inbox has no watch`、bodyは閾値を超えて待ったaskの件数）を1回送る。askの登録以外で`cmux notify`を送るのはこれだけ。

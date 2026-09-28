@@ -109,6 +109,35 @@ impl SqliteQueue {
         Ok(id)
     }
 
+    /// Record `inbox_nudged` with `payload` unless one with the same
+    /// `absent_since` and `attempt` is recorded, in one write transaction
+    /// (ADR-t906-1 decision 1 (3)): `false` when another supervisor
+    /// recorded it first, and only the claimer nudges.
+    pub fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
+        let kind = EventKind::InboxNudged;
+        crate::domain::check_event_target(kind, None, None)?;
+        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let claimed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_events
+             WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+             AND json_extract(payload,'$.absent_since') IS ?2
+             AND json_extract(payload,'$.attempt') IS ?3)",
+            params![
+                kind.as_str(),
+                payload["absent_since"].as_i64(),
+                payload["attempt"].as_i64()
+            ],
+            |r| r.get(0),
+        )?;
+        if claimed {
+            return Ok(false);
+        }
+        queue_event(&tx, kind, &payload)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The events of one of `kinds` with `after < id <= upto`, oldest
     /// first, at most `limit`.
     pub fn events_of_between(
@@ -698,6 +727,9 @@ impl RunLog for SqliteQueue {
     }
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         SqliteQueue::record_queue_event(self, kind, payload)
+    }
+    fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
+        SqliteQueue::claim_inbox_nudge(self, payload)
     }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
         SqliteQueue::latest_event_of(self, kind)

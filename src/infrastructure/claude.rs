@@ -390,6 +390,21 @@ pub fn input_pending(screen: &str, text: &str) -> bool {
             .contains(&tail)
 }
 
+/// Whether Claude Code's input box is drawn with no dialog and holds no
+/// text: nothing after its prompt, or only the placeholder Claude Code
+/// draws in an empty box (`Try "..."`).
+pub fn input_empty(screen: &str) -> bool {
+    if detect_prompt(screen).is_some() {
+        return false;
+    }
+    let Some(lines) = input_box(screen) else {
+        return false;
+    };
+    let content = lines.join(" ");
+    let content = content.trim_start_matches(['❯', '>']).trim();
+    content.is_empty() || content.starts_with("Try \"")
+}
+
 /// The kinds of background work Claude Code counts in the status line
 /// under its input box (`⏵⏵ auto mode on · 3 shells · ↓ to manage`), each
 /// after its number: a `/exit` sent while one runs stops at its
@@ -560,6 +575,10 @@ impl AgentSignals for ClaudeCode {
 
     fn input_pending(&self, screen: &str, text: &str) -> bool {
         input_pending(screen, text)
+    }
+
+    fn input_empty(&self, screen: &str) -> bool {
+        input_empty(screen)
     }
 
     fn working(&self, screen: &str) -> bool {
@@ -764,6 +783,36 @@ worktree on  dagq/68a96a60 took 8h32m49s
         // A box scrolled far above the bottom is not the input box.
         let scrolled = format!("{READY}{}", "output line\n".repeat(INPUT_FOOTER_LINES));
         assert!(!input_ready(&scrolled));
+    }
+
+    #[test]
+    fn input_empty_reads_a_box_with_nothing_typed_in_it() {
+        assert!(input_empty(READY));
+        assert!(input_empty(READY_BOXED));
+        let placeholder = READY.replacen("❯\u{a0}\n", "❯ Try \"how does main.rs work?\"\n", 1);
+        assert!(input_empty(&placeholder));
+        for screen in [
+            LONG_PENDING,
+            PASTED,
+            EXIT_PENDING,
+            BOOT,
+            BOOT_BANNER,
+            EXITED,
+            "",
+        ] {
+            assert!(!input_empty(screen), "{screen}");
+        }
+        for dialog in [TRUST, LSP_PLUGIN, AUTO_MODE] {
+            assert!(!input_empty(dialog), "{dialog}");
+        }
+        let shell = READY.replacen("❯\u{a0}\n", "! ls\n", 1);
+        assert!(!input_empty(&shell));
+        let typing = READY.replacen("❯\u{a0}\n", "❯ half a senten\n", 1);
+        assert!(!input_empty(&typing));
+        let signals = ClaudeCode {
+            executable: "claude".into(),
+        };
+        assert!(signals.input_empty(READY));
     }
 
     #[test]

@@ -93,6 +93,8 @@ event_kinds! {
     HoldAnswerApplied => "hold_answer_applied",
     HoldContinueSent => "hold_continue_sent",
     IdleInferred => "idle_inferred",
+    InboxNudgeFailed => "inbox_nudge_failed",
+    InboxNudged => "inbox_nudged",
     InputNotReady => "input_not_ready",
     IntegrationApproved => "integration_approved",
     IntegrationDeferred => "integration_deferred",
@@ -295,6 +297,10 @@ impl EventKind {
                 // planner timeout (task 805); the revise's is on its
                 // proposal's task.
                 | PlannerUnresponsive
+                // The supervisor's nudges of an inbox without a watcher
+                // (ADR-t906-1 decision 1 (3)).
+                | InboxNudged
+                | InboxNudgeFailed
                 // An idle planner of the runtime's asked to exit so that a
                 // revise with no planner, waiting past the planner timeout,
                 // gets its place (task 884).
@@ -452,6 +458,12 @@ pub const HOLD_CONTINUE_SENT: &str = EventKind::HoldContinueSent.as_str();
 /// A session without a fresh idle marker whose screen was inferred idle
 /// (ADR-t803-1), once per span.
 pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
+/// The supervisor typed a line into the inbox without a watcher, or told a
+/// person by `cmux notify` (ADR-t906-1 decision 1 (3)): its claim, once per
+/// absence and attempt.
+pub const INBOX_NUDGED: &str = EventKind::InboxNudged.as_str();
+/// A nudge of the inbox the supervisor could not deliver.
+pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
 pub const INPUT_NOT_READY: &str = EventKind::InputNotReady.as_str();
 pub const INTEGRATION_APPROVED: &str = EventKind::IntegrationApproved.as_str();
 pub const INTEGRATION_DEFERRED: &str = EventKind::IntegrationDeferred.as_str();
@@ -691,6 +703,8 @@ mod tests {
             (EventKind::HoldAnswerApplied, "hold_answer_applied"),
             (EventKind::HoldContinueSent, "hold_continue_sent"),
             (EventKind::IdleInferred, "idle_inferred"),
+            (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
+            (EventKind::InboxNudged, "inbox_nudged"),
             (EventKind::InputNotReady, "input_not_ready"),
             (EventKind::IntegrationApproved, "integration_approved"),
             (EventKind::IntegrationDeferred, "integration_deferred"),

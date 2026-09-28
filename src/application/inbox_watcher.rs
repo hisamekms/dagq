@@ -9,6 +9,34 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+
+use super::RunFiles;
+
+/// The directory of the records, under the queue's directory.
+pub const DIR: &str = "inbox-watchers";
+
+/// The records' directory for the queue at `db`.
+pub fn dir(db: &Path) -> PathBuf {
+    match db.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(DIR),
+        _ => PathBuf::from(DIR),
+    }
+}
+
+/// Every record in `dir` read through `files`, skipping those that cannot
+/// be read or parsed (a missing directory is no record): what the
+/// supervisor judges by.
+pub fn read(files: &dyn RunFiles, dir: &Path) -> Vec<WatcherRecord> {
+    files
+        .read_dir(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|path| files.read(&path).ok())
+        .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
+        .collect()
+}
 
 /// A running watch whose heartbeat is older than this many `--interval`s
 /// (plus [`HEARTBEAT_SLACK_SECS`]) is not watching: it renews the heartbeat

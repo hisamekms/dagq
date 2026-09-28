@@ -14,20 +14,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// The directory of the records, under the queue's directory.
-pub const DIR: &str = "inbox-watchers";
+pub use crate::application::inbox_watcher::{DIR, dir};
 
 /// A record whose watch was last seen this long ago is deleted when the
 /// next watch starts.
 pub const PRUNE_AFTER_SECS: i64 = 7 * 24 * 3600;
-
-/// The records' directory for the queue at `db`.
-pub fn dir(db: &Path) -> PathBuf {
-    match db.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(DIR),
-        _ => PathBuf::from(DIR),
-    }
-}
 
 /// Every record in `dir`, skipping files that cannot be read or parsed (a
 /// missing directory is no record).

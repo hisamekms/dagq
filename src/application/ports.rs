@@ -724,6 +724,12 @@ pub trait AgentSignals {
     fn input_ready(&self, screen: &str) -> bool;
     /// Whether the input box still holds `text` after it was submitted.
     fn input_pending(&self, screen: &str, text: &str) -> bool;
+    /// Whether the input box is drawn and holds nothing a person typed
+    /// (ADR-t906-1 decision 1 (3)): the supervisor types into a session a
+    /// person may use only then. `false` by default, which never types.
+    fn input_empty(&self, _screen: &str) -> bool {
+        false
+    }
     /// Whether the screen shows the agent at work on a turn.
     fn working(&self, screen: &str) -> bool;
     /// Whether `screen` shows background work the agent keeps running
@@ -1700,6 +1706,11 @@ pub trait RunLog {
     -> Result<()>;
     /// Record an event of the queue itself, on no task, goal or run.
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
+    /// Record `inbox_nudged` with `payload` unless one with the same
+    /// `absent_since` and `attempt` is recorded (ADR-t906-1 decision 1
+    /// (3)), in one write transaction: `false` when another supervisor
+    /// recorded it first. Only the claimer nudges the inbox.
+    fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool>;
     /// The newest event of `kind`, on whatever task, goal or run.
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
     /// The newest `limit` events of `kind`, on whatever task, goal or run,

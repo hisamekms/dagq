@@ -113,6 +113,7 @@ mod handoff;
 mod headless;
 mod host_metrics;
 mod idle;
+mod inbox_nudge;
 mod jobs;
 mod landing;
 mod plan_review;
@@ -1095,6 +1096,10 @@ impl Supervisor<'_> {
             self.release_pass(!stopping && self.claiming);
             // A message waiting is sent while the supervisor does not stop.
             self.push_pass(!stopping);
+            // An inbox without a watcher is woken while asks wait for it
+            // (ADR-t906-1 decision 1 (3)), draining or not: a drain waits
+            // for their answers.
+            self.inbox_nudge_pass();
             if !stopping && self.claiming {
                 if self.queue_hold.is_none() {
                     self.start_observer_when_due(options);

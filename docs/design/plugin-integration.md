@@ -4,8 +4,8 @@ type: design
 title: Claude Code and Codex plugin integration
 status: current
 created: 2026-09-21
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: distribution
 related:
   - adr-0005
@@ -155,7 +155,7 @@ inbox（唯一の常駐session）とplanner（proposalごとのオンデマン�
 
 ### watchを張らせるStop hook（ADR-t906-1）
 
-inboxのClaude sessionを起こすのは`watch --role inbox`の終了だけで、`cmux notify`はsessionを起こさない。`/clear`・compaction・再起動の後にwatchを張り直さずにturnを終えると、その後に開いたaskは人に届かない（2026-09-28に約3時間）。Stop hookがそのturnの終わりを止める。
+inboxのClaude sessionを起こすのは`watch --role inbox`の終了と、watcherが居ないあいだにsupervisorが打ち込む1行の知らせ（[通知経路](supervisor-lifecycle/notification-route.md#supervisorによるinboxへの知らせadr-t906-1)。`dagq-inbox` skillはそれを受けたら`status --role inbox`を読んでwatchを張ると書く）だけで、`cmux notify`はsessionを起こさない。`/clear`・compaction・再起動の後にwatchを張り直さずにturnを終えると、その後に開いたaskは人に届かない（2026-09-28に約3時間）。Stop hookがそのturnの終わりを止める。
 
 - `hooks/hooks.json`は`Stop`（matcherなし）で`${CLAUDE_PLUGIN_ROOT}/hooks/stop-watch.sh`を呼ぶ。
 - `stop-watch.sh`は`DAGQ_ROLE`が`inbox`のときだけ働く。hookのstdinの`stop_hook_active`が`true`（Stop hookのblockで続いたturn）なら何もしない（1回までしか止めず、繰り返さない）。`bin/dagq status --role inbox`の`inbox_watcher.watching`（猶予を含まない、heartbeatが新しい`watch --role inbox`の数。[`events` / `watch`](supervisor-lifecycle/events-watch.md#inboxのwatcherの記録adr-t906-1)）が0なら1秒おいてもう一度読み（turnの終わりに張ったwatchがまだ記録を書いていない場合）、それでも0なら`{"decision": "block", "reason": "..."}`をstdoutに出す。reasonはwatchが無いことと、返ったばかりのwatchの出力が未処理なら先に処理してその`cursor`から次を張ること、そうでなければ`status`のcursorからの`"<launcher>" watch --role inbox --until-attention --after <cursor>`の1コマンドをshellのループで包まずにbackgroundで張ること、既に走っているwatchなら失敗していないか確かめることを書く。Claude Codeはturnを続けてreasonをmodelに渡す。

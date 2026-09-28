@@ -2417,6 +2417,9 @@ mod tests {
         fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
             unreachable!("resumes_left reads only the run's events")
         }
+        fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
+            unreachable!("resumes_left reads only the run's events")
+        }
         fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
             unreachable!("resumes_left reads only the run's events")
         }

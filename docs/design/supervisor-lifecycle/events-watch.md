@@ -4,8 +4,8 @@ type: design
 title: "`events` / `watch`"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -29,7 +29,7 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 
 `watch --role inbox`は実行中、自分の記録を queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`inbox-watchers/<開始のミリ秒>-<pid>.json`に書く（`src/infrastructure/inbox_watchers.rs`）。queue DBには書かず、`watch`はqueueを読むだけのまま。記録は`{pid, started_at, heartbeat_at, ended_at, timeout_secs, interval_secs}`（時刻はunix秒。`timeout_secs`は`--until-attention`のwatchでは`null`で、`--until-attention`より前の記録は数値を持ち、欄が無い記録も`null`として読む）で、開始時に書き、queueを読むたび（`--interval`ごと。読みが無くても同じ間隔でloopが回る）に`heartbeat_at`を更新し、返るときに`ended_at`を書く（errorで抜けたときもdropで書く）。書き込みは一時ファイルとrenameで、書けなくてもwatchは止まらない（tracingのwarnだけ）。ファイル名が開始時刻とpidを持つので、pidが再利用されても別の記録になり、各watchは自分のファイルだけを書き換える。複数のwatchが同時に走ってよい。開始時に、最後に見えた時刻が7日（`PRUNE_AFTER_SECS`）より前の記録を消す。`--role inbox`以外のwatchは記録を書かない。
 
-判定は`application::inbox_watcher::judge(records, now)`の1か所にあり、`status`・`doctor`・pluginのStop hook（`status`を通して）・後続のsupervisorの知らせが同じものを使う。processの有無は見ず、heartbeatの新しさだけで決める:
+判定は`application::inbox_watcher::judge(records, now)`の1か所にあり、`status`・`doctor`・pluginのStop hook（`status`を通して）・supervisorのinboxへの知らせ（[通知経路](notification-route.md#supervisorによるinboxへの知らせadr-t906-1)）が同じものを使う。processの有無は見ず、heartbeatの新しさだけで決める:
 
 - **watching**: `ended_at`が無く、`now - heartbeat_at <= 3 × interval + 10`秒（`HEARTBEAT_INTERVALS`・`HEARTBEAT_SLACK_SECS`。既定の`--interval 2`で16秒）で、かつ`timeout_secs`があれば`now <= started_at + timeout + 同じ閾値`（自分の`--timeout`を過ぎても返らないwatchは固まっている）。`timeout_secs`が`null`（`--until-attention`）のwatchはこの条件を当てはめず、heartbeatの新しさだけで決める（何時間走っても、heartbeatが新しければwatching）。heartbeatが閾値より古ければ、processが残っていても（固まった・queueを読めていない）watchingでない。
 - **state**: watchingのwatchが1つでもあるか、返ってから`END_GRACE_SECS`（120秒）以内のwatchがあれば`alive`、それ以外は`absent`。猶予は、watchが返ってからinboxが報告して次のwatchを張るまでの切れ目を居ないと数えないため。
