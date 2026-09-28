@@ -466,7 +466,12 @@ impl ExitWatch {
     /// for a session that was never asked. When it does, the workspace is
     /// closed (one already closed or no longer listed counts as closed) and
     /// the watch has no session left, so the run goes on to land. When it
-    /// does not, or the close fails, the run takes the path of an
+    /// does not but cmux no longer lists the workspace, and the run does
+    /// not land or integrate checks again what held it
+    /// ([`rechecked_on_landing`]), the session is taken as ended, as one
+    /// whose wrapper died (`exit_unsent` with `action: session_gone`), and
+    /// the run goes on to `then` (task 757).
+    /// Otherwise, or when the close fails, the run takes the path of an
     /// `exit_unsent` that could not land: `exit_request_timed_out` (with
     /// `unsent` and `adopted`), the retries of the `/exit` and then the
     /// `stuck_exit` recovery job and ask, which the watch's first poll
@@ -492,6 +497,40 @@ impl ExitWatch {
             info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent and before its workspace {workspace} was recorded closed; its receipt still holds against its clean worktree, so the workspace is closed and it goes on to land", run.id());
             return Ok(());
         };
+        // The previous supervisor recorded `close_and_land` only once its
+        // close succeeded, so the workspace is usually gone: its session
+        // ended as one whose wrapper died, and no `/exit`, recovery job or
+        // ask is aimed at a workspace that does not exist (task 757). The
+        // run goes on to `then`. A landing goes on only when integrate
+        // checks again what held it (its receipt); a reviewed commit that
+        // is no longer the head, an open worker_question or a rebase in
+        // progress is not checked there, and stays with the person.
+        let rechecked = !matches!(self.then, AfterExit::Land) || rechecked_on_landing(&why);
+        if rechecked && matches!(sv.cmux.exists(workspace), Ok(false)) {
+            sv.queue.record_runtime_event(
+                run.id(),
+                EventKind::ExitUnsent,
+                json!({
+                    "code": ReasonCode::BackendTimeout,
+                    "workspace_id": workspace,
+                    "attempts": attempts,
+                    "action": "session_gone",
+                    "adopted": true,
+                    "workspace_gone": true,
+                    "held": why,
+                    "then": if matches!(self.then, AfterExit::Land) { "land" } else { "rest" },
+                }),
+            )?;
+            self.forget_session(sv, run, workspace)?;
+            for ask in sv
+                .queue
+                .close_stuck_exit_asks(run.id(), STUCK_EXIT_CLOSED)?
+            {
+                info!(run_id = %run.id(), ask_id = %ask.id, "workspace of {} is gone; closed its stuck_exit ask {}", run.id(), ask.id);
+            }
+            info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent; it cannot land without its exit ({why}), but its workspace {workspace} is gone, so its session is taken as ended", run.id());
+            return Ok(());
+        }
         warn!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent, and it cannot land without its exit ({why}); its recovery job looks at it", run.id());
         let timeout = sv.cmux.exit_timeout();
         sv.queue.record_runtime_event(
@@ -525,17 +564,7 @@ impl ExitWatch {
         attempts: u64,
         adopted: bool,
     ) -> Result<()> {
-        match self.session.take().and_then(|session| session.resume) {
-            None => {
-                sv.queue.workspace_closed(run.id(), &sv.token)?;
-            }
-            Some(attempt) => sv.queue.record_runtime_event(
-                run.id(),
-                EventKind::WorkspaceClosed,
-                json!({"workspace_id": workspace, "resume_attempt": attempt}),
-            )?,
-        }
-        close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
+        self.forget_session(sv, run, workspace)?;
         let mut conditions = json!({
             "cause": cause,
             "attempts": attempts,
@@ -563,6 +592,31 @@ impl ExitWatch {
     }
 }
 
+impl ExitWatch {
+    /// The session's workspace is closed (or gone): `workspace_closed` is
+    /// recorded (the resume's, for a resumed session), the session's dialog
+    /// asks are closed as for one that exited, and the watch keeps no
+    /// session.
+    fn forget_session(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+    ) -> Result<()> {
+        match self.session.take().and_then(|session| session.resume) {
+            None => {
+                sv.queue.workspace_closed(run.id(), &sv.token)?;
+            }
+            Some(attempt) => sv.queue.record_runtime_event(
+                run.id(),
+                EventKind::WorkspaceClosed,
+                json!({"workspace_id": workspace, "resume_attempt": attempt}),
+            )?,
+        }
+        close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)
+    }
+}
+
 /// Close `workspace` unless cmux no longer lists it: one closed already, by
 /// a previous supervisor or a person, counts as closed, and so does one
 /// that is gone after a close that failed.
@@ -578,6 +632,19 @@ fn close_unless_gone(cmux: &dyn WorkspaceBackend, workspace: &str) -> Result<()>
 
 /// What a `stuck_exit` ask says first when the `/exit` never got there.
 pub(super) const EXIT_UNSENT: &str = "The supervisor's /exit timed out in cmux on every attempt and its screen showed each time that it had not reached the session (exit_unsent), so the session was not asked to exit and the run cannot land without it";
+
+/// Why a receipt no longer holds ([`landable_without_exit`]).
+const RECEIPT_NO_LONGER_HOLDS: &str = "its receipt no longer holds";
+/// Why a receipt could not be checked ([`landable_without_exit`]).
+const RECEIPT_NOT_CHECKED: &str = "its receipt could not be checked";
+
+/// Whether integrate checks again what `why` ([`landable_without_exit`])
+/// says holds a run back from landing: its receipt against its clean
+/// worktree, which integrate checks before it lands. The reviewed commit,
+/// the run's `worker_question` asks and a rebase in progress it does not.
+fn rechecked_on_landing(why: &str) -> bool {
+    why.starts_with(RECEIPT_NO_LONGER_HOLDS) || why.starts_with(RECEIPT_NOT_CHECKED)
+}
 
 /// Why `run` cannot land without its session's exit, `None` when it can:
 /// its receipt still stands against its worktree (the commit it names is
@@ -619,8 +686,8 @@ pub(super) fn landable_without_exit(sv: &mut Supervisor<'_>, run: &TaskRun) -> O
             )),
             None => Some("the run has no reviewed commit".to_owned()),
         },
-        Ok(Err(rejection)) => Some(format!("its receipt no longer holds: {}", rejection.reason)),
-        Err(error) => Some(format!("its receipt could not be checked: {error:#}")),
+        Ok(Err(rejection)) => Some(format!("{RECEIPT_NO_LONGER_HOLDS}: {}", rejection.reason)),
+        Err(error) => Some(format!("{RECEIPT_NOT_CHECKED}: {error:#}")),
     }
 }
 

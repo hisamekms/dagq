@@ -275,7 +275,9 @@ impl<'a> RunHistory<'a> {
     /// close_and_land` after the last `exit_requested`), with neither the
     /// workspace's close (`workspace_closed`) nor a timeout
     /// (`exit_request_timed_out`) recorded after it: the supervisor that
-    /// decided it died in between (task 464). That `exit_unsent`, if so.
+    /// decided it died in between (task 464). An adopter's `session_gone`
+    /// (task 757) with no `workspace_closed` after it counts too: that
+    /// adopter died before recording the close. That `exit_unsent`, if so.
     pub fn latest_exit_unsent_to_land(&self) -> Option<&'a RunEvent> {
         let requested = self.last(event_kind::EXIT_REQUESTED)?;
         self.events
@@ -283,8 +285,10 @@ impl<'a> RunHistory<'a> {
             .rev()
             .find(|e| e.id > requested.id && e.kind == event_kind::EXIT_UNSENT)
             .filter(|unsent| {
-                unsent.payload["action"] == "close_and_land"
-                    && !self.has_after(unsent.id, event_kind::WORKSPACE_CLOSED)
+                matches!(
+                    unsent.payload["action"].as_str(),
+                    Some("close_and_land" | "session_gone")
+                ) && !self.has_after(unsent.id, event_kind::WORKSPACE_CLOSED)
                     && !self.has_after(unsent.id, event_kind::EXIT_REQUEST_TIMED_OUT)
             })
     }
@@ -791,6 +795,17 @@ mod tests {
             pending(&[plain(1, "exit_requested"), unsent(2, "recover")]),
             None
         );
+        // An adopter that found the workspace gone and died before
+        // recording the close (task 757).
+        let gone = [
+            plain(1, "exit_requested"),
+            unsent(2, "close_and_land"),
+            unsent(3, "session_gone"),
+        ];
+        assert_eq!(pending(&gone), Some(3));
+        let mut closed = gone.to_vec();
+        closed.push(plain(4, "workspace_closed"));
+        assert_eq!(pending(&closed), None);
         for after in ["workspace_closed", "exit_request_timed_out"] {
             let mut done = landing.to_vec();
             done.push(plain(3, after));

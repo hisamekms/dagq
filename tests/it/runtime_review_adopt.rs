@@ -489,3 +489,122 @@ fn an_adopter_asks_when_an_unsent_exit_to_land_no_longer_holds() {
         1
     );
 }
+
+/// The same run whose workspace is gone by the time its adopter finds the
+/// close no longer holding, as the previous supervisor records
+/// `close_and_land` only after the close succeeded (task 757): its session
+/// is taken as ended even while its wrapper's heartbeat is fresh, so no
+/// `/exit`, `stuck_exit` recovery job or ask is aimed at the workspace, and
+/// the run goes on to land, where integrate checks it again and parks it.
+#[test]
+fn an_adopter_takes_the_session_as_ended_when_the_workspace_of_an_unsent_exit_is_gone() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.exit_timeout = Duration::from_secs(3600);
+    let backend = Arc::new(backend);
+    let run = adoptable_unsent_exit(&repo, &db, &backend, Some("printf 'x\\n' > stray.txt"));
+    backend.hidden.lock().unwrap().push(WORKSPACE_ID.to_owned());
+    let supervisor = supervise_adopter(&db, &repo, &backend);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue.run(run.id()).unwrap().workspace_closed_at().is_some()
+            && queue
+                .show(TaskId::new(1))
+                .unwrap()
+                .events
+                .iter()
+                .any(|e| e.kind == "landing_queued" || e.kind == "integration_started")
+    });
+    // The wrapper lived on; the test ends its session.
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    // Integrate finds the stray file and parks the run for a session, which
+    // this backend has no script to resume.
+    assert_eq!(outcome["runs"][0]["status"], "needs_session", "{outcome}");
+    let last_error = outcome["runs"][0]["last_error"].as_str().unwrap();
+    assert!(last_error.contains("stray.txt"), "{last_error}");
+    let errors = outcome["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().all(|e| e["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("could not be resumed: no resume script for task 1")),
+        "{outcome}"
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"exit_request_timed_out"), "{kinds:?}");
+    assert!(!kinds.contains(&"recovery_requested"), "{kinds:?}");
+    let unsent = payloads(&detail, "exit_unsent");
+    assert_eq!(unsent.len(), 2, "{unsent:?}");
+    assert_eq!(unsent[1]["action"], "session_gone");
+    assert_eq!(unsent[1]["adopted"], true);
+    assert_eq!(unsent[1]["workspace_gone"], true);
+    assert_eq!(unsent[1]["then"], "land");
+    let held = unsent[1]["held"].as_str().unwrap();
+    assert!(
+        held.starts_with("its receipt no longer holds: worktree is not clean"),
+        "{held}"
+    );
+    for (earlier, later) in [
+        ("run_adopted", "workspace_closed"),
+        ("workspace_closed", "landing_queued"),
+    ] {
+        assert!(
+            position(&kinds, earlier) < position(&kinds, later),
+            "{earlier} before {later}: {kinds:?}"
+        );
+    }
+    assert!(payloads(&detail, "auto_repaired").is_empty());
+    assert!(backend.closed().is_empty());
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert!(
+        queue
+            .asks(AskQuery::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.kind != AskKind::StuckExit),
+    );
+}
+
+/// What integrate does not check again (here the reviewed commit that is no
+/// longer the head) keeps the run from landing even when the workspace of
+/// its unsent exit is gone: its adopter records the timeout with why and the
+/// run takes the `stuck_exit` path as before (task 757).
+#[test]
+fn an_adopter_keeps_an_unreviewed_head_from_landing_when_the_workspace_is_gone() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.exit_timeout = Duration::from_secs(3600);
+    let backend = Arc::new(backend);
+    let run = adoptable_unsent_exit(&repo, &db, &backend, None);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), base],
+        )
+        .unwrap();
+    backend.hidden.lock().unwrap().push(WORKSPACE_ID.to_owned());
+    let supervisor = supervise_adopter(&db, &repo, &backend);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .show(TaskId::new(1))
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == "exit_request_timed_out")
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let timed_out = payloads(&detail, "exit_request_timed_out");
+    assert_eq!(timed_out[0]["adopted"], true);
+    let held = timed_out[0]["held"].as_str().unwrap();
+    assert!(held.contains("is not the reviewed commit"), "{held}");
+    assert_eq!(payloads(&detail, "exit_unsent").len(), 1);
+    assert!(queue.run(run.id()).unwrap().workspace_closed_at().is_none());
+    // The test ends the session; what follows is the old path's.
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    joined(supervisor, "the supervisor thread to return");
+}
