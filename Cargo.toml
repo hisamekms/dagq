@@ -62,6 +62,11 @@ path = "tests/plugin.rs"
 
 # Keep line tables so panic backtraces still point at file:line, and drop the
 # debug info of dependencies: test binaries get smaller and link faster.
+# Measured and not adopted (task 554, macOS arm64, ld-prime 1053): split-debuginfo
+# off / packed, -Wl,-no_deduplicate, and the bundled rust-lld. With 13 test
+# binaries after tests/it, `cargo test --no-run` after touching src/lib.rs took
+# about 9-11 s and no candidate was 15% faster in both rounds; the differences
+# stayed within the load noise, and rust-lld was slower.
 [profile.dev]
 debug = "line-tables-only"
 
