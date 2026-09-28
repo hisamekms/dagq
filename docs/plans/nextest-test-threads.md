@@ -4,7 +4,7 @@ type: plan
 title: NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方
 status: active
 created: 2026-09-27
-updated: 2026-09-28
+updated: 2026-09-29
 owners:
   - hisamekms
 tags:
@@ -207,3 +207,30 @@ task 563が、6章の方法で8の期間の値を取った（565のfollow-upを�
 2. 1と並べて、`runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged`の約127秒の分岐を直す。このtestは8の期間の8 run（期間の後の直近では31件のうち14件）で最長のtestになってtest段を決め、そのrunの段を約110秒延ばしている（段の中央値は308秒と198秒）（nextest-measurementの6.4節）。
 
 値を戻すtaskはこの文書からは登録しない（receiptのfollow_upsに書く）。
+
+## 8. 6に下げた（task 930）
+
+task 930が`dagq.toml`の`[run.env]`の`RUST_TEST_THREADS`と`NEXTEST_TEST_THREADS`を両方8から6に下げた。`CARGO_BUILD_JOBS`（4）と`--parallel`（3）は変えていない。1〜7章の値は変えていない。
+
+### 8.1 下げた理由
+
+7.2節の見立てのとおり。8の期間はtest段（nextest）の中央値が163秒に縮み（100件あたり約36%短い）、llvm-covの段の全体も約93秒縮んだが、6章の悪化の目安のうち3つがそろって当たった。
+
+- captureの時間切れが17件出て、`backend_call_failed`の`exhausted`が7件あった（4の期間は0件）。
+- llvm-covの段の間のload1の平均の中央値が13.5で目安の12前後を超え、最大は46.6だった。
+- 時間の上限と競合による`verification_failed`のresumeが69 run中5件あった（4の期間は0件）。
+
+6章の「どれかが起きたら6に戻す」に従って6に下げた。AGENTS.mdの方針（悪化すれば6か4に戻す）の範囲の判断なので、新しいADRは書いていない。悪化のすべてが並列度8によるとは言えない（7.2節）ので、4まで一度に戻さず、6で測ってから決める。
+
+### 8.2 6の期間の測り方
+
+- 境界: task 930の着地。`dagq marks`の`run_env_changed`（`[run.env]` changed: NEXTEST_TEST_THREADS, RUST_TEST_THREADS）のeventを始まりにする。
+- llvm-covを流して着地したrunが10件以上そろったら、6章の測り方と同じ指標（llvm-covの段・build・test段・test段100件あたり・test段の後・`backend_call_failed`とload帯と`exhausted`・captureの時間切れ・`verification_failed`の原因別の件数・load1）を取り、7.1節の表に4・8・6の3列で並べる。範囲は`dagq stats --since <境界のevent> --until <10件目以降の着地のevent> --full`、KPIは`dagq kpi --compare <境界の印> --kind runtime`でも読む。
+- 期待するのは、test段100件あたりが8より約1/3伸びる代わりに、段の間のload1の平均の中央値が12未満、captureの時間切れが0件に近づくこと。
+- 期間の中で他の変更（task 931・933のtestの直し、task 932の調査から出た変更など）が着地したら、その境界を書き、前後を分けて読む。
+
+### 8.3 6でも戻らないとき
+
+6でも段の間のloadとcaptureの時間切れが4の期間の水準に戻らなければ、並列度を4に戻す前に、hostのほかのloadを先に見る。7.1節のとおり`backend_call_failed`の6割とcaptureの時間切れの8割はllvm-covの段の外（04:00〜06:30 JSTのloadの山）で起きているので、その出どころの調査（task 932）の結果を先に読む。並列度が原因と言えるときだけ4に戻す。
+
+また、test段を律速しうる`runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged`の約127秒の分岐（7.2節の2、task 931・933）が6の期間にも重なる。このtestが最長になったrunは段が約110秒延びるので、test段と段の全体の比較ではそのrunを分けて読み、931・933の着地の前後も分ける。

@@ -19,16 +19,19 @@ SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
 # 合計 16 並列（コア数 8 の 2 倍）程度に収まるようにする。--parallel や host を変えたら合わせて見直す。
 # CARGO_BUILD_JOBS は build の job 数で、この値で絞る。
 CARGO_BUILD_JOBS = "4"
-# test の並列度は build と分けて考え、8 にする（2026-09-26 に人が planner と決めた。task 566）。
-# test は待ちが中心で CPU をあまり使わない（task 537 の測定で test の process 4 本の CPU は 0.1〜0.4 コア、
-# 関門の test 段は per-test の時間の合計 ÷ 並列数で律速する。docs/plans/nextest-measurement.md）ので、
-# 並列度を上げても host の負荷は小さく、integrate の test 段が縮む。
+# test の並列度は build と分けて考え、6 にする（task 427 で 4、task 566 で 8、task 930 で 6）。
+# test は待ちが中心で CPU をあまり使わず（task 537 の測定。docs/plans/nextest-measurement.md）、
+# 関門の test 段は per-test の時間の合計 ÷ 並列数で律速するので、566 で 8 に上げて test 段を縮めた。
+# task 563 が 8 の期間を測ると test 段は縮んだが、capture の時間切れ（17 件）・llvm-cov の段の load1 の
+# 平均の中央値 13.5（目安 12 前後）・時間の上限による verification_failed（5 件）と、戻す目安の悪化の印が
+# そろって当たったので 6 に下げた（docs/plans/nextest-test-threads.md の 7 章・8 章）。
+# 6 でも load と capture の時間切れが戻らなければ、4 に戻す前に host のほかの load を先に見る。
 # RUST_TEST_THREADS は 1 つの test binary の中の並列 thread 数。
-RUST_TEST_THREADS = "8"
+RUST_TEST_THREADS = "6"
 # coverage の関門（cargo llvm-cov nextest）で同時に走らせる test の process 数（ADR-0076 の決定 2）。
 # nextest は RUST_TEST_THREADS を読まず既定で CPU 数だけ走らせるので、RUST_TEST_THREADS と同じ値にする。
 # .config/nextest.toml には書かない（CI と人の手元の nextest まで絞られるため）。
-NEXTEST_TEST_THREADS = "8"
+NEXTEST_TEST_THREADS = "6"
 
 [recheck]
 # 着地のたびに supervisor が着地待ちの run を着地後の main に載せた木で確かめる軽い検査（ADR-0068 の決定 2）。
