@@ -1,13 +1,25 @@
 //! The dagq resource broker, `dagq-broker` ([Broker], ADR-t827-1): the HTTP
 //! server that does fs, process and git on behalf of a run, behind the run's
-//! token. For now the binary answers `--version` and prints the health
-//! answer; the server, the backends and the audit come in the next tasks.
+//! token. `serve` listens on loopback, answers health without a token,
+//! refuses everything else without a valid, active token (default deny) and
+//! writes an audit line per request. The fs, process and git backends are
+//! [`backend::Unimplemented`] until their tasks land.
 //!
 //! [Broker]: https://github.com/hisamekms/dagq/blob/main/docs/design/broker.md
+
+pub mod audit;
+pub mod backend;
+pub mod config;
+pub mod http;
+pub mod server;
 
 use std::io::Write;
 
 use dagq_broker_protocol::HealthResponse;
+
+use crate::backend::Backends;
+use crate::config::Config;
+use crate::server::Server;
 
 /// The name of the binary.
 pub const NAME: &str = "dagq-broker";
@@ -22,10 +34,13 @@ pub fn health() -> HealthResponse {
 }
 
 /// Run the command line `args` (without the program name), writing to `out`.
-/// `Err` is the message for stderr, and the exit status is then 2.
+/// `Err` is the message for stderr, and the exit status is then 2. `serve`
+/// returns only on an error.
 pub fn run(args: &[String], out: &mut impl Write) -> Result<(), String> {
     let write = |out: &mut dyn Write, text: String| {
-        writeln!(out, "{text}").map_err(|error| format!("{NAME}: write the output: {error}"))
+        writeln!(out, "{text}")
+            .and_then(|()| out.flush())
+            .map_err(|error| format!("{NAME}: write the output: {error}"))
     };
     match args {
         [flag] if flag == "--version" || flag == "-V" => write(out, format!("{NAME} {BUILD}")),
@@ -34,13 +49,36 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<(), String> {
                 .map_err(|error| format!("{NAME}: serialize the health answer: {error}"))?;
             write(out, json)
         }
+        [command, rest @ ..] if command == "serve" => {
+            let config = Config::parse(rest).map_err(|error| format!("{NAME} serve: {error}"))?;
+            let server = Server::bind(&config, Backends::unimplemented())
+                .map_err(|error| format!("{NAME} serve: {error}"))?;
+            let listening = server
+                .local_addr()
+                .map_err(|error| format!("{NAME} serve: {error}"))?;
+            write(
+                out,
+                serde_json::json!({ "listening": listening.to_string(), "build": BUILD })
+                    .to_string(),
+            )?;
+            server.serve();
+            Ok(())
+        }
         [flag] if flag == "--help" || flag == "-h" => write(out, usage()),
         _ => Err(format!("{NAME}: unknown arguments {args:?}\n{}", usage())),
     }
 }
 
 fn usage() -> String {
-    format!("Usage: {NAME} --version\n       {NAME} health    print the health answer as JSON")
+    format!(
+        "Usage: {NAME} --version
+       {NAME} health    print the health answer as JSON
+       {NAME} serve --key FILE --active DIR --audit DIR --root DIR... [--listen ADDR:PORT]
+                    [--container] [--exec-timeout-secs N] [--exec-max-timeout-secs N]
+                    [--output-limit-bytes N] [--exec-allow NAME]... [--exec-env NAME]...
+                 listen (127.0.0.1:8750 by default; loopback only outside the container)
+                 and print {{\"listening\":ADDR,\"build\":BUILD}} once bound"
+    )
 }
 
 #[cfg(test)]
@@ -77,9 +115,36 @@ mod tests {
         let (result, out) = run_with(&["--help"]);
         assert_eq!(result, Ok(()));
         assert!(out.starts_with("Usage: dagq-broker"));
-        let (result, out) = run_with(&["serve", "--bind", "0.0.0.0:1"]);
+        assert!(out.contains("serve --key"));
+        let (result, out) = run_with(&["frobnicate"]);
         assert!(result.unwrap_err().contains("unknown arguments"));
         assert!(out.is_empty());
         assert!(run_with(&[]).0.is_err());
+    }
+
+    #[test]
+    fn serve_refuses_a_bad_configuration_before_listening() {
+        let (result, out) = run_with(&["serve", "--listen", "0.0.0.0:0"]);
+        let error = result.unwrap_err();
+        assert!(error.starts_with("dagq-broker serve: "), "{error}");
+        assert!(error.contains("not a loopback address"), "{error}");
+        assert!(out.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("key");
+        let (result, _) = run_with(&[
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--key",
+            missing.to_str().unwrap(),
+            "--active",
+            "/a",
+            "--audit",
+            "/b",
+            "--root",
+            "/c",
+        ]);
+        assert!(result.unwrap_err().contains("read the key"));
     }
 }

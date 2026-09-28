@@ -54,7 +54,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 | crate | 種類 | 中身 | 依存（増える主なもの） | crates.io |
 | --- | --- | --- | --- | --- |
 | `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`・`sha2`（HMACとbase64urlは自前の小さな関数。`hmac` crateは足さない） | publishする（最初） |
-| `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（同期の小さなserver。例: `tiny_http`）、fs・process・gitのbackend、tokenの検証、audit | protocol・HTTPのserver | publishする（最後。releaseのimageの材料） |
+| `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（`std::net`の上の自前の小さな同期のserver。task 830）、fs・process・gitのbackend、tokenの検証、audit | protocol・`uuid`・`sha2`（HTTPのcrateは足さない） | publishする（最後。releaseのimageの材料） |
 | `dagq-broker-client`（`crates/dagq-broker-client`） | lib + bin `dagq-broker-client` | HTTPのclient（例: `ureq`、TLSなし）、subcommand `mcp`（stdioのMCP server。JSON-RPCは`serde_json`で自前）、診断のCLI | protocol・HTTPのclient | publishする（dagqの後） |
 
 - `dagq`は`dagq-broker-protocol`だけに依存し（`version = "=<同じ版>"`と`path`）、HTTPの依存を持たない。brokerのhealthは`dagq-broker-client health --json`を子プロセスで呼んで見る（ADR-t827-1決定2）
@@ -62,6 +62,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - tokioなどのasync runtimeは入れない（最小のmachineでのbuildを軽く保つ）
 - 今（task 828）: protocolの型（下の「protocolの型」）と、serverとclientの骨組み（`dagq-broker --version`・`dagq-broker health`（healthの応答のJSONを出す）、`dagq-broker-client --version`）。未知の引数はexit 2。HTTP・token・backend・MCPは後のtaskが足す。serverとclientの`--version`はまだ`CARGO_PKG_VERSION`で、dagqのbuild識別子（`X.Y.Z-dev+<commit>`）にそろえるのは後のtask。
 - task 829: protocolに`token`（`sign` / `verify` / `check_active`、`SigningKey`・`BrokerSessionToken`・`TokenError`、`TokenClaims::require` / `confine`）、dagqに`src/infrastructure/broker_token.rs`（`ensure_key`・`issue_run_token`・`broker_grants`）。dagqはprotocolに依存する（`=<同じ版>`と`path`）。claimでの発行・token fileと有効な印の書き込み・失効はhost workerの統合のtaskが足す
+- task 830: serverに`dagq-broker serve`（下の「serve」）。HTTPのserver・loopbackだけのbind・health・tokenの認証・default denyのrouting・構造化のerror・audit。fs・process・gitのbackendは`Backend` traitの後ろの`Unimplemented`（全てのopを`backend_error`の「`<op> is not implemented yet`」で返す）で、各backendのtaskが置き換える
 
 ### protocolの型
 
@@ -90,7 +91,7 @@ resolver = "3"
 
 - `default-members`でrootの`cargo test --locked`・`cargo clippy --locked --all-targets -- -D warnings`・`cargo nextest run`が全crateを覆う。workerの手元の`cargo test --locked --test it <module>::`と`--lib <module>`は`-p`なしで通る（task 828で確かめた。`--test it`はdagqのtestだけを選び、`--lib`は全crateのunit testからfilterに合うものを選ぶ）。brokerのcrateのtestは`-p <crate>`で絞る
 - coverageの関門は`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`（ADR-t828-1がADR-t827-1決定3をamends）。cargo-llvm-cov（0.9.1）はrootがpackageのworkspaceで`-p`も`--workspace`も無いと`default-members`を見ずroot package（dagq）だけをreportに入れるので、`--workspace`で全crateを80%に数える。登録済みのtaskの旧コマンド（`--workspace`なし）はdagqのcoverageと全crateのtestの成否を見て、brokerのcrateの行は数えない
-- 新しいcrateのtestは各crateの`src/`のunit testと`crates/<crate>/tests/`に置く。serverのtestは`CARGO_BIN_EXE_dagq-broker`をhostのプロセスとして`--bind 127.0.0.1:0`と一時のdirで起こし、podmanなしでcoverageに数える。podmanを要るtest（containerの起動・mount・LANで待ち受けないことの確認）は`#[ignore]`で、e2eと同じく関門とCIに数えない
+- 新しいcrateのtestは各crateの`src/`のunit testと`crates/<crate>/tests/`に置く。serverのtestは`CARGO_BIN_EXE_dagq-broker`をhostのプロセスとして`serve --listen 127.0.0.1:0`と一時のdirで起こし（`crates/dagq-broker/tests/serve.rs`）、podmanなしでcoverageに数える。podmanを要るtest（containerの起動・mount・LANで待ち受けないことの確認）は`#[ignore]`で、e2eと同じく関門とCIに数えない
 - `scripts/check-test-file-lines.sh`は`tests/`と`crates/*/tests/`の下の`.rs`を見る（task 828）
 - CI（`ci.yml`）のcoverageの関門は上の`--workspace`の形で、他のコマンドはそのまま。CIはmacOSだけなので、serverのLinux（musl）の経路とContainerfileはCIではbuildもtestもされない。serverのコードはOSに依らない部分（tokenの検証・閉じ込め・exec・audit）をmacOSのtestで覆い、Linuxだけの部分（`openat2`など）は`cfg`で分けてpodmanを要る`#[ignore]`のtestとスモークで確かめる
 - dagqのpodmanを呼ぶ部分（`broker::ensure`）はpodmanのコマンドをportの後ろに置き、判定（machine・image・containerの状態からの次の一手、lock、版の比較）をstubのportでunit testする。実物のpodmanを呼ぶadapterだけが`#[ignore]`のtestになる
@@ -127,6 +128,27 @@ resolver = "3"
 - portはqueueごと。`host.toml`の`[broker] port`（既定0 = 空いているportを選ぶ）。選んだportは`<queue dir>/broker/state.json`に残し、containerを起動し直すときも同じportを使う
 - header: `Authorization: Bearer <token>`、`X-Dagq-Broker-Protocol: 1`。応答にも`X-Dagq-Broker-Protocol`と`X-Dagq-Broker-Build`を付ける
 - 要求の本体の上限は8 MiB（超えれば`invalid_request`）
+
+### serve
+
+`dagq-broker serve`の引数（設定はcommand lineだけで、supervisorがcontainerの起動の引数に書く）:
+
+| flag | 既定 | 中身 |
+| --- | --- | --- |
+| `--listen <addr>:<port>` | `127.0.0.1:8750` | 待ち受け。`--container`が無ければloopbackでないaddress（`0.0.0.0`・`::`・LAN）をexit 2で拒む |
+| `--container` | なし | containerの中。containerの自分のinterfaceへのbindを許す（hostへのpublishは`127.0.0.1`だけ） |
+| `--key <file>` | 必須 | 鍵（32 byte）。起動時に1回読む |
+| `--active <dir>` | 必須 | 有効な印 |
+| `--audit <dir>` | 必須 | auditの置き場所。無ければ作り、起動時に保持の日数を過ぎた日のファイルを消す |
+| `--root <dir>`（複数可） | 必須（1つ以上、絶対パス） | mountしたruns dir。tokenの`workspace`がどのrootの下にも無ければ`workspace_violation` |
+| `--exec-timeout-secs` / `--exec-max-timeout-secs` / `--output-limit-bytes` | 60 / 300 / 1048576 | 上限の既定値（backendに渡す） |
+| `--exec-allow <name>` / `--exec-env <name>`（複数可） | 空 | execのallowlist（backendに渡す） |
+
+- bindしたら`{"listening":"<addr>","build":"<build>"}`の1行をstdoutに出す（port 0で選ばれたportをtestと起動側が読む）
+- HTTPは`std::net`の上の自前の小さなserver（1接続1要求・1接続1 thread で同時に32接続まで（超えた接続は答えずに閉じる）、本体は`Content-Length`だけで`Transfer-Encoding`は拒む、本体は届いた分だけ伸ばして読む、応答は`Connection: close`、要求の全体を読む期限と書きのtimeoutは30秒、要求の頭は16 KiBまで）。以前の例の`tiny_http`はofflineのbuildで使えず、要るのはloopbackで自分のclientと話すことだけなので足さない
+- 判定の順（どれかで拒めば先を見ない）: (1) `GET /v1/health`だけはtokenなしで答える。(2) `Authorization: Bearer <token>`を`verify`（書式・署名・claims・期限）と`check_active`で確かめる（無い・Bearerでない・通らなければ`unauthorized`）。未知のpathもtokenより前には答えない（default deny）。(3) methodとpathを`Operation::route`で引き、無ければ`invalid_request`（`no such operation`。`POST /v1/health`も）。(4) `X-Dagq-Broker-Protocol`が`1`でない・無ければ`invalid_request`。(5) opの要るcapabilityをtokenが持たなければ`capability_denied`。(6) 本体をopの要求の型で読む（未知の欄は`invalid_request`。workerが本体に`run_id`などを書いても未知の欄で拒み、誰の要求かはtokenのclaimsだけで決める）。(7) tokenの`workspace`が`--root`の下か、要求のpath（fsの`path`、gitの`paths`）を`TokenClaims::confine`で字面で閉じ込める（外は`workspace_violation`。symlinkはbackendが解く）。(8) opのbackend（fs・process・git）に渡す
+- 読めない要求（HTTPでない・頭が長すぎる・本体の上限超え・chunked）と、途中で切れた・期限を過ぎた要求（`the request is incomplete`）は`invalid_request`で答え（届けば）、auditに残す。1 byteも送らずに切れた接続は要求ではないので、答えずauditにも残さない
+- auditの行は応答を送る前に書く。書けなければstderrに要求のIDと理由を出し、応答を`backend_error`（`the audit could not be written`）に替える（auditの無い答えを返さない）。backendを持つtaskは、opを走らせる前にauditを書けることを確かめるかを決める
 
 | method と path | capability | 要求 | 応答 |
 | --- | --- | --- | --- |
@@ -323,8 +345,9 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 
 - 置き場所: `<queue dir>/broker/audit/<YYYY-MM-DD>.jsonl`（UTCの日付）。brokerが1要求1行で追記する。30日より古いファイルはbrokerの起動時に消す
 - auditは記録で、改ざんへの耐性は持たない（上の「既知の制限」と、hostのworkerが同じファイルを書けること）
-- 欄: `ts`・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`op`（`fs.read`など）・`capability`・`path`（workspaceからの相対）・`program`（execの`argv[0]`のbasename）・`argc`・`argv_sha256`・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`・`bytes_out`
-- 署名の合わないtokenの要求は`jti`・`run_id`などをnullにし、`result: unauthorized`だけを残す（claimsを信用しない）
+- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。閉じ込めで拒んだpathは残さない）・`program`（execの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
+- healthの要求も1行残す（`op: health`）
+- `verify`が通らないtoken（書式・署名・claims・期限）の要求は`jti`・`run_id`などをnullにし、`result: unauthorized`だけを残す（claimsを信用しない）。署名の通ったtokenで有効な印だけが無いものは、claimsの`jti`・`run_id`・`task_id`・`actor_id`を残す
 - `argv_sha256`は照合用で、推測しやすい引数はhashから総当たりで戻せる
 - 残さないもの: token・署名・鍵、ファイルの中身、diff、execのstdout・stderr・stdin、envの名前と値、`argv`の引数、commit message
 - 読む: `dagq broker audit [--run ID] [--task ID] [--since T] [--until T] [--limit N]`（状態を変えない。JSONの配列）。queue DBには取り込まない

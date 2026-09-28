@@ -32,7 +32,7 @@ fn prints_the_health_answer() {
 
 #[test]
 fn refuses_unknown_arguments_with_status_2() {
-    let output = broker(&["serve"]);
+    let output = broker(&["frobnicate"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown arguments"));
 }
