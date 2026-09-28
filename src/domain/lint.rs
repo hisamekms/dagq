@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use super::{GoalId, GoalVerdict, Task, TaskId, TaskStatus, scope::validate_path_globs};
+use super::{ChangeSet, GoalId, GoalVerdict, Task, TaskId, TaskStatus, scope::validate_path_globs};
 
 /// A rule [`lint`] checks; the snake-case name is the `code` it reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -36,6 +36,12 @@ pub enum LintCode {
     InvalidPathGlob,
     /// The acceptance criteria are blank.
     BlankAcceptance,
+    /// The repository names a set of changes (`[tasks] changes`,
+    /// ADR-t980-1) and the task declares none.
+    MissingChange,
+    /// The task's change is not one of the repository's set, which changed
+    /// since it was declared.
+    ChangeOutsideSet,
     /// Another task of the linted set has the same title (ignoring case
     /// and surrounding whitespace).
     DuplicateTitle,
@@ -70,6 +76,8 @@ pub struct LintInput {
     pub nodes: BTreeMap<TaskId, LintNode>,
     /// Every goal of the queue with its verdict (`None`: not closed).
     pub goals: BTreeMap<GoalId, Option<GoalVerdict>>,
+    /// The repository's set of changes (ADR-t980-1); none checks no change.
+    pub changes: Option<ChangeSet>,
 }
 
 /// Check every rule on `input.targets`. The violations come per target in
@@ -107,6 +115,9 @@ pub fn lint(input: &LintInput) -> Vec<LintViolation> {
             }
         }
         content_rules(task, &mut found);
+        if let Some(changes) = &input.changes {
+            change_rule(task, changes, &mut found);
+        }
         violations.extend(found);
     }
     violations.extend(duplicate_titles(&input.targets));
@@ -192,6 +203,18 @@ fn content_rules(task: &Task, found: &mut Vec<LintViolation>) {
             "its acceptance criteria are blank".into(),
         ));
     }
+}
+
+/// A task must declare a change of the repository's set (ADR-t980-1).
+fn change_rule(task: &Task, changes: &ChangeSet, found: &mut Vec<LintViolation>) {
+    let Err(error) = changes.check_declared(task.id(), task.change()) else {
+        return;
+    };
+    let code = match task.change() {
+        None => LintCode::MissingChange,
+        Some(_) => LintCode::ChangeOutsideSet,
+    };
+    found.push(violation(code, task, error.to_string()));
 }
 
 /// Each task whose title another target shares, naming the others.
@@ -284,6 +307,7 @@ mod tests {
                 paths: vec![],
                 priority: Default::default(),
                 kind: None,
+                change: None,
                 provider: None,
                 worker_mode: None,
             },
@@ -312,6 +336,7 @@ mod tests {
             targets,
             nodes,
             goals: BTreeMap::new(),
+            changes: None,
         }
     }
 
@@ -471,6 +496,7 @@ mod tests {
             paths: task.paths().to_vec(),
             priority: task.priority(),
             kind: task.kind().cloned(),
+            change: task.change().cloned(),
             status: task.status(),
             goal_id: task.goal_id(),
             context: task.context().into(),
@@ -480,6 +506,29 @@ mod tests {
         };
         edit(&mut record);
         Task::restore(record).unwrap()
+    }
+
+    /// With the repository's set of changes (ADR-t980-1), a task must
+    /// declare one of them; without a set, none is checked.
+    #[test]
+    fn a_set_of_changes_requires_one_of_them() {
+        let fix: crate::domain::TaskChange = "fix".parse().unwrap();
+        let docs: crate::domain::TaskChange = "docs".parse().unwrap();
+        let declared = with(task(1, "a"), |r| r.change = Some(fix.clone()));
+        let stale = with(task(2, "b"), |r| r.change = Some(docs));
+        let missing = task(3, "c");
+        let mut input = input(vec![declared, stale, missing], vec![]);
+        assert_eq!(codes(&input), []);
+        input.changes = Some(crate::domain::ChangeSet::new(vec![fix]).unwrap());
+        assert_eq!(
+            codes(&input),
+            [
+                (2, LintCode::ChangeOutsideSet),
+                (3, LintCode::MissingChange)
+            ]
+        );
+        let found = lint(&input);
+        assert!(found[1].reason.contains("declares no change"), "{found:?}");
     }
 
     #[test]

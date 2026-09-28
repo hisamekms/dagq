@@ -17,6 +17,7 @@ const JST: i64 = 9 * HOUR;
 struct Queue {
     events: Vec<RunEvent>,
     kinds: HashMap<TaskId, Option<TaskKind>>,
+    changes: HashMap<TaskId, Option<TaskChange>>,
     goals: HashMap<TaskId, Option<GoalId>>,
     /// The registered supervisors' last heartbeats.
     heartbeats: HashMap<String, i64>,
@@ -30,6 +31,8 @@ struct Queue {
 struct Run {
     task: i64,
     kind: Option<TaskKind>,
+    /// The change its task declares (ADR-t980-1).
+    change: Option<TaskChange>,
     /// Unix seconds of the claim.
     claimed: i64,
     work: i64,
@@ -53,6 +56,7 @@ impl Run {
         Self {
             task,
             kind,
+            change: None,
             claimed,
             work,
             parallel: 3,
@@ -99,6 +103,8 @@ impl Queue {
         let id = format!("{:08x}-0000-4000-8000-{:012x}", run.task, run.claimed);
         let (task, id) = (Some(run.task), Some(id.as_str()));
         self.kinds.insert(TaskId::new(run.task), run.kind.clone());
+        self.changes
+            .insert(TaskId::new(run.task), run.change.clone());
         self.goals.insert(TaskId::new(run.task), None);
         self.push(
             task,
@@ -226,6 +232,7 @@ impl Queue {
                 events: &self.events,
                 goals: &self.goals,
                 kinds: &self.kinds,
+                changes: &self.changes,
                 areas: self.areas.as_ref(),
                 heartbeats: &self.heartbeats,
                 draft_origins: &self.draft_origins,
@@ -496,6 +503,7 @@ fn the_period_not_over_yet_is_partial() {
             targets: vec![Target {
                 kpi: "landings".into(),
                 kind: None,
+                change: None,
                 area: None,
                 stat: None,
                 min: Some(1.0),
@@ -545,6 +553,7 @@ fn a_breach_needs_consecutive_judged_periods_off_target() {
             targets: vec![Target {
                 kpi: "phase.work".into(),
                 kind: Some("runtime".into()),
+                change: None,
                 area: None,
                 stat: Some(Stat::Median),
                 min: None,
@@ -628,6 +637,7 @@ fn the_host_settings_win_over_the_repository() {
     let target = |kpi: &str, kind: Option<&str>, max: f64| Target {
         kpi: kpi.into(),
         kind: kind.map(Into::into),
+        change: None,
         area: None,
         stat: None,
         min: None,
@@ -922,6 +932,7 @@ fn compares_two_explicit_windows() {
             events: &queue.events,
             goals: &queue.goals,
             kinds: &queue.kinds,
+            changes: &queue.changes,
             areas: None,
             heartbeats: &queue.heartbeats,
             draft_origins: &queue.draft_origins,
@@ -1086,6 +1097,7 @@ fn one_window_of_any_length() {
             events: &queue.events,
             goals: &queue.goals,
             kinds: &queue.kinds,
+            changes: &queue.changes,
             areas: None,
             heartbeats: &queue.heartbeats,
             draft_origins: &queue.draft_origins,
@@ -1566,6 +1578,7 @@ fn the_drafts_per_landing_and_the_backlog_are_stats_draft_flow() {
                 .map(|kpi| Target {
                     kpi: kpi.into(),
                     kind: None,
+                    change: None,
                     area: None,
                     stat: None,
                     min: None,
@@ -1919,6 +1932,7 @@ fn periods_windows_and_comparisons_carry_the_host_load_of_their_span() {
             targets: vec![Target {
                 kpi: "landings".into(),
                 kind: None,
+                change: None,
                 area: None,
                 stat: None,
                 min: Some(5.0),
@@ -2150,6 +2164,7 @@ fn splits_the_landed_runs_by_their_areas() {
             targets: vec![Target {
                 kpi: "phase.work".into(),
                 kind: None,
+                change: None,
                 area: Some("src".into()),
                 stat: None,
                 min: None,
@@ -2408,4 +2423,128 @@ fn review_sendback_rate_is_split_by_code_and_kind() {
         day.window.details["review_reasons"]["review"]["sent_back"],
         2
     );
+}
+
+/// The runs split by their task's change (ADR-t980-1): `change=<change>`
+/// always, `change=unknown` without one; `--change` keeps only those
+/// changes' strata; a comparison summarizes per change; a target can bound
+/// a change; the asks of a task count per change.
+#[test]
+fn splits_the_runs_by_their_change() {
+    let mut queue = Queue::default();
+    let fix: TaskChange = "fix".parse().unwrap();
+    let feature: TaskChange = "feature".parse().unwrap();
+    let mut runs = [
+        Run::new(1, None, MONDAY + HOUR, 100),
+        Run::new(2, None, MONDAY + 2 * HOUR, 300),
+        Run::new(3, None, MONDAY + 3 * HOUR, 500),
+    ];
+    runs[0].change = Some(fix.clone());
+    runs[1].change = Some(fix);
+    runs[2].change = Some(feature);
+    for run in &runs {
+        queue.run(run);
+    }
+    queue.run(&Run::new(4, None, MONDAY + 4 * HOUR, 700));
+    queue.push(
+        Some(1),
+        None,
+        "ask_opened",
+        json!({"ask_id": 1, "kind": "worker_question"}),
+        MONDAY + HOUR + 10,
+    );
+    let now = MONDAY + DAY + HOUR;
+    let config = KpiConfig::merge(
+        Some(&KpiSettings {
+            min_samples: Some(1),
+            targets: vec![Target {
+                kpi: "phase.work".into(),
+                kind: None,
+                change: Some("fix".into()),
+                area: None,
+                stat: None,
+                min: None,
+                max: Some(150.0),
+            }],
+            ..KpiSettings::default()
+        }),
+        None,
+    );
+    let result = queue.kpi(now, &config, &KpiQuery::default());
+    let monday = &result.periods[DEFAULT_LAST - 2];
+    let landings = |stratum: &str| measure(monday, "landings", stratum).value;
+    assert_eq!(landings("change=fix"), Some(2.0));
+    assert_eq!(landings("change=feature"), Some(1.0));
+    assert_eq!(landings("change=unknown"), Some(1.0));
+    assert_eq!(landings(ALL), Some(4.0));
+    assert_eq!(
+        measure(monday, "phase.work", "change=fix").median,
+        Some(200.0)
+    );
+    assert_eq!(
+        measure(monday, "asks_per_landing", "change=fix").value,
+        Some(0.5)
+    );
+    let target = &result.targets[0];
+    assert_eq!(target.stratum, "change=fix");
+    assert_eq!(target.periods[DEFAULT_LAST - 2].met, Some(false));
+
+    let only = queue.kpi(
+        now,
+        &config,
+        &KpiQuery {
+            changes: vec!["feature".into()],
+            ..KpiQuery::default()
+        },
+    );
+    let strata: Vec<&String> = only.periods[DEFAULT_LAST - 2].window.kpis["landings"]
+        .keys()
+        .collect();
+    assert!(strata.contains(&&"change=feature".to_owned()));
+    assert!(strata.contains(&&"kind=unknown".to_owned()));
+    assert!(!strata.contains(&&"change=fix".to_owned()));
+
+    let spec: CompareSpec = format!(
+        "@{}..@{},@{}..@{}",
+        MONDAY,
+        MONDAY + 2 * HOUR,
+        MONDAY + 2 * HOUR,
+        MONDAY + DAY
+    )
+    .parse()
+    .unwrap();
+    let compare = queue
+        .kpi(
+            now,
+            &config,
+            &KpiQuery {
+                compare: Some(spec),
+                ..KpiQuery::default()
+            },
+        )
+        .compare
+        .unwrap();
+    assert_eq!(
+        compare.change_summary.keys().collect::<Vec<_>>(),
+        ["feature", "fix", "unknown"]
+    );
+    let fixes = &compare.change_summary["fix"]["phase.work"];
+    assert_eq!(
+        (fixes.before.median, fixes.after.median),
+        (Some(100.0), Some(300.0))
+    );
+    let asked = queue
+        .kpi(
+            now,
+            &config,
+            &KpiQuery {
+                compare: Some(spec),
+                changes: vec!["fix".into()],
+                ..KpiQuery::default()
+            },
+        )
+        .compare
+        .unwrap();
+    assert_eq!(asked.change_summary.keys().collect::<Vec<_>>(), ["fix"]);
+    assert_eq!("change".parse::<Axis>(), Ok(Axis::Change));
 }

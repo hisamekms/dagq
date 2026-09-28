@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    EventId, GoalId, RunEvent, RunId, RunStatus, TaskId, TaskKind,
+    EventId, GoalId, RunEvent, RunId, RunStatus, TaskChange, TaskId, TaskKind,
     reason::{REPEATED_CODE_KINDS, event_code},
     stall::{BackgroundTask, StallConfig},
 };
@@ -213,6 +213,9 @@ pub struct RunStats {
     pub title: Option<String>,
     /// The task's kind (goal 21); null for a task without one.
     pub kind: Option<TaskKind>,
+    /// The change its task declares (ADR-t980-1); null for a task without
+    /// one.
+    pub change: Option<TaskChange>,
     /// The areas of what it landed (ADR-t980-1), by the repository's
     /// `[areas]`: empty for a run that did not land or whose commit Git
     /// does not have; not listed without `[areas]` ([`with_areas`]).
@@ -300,6 +303,15 @@ pub struct GoalStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KindStats {
     pub kind: Option<TaskKind>,
+    #[serde(flatten)]
+    pub intervals: Intervals,
+}
+
+/// The runs of one change (ADR-t980-1), as [`KindStats`] groups them by
+/// kind: `change` is null for the runs of tasks without one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeStats {
+    pub change: Option<TaskChange>,
     #[serde(flatten)]
     pub intervals: Intervals,
 }
@@ -426,6 +438,9 @@ pub struct Stats {
     /// One entry per kind of those runs' tasks, by name; runs of tasks
     /// without a kind last ([`with_kinds`]).
     pub kinds: Vec<KindStats>,
+    /// One entry per change of those runs' tasks, by name; runs of tasks
+    /// without a change last ([`with_changes`]).
+    pub changes: Vec<ChangeStats>,
     /// One entry per area of those runs, by name, runs without one last
     /// ([`with_areas`]); not listed without `[areas]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1114,6 +1129,7 @@ pub fn stats(
         runs: finished.into_iter().map(|track| track.stats).collect(),
         goals: goal_stats,
         kinds: Vec::new(),
+        changes: Vec::new(),
         areas: Vec::new(),
         overall,
         alerts,
@@ -1640,6 +1656,30 @@ pub fn with_kinds(stats: &mut Stats, kinds: &HashMap<TaskId, Option<TaskKind>>) 
     stats.review_reasons.plan_review.with_kinds(kinds);
 }
 
+/// Give each run of `stats` the change of its task from `changes`, and
+/// group the runs by it into `stats.changes` (ADR-t980-1), as
+/// [`with_kinds`] does by kind.
+pub fn with_changes(stats: &mut Stats, changes: &HashMap<TaskId, Option<TaskChange>>) {
+    for run in &mut stats.runs {
+        run.change = changes.get(&run.task_id).cloned().flatten();
+    }
+    let mut by_change: BTreeMap<(bool, Option<&str>), Vec<&RunStats>> = BTreeMap::new();
+    for run in &stats.runs {
+        let change = run.change.as_ref().map(TaskChange::as_str);
+        by_change
+            .entry((change.is_none(), change))
+            .or_default()
+            .push(run);
+    }
+    stats.changes = by_change
+        .values()
+        .map(|runs| ChangeStats {
+            change: runs[0].change.clone(),
+            intervals: intervals(runs),
+        })
+        .collect();
+}
+
 /// Give each run of `stats` its areas from `areas` (none for a run it
 /// does not list), and group the runs by them into `stats.areas`
 /// (ADR-t980-1): a run in every area it has. `None` (no `[areas]`) leaves
@@ -1744,6 +1784,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     land_phases: None,
                     title: None,
                     kind: None,
+                    change: None,
                     areas: None,
                     claimed_at: None,
                     validated_at: None,

@@ -177,6 +177,7 @@ fn register_gaps(
                 paths: Vec::new(),
                 priority: Default::default(),
                 kind: None,
+                change: None,
                 dependencies: Vec::new(),
                 goal_dependencies: Vec::new(),
                 goal_id: Some(goal),

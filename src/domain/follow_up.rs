@@ -293,6 +293,7 @@ mod tests {
                 goal_dependencies: Vec::new(),
                 priority: Default::default(),
                 kind: None,
+                change: None,
                 goal_id: None,
                 context: String::new(),
                 provider: None,

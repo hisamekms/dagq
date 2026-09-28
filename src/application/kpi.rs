@@ -30,6 +30,7 @@ pub fn kpi(
     let run_areas = areas.run_areas(&events);
     let goals = queue.task_goals()?;
     let kinds = queue.task_kinds()?;
+    let changes = queue.task_changes()?;
     let draft_origins = queue.draft_origins()?;
     let heartbeats = queue
         .supervisors()?
@@ -41,6 +42,7 @@ pub fn kpi(
             events: &events,
             goals: &goals,
             kinds: &kinds,
+            changes: &changes,
             areas: run_areas.as_ref(),
             heartbeats: &heartbeats,
             draft_origins: &draft_origins,

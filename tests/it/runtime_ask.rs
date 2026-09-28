@@ -661,6 +661,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
             goal_dependencies: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             goal_id: None,
             context: String::new(),
             provider: None,

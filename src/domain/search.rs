@@ -252,6 +252,10 @@ pub struct SearchHit {
     pub provider: Option<super::Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_mode: Option<super::worker::WorkerMode>,
+    /// A task's change (ADR-t980-1); none for a task without one and for
+    /// the other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<super::TaskChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

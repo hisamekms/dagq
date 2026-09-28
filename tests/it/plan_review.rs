@@ -99,6 +99,7 @@ pub(crate) fn add(
     queue
         .add(NewTask {
             kind: None,
+            change: None,
             title: title.into(),
             description: format!("{title}: change the type of Foo"),
             acceptance: format!("{title} works; tests/cli.rs is not changed"),
@@ -1499,6 +1500,7 @@ pub(crate) fn runtime_draft(
             paths: Vec::new(),
             priority: Priority::Normal,
             kind: None,
+            change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
             goal_id: goal,
@@ -2112,6 +2114,7 @@ fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance:
     queue
         .add(NewTask {
             kind: None,
+            change: None,
             title: title.into(),
             description: description.into(),
             acceptance: acceptance.into(),
@@ -2293,6 +2296,7 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
     queue
         .add(NewTask {
             kind: None,
+            change: None,
             title: title.into(),
             description: format!("{title}: the long description"),
             acceptance: format!("{title} works"),
@@ -2405,6 +2409,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
     let running = queue
         .add(NewTask {
             kind: None,
+            change: None,
             title: "poiuytrewq running".into(),
             description: "d".into(),
             acceptance: "a".into(),

@@ -36,7 +36,7 @@ pub struct ForecastQuery {
 }
 
 /// The forecast of every open task and goal at the unix second `now`, each
-/// kind drawing from the whole distribution below `min_samples` landed
+/// change drawing from the whole distribution below `min_samples` landed
 /// runs, narrowed to `query` after the whole queue is simulated.
 pub fn forecast(
     queue: &dyn Queue,
@@ -58,8 +58,8 @@ fn forecast_through(
 ) -> Result<(Forecast, i64)> {
     let events = queue.all_events()?;
     let goals = queue.task_goals()?;
-    let kinds = queue.task_kinds()?;
-    let history = history(&events, &goals, &kinds, now);
+    let changes = queue.task_changes()?;
+    let history = history(&events, &goals, &changes, now);
     let parallel = match query.parallel {
         Some(parallel) => parallel,
         None => queue
@@ -97,7 +97,7 @@ fn forecast_through(
         tasks.push(ForecastTask {
             id: node.id,
             goal_id: node.goal_id,
-            kind: kinds.get(&node.id).cloned().flatten(),
+            change: changes.get(&node.id).cloned().flatten(),
             rank: ClaimRank::new(node.effective_priority, node.unblocks, node.id),
             depends_on,
             goal_dependencies,

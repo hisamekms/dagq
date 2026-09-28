@@ -504,6 +504,11 @@ mod stats {
             first.as_object_mut().unwrap().remove("review_reasons"),
             Some(json!([]))
         );
+        // ADR-t980-1: its task declares no change.
+        assert_eq!(
+            first.as_object_mut().unwrap().remove("change"),
+            Some(Value::Null)
+        );
         assert_eq!(
             first,
             json!({
@@ -991,7 +996,12 @@ mod stats {
         assert_eq!(empty["alerts"], json!([]));
         assert_eq!(empty["overall"]["work"]["median"], Value::Null);
         ok(&db, &["goal", "add", "measured"]);
-        ok(&db, &["add", "first", "--goal", "1", "--kind", "runtime"]);
+        ok(
+            &db,
+            &[
+                "add", "first", "--goal", "1", "--kind", "runtime", "--change", "fix",
+            ],
+        );
         ok(&db, &["add", "second"]);
         ok(&db, &["ready", "1", "--bypass-review"]);
         ok(&db, &["ready", "2", "--bypass-review"]);
@@ -1029,6 +1039,9 @@ mod stats {
         assert_eq!(report["runs"][0]["kind"], "runtime");
         assert_eq!(report["kinds"][0]["kind"], "runtime");
         assert_eq!(report["kinds"][0]["runs"], 1);
+        assert_eq!(report["runs"][0]["change"], "fix");
+        assert_eq!(report["changes"][0]["change"], "fix");
+        assert_eq!(report["changes"][0]["runs"], 1);
         let cursor = report["next_cursor"].as_i64().unwrap();
         assert_eq!(cursor, ok(&db, &["status"])["cursor"].as_i64().unwrap());
 
@@ -1051,6 +1064,12 @@ mod stats {
         assert_eq!(kinds[1]["kind"], Value::Null);
         assert_eq!(kinds[1]["runs"], 1);
         assert!(kinds[1]["work"]["median"].is_i64());
+        // Per change likewise (ADR-t980-1).
+        let changes = ok(&db, &["stats", "--full"])["changes"].clone();
+        assert_eq!(changes.as_array().unwrap().len(), 2);
+        assert_eq!(changes[0]["change"], "fix");
+        assert_eq!(changes[1]["change"], Value::Null);
+        assert_eq!(changes[1]["runs"], 1);
         let goal = ok(&db, &["stats", "--goal", "1"]);
         assert_eq!(goal["runs"].as_array().unwrap().len(), 1);
         assert_eq!(goal["goals"][0]["goal_id"], 1);

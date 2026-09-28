@@ -90,6 +90,7 @@ fn draft_at(
     queue
         .add(NewTask {
             kind: None,
+            change: None,
             title: title.into(),
             description: format!("{title}: split the file"),
             acceptance: format!("{title} is split"),

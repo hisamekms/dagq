@@ -2111,6 +2111,16 @@ fn report_setup(
     })
 }
 
+/// The `[tasks] changes` of the `dagq.toml` of the main checkout `queue`
+/// is bound to (ADR-t980-1), which `add`, `edit`, `submit` and `lint` hold
+/// the tasks to; none for a queue bound to no checkout or without them.
+pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
+    match bound_checkout(queue)? {
+        Some(checkout) => crate::infrastructure::run_env::load_change_set(&checkout),
+        None => Ok(None),
+    }
+}
+
 /// The `[areas]` of `checkout`'s `dagq.toml` and its Git for the landed
 /// commits' changes (ADR-t980-1); no checkout or no `[areas]` gives no run
 /// areas.

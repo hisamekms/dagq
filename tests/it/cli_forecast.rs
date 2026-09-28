@@ -56,7 +56,7 @@ fn ids(list: &Value) -> Vec<i64> {
         .collect()
 }
 
-/// One runtime task of a goal lands; a docs task of the goal is in flight,
+/// One feature task of a goal lands; a docs task of the goal is in flight,
 /// a third waits for it, and a task outside the goal waits for a slot.
 #[test]
 fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
@@ -66,7 +66,7 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     let goal = ok(&db, &["goal", "add", "grouped"])["id"].to_string();
     ok(
         &db,
-        &["add", "landed", "--kind", "runtime", "--goal", &goal],
+        &["add", "landed", "--change", "feature", "--goal", &goal],
     );
     ok(&db, &["ready", "1", "--bypass-review"]);
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -88,7 +88,10 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
         .unwrap()
         .execute("UPDATE tasks SET status='completed' WHERE id=1", [])
         .unwrap();
-    ok(&db, &["add", "running", "--kind", "docs", "--goal", &goal]);
+    ok(
+        &db,
+        &["add", "running", "--change", "docs", "--goal", &goal],
+    );
     ok(&db, &["ready", "2", "--bypass-review"]);
     claim(&mut queue);
     ok(&db, &["add", "after", "--goal", &goal, "--depends-on", "2"]);
@@ -99,16 +102,16 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     let events = queue.all_events().unwrap().len();
 
     let all = forecast(None, &db, &config, &["--parallel", "2", "--trials", "20"]);
-    assert_eq!(all["method"], 1);
+    assert_eq!(all["method"], 2);
     assert_eq!(all["trials"], 20);
     assert!(all["seed"].is_u64());
     let assumptions = &all["assumptions"];
     assert_eq!(assumptions["parallel"], 2);
     assert_eq!(assumptions["min_samples"], 5);
     assert_eq!(assumptions["samples"]["all"], 1);
-    assert_eq!(assumptions["samples"]["kinds"]["runtime"]["runs"], 1);
+    assert_eq!(assumptions["samples"]["changes"]["feature"]["runs"], 1);
     assert_eq!(
-        assumptions["samples"]["kinds"]["docs"],
+        assumptions["samples"]["changes"]["docs"],
         json!({"runs": 0, "distribution": "all"})
     );
     assert_eq!(assumptions["substituted"], json!(["docs", "unknown"]));
@@ -118,7 +121,7 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     assert_eq!(running["phase"], "work");
     assert_eq!(running["waiting"], false);
     assert_eq!(running["distribution"], "all");
-    assert_eq!(running["kind"], "docs");
+    assert_eq!(running["change"], "docs");
     for task in all["tasks"].as_array().unwrap() {
         assert!(task["p50"].is_string(), "{task}");
         assert!(task["p90_secs"].as_i64().unwrap() >= task["p50_secs"].as_i64().unwrap());

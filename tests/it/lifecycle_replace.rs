@@ -44,6 +44,7 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: vec![],
             goal_dependencies: Vec::new(),
             goal_id: None,
@@ -1122,6 +1123,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP TABLE draft_bundles;
              DROP TABLE draft_bundle_members;
              ALTER TABLE tasks DROP COLUMN kind;
+             ALTER TABLE tasks DROP COLUMN change;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
              ALTER TABLE asks DROP COLUMN answer_authority;
@@ -1202,6 +1204,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP TABLE draft_bundles;
              DROP TABLE draft_bundle_members;
              ALTER TABLE tasks DROP COLUMN kind;
+             ALTER TABLE tasks DROP COLUMN change;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
              ALTER TABLE asks DROP COLUMN answer_authority;

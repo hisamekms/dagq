@@ -61,8 +61,12 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal =
-            super::proposals::submit(&tx, submission, &self.generators.clock.timestamp())?;
+        let proposal = super::proposals::submit(
+            &tx,
+            submission,
+            self.changes.as_ref(),
+            &self.generators.clock.timestamp(),
+        )?;
         link_findings(&tx, proposal.id(), workspace.as_deref(), findings, by, now)?;
         let proposal = super::proposals::read(&tx, proposal.id())?;
         tx.commit()?;

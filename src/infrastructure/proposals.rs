@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
-    Ask, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId, ProposalRecord,
+    Ask, ChangeSet, DomainError, GoalStatus, PlannerOwner, Proposal, ProposalId, ProposalRecord,
     ProposalStatus, Submission, TaskAction, TaskId, TaskStatus, follow_up::reopened_material, goal,
     proposal,
 };
@@ -21,8 +21,14 @@ use crate::domain::{
 /// and the draft tasks of its goals (and, for a resubmission, the drafts
 /// the proposal already holds) move from `draft` to `submitted` and join
 /// the proposal, recording `task_status_changed` and `task_submitted`
-/// (`goal_submitted` for a goal).
-pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Result<Proposal> {
+/// (`goal_submitted` for a goal). With the repository's set of changes,
+/// every task that moves must declare one of them (ADR-t980-1).
+pub(super) fn submit(
+    conn: &Connection,
+    submission: Submission,
+    changes: Option<&ChangeSet>,
+    now: &str,
+) -> Result<Proposal> {
     submission.validate()?;
     let target = submission.proposal;
     let existing = target.map(|id| read(conn, id)).transpose()?;
@@ -101,6 +107,12 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
             membership(conn, "tasks", task_id.as_i64())?,
             target,
         )?;
+    }
+    if let Some(changes) = changes {
+        for &task_id in &tasks {
+            let task = super::sqlite::read_task(conn, task_id)?;
+            changes.check_declared(task_id, task.change())?;
+        }
     }
     let adoptions = super::draft_planners::check_adoptions(conn, &tasks, submission.owner.origin)?;
     let submitted = match existing {

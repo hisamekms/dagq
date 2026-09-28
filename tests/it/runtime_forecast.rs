@@ -102,7 +102,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     assert_eq!(ids(&recorded[0], "goals"), [goal.as_i64()]);
     assert!(recorded[0]["tasks"][0]["p50_secs"].is_null());
     assert!(recorded[0]["supervisor"].is_string());
-    assert_eq!(recorded[0]["method"], 1);
+    assert_eq!(recorded[0]["method"], 2);
     assert!(recorded[0]["assumptions"]["parallel"].is_number());
     assert!(recorded[0]["triggers_through"].as_i64().unwrap() > 0);
     // The first landing gave the second task a time.

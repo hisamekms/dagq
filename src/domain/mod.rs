@@ -750,6 +750,7 @@ pub mod actor;
 pub mod actor_model;
 pub mod areas;
 pub mod authorization;
+pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;
 pub mod disk;
@@ -813,6 +814,7 @@ pub mod write_rules;
 
 pub use actor::{ActorContext, ActorRole, TrustLevel};
 pub use authorization::{AuthorizationError, Authorizer, Capability, Resource, StaticPolicy};
+pub use change::{ChangeSet, TaskChange};
 pub use error::DomainError;
 use error::require;
 pub use finding::{
@@ -1455,6 +1457,7 @@ mod tests {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: vec![TaskId::new(0)],
             goal_dependencies: Vec::new(),
             goal_id: None,
@@ -1491,6 +1494,7 @@ mod tests {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
             goal_id: None,

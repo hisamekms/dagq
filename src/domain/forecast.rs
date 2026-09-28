@@ -3,7 +3,8 @@
 //! and p90 of a simulation. The simulation puts the claimable tasks into the
 //! free slots in claim order ([`ClaimRank`]), draws each run's `work`,
 //! `validate` and `wait_to_land` together from one landed run of the task's
-//! kind (the whole distribution when the kind has fewer than `min_samples`),
+//! change (ADR-t980-1; the whole distribution when the change has fewer
+//! than `min_samples`),
 //! and repeats that `trials` times with a seeded generator, so the same input
 //! always gives the same forecast. New tasks (inflow) are never added.
 //! Nothing here reads or writes the queue; [`history`] derives the samples
@@ -19,18 +20,19 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use super::{ClaimRank, GoalId, TaskId, TaskKind, marks::utc_text};
+use super::{ClaimRank, GoalId, TaskChange, TaskId, marks::utc_text};
 
 pub use history::{History, Sample, history, running};
 
 /// The version of the method (ADR-0070 decision 1): raised whenever the
-/// calculation changes, so the scoring can be read per method.
-pub const METHOD: u32 = 1;
+/// calculation changes, so the scoring can be read per method: 2 draws
+/// from the task's change instead of its kind (ADR-t980-1).
+pub const METHOD: u32 = 2;
 /// Simulation trials (ADR-0070's first value).
 pub const DEFAULT_TRIALS: usize = 1000;
 /// The name of the whole distribution.
 pub const ALL: &str = "all";
-/// The name of the kind of a task without one.
+/// The name of the change of a task without one.
 pub const UNKNOWN: &str = "unknown";
 /// What the forecast leaves out, printed with it.
 const LEFT_OUT: [&str; 4] = [
@@ -68,7 +70,8 @@ pub struct Running {
 pub struct ForecastTask {
     pub id: TaskId,
     pub goal_id: Option<GoalId>,
-    pub kind: Option<TaskKind>,
+    /// The change it declares (ADR-t980-1), whose landed runs it draws from.
+    pub change: Option<TaskChange>,
     /// Where it stands in the claim order now.
     pub rank: ClaimRank,
     /// The unfinished tasks it waits for. One that is not forecast (a draft
@@ -105,7 +108,7 @@ pub struct ForecastInput<'a> {
     /// The slots: the live supervisors' `parallel` together.
     pub parallel: usize,
     pub history: &'a History,
-    /// A kind with fewer landed runs uses the whole distribution.
+    /// A change with fewer landed runs uses the whole distribution.
     pub min_samples: usize,
     pub trials: usize,
     pub seed: u64,
@@ -130,7 +133,7 @@ pub struct Assumptions {
     pub parallel: usize,
     pub min_samples: usize,
     pub samples: Samples,
-    /// The kinds of forecast tasks that drew from the whole distribution
+    /// The changes of forecast tasks that drew from the whole distribution
     /// for want of their own samples.
     pub substituted: Vec<String>,
     pub left_out: Vec<&'static str>,
@@ -141,19 +144,19 @@ pub struct Assumptions {
 pub struct Samples {
     /// Landed runs with all three intervals.
     pub all: usize,
-    /// Per kind of the landed runs and of the forecast tasks.
-    pub kinds: BTreeMap<String, KindSamples>,
+    /// Per change of the landed runs and of the forecast tasks.
+    pub changes: BTreeMap<String, ChangeSamples>,
     /// Goals closed as achieved after a landing: the delay to close.
     pub close_delay: usize,
     /// Asks a person answered: the wait of a run waiting for one.
     pub ask_wait: usize,
 }
 
-/// A kind's samples and the distribution its tasks draw from.
+/// A change's samples and the distribution its tasks draw from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct KindSamples {
+pub struct ChangeSamples {
     pub runs: usize,
-    /// The kind itself, or `all`.
+    /// The change itself, or `all`.
     pub distribution: String,
 }
 
@@ -162,11 +165,11 @@ pub struct KindSamples {
 pub struct TaskForecast {
     pub id: TaskId,
     pub goal_id: Option<GoalId>,
-    pub kind: Option<TaskKind>,
+    pub change: Option<TaskChange>,
     /// The phase of its run in flight; null while it waits for a slot.
     pub phase: Option<Phase>,
     pub waiting: bool,
-    /// The kind whose distribution it drew from, or `all`.
+    /// The change whose distribution it drew from, or `all`.
     pub distribution: String,
     #[serde(flatten)]
     pub at: Percentiles,
@@ -206,38 +209,44 @@ pub fn seed(now: i64, latest_event: i64) -> u64 {
 /// The forecast of `input` (ADR-0070 decision 1).
 pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
     let history = input.history;
-    let kind_name = |kind: Option<&TaskKind>| kind.map_or(UNKNOWN, TaskKind::as_str).to_owned();
+    let change_name =
+        |change: Option<&TaskChange>| change.map_or(UNKNOWN, TaskChange::as_str).to_owned();
     let all: Vec<&Sample> = history.runs.iter().map(|(_, sample)| sample).collect();
-    let mut by_kind: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
-    for (kind, sample) in &history.runs {
-        by_kind
-            .entry(kind_name(kind.as_ref()))
+    let mut by_change: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
+    for (change, sample) in &history.runs {
+        by_change
+            .entry(change_name(change.as_ref()))
             .or_default()
             .push(sample);
     }
     for task in input.tasks {
-        by_kind.entry(kind_name(task.kind.as_ref())).or_default();
+        by_change
+            .entry(change_name(task.change.as_ref()))
+            .or_default();
     }
     let own = |runs: &[&Sample]| !runs.is_empty() && runs.len() >= input.min_samples;
-    let kinds: BTreeMap<String, KindSamples> = by_kind
+    let changes: BTreeMap<String, ChangeSamples> = by_change
         .iter()
-        .map(|(kind, runs)| {
+        .map(|(change, runs)| {
             let distribution = if own(runs) {
-                kind.clone()
+                change.clone()
             } else {
                 ALL.to_owned()
             };
             (
-                kind.clone(),
-                KindSamples {
+                change.clone(),
+                ChangeSamples {
                     runs: runs.len(),
                     distribution,
                 },
             )
         })
         .collect();
-    let distribution_of =
-        |task: &ForecastTask| kinds[&kind_name(task.kind.as_ref())].distribution.clone();
+    let distribution_of = |task: &ForecastTask| {
+        changes[&change_name(task.change.as_ref())]
+            .distribution
+            .clone()
+    };
     let pools: Vec<&[&Sample]> = input
         .tasks
         .iter()
@@ -246,15 +255,15 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
             if name == ALL {
                 all.as_slice()
             } else {
-                by_kind[&name].as_slice()
+                by_change[&name].as_slice()
             }
         })
         .collect();
     let mut substituted: Vec<String> = input
         .tasks
         .iter()
-        .map(|task| kind_name(task.kind.as_ref()))
-        .filter(|kind| kinds[kind].distribution == ALL)
+        .map(|task| change_name(task.change.as_ref()))
+        .filter(|change| changes[change].distribution == ALL)
         .collect();
     substituted.sort();
     substituted.dedup();
@@ -292,7 +301,7 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
         .map(|((task, ends), &blocked)| TaskForecast {
             id: task.id,
             goal_id: task.goal_id,
-            kind: task.kind.clone(),
+            change: task.change.clone(),
             phase: task.running.map(|running| running.phase),
             waiting: task.running.is_some_and(|r| r.waiting.is_some()),
             distribution: distribution_of(task),
@@ -325,7 +334,7 @@ pub fn forecast(input: &ForecastInput<'_>) -> Forecast {
             min_samples: input.min_samples,
             samples: Samples {
                 all: all.len(),
-                kinds,
+                changes,
                 close_delay: history.close_delays.len(),
                 ask_wait: history.ask_waits.len(),
             },

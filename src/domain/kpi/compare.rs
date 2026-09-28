@@ -73,12 +73,16 @@ pub struct Comparison {
     pub confounders: Vec<Confounder>,
     /// The groups of overlapping marks in the range, each taken as one change.
     pub overlapping: Vec<Vec<Mark>>,
-    /// Per KPI, per stratum (`all`, `kind=`, `area=`, `parallel=`,
+    /// Per KPI, per stratum (`all`, `kind=`, `change=`, `area=`, `parallel=`,
     /// `load=`, `build=`).
     pub strata: Kpis<Side>,
     /// The times of the work (`lead_time`, `phase.*`, `land_phase.*`) for
     /// each kind the summary is made for, by kind.
     pub summary: BTreeMap<String, BTreeMap<String, Side>>,
+    /// The same for each change (ADR-t980-1), by change; not listed when
+    /// no run of the comparison has a stratum of one.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub change_summary: BTreeMap<String, BTreeMap<String, Side>>,
     /// The same for each area (ADR-t980-1), by area; not listed without
     /// `[areas]`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -260,8 +264,9 @@ pub(super) fn compare(
     // Work differs by an order of magnitude between kinds (decision 15), so
     // the summary is made per kind: the ones asked for, or every kind the
     // comparison saw (ADR-t624-1: no kind is built in); and the same per
-    // area (ADR-t980-1 decision 6(b)).
+    // change and per area (ADR-t980-1 decision 6(b)).
     let summary = summarize(&strata, "kind", &query.kinds);
+    let change_summary = summarize(&strata, "change", &query.changes);
     let area_summary = summarize(&strata, "area", &query.areas);
     Ok(Comparison {
         split,
@@ -271,6 +276,7 @@ pub(super) fn compare(
         overlapping,
         strata,
         summary,
+        change_summary,
         area_summary,
     })
 }

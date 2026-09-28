@@ -707,6 +707,7 @@ mod tests {
                 paths: Vec::new(),
                 priority: Default::default(),
                 kind: None,
+                change: None,
                 provider: None,
                 worker_mode: None,
             },

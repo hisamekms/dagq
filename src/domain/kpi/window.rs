@@ -1,6 +1,6 @@
 //! One window's KPIs (ADR-0051 decisions 1–7): the runs that finished in
-//! it as [`stats`] derives them, split into strata by the task's kind and
-//! the attributes of the claim, and the KPIs no run carries (asks,
+//! it as [`stats`] derives them, split into strata by the task's kind, its
+//! change, the run's areas and the attributes of the claim, and the KPIs no run carries (asks,
 //! attentions, backend failures, load, verification commands, slots,
 //! findings, sessions of the other kinds) over the whole window.
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float, round3};
 use crate::domain::{
-    DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskId, TaskKind,
+    DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskChange, TaskId,
+    TaskKind,
     areas::RunAreas,
     event_attention,
     forecast::score::{self, Scoring, Target},
@@ -68,6 +69,7 @@ pub(super) struct Context<'a> {
     pub events: &'a [RunEvent],
     goals: &'a HashMap<TaskId, Option<GoalId>>,
     kinds: &'a HashMap<TaskId, Option<TaskKind>>,
+    changes: &'a HashMap<TaskId, Option<TaskChange>>,
     /// The landed runs' areas; `None` without `[areas]`.
     areas: Option<&'a RunAreas>,
     goal_id: Option<GoalId>,
@@ -269,6 +271,7 @@ impl<'a> Context<'a> {
             events,
             goals: input.goals,
             kinds: input.kinds,
+            changes: input.changes,
             areas: input.areas,
             goal_id,
             live: LiveSnapshot {
@@ -318,6 +321,13 @@ impl<'a> Context<'a> {
             .map_or(UNKNOWN, TaskKind::as_str)
     }
 
+    fn change_of(&self, task_id: Option<TaskId>) -> &'a str {
+        let changes: &'a HashMap<TaskId, Option<TaskChange>> = self.changes;
+        task_id
+            .and_then(|task| changes.get(&task)?.as_ref())
+            .map_or(UNKNOWN, TaskChange::as_str)
+    }
+
     /// What `stats` derives for the runs that finished after `after` up
     /// to `upto`, every one of them.
     fn stats(&self, after: Option<EventId>, upto: Option<EventId>) -> stats::Stats {
@@ -335,6 +345,7 @@ impl<'a> Context<'a> {
             &self.live,
         );
         stats::with_kinds(&mut stats, self.kinds);
+        stats::with_changes(&mut stats, self.changes);
         stats::with_areas(&mut stats, self.areas);
         stats
     }
@@ -361,6 +372,11 @@ impl<'a> Context<'a> {
                 .kind
                 .as_ref()
                 .map_or(UNKNOWN, TaskKind::as_str)
+                .to_owned(),
+            Axis::Change => run
+                .change
+                .as_ref()
+                .map_or(UNKNOWN, TaskChange::as_str)
                 .to_owned(),
             Axis::Area => unreachable!("an area is one of a run's values (axis_values)"),
             Axis::Build => text(&measures.dagq_version),
@@ -532,7 +548,8 @@ impl<'a> Context<'a> {
         }
         let landed = |stratum: &str| landings.get(stratum).copied().unwrap_or(0);
 
-        // Asks: all of them, and those of a task per its kind (decision 7).
+        // Asks: all of them, and those of a task per its kind (decision 7)
+        // and its change (ADR-t980-1).
         let mut asks: BTreeMap<String, usize> = BTreeMap::new();
         for event in events
             .iter()
@@ -545,10 +562,15 @@ impl<'a> Context<'a> {
                     .entry(format!("kind={}", self.kind_of(event.task_id)))
                     .or_default() += 1;
             }
+            if event.task_id.is_some() && axes.contains(&Axis::Change) {
+                *asks
+                    .entry(format!("change={}", self.change_of(event.task_id)))
+                    .or_default() += 1;
+            }
         }
         for stratum in groups
             .keys()
-            .filter(|s| *s == ALL || s.starts_with("kind="))
+            .filter(|s| *s == ALL || s.starts_with("kind=") || s.starts_with("change="))
         {
             let opened = asks.get(stratum).copied().unwrap_or(0);
             put(
@@ -966,6 +988,7 @@ impl<'a> Context<'a> {
             ];
             if let Target::Task(task) = sample.target {
                 keys.push(format!("kind={}", self.kind_of(Some(task))));
+                keys.push(format!("change={}", self.change_of(Some(task))));
             }
             for key in keys {
                 groups.entry(key).or_default().push(sample);

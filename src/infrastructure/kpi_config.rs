@@ -24,6 +24,10 @@
 //! [kpi.targets."phase.work".src]  # an area of `[areas]` (ADR-t980-1)
 //! area = "src"                    # instead of kind
 //! max = 5400
+//!
+//! [kpi.targets."phase.work".fix]  # a change (ADR-t980-1)
+//! change = "fix"                  # instead of kind or area
+//! max = 1800
 //! ```
 //!
 //! `host.toml`'s other tables (`[push]`, `[report]`) are read elsewhere
@@ -33,7 +37,7 @@ use std::{env, fs, path::Path};
 
 use super::run_env::{parse_positive, parse_string, strip_comment};
 use crate::domain::{
-    TaskKind, areas,
+    TaskChange, TaskKind, areas,
     kpi::{KpiSettings, Stat, Target, UNKNOWN},
 };
 
@@ -81,6 +85,7 @@ impl KpiTables {
         self.target = target.map(|kpi| Target {
             kpi,
             kind: None,
+            change: None,
             area: None,
             stat: None,
             min: None,
@@ -125,10 +130,21 @@ impl KpiTables {
                         kind.parse::<TaskKind>().map_err(anyhow::Error::msg)?;
                     }
                     ensure!(
-                        target.area.is_none(),
-                        "a target has a kind or an area, not both"
+                        target.change.is_none() && target.area.is_none(),
+                        "a target has one of kind, change and area"
                     );
                     target.kind = Some(kind);
+                }
+                "change" => {
+                    let change = parse_string(rest).context("value of change")?;
+                    if change != TaskChange::NONE {
+                        change.parse::<TaskChange>().map_err(anyhow::Error::msg)?;
+                    }
+                    ensure!(
+                        target.kind.is_none() && target.area.is_none(),
+                        "a target has one of kind, change and area"
+                    );
+                    target.change = Some(change);
                 }
                 "area" => {
                     let area = parse_string(rest).context("value of area")?;
@@ -136,8 +152,8 @@ impl KpiTables {
                         areas::check_name(&area).map_err(anyhow::Error::msg)?;
                     }
                     ensure!(
-                        target.kind.is_none(),
-                        "a target has a kind or an area, not both"
+                        target.kind.is_none() && target.change.is_none(),
+                        "a target has one of kind, change and area"
                     );
                     target.area = Some(area);
                 }
@@ -148,7 +164,9 @@ impl KpiTables {
                 "min" => target.min = Some(number(rest).context("value of min")?),
                 "max" => target.max = Some(number(rest).context("value of max")?),
                 _ => {
-                    bail!("unknown key {key} in a target; the keys are kind, area, stat, min, max")
+                    bail!(
+                        "unknown key {key} in a target; the keys are kind, change, area, stat, min, max"
+                    )
                 }
             },
         }
@@ -323,6 +341,14 @@ mod tests {
         .unwrap();
         assert_eq!(areas.targets[0].stratum(), "area=src");
         assert_eq!(areas.targets[1].stratum(), "area=other");
+        let changes = parse_host_kpi(
+            "[kpi.targets.\"phase.work\"]\nchange = \"fix\"\nmax = 1\n[kpi.targets.landings]\nchange = \"unknown\"\nmin = 1\n",
+            "h",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(changes.targets[0].stratum(), "change=fix");
+        assert_eq!(changes.targets[1].stratum(), "change=unknown");
     }
 
     #[test]
@@ -337,11 +363,20 @@ mod tests {
         assert!(error("[kpi.targets.x]\nmax = 1\nstat = \"mean\"\n").contains("not a stat"));
         assert!(error("[kpi.targets.x]\nmax = 1\narea = \"all\"\n").contains("runtime gives"));
         assert!(
-            error("[kpi.targets.x]\nmax = 1\narea = \"a\"\nkind = \"b\"\n").contains("not both")
+            error("[kpi.targets.x]\nmax = 1\narea = \"a\"\nkind = \"b\"\n").contains("one of kind")
         );
         assert!(
-            error("[kpi.targets.x]\nmax = 1\nkind = \"b\"\narea = \"a\"\n").contains("not both")
+            error("[kpi.targets.x]\nmax = 1\nkind = \"b\"\narea = \"a\"\n").contains("one of kind")
         );
+        for text in [
+            "[kpi.targets.x]\nmax = 1\nchange = \"a\"\nkind = \"b\"\n",
+            "[kpi.targets.x]\nmax = 1\nkind = \"b\"\nchange = \"a\"\n",
+            "[kpi.targets.x]\nmax = 1\narea = \"b\"\nchange = \"a\"\n",
+            "[kpi.targets.x]\nmax = 1\nchange = \"b\"\narea = \"a\"\n",
+        ] {
+            assert!(error(text).contains("one of kind"), "{text}");
+        }
+        assert!(error("[kpi.targets.x]\nmax = 1\nchange = \"Fix\"\n").contains("task change"));
         assert!(error("[kpi.targets.x]\nmax = one\n").contains("expected a number"));
         assert!(error("[kpi.targets.x]\nmax = 1\nwho = 1\n").contains("unknown key who"));
         assert!(error("[kpi.targets.phase.work]\nmax = 1\n").contains("quote"));

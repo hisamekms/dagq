@@ -347,6 +347,7 @@ fn a_land_answer_is_applied_while_another_run_integrates() {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
             goal_id: None,

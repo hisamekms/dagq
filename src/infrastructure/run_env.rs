@@ -15,7 +15,8 @@
 //! session other than the worker's (ADR-0079 decision 7). `[supervisor]`
 //! holds `parallel`, `max_waiting` and `runtime_planners` of a supervisor
 //! started without the flags (task 698, task 941). `[areas]` maps the
-//! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1).
+//! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
+//! and `[tasks] changes` names the set of changes a task declares one of.
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -31,6 +32,7 @@ use std::{
 use crate::{
     application::{Exit, Verifier},
     domain::{
+        ChangeSet, TaskChange,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         areas::AreaMap,
         disk::DiskConfig,
@@ -82,7 +84,11 @@ const LANGUAGE_TABLE: &str = "language";
 const SUPERVISOR_TABLE: &str = "supervisor";
 /// `[areas]`: each area's name and its globs (ADR-t980-1).
 const AREAS_TABLE: &str = "areas";
-const TABLES: [&str; 12] = [
+/// `[tasks]`: `changes`, the repository's set of changes (ADR-t980-1).
+const TASKS_TABLE: &str = "tasks";
+/// The one key of `[tasks]`.
+const TASKS_CHANGES: &str = "changes";
+const TABLES: [&str; 13] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -95,6 +101,7 @@ const TABLES: [&str; 12] = [
     LANGUAGE_TABLE,
     SUPERVISOR_TABLE,
     AREAS_TABLE,
+    TASKS_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -157,6 +164,8 @@ pub struct Config {
     pub supervisor: SupervisorConfig,
     /// `[areas]` (ADR-t980-1); `None` without the table.
     pub areas: Option<AreaMap>,
+    /// `[tasks] changes` (ADR-t980-1); `None` without it.
+    pub changes: Option<ChangeSet>,
 }
 
 /// Parse the whole file.
@@ -214,7 +223,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -242,6 +251,28 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 let globs = parse_string_array(rest.trim())
                     .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {name}"))?;
                 areas.get_or_insert_with(Vec::new).push((name, globs));
+            }
+            Some(TASKS_TABLE) => {
+                ensure!(
+                    key == TASKS_CHANGES,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{TASKS_TABLE}]; the key is {TASKS_CHANGES}"
+                );
+                ensure!(
+                    config.changes.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let changes = parse_string_array(rest.trim())
+                    .with_context(with)?
+                    .iter()
+                    .map(|change| change.parse::<TaskChange>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .with_context(with)?;
+                config.changes = Some(
+                    ChangeSet::new(changes)
+                        .map_err(anyhow::Error::msg)
+                        .with_context(with)?,
+                );
             }
             Some(KPI_TABLE) => kpi
                 .entry(key, rest.trim())
@@ -482,7 +513,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -755,6 +786,20 @@ pub fn load_area_map(root: &Path) -> Result<Option<AreaMap>> {
             parse_config(&text)
                 .with_context(|| format!("parse {}", path.display()))?
                 .areas
+        }
+        None => None,
+    })
+}
+
+/// `[tasks] changes` of the `dagq.toml` in `root` (ADR-t980-1), `None`
+/// when there is no file or no such key.
+pub fn load_change_set(root: &Path) -> Result<Option<ChangeSet>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    Ok(match read_config(&path)? {
+        Some(text) => {
+            parse_config(&text)
+                .with_context(|| format!("parse {}", path.display()))?
+                .changes
         }
         None => None,
     })
@@ -1169,6 +1214,53 @@ mod tests {
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[areas]\nX = [\"a\"]\n").unwrap();
         assert!(load_area_map(dir.path()).is_err());
+    }
+
+    /// `[tasks] changes` names the repository's set of changes (ADR-t980-1).
+    #[test]
+    fn parses_the_changes_of_the_tasks_table() {
+        let config = parse_config("[tasks]\nchanges = [\"feature\", 'fix'] # set\n").unwrap();
+        let changes = config.changes.unwrap();
+        assert_eq!(
+            changes
+                .values()
+                .iter()
+                .map(TaskChange::as_str)
+                .collect::<Vec<_>>(),
+            ["feature", "fix"]
+        );
+        assert_eq!(parse_config("[tasks]\n").unwrap().changes, None);
+        assert_eq!(parse_config("").unwrap().changes, None);
+        let error = |text: &str| format!("{:#}", parse_config(text).unwrap_err());
+        for (text, expected) in [
+            ("[tasks]\nkinds = [\"a\"]\n", "unknown key kinds"),
+            (
+                "[tasks]\nchanges = [\"a\"]\nchanges = [\"b\"]\n",
+                "defined twice",
+            ),
+            ("[tasks]\nchanges = \"a\"\n", "expected an array"),
+            ("[tasks]\nchanges = [\"Fix\"]\n", "task change"),
+            ("[tasks]\nchanges = [\"unknown\"]\n", "task change"),
+            ("[tasks]\nchanges = []\n", "names no change"),
+            ("[tasks]\nchanges = [\"a\", \"a\"]\n", "twice"),
+            ("[tasks]\nchanges = [\"a\"]\n[tasks]\n", "defined twice"),
+        ] {
+            let got = error(text);
+            assert!(got.contains(expected), "{text}: {got}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_change_set(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[tasks]\nchanges = [\"fix\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_change_set(dir.path()).unwrap().unwrap().values().len(),
+            1
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[tasks]\nchanges = 1\n").unwrap();
+        assert!(load_change_set(dir.path()).is_err());
     }
 
     #[test]
@@ -1671,7 +1763,10 @@ LITERAL = 'no \n escapes # here'
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
-        assert!(error.contains("[supervisor], [areas] and [kpi]"), "{error}");
+        assert!(
+            error.contains("[supervisor], [areas], [tasks] and [kpi]"),
+            "{error}"
+        );
     }
 
     #[test]

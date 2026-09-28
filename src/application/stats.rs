@@ -17,7 +17,7 @@ use crate::domain::{
         ConflictConfig, ConflictConfigReport, History, ListedWorkspace, LiveRun, LiveSnapshot,
         SlotSnapshot, StallConfigReport, Stats, StatsQuery, Workspaces,
         conflicts::{MainHistory, earliest_conflict},
-        stats as aggregate, timestamp_millis, with_areas, with_kinds,
+        stats as aggregate, timestamp_millis, with_areas, with_changes, with_kinds,
     },
 };
 
@@ -214,6 +214,7 @@ pub fn stats(
         run.title = titles.get(&run.task_id).cloned();
     }
     with_kinds(&mut stats, &queue.task_kinds()?);
+    with_changes(&mut stats, &queue.task_changes()?);
     // Only the listed runs' landings are read from Git.
     let listed: HashSet<&RunId> = stats.runs.iter().map(|run| &run.run_id).collect();
     let landings: Vec<crate::domain::RunEvent> = events

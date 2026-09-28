@@ -351,6 +351,7 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: vec![],
             goal_dependencies: Vec::new(),
             goal_id: None,

@@ -32,7 +32,7 @@ use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
     PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunHistory, RunId,
     RunLease, RunPaths, RunProcess, RunStatus, SessionRole, SupervisorMode, SupervisorRegistration,
-    Task, TaskAction, TaskId, TaskKind, TaskRun, event_kind,
+    Task, TaskAction, TaskChange, TaskId, TaskKind, TaskRun, event_kind,
     forecast::snapshot::FORECAST_RECORDED,
     kpi::report::REPORT_WRITTEN,
     related::RelatedPage,

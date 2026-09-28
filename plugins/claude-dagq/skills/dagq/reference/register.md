@@ -20,6 +20,7 @@ Split the goal into tasks, each one session in one worktree. Collect per task:
 - `--context` (why it exists, what to read first)
 - `--evidence` (receipt checks to report `passed` with evidence: `tests`, `e2e`, `subagent_review`). A missing one parks the run (`evidence_missing`).
 - `--paths GLOB` (repeatable) limits what a task may change: a run changing more parks (`scope_violation`).
+- `--change CHANGE`: the kind of change the task makes (a lowercase label, ADR-t980-1). When the repository's `dagq.toml` lists `[tasks] changes`, give one of them: `add` / `edit` refuse another value, and `lint` (`missing_change`) and `submit` refuse a task without one. Without the list it is optional.
 
 Pick `--verify`, `--paths`, `--evidence`, `--kind` (docs, plugin, runtime, ci) and the files named per `reference/scope.md`.
 

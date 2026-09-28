@@ -116,7 +116,9 @@ impl SqliteQueue {
                     (SELECT t.worker_provider FROM tasks t
                      WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_provider,
                     (SELECT t.worker_mode FROM tasks t
-                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_mode
+                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS worker_mode,
+                    (SELECT t.change FROM tasks t
+                     WHERE search_index.kind = 'task' AND t.id = search_index.ref) AS change
              FROM search_index WHERE {filter} ORDER BY {order} LIMIT ?"
         );
         let words: Vec<String> = terms.long.iter().chain(&terms.short).cloned().collect();
@@ -263,6 +265,10 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
             .filter(|_| kind != SearchKind::Goal),
         provider: worker.map(|worker| worker.provider),
         worker_mode: worker.map(|worker| worker.mode),
+        // Any label reads as written; one that is not reads as none.
+        change: row
+            .get::<_, Option<String>>("change")?
+            .and_then(|change| change.parse().ok()),
         score: if full { row.get("score")? } else { None },
         fields,
     })
@@ -279,6 +285,7 @@ mod tests {
         queue
             .add(NewTask {
                 kind: None,
+                change: None,
                 title: title.into(),
                 description: description.into(),
                 acceptance: "done".into(),

@@ -20,11 +20,12 @@ use crate::{
         StatusFilter, TaskListItem, TaskPage, TaskQuery, TaskStore, dependency_graph, timestamp,
     },
     domain::{
-        ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit, GoalId,
-        GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput, LintNode,
-        NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND, Predecessor,
-        Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission, Task, TaskAction,
-        TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun, TaskStatus, TaskStatusCounts,
+        ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
+        GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
+        LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
+        Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission, Task,
+        TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun,
+        TaskStatus, TaskStatusCounts,
         actor::ActorContext,
         goal,
         provider_switch::{self, SwitchPhase, WorkerRoute},
@@ -82,6 +83,10 @@ pub struct SqliteQueue {
     /// Who the events written through this connection record
     /// (ADR-t728-1 decision 4).
     pub(super) actors: EventActors,
+    /// The repository's set of changes (`[tasks] changes` of dagq.toml,
+    /// ADR-t980-1) that `add`, `edit`, `submit` and `lint` hold the tasks
+    /// to; none accepts any change and a task without one.
+    pub(super) changes: Option<ChangeSet>,
 }
 
 impl SqliteQueue {
@@ -175,6 +180,7 @@ impl SqliteQueue {
             runs_dir: queue.runs_dir.clone(),
             generators: queue.generators.clone(),
             actors,
+            changes: queue.changes.clone(),
         };
         copy.apply(state.version, None)?;
         Ok((schema, ReadOnlyQueue::Readable(copy)))
@@ -265,6 +271,13 @@ impl SqliteQueue {
         self
     }
 
+    /// The queue holding the tasks to the repository's set of changes
+    /// (ADR-t980-1); `None` holds them to none.
+    pub fn with_changes(mut self, changes: Option<ChangeSet>) -> Self {
+        self.changes = changes;
+        self
+    }
+
     pub fn generators(&self) -> &Generators {
         &self.generators
     }
@@ -309,6 +322,7 @@ impl SqliteQueue {
             runs_dir: runs_dir(&db),
             generators: clock::system(),
             actors,
+            changes: None,
         })
     }
 
@@ -588,6 +602,9 @@ impl TaskStore for SqliteQueue {
     fn add(&mut self, new: NewTask) -> Result<Task> {
         // Rejected before taking the write lock; `new` checks it again.
         new.validate()?;
+        if let (Some(changes), Some(change)) = (&self.changes, &new.change) {
+            changes.check(change)?;
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1098,7 +1115,9 @@ impl TaskStore for SqliteQueue {
 
     fn lint_input(&self, tasks: &[TaskId]) -> Result<LintInput> {
         let tx = self.conn.unchecked_transaction()?;
-        read_lint_input(&tx, tasks)
+        let mut input = read_lint_input(&tx, tasks)?;
+        input.changes = self.changes.clone();
+        Ok(input)
     }
 
     fn ready_goal(&mut self, goal_id: GoalId) -> Result<Goal> {
@@ -1277,6 +1296,9 @@ impl TaskStore for SqliteQueue {
         ensure!(!edit.is_empty(), "task edit changes nothing");
         // Checked before the task is read, so a bad value is reported first.
         edit.validate()?;
+        if let (Some(changes), Some(change)) = (&self.changes, &edit.change) {
+            changes.check(change)?;
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1296,7 +1318,8 @@ impl TaskStore for SqliteQueue {
             tx.execute(
                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
                  verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
-                 kind=?8, worker_provider=?11, worker_mode=?12, updated_at=?9 WHERE id=?10",
+                 kind=?8, worker_provider=?11, worker_mode=?12, change=?13, updated_at=?9
+                 WHERE id=?10",
                 params![
                     new.title(),
                     new.description(),
@@ -1310,6 +1333,7 @@ impl TaskStore for SqliteQueue {
                     task_id,
                     new.worker().provider.as_str(),
                     new.worker().mode.as_str(),
+                    new.change().map(TaskChange::as_str),
                 ],
             )?;
             event(
@@ -1357,7 +1381,7 @@ impl TaskStore for SqliteQueue {
 
 /// The fields `dagq edit` replaces, as the task JSON names them; `task_edited`
 /// records the ones that changed.
-const EDITABLE_TASK_FIELDS: [&str; 10] = [
+const EDITABLE_TASK_FIELDS: [&str; 11] = [
     "title",
     "description",
     "acceptance",
@@ -1366,6 +1390,7 @@ const EDITABLE_TASK_FIELDS: [&str; 10] = [
     "paths",
     "context",
     "kind",
+    "change",
     "provider",
     "worker_mode",
 ];
@@ -1384,14 +1409,15 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
     tx.execute(
             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
                                context, required_evidence, paths, priority, kind, created_at,
-                               updated_at, worker_provider, worker_mode)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                               updated_at, worker_provider, worker_mode, change)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
                 serde_json::to_string(task.paths())?, task.priority().as_i64(),
                 task.kind().map(TaskKind::as_str), task.created_at(), task.updated_at(),
-                task.worker().provider.as_str(), task.worker().mode.as_str()],
+                task.worker().provider.as_str(), task.worker().mode.as_str(),
+                task.change().map(TaskChange::as_str)],
         )?;
     event(
         tx,
@@ -1698,6 +1724,7 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
         targets,
         nodes,
         goals,
+        changes: None,
     })
 }
 
@@ -2187,6 +2214,10 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         kind: row
             .get::<_, Option<String>>("kind")?
             .and_then(|kind| kind.parse().ok()),
+        // Likewise any label (ADR-t980-1), whatever set dagq.toml names now.
+        change: row
+            .get::<_, Option<String>>("change")?
+            .and_then(|change| change.parse().ok()),
         // NULL (a task from before the worker existed) is Claude,
         // interactive; the columns' CHECK keeps any other value out.
         worker: Worker::resolve(

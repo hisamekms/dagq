@@ -172,6 +172,23 @@ pub enum DomainError {
     InvalidTaskKind {
         kind: String,
     },
+    /// A task's change is not a lowercase slug, or is `unknown` or `all`
+    /// (ADR-t980-1).
+    InvalidTaskChange {
+        change: String,
+    },
+    /// A change outside the repository's set, `[tasks] changes` of
+    /// dagq.toml (ADR-t980-1).
+    ChangeNotInSet {
+        change: String,
+        changes: Vec<String>,
+    },
+    /// The repository names a set of changes and the task declares none
+    /// (ADR-t980-1).
+    ChangeMissing {
+        task_id: TaskId,
+        changes: Vec<String>,
+    },
     /// A worker provider that has no such mode (ADR-t813-1 decision 7:
     /// Codex runs headless only).
     WorkerModeUnsupported {
@@ -464,6 +481,20 @@ impl fmt::Display for DomainError {
             Self::InvalidTaskKind { kind } => write!(
                 f,
                 "task kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes, other than \"unknown\" and \"all\""
+            ),
+            Self::InvalidTaskChange { change } => write!(
+                f,
+                "task change {change:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes, other than \"unknown\" and \"all\""
+            ),
+            Self::ChangeNotInSet { change, changes } => write!(
+                f,
+                "change {change:?} is not one of [tasks] changes of dagq.toml: {}",
+                changes.join(", ")
+            ),
+            Self::ChangeMissing { task_id, changes } => write!(
+                f,
+                "task {task_id} declares no change; [tasks] changes of dagq.toml requires one of {} (edit {task_id} --change CHANGE)",
+                changes.join(", ")
             ),
             Self::WorkerModeUnsupported { provider, mode } => write!(
                 f,

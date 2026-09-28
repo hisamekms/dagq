@@ -213,6 +213,7 @@ mod tests {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             status: TaskStatus::InProgress,
             goal_id: None,
             context: String::new(),

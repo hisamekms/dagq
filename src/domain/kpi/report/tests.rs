@@ -179,6 +179,7 @@ fn report_with_host(
             Target {
                 kpi: "landings".into(),
                 kind: None,
+                change: None,
                 area: None,
                 stat: None,
                 min: Some(2.0),
@@ -187,6 +188,7 @@ fn report_with_host(
             Target {
                 kpi: "forecast.p90_hit_rate".into(),
                 kind: None,
+                change: None,
                 area: None,
                 stat: None,
                 min: Some(0.75),
@@ -201,6 +203,9 @@ fn report_with_host(
             events: &events,
             goals: &goals,
             kinds: &kinds,
+            changes: &(1..=4)
+                .map(|task| (TaskId::new(task), Some("fix".parse().unwrap())))
+                .collect(),
             areas: None,
             heartbeats: &HashMap::new(),
             draft_origins: &HashMap::new(),
@@ -365,6 +370,10 @@ fn a_report_shows_the_forecast_error() {
     let section = &section[..section.find("</table>").unwrap()];
     assert!(section.contains("1 sample(s)"), "{section}");
     assert!(section.contains("<td>kind=runtime</td>"), "{section}");
+    assert!(section.contains("<td>change=fix</td>"), "{section}");
+    // The strata table has the change's too (ADR-t980-1).
+    let strata = &html[html.find("By stratum (kind, change, area").unwrap()..];
+    assert!(strata.contains("<td>change=fix</td>"), "{strata}");
     assert!(section.contains("<td>marks=0</td>"), "{section}");
     // 2 hours 11 minutes late, a tenth of the 20 hours given.
     assert!(section.contains("+2h 11m"), "{section}");

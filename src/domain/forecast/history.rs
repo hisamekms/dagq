@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{Phase, Running};
 use crate::domain::{
-    EventId, GoalId, GoalVerdict, RunEvent, TaskId, TaskKind,
+    EventId, GoalId, GoalVerdict, RunEvent, TaskChange, TaskId,
     event_kind::{GOAL_CLOSED, RUN_INTEGRATED},
     stats::{self, LiveSnapshot, SlotSnapshot, StatsQuery, timestamp_millis},
     waiting::WaitState,
@@ -52,8 +52,9 @@ impl Sample {
 /// The distributions the forecast draws from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
-    /// The landed runs with all three intervals, and their task's kind.
-    pub runs: Vec<(Option<TaskKind>, Sample)>,
+    /// The landed runs with all three intervals, and their task's change
+    /// (ADR-t980-1).
+    pub runs: Vec<(Option<TaskChange>, Sample)>,
     /// Seconds from a goal's last landing to its close as achieved.
     pub close_delays: Vec<i64>,
     /// Seconds from an ask's opening to a person's answer.
@@ -66,7 +67,7 @@ pub struct History {
 pub fn history(
     events: &[RunEvent],
     goals: &HashMap<TaskId, Option<GoalId>>,
-    kinds: &HashMap<TaskId, Option<TaskKind>>,
+    changes: &HashMap<TaskId, Option<TaskChange>>,
     now: i64,
 ) -> History {
     let derived = stats::stats(
@@ -90,7 +91,7 @@ pub fn history(
                 validate: run.validate?,
                 wait_to_land: run.wait_to_land?,
             };
-            Some((kinds.get(&run.task_id).cloned().flatten(), sample))
+            Some((changes.get(&run.task_id).cloned().flatten(), sample))
         })
         .collect();
     let mut last_landings: HashMap<GoalId, i64> = HashMap::new();

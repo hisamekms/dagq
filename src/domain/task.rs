@@ -5,8 +5,8 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, EvidenceCheck, GoalId, NewTask, Priority, TaskEdit, TaskId, TaskKind, TaskRecord,
-    TaskStatus, require,
+    DomainError, EvidenceCheck, GoalId, NewTask, Priority, TaskChange, TaskEdit, TaskId, TaskKind,
+    TaskRecord, TaskStatus, require,
     scope::{dedup_globs, validate_path_globs},
     worker::Worker,
 };
@@ -104,6 +104,9 @@ pub struct Task {
     /// What the task changes (goal 21); null for a task registered without
     /// one, before the kind existed among them.
     kind: Option<TaskKind>,
+    /// The kind of change it makes, as the registrant declared it
+    /// (ADR-t980-1); null for a task registered without one.
+    change: Option<TaskChange>,
     /// The provider and mode its worker runs on (ADR-t813-2 decision 1,
     /// ADR-t813-1 decision 7): Claude interactive unless it asks for
     /// another; shown as `provider` and `worker_mode`.
@@ -131,6 +134,7 @@ impl Task {
             paths: dedup_globs(&new.paths),
             priority: new.priority,
             kind: new.kind,
+            change: new.change,
             title: new.title,
             description: new.description,
             acceptance: new.acceptance,
@@ -164,6 +168,7 @@ impl Task {
             paths: record.paths,
             priority: record.priority,
             kind: record.kind,
+            change: record.change,
             worker: record.worker,
             status: record.status,
             goal_id: record.goal_id,
@@ -207,6 +212,10 @@ impl Task {
 
     pub fn kind(&self) -> Option<&TaskKind> {
         self.kind.as_ref()
+    }
+
+    pub fn change(&self) -> Option<&TaskChange> {
+        self.change.as_ref()
     }
 
     pub fn worker(&self) -> Worker {
@@ -348,6 +357,9 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     if let Some(kind) = edit.kind {
         task.kind = Some(kind);
     }
+    if let Some(change) = edit.change {
+        task.change = Some(change);
+    }
     task.worker = task.worker.with(edit.provider, edit.worker_mode)?;
     Ok(task)
 }
@@ -432,6 +444,7 @@ mod tests {
             paths: vec!["docs/**".into(), "docs/**".into()],
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
             goal_id: Some(GoalId::new(2)),
@@ -452,6 +465,7 @@ mod tests {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             status,
             goal_id: None,
             context: String::new(),
@@ -723,6 +737,7 @@ mod tests {
             draft,
             TaskEdit {
                 kind: Some("runtime".parse::<TaskKind>().unwrap()),
+                change: None,
                 title: Some("t2".into()),
                 description: Some("d2".into()),
                 acceptance: Some("a2".into()),

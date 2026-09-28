@@ -39,6 +39,7 @@ fn add_task(db: &Path, provider: Provider, dependencies: &[TaskId]) -> TaskId {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: dependencies.to_vec(),
             goal_dependencies: Vec::new(),
             goal_id: None,

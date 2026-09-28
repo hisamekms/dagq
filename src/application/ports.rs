@@ -21,8 +21,8 @@ use crate::domain::{
     NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
     PlannerId, PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason,
     RunEvent, RunId, RunLease, RunPlan, RunProcess, RunStatus, SessionRole, StrandedDependency,
-    Submission, SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskDetail, TaskEdit,
-    TaskId, TaskKind, TaskRun, TaskStatus,
+    Submission, SupervisorMode, SupervisorRegistration, Task, TaskAction, TaskChange, TaskDetail,
+    TaskEdit, TaskId, TaskKind, TaskRun, TaskStatus,
     goal_review::{GoalReviewDecision, GoalReviewVerdict},
     related::RelatedPage,
     search::{SearchPage, SearchQuery},
@@ -1762,6 +1762,9 @@ pub trait QueueRecords {
     fn task_titles(&self) -> Result<HashMap<TaskId, String>>;
     /// The kind of every task (none for a task without one), for `stats`.
     fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>>;
+    /// The change of every task (none for a task without one, ADR-t980-1),
+    /// for `stats`, `kpi` and `forecast`.
+    fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>>;
     /// The findings `query` lists, larger impact first (`findings`), for
     /// the KPI report's open findings.
     fn findings(&self, query: &crate::domain::FindingQuery) -> Result<Vec<FindingView>>;

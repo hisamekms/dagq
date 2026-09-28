@@ -36,6 +36,7 @@ fn codex_fixture() -> (Fixture, PathBuf, PathBuf, TestWorkspace, PathBuf) {
             paths: Vec::new(),
             priority: Default::default(),
             kind: None,
+            change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
             goal_id: None,

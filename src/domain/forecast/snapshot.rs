@@ -304,7 +304,7 @@ mod tests {
                 min_samples: 1,
                 samples: Samples {
                     all: 0,
-                    kinds: Default::default(),
+                    changes: Default::default(),
                     close_delay: 0,
                     ask_wait: 0,
                 },
@@ -316,7 +316,7 @@ mod tests {
                 .map(|&(id, p50)| TaskForecast {
                     id: TaskId::new(id),
                     goal_id: None,
-                    kind: None,
+                    change: None,
                     phase: None,
                     waiting: false,
                     distribution: "all".into(),

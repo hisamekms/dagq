@@ -355,6 +355,7 @@ mod tests {
             paths: Vec::new(),
             priority: Priority::default(),
             kind: None,
+            change: None,
             provider: None,
             worker_mode: None,
         }

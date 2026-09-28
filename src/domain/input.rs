@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CommitSha, DomainError, EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, Provider,
-    RunId, RunStatus, TaskId, TaskKind, TaskStatus, require, scope,
+    RunId, RunStatus, TaskChange, TaskId, TaskKind, TaskStatus, require, scope,
     worker::{Worker, WorkerMode},
 };
 
@@ -38,6 +38,10 @@ pub struct NewTask {
     /// What the task changes (goal 21); none when the registrant did not say.
     #[serde(default)]
     pub kind: Option<TaskKind>,
+    /// The kind of change it makes (ADR-t980-1); none when the registrant
+    /// did not say.
+    #[serde(default)]
+    pub change: Option<TaskChange>,
     /// The worker's provider (ADR-t813-2 decision 1); none is Claude.
     #[serde(default)]
     pub provider: Option<Provider>,
@@ -156,6 +160,8 @@ pub struct TaskEdit {
     pub context: Option<String>,
     #[serde(default)]
     pub kind: Option<TaskKind>,
+    #[serde(default)]
+    pub change: Option<TaskChange>,
     /// A new provider of the worker; without `worker_mode`, it runs in
     /// that provider's default mode.
     #[serde(default)]
@@ -174,6 +180,7 @@ impl TaskEdit {
             && self.paths.is_none()
             && self.context.is_none()
             && self.kind.is_none()
+            && self.change.is_none()
             && self.provider.is_none()
             && self.worker_mode.is_none()
     }
@@ -211,6 +218,7 @@ pub struct TaskRecord {
     pub paths: Vec<String>,
     pub priority: Priority,
     pub kind: Option<TaskKind>,
+    pub change: Option<TaskChange>,
     pub worker: Worker,
     pub status: TaskStatus,
     pub goal_id: Option<GoalId>,

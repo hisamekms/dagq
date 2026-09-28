@@ -26,6 +26,7 @@ pub fn new_task(title: &str) -> NewTask {
         paths: Vec::new(),
         priority: Default::default(),
         kind: None,
+        change: None,
         dependencies: vec![],
         goal_dependencies: Vec::new(),
         goal_id: None,

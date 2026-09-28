@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde::ser::SerializeMap;
 
 use super::{
-    DraftOrigin, GoalId, RunEvent, TaskId, TaskKind,
+    DraftOrigin, GoalId, RunEvent, TaskChange, TaskId, TaskKind,
     areas::RunAreas,
     host_metrics::HostSummary,
     marks::{self, Mark},
@@ -145,6 +145,8 @@ fn date(days: i64) -> String {
 pub enum Axis {
     /// The task's kind; `unknown` without one.
     Kind,
+    /// The change the task declares (ADR-t980-1); `unknown` without one.
+    Change,
     /// The areas of what the run landed (ADR-t980-1): a run is in every
     /// stratum of its areas, `unknown` without one; no stratum without
     /// `[areas]`.
@@ -185,8 +187,9 @@ pub enum Axis {
 }
 
 impl Axis {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Kind,
+        Self::Change,
         Self::Area,
         Self::Build,
         Self::Parallel,
@@ -206,6 +209,7 @@ impl Axis {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Kind => "kind",
+            Self::Change => "change",
             Self::Area => "area",
             Self::Build => "build",
             Self::Parallel => "parallel",
@@ -242,8 +246,9 @@ impl std::str::FromStr for Axis {
 
 /// The axes a comparison across a mark is split by (decision 15), besides
 /// those `--by` names.
-pub const COMPARE_AXES: [Axis; 5] = [
+pub const COMPARE_AXES: [Axis; 6] = [
     Axis::Kind,
+    Axis::Change,
     Axis::Area,
     Axis::Parallel,
     Axis::Load,
@@ -294,6 +299,10 @@ pub struct KpiQuery {
     /// kinds a comparison's summary is made for (every kind seen when
     /// empty).
     pub kinds: Vec<String>,
+    /// The changes whose strata are listed (every change when empty), and
+    /// the changes a comparison's change summary is made for (every change
+    /// seen when empty) (ADR-t980-1).
+    pub changes: Vec<String>,
     /// The areas whose strata are listed (every area when empty), and the
     /// areas a comparison's area summary is made for (every area seen when
     /// empty) (ADR-t980-1).
@@ -316,6 +325,7 @@ impl Default for KpiQuery {
             since: None,
             until: None,
             kinds: Vec::new(),
+            changes: Vec::new(),
             areas: Vec::new(),
             by: Vec::new(),
             compare: None,
@@ -352,6 +362,8 @@ pub struct KpiInput<'a> {
     pub events: &'a [RunEvent],
     pub goals: &'a HashMap<TaskId, Option<GoalId>>,
     pub kinds: &'a HashMap<TaskId, Option<TaskKind>>,
+    /// The change of every task (ADR-t980-1).
+    pub changes: &'a HashMap<TaskId, Option<TaskChange>>,
     /// The landed runs' areas (ADR-t980-1); `None` without `[areas]`.
     pub areas: Option<&'a RunAreas>,
     /// The registered supervisors' last heartbeats (unix seconds), by
@@ -709,7 +721,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
     let context = Context::new(input, query.goal_id);
     let now_ms = input.now * 1000;
     let offset_ms = input.utc_offset_secs * 1000;
-    let mut axes = vec![Axis::Kind, Axis::Area];
+    let mut axes = vec![Axis::Kind, Axis::Change, Axis::Area];
     for axis in &query.by {
         if !axes.contains(axis) {
             axes.push(*axis);
@@ -853,7 +865,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
         targets,
         compare,
     };
-    if !query.kinds.is_empty() || !query.areas.is_empty() {
+    if !query.kinds.is_empty() || !query.changes.is_empty() || !query.areas.is_empty() {
         let wanted = |stratum: &str, axis: &str, values: &[String]| {
             values.is_empty()
                 || stratum
@@ -862,7 +874,9 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
                     .is_none_or(|value| values.iter().any(|wanted| wanted == value))
         };
         let keep = |stratum: &String| {
-            wanted(stratum, "kind", &query.kinds) && wanted(stratum, "area", &query.areas)
+            wanted(stratum, "kind", &query.kinds)
+                && wanted(stratum, "change", &query.changes)
+                && wanted(stratum, "area", &query.areas)
         };
         for period in &mut kpi.periods {
             for strata in period.window.kpis.values_mut() {
