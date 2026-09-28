@@ -151,6 +151,91 @@ fn a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree() 
     assert!(stalled_asks(&queue).is_empty());
 }
 
+/// The worker of task 438's run (task 918): it commits, leaves a wait loop
+/// in its worktree (a shell that forks `sleep`, its pid in `bg.pid` of the
+/// run directory), writes its receipt and goes idle with that background
+/// work running. It goes idle without it once the loop is gone, or after a
+/// bounded wait so that a runtime that never stops the loop fails the test
+/// instead of hanging it.
+const LEFTOVER_LOOP_AGENT: &str = r#"
+commit work
+bg="$(dirname "$RECEIPT")/bg.pid"
+( sh -c 'while :; do sleep 1; done' >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
+receipt "$(git rev-parse HEAD)"; idle_bg
+pid=$(cat "$bg")
+i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done
+kill "$pid" 2>/dev/null
+idle_bg_done; await_exit
+"#;
+
+/// Task 918: background work the session left running after its receipt
+/// (task 438's run held its slot 5.6 hours with a wait loop) is the
+/// `long_background` alert past its threshold too, with `phase:
+/// after_receipt`; the recovery job's `stop_processes` stops the loop, the
+/// session goes idle, and the run goes on to validation and lands without
+/// an ask, a person or the observer.
+#[test]
+fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_recovery_job() {
+    let (_dir, repo, db) = fixture();
+    let (backend, reviewer, supervisor) = supervise_repair(
+        &db,
+        &repo,
+        LEFTOVER_LOOP_AGENT,
+        dagq::domain::stall::StallConfig {
+            background_alert_secs: 1,
+            ..Default::default()
+        },
+        &[&recovery_verdict(&json!({
+            "verdict": "repair",
+            "confidence": "high",
+            "diagnosis": "a wait loop left after the receipt holds the session",
+            "actions": [{"action": "stop_processes", "pids": ["PID"]}],
+        }))],
+    );
+    let outcome = supervisor.join().unwrap().unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let run = &detail.runs[0];
+    let pid: u32 = fs::read_to_string(Path::new(run.run_dir().unwrap()).join("bg.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!pid_alive(pid));
+    let requested = payloads(&detail, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["alert"], "long_background");
+    assert_eq!(requested[0]["phase"], "after_receipt");
+    assert_eq!(requested[0]["threshold_secs"], 1);
+    let kinds = event_kinds(&detail);
+    assert!(position(&kinds, "receipt_observed") < position(&kinds, "recovery_requested"));
+    let prompts = reviewer.triage_prompts();
+    assert_eq!(prompts.len(), 1);
+    for part in [
+        "long_background",
+        "after_receipt",
+        &format!("- pid {pid} (parent "),
+    ] {
+        assert!(prompts[0].0.contains(part), "{part}: {}", prompts[0].0);
+    }
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["alert"], "long_background");
+    assert_eq!(repaired[0]["repair"], "stop_processes");
+    assert_eq!(repaired[0]["processes"][0]["pid"], pid);
+    let finished = payloads(&detail, "recovery_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["applied"], json!(["stop_processes"]));
+    let idle = payloads(&detail, "session_idle_observed");
+    assert_eq!(idle.len(), 1, "{idle:?}");
+    assert_eq!(idle[0]["background_running"], false);
+    assert!(position(&kinds, "auto_repaired") < position(&kinds, "session_idle_observed"));
+    assert!(stalled_asks(&queue).is_empty());
+}
+
 /// Wait for the `stalled` ask of a `long_background` test, check that the
 /// orphan still runs, then stop it as a person would and let the run end.
 fn escalated_long_background(

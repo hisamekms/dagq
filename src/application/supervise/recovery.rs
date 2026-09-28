@@ -833,19 +833,35 @@ pub(super) fn leave_idle_to_phase(
     escalation: &Escalation,
     phase: &str,
 ) -> Result<()> {
-    let alert = RecoveryAlert::IdleProcess;
+    leave_to_phase(
+        sv,
+        run,
+        RecoveryAlert::IdleProcess,
+        attempt,
+        escalation,
+        phase,
+        json!({}),
+    )
+}
+
+/// [`leave_idle_to_phase`] for `alert`: also a `long_background`
+/// escalation after the receipt (task 918), whose wait ends at the resume
+/// timeout from the receipt. `extra` goes into its `recovery_finished`.
+pub(super) fn leave_to_phase(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    alert: RecoveryAlert,
+    attempt: usize,
+    escalation: &Escalation,
+    phase: &str,
+    mut extra: Value,
+) -> Result<()> {
     let note = escalation.note(run, alert, attempt);
-    warn!(run_id = %run.id(), "run {}: idle processes: {}; left to the {phase} phase's own timeout", run.id(), note.why);
+    warn!(run_id = %run.id(), "run {}: {}: {}; left to the {phase} phase's own timeout", run.id(), alert.as_str(), note.why);
+    extra["outcome"] = json!("left_to_phase");
+    extra["phase"] = json!(phase);
     sv.for_escalation(run, alert, attempt, escalation, |sv| {
-        escalation.record(
-            sv,
-            run,
-            alert,
-            attempt,
-            &note,
-            None,
-            json!({"outcome": "left_to_phase", "phase": phase}),
-        )
+        escalation.record(sv, run, alert, attempt, &note, None, extra)
     })
 }
 
@@ -1315,23 +1331,15 @@ impl SessionWatch {
     /// One look at the session's background work (ADR-0047 decision 39):
     /// follow its recovery job in progress, or start one when the idle
     /// marker says background work has run past the threshold, no other
-    /// alert's job runs and no `stalled` ask is open for the run.
+    /// alert's job runs and no `stalled` ask is open for the run. Also
+    /// after the receipt, where the work holds the run back from its
+    /// validation (task 918): there an escalation opens no ask and is left
+    /// to the wait's own end at the resume timeout.
     pub(super) fn watch_background(
         &mut self,
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<()> {
-        // After the receipt the session's own wait on background work
-        // takes over (up to the resume timeout): no job acts on it.
-        if self.receipt_seen {
-            self.recovery.stop_for(
-                sv,
-                run,
-                Some(RecoveryAlert::LongBackground),
-                "session_ended",
-            );
-            return Ok(());
-        }
         if let Some((job, verdict)) =
             self.recovery
                 .ended(sv, RecoveryAlert::LongBackground, None)?
@@ -1375,6 +1383,7 @@ impl SessionWatch {
         self.recovery.recheck = None;
         self.recovery.seen = Some(marker);
         let facts = json!({
+            "phase": self.background_phase(),
             "idle_secs": idle_secs,
             "background_since_ms": millis(since),
             "threshold": BACKGROUND_THRESHOLD,
@@ -1463,9 +1472,21 @@ impl SessionWatch {
         }
     }
 
+    /// The phase the `long_background` alert is raised in: before the
+    /// receipt (`session`) or after it (`after_receipt`).
+    fn background_phase(&self) -> &'static str {
+        if self.receipt_seen {
+            "after_receipt"
+        } else {
+            SESSION_PHASE
+        }
+    }
+
     /// Raise the `long_background` alert to the inbox as a `stalled` ask
     /// with the job's diagnosis, its recommended actions and why a person
-    /// is needed, and hand the ask to the [`StallWatch`].
+    /// is needed, and hand the ask to the [`StallWatch`]. After the receipt
+    /// no ask is opened: the wait on background work goes on to validation
+    /// at the resume timeout by itself ([`leave_to_phase`]).
     fn escalate_background(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -1476,6 +1497,17 @@ impl SessionWatch {
         escalation: Escalation,
     ) -> Result<()> {
         let alert = RecoveryAlert::LongBackground;
+        if self.receipt_seen {
+            return leave_to_phase(
+                sv,
+                run,
+                alert,
+                attempt,
+                &escalation,
+                self.background_phase(),
+                json!({"marker_at_ms": millis(marker)}),
+            );
+        }
         sv.for_escalation(run, alert, attempt, &escalation, |sv| {
             self.ask_background(sv, run, attempt, marker, idle_secs, &escalation)
         })

@@ -126,15 +126,28 @@ pub fn attempts(events: &[RunEvent], alert: RecoveryAlert) -> usize {
         .count()
 }
 
+/// Whether `event` is a `recovery_requested` for the alert of a run that
+/// ended (`failed`, `interrupted`, `resume_exhausted`): a live session's
+/// (`long_background` after the receipt of a run that then failed, task
+/// 918) is not that run's triage.
+fn ended_request(event: &RunEvent) -> bool {
+    event.kind == "recovery_requested"
+        && event.payload["alert"]
+            .as_str()
+            .and_then(|alert| alert.parse::<RecoveryAlert>().ok())
+            .is_some_and(|alert| alert.ask_kind() == AskKind::Decide)
+}
+
 /// The `recovery_requested` of a run that ended which no round took yet: the
 /// latest one after the latest `triage_started` and `resume_started` (the
-/// runtime records it when a run's resumes are used up).
+/// runtime records it when a run's resumes are used up). Requests of a
+/// live session's alerts are not.
 pub fn pending_request(events: &[RunEvent]) -> Option<&RunEvent> {
     events
         .iter()
         .rev()
         .take_while(|e| !matches!(e.kind.as_str(), "triage_started" | "resume_started"))
-        .find(|e| e.kind == "recovery_requested")
+        .find(|e| ended_request(e))
 }
 
 /// The alert of the run's recovery since its last `resume_started`: that
@@ -145,7 +158,7 @@ pub fn current_alert(events: &[RunEvent]) -> Option<RecoveryAlert> {
         .iter()
         .rev()
         .take_while(|e| e.kind != "resume_started")
-        .find(|e| e.kind == "recovery_requested")
+        .find(|e| ended_request(e))
         .and_then(|e| e.payload["alert"].as_str())
         .and_then(|alert| alert.parse().ok())
 }
@@ -488,6 +501,17 @@ mod tests {
             event("resume_started", serde_json::json!({})),
         ];
         assert_eq!(current_alert(&resumed), None);
+        // A live session's request (task 918: long_background after the
+        // receipt of a run that then failed) is not the ended run's.
+        let live = [event(
+            "recovery_requested",
+            serde_json::json!({"alert": "long_background"}),
+        )];
+        assert_eq!(alert(&live), None);
+        assert_eq!(current_alert(&live), None);
+        let after = [failed.clone(), live[0].clone()];
+        assert_eq!(alert(&after).as_deref(), Some("failed"));
+        assert_eq!(current_alert(&after), Some(RecoveryAlert::Failed));
     }
 
     #[test]

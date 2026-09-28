@@ -1626,7 +1626,7 @@ pub fn recovery_prompt(
         alert = material.alert.as_str(),
         meaning = match material.alert {
             RecoveryAlert::LongBackground =>
-                "background work the session started has run longer than the threshold, and the session waits for it.",
+                "background work the session started has run longer than the threshold, and the session waits for it. With phase after_receipt the session already wrote its receipt: the run goes on to its validation and landing only once the session goes idle with no background work running, so work left over from before the receipt (a wait loop, a watch) holds it.",
             RecoveryAlert::Failed =>
                 "the run failed (its receipt said failed, its validation or landing failed, or its session exited without finishing).",
             RecoveryAlert::Interrupted =>
