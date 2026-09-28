@@ -40,6 +40,18 @@ NEXTEST_TEST_THREADS = "8"
 # [recheck] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 462 を含んでから足した。
 command = "cargo check --locked --all-targets"
 
+[supervisor]
+# runtime が同時に立てる planner の上限（draft・finding・revise の planner で共有。既定 1。task 941・942、goal 63）。
+# 2026-09-28、planner_question（ask 176）の答えを待つ planner が 1 枠を約 5.5 時間ふさぎ、follow_up などの
+# draft 約 20 件が決まらず、proposal 283 の revise も届かずに planner_unresponsive になった。
+# 答えを待つ planner が枠を空ける根本の対応は人が別途行い、これは当面の緩和として 2 にする。
+# supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
+# parallel と max_waiting はここに書かない（--parallel 3 は AGENTS.md の up のコマンドが渡し、
+# ここに書くと flag なしの up の既定が変わる）。
+# [supervisor] の runtime_planners を知らない旧バイナリは dagq.toml を読めなくなるので、
+# 固定バイナリが task 941 を含んでから足した。
+runtime_planners = 2
+
 # KPI の目標（ADR-0051 の決定 17・19。書式は docs/design/supervisor-lifecycle/kpi.md の「目標」）。
 # ここには host に依らない repository の方針だけを書く。phase.* や max_load_avg のように host の性能で
 # 決まる目標は host.toml に書く。[kpi] の min_samples・breach_periods・breach_weeks・
