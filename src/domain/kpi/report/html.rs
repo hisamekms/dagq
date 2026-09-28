@@ -427,7 +427,7 @@ fn kpis(page: &mut String, period: &PeriodKpis) {
     page.push_str("</table></div>");
     let _ = write!(
         page,
-        "<details><summary>By stratum (kind and the claim's attributes)</summary><div class=\"scroll\"><table><tr><th>KPI</th><th>stratum</th>{columns}"
+        "<details><summary>By stratum (kind, area and the claim's attributes)</summary><div class=\"scroll\"><table><tr><th>KPI</th><th>stratum</th>{columns}"
     );
     for (name, strata) in &period.window.kpis {
         for (stratum, measure) in strata.iter().filter(|(s, _)| s.as_str() != ALL) {

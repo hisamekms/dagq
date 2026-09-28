@@ -1141,6 +1141,7 @@ impl OneShot {
             conflicts_file: &conflicts_file,
             history: &history,
             host_metrics: Some(&host_metrics),
+            areas: &area_reader(checkout.as_deref())?,
         };
         Ok(serde_json::to_value(statistics::stats(
             queue,
@@ -1175,6 +1176,7 @@ impl OneShot {
             now,
             setup.host,
             &setup.config,
+            &setup.areas,
             query,
             setup
                 .host_metrics
@@ -1233,6 +1235,7 @@ impl OneShot {
                 now,
                 setup.host,
                 &setup.config,
+                &setup.areas,
                 &KpiQuery {
                     period,
                     last,
@@ -2072,9 +2075,28 @@ fn report_setup(
         keep: load_host_report(queue_dir, host_wide)?,
         build: crate::VERSION.to_owned(),
         diagram: d2_renderer(std::env::var_os("PATH")),
+        areas: area_reader(checkout)?,
         host_metrics: Some(host_metrics_reader(
             queue_dir.join(crate::domain::host_metrics::HOST_DIR),
         )),
+    })
+}
+
+/// The `[areas]` of `checkout`'s `dagq.toml` and its Git for the landed
+/// commits' changes (ADR-t980-1); no checkout or no `[areas]` gives no run
+/// areas.
+fn area_reader(checkout: Option<&Path>) -> Result<crate::application::areas::AreaReader> {
+    use crate::application::areas::AreaReader;
+    let Some(checkout) = checkout else {
+        return Ok(AreaReader::none());
+    };
+    let map = crate::infrastructure::run_env::load_area_map(checkout)?;
+    let checkout = checkout.to_path_buf();
+    Ok(AreaReader {
+        map,
+        changed: Arc::new(move |commits: &[String]| {
+            GitRepository::inspect(&checkout)?.landed_changes(commits)
+        }),
     })
 }
 

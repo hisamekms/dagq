@@ -53,6 +53,8 @@ pub struct Target {
     pub kpi: String,
     /// The kind of task it bounds; every run (`all`) without one.
     pub kind: Option<String>,
+    /// The area it bounds (ADR-t980-1), instead of a kind.
+    pub area: Option<String>,
     /// The value, or a spread's median, without one.
     pub stat: Option<Stat>,
     pub min: Option<f64>,
@@ -60,11 +62,13 @@ pub struct Target {
 }
 
 impl Target {
-    /// The stratum it bounds: `all` or `kind=<kind>`.
+    /// The stratum it bounds: `all`, `kind=<kind>` or `area=<area>`.
     pub fn stratum(&self) -> String {
-        self.kind
-            .as_ref()
-            .map_or_else(|| ALL.to_owned(), |kind| format!("kind={kind}"))
+        match (&self.kind, &self.area) {
+            (Some(kind), _) => format!("kind={kind}"),
+            (None, Some(area)) => format!("area={area}"),
+            (None, None) => ALL.to_owned(),
+        }
     }
 }
 

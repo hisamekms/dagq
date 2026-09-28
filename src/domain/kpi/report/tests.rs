@@ -169,6 +169,7 @@ pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
             Target {
                 kpi: "landings".into(),
                 kind: None,
+                area: None,
                 stat: None,
                 min: Some(2.0),
                 max: None,
@@ -176,6 +177,7 @@ pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
             Target {
                 kpi: "forecast.p90_hit_rate".into(),
                 kind: None,
+                area: None,
                 stat: None,
                 min: Some(0.75),
                 max: None,
@@ -189,6 +191,7 @@ pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
             events: &events,
             goals: &goals,
             kinds: &kinds,
+            areas: None,
             heartbeats: &HashMap::new(),
             draft_origins: &HashMap::new(),
             now,

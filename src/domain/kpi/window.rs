@@ -11,6 +11,7 @@ use serde_json::Value;
 use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskId, TaskKind,
+    areas::RunAreas,
     event_attention,
     forecast::score::{self, Scoring, Target},
     marks::{self, Mark},
@@ -63,6 +64,8 @@ pub(super) struct Context<'a> {
     pub events: &'a [RunEvent],
     goals: &'a HashMap<TaskId, Option<GoalId>>,
     kinds: &'a HashMap<TaskId, Option<TaskKind>>,
+    /// The landed runs' areas; `None` without `[areas]`.
+    areas: Option<&'a RunAreas>,
     goal_id: Option<GoalId>,
     /// What `stats` reads besides the events: only the drafts' origins.
     live: LiveSnapshot,
@@ -262,6 +265,7 @@ impl<'a> Context<'a> {
             events,
             goals: input.goals,
             kinds: input.kinds,
+            areas: input.areas,
             goal_id,
             live: LiveSnapshot {
                 draft_origins: input.draft_origins.clone(),
@@ -327,7 +331,21 @@ impl<'a> Context<'a> {
             &self.live,
         );
         stats::with_kinds(&mut stats, self.kinds);
+        stats::with_areas(&mut stats, self.areas);
         stats
+    }
+
+    /// The values of `axis` for `run`: one, but for the area, the run's
+    /// every area (`unknown` without one), and none without `[areas]`.
+    fn axis_values(&self, run: &RunStats, axis: Axis) -> Vec<String> {
+        if axis != Axis::Area {
+            return vec![self.axis_value(run, axis)];
+        }
+        match &run.areas {
+            None => Vec::new(),
+            Some(areas) if areas.is_empty() => vec![UNKNOWN.to_owned()],
+            Some(areas) => areas.clone(),
+        }
     }
 
     /// The value of `axis` for `run`.
@@ -340,6 +358,7 @@ impl<'a> Context<'a> {
                 .as_ref()
                 .map_or(UNKNOWN, TaskKind::as_str)
                 .to_owned(),
+            Axis::Area => unreachable!("an area is one of a run's values (axis_values)"),
             Axis::Build => text(&measures.dagq_version),
             Axis::Claude => text(&measures.claude_version),
             Axis::Provider => text(&measures.provider),
@@ -421,8 +440,10 @@ impl<'a> Context<'a> {
         for run in &stats.runs {
             groups.entry(ALL.to_owned()).or_default().push(run);
             for &axis in axes {
-                let key = format!("{}={}", axis.as_str(), self.axis_value(run, axis));
-                groups.entry(key).or_default().push(run);
+                for value in self.axis_values(run, axis) {
+                    let key = format!("{}={value}", axis.as_str());
+                    groups.entry(key).or_default().push(run);
+                }
             }
         }
         let mut landings: BTreeMap<&str, usize> = BTreeMap::new();

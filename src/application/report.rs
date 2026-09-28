@@ -57,6 +57,8 @@ pub struct ReportSetup {
     pub keep: Keep,
     pub build: String,
     pub diagram: DiagramRenderer,
+    /// The `[areas]` map and the landed commits' changes (ADR-t980-1).
+    pub areas: super::areas::AreaReader,
     /// What summarizes the host's load next to each period (task 872);
     /// `None` reads none.
     pub host_metrics: Option<HostMetrics>,
@@ -150,6 +152,7 @@ fn make_with(
         now,
         setup.host,
         &setup.config,
+        &setup.areas,
         &KpiQuery {
             period,
             at,

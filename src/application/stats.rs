@@ -17,7 +17,7 @@ use crate::domain::{
         ConflictConfig, ConflictConfigReport, History, ListedWorkspace, LiveRun, LiveSnapshot,
         SlotSnapshot, StallConfigReport, Stats, StatsQuery, Workspaces,
         conflicts::{MainHistory, earliest_conflict},
-        stats as aggregate, timestamp_millis, with_kinds,
+        stats as aggregate, timestamp_millis, with_areas, with_kinds,
     },
 };
 
@@ -48,6 +48,9 @@ pub struct StatsSources<'a> {
     /// The summary of the host's load between two unix seconds (task
     /// 516); `None` reads none.
     pub host_metrics: Option<&'a dyn Fn(i64, i64) -> HostSummary>,
+    /// The `[areas]` of `dagq.toml` and the landed commits' changes, for
+    /// the runs' areas (ADR-t980-1).
+    pub areas: &'a super::areas::AreaReader,
 }
 
 /// Main's history since the earliest event of `events` (a second before
@@ -211,6 +214,21 @@ pub fn stats(
         run.title = titles.get(&run.task_id).cloned();
     }
     with_kinds(&mut stats, &queue.task_kinds()?);
+    // Only the listed runs' landings are read from Git.
+    let listed: HashSet<&RunId> = stats.runs.iter().map(|run| &run.run_id).collect();
+    let landings: Vec<crate::domain::RunEvent> = events
+        .iter()
+        .filter(|event| {
+            event.kind == "run_integrated"
+                && event
+                    .run_id
+                    .as_ref()
+                    .is_some_and(|run| listed.contains(run))
+        })
+        .cloned()
+        .collect();
+    let areas = sources.areas.run_areas(&landings);
+    with_areas(&mut stats, areas.as_ref());
     if let Some(read) = sources.host_metrics {
         let (from, until) = stats.window_ms;
         stats.host = Some(read(from.div_euclid(1000), until.div_euclid(1000)));

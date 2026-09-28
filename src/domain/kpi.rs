@@ -15,6 +15,7 @@ use serde::ser::SerializeMap;
 
 use super::{
     DraftOrigin, GoalId, RunEvent, TaskId, TaskKind,
+    areas::RunAreas,
     host_metrics::HostSummary,
     marks::{self, Mark},
     stats::{Cursor, landing::p90, median, median_f64, timestamp_millis},
@@ -144,6 +145,10 @@ fn date(days: i64) -> String {
 pub enum Axis {
     /// The task's kind; `unknown` without one.
     Kind,
+    /// The areas of what the run landed (ADR-t980-1): a run is in every
+    /// stratum of its areas, `unknown` without one; no stratum without
+    /// `[areas]`.
+    Area,
     /// The build identifier the run was claimed by.
     Build,
     /// The supervisor's `parallel` at the claim.
@@ -180,8 +185,9 @@ pub enum Axis {
 }
 
 impl Axis {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Kind,
+        Self::Area,
         Self::Build,
         Self::Parallel,
         Self::Slot,
@@ -200,6 +206,7 @@ impl Axis {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Kind => "kind",
+            Self::Area => "area",
             Self::Build => "build",
             Self::Parallel => "parallel",
             Self::Slot => "slot",
@@ -235,7 +242,13 @@ impl std::str::FromStr for Axis {
 
 /// The axes a comparison across a mark is split by (decision 15), besides
 /// those `--by` names.
-pub const COMPARE_AXES: [Axis; 4] = [Axis::Kind, Axis::Parallel, Axis::Load, Axis::Build];
+pub const COMPARE_AXES: [Axis; 5] = [
+    Axis::Kind,
+    Axis::Area,
+    Axis::Parallel,
+    Axis::Load,
+    Axis::Build,
+];
 
 /// What `--compare` names (decision 14): a mark (its event id) or any
 /// time to split at, or two windows `A..B,C..D`.
@@ -281,7 +294,11 @@ pub struct KpiQuery {
     /// kinds a comparison's summary is made for (every kind seen when
     /// empty).
     pub kinds: Vec<String>,
-    /// The axes the periods are split by besides the kind.
+    /// The areas whose strata are listed (every area when empty), and the
+    /// areas a comparison's area summary is made for (every area seen when
+    /// empty) (ADR-t980-1).
+    pub areas: Vec<String>,
+    /// The axes the periods are split by besides the kind and the area.
     pub by: Vec<Axis>,
     pub compare: Option<CompareSpec>,
     /// Each side of a comparison across a mark, in days.
@@ -299,6 +316,7 @@ impl Default for KpiQuery {
             since: None,
             until: None,
             kinds: Vec::new(),
+            areas: Vec::new(),
             by: Vec::new(),
             compare: None,
             window_days: DEFAULT_WINDOW_DAYS,
@@ -334,6 +352,8 @@ pub struct KpiInput<'a> {
     pub events: &'a [RunEvent],
     pub goals: &'a HashMap<TaskId, Option<GoalId>>,
     pub kinds: &'a HashMap<TaskId, Option<TaskKind>>,
+    /// The landed runs' areas (ADR-t980-1); `None` without `[areas]`.
+    pub areas: Option<&'a RunAreas>,
     /// The registered supervisors' last heartbeats (unix seconds), by
     /// token: a stale one ends that supervisor's life (decision 10).
     pub heartbeats: &'a HashMap<String, i64>,
@@ -689,7 +709,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
     let context = Context::new(input, query.goal_id);
     let now_ms = input.now * 1000;
     let offset_ms = input.utc_offset_secs * 1000;
-    let mut axes = vec![Axis::Kind];
+    let mut axes = vec![Axis::Kind, Axis::Area];
     for axis in &query.by {
         if !axes.contains(axis) {
             axes.push(*axis);
@@ -833,11 +853,16 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
         targets,
         compare,
     };
-    if !query.kinds.is_empty() {
+    if !query.kinds.is_empty() || !query.areas.is_empty() {
+        let wanted = |stratum: &str, axis: &str, values: &[String]| {
+            values.is_empty()
+                || stratum
+                    .strip_prefix(axis)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .is_none_or(|value| values.iter().any(|wanted| wanted == value))
+        };
         let keep = |stratum: &String| {
-            stratum
-                .strip_prefix("kind=")
-                .is_none_or(|kind| query.kinds.iter().any(|wanted| wanted == kind))
+            wanted(stratum, "kind", &query.kinds) && wanted(stratum, "area", &query.areas)
         };
         for period in &mut kpi.periods {
             for strata in period.window.kpis.values_mut() {

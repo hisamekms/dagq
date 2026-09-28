@@ -989,8 +989,9 @@ enum Command {
         cmux: PathBuf,
     },
     /// KPIs of the flow, rework, people's load, infrastructure, improvements and sessions per day
-    /// or ISO week (ADR-0051), split by the task's kind (`unknown` without one) and --by the
-    /// claim's attributes, each next to the previous period (and a day's 7-day median), judged
+    /// or ISO week (ADR-0051), split by the task's kind (`unknown` without one), by the areas of
+    /// what the run landed when dagq.toml has `[areas]` (ADR-t980-1), and --by the claim's
+    /// attributes, each next to the previous period (and a day's 7-day median), judged
     /// against the `[kpi.targets]` of dagq.toml and host.toml. --compare splits at a mark (its
     /// event id) or a time, or compares two windows A..B,C..D, and lists every other mark in and
     /// between them. Reads only; JSON.
@@ -1014,8 +1015,13 @@ enum Command {
         /// summary is made for them (every kind it saw without).
         #[arg(long = "kind", value_parser = parse_kpi_kind)]
         kinds: Vec<String>,
+        /// List only these areas' strata (`unknown`: the runs without an area, `other`: files no
+        /// area of `[areas]` matches); a comparison's area summary is made for them (every area
+        /// it saw without).
+        #[arg(long = "area", value_parser = parse_kpi_area)]
+        areas: Vec<String>,
         /// Also split the runs by these attributes of the claim.
-        #[arg(long, value_parser = ["kind", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
+        #[arg(long, value_parser = ["kind", "area", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
         by: Vec<String>,
         /// A mark's event id or a time to compare before and after, or two windows A..B,C..D.
         #[arg(long)]
@@ -1164,6 +1170,14 @@ fn parse_kpi_kind(value: &str) -> Result<String, String> {
         .parse::<TaskKind>()
         .map(String::from)
         .map_err(|error| error.to_string())
+}
+
+fn parse_kpi_area(value: &str) -> Result<String, String> {
+    use dagq::domain::areas::{OTHER, UNKNOWN, check_name};
+    if value == UNKNOWN || value == OTHER {
+        return Ok(value.to_owned());
+    }
+    check_name(value).map(|()| value.to_owned())
 }
 
 fn parse_role(value: Option<String>) -> Result<Option<SessionRole>> {
@@ -2843,6 +2857,7 @@ fn execute(cli: Cli) -> Result<Value> {
             since,
             until,
             kinds,
+            areas,
             by,
             compare,
             window,
@@ -2857,6 +2872,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 since,
                 until,
                 kinds,
+                areas,
                 by: by
                     .iter()
                     .map(|axis| axis.parse())

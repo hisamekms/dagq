@@ -22,6 +22,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     env,
     ffi::OsString,
     fs,
@@ -1060,6 +1061,36 @@ impl GitRepository {
         })
     }
 
+    /// The paths each of `commits` changed against its first parent
+    /// (`--no-renames`: both sides of a rename), by the commit's full ID:
+    /// what the areas of the landed runs are read from (ADR-t980-1). One
+    /// `git log --no-walk` per [`LANDED_BATCH`] commits, not one per
+    /// commit; a commit the repository does not have is left out.
+    pub fn landed_changes(&self, commits: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        let mut changes = HashMap::new();
+        for batch in commits.chunks(LANDED_BATCH) {
+            let log = review_output(
+                Command::new(&self.git)
+                    .arg("-C")
+                    .arg(&self.root)
+                    .args([
+                        "log",
+                        "-z",
+                        "--ignore-missing",
+                        "--no-walk=unsorted",
+                        "--diff-merges=first-parent",
+                        "--no-renames",
+                        "--name-only",
+                        "--format=%x01%H",
+                    ])
+                    .args(batch)
+                    .arg("--"),
+            )?;
+            changes.extend(parse_landed_log(&log));
+        }
+        Ok(changes)
+    }
+
     /// Porcelain status including untracked files; empty means clean.
     pub fn status(&self, worktree: &Path) -> Result<String> {
         output(self.read_worktree(worktree).args([
@@ -1601,6 +1632,31 @@ impl GitRepository {
 
 /// How long `integrate` waits for `git push` before counting it as failed.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The commits [`GitRepository::landed_changes`] reads per `git log`.
+const LANDED_BATCH: usize = 500;
+
+/// `git log -z --name-only --format=%x01%H`: each commit's full ID and
+/// the paths it changed.
+fn parse_landed_log(log: &str) -> HashMap<String, Vec<String>> {
+    let mut changes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current: Option<String> = None;
+    for field in log.split('\0').map(|field| field.trim_start_matches('\n')) {
+        if let Some(commit) = field.strip_prefix('\u{1}') {
+            let commit = commit.trim().to_owned();
+            changes.entry(commit.clone()).or_default();
+            current = Some(commit);
+        } else if !field.is_empty()
+            && let Some(commit) = &current
+        {
+            changes
+                .get_mut(commit)
+                .expect("the commit was listed")
+                .push(field.to_owned());
+        }
+    }
+    changes
+}
 
 /// `git log -z --format=%x01%ct --name-status` as commits: NUL-separated
 /// fields where a `\x01<unix seconds>` field starts a commit, then each
@@ -3090,6 +3146,38 @@ mod tests {
         fs::write(dir.path().join("dagq.toml"), "[repository]\nbranch = 1\n").unwrap();
         let error = format!("{:#}", git.main_head().unwrap_err());
         assert!(error.contains("[repository]"), "{error}");
+    }
+
+    /// `landed_changes` reads the paths of many commits in one `git log`,
+    /// both sides of a rename, leaving out a commit the repository lacks.
+    #[test]
+    fn landed_changes_reads_the_commits_paths_at_once() {
+        let (dir, git) = committed_repository();
+        let head = |dir: &Path| {
+            String::from_utf8_lossy(&git_in(dir, &["rev-parse", "HEAD"]).stdout)
+                .trim()
+                .to_owned()
+        };
+        let first = head(dir.path());
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("docs/a.md"), "a\n").unwrap();
+        for step in [
+            &["add", "docs/a.md"][..],
+            &["mv", "change.txt", "moved.txt"],
+            &["commit", "-q", "-m", "second"],
+        ] {
+            assert!(git_in(dir.path(), step).status.success(), "{step:?}");
+        }
+        let second = head(dir.path());
+        let missing = "0123456789012345678901234567890123456789".to_owned();
+        let changes = git
+            .landed_changes(&[second.clone(), missing.clone(), first.clone()])
+            .unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[&first], ["change.txt"]);
+        assert_eq!(changes[&second], ["change.txt", "docs/a.md", "moved.txt"]);
+        assert!(git.landed_changes(&[missing]).unwrap().is_empty());
+        assert!(git.landed_changes(&[]).unwrap().is_empty());
     }
 
     /// `main_history` lists main's commits with the paths each changed,

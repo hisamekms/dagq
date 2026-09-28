@@ -14,7 +14,9 @@
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the model and effort of a
 //! session other than the worker's (ADR-0079 decision 7). `[supervisor]`
 //! holds `parallel`, `max_waiting` and `runtime_planners` of a supervisor
-//! started without the flags (task 698, task 941). The file is parsed by
+//! started without the flags (task 698, task 941). `[areas]` maps the
+//! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1).
+//! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
 use anyhow::{Context, Result, bail, ensure};
@@ -30,6 +32,7 @@ use crate::{
     application::{Exit, Verifier},
     domain::{
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
+        areas::AreaMap,
         disk::DiskConfig,
         exit::ExitConfig,
         kpi::KpiSettings,
@@ -77,7 +80,9 @@ const LANGUAGE_TABLE: &str = "language";
 /// `[supervisor]`: `parallel` and `max_waiting` (task 698), and
 /// `runtime_planners` (task 941).
 const SUPERVISOR_TABLE: &str = "supervisor";
-const TABLES: [&str; 11] = [
+/// `[areas]`: each area's name and its globs (ADR-t980-1).
+const AREAS_TABLE: &str = "areas";
+const TABLES: [&str; 12] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -89,6 +94,7 @@ const TABLES: [&str; 11] = [
     WORKER_TRIAL_TABLE,
     LANGUAGE_TABLE,
     SUPERVISOR_TABLE,
+    AREAS_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -149,6 +155,8 @@ pub struct Config {
     pub roles: RoleModels,
     /// `[supervisor]`, each key it sets (task 698).
     pub supervisor: SupervisorConfig,
+    /// `[areas]` (ADR-t980-1); `None` without the table.
+    pub areas: Option<AreaMap>,
 }
 
 /// Parse the whole file.
@@ -167,6 +175,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
+    let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -205,7 +214,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -214,6 +223,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             );
             seen.push(known);
             table = Some(known);
+            if *known == AREAS_TABLE {
+                areas.get_or_insert_with(Vec::new);
+            }
             continue;
         }
         if table == Some(LANGUAGE_TABLE) {
@@ -224,6 +236,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
             .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: expected KEY = value"))?;
         let key = key.trim();
         match table {
+            Some(AREAS_TABLE) => {
+                let with = || format!("{CONFIG_FILE_NAME}:{number}");
+                let name = parse_key(key).with_context(with)?;
+                let globs = parse_string_array(rest.trim())
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {name}"))?;
+                areas.get_or_insert_with(Vec::new).push((name, globs));
+            }
             Some(KPI_TABLE) => kpi
                 .entry(key, rest.trim())
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?,
@@ -463,12 +482,74 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
+    config.areas = areas
+        .map(|areas| AreaMap::new(areas).map_err(anyhow::Error::msg))
+        .transpose()
+        .with_context(|| format!("{CONFIG_FILE_NAME}: [{AREAS_TABLE}]"))?;
     Ok(config)
+}
+
+/// A key as written: bare, or a TOML string (`"src-domain"`).
+fn parse_key(key: &str) -> Result<String> {
+    if key.starts_with(['"', '\'']) {
+        parse_string(key)
+    } else {
+        Ok(key.to_owned())
+    }
+}
+
+/// A one-line array of TOML strings (`["src/**", 'docs/**']`), followed by
+/// nothing but an optional comment.
+fn parse_string_array(text: &str) -> Result<Vec<String>> {
+    let mut rest = text
+        .strip_prefix('[')
+        .with_context(|| format!("expected an array of strings like [\"src/**\"], not {text}"))?
+        .trim_start();
+    let mut values = Vec::new();
+    loop {
+        if let Some(after) = rest.strip_prefix(']') {
+            let after = after.trim();
+            ensure!(
+                after.is_empty() || after.starts_with('#'),
+                "unexpected text after the array: {after}"
+            );
+            return Ok(values);
+        }
+        let quote = rest.chars().next().context("unterminated array")?;
+        ensure!(
+            quote == '"' || quote == '\'',
+            "expected a quoted string in the array, not {rest}"
+        );
+        // A basic string's `\"` does not end it.
+        let mut escaped = false;
+        let end = rest
+            .char_indices()
+            .skip(1)
+            .find(|&(_, c)| {
+                let ends = c == quote && !escaped;
+                escaped = quote == '"' && c == '\\' && !escaped;
+                ends
+            })
+            .context("unterminated string in the array")?
+            .0
+            + 1;
+        values.push(parse_string(&rest[..end])?);
+        rest = rest[end..].trim_start();
+        if let Some(after) = rest.strip_prefix(',') {
+            rest = after.trim_start();
+        } else {
+            ensure!(!rest.is_empty(), "unterminated array");
+            ensure!(
+                rest.starts_with(']'),
+                "expected , or ] in the array, not {rest}"
+            );
+        }
+    }
 }
 
 /// A positive integer (a `what`), followed by nothing but an optional comment.
@@ -663,6 +744,20 @@ pub fn load_supervisor_config(root: &Path) -> Result<Option<SupervisorConfig>> {
             .with_context(|| format!("parse {}", path.display()))?
             .supervisor,
     ))
+}
+
+/// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
+/// is no file or no `[areas]` table.
+pub fn load_area_map(root: &Path) -> Result<Option<AreaMap>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    Ok(match read_config(&path)? {
+        Some(text) => {
+            parse_config(&text)
+                .with_context(|| format!("parse {}", path.display()))?
+                .areas
+        }
+        None => None,
+    })
 }
 
 /// `[roles.<role>]` of the `dagq.toml` in `root` (ADR-0079 decision 7);
@@ -1014,6 +1109,66 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// `[areas]` maps each area's name, bare or quoted, to a one-line
+    /// array of globs; a mistake in it is refused with its line.
+    #[test]
+    fn parses_the_areas_table() {
+        let config = parse_config(
+            "[areas] # by path\nsrc = [\"src/**\", 'migrations/**'] # runtime\n\"docs-site\" = [ \"docs/**\" ,\"*.md\", ]\n",
+        )
+        .unwrap();
+        let map = config.areas.unwrap();
+        assert_eq!(map.names().collect::<Vec<_>>(), ["src", "docs-site"]);
+        let quoted = parse_config("[areas]\nq = [\"a\\\"b\", 'c\\']\n").unwrap();
+        assert_eq!(quoted.areas.unwrap().areas_of(["a\"b", "c\\"]), ["q"]);
+        assert_eq!(
+            map.areas_of(["README.md", "build.rs"]),
+            ["docs-site", "other"]
+        );
+        assert_eq!(
+            parse_config("[areas]\n").unwrap().areas,
+            Some(AreaMap::default())
+        );
+        assert_eq!(parse_config("").unwrap().areas, None);
+        let error = |text: &str| format!("{:#}", parse_config(text).unwrap_err());
+        for (text, expected) in [
+            ("[areas]\nsrc = \"src/**\"\n", "expected an array"),
+            ("[areas]\nsrc = [src]\n", "expected a quoted string"),
+            ("[areas]\nsrc = [\"src\" \"x\"]\n", "expected , or ]"),
+            ("[areas]\nsrc = [\"src\"\n", "unterminated"),
+            ("[areas]\nsrc = [\"src\n", "unterminated string"),
+            ("[areas]\nsrc = [\"src\"] x\n", "after the array"),
+            ("[areas]\nsrc = []\n", "no glob"),
+            ("[areas]\nSrc = [\"src\"]\n", "lowercase slug"),
+            ("[areas]\nall = [\"src\"]\n", "runtime gives"),
+            ("[areas]\na = [\"x\"]\na = [\"y\"]\n", "defined twice"),
+            ("[areas]\na = [\"/x\"]\n", "area a"),
+            ("[areas]\n\"a = [\"x\"]\n", "line 2"),
+        ] {
+            let got = error(text);
+            assert!(
+                got.contains(expected) || (expected == "line 2" && got.contains(":2")),
+                "{text}: {got}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_area_map(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[areas]\ndocs = [\"docs/**\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_area_map(dir.path())
+                .unwrap()
+                .unwrap()
+                .areas_of(["docs/x.md"]),
+            ["docs"]
+        );
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[areas]\nX = [\"a\"]\n").unwrap();
+        assert!(load_area_map(dir.path()).is_err());
     }
 
     #[test]
@@ -1516,7 +1671,7 @@ LITERAL = 'no \n escapes # here'
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
-        assert!(error.contains("[supervisor] and [kpi]"), "{error}");
+        assert!(error.contains("[supervisor], [areas] and [kpi]"), "{error}");
     }
 
     #[test]

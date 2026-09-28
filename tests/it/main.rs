@@ -12,6 +12,7 @@ mod runtime_support;
 mod actor_model;
 mod broker_podman;
 mod cli_actor;
+mod cli_areas;
 mod cli_authorization;
 mod cli_broker;
 mod cli_dialogue;

@@ -1,7 +1,8 @@
 //! The comparison across a change (ADR-0051 decisions 14–16): a window
 //! before the mark and one after it, every other mark in and between them
 //! listed next to the numbers (`confounders`), both split by the kind,
-//! `parallel`, the load band, the build and the axes of `--by`, and marks too close to split
+//! the area, `parallel`, the load band, the build and the axes of `--by`,
+//! and marks too close to split
 //! (fewer finished runs between them than `min_samples`) taken as one
 //! overlapping change. Nothing is removed automatically: a person narrows
 //! the windows with `--compare A..B,C..D`.
@@ -72,11 +73,16 @@ pub struct Comparison {
     pub confounders: Vec<Confounder>,
     /// The groups of overlapping marks in the range, each taken as one change.
     pub overlapping: Vec<Vec<Mark>>,
-    /// Per KPI, per stratum (`all`, `kind=`, `parallel=`, `load=`, `build=`).
+    /// Per KPI, per stratum (`all`, `kind=`, `area=`, `parallel=`,
+    /// `load=`, `build=`).
     pub strata: Kpis<Side>,
     /// The times of the work (`lead_time`, `phase.*`, `land_phase.*`) for
     /// each kind the summary is made for, by kind.
     pub summary: BTreeMap<String, BTreeMap<String, Side>>,
+    /// The same for each area (ADR-t980-1), by area; not listed without
+    /// `[areas]`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub area_summary: BTreeMap<String, BTreeMap<String, Side>>,
 }
 
 /// The marks that split KPIs, by when they took effect: neither a
@@ -253,23 +259,46 @@ pub(super) fn compare(
     }
     // Work differs by an order of magnitude between kinds (decision 15), so
     // the summary is made per kind: the ones asked for, or every kind the
-    // comparison saw (ADR-t624-1: no kind is built in).
-    let kinds: Vec<String> = if query.kinds.is_empty() {
+    // comparison saw (ADR-t624-1: no kind is built in); and the same per
+    // area (ADR-t980-1 decision 6(b)).
+    let summary = summarize(&strata, "kind", &query.kinds);
+    let area_summary = summarize(&strata, "area", &query.areas);
+    Ok(Comparison {
+        split,
+        before: span(before, windows[0].runs),
+        after: span(after, windows[1].runs),
+        confounders,
+        overlapping,
+        strata,
+        summary,
+        area_summary,
+    })
+}
+
+/// The times of the work for each value of `axis`: those in `wanted`, or
+/// every value the strata have.
+fn summarize(
+    strata: &Kpis<Side>,
+    axis: &str,
+    wanted: &[String],
+) -> BTreeMap<String, BTreeMap<String, Side>> {
+    let prefix = format!("{axis}=");
+    let values: Vec<String> = if wanted.is_empty() {
         strata
             .values()
             .flat_map(|sides| sides.keys())
-            .filter_map(|stratum| stratum.strip_prefix("kind="))
+            .filter_map(|stratum| stratum.strip_prefix(&prefix))
             .map(str::to_owned)
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()
     } else {
-        query.kinds.clone()
+        wanted.to_vec()
     };
-    let summary = kinds
+    values
         .into_iter()
-        .map(|kind| {
-            let stratum = format!("kind={kind}");
+        .map(|value| {
+            let stratum = format!("{prefix}{value}");
             let kpis = strata
                 .iter()
                 .filter(|(name, _)| {
@@ -279,16 +308,7 @@ pub(super) fn compare(
                 })
                 .filter_map(|(name, sides)| Some((name.clone(), sides.get(&stratum)?.clone())))
                 .collect();
-            (kind, kpis)
+            (value, kpis)
         })
-        .collect();
-    Ok(Comparison {
-        split,
-        before: span(before, windows[0].runs),
-        after: span(after, windows[1].runs),
-        confounders,
-        overlapping,
-        strata,
-        summary,
-    })
+        .collect()
 }

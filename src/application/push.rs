@@ -94,6 +94,7 @@ pub fn check_breaches(
             now,
             setup.host,
             &setup.config,
+            &setup.areas,
             &KpiQuery {
                 period,
                 // The period over and the one in progress: a target's

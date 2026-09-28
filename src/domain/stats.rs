@@ -211,6 +211,11 @@ pub struct RunStats {
     pub title: Option<String>,
     /// The task's kind (goal 21); null for a task without one.
     pub kind: Option<TaskKind>,
+    /// The areas of what it landed (ADR-t980-1), by the repository's
+    /// `[areas]`: empty for a run that did not land or whose commit Git
+    /// does not have; not listed without `[areas]` ([`with_areas`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub areas: Option<Vec<String>>,
     /// When the run was claimed (`run_claimed`), first validated
     /// (`validation_finished`) and landed (`run_integrated`).
     pub claimed_at: Option<String>,
@@ -289,6 +294,16 @@ pub struct GoalStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KindStats {
     pub kind: Option<TaskKind>,
+    #[serde(flatten)]
+    pub intervals: Intervals,
+}
+
+/// The runs of one area (ADR-t980-1), as [`KindStats`] groups them by
+/// kind; a run counts in every area it has, and `area` is null for the runs
+/// without one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AreaStats {
+    pub area: Option<String>,
     #[serde(flatten)]
     pub intervals: Intervals,
 }
@@ -405,6 +420,10 @@ pub struct Stats {
     /// One entry per kind of those runs' tasks, by name; runs of tasks
     /// without a kind last ([`with_kinds`]).
     pub kinds: Vec<KindStats>,
+    /// One entry per area of those runs, by name, runs without one last
+    /// ([`with_areas`]); not listed without `[areas]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<AreaStats>,
     pub overall: Intervals,
     pub alerts: Vec<Alert>,
     /// Failed backend calls after `--since` (up to `next_cursor`); without
@@ -1053,6 +1072,7 @@ pub fn stats(
         runs: finished.into_iter().map(|track| track.stats).collect(),
         goals: goal_stats,
         kinds: Vec::new(),
+        areas: Vec::new(),
         overall,
         alerts,
         backend_failures,
@@ -1574,6 +1594,39 @@ pub fn with_kinds(stats: &mut Stats, kinds: &HashMap<TaskId, Option<TaskKind>>) 
         .collect();
 }
 
+/// Give each run of `stats` its areas from `areas` (none for a run it
+/// does not list), and group the runs by them into `stats.areas`
+/// (ADR-t980-1): a run in every area it has. `None` (no `[areas]`) leaves
+/// the runs and the groups without areas.
+pub fn with_areas(stats: &mut Stats, areas: Option<&crate::domain::areas::RunAreas>) {
+    let Some(areas) = areas else {
+        return;
+    };
+    for run in &mut stats.runs {
+        run.areas = Some(areas.get(&run.run_id).cloned().unwrap_or_default());
+    }
+    let mut by_area: BTreeMap<(bool, Option<&str>), Vec<&RunStats>> = BTreeMap::new();
+    for run in &stats.runs {
+        let names = run.areas.as_deref().unwrap_or_default();
+        if names.is_empty() {
+            by_area.entry((true, None)).or_default().push(run);
+        }
+        for name in names {
+            by_area
+                .entry((false, Some(name.as_str())))
+                .or_default()
+                .push(run);
+        }
+    }
+    stats.areas = by_area
+        .iter()
+        .map(|((_, area), runs)| AreaStats {
+            area: area.map(str::to_owned),
+            intervals: intervals(runs),
+        })
+        .collect();
+}
+
 fn intervals(runs: &[&RunStats]) -> Intervals {
     Intervals {
         runs: runs.len(),
@@ -1645,6 +1698,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     land_phases: None,
                     title: None,
                     kind: None,
+                    areas: None,
                     claimed_at: None,
                     validated_at: None,
                     landed_at: None,

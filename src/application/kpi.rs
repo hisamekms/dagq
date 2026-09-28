@@ -2,7 +2,7 @@
 //! [`crate::domain::kpi::kpi`] derives the KPIs from. Reads only.
 use anyhow::{Result, anyhow};
 
-use super::Queue;
+use super::{Queue, areas::AreaReader};
 use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
@@ -14,17 +14,20 @@ pub struct Host {
 }
 
 /// The KPIs `query` asks for, at the unix second `now`, judged by `config`,
-/// with the host's load of each window when `host_metrics` reads it (task
-/// 872; `kpi` and the reports do, the breach check and the observer do not).
+/// the landed runs' areas read by `areas`, with the host's load of each
+/// window when `host_metrics` reads it (task 872; `kpi` and the reports do,
+/// the breach check and the observer do not).
 pub fn kpi(
     queue: &dyn Queue,
     now: i64,
     host: Host,
     config: &KpiConfig,
+    areas: &AreaReader,
     query: &KpiQuery,
     host_metrics: Option<HostReader<'_>>,
 ) -> Result<Kpi> {
     let events = queue.all_events()?;
+    let run_areas = areas.run_areas(&events);
     let goals = queue.task_goals()?;
     let kinds = queue.task_kinds()?;
     let draft_origins = queue.draft_origins()?;
@@ -38,6 +41,7 @@ pub fn kpi(
             events: &events,
             goals: &goals,
             kinds: &kinds,
+            areas: run_areas.as_ref(),
             heartbeats: &heartbeats,
             draft_origins: &draft_origins,
             now,

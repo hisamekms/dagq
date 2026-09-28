@@ -7,6 +7,7 @@
 //! the dependency view of `list` and `graph` stay here.
 
 pub mod actor_executor;
+pub mod areas;
 pub mod ask;
 pub mod broker;
 pub mod commands;

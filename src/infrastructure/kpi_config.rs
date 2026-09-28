@@ -20,6 +20,10 @@
 //! [kpi.targets."phase.work".docs] # a second stratum of the same KPI
 //! kind = "docs"
 //! max = 600
+//!
+//! [kpi.targets."phase.work".src]  # an area of `[areas]` (ADR-t980-1)
+//! area = "src"                    # instead of kind
+//! max = 5400
 //! ```
 //!
 //! `host.toml`'s other tables (`[push]`, `[report]`) are read elsewhere
@@ -29,7 +33,7 @@ use std::{env, fs, path::Path};
 
 use super::run_env::{parse_positive, parse_string, strip_comment};
 use crate::domain::{
-    TaskKind,
+    TaskKind, areas,
     kpi::{KpiSettings, Stat, Target, UNKNOWN},
 };
 
@@ -77,6 +81,7 @@ impl KpiTables {
         self.target = target.map(|kpi| Target {
             kpi,
             kind: None,
+            area: None,
             stat: None,
             min: None,
             max: None,
@@ -119,7 +124,22 @@ impl KpiTables {
                     if kind != UNKNOWN {
                         kind.parse::<TaskKind>().map_err(anyhow::Error::msg)?;
                     }
+                    ensure!(
+                        target.area.is_none(),
+                        "a target has a kind or an area, not both"
+                    );
                     target.kind = Some(kind);
+                }
+                "area" => {
+                    let area = parse_string(rest).context("value of area")?;
+                    if ![areas::UNKNOWN, areas::OTHER].contains(&area.as_str()) {
+                        areas::check_name(&area).map_err(anyhow::Error::msg)?;
+                    }
+                    ensure!(
+                        target.kind.is_none(),
+                        "a target has a kind or an area, not both"
+                    );
+                    target.area = Some(area);
                 }
                 "stat" => {
                     let stat = parse_string(rest).context("value of stat")?;
@@ -127,7 +147,9 @@ impl KpiTables {
                 }
                 "min" => target.min = Some(number(rest).context("value of min")?),
                 "max" => target.max = Some(number(rest).context("value of max")?),
-                _ => bail!("unknown key {key} in a target; the keys are kind, stat, min, max"),
+                _ => {
+                    bail!("unknown key {key} in a target; the keys are kind, area, stat, min, max")
+                }
             },
         }
         Ok(())
@@ -293,6 +315,14 @@ mod tests {
         assert_eq!(settings.targets[2].kpi, "first_pass_rate");
         assert_eq!(settings.targets[2].min, Some(0.6));
         assert_eq!(parse_host_kpi("[push]\na = 1\n", "h").unwrap(), None);
+        let areas = parse_host_kpi(
+            "[kpi.targets.\"phase.work\"]\narea = \"src\"\nmax = 1\n[kpi.targets.landings]\narea = \"other\"\nmin = 1\n",
+            "h",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(areas.targets[0].stratum(), "area=src");
+        assert_eq!(areas.targets[1].stratum(), "area=other");
     }
 
     #[test]
@@ -305,6 +335,13 @@ mod tests {
         assert!(error("[kpi.targets.x]\nkind = \"docs\"\n").contains("neither min nor max"));
         assert!(error("[kpi.targets.x]\nmax = 1\nkind = \"Web\"\n").contains("must be a slug"));
         assert!(error("[kpi.targets.x]\nmax = 1\nstat = \"mean\"\n").contains("not a stat"));
+        assert!(error("[kpi.targets.x]\nmax = 1\narea = \"all\"\n").contains("runtime gives"));
+        assert!(
+            error("[kpi.targets.x]\nmax = 1\narea = \"a\"\nkind = \"b\"\n").contains("not both")
+        );
+        assert!(
+            error("[kpi.targets.x]\nmax = 1\nkind = \"b\"\narea = \"a\"\n").contains("not both")
+        );
         assert!(error("[kpi.targets.x]\nmax = one\n").contains("expected a number"));
         assert!(error("[kpi.targets.x]\nmax = 1\nwho = 1\n").contains("unknown key who"));
         assert!(error("[kpi.targets.phase.work]\nmax = 1\n").contains("quote"));
