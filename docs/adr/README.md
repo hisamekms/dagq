@@ -98,6 +98,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t768-1](2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md) | 着地の検証のnextestは落ちたtestを1回だけ流し直してFLAKYを見分けるが検証は失敗のままにし、落ちたtestが全てFLAKYならworkerをresumeせずに着地を1回やり直す（ADR-0076決定2をamends） | 2026-09-27 |
 | [ADR-t803-1](2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md) | idle の印（Stop hook）を主な信号のまま残し、印が無いか最後の入力より古いときだけ画面から idle を推定する | 2026-09-27 |
 | [ADR-t791-1](2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md) | 効く優先度の継承元から、abandonedで閉じたgoalに依存するtaskを除く（ADR-0049決定4をamends） | 2026-09-28 |
+| [ADR-t649-1](2026-09-28-t649-1-new-time-driven-alerts-wake-the-observer.md) | eventを出さずに時間だけで閾値を超えたalertが前回のobservationに無かったものなら、observerの変化とみなして起動する（ADR-0047決定21をamends） | 2026-09-28 |
 | [ADR-t807-1](2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md) | 同じきっかけ（同じrunのreceipt・同じgoal review・同じwithdraw）で作られたdraftを1つのruntimeのplannerにまとめて渡し、まとめ方とdraftごとの結末と出どころを記録する（ADR-0047決定16をamends） | 2026-09-28 |
 | [ADR-t808-1](2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md) | runtimeのplannerが人の判断を経ずにsubmitできないfollow_upの深さを2以上から3以上に上げる（ADR-0047決定16・20をamends） | 2026-09-28 |
 | [ADR-t813-1](2026-09-28-t813-1-headless-worker-path.md) | workerの非対話の経路を足し、1 turnを1回の非対話の呼び出しにして、answer・revise・resume・催促を同じsessionのresumeの呼び出しで送り、processをcmuxのworkspaceのsession wrapperの中で動かす。対話の経路はClaudeの既定に残し、非対話で起きる止まりはADR-0047の3層で扱い新しいactorは足さない（ADR-0027決定1・2・4、ADR-0071決定1・2・6・16、ADR-0047決定30・31・37・39・40をamends） | 2026-09-28 |

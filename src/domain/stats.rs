@@ -306,6 +306,9 @@ pub struct Alert {
     /// `awaiting_integration`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<&'static str>,
+    /// The ask of an `ask_unanswered`, as its `ask_opened` recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<String>,
 }
 
 /// The `backend_call_failed` events in the window: how often cmux failed or
@@ -862,6 +865,7 @@ pub fn stats(
                 threshold: ASK_UNANSWERED_SECS,
                 path: None,
                 phase: None,
+                ask_id: ask.id,
             });
         }
     }
@@ -979,6 +983,7 @@ pub fn stats(
             threshold: live.conflicts.config.hotspot_conflicts,
             path: Some(file.path.clone()),
             phase: None,
+            ask_id: None,
         });
     }
     if backend_failures.count >= BACKEND_FAILURES {
@@ -990,6 +995,7 @@ pub fn stats(
             threshold: BACKEND_FAILURES,
             path: None,
             phase: None,
+            ask_id: None,
         });
     }
     // Slots left free while claims are held are that hold's, not idle ones.
@@ -1002,6 +1008,7 @@ pub fn stats(
             threshold: 0,
             path: None,
             phase: None,
+            ask_id: None,
         });
     } else if slots.free_slots > 0 && !claim_deferrals.deferred.is_empty() {
         // Slots left free while candidates wait on a conflict hotspot
@@ -1014,6 +1021,7 @@ pub fn stats(
             threshold: 0,
             path: None,
             phase: None,
+            ask_id: None,
         });
     } else if slots.free_slots > 0 && slots.candidates == 0 && slots.ready > 0 {
         alerts.push(Alert {
@@ -1024,6 +1032,7 @@ pub fn stats(
             threshold: 0,
             path: None,
             phase: None,
+            ask_id: None,
         });
     }
 
@@ -1492,6 +1501,7 @@ fn alert(kind: &'static str, run: &RunStats, value: i64, threshold: i64) -> Aler
         threshold,
         path: None,
         phase: None,
+        ask_id: None,
     }
 }
 
@@ -1726,6 +1736,8 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
 }
 
 struct OpenAsk {
+    /// The payload's `ask_id` (or `id`), when `ask_opened` recorded one.
+    id: Option<String>,
     task_id: Option<TaskId>,
     run_id: Option<RunId>,
     /// The ask's kind, as `ask_opened` recorded it.
@@ -1757,6 +1769,7 @@ fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
                     open.push((
                         key(event),
                         OpenAsk {
+                            id: key(event).0,
                             task_id: event.task_id,
                             run_id: event.run_id.clone(),
                             kind: event

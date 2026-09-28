@@ -5,7 +5,8 @@
 //! `DAGQ_ROLE=observer`, notes and goals included. The supervisor starts it on
 //! a timer (`--observe-interval`, `--observe-daily`); `observe` starts it
 //! by hand. An observation that finds no event since the last one but its
-//! own starts no agent and records a skipped `observe_finished`; the agent
+//! own and no alert the last one did not see starts no agent and records a
+//! skipped `observe_finished`; the agent
 //! loads no MCP server; `observe --history` reads what each observation
 //! read and wrote.
 use crate::domain::EventKind;
@@ -112,13 +113,6 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         (None, ObserveMode::Hourly) => read_cursor(&db)?,
         (None, ObserveMode::Daily) => Some(queue.event_id_before(started - DAILY_WINDOW_SECS)?),
     };
-    // A cursor given by hand asks to read past it whatever happened since.
-    if options.since.is_none()
-        && !options.dry_run
-        && let Some(payload) = skip(&queue, options.mode, since)?
-    {
-        return Ok(payload);
-    }
     // The cmux on PATH lists the workspaces for `workspace_mismatch`;
     // without one, only that alert is left unjudged.
     let cmux = crate::infrastructure::adapters::executable(Path::new("cmux"))
@@ -135,6 +129,14 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         cmux.as_ref()
             .map(|cmux| cmux as &dyn crate::application::stats::WorkspaceListing),
     )?;
+    let alerts = alert_keys(&stats);
+    // A cursor given by hand asks to read past it whatever happened since.
+    if options.since.is_none()
+        && !options.dry_run
+        && let Some(payload) = skip(&queue, options.mode, since, &alerts)?
+    {
+        return Ok(payload);
+    }
     let cursor = EventId::new(stats["next_cursor"].as_i64().unwrap_or_default());
     let notes = queue.notes(&NoteQuery {
         goal_id: None,
@@ -265,6 +267,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "dir": dir,
         "wall": wall.map(Wall::as_str),
         "hold_ask_id": hold,
+        "alerts": alerts,
     });
     queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
     tracing::info!(
@@ -346,10 +349,52 @@ pub fn observer_input(input: ObserverInput) -> Value {
     })
 }
 
-/// When the last observation of `mode` that ran its agent succeeded and no
-/// event but the observer's own came after the events it read, record a skipped
+/// What tells the alerts of `stats` apart (ADR-t649-1): the kind and the
+/// target (task, run, file, ask, workspace) of each of `alerts` and
+/// `running_alerts`, without the value that grows with time, sorted and
+/// without repeats.
+fn alert_keys(stats: &Value) -> Vec<Value> {
+    const TARGETS: &[&str] = &["task_id", "run_id", "path", "ask_id", "workspace_id"];
+    let mut keys = ["alerts", "running_alerts"]
+        .iter()
+        .filter_map(|list| stats[*list].as_array())
+        .flatten()
+        .map(|alert| {
+            let mut key = serde_json::Map::new();
+            key.insert("kind".into(), alert["kind"].clone());
+            for target in TARGETS {
+                if let Some(value) = alert.get(*target).filter(|value| !value.is_null()) {
+                    key.insert((*target).into(), value.clone());
+                }
+            }
+            Value::Object(key)
+        })
+        .collect::<Vec<_>>();
+    keys.sort_by_key(Value::to_string);
+    keys.dedup();
+    keys
+}
+
+/// Whether `alerts` has one the last observation did not see; one that
+/// kept no `alerts` (from before ADR-t649-1) saw none of them.
+fn new_alerts(last: &Value, alerts: &[Value]) -> bool {
+    match last["alerts"].as_array() {
+        Some(seen) => alerts.iter().any(|alert| !seen.contains(alert)),
+        None => !alerts.is_empty(),
+    }
+}
+
+/// When the last observation of `mode` that ran its agent succeeded, no
+/// event but the observer's own came after the events it read and none of
+/// `alerts` is new since it (ADR-t649-1: an alert that grew past its
+/// threshold with time alone records no event), record a skipped
 /// `observe_finished` without starting anything, and return its payload.
-fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Result<Option<Value>> {
+fn skip(
+    queue: &SqliteQueue,
+    mode: ObserveMode,
+    since: Option<EventId>,
+    alerts: &[Value],
+) -> Result<Option<Value>> {
     let Some((previous, last)) = queue.last_observation(mode.as_str())? else {
         return Ok(None);
     };
@@ -357,6 +402,7 @@ fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Resul
     // others while its agent ran are unread too.
     let read = last["cursor"].as_i64().map_or(previous, EventId::new);
     if last["outcome"] != "succeeded"
+        || new_alerts(&last, alerts)
         || queue.events_besides(OBSERVER_ROLE, crate::domain::sessions::OBSERVER, read)? > 0
     {
         return Ok(None);
@@ -364,7 +410,7 @@ fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Resul
     let payload = json!({
         "mode": mode.as_str(),
         "outcome": "skipped",
-        "reason": "no events but the observer's own since the last observation",
+        "reason": "no events but the observer's own and no new alert since the last observation",
         "previous_event_id": previous,
         "since": since,
         "cursor": since,
@@ -379,6 +425,7 @@ fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Resul
         "ask_ids": [],
         "duration_secs": 0,
         "dir": null,
+        "alerts": alerts,
     });
     queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
     tracing::info!(

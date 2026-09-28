@@ -658,6 +658,91 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
     assert_eq!(forced["outcome"], "succeeded", "{forced}");
 }
 
+/// ADR-t649-1: an alert that grew past its threshold with time alone, with
+/// no event, starts the agent even when nothing else happened; the same
+/// alerts again, or an older observation that kept none while there are
+/// none, leave the observation skipped. After an older observation that
+/// kept no alerts, any alert starts it.
+#[test]
+fn observe_starts_again_for_an_alert_that_time_alone_raised() {
+    use dagq::domain::{AskKind, AskReason, NewAsk};
+    use dagq::observer::{ObserveMode, observe};
+    let (_dir, _repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = queue
+        .ask(NewAsk {
+            kind: AskKind::Blocked,
+            task_id: None,
+            run_id: None,
+            question: "is it stuck?".into(),
+            options: Vec::new(),
+            asked_by: "observer".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask;
+    let quiet = ObserverProvider {
+        script: "true".into(),
+    };
+    let unanswered = |payload: &Value| {
+        payload["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|alert| alert["kind"] == "ask_unanswered")
+    };
+    let first = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(first["outcome"], "succeeded", "{first}");
+    assert!(!unanswered(&first), "{first}");
+    // An older observation that kept no alerts, while there is none.
+    queue
+        .record_queue_event(
+            EventKind::ObserveFinished,
+            json!({"mode": "hourly", "outcome": "succeeded"}),
+        )
+        .unwrap();
+    let quiet_again = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(quiet_again["outcome"], "skipped", "{quiet_again}");
+
+    // Two hours pass with the ask open: `ask_unanswered` is raised with no
+    // event recorded.
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-2 hours')
+             WHERE kind='ask_opened'",
+            [],
+        )
+        .unwrap();
+    let raised = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(raised["outcome"], "succeeded", "{raised}");
+    let alert = raised["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|alert| alert["kind"] == "ask_unanswered")
+        .unwrap_or_else(|| panic!("{raised}"));
+    assert_eq!(alert["ask_id"], ask.id.to_string());
+    // The alert stays but is no longer new: skipped.
+    let same = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(same["outcome"], "skipped", "{same}");
+    assert!(unanswered(&same), "{same}");
+
+    // After an older observation that kept no alerts, any alert is new.
+    queue
+        .record_queue_event(
+            EventKind::ObserveFinished,
+            json!({"mode": "hourly", "outcome": "succeeded"}),
+        )
+        .unwrap();
+    let after_old = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(after_old["outcome"], "succeeded", "{after_old}");
+    let settled = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(settled["outcome"], "skipped", "{settled}");
+    assert_eq!(queue_events(&db, "observe_started").len(), 3);
+}
+
 /// ADR-0051 decisions 24 and 25: the observer reads the KPIs judged
 /// against the checkout's `[kpi]` targets and the improvements running
 /// against their limit, and a breach it records again under one subject
