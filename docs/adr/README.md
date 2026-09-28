@@ -118,6 +118,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t947-4](2026-09-28-t947-4-cancel-carries-a-reason-code.md) | taskのcancelに理由の分類コードを必ず持たせ、--duplicate-ofは中身を受け持つtaskを指す欄として残し、runtimeが自分で行うcancelは経路から理由を付ける（ADR-0063決定5をamends） | 2026-09-28 |
 | [ADR-t980-1](2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md) | taskのkindを廃止し、plannerが宣言する変更の種類（change）と着地の差分から読むときに求める変更の対象（area）の2軸でrunを分類する（ADR-t624-1を置き換え、ADR-0051決定5・15をamends） | 2026-09-29 |
 | [ADR-t963-1](2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md) | 全部のe2eを自動更新（と人のinstall）が固定バイナリを入れ替える前の関門で流し、workerのe2eはrunの差分がdagq.tomlのe2eのpathに触れるときだけ必須にし、integrateでは流さない（ADR-0047決定28、ADR-0073決定12・14・17をamends） | 2026-09-29 |
+| [ADR-t996-1](2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md) | supervisorが毎時（runtimeの規則の判定に当たったときだけ）・日次・週次にスループットの見直しのheadlessのjobを起動し、状態を変えずに結果をreports/に残してinboxに知らせるだけのattentionで届け、週次の次の一手はsupervisorがproposalを求めるfindingにする（ADR-0047決定1・2・17をamends） | 2026-09-29 |
 
 ## 置き換え・廃止されたADR
 
