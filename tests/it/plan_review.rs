@@ -66,15 +66,10 @@ pub(crate) fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-b", "main"]);
-    git(&repo, &["config", "user.name", "test"]);
-    git(&repo, &["config", "user.email", "test@example.invalid"]);
-    fs::write(repo.join("seed.txt"), "seed\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "seed"]);
+    common::template::repository(&repo, "seed\n");
     let db = dir.path().join("queue").join("queue.db");
     fs::create_dir_all(db.parent().unwrap()).unwrap();
-    let mut queue = SqliteQueue::init(&db).unwrap();
+    let mut queue = common::template::queue(&db);
     let blocker = add(&mut queue, "blocker", &[], Priority::Normal);
     assert_eq!(blocker, TaskId::new(1));
     let claude = dir.path().join("claude-stub");

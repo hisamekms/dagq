@@ -59,17 +59,12 @@ pub fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("my repo");
     fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-b", "main"]);
-    git(&repo, &["config", "user.name", "test"]);
-    git(&repo, &["config", "user.email", "test@example.invalid"]);
-    fs::write(repo.join("seed.txt"), "fixture\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-q", "-m", "seed"]);
+    super::template::repository(&repo, "fixture\n");
     let db = dir.path().join("queue's dir").join("queue.db");
     let home = dir.path().join("home");
     let location = QueueLocation::explicit_in(&db, &home);
     location.prepare().unwrap();
-    SqliteQueue::init(&db).unwrap();
+    super::template::queue(&db);
     let claude = dir.path().join("claude-stub");
     // `plugin list --json` prints `<stub>.plugins` (see `list_plugins`),
     // and fails when there is none.

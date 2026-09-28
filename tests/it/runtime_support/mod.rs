@@ -196,14 +196,9 @@ pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo's directory");
     fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-b", "main"]);
-    git(&repo, &["config", "user.name", "test"]);
-    git(&repo, &["config", "user.email", "test@example.invalid"]);
-    fs::write(repo.join("seed.txt"), "fixture\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "seed"]);
+    common::template::repository(&repo, "fixture\n");
     let db = dir.path().join("queue's data.db");
-    let mut queue = SqliteQueue::init(&db).unwrap();
+    let mut queue = common::template::queue(&db);
     add_ready_task(&mut queue, "test task", &[]);
     (
         Fixture {

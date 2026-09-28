@@ -17,7 +17,7 @@ use common::queue::*;
 
 #[test]
 fn initialization_is_repeatable_and_preserves_existing_tasks() {
-    let (dir, mut queue) = fixture();
+    let (dir, mut queue) = migrated_fixture();
     queue.add(new_task("preserved")).unwrap();
     drop(queue);
     let queue = SqliteQueue::init(dir.path().join("queue.db")).unwrap();
@@ -89,7 +89,7 @@ fn apply_future_compatible_migration(raw: &Connection) {
 
 #[test]
 fn a_newer_queue_within_the_floor_is_used_as_it_is() {
-    let (dir, mut queue) = fixture();
+    let (dir, mut queue) = migrated_fixture();
     let first = queue.add(new_task("before")).unwrap().id();
     drop(queue);
     let path = dir.path().join("queue.db");
@@ -370,7 +370,7 @@ fn a_breaking_migration_waits_for_an_idle_queue() {
 /// back from the rows instead of left to the CHECK.
 #[test]
 fn the_rows_the_ports_write_keep_the_check_rules() {
-    let (dir, mut queue) = fixture();
+    let (dir, mut queue) = migrated_fixture();
     let task = queue
         .add(NewTask {
             verification_commands: vec!["cargo test".into()],
@@ -422,7 +422,7 @@ fn the_rows_the_ports_write_keep_the_check_rules() {
 #[test]
 fn the_latest_schema_has_no_check_constraint() {
     // ADR-t876-1: the rules live in the domain and the write port.
-    let (dir, queue) = fixture();
+    let (dir, queue) = migrated_fixture();
     assert_eq!(queue.schema_version().unwrap(), SqliteQueue::SCHEMA_VERSION);
     drop(queue);
     let conn = Connection::open(dir.path().join("queue.db")).unwrap();

@@ -70,7 +70,16 @@ pub fn migrated(path: &Path) -> SqliteQueue {
     SqliteQueue::open(path).unwrap()
 }
 
+/// A queue copied from the migrated template (task 1044).
 pub fn fixture() -> (TempDir, SqliteQueue) {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = super::template::queue(&dir.path().join("queue.db"));
+    (dir, queue)
+}
+
+/// A queue `init` migrates from an empty file, for the tests of the schema
+/// and the migrations themselves.
+pub fn migrated_fixture() -> (TempDir, SqliteQueue) {
     let dir = tempfile::tempdir().unwrap();
     let queue = SqliteQueue::init(dir.path().join("queue.db")).unwrap();
     (dir, queue)
