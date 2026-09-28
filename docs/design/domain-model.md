@@ -325,6 +325,19 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 
 `last_error`はstatusと最後のイベントに合わせて読む。`failed`なら非0終了・検証拒否・着地時の`failed` receipt、`claimed`/`starting`/`running`/`validating`で`last_error`があればsupervisorが手放したrun（`doctor`にleaseなしで出る）、`awaiting_integration`で`last_error`があればclose失敗（`cleanup_failed`、`workspace_closed_at`はnull）かmainを進める前に止まった着地（`integration_error`）、`needs_session`なら着地の衝突である。`show`・`doctor`・superviseの結果の`errors`に出て、`list`には出ない。`recover`は`last_error`を上書きしない。
 
+### providerの切り替えの理由（`SwitchReason`）
+
+[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)（task 818）。workerをもう一方のproviderへ移す理由は`domain::provider_switch::SwitchReason`の閉じた集合で、`provider_switched`と`provider_held`の`reason`に入る。上の`code`（`ReasonCode`）とは別の集合で、どれも失敗ではなく「そのproviderが使えない」ことを言う。
+
+| reason | 意味 | 控え（`ProviderHold`）の長さ。利用上限は文が言う解ける時刻を優先する（`reset_at`） |
+| --- | --- | --- |
+| `executable_missing` | supervisorの表にそのproviderの組が無い（実行ファイルが見つからないか、preflightで動かない）。claimのときだけ | （控えない） |
+| `authentication` | turnが認証の失敗で止まった（読み手の`authentication`） | 900秒 |
+| `usage_limit` | turnが利用上限かrate limitで止まった（読み手の`usage_limit`） | 1800秒 |
+| `launch_failed` | turnのagentを起動できない、または出力無しに非0で終わった（turnの`failure`が`launch`） | 600秒（Claudeもこの理由では`ProviderHold`で控える） |
+
+`SwitchPhase`（`start` / `answer` / `revise` / `resume` / `nudge`）は切り替え先で行う呼び出しの種類。runの切り替えは`MAX_PROVIDER_SWITCHES`（2）回まで。
+
 ### 理由の分類コード（`code`）
 
 [ADR-0034](../adr/0034-domain-events-carry-reason-codes-actor-and-configuration-changes.md)の決定1（task 195）。失敗・保留・中断を記録するイベントは、payloadに`code`（`domain::ReasonCode`、snake_caseの閉じた集合）と、コードごとの構造化した値を持つ。今の`reason` / `message` / `error` / `last_error`の自由文は項目も文言も変えずに残す。コードは「なぜ」で、「どの工程で」はイベントのkindが持つ（同じ`backend_timeout`が`runtime_error`にも`screen_capture_failed`にも付く）。足す値にpath・workspace ID・pidなどマシン依存の値は入れない（[ADR-0032](../adr/0032-classify-records-into-domain-events-diagnostics-coordination-and-bodies.md)。既存の項目の`workspace_id`などはそのまま）。schemaは変えず、`task_runs`に列は足さない。コードが入る前のイベントには`code`が無く、読む側はそれを許す。コードの一覧は`ReasonCode::ALL`と`meaning()`が正で、名前を変えるにはADRが要る。

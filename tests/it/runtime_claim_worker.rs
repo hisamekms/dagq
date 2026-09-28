@@ -6,6 +6,7 @@ use crate::runtime_support;
 
 use dagq::domain::{
     ClaimOutcome, LeaseToken, Provider,
+    provider_switch::WorkerRoute,
     worker::{Worker, WorkerMode},
 };
 use runtime_support::*;
@@ -75,7 +76,7 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
                 order,
                 None,
                 &Default::default(),
-                workers,
+                &WorkerRoute::direct(workers),
             )
             .unwrap()
     };
@@ -111,12 +112,14 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
 }
 
 /// A supervisor with the adapters of Claude only (interactive and headless,
-/// ADR-t813-2: its `codex` is not found) does not claim a Codex task
-/// (`provider_unavailable`): the
-/// deferral is recorded once, with the worker, and shown by `status`; the
-/// task of interactive Claude is claimed beside it. A task that leaves the
-/// candidates ends its deferral. (A mode the binary lacks for a provider it
-/// has, `mode_unavailable`, is judged the same way: `domain::worker`.)
+/// ADR-t813-2: its `codex` is not found) while Claude is held (its hold ask
+/// is open) can run no worker: it claims neither the Codex task nor the
+/// interactive Claude one (`provider_unavailable`): each deferral is
+/// recorded once, with the worker, and shown by `status`. A task that
+/// leaves the candidates ends its deferral. (A mode the binary lacks for a
+/// provider it has, `mode_unavailable`, is judged the same way:
+/// `domain::worker`; a Codex task that Claude can take instead starts on
+/// it: `runtime_provider_switch`.)
 #[test]
 fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
     let (_dir, repo, db) = fixture();
@@ -124,23 +127,23 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
         let mut queue = SqliteQueue::open(&db).unwrap();
         add_task(&mut queue, "codex", Some(Provider::Codex), None)
     };
+    open_hold_ask(&db, dagq::domain::AskReason::Authentication, None);
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let outcome = supervise_with(&db, &repo, &backend, &supervise_options(3, true)).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let claimed = runs_of(&db, TaskId::new(1));
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].worker_mode(), WorkerMode::Interactive);
-    assert_eq!(claimed[0].requested_provider(), Provider::Claude);
+    assert!(runs_of(&db, TaskId::new(1)).is_empty());
     assert!(runs_of(&db, codex).is_empty());
     let deferred = events(&db, "claim_deferred");
-    assert_eq!(deferred.len(), 1, "{deferred:?}");
-    let (task, payload) = &deferred[0];
+    assert_eq!(deferred.len(), 2, "{deferred:?}");
+    let (task, payload) = &deferred[1];
     assert_eq!(*task, Some(codex));
     assert_eq!(payload["reason"], "provider_unavailable");
     assert_eq!(payload["provider"], "codex");
     assert_eq!(payload["worker_mode"], "headless");
     assert!(payload["message"].as_str().unwrap().contains("codex"));
+    assert_eq!(deferred[0].0, Some(TaskId::new(1)));
+    assert_eq!(deferred[0].1["reason"], "provider_unavailable");
     let status = runtime::status(&db).unwrap();
     let reasons: Vec<(Value, Value)> = status["claim_deferrals"]
         .as_array()
@@ -148,14 +151,20 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
         .iter()
         .map(|open| (open["task_id"].clone(), open["reason"].clone()))
         .collect();
-    assert_eq!(reasons, [(json!(codex), json!("provider_unavailable"))]);
+    assert_eq!(
+        reasons,
+        [
+            (json!(1), json!("provider_unavailable")),
+            (json!(codex), json!("provider_unavailable"))
+        ]
+    );
 
     // Deferred still, not recorded again; canceled, it ends.
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let outcome = supervise_with(&db, &repo, &backend, &supervise_options(3, true)).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(events(&db, "claim_deferred").len(), 1);
+    assert_eq!(events(&db, "claim_deferred").len(), 2);
     SqliteQueue::open(&db)
         .unwrap()
         .transition(codex, TaskAction::Cancel)

@@ -486,6 +486,36 @@ impl SessionWatch {
         Ok(parked)
     }
 
+    /// This interactive session stopped at a wall and its run moves to
+    /// headless Codex (ADR-t813-2 decision 5): park it for a session of its
+    /// own, which the switch's instruction starts, as a recovery job's
+    /// `resume` does; the session is asked to exit (as the interactive one
+    /// it is), its worktree stays, and the run moves when its resume
+    /// begins.
+    pub(super) fn park_for_switch(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        switch: &PendingSwitch,
+    ) -> Result<TaskRun> {
+        let (instruction, reason, message) = (&switch.instruction, switch.reason, &switch.message);
+        self.end_sends_with(sv, run, "provider_switched")?;
+        self.stall.ended(sv, run)?;
+        self.recovery.stop(sv, run);
+        let parked = sv.queue.park_live(
+            run.id(),
+            &sv.token,
+            instruction,
+            json!({
+                "instruction": instruction,
+                PARK_SWITCH: {"to": Provider::Codex, "reason": reason, "message": message},
+                "workspace_id": self.workspace,
+            }),
+        )?;
+        info!(run_id = %run.id(), "run {} is parked for a headless Codex session; its interactive session is asked to exit", run.id());
+        Ok(parked)
+    }
+
     /// Record how the recovery job `attempt` of the send `send` ended
     /// (`stall_resolved`, `detection: recovery`), once.
     fn send_resolved(

@@ -175,51 +175,19 @@ pub(super) fn alert_at_once(mark: Option<TurnMark>) -> Option<&'static str> {
         .map(|_| PERMISSION_DENIED)
 }
 
-/// The provider's login ran out or its usage limit was hit in the last
-/// turn: the failure, which holds the queue for a person rather than a
-/// nudge.
+/// The provider could not be used in the last turn (its login ran out, its
+/// usage limit was hit, or its agent did not start): the failure, which
+/// moves the run to the other provider or holds it for a person rather
+/// than a nudge (ADR-t813-2).
 pub(super) fn provider_failure(mark: Option<TurnMark>) -> Option<TurnFailure> {
     mark.filter(|mark| mark.outcome == TurnOutcome::Failed)
         .and_then(|mark| mark.failure)
         .filter(|failure| {
             matches!(
                 failure,
-                TurnFailure::Authentication | TurnFailure::UsageLimit
+                TurnFailure::Authentication | TurnFailure::UsageLimit | TurnFailure::Launch
             )
         })
-}
-
-/// A headless session's last turn failed at its provider's login or usage
-/// limit (`failure`): the run joins the queue's hold of it, or opens it, as
-/// an interactive session stopped at a login does (ADR-0047 decision 42).
-/// The turn is named in what is raised, so a later turn that fails the
-/// same way after a person's `done` is raised again.
-pub(super) fn raise_turn_failure(
-    sv: &mut Supervisor<'_>,
-    run: &TaskRun,
-    workspace: &str,
-    failure: TurnFailure,
-) -> Result<()> {
-    let events = sv.queue.run_events(run.id())?;
-    let last = events
-        .iter()
-        .rfind(|e| e.kind == event_kind::TURN_FINISHED)
-        .map(|e| e.payload.clone())
-        .unwrap_or_default();
-    let text = format!(
-        "turn {} of the headless session failed ({}): {}",
-        last["turn"],
-        failure.as_str(),
-        last["message"].as_str().unwrap_or("no message")
-    );
-    // The same hold, event and question as an interactive session's
-    // screen at the wall (task 438).
-    let wall = match failure {
-        TurnFailure::UsageLimit => Wall::UsageLimit,
-        _ => Wall::Authentication,
-    };
-    raise_wall(sv, run, workspace, &text, wall)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -249,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_login_or_a_usage_limit_is_the_providers() {
+    fn only_a_login_a_usage_limit_or_a_start_is_the_providers() {
         assert_eq!(
             provider_failure(Some(mark(
                 TurnOutcome::Failed,
@@ -265,6 +233,14 @@ mod tests {
                 0
             ))),
             Some(TurnFailure::UsageLimit)
+        );
+        assert_eq!(
+            provider_failure(Some(mark(
+                TurnOutcome::Failed,
+                Some(TurnFailure::Launch),
+                0
+            ))),
+            Some(TurnFailure::Launch)
         );
         assert_eq!(
             provider_failure(Some(mark(TurnOutcome::Failed, Some(TurnFailure::Model), 0))),

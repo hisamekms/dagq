@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::application::{AgentProvider, CommandSpec, TurnReader};
-use crate::domain::TaskRun;
+use crate::domain::{TaskRun, turn::TurnSession};
 
 use super::{adapters::output, codex_turns::CodexTurnReader};
 
@@ -236,8 +236,10 @@ impl AgentProvider for Codex {
         &self,
         run: &TaskRun,
         prompt: &str,
-        resume: Option<&str>,
+        session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
+        // Codex names a new thread itself.
+        let resume = session.resumed();
         let worktree = Path::new(run.worktree_path().context("missing worktree")?);
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let roots = writable_roots(worktree, run_dir, &cargo_home()?)?;
@@ -433,7 +435,9 @@ mod tests {
             &writable_roots(&worktree, &run_dir, &cargo_home().unwrap()).unwrap(),
         )
         .unwrap();
-        let first = codex.turn_command(&run, "-do it", None).unwrap();
+        let first = codex
+            .turn_command(&run, "-do it", TurnSession::New("ignored"))
+            .unwrap();
         assert_eq!(first.get_program(), "/bin/codex");
         assert_eq!(first.get_current_dir(), Some(worktree.as_path()));
         assert!(first.get_new_session());
@@ -452,7 +456,9 @@ mod tests {
         expected.extend(sandbox);
         expected.extend(["--", "-do it"]);
         assert_eq!(args(&first), expected);
-        let resumed = codex.turn_command(&run, "answer", Some("th-1")).unwrap();
+        let resumed = codex
+            .turn_command(&run, "answer", TurnSession::Resume("th-1"))
+            .unwrap();
         assert_eq!(resumed.get_current_dir(), Some(worktree.as_path()));
         let mut expected = vec!["exec", "resume", "--json"];
         expected.extend(sandbox);

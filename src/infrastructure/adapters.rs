@@ -44,6 +44,7 @@ pub use crate::application::{
     },
     path_text,
 };
+use crate::domain::turn::TurnSession;
 use crate::infrastructure::claude_turns::{ClaudeTurnReader, HEADLESS_PERMISSION_MODE};
 use crate::infrastructure::run_env::load_repository_config;
 
@@ -2659,7 +2660,7 @@ impl AgentProvider for ClaudeCode {
         &self,
         run: &TaskRun,
         prompt: &str,
-        resume: Option<&str>,
+        session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join(HEADLESS_SETTINGS);
@@ -2672,12 +2673,10 @@ impl AgentProvider for ClaudeCode {
         command
             .current_dir(run.worktree_path().context("missing worktree")?)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
-            .arg(if resume.is_some() {
-                "--resume"
-            } else {
-                "--session-id"
+            .args(match session {
+                TurnSession::Resume(id) => ["--resume", id],
+                TurnSession::New(name) => ["--session-id", name],
             })
-            .arg(resume.unwrap_or(run.id().as_str()))
             .arg("--permission-mode")
             .arg(HEADLESS_PERMISSION_MODE)
             .arg("--debug-file")
@@ -2696,10 +2695,9 @@ impl AgentProvider for ClaudeCode {
     }
     /// Its transcript under `$CLAUDE_CONFIG_DIR` (or `~/.claude`): Claude
     /// Code refuses a `--session-id` in use.
-    fn turn_session_exists(&self, run: &TaskRun) -> bool {
+    fn turn_session_exists(&self, run: &TaskRun, name: &str) -> bool {
         run.worktree_path().is_some_and(|cwd| {
-            crate::infrastructure::transcripts::ClaudeTranscripts::from_env()
-                .exists(cwd, run.id().as_str())
+            crate::infrastructure::transcripts::ClaudeTranscripts::from_env().exists(cwd, name)
         })
     }
     fn turn_permission_mode(&self) -> Option<&'static str> {

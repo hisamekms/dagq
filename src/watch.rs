@@ -226,6 +226,12 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
         "run_id": run,
         "task_id": task_run.task_id(),
         "status": task_run.status(),
+        // The providers the run asked for and ran on, and its moves
+        // between them (ADR-t813-2).
+        "requested_provider": task_run.requested_provider(),
+        "actual_provider": task_run.actual_provider(),
+        "worker_mode": task_run.worker_mode(),
+        "provider_switches": timeline::provider_switches(&events),
         "gap_secs": gap_secs,
         "events": shown_events.iter().map(|event| shown(event, full)).collect::<Vec<_>>(),
         "gaps": gaps,

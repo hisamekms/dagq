@@ -23,6 +23,7 @@ pub mod failed_tests;
 pub mod landing;
 pub mod measures;
 pub mod predictions;
+pub mod providers;
 pub mod retries;
 pub mod sessions;
 pub mod thresholds;
@@ -481,6 +482,9 @@ pub struct Stats {
     /// ADR-0047 decision 45) in the same window as `asks`: by layer and
     /// repair, and per day next to the asks opened that day.
     pub auto_repairs: AutoRepairStats,
+    /// The workers moved to the other provider (`provider_switched`,
+    /// ADR-t813-2) in the same window as `asks`, and Codex's holds.
+    pub provider_switches: providers::ProviderSwitchStats,
     /// The steps of the automatic update of the fixed binary (`update_*`,
     /// ADR-0073 decision 17) in the same window as `asks`: by kind, the
     /// failures by stage and the builds installed. Empty with `--goal`.
@@ -909,6 +913,7 @@ pub fn stats(
         .unwrap_or(window_until)
         .min(window_until);
     let auto_repairs = auto_repairs::auto_repairs(events, window_start, next_cursor, counts);
+    let provider_switches = providers::provider_switches(events, window_start, next_cursor, counts);
     let updates = updates::updates(events, window_start, next_cursor, counts);
     let draft_flow = drafts::draft_flow(
         events,
@@ -1051,6 +1056,7 @@ pub fn stats(
         landing_holds,
         claim_deferrals,
         auto_repairs,
+        provider_switches,
         updates,
         draft_flow,
         host: None,

@@ -40,6 +40,23 @@ use serde_json::Value;
 
 use super::{AskKind, EventId, RunEvent, stats::timestamp_millis};
 
+/// The run's moves to the other provider (`provider_switched`,
+/// ADR-t813-2), oldest first: each with its event and time.
+pub fn provider_switches(events: &[RunEvent]) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e.kind == super::event_kind::PROVIDER_SWITCHED)
+        .map(|e| {
+            let mut switch = e.payload.clone();
+            if let Some(object) = switch.as_object_mut() {
+                object.insert("event_id".to_owned(), serde_json::json!(e.id));
+                object.insert("at".to_owned(), serde_json::json!(e.created_at));
+            }
+            switch
+        })
+        .collect()
+}
+
 /// The default shortest gap `timeline` reports, in seconds.
 pub const DEFAULT_GAP_SECS: i64 = 300;
 

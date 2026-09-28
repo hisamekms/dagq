@@ -71,6 +71,52 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         }
         Ok(None)
     }
+    /// Write `run`'s prompt (`prompt.txt` in `run_dir`) for its task, as
+    /// its worker's route and provider take it; the branch it inherits, if
+    /// any. Written again when the run moves to the other provider
+    /// (ADR-t813-2), whose worker is told otherwise.
+    pub(super) fn write_prompt(
+        &mut self,
+        task: &crate::domain::Task,
+        run: &TaskRun,
+        run_dir: &Path,
+    ) -> Result<Option<Inheritance>> {
+        let predecessors: Vec<PredecessorSummary> = self
+            .queue
+            .predecessors(task.id())?
+            .iter()
+            .map(|predecessor| PredecessorSummary::from_predecessor(&*self.files, predecessor))
+            .collect();
+        let goal_predecessors: Vec<GoalPredecessorSummary> = self
+            .queue
+            .goal_predecessors(task.id())?
+            .iter()
+            .map(|goal| GoalPredecessorSummary::from_goal_predecessor(&*self.files, goal))
+            .collect();
+        let goal = match task.goal_id() {
+            Some(goal_id) => Some(self.queue.show_goal(goal_id)?.goal),
+            None => None,
+        };
+        let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
+        let inherited = self.inheritance(run)?;
+        self.files.write(
+            &run_dir.join("prompt.txt"),
+            with_instruction(
+                prompt(
+                    task,
+                    run,
+                    goal.as_ref(),
+                    &predecessors,
+                    &goal_predecessors,
+                    &siblings,
+                    inherited.as_ref(),
+                )?,
+                self.verifier.language().as_ref(),
+            )
+            .as_bytes(),
+        )?;
+        Ok(inherited)
+    }
     pub(super) fn provision(&mut self, claimed: &TaskRun) -> Result<SessionWatch> {
         let state_dir = &self.layout.runs_dir;
         let paths = RunPaths::new(state_dir, claimed.id());
@@ -92,40 +138,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         let run_env = self.verifier.run_env(&run_dir)?;
         let run = self.queue.run(claimed.id())?;
         let task = self.queue.show(run.task_id())?.task;
-        let predecessors: Vec<PredecessorSummary> = self
-            .queue
-            .predecessors(task.id())?
-            .iter()
-            .map(|predecessor| PredecessorSummary::from_predecessor(&*self.files, predecessor))
-            .collect();
-        let goal_predecessors: Vec<GoalPredecessorSummary> = self
-            .queue
-            .goal_predecessors(task.id())?
-            .iter()
-            .map(|goal| GoalPredecessorSummary::from_goal_predecessor(&*self.files, goal))
-            .collect();
-        let goal = match task.goal_id() {
-            Some(goal_id) => Some(self.queue.show_goal(goal_id)?.goal),
-            None => None,
-        };
-        let siblings = siblings_in_progress(&task, self.queue.tasks_in_progress()?);
-        let inherited = self.inheritance(&run)?;
-        self.files.write(
-            &run_dir.join("prompt.txt"),
-            with_instruction(
-                prompt(
-                    &task,
-                    &run,
-                    goal.as_ref(),
-                    &predecessors,
-                    &goal_predecessors,
-                    &siblings,
-                    inherited.as_ref(),
-                )?,
-                self.verifier.language().as_ref(),
-            )
-            .as_bytes(),
-        )?;
+        let inherited = self.write_prompt(&task, &run, &run_dir)?;
         if let Some(inherited) = &inherited {
             self.queue.record_runtime_event(
                 run.id(),
@@ -660,6 +673,11 @@ impl SessionWatch {
                         if let Some(instruction) = self.stall.take_park() {
                             return self.park_for_resume(sv, run, &instruction).map(Some);
                         }
+                        // An interactive session at a wall whose run moved
+                        // to headless Codex (ADR-t813-2 decision 5).
+                        if let Some(switch) = self.stall.take_switch() {
+                            return self.park_for_switch(sv, run, &switch).map(Some);
+                        }
                         self.watch_background(sv, run)?;
                         self.watch_idle_processes(sv, run)?;
                     }
@@ -830,10 +848,22 @@ impl SessionWatch {
         // only a person moves it, once for every session it stopped
         // (ADR-0047 decision 42).
         let workspace = self.workspace.clone();
-        if let Some(wall) = sv.signals.screen_wall(&screen)
-            && raise_wall(sv, run, &workspace, &screen, wall)?
-        {
-            return self.clear_prompt(sv, run);
+        if let Some(wall) = sv.signals.screen_wall(&screen) {
+            // A worker's own interactive Claude session moves to headless
+            // Codex when it can (ADR-t813-2 decision 5); the watch parks it.
+            if self.stall.parking() {
+                return self.clear_prompt(sv, run);
+            }
+            if self.input_at.is_none()
+                && !self.receipt_seen
+                && let Some(switch) = interactive_switch(sv, run, wall)?
+            {
+                self.stall.request_switch(switch);
+                return self.clear_prompt(sv, run);
+            }
+            if raise_wall(sv, run, &workspace, &screen, wall)? {
+                return self.clear_prompt(sv, run);
+            }
         }
         // A known dialog is answered by rule once its conditions hold
         // (ADR-0047 decision 29); otherwise, or once answered in vain, it is

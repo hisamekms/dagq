@@ -176,7 +176,9 @@ fn a_retry_inherits_the_raised_step() {
                 &[TaskId::new(1)],
                 None,
                 &WorkerTrial::default(),
-                &dagq::domain::worker::Worker::ALL,
+                &dagq::domain::provider_switch::WorkerRoute::direct(
+                    &dagq::domain::worker::Worker::ALL,
+                ),
             )
             .unwrap()
         else {

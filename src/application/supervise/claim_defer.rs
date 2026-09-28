@@ -20,11 +20,12 @@ use crate::domain::{
         self, DEFERRAL_KINDS, Decision, Deferral, InFlight, RELATED_TASKS, deferrals_in_place,
         expected_files, worker_deferral_ended, worker_deferrals_in_place, worker_deferred,
     },
+    provider_switch::route_of,
     stats::{
         ConflictConfigReport,
         conflicts::{CONFLICTS_CONFIG_CHANGED, conflicts_change},
     },
-    worker::{Worker, unavailable},
+    worker::{PROVIDER_UNAVAILABLE, Worker, unavailable},
 };
 
 /// How long the hotspots (and the expected files of the tasks) are reused.
@@ -130,10 +131,12 @@ impl Supervisor<'_> {
             Some(deferrals) => deferrals,
             None => worker_deferrals_in_place(&latest),
         };
-        // Every worker runs here: no candidate is read for its worker.
+        // Every worker runs here, on its own provider or the other one: no
+        // candidate is read for its worker (ADR-t813-2).
+        let routes = self.routes();
         let workers: HashMap<TaskId, Worker> = if Worker::ALL
             .iter()
-            .all(|worker| self.workers.contains(worker))
+            .all(|worker| route_of(&routes, *worker).is_some())
         {
             HashMap::new()
         } else {
@@ -146,9 +149,14 @@ impl Supervisor<'_> {
         let mut order = Vec::new();
         let mut events = Vec::new();
         for &id in &graph.candidates {
-            let reason = workers
-                .get(&id)
-                .and_then(|&worker| unavailable(worker, &self.workers).map(|why| (worker, why)));
+            let reason = workers.get(&id).and_then(|&worker| {
+                route_of(&routes, worker).is_none().then(|| {
+                    // Held rather than missing, it is its provider that
+                    // cannot be used.
+                    let why = unavailable(worker, &self.workers).unwrap_or(PROVIDER_UNAVAILABLE);
+                    (worker, why)
+                })
+            });
             match (reason, worker_deferrals.get(&id)) {
                 (Some(_), Some(_)) => continue,
                 (Some((worker, why)), None) => {

@@ -12,8 +12,10 @@
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
+use crate::domain::queue_hold::Wall;
 use crate::domain::tokens::TokenUsage;
 use crate::domain::turn::{TurnFailure, TurnResult, TurnSignal, shortened};
+use crate::infrastructure::claude::job_wall;
 
 /// The permission mode a headless worker's turn is started in: tools that
 /// need a person's permission are refused rather than waited on, and the
@@ -123,14 +125,22 @@ impl ClaudeTurnReader {
         signals
     }
 
-    /// Why a turn that failed failed.
-    fn failure(&self, result: Option<&Value>, message: &str) -> TurnFailure {
+    /// Why a turn that failed failed. Past the stream's own signs, the
+    /// result's text and stderr are read for a login or a usage limit as
+    /// every Claude job's output is (`claude::job_wall`, task 438), so the
+    /// worker and the jobs tell them by the same words.
+    fn failure(&self, result: Option<&Value>, message: &str, stderr: &str) -> TurnFailure {
         let status = result.and_then(|r| r["api_error_status"].as_i64());
         if self.authentication.is_some() || status == Some(401) {
             return TurnFailure::Authentication;
         }
         if self.usage_limit.is_some() || status == Some(429) {
             return TurnFailure::UsageLimit;
+        }
+        match job_wall(&format!("{message}\n{stderr}")) {
+            Some(Wall::Authentication) => return TurnFailure::Authentication,
+            Some(Wall::UsageLimit) => return TurnFailure::UsageLimit,
+            None => (),
         }
         let lower = message.to_ascii_lowercase();
         if status == Some(404)
@@ -219,7 +229,8 @@ impl TurnReader for ClaudeTurnReader {
                 })
             })
             .or_else(|| self.last_text.clone());
-        let failure = is_error.then(|| self.failure(result, message.as_deref().unwrap_or("")));
+        let failure =
+            is_error.then(|| self.failure(result, message.as_deref().unwrap_or(""), stderr));
         TurnResult {
             result_seen: result.is_some(),
             is_error,
@@ -420,6 +431,22 @@ mod tests {
         let result = reader.finish(Some(&exit(0)), "");
         assert!(result.is_error);
         assert_eq!(result.message.as_deref(), Some("halfway"));
+        // Claude Code's words for the usage limit or a login, in the
+        // result or on stderr, as a job's output is read (task 438).
+        let (mut reader, _) = read(&[
+            json!({"type": "result", "is_error": true, "result": "Claude AI usage limit reached|1790535600"}),
+        ]);
+        assert_eq!(
+            reader.finish(Some(&exit(1)), "").failure,
+            Some(TurnFailure::UsageLimit)
+        );
+        let (mut reader, _) = read(&[init("auto")]);
+        assert_eq!(
+            reader
+                .finish(Some(&exit(1)), "Invalid API key · Please run /login\n")
+                .failure,
+            Some(TurnFailure::Authentication)
+        );
         // Failed errors of a result are joined.
         let (mut reader, _) = read(&[
             json!({"type": "result", "subtype": "error_max_turns", "is_error": true, "errors": ["Reached maximum number of turns (1)"]}),

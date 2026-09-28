@@ -162,6 +162,17 @@ string_enum!(Provider {
     Codex => "codex",
 });
 
+impl Provider {
+    /// The provider a worker moves to when this one cannot be used
+    /// (ADR-t813-2 decision 2).
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Claude,
+        }
+    }
+}
+
 // How `up` started a supervisor (ADR-0011). `Launchd` is the resident
 // LaunchAgent; `InCmux` is the fallback that runs `supervise` inside the cmux
 // workspace `[<repo>]supervisor`, which nothing restarts. A registration
@@ -728,6 +739,7 @@ pub mod plan_review;
 pub mod planner;
 pub mod prediction;
 pub mod proposal;
+pub mod provider_switch;
 pub mod queue_hold;
 pub mod reason;
 mod receipt;

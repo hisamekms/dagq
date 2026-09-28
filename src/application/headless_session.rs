@@ -13,7 +13,11 @@
 //! session, so that the run goes to its recovery job as a run that failed;
 //! one that failed at the provider's login or usage limit does not, and
 //! the supervisor holds the queue for a person as it does for an
-//! interactive session.
+//! interactive session. A turn whose agent did not start is one too
+//! (ADR-t813-2): the supervisor then moves the run to the other provider,
+//! and the wrapper runs the next request as the first turn of a new session
+//! of that provider in the same worktree (the run's `actual_provider` says
+//! which, read before every turn).
 
 use crate::domain::EventKind;
 use anyhow::{Context, Result};
@@ -33,12 +37,14 @@ use super::{
     },
 };
 use crate::domain::{
-    ActorContext, TaskRun, event_kind,
+    ActorContext, Provider, TaskRun, event_kind,
+    provider_switch::{since_switch, switches},
     stall::StallConfig,
     tokens::TokenUsage,
     turn::{
-        LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSignal,
-        exit_path, idle_marker, output_path, pending, request_path, taken_path, turns_dir,
+        LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
+        TurnSignal, exit_path, idle_marker, output_path, pending, request_path, session_name,
+        taken_path, turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -48,13 +54,50 @@ pub(super) struct Turns<'a> {
     pub(super) queue: &'a mut dyn Queue,
     pub(super) db: &'a Path,
     pub(super) run: &'a TaskRun,
+    /// The agent of the run's provider when the wrapper started.
     pub(super) provider: &'a dyn AgentProvider,
+    /// The headless agent of the other provider, which the run's turns go
+    /// to once the supervisor moved it there (ADR-t813-2); `None` when the
+    /// binary has none.
+    pub(super) other: Option<&'a dyn AgentProvider>,
     pub(super) spawner: &'a dyn Spawner,
     pub(super) files: &'a dyn RunFiles,
     pub(super) pid: u32,
     /// The wrapper of a `needs_session` run's resume: it waits for the
     /// supervisor's request instead of starting with the task's prompt.
     pub(super) resume: bool,
+}
+
+/// The session of the provider a run is on, as its events since it last
+/// moved to that provider say (ADR-t813-2 decision 4).
+struct Agent {
+    provider: Provider,
+    /// A turn of it had its model answer: there is a conversation to
+    /// resume.
+    created: bool,
+    /// The session the agent said it started (Codex's thread), the last
+    /// recorded.
+    identified: Option<String>,
+    /// The name of its session for a provider that takes one (Claude): the
+    /// run's id until the run first switched, a name of its own after.
+    name: String,
+}
+
+impl Agent {
+    fn new(run: &TaskRun, provider: Provider, events: &[crate::domain::RunEvent]) -> Self {
+        let current = since_switch(events);
+        Self {
+            provider,
+            created: current.iter().any(|e| {
+                e.kind == event_kind::TURN_FINISHED && e.payload["session_created"] == true
+            }),
+            identified: current
+                .iter()
+                .rfind(|e| e.kind == event_kind::TURN_SESSION_IDENTIFIED)
+                .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned)),
+            name: session_name(run.id().as_str(), switches(events)),
+        }
+    }
 }
 
 /// How a turn ended.
@@ -69,6 +112,20 @@ struct Stop {
     outcome: TurnOutcome,
     failure: Option<TurnFailure>,
     why: String,
+}
+
+/// Whether starting a turn failed because its executable could not be run
+/// (not found, not executable), rather than for anything else the wrapper
+/// met on the way (the run's settings, its worktree).
+fn executable_unrunnable(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            )
+        })
+    })
 }
 
 /// The lines of a file another process appends to, read as they come.
@@ -106,7 +163,7 @@ fn say(text: &str) {
     }
 }
 
-impl Turns<'_> {
+impl<'a> Turns<'a> {
     /// Run the session's turns until the exit request or a turn that ends
     /// it; the wrapper's exit code: 0 after the exit request, 1 after a
     /// turn that failed or was stopped. `child_may_be_alive` is set while a
@@ -117,21 +174,14 @@ impl Turns<'_> {
         // request, its untaken requests) before it opened this workspace.
         self.files.create_dir_all(&turns_dir(&run_dir))?;
         let events = self.queue.run_events(self.run.id())?;
-        let mut created = events
-            .iter()
-            .any(|e| e.kind == event_kind::TURN_FINISHED && e.payload["session_created"] == true);
         let mut turn = events
             .iter()
             .filter(|e| e.kind == event_kind::TURN_STARTED)
             .count() as u64;
-        // The session an agent that names its own (Codex's thread) said it
-        // started, the last one recorded.
-        let from_output = self.provider.turn_session_from_output();
-        let mut identified = events
-            .iter()
-            .rfind(|e| e.kind == event_kind::TURN_SESSION_IDENTIFIED)
-            .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned));
-        let task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
+        // The session of the provider the run is on: what it did since the
+        // run last moved to it (ADR-t813-2).
+        let mut on = Agent::new(self.run, self.run.actual_provider(), &events);
+        let mut task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
         let mut first = (!self.resume).then(|| task_prompt.clone());
         let mut registered = false;
         // The request of a turn that resumed a thread its agent does not
@@ -148,16 +198,31 @@ impl Turns<'_> {
                     }
                 },
             };
+            // The supervisor moved the run to the other provider: this turn
+            // is the first of a new session there, in the same worktree.
+            let provider = self.queue.run(self.run.id())?.actual_provider();
+            if provider != on.provider {
+                on = Agent::new(self.run, provider, &self.queue.run_events(self.run.id())?);
+                // The supervisor wrote the task's prompt again for this
+                // provider's worker.
+                task_prompt = self.files.read_to_string(&run_dir.join("prompt.txt"))?;
+                say(&format!(
+                    "the run moved to {}; a new session starts",
+                    provider.as_str()
+                ));
+            }
+            let agent = self.agent(on.provider)?;
             // A session is resumed once its model answered or the agent
             // keeps it (a turn that failed before an answer may have left
             // it); an agent that names its own resumes the one it said it
             // started. One that never was starts with the task's prompt,
             // the request after it.
+            let from_output = agent.turn_session_from_output();
             let resume = if from_output {
-                identified.clone()
+                on.identified.clone()
             } else {
-                (created || self.provider.turn_session_exists(self.run))
-                    .then(|| self.run.id().to_string())
+                (on.created || agent.turn_session_exists(self.run, &on.name))
+                    .then(|| on.name.clone())
             };
             let asked = prompt.clone();
             let prompt = match &request {
@@ -174,13 +239,13 @@ impl Turns<'_> {
                 turn,
                 &prompt,
                 resume.as_deref(),
-                &mut identified,
+                &mut on,
                 request.as_ref(),
                 &session,
                 &mut registered,
                 child_may_be_alive,
             )?;
-            created |= ended.result.session_created;
+            on.created |= ended.result.session_created;
             if let Some(missing) = resume.filter(|_| from_output && ended.result.session_missing) {
                 // The agent kept no thread of that id (the turn that named
                 // it ended before it was saved): forget it and start anew.
@@ -191,11 +256,11 @@ impl Turns<'_> {
                         "turn": turn,
                         "session_id": null,
                         "missing": missing,
-                        "provider": self.run.actual_provider(),
+                        "provider": on.provider,
                     }),
                 )?;
                 say(&format!("session {missing} is gone; a new one starts"));
-                identified = None;
+                on.identified = None;
                 again = Some((asked, request));
                 continue;
             }
@@ -211,6 +276,21 @@ impl Turns<'_> {
                 });
             }
         }
+    }
+
+    /// The agent of `provider`: the one the wrapper started with, or the
+    /// other provider's.
+    fn agent(&self, provider: Provider) -> Result<&'a dyn AgentProvider> {
+        if provider == self.run.actual_provider() {
+            return Ok(self.provider);
+        }
+        self.other.with_context(|| {
+            format!(
+                "run {} moved to {}, which this wrapper has no headless agent of",
+                self.run.id(),
+                provider.as_str()
+            )
+        })
     }
 
     /// Wait for the supervisor's next request, heartbeating, and take it;
@@ -250,10 +330,11 @@ impl Turns<'_> {
         }
     }
 
-    /// Run turn `turn` with `prompt`, resuming the session `resume`, and
-    /// record it; `identified` is the session the agent last said it
-    /// started. A turn that may still run when an error ends the wrapper
-    /// is stopped with its group first.
+    /// Run turn `turn` with `prompt` on the agent `on` is of, resuming the
+    /// session `resume` (or starting one), and record it. A turn that may
+    /// still run when an error ends the wrapper is stopped with its group
+    /// first; one whose agent could not be started is recorded as failed
+    /// to start (`launch`).
     #[allow(clippy::too_many_arguments)]
     fn turn(
         &mut self,
@@ -261,7 +342,7 @@ impl Turns<'_> {
         turn: u64,
         prompt: &str,
         resume: Option<&str>,
-        identified: &mut Option<String>,
+        on: &mut Agent,
         request: Option<&TurnRequest>,
         session: &WorkerSession,
         registered: &mut bool,
@@ -277,33 +358,46 @@ impl Turns<'_> {
         );
         let stdout = output_path(run_dir, turn, "jsonl");
         let stderr = output_path(run_dir, turn, "err");
-        let mut reader = self.provider.turn_reader()?;
-        let mut child = HostActorExecutor::new(self.db)
-            .with_provider(self.provider)
+        let agent = self.agent(on.provider)?;
+        let mut reader = agent.turn_reader()?;
+        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        let spawned = HostActorExecutor::new(self.db)
+            .with_provider(agent)
             .with_spawner(self.spawner)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::worker(run.id(), run.task_id()),
-                WorkspaceAccess::Write(PathBuf::from(
-                    run.worktree_path().context("missing worktree")?,
-                )),
+                WorkspaceAccess::Write(worktree),
                 ActorProgram::SessionAgent {
                     agent: SessionAgent::Turn {
                         run,
                         prompt,
-                        resume,
+                        session: match resume {
+                            Some(id) => TurnSession::Resume(id),
+                            None => TurnSession::New(&on.name),
+                        },
                         stdout: &stdout,
                         stderr: &stderr,
                     },
                     model: Some((&session.model, &session.effort)),
                 },
-            ))?
-            .process()?;
+            ))
+            .and_then(|handle| handle.process());
+        let mut child = match spawned {
+            Ok(child) => child,
+            // The agent's executable cannot be run: its provider cannot be
+            // used (ADR-t813-2 decision 2). Any other error is the
+            // wrapper's, as before.
+            Err(error) if executable_unrunnable(&error) => {
+                return self.launch_failed(run_dir, turn, resume, on, request, &error);
+            }
+            Err(error) => return Err(error),
+        };
         *child_may_be_alive = true;
         let ended = self.follow_turn(
             run_dir,
             turn,
             resume,
-            identified,
+            on,
             request,
             registered,
             &mut *child,
@@ -334,7 +428,7 @@ impl Turns<'_> {
         run_dir: &Path,
         turn: u64,
         resume: Option<&str>,
-        identified: &mut Option<String>,
+        on: &mut Agent,
         request: Option<&TurnRequest>,
         registered: &mut bool,
         child: &mut dyn Spawned,
@@ -353,28 +447,9 @@ impl Turns<'_> {
             registration?;
             *registered = true;
         }
-        let what = request.map_or("the task's prompt", |r| r.what.as_str());
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::TurnStarted,
-            json!({
-                "turn": turn,
-                "resume": resume.is_some(),
-                "request": request.map(|r| r.seq),
-                "what": what,
-                "pid": child.id(),
-                // An agent that names its own session names a new one in
-                // its output.
-                "session_id": resume.map(str::to_owned).or_else(|| {
-                    (!self.provider.turn_session_from_output()).then(|| run.id().to_string())
-                }),
-                "silence_secs": limits.silence_secs,
-                "limit_secs": limits.limit_secs,
-            }),
-        )?;
-        say(&format!("turn {turn} started: {what}"));
+        self.started(turn, resume, on, request, Some(child.id()), limits)?;
         let (exit, stop, mut tail) =
-            self.follow(run_dir, turn, identified, child, reader, stdout, limits)?;
+            self.follow(run_dir, turn, on, child, reader, stdout, limits)?;
         // What it wrote after the last look.
         for line in tail.read(self.files, stdout, true) {
             for signal in reader.line(&line) {
@@ -383,19 +458,124 @@ impl Turns<'_> {
                     ..
                 } = signal
                 {
-                    self.identify(turn, identified, &id)?;
+                    self.identify(turn, on, &id)?;
                 }
             }
         }
         let stderr_text = self.files.read_to_string(stderr).unwrap_or_default();
-        let result = reader.finish(exit.as_ref(), &stderr_text);
+        let mut result = reader.finish(exit.as_ref(), &stderr_text);
+        // An agent that exited in failure (not by a signal) with nothing on
+        // its output, and that its reader could tell nothing of, did not
+        // start: its provider cannot be used (ADR-t813-2 decision 2).
+        if stop.is_none()
+            && tail.offset == 0
+            && exit
+                .as_ref()
+                .is_some_and(|exit| !exit.success && exit.code.is_some())
+            && !result.session_missing
+            && matches!(result.failure, None | Some(TurnFailure::Other))
+        {
+            result.is_error = true;
+            result.failure = Some(TurnFailure::Launch);
+        }
         let (outcome, failure) = match &stop {
             Some(stop) => (stop.outcome, stop.failure.or(result.failure)),
             None if result.is_error => (TurnOutcome::Failed, result.failure),
             None => (TurnOutcome::Succeeded, None),
         };
         let exit_code = exit.as_ref().and_then(|exit| exit.code);
+        let stopped = stop.as_ref().map(|stop| stop.why.as_str());
+        self.finished(turn, outcome, failure, stopped, exit_code, result)
+    }
+
+    /// Record that turn `turn` started (its agent's `pid`, none when it
+    /// could not be started).
+    fn started(
+        &mut self,
+        turn: u64,
+        resume: Option<&str>,
+        on: &Agent,
+        request: Option<&TurnRequest>,
+        pid: Option<u32>,
+        limits: TurnLimits,
+    ) -> Result<()> {
+        let what = request.map_or("the task's prompt", |r| r.what.as_str());
+        let from_output = self.agent(on.provider)?.turn_session_from_output();
+        self.queue.record_runtime_event(
+            self.run.id(),
+            EventKind::TurnStarted,
+            json!({
+                "turn": turn,
+                "resume": resume.is_some(),
+                "request": request.map(|r| r.seq),
+                "what": what,
+                "pid": pid,
+                "provider": on.provider,
+                // An agent that names its own session names a new one in
+                // its output.
+                "session_id": resume
+                    .map(str::to_owned)
+                    .or_else(|| (!from_output).then(|| on.name.clone())),
+                "silence_secs": limits.silence_secs,
+                "limit_secs": limits.limit_secs,
+            }),
+        )?;
+        say(&format!("turn {turn} started: {what}"));
+        Ok(())
+    }
+
+    /// Turn `turn`'s agent could not be started (`error`): recorded as a
+    /// turn that started and failed to start (`launch`), with the idle
+    /// marker, so that the supervisor moves the run to the other provider
+    /// (ADR-t813-2 decision 2).
+    fn launch_failed(
+        &mut self,
+        run_dir: &Path,
+        turn: u64,
+        resume: Option<&str>,
+        on: &Agent,
+        request: Option<&TurnRequest>,
+        error: &anyhow::Error,
+    ) -> Result<Turn> {
+        let limits = TurnLimits::parse_or(
+            self.files
+                .read_to_string(&turns_dir(run_dir).join(LIMITS_FILE))
+                .ok()
+                .as_deref(),
+            StallConfig::default().turn_limits(),
+        );
+        self.started(turn, resume, on, request, None, limits)?;
+        let result = TurnResult {
+            is_error: true,
+            failure: Some(TurnFailure::Launch),
+            message: Some(format!("the agent could not be started: {error:#}")),
+            ..TurnResult::default()
+        };
+        self.finished(
+            turn,
+            TurnOutcome::Failed,
+            Some(TurnFailure::Launch),
+            None,
+            None,
+            result,
+        )
+    }
+
+    /// Record how turn `turn` ended and write the idle marker.
+    fn finished(
+        &mut self,
+        turn: u64,
+        outcome: TurnOutcome,
+        failure: Option<TurnFailure>,
+        stopped: Option<&str>,
+        exit_code: Option<i32>,
+        result: TurnResult,
+    ) -> Result<Turn> {
+        let run = self.run;
         let (tokens, tokens_total) = self.turn_tokens(&result)?;
+        // The provider the turn ran on: the wrapper's copy of the run may
+        // predate a switch (ADR-t813-2).
+        let provider = self.queue.run(run.id())?.actual_provider();
         self.queue.record_runtime_event(
             run.id(),
             EventKind::TurnFinished,
@@ -403,7 +583,7 @@ impl Turns<'_> {
                 "turn": turn,
                 "outcome": outcome,
                 "failure": failure,
-                "stopped": stop.as_ref().map(|stop| stop.why.as_str()),
+                "stopped": stopped,
                 "exit_code": exit_code,
                 "message": result.message,
                 "session_id": result.session_id,
@@ -412,7 +592,7 @@ impl Turns<'_> {
                 "duration_ms": result.duration_ms,
                 "cost_usd": result.cost_usd,
                 "usage": result.usage,
-                "provider": run.actual_provider(),
+                "provider": provider,
                 // The runtime's kinds of token, which the span sums
                 // (ADR-t813-2 decision 7).
                 "tokens": tokens.as_ref().map(TokenUsage::payload),
@@ -480,10 +660,12 @@ impl Turns<'_> {
     }
 
     /// Record the session `id` the agent said turn `turn` runs in, when it
-    /// names its own and `id` is not the one `identified` last: the next
-    /// turns resume it (Codex's thread, ADR-t813-1).
-    fn identify(&mut self, turn: u64, identified: &mut Option<String>, id: &str) -> Result<()> {
-        if !self.provider.turn_session_from_output() || identified.as_deref() == Some(id) {
+    /// names its own and `id` is not the one it said last: the next turns
+    /// resume it (Codex's thread, ADR-t813-1).
+    fn identify(&mut self, turn: u64, on: &mut Agent, id: &str) -> Result<()> {
+        if !self.agent(on.provider)?.turn_session_from_output()
+            || on.identified.as_deref() == Some(id)
+        {
             return Ok(());
         }
         self.queue.record_runtime_event(
@@ -492,10 +674,10 @@ impl Turns<'_> {
             json!({
                 "turn": turn,
                 "session_id": id,
-                "provider": self.run.actual_provider(),
+                "provider": on.provider,
             }),
         )?;
-        *identified = Some(id.to_owned());
+        on.identified = Some(id.to_owned());
         Ok(())
     }
 
@@ -507,7 +689,7 @@ impl Turns<'_> {
         &mut self,
         run_dir: &Path,
         turn: u64,
-        identified: &mut Option<String>,
+        on: &mut Agent,
         child: &mut dyn Spawned,
         reader: &mut dyn TurnReader,
         stdout: &Path,
@@ -533,9 +715,9 @@ impl Turns<'_> {
                             ..
                         } => {
                             if let Some(id) = session_id {
-                                self.identify(turn, identified, &id)?;
+                                self.identify(turn, on, &id)?;
                             }
-                            if let Some(expected) = self.provider.turn_permission_mode()
+                            if let Some(expected) = self.agent(on.provider)?.turn_permission_mode()
                                 && permission_mode.as_deref() != Some(expected)
                                 && stop.is_none()
                             {
@@ -610,6 +792,19 @@ impl Turns<'_> {
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
+
+    #[test]
+    fn only_an_executable_that_cannot_be_run_is_a_start_that_failed() {
+        let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("spawn /nonexistent/codex");
+        assert!(executable_unrunnable(&missing));
+        let denied =
+            anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(executable_unrunnable(&denied));
+        assert!(!executable_unrunnable(&anyhow::anyhow!("missing worktree")));
+        let full = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert!(!executable_unrunnable(&full));
+    }
 
     #[test]
     fn a_tail_reads_whole_lines_as_they_come() {

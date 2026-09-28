@@ -104,6 +104,9 @@ pub struct Session<'a> {
     /// The queue's database, which the executor starts the agent on.
     pub db: &'a Path,
     pub provider: &'a dyn AgentProvider,
+    /// The headless agent of the other provider, for a headless run the
+    /// supervisor moves there (ADR-t813-2); `None` when there is none.
+    pub other: Option<&'a dyn AgentProvider>,
     pub spawner: &'a dyn Spawner,
     pub files: &'a dyn RunFiles,
     pub pid: u32,
@@ -125,6 +128,7 @@ pub fn run_session(
         queue,
         db,
         provider,
+        other,
         spawner,
         files,
         pid,
@@ -156,6 +160,7 @@ pub fn run_session(
             db,
             run: &run,
             provider,
+            other,
             spawner,
             files,
             pid,

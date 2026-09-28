@@ -210,6 +210,9 @@ impl Supervisor<'_> {
             return Err(error);
         }
         let restarted = if answer == DONE {
+            // A person fixed what the providers stopped at: Codex is tried
+            // again too (ADR-t813-2 decision 6).
+            self.release_provider_holds(DONE)?;
             self.restart_failed_jobs(ask)
         } else {
             Vec::new()

@@ -150,7 +150,9 @@ fn claims_choose_the_session_in_their_transaction() {
                 &[TaskId::new(task)],
                 None,
                 trial,
-                &dagq::domain::worker::Worker::ALL,
+                &dagq::domain::provider_switch::WorkerRoute::direct(
+                    &dagq::domain::worker::Worker::ALL,
+                ),
             )
             .unwrap();
         let ClaimOutcome::Claimed { run } = outcome else {
@@ -202,7 +204,9 @@ fn stats_compare_the_groups() {
                 &[TaskId::new(task)],
                 None,
                 &on,
-                &dagq::domain::worker::Worker::ALL,
+                &dagq::domain::provider_switch::WorkerRoute::direct(
+                    &dagq::domain::worker::Worker::ALL,
+                ),
             )
             .unwrap()
         else {

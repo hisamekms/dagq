@@ -243,6 +243,16 @@ impl ReviseWatch {
                 self.sent = Instant::now();
             }
         }
+        // A turn at its provider's wall (ADR-t813-2): the call went to the
+        // other provider, or the run waits in the hold ask.
+        match self.live.provider_wall(sv, run)? {
+            WallGate::Held => return Ok(None),
+            WallGate::Moved(_) => {
+                self.sent = Instant::now();
+                self.start = None;
+            }
+            WallGate::Open => (),
+        }
         // An answer delivered by hand (or by the supervisor this one
         // adopted the run from) is input too: the idle marker of the stop at
         // the question is older than it. Its close is known to the second: a

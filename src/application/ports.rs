@@ -491,18 +491,19 @@ pub trait AgentProvider {
     }
     /// One turn of a headless worker (ADR-t813-1 decision 1): a
     /// non-interactive call in the run's worktree with `prompt` as its only
-    /// input, starting a session or, with `resume`, going on with the
-    /// session of that id, under the run's settings. Its stdout is the
-    /// turn's output for [`AgentProvider::turn_reader`]. The caller closes
-    /// stdin, says where the output goes and starts it in a process group
-    /// of its own. A provider without one refuses.
+    /// input, starting a new session (named as `session` says, for a
+    /// provider that takes the name) or going on with the session of that
+    /// id, under the run's settings. Its stdout is the turn's output for
+    /// [`AgentProvider::turn_reader`]. The caller closes stdin, says where
+    /// the output goes and starts it in a process group of its own. A
+    /// provider without one refuses.
     fn turn_command(
         &self,
         run: &crate::domain::TaskRun,
         prompt: &str,
-        resume: Option<&str>,
+        session: crate::domain::turn::TurnSession<'_>,
     ) -> Result<CommandSpec> {
-        let _ = (run, prompt, resume);
+        let _ = (run, prompt, session);
         anyhow::bail!("this provider has no headless worker")
     }
     /// Whether the agent names a new session itself, in the turn's output
@@ -512,12 +513,12 @@ pub trait AgentProvider {
     fn turn_session_from_output(&self) -> bool {
         false
     }
-    /// Whether the agent keeps a session named by `run`'s id already (its
-    /// transcript exists), so that the next turn resumes it rather than
-    /// starting one of that name again: a turn that failed before its
-    /// model answered (a login that ran out) may have left one.
-    fn turn_session_exists(&self, run: &crate::domain::TaskRun) -> bool {
-        let _ = run;
+    /// Whether the agent keeps a session named `name` in `run`'s worktree
+    /// already (its transcript exists), so that the next turn resumes it
+    /// rather than starting one of that name again: a turn that failed
+    /// before its model answered (a login that ran out) may have left one.
+    fn turn_session_exists(&self, run: &crate::domain::TaskRun, name: &str) -> bool {
+        let _ = (run, name);
         false
     }
     /// The reader of a headless turn's output, one per turn.
@@ -1326,8 +1327,18 @@ pub trait RunTransitions {
         order: &[TaskId],
         attributes: Option<&serde_json::Value>,
         trial: &crate::domain::worker_model::WorkerTrial,
-        workers: &[crate::domain::worker::Worker],
+        routes: &[crate::domain::provider_switch::WorkerRoute],
     ) -> Result<ClaimOutcome>;
+    /// Move the run's worker to `worker`, the other provider's, under the
+    /// lease `token` (ADR-t813-2 decision 4): recorded as
+    /// `provider_switched` with `payload`.
+    fn switch_provider(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        worker: crate::domain::worker::Worker,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// Record a runtime error on the run without changing its status.
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()>;
     /// Save the paths a claimed run is provisioned at.

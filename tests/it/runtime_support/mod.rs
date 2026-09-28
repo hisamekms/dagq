@@ -778,13 +778,15 @@ impl WorkspaceBackend for TestWorkspace {
         let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
-            if let Some(provider) = headless {
-                return runtime::session_with_provider(
+            if let Some((provider, other)) = headless {
+                return runtime::session_with_providers(
                     &db,
                     &id,
                     &LeaseToken::new(&token),
                     &provider,
+                    Some(&other),
                     &spawner,
+                    false,
                 );
             }
             let provider = TestProvider {
@@ -869,13 +871,15 @@ impl WorkspaceBackend for TestWorkspace {
         let workspace = workspace_id(sessions.len());
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
-            if let Some(provider) = headless {
-                return runtime::resume_session_with_provider(
+            if let Some((provider, other)) = headless {
+                return runtime::session_with_providers(
                     &db,
                     &id,
                     &LeaseToken::new(&token),
                     &provider,
+                    Some(&other),
                     &spawner,
+                    true,
                 );
             }
             let provider = TestProvider {
@@ -1163,17 +1167,33 @@ impl WorkspaceBackend for TestWorkspace {
     }
 }
 
-/// The provider of a headless run's wrapper (ADR-t813-1): the run's
+/// The providers of a headless run's wrapper (ADR-t813-1): the run's
 /// provider's own turns and reader (Claude Code's calling the stub `claude`
-/// at `claude`, Codex's the stub `codex` at `codex`), with the test tick.
-/// `None` for an interactive run.
+/// at `claude`, Codex's the stub `codex` at `codex`), with the test tick,
+/// and the other provider's, which the run's turns go to once the
+/// supervisor moves it there (ADR-t813-2). `None` for an interactive run.
 fn headless_provider(
     run: &TaskRun,
     claude: Option<&Path>,
     codex: Option<&Path>,
-) -> Option<HeadlessProvider> {
+) -> Option<(HeadlessProvider, HeadlessProvider)> {
     (run.worker_mode() == dagq::domain::worker::WorkerMode::Headless).then(|| {
-        let agent: Box<dyn AgentProvider + Send> = match run.actual_provider() {
+        let provider = run.actual_provider();
+        (
+            headless_of(provider, claude, codex),
+            headless_of(provider.other(), claude, codex),
+        )
+    })
+}
+
+/// `provider`'s headless turns with its stub.
+fn headless_of(
+    provider: dagq::domain::Provider,
+    claude: Option<&Path>,
+    codex: Option<&Path>,
+) -> HeadlessProvider {
+    {
+        let agent: Box<dyn AgentProvider + Send> = match provider {
             dagq::domain::Provider::Codex => Box::new(dagq::infrastructure::codex::Codex {
                 executable: codex
                     .unwrap_or(Path::new("/nonexistent/headless-codex"))
@@ -1188,7 +1208,7 @@ fn headless_provider(
             }
         };
         HeadlessProvider { agent }
-    })
+    }
 }
 
 /// A provider's headless turns (the real `turn_command` and reader) with
@@ -1222,9 +1242,9 @@ impl AgentProvider for HeadlessProvider {
         &self,
         run: &TaskRun,
         prompt: &str,
-        resume: Option<&str>,
+        session: dagq::domain::turn::TurnSession<'_>,
     ) -> Result<CommandSpec> {
-        self.agent.turn_command(run, prompt, resume)
+        self.agent.turn_command(run, prompt, session)
     }
     fn turn_reader(&self) -> Result<Box<dyn dagq::application::TurnReader>> {
         self.agent.turn_reader()
@@ -1286,10 +1306,10 @@ fail() {{
 }}
 commit() {{ printf 'change by %s turn %s\n' "$SESSION" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
 receipt() {{
-  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$SESSION" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
+  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "$SESSION" --kind worker_question --because scope --question "$1" >/dev/null; }}
+ask() {{ "$DAGQ" --db "$DB" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --question "$1" >/dev/null; }}
 printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 . {turns}
 [ -n "$RESULTED" ] || result
@@ -1527,7 +1547,7 @@ const EVENTS_PRINTED: i64 = 200;
 /// stderr, oldest first, for a supervise that timed out. It runs on the
 /// timeout monitor's cleanup thread while the supervisor may still write,
 /// so it only reads; what cannot be read is said instead.
-fn print_queue_events(db: &Path) {
+pub fn print_queue_events(db: &Path) {
     use std::io::Write as _;
     let read = || -> rusqlite::Result<Vec<String>> {
         let connection =
@@ -2393,4 +2413,30 @@ pub fn stalled_asks(queue: &SqliteQueue) -> Vec<dagq::domain::Ask> {
         .into_iter()
         .filter(|ask| ask.kind == AskKind::Stalled)
         .collect()
+}
+
+/// Open the queue's hold ask of `reason` (and `subject`) with no run in
+/// it, as the runtime does when Claude's login or its usage limit stops
+/// the work: Claude is held (ADR-0047 decision 42, ADR-t813-2).
+pub fn open_hold_ask(
+    db: &Path,
+    reason: dagq::domain::AskReason,
+    subject: Option<&str>,
+) -> dagq::domain::Ask {
+    SqliteQueue::open(db)
+        .unwrap()
+        .hold(dagq::domain::NewHold {
+            reason_category: reason,
+            subject: subject.map(str::to_owned),
+            run_id: None,
+            job: None,
+            question: "the login ran out".into(),
+            options: dagq::domain::HOLD_OPTIONS
+                .iter()
+                .map(|o| (*o).to_owned())
+                .collect(),
+            asked_by: "supervisor".into(),
+        })
+        .unwrap()
+        .ask
 }

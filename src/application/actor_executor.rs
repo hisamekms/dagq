@@ -84,14 +84,13 @@ pub enum SessionAgent<'a> {
     Worker { run: &'a TaskRun, prompt: &'a str },
     /// The same session reopened for a `needs_session` run (ADR-0019).
     Resume { run: &'a TaskRun },
-    /// One turn of a headless worker (ADR-t813-1): `prompt` starting its
-    /// session or, with `resume`, going on with the session of that id,
-    /// its output to `stdout` and `stderr` rather than the wrapper's
-    /// terminal.
+    /// One turn of a headless worker (ADR-t813-1): `prompt` starting a
+    /// session or going on with one, as `session` says, its output to
+    /// `stdout` and `stderr` rather than the wrapper's terminal.
     Turn {
         run: &'a TaskRun,
         prompt: &'a str,
-        resume: Option<&'a str>,
+        session: crate::domain::turn::TurnSession<'a>,
         stdout: &'a Path,
         stderr: &'a Path,
     },
@@ -609,12 +608,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     SessionAgent::Turn {
                         run,
                         prompt,
-                        resume,
+                        session,
                         stdout,
                         stderr,
                     } => {
                         streams = Streams::Files { stdout, stderr };
-                        provider.turn_command(run, prompt, resume)?
+                        provider.turn_command(run, prompt, session)?
                     }
                     SessionAgent::Planner(planner) => provider.planner_command(&planner)?,
                 };

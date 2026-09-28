@@ -201,6 +201,16 @@ impl TaskRun {
         &self.created_at
     }
 
+    /// This run, just claimed, run on `worker` rather than its task's: its
+    /// task's provider cannot be used, and the claim starts it on the other
+    /// one (ADR-t813-2 decisions 2 and 6). The requested provider stays the
+    /// task's.
+    pub fn running_on(mut self, worker: super::worker::Worker) -> Self {
+        self.actual_provider = worker.provider;
+        self.worker_mode = worker.mode;
+        self
+    }
+
     /// The run with its queue-local paths re-derived under `runs_dir`. The
     /// stored values are the absolute paths of the queue at claim time and go
     /// stale when the queue directory moves; a path that was never planned

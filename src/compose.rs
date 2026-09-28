@@ -2225,6 +2225,14 @@ pub fn session(
             worker.mode.as_str()
         )
     })?;
+    // The other provider's headless turns, for a run the supervisor moves
+    // there when its own provider cannot be used (ADR-t813-2).
+    let other = workers
+        .get(Worker {
+            provider: worker.provider.other(),
+            mode: WorkerMode::Headless,
+        })
+        .map(|adapter| adapter.agent);
     let cmux = Cmux {
         executable: cmux.into(),
     };
@@ -2236,6 +2244,7 @@ pub fn session(
         id,
         token,
         adapter.agent,
+        other,
         &LocalSpawner,
         resume,
         own_workspace(&cmux),
@@ -2259,7 +2268,22 @@ pub fn session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, spawner, false, None)
+    run_session(db, id, token, provider, None, spawner, false, None)
+}
+
+/// The wrapper (`resume` for `session --resume`) with `provider`'s agent
+/// and, for a headless run moved to the other provider (ADR-t813-2),
+/// `other`'s, started by `spawner`.
+pub fn session_with_providers(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
+    spawner: &dyn Spawner,
+    resume: bool,
+) -> Result<Value> {
+    run_session(db, id, token, provider, other, spawner, resume, None)
 }
 
 /// The wrapper of a resumed session: `session --resume`.
@@ -2270,7 +2294,7 @@ pub fn resume_session_with_provider(
     provider: &dyn AgentProvider,
     spawner: &dyn Spawner,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, spawner, true, None)
+    run_session(db, id, token, provider, None, spawner, true, None)
 }
 
 /// The wrapper (`resume` for `session --resume`) running in the workspace
@@ -2285,14 +2309,16 @@ pub fn session_in_workspace(
     resume: bool,
     own: OwnWorkspace<'_>,
 ) -> Result<Value> {
-    run_session(db, id, token, provider, spawner, resume, Some(own))
+    run_session(db, id, token, provider, None, spawner, resume, Some(own))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_session(
     db: &Path,
     id: &RunId,
     token: &LeaseToken,
     provider: &dyn AgentProvider,
+    other: Option<&dyn AgentProvider>,
     spawner: &dyn Spawner,
     resume: bool,
     own_workspace: Option<OwnWorkspace<'_>>,
@@ -2306,6 +2332,7 @@ fn run_session(
             queue: &mut queue,
             db,
             provider,
+            other,
             spawner,
             files: &LocalRunFiles,
             pid: std::process::id(),

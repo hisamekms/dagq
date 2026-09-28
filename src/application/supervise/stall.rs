@@ -117,6 +117,15 @@ struct Asked {
     threshold: &'static str,
 }
 
+/// Why the session's watch parks its run for a session of its own.
+#[derive(Debug, Clone)]
+enum Park {
+    /// A recovery job's `resume`, with its instruction.
+    Resume(String),
+    /// The run moves to headless Codex.
+    Switch(PendingSwitch),
+}
+
 /// Receipt-less idle of one session, judged each tick.
 #[derive(Debug, Clone, Default)]
 pub(super) struct StallWatch {
@@ -154,9 +163,10 @@ pub(super) struct StallWatch {
     recovering: Option<Box<Recovering>>,
     /// A recovery job's repair (other than `wait`) restarts the count here.
     recovered_from: Option<SystemTime>,
-    /// A recovery job's `resume` repair (task 442), with its instruction:
-    /// the session's watch parks the run as `needs_session`.
-    park: Option<String>,
+    /// A recovery job's `resume` repair (task 442), or a move to headless
+    /// Codex (ADR-t813-2 decision 5), with its instruction: the session's
+    /// watch parks the run as `needs_session`. Boxed: rarely set.
+    park: Option<Box<Park>>,
     /// The last observation followed the idle's recovery job: one that
     /// did not (a dialog, a question, a hold or an input came first) leaves
     /// the job nobody to act on, so the session's watch stops it.
@@ -611,12 +621,41 @@ impl StallWatch {
     /// A recovery job chose `resume` with `instruction`: the session's
     /// watch parks the run on its next step.
     pub(super) fn request_park(&mut self, instruction: String) {
-        self.park = Some(instruction);
+        self.park = Some(Box::new(Park::Resume(instruction)));
     }
 
     /// The `resume` a recovery job chose, once.
     pub(super) fn take_park(&mut self) -> Option<String> {
-        self.park.take()
+        match self.park.take().map(|park| *park) {
+            Some(Park::Resume(instruction)) => Some(instruction),
+            other => {
+                self.park = other.map(Box::new);
+                None
+            }
+        }
+    }
+
+    /// The interactive session stopped at a wall and its run moved to
+    /// headless Codex (ADR-t813-2 decision 5): the session's watch parks
+    /// the run for a session of Codex's, which `instruction` starts.
+    pub(super) fn request_switch(&mut self, switch: PendingSwitch) {
+        self.park = Some(Box::new(Park::Switch(switch)));
+    }
+
+    /// Whether the session's watch is to park the run on its next step.
+    pub(super) fn parking(&self) -> bool {
+        self.park.is_some()
+    }
+
+    /// The move to Codex, once.
+    pub(super) fn take_switch(&mut self) -> Option<PendingSwitch> {
+        match self.park.take().map(|park| *park) {
+            Some(Park::Switch(switch)) => Some(switch),
+            other => {
+                self.park = other.map(Box::new);
+                None
+            }
+        }
     }
 
     /// The run is parked for a session of its own by the idle's recovery
@@ -958,10 +997,19 @@ impl StallWatch {
             return Ok(None);
         }
         if let Ok(screen) = screen {
-            if let Some(wall) = sv.signals.screen_wall(&screen)
-                && raise_wall(sv, run, workspace, &screen, wall)?
-            {
-                return Ok(None);
+            if let Some(wall) = sv.signals.screen_wall(&screen) {
+                // An interactive Claude worker moves to headless Codex
+                // (ADR-t813-2 decision 5), else it joins the hold ask.
+                if self.parking() {
+                    return Ok(None);
+                }
+                if let Some(switch) = interactive_switch(sv, run, wall)? {
+                    self.request_switch(switch);
+                    return Ok(None);
+                }
+                if raise_wall(sv, run, workspace, &screen, wall)? {
+                    return Ok(None);
+                }
             }
             // A Settings panel left open would take the nudge: it is closed
             // first, and the nudge follows on a later tick (ADR-0047
@@ -1017,8 +1065,10 @@ impl StallWatch {
         if mark.is_some_and(|mark| !mark.outcome.goes_on(mark.failure)) {
             return Ok(None);
         }
+        // Its provider cannot be used: the next call goes to the other one,
+        // or the run waits in the hold ask (ADR-t813-2).
         if let Some(failure) = provider_failure(mark) {
-            raise_turn_failure(sv, run, workspace, failure)?;
+            sv.turn_at_wall(run, workspace, failure)?;
             return Ok(None);
         }
         // After a person's `wait` the ask follows the next turn: a headless
@@ -1138,7 +1188,7 @@ impl StallWatch {
                     self.recovered_from = Some(now);
                 }
                 if let Some(instruction) = applied.resume {
-                    self.park = Some(instruction);
+                    self.park = Some(Box::new(Park::Resume(instruction)));
                 }
                 Ok(applied.sent.map(|(text, sent_at, submission)| {
                     self.input_sent(sent_at, Some(&text));

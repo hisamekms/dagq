@@ -137,6 +137,10 @@ event_kinds! {
     PlannerUnresponsive => "planner_unresponsive",
     PromptCleared => "prompt_cleared",
     PromptWaiting => "prompt_waiting",
+    ProviderHeld => "provider_held",
+    ProviderReleased => "provider_released",
+    ProviderSwitched => "provider_switched",
+    ProviderWaiting => "provider_waiting",
     ProposalResubmitted => "proposal_resubmitted",
     ProposalSettled => "proposal_settled",
     ProposalWithdrawn => "proposal_withdrawn",
@@ -348,6 +352,9 @@ impl EventKind {
                 // decision 2).
                 | ReleaseChecked
                 | ReleaseCheckFailed
+                // A provider's hold and its end (ADR-t813-2 decision 6).
+                | ProviderHeld
+                | ProviderReleased
         )
     }
 }
@@ -482,6 +489,28 @@ pub const PUSH_FINISHED: &str = EventKind::PushFinished.as_str();
 pub const PUSH_SKIPPED: &str = EventKind::PushSkipped.as_str();
 pub const QUEUE_HOLD_APPLIED: &str = EventKind::QueueHoldApplied.as_str();
 pub const RECEIPT_OBSERVED: &str = EventKind::ReceiptObserved.as_str();
+/// A provider the workers could not use is held (ADR-t813-2 decision 6):
+/// a queue event with `provider`, `reason` (`authentication`,
+/// `usage_limit`, `launch_failed`), `since`, `retry_at`, `reset_read`,
+/// `run_id` and `supervisor`. Codex's holds, and Claude's for an agent that
+/// did not start; Claude's login or usage limit is the queue's
+/// `queue_hold` ask.
+pub const PROVIDER_HELD: &str = EventKind::ProviderHeld.as_str();
+/// A provider's hold ended (`provider`, `reason`, `why`: `retry_due`, or
+/// `done` when a person answered a hold ask): the next call of it checks it
+/// again.
+pub const PROVIDER_RELEASED: &str = EventKind::ProviderReleased.as_str();
+/// A run's worker moved to the other provider because its own could not be
+/// used (ADR-t813-2 decisions 2 and 4): `from`, `to`, `reason`, `phase`,
+/// `turn`, `count`, `worker_mode` and `message`.
+pub const PROVIDER_SWITCHED: &str = EventKind::ProviderSwitched.as_str();
+/// A headless run's turn failed because its provider cannot be used, and
+/// the run cannot move to the other provider now (ADR-t813-2): it waits,
+/// not failed (`turn`, `provider`, `reason`, `other`, `blocked`,
+/// `retry_at`), until its provider's hold ends (a `provider retry`
+/// request), the other provider can take it (`provider_switched`) or a
+/// person answers the hold ask it joined.
+pub const PROVIDER_WAITING: &str = EventKind::ProviderWaiting.as_str();
 pub const RECOVERY_FAILED: &str = EventKind::RecoveryFailed.as_str();
 pub const RECOVERY_FINISHED: &str = EventKind::RecoveryFinished.as_str();
 pub const RECOVERY_PARKED: &str = EventKind::RecoveryParked.as_str();
@@ -700,6 +729,10 @@ mod tests {
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),
             (EventKind::PromptCleared, "prompt_cleared"),
             (EventKind::PromptWaiting, "prompt_waiting"),
+            (EventKind::ProviderHeld, "provider_held"),
+            (EventKind::ProviderReleased, "provider_released"),
+            (EventKind::ProviderSwitched, "provider_switched"),
+            (EventKind::ProviderWaiting, "provider_waiting"),
             (EventKind::ProposalResubmitted, "proposal_resubmitted"),
             (EventKind::ProposalSettled, "proposal_settled"),
             (EventKind::ProposalWithdrawn, "proposal_withdrawn"),

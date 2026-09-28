@@ -408,9 +408,17 @@ fn slots_and_waits(
             .latest_queue_event(&kinds.kinds())?
             .filter(|event| event.kind == kinds.held))
     };
+    // Codex held for the workers (ADR-t813-2 decision 6), until its time.
+    let provider_hold = queue
+        .latest_queue_event(&[
+            crate::domain::event_kind::PROVIDER_HELD,
+            crate::domain::event_kind::PROVIDER_RELEASED,
+        ])?
+        .filter(|event| event.kind == crate::domain::event_kind::PROVIDER_HELD);
     let holds = [
         ("claim_hold", held(crate::domain::claim_hold::CLAIMS)?),
         ("landing_hold", held(crate::domain::claim_hold::LANDINGS)?),
+        ("provider_hold", provider_hold),
     ];
     let supervisors = health
         .into_iter()

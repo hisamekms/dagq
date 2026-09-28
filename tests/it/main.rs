@@ -79,6 +79,7 @@ mod runtime_job_verdicts;
 mod runtime_observer;
 mod runtime_open_turn;
 mod runtime_precheck;
+mod runtime_provider_switch;
 mod runtime_push;
 mod runtime_queue_hold;
 mod runtime_queue_hold_detect;

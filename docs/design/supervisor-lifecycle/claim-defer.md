@@ -46,14 +46,13 @@ supervisorは控えの状態（taskごとの始まりと上限を過ぎたか）
 
 ## workerを動かせないtask
 
-supervisorは、自分のadapterの表（[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)）に無いworker（providerと経路の組）のtaskもclaimせずに飛ばす（ADR-t813-2。task 814）。hotspotの判定より先に、`Queue::candidates`のtaskの`worker`を`domain::worker::unavailable`にかける（表に全workerがあるときは読まない）。
+supervisorは、どのproviderでも動かせないworker（providerと経路の組）のtaskをclaimせずに飛ばす（ADR-t813-2。task 814・818）。hotspotの判定より先に、`Queue::candidates`のtaskの`worker`にこのpassの経路（`Supervisor::routes`、`domain::provider_switch::routes`: 自分のadapterの表と2つのproviderの控えから決める。[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）があるかを見る（全workerに経路があるときは読まない）。そのproviderが使えなくても、もう一方の非対話で動かせるtaskは控えずにそちらでclaimする。
 
-- 理由は`provider_unavailable`（そのproviderの組が無い。今はCodex）か`mode_unavailable`（providerの組はあるがその経路の組が無い。今はClaudeの非対話）。最初に飛ばしたときだけ`claim_deferred`（`domain::claim_defer::worker_deferred`）を書く
+- 理由は`provider_unavailable`（そのproviderが使えず、もう一方でも動かせない）か`mode_unavailable`（providerの組はあるがその経路の組が無い）。最初に飛ばしたときだけ`claim_deferred`（`domain::claim_defer::worker_deferred`）を書く
+- 両方のproviderが使えない（Claudeの控えのaskが開き、Codexが無いか控えられている）passは、控えのaskが新しいclaimを止める（`claim_held`）が、その前に候補をこの判定にかけ、`provider_unavailable`の控えを記録する（`status`の`claim_deferrals`に出る）
 - 上限は無く、hotspotの控えと違って`defer_max_secs`で期限切れにならない。表にそのworkerが入ったsupervisorは`claim_deferral_ended`（`why: cleared`）を書いてclaimし、候補から外れたtaskは`why: not_candidate`で終える
 - 起動して最初の判定で、taskごとの最新のeventがこの理由の`claim_deferred`なら控えの途中として組み立て直す（`worker_deferrals_in_place`）。hotspotの控え（`deferrals_in_place`）は`reason`が`hot_files`のもの（`reason`の無い古いeventを含む）だけを読む
-- 同じpassで`claim_for_supervisor_in_order`にも表のworkerの一覧を渡し、順に無いtaskを取る後戻りでも表に無いworkerのtaskは取らない
-
-使えないproviderからもう一方へ切り替えるフォールバック（ADR-t813-2の決定2・6）は後続のtaskで、今は控えるだけ。
+- 同じpassで`claim_for_supervisor_in_order`にも経路の一覧を渡し、順に無いtaskを取る後戻りでも経路の無いworkerのtaskは取らない。経路がもう一方のproviderなら、runはそのproviderの非対話で始まり、`provider_switched`（`phase: start`）を記録する
 
 ## 記録
 

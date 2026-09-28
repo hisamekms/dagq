@@ -93,6 +93,9 @@ impl Supervisor<'_> {
             let Some((run, attempt)) = begun else {
                 continue;
             };
+            // An interactive session parked to move to Codex moves now
+            // (ADR-t813-2 decision 5).
+            let run = self.switch_parked(run)?;
             let request = ResumeRequest {
                 main,
                 branch,
@@ -1358,6 +1361,13 @@ impl ResumeWatch {
         // rewrite a stale receipt (ADR-0071 decision 16).
         if sv.queue.has_unclosed_worker_question(run.id())? {
             return Ok(None);
+        }
+        // A turn at its provider's wall (ADR-t813-2): the call went to the
+        // other provider, or the run waits in the hold ask.
+        match self.live.provider_wall(sv, run)? {
+            WallGate::Held => return Ok(None),
+            WallGate::Moved(_) => self.restart_clocks(&*sv.files),
+            WallGate::Open => (),
         }
         self.watch_idle_processes(sv, run)?;
         // An answer delivered by hand (or by the supervisor this one took

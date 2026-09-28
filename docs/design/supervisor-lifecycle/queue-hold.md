@@ -9,6 +9,7 @@ last_verified: 2026-09-28
 scope: runtime
 related:
   - adr-0047
+  - adr-t813-2
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-ask
   - design-supervisor-lifecycle-claim-hold
@@ -36,6 +37,15 @@ Claude Codeのログインが切れるか利用上限に達すると、新しい
   - observer: `observe_finished`に`wall`と`hold_ask_id`を足す。控えが解けると次の間隔で動く
 - **affectedのjob**: askの`affected`にはrunのIDと並べてjobの項目（`domain::queue_hold::HoldJob::entry`: `review job of run <id>`、`recovery job of run <id>`、`plan_review job of proposal <id>`、`goal_review job of goal <id>`、`observer job`）を足す。jobの項目は空白を含み、runのIDは含まないので区別できる（`is_run_entry`・`affected_runs`）。questionの末尾は`Affected: run <id>, review job of run <id>, ...`（古いバイナリの`Affected runs:`も書き直せる。`NewHold::base_question`）。runの無いjobが足されたときの`ask_updated`はqueueイベント（taskもrunも無い）になる。attentionは`health::attention`が、閉じていない対象のaskに居るjob（`queue_hold::job_held`）の失敗を出さず、ask自体をattentionにする
 
+## providerごとの控え（ADR-t813-2）
+
+[ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定6（ADR-0047決定42をamends、task 818）で、控えの単位はproviderごとになった。このページの`queue_hold`のaskはClaudeの控えで、Codexの控えはaskを開かないqueueイベント（`provider_held` / `provider_released`、[provider-lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)）。
+
+- **workerのclaimとturn**: 使えるproviderがあれば止めない。askが開いていても（Claudeが控えられていても）Codexのworkerが動かせれば、新しいclaimは控えず（`claim_held`を書かない）、taskは非対話のCodexで始まる。Codexが控えられていればCodexのtaskは非対話のClaudeで始まる。両方が使えない（Claudeのaskが開き、Codexが無いか控えられている）ときだけ、下の「控え」のとおりaskが新しいclaimを止め、候補は`claim_deferred`（`provider_unavailable`）で控える
+- **askを開くとき**: Claudeが止まったとき（workerのsessionの画面、headlessのjobの出力、Claudeの非対話のturn）は、Codexが使えても開く（Claudeだけの役割のreview・復旧・plan review・goal reviewのjobとobserverは人を待つ）。Claudeの非対話のturnからCodexへ移ったrunはaskの`affected`に入れず、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。Codexだけが止まったときは開かない。止まったrunがもう一方へも移れないときはrunを失敗にせず待たせ（`provider_waiting`）、Claudeの認証と利用上限か、両方使えないときは、providerに関わらずrunが`raise_wall`でaskに入る（壁は開いている控えのaskの理由か、認証・利用上限の側の理由）。切り替えの上限でCodexから移れずClaudeが使えるときはaskを開かず、Codexの控えが解けた後に同じthreadへもう一度送る
+- **`done`**: 下の適用に加え、askを閉じるsupervisorがCodexの控えも解く（`provider_released`の`why: done`。どのsupervisorも毎passでqueueの控えを読み直す）。控えのaskに入って待つrunへの「続けて」は、runの今のproviderに行く
+- **Claudeだけの役割**: review・復旧・plan review・goal review・observerの控えは今までどおりaskに従う
+
 ## どのaskが控えるか
 
 `domain::queue_hold::reason_of`: kindが`queue_hold`で、理由が`authentication`なら`HoldReason::Authentication`、`cost`で`subject`が`usage_limit`（`USAGE_LIMIT_SUBJECT`）なら`HoldReason::UsageLimit`。`subject`が`disk`のものは対象外で、それ以外の`subject`の`cost`は利用上限と同じに扱う。`hold_of`はそのうちopen（未回答）のものだけを控えにする。
@@ -44,7 +54,7 @@ Claude Codeのログインが切れるか利用上限に達すると、新しい
 
 supervisorは毎pass（drainの途中も）、ディスクの確認（`check_disk`）の次に`Supervisor::check_queue_hold`でqueueのcloseされていない対象のaskを読み、回答済みのものを適用してから、openなものの最初の1件を`queue_hold`（`claim_hold::QueueHold`: 理由、`ask_id`、`affected`の数）として持つ。持っている間:
 
-- **claim**: `ClaimHold::judge`は`HoldInputs.queue_hold`をディスクとloadより先に判定し、`claim_held`（`reason`が`authentication` / `usage_limit`、`value`がaskの`affected`の数、`threshold`が0、`ask_id`、`message`）を記録してclaimしない。askが閉じるか回答されると次のpassで`claim_resumed`になる（記録の規則と`status`の`claim_hold`・`stats`の`claim_holds.by_reason`は[claimを控える](claim-hold.md)と同じ）
+- **claim**: `ClaimHold::judge`は`HoldInputs.queue_hold`（どのworkerにも経路が無いときだけ渡す。上の「providerごとの控え」）をディスクとloadより先に判定し、`claim_held`（`reason`が`authentication` / `usage_limit`、`value`がaskの`affected`の数、`threshold`が0、`ask_id`、`message`）を記録してclaimしない。askが閉じるか回答されると次のpassで`claim_resumed`になる（記録の規則と`status`の`claim_hold`・`stats`の`claim_holds.by_reason`は[claimを控える](claim-hold.md)と同じ）
 - **review**: 受理されたrunのreviewは`Phase::ReviewHeld`で待ち、sessionは開いたまま、`review_started`を書かない（`start_review` / `retry_review`が入口で判定する）。控えが解けたpassで`start_review`が始める。引き継ぎとadoptは`awaiting_integration`のreviewの無いrunを`start_review`で組み立て直すので、同じく待つ
 - **復旧job**: 終わったrunのtriage（`triage_runs`）を始めない。生きているsessionのalertの復旧job（`RecoveryWatch::start`）も始めず、alertは控えが解けた後のpassでまた拾う（長く走るbackgroundのalertは、`seen`を進める前に判定するので失われない）
 - **plan review・goal review・observer**: 起動しない（`plan_review_pass` / `goal_review_pass`に`starting: false`、`start_observer_when_due`を呼ばない）。走っているjobは最後まで追う
@@ -85,5 +95,6 @@ runのeventかleaseが読めなかったpassは閉じず、次のpassで読み�
 ## 記録とtest
 
 - queueイベント: `claim_held` / `claim_resumed`（理由`authentication` / `usage_limit`、`ask_id`）、`queue_hold_applied`、runの無いjobの`ask_updated`・`auth_required`・`usage_limited`（`EventKind::is_queue`）
-- runイベント: `hold_answer_applied`、`hold_continue_sent`、`job_restarted`、`runtime_error`（`hold_canceled`）、`auth_required` / `usage_limited`（画面のものと、`job`を持つjobのもの）
+- runイベント: `hold_answer_applied`、`hold_continue_sent`、`job_restarted`、`runtime_error`（`hold_canceled`）、`auth_required` / `usage_limited`（画面のものと、`job`を持つjobのもの、Codexへ移ったrunの`switched_to`を持つもの）、`provider_switched`
+- queueイベント（Codexの控え）: `provider_held`、`provider_released`
 - test: `tests/it/runtime_queue_hold.rs`（利用上限のaskの控えでclaimとreviewが待ち、`done`で再開する／`cancel_affected`でrunを手放す／`done`で失敗したtriageを起動し直す）、`tests/it/runtime_queue_hold_shared.rs`（2つのsupervisorが1件のaskのrunを1つずつ持ち、`cancel_affected`で両方が手放され、`done`でどちらのsessionにも文面が1回ずつ届く／別の生きているsupervisorがleaseを持つrunを待ってから閉じ、leaseの無いrunを`unwatched`にする）、`tests/it/runtime_stall.rs`の`an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask`（ログインの切れで控え、`done`で続きの文面を送る）、`tests/it/runtime_queue_hold_detect.rs`（利用上限の画面で`cost`のaskに入る／2つのreviewがログインの切れで1件のaskにjobとしてまとまり、`done`でやり直して着地する／runとjobが1件のaskに並ぶ）、`tests/it/plan_review.rs`の`a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_done`、`infrastructure::claude`（`auth_required`・`usage_limited`・`job_wall`）・`domain::queue_hold`・`domain::claim_hold`のunit test

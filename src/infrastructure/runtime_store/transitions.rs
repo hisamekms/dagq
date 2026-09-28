@@ -21,14 +21,15 @@ impl SqliteQueue {
             &[],
             None,
             &WorkerTrial::default(),
-            &[Worker::DEFAULT],
+            &WorkerRoute::direct(&[Worker::DEFAULT]),
         )
     }
 
     /// [`Self::claim_for_supervisor`], taking the first task of `order` that
     /// is still claimable (the lowest-ID candidate when none is), with
     /// `attributes` in its `run_claimed` and the worker session `trial`
-    /// chooses for the task; only a task whose worker is one of `workers`.
+    /// chooses for the task; only a task whose worker has one of `routes`,
+    /// run on its route's worker.
     pub fn claim_for_supervisor_in_order(
         &mut self,
         base_commit: &CommitSha,
@@ -36,7 +37,7 @@ impl SqliteQueue {
         order: &[TaskId],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
-        workers: &[Worker],
+        routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
         let tx = self
             .conn
@@ -52,7 +53,7 @@ impl SqliteQueue {
             order,
             attributes,
             trial,
-            workers,
+            routes,
         )?;
         if let ClaimOutcome::Claimed { run } = &outcome {
             tx.execute(
@@ -311,6 +312,30 @@ impl SqliteQueue {
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
+    }
+
+    /// Move `id`'s worker to `worker` (ADR-t813-2 decision 4) under this
+    /// supervisor's lease: its `actual_provider` and `worker_mode` change,
+    /// recorded as `provider_switched` with `payload`.
+    pub fn switch_provider(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        worker: Worker,
+        payload: Value,
+    ) -> Result<TaskRun> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        // Written from the typed worker: the column has no CHECK (ADR-t876-1).
+        tx.execute(
+            "UPDATE task_runs SET actual_provider=?2, worker_mode=?3 WHERE id=?1",
+            params![id, worker.provider.as_str(), worker.mode.as_str()],
+        )?;
+        run_event(&tx, id, EventKind::ProviderSwitched, payload)?;
+        tx.commit()?;
+        self.run(id)
     }
 
     /// Park a run awaiting integration that the landing recheck found no
@@ -861,7 +886,7 @@ impl RunTransitions for SqliteQueue {
         order: &[TaskId],
         attributes: Option<&Value>,
         trial: &WorkerTrial,
-        workers: &[Worker],
+        routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
         SqliteQueue::claim_for_supervisor_in_order(
             self,
@@ -870,8 +895,17 @@ impl RunTransitions for SqliteQueue {
             order,
             attributes,
             trial,
-            workers,
+            routes,
         )
+    }
+    fn switch_provider(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        worker: Worker,
+        payload: Value,
+    ) -> Result<TaskRun> {
+        SqliteQueue::switch_provider(self, id, token, worker, payload)
     }
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {
         SqliteQueue::record_runtime_error(self, id, message, reason)

@@ -53,11 +53,15 @@ string_enum!(TurnOutcome {
     Stopped => "stopped",
 });
 
+// Why a turn failed; `launch`: the agent did not start (its executable
+// could not be run, or it ended with nothing on its output, ADR-t813-2
+// decision 2).
 string_enum!(TurnFailure {
     Authentication => "authentication",
     UsageLimit => "usage_limit",
     Model => "model",
     Sandbox => "sandbox",
+    Launch => "launch",
     Other => "other",
 });
 
@@ -65,15 +69,17 @@ impl TurnOutcome {
     /// Whether the run goes on after a turn that ended so: the session
     /// waits for its next request. A turn the runtime stopped (silent, past
     /// its limit, started otherwise than asked) or that failed for any
-    /// reason but a login or a usage limit ends the session, and the run
-    /// goes to its recovery job as a run that failed (ADR-t813-1 decision
-    /// 9); one stopped by the exit request ends it too.
+    /// reason but a login, a usage limit or an agent that did not start
+    /// ends the session, and the run goes to its recovery job as a run that
+    /// failed (ADR-t813-1 decision 9); one stopped by the exit request ends
+    /// it too. After those three the supervisor moves the worker to the
+    /// other provider or holds it (ADR-t813-2).
     pub fn goes_on(self, failure: Option<TurnFailure>) -> bool {
         match self {
             Self::Succeeded => true,
             Self::Failed => matches!(
                 failure,
-                Some(TurnFailure::Authentication | TurnFailure::UsageLimit)
+                Some(TurnFailure::Authentication | TurnFailure::UsageLimit | TurnFailure::Launch)
             ),
             Self::Silent | Self::TimedOut | Self::LaunchMismatch | Self::Stopped => false,
         }
@@ -116,6 +122,52 @@ pub struct TurnRequest {
     pub seq: u64,
     pub what: String,
     pub prompt: String,
+}
+
+/// The session a turn runs in: a new one (named `name` for a provider that
+/// takes the name, Claude; Codex names its own), or the one of that id
+/// resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnSession<'a> {
+    New(&'a str),
+    Resume(&'a str),
+}
+
+impl<'a> TurnSession<'a> {
+    /// The session resumed, if one is.
+    pub fn resumed(self) -> Option<&'a str> {
+        match self {
+            Self::New(_) => None,
+            Self::Resume(id) => Some(id),
+        }
+    }
+}
+
+/// The name of the session a provider that takes one (Claude) gives the
+/// run `run_id` after `switches` switches of its provider (ADR-t813-2
+/// decision 4): the run's id until the first switch, then a UUID of its own
+/// for each, since Claude Code refuses a session id in use and the session
+/// after a switch is a new one.
+pub fn session_name(run_id: &str, switches: usize) -> String {
+    use sha2::{Digest, Sha256};
+    if switches == 0 {
+        return run_id.to_owned();
+    }
+    let digest = Sha256::digest(format!("{run_id}/{switches}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // A version-4 shaped UUID (the variant and version bits set).
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 /// The turns directory of the run whose directory is `run_dir`.
@@ -380,6 +432,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_session_is_named_by_the_run_until_its_provider_switched() {
+        assert_eq!(session_name("run-1", 0), "run-1");
+        let first = session_name("run-1", 1);
+        let second = session_name("run-1", 2);
+        assert_ne!(first, second);
+        assert_eq!(first, session_name("run-1", 1));
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        assert!(first.split('-').map(str::len).eq([8, 4, 4, 4, 12]));
+        assert_eq!(TurnSession::New("a").resumed(), None);
+        assert_eq!(TurnSession::Resume("a").resumed(), Some("a"));
+    }
+
+    #[test]
     fn requests_are_numbered_and_taken_in_order() {
         let names = [
             "request-000002.json",
@@ -414,6 +480,7 @@ mod tests {
         assert!(TurnOutcome::Succeeded.goes_on(None));
         assert!(TurnOutcome::Failed.goes_on(Some(TurnFailure::Authentication)));
         assert!(TurnOutcome::Failed.goes_on(Some(TurnFailure::UsageLimit)));
+        assert!(TurnOutcome::Failed.goes_on(Some(TurnFailure::Launch)));
         assert!(!TurnOutcome::Failed.goes_on(Some(TurnFailure::Model)));
         assert!(!TurnOutcome::Failed.goes_on(Some(TurnFailure::Sandbox)));
         assert!(!TurnOutcome::Failed.goes_on(None));

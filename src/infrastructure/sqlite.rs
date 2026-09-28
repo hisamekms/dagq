@@ -27,6 +27,7 @@ use crate::{
         TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun, TaskStatus, TaskStatusCounts,
         actor::ActorContext,
         goal,
+        provider_switch::{self, SwitchPhase, WorkerRoute},
         scope::validate_path_globs,
         task,
         worker::{Worker, WorkerMode},
@@ -865,7 +866,7 @@ impl TaskStore for SqliteQueue {
             &WorkerTrial::default(),
             // What every binary runs (ADR-t813-2); a supervisor claims
             // through its table of adapters instead.
-            &[Worker::DEFAULT],
+            &WorkerRoute::direct(&[Worker::DEFAULT]),
         )?;
         tx.commit()?;
         Ok(outcome)
@@ -1714,8 +1715,10 @@ fn claim_order(conn: &Connection) -> Result<Vec<TaskId>> {
 /// beside its transition, and so does the worker session `trial` chooses
 /// for the task (ADR-0079 decisions 3 and 4): chosen here, in the claim's
 /// transaction, so two claims never take the same turn of the trial. A
-/// task whose worker is not one of `workers` is not claimed (ADR-t813-2):
-/// the run takes the provider and mode of its task's worker.
+/// task whose worker has none of `routes` is not claimed (ADR-t813-2):
+/// the run requests the provider of its task's worker and runs on its
+/// route's, recorded as `provider_switched` (phase `start`) when they
+/// differ.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn claim_task(
     tx: &Connection,
@@ -1726,10 +1729,10 @@ pub(super) fn claim_task(
     order: &[TaskId],
     attributes: Option<&serde_json::Value>,
     trial: &WorkerTrial,
-    workers: &[Worker],
+    routes: &[WorkerRoute],
 ) -> Result<ClaimOutcome> {
     let mut ready = ready_tasks(tx)?;
-    ready.retain(|task| workers.contains(&task.worker()));
+    ready.retain(|task| provider_switch::route_of(routes, task.worker()).is_some());
     if ready.is_empty() {
         return Ok(ClaimOutcome::NoReadyTask);
     }
@@ -1751,7 +1754,10 @@ pub(super) fn claim_task(
         .inheriting(&session_events(tx, task.id())?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
-    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?;
+    let route = provider_switch::route_of(routes, task.worker())
+        .copied()
+        .context("the claimed task has no route")?;
+    let run = TaskRun::new(run_id, &task, base_commit, now.clone())?.running_on(route.actual);
     // `status='ready'` only detects a concurrent change; the domain decided the claim.
     ensure!(
         tx.execute(
@@ -1775,8 +1781,25 @@ pub(super) fn claim_task(
             run.created_at()
         ],
     )?;
+    if let Some(reason) = route.switch {
+        event(
+            tx,
+            task.id(),
+            Some(run.id()),
+            EventKind::ProviderSwitched,
+            provider_switch::switched_payload(
+                run.requested_provider(),
+                route.actual,
+                reason,
+                SwitchPhase::Start,
+                None,
+                1,
+                None,
+            ),
+        )?;
+    }
     event(tx, task.id(), Some(run.id()), EventKind::RunClaimed, {
-        let mut payload = json!({"from": "ready", "to": task.status(), "provider": run.actual_provider(), "worker_mode": run.worker_mode()});
+        let mut payload = json!({"from": "ready", "to": task.status(), "provider": run.actual_provider(), "requested_provider": run.requested_provider(), "worker_mode": run.worker_mode()});
         if let (Some(payload), Some(serde_json::Value::Object(attributes))) =
             (payload.as_object_mut(), attributes)
         {

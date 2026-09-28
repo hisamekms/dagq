@@ -8,7 +8,7 @@
 use crate::common;
 use crate::runtime_support;
 
-use dagq::domain::{AskReason, Provider, worker::WorkerMode};
+use dagq::domain::{AskReason, Provider, queue_hold::USAGE_LIMIT_SUBJECT, worker::WorkerMode};
 use runtime_support::*;
 
 const TASK: TaskId = TaskId::new(2);
@@ -332,7 +332,8 @@ esac"#
 
 /// Acceptance (3): a turn that failed says why on the run's events: a
 /// model Codex cannot use is `model`, the session ends and the run goes to
-/// its recovery job as one that failed.
+/// its recovery job as one that failed. It is no reason to move the worker
+/// to Claude (ADR-t813-2 decision 3), which could take it.
 #[test]
 fn a_codex_turn_that_failed_is_classified_on_the_run() {
     let (dir, repo, db, backend, codex) = codex_fixture();
@@ -360,15 +361,19 @@ fn a_codex_turn_that_failed_is_classified_on_the_run() {
     );
     let requested = payloads(&detail, "recovery_requested");
     assert_eq!(requested[0]["alert"], "failed", "{requested:?}");
+    assert!(payloads(&detail, "provider_switched").is_empty());
+    assert_eq!(detail.runs[0].actual_provider(), Provider::Codex);
 }
 
 /// Acceptance (3): a turn at Codex's usage limit is stopped at the first
-/// error that says it and holds the queue for a person (`cost`); `done`
-/// has the session go on with a resume of the same thread, and the run
-/// lands.
+/// error that says it; with Claude held too (its usage-limit ask open), the
+/// run cannot move to Claude (ADR-t813-2) and joins the ask (`cost`)
+/// rather than failing; `done` has the session go on with a resume of the
+/// same thread, and the run lands.
 #[test]
 fn a_codex_turn_at_its_usage_limit_holds_the_queue_then_resumes_its_thread() {
     let (dir, repo, db, backend, codex) = codex_fixture();
+    open_hold_ask(&db, AskReason::Cost, Some(USAGE_LIMIT_SUBJECT));
     set_turns(
         dir.path(),
         &format!(
@@ -387,7 +392,13 @@ esac"#
         &codex,
         &[verdict("pass", &[], "meets the acceptance")],
     );
-    let ask = open_ask(&db, |ask| ask.reason_category == AskReason::Cost);
+    let ask = open_ask(&db, |ask| {
+        ask.reason_category == AskReason::Cost && !ask.affected.is_empty()
+    });
+    // Waiting, not failed, on Codex.
+    let run = &detail(&db).runs[0];
+    assert_eq!(run.status(), RunStatus::Running);
+    assert_eq!(run.actual_provider(), Provider::Codex);
     SqliteQueue::open(&db)
         .unwrap()
         .answer(ask.id, "done")
@@ -395,6 +406,7 @@ esac"#
     finished(&backend, supervisor);
     let detail = detail(&db);
     assert_landed_run(&detail.runs[0], &repo, &base);
+    assert!(payloads(&detail, "provider_switched").is_empty());
     let turns = payloads(&detail, "turn_finished");
     assert_eq!(turns[0]["outcome"], "failed", "{turns:?}");
     assert_eq!(turns[0]["failure"], "usage_limit");
@@ -419,6 +431,8 @@ esac"#
 #[test]
 fn a_resume_of_a_thread_codex_does_not_have_starts_a_new_one() {
     let (dir, repo, db, backend, codex) = codex_fixture();
+    // Claude held too: the run waits for `done` on Codex (ADR-t813-2).
+    open_hold_ask(&db, AskReason::Cost, Some(USAGE_LIMIT_SUBJECT));
     set_turns(
         dir.path(),
         &format!(
@@ -438,7 +452,9 @@ esac"#
         &codex,
         &[verdict("pass", &[], "meets the acceptance")],
     );
-    let ask = open_ask(&db, |ask| ask.reason_category == AskReason::Cost);
+    let ask = open_ask(&db, |ask| {
+        ask.reason_category == AskReason::Cost && !ask.affected.is_empty()
+    });
     SqliteQueue::open(&db)
         .unwrap()
         .answer(ask.id, "done")

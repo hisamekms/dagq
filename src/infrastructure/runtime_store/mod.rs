@@ -27,7 +27,6 @@ use crate::application::{
     SessionRegistry, timestamp, unix_seconds,
 };
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
-use crate::domain::worker::Worker;
 use crate::domain::worker_model::{self, WorkerTrial};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
@@ -42,6 +41,7 @@ use crate::domain::{
     search::{SearchPage, SearchQuery},
 };
 use crate::domain::{EventKind, LeaseToken};
+use crate::domain::{provider_switch::WorkerRoute, worker::Worker};
 
 pub use crate::application::{
     EndedRunWorkspace, EndedRunWorktree, Exhaustion, Landing, LeasedRun, ResumeCandidate,

@@ -77,11 +77,11 @@ use crate::domain::{
     ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, ActorContext,
     AfterValidation, AskId, AskKind, AskReason, ClaimOutcome, CommitSha, ConflictDecision, EventId,
     EvidenceCheck, HEARTBEAT_TIMEOUT_SECS, IntegrationOutcome, LANDING_OPTIONS,
-    MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Reason, ReasonCode,
-    Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision,
-    RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus, SessionRole,
-    TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun, TaskStatus, TriageState,
-    after_validation,
+    MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Predecessor, Provider, Reason,
+    ReasonCode, Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict,
+    ReviseDecision, RunEvent, RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess,
+    RunStatus, SessionRole, TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun,
+    TaskStatus, TriageState, after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
     decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
     kpi::CandidatesSample,
@@ -116,6 +116,7 @@ mod idle;
 mod jobs;
 mod landing;
 mod plan_review;
+mod provider;
 mod push;
 mod queue_hold;
 mod recheck;
@@ -141,8 +142,8 @@ pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
-    deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*, recovery::*,
-    resume::*, revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
+    deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*, provider::*,
+    recovery::*, resume::*, revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
 };
 
 /// How often the supervisor records the finished transcript turns of the
@@ -588,6 +589,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         candidates: None,
         landing_unresolved: false,
         queue_hold: None,
+        provider_holds: Vec::new(),
+        moved: HashMap::new(),
         hold_continue: HashMap::new(),
         draining: false,
         update: update::UpdateWatch::default(),
@@ -756,6 +759,13 @@ struct Supervisor<'a> {
     /// pass (task 437): no new run is claimed and no headless job starts
     /// while it holds.
     queue_hold: Option<claim_hold::QueueHold>,
+    /// The providers held for the workers without an ask (ADR-t813-2
+    /// decision 6): Codex for any reason, Claude for an agent that did not
+    /// start. Their tasks run on the other provider meanwhile.
+    provider_holds: Vec<crate::domain::provider_switch::ProviderHold>,
+    /// The runs whose worker moved to the other provider in this step: the
+    /// slot's copy takes the new worker once the step returns.
+    moved: HashMap<RunId, Worker>,
     /// The held runs whose session gets the fixed text to go on, with the
     /// ask a person answered `done` (task 437).
     hold_continue: HashMap<RunId, AskId>,
@@ -1007,8 +1017,9 @@ impl Supervisor<'_> {
             self.check_disk()?;
             // Every pass too: the answer of an authentication or usage-limit
             // ask is applied and the hold read before any work starts (task
-            // 437).
+            // 437), and Codex's hold ends once its time is up (ADR-t813-2).
             self.check_queue_hold(true)?;
+            self.check_provider_holds()?;
             self.draining = stopping || !self.claiming || self.handoff.is_some();
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
@@ -1187,6 +1198,12 @@ impl Supervisor<'_> {
         }
         // The runs in flight go on; only new claims wait (task 327).
         if self.hold_claims()? {
+            // Neither provider can take a worker: the candidates are
+            // deferred for it too (ADR-t813-2 decision 6).
+            if self.routes().is_empty() {
+                let graph = dependency_graph(self.queue.graph_input()?, None);
+                self.claimable(&graph)?;
+            }
             return Ok(());
         }
         let mut host: Option<HostVersions> = None;
@@ -1207,7 +1224,19 @@ impl Supervisor<'_> {
             if order.is_empty() {
                 break;
             }
-            let base = self.repository.main_head()?;
+            // The landing branch was read at the top of the pass; one that
+            // stopped resolving since holds the claims as it would have then
+            // (ADR-t615-1), and any other error ends the loop as before.
+            let base = match self.repository.main_head() {
+                Ok(base) => base,
+                Err(error) => {
+                    self.check_landing_branch();
+                    if self.landing_unresolved {
+                        break;
+                    }
+                    return Err(error);
+                }
+            };
             // Read once per pass: `rustc -vV` takes a moment on a loaded host.
             let host = host.get_or_insert_with(|| {
                 // Codex's version only when this supervisor runs Codex.
@@ -1225,7 +1254,7 @@ impl Supervisor<'_> {
                 &order,
                 Some(&serde_json::to_value(&attributes)?),
                 &trial,
-                &self.workers,
+                &self.routes(),
             )? {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => break,
@@ -1306,7 +1335,9 @@ impl Supervisor<'_> {
             max_load: self.max_load,
             free_bytes: self.free,
             needed_bytes: needed,
-            queue_hold: self.queue_hold,
+            // Claude's hold ask holds the claims only while no worker can
+            // run on the other provider either (ADR-t813-2 decision 6).
+            queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
         });
         self.record_hold(claim_hold::CLAIMS, hold.as_ref())
     }
@@ -1442,6 +1473,9 @@ impl Supervisor<'_> {
             } else {
                 self.step(&mut slot)
             };
+            if let Some(worker) = self.moved.remove(slot.run.id()) {
+                slot.run = slot.run.clone().running_on(worker);
+            }
             match stepped {
                 Ok(Step::Continue) => {
                     self.slots.insert(index, slot);
