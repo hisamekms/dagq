@@ -23,6 +23,10 @@ pub(super) struct ReviseWatch {
     /// The answers of the session's `worker_question`s and the dialogs it
     /// stops at, followed as a worker's own session's are (task 238).
     pub(super) live: Box<SessionWatch>,
+    /// The first second of the `worker_question`s that hold the revise
+    /// besides [`SessionWatch::asks_from`]: a session that rewrote its
+    /// receipt after its questions went on past them (task 583).
+    pub(super) questions_from: i64,
 }
 
 /// What the live session was asked to fix (ADR-0027 decisions 2 and 4).
@@ -106,6 +110,7 @@ impl ReviseWatch {
             sent: Instant::now(),
             start,
             live,
+            questions_from: 0,
         })
     }
 
@@ -139,6 +144,18 @@ impl ReviseWatch {
             self.live.end_sends(sv, run)?;
         }
         Ok(outcome)
+    }
+
+    /// The first second of the `worker_question`s that hold the revise.
+    pub(super) fn holds_questions_from(&self) -> i64 {
+        self.live.asks_from.max(self.questions_from)
+    }
+
+    /// Whether the session rewrote `receipt` since the request.
+    fn rewritten(&self, sv: &Supervisor<'_>, receipt: &Path) -> bool {
+        sv.files
+            .modified(receipt)
+            .is_ok_and(|modified| modified > self.sent_at)
     }
 
     fn observe(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<Option<ReviseOutcome>> {
@@ -203,9 +220,28 @@ impl ReviseWatch {
         }
         // A session stopped at its own question, asked since the request,
         // waits for its answer, however long a person takes: it neither went
-        // idle without rewriting the receipt nor ran out of time.
-        if self.live.waits_for_question(sv, run)? {
-            return Ok(None);
+        // idle without rewriting the receipt nor ran out of time. A receipt
+        // it rewrote since the request is judged all the same, as a
+        // worker's own session is (task 583): the session went on past the
+        // questions it asked before the receipt, which hold it no longer
+        // (nor after a request to fix the receipt), and its time runs from
+        // there.
+        let receipt = Path::new(run.receipt_path().context("missing receipt path")?);
+        if sv
+            .queue
+            .has_unclosed_worker_question_since(run.id(), self.holds_questions_from())?
+        {
+            let Ok(modified) = sv.files.modified(receipt) else {
+                return Ok(None);
+            };
+            if modified <= self.sent_at {
+                return Ok(None);
+            }
+            let from = unix_seconds(modified) + 1;
+            if from > self.questions_from {
+                self.questions_from = from;
+                self.sent = Instant::now();
+            }
         }
         // An answer delivered by hand (or by the supervisor this one
         // adopted the run from) is input too: the idle marker of the stop at
@@ -219,7 +255,6 @@ impl ReviseWatch {
             self.live.input_at = Some(UNIX_EPOCH + Duration::from_secs(closed.max(0) as u64));
             self.sent = Instant::now();
         }
-        let receipt = Path::new(run.receipt_path().context("missing receipt path")?);
         // The idle marker is read before the receipt: a receipt rewritten
         // after this read is judged at the next poll, never as idle without
         // it. A marker from before the last input typed is not this turn's.
@@ -245,10 +280,7 @@ impl ReviseWatch {
         let input = InputMarker::read(&*sv.files, sv.signals, &idle_marker)?;
         let idle =
             idle.filter(|idle| idle.modified() > input_at && !idle.turn_open_after(input.as_ref()));
-        let rewritten = sv
-            .files
-            .modified(receipt)
-            .is_ok_and(|modified| modified > self.sent_at);
+        let rewritten = self.rewritten(sv, receipt);
         let idle_after_receipt = match &idle {
             Some(idle) if rewritten => idle.idle_after_receipt(&*sv.files, receipt)?.is_some(),
             _ => false,

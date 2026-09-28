@@ -11,6 +11,7 @@ supersedes:
 amended_by:
   - adr-t610-1
   - adr-t813-1
+  - adr-t583-1
 owners:
   - hisamekms
 tags:

@@ -98,11 +98,12 @@ impl Slot {
 
     /// Whether the run waits for `ask`: a revise or a conflict request
     /// follows only the `worker_question`s asked since it was sent
-    /// ([`SessionWatch::asks_from`], task 582).
+    /// ([`SessionWatch::asks_from`], task 582) and, once the session
+    /// rewrote its receipt after them, since that receipt (task 583).
     fn follows(&self, ask: &Ask) -> bool {
         match &self.phase {
             Phase::Revise(watch) if ask.kind == AskKind::WorkerQuestion => {
-                ask.created_at >= watch.live.asks_from
+                ask.created_at >= watch.holds_questions_from()
             }
             _ => true,
         }
@@ -382,6 +383,21 @@ impl Supervisor<'_> {
             watch
                 .stall
                 .poll_quiet(self, &run, &workspace, &idle_marker, dialog)?;
+        }
+        // A revise whose session rewrote its receipt since the request
+        // moved on past its question: its stage judges that receipt once
+        // the session is idle after it, without the question's close (task
+        // 583).
+        if let Phase::Revise(watch) = &slot.phase
+            && let Some(ask) = held_kind(AskKind::WorkerQuestion)
+            && let Some(receipt) = run.receipt_path()
+            && self
+                .files
+                .modified(Path::new(receipt))
+                .is_ok_and(|at| at > watch.sent_at)
+        {
+            self.end_wait(slot, WaitCause::SessionMoved, Some(ask))?;
+            return Ok(Step::Continue);
         }
         // A revise or a resume that waits for the answer of its own question
         // goes on only once it is answered: back in its slot without it, the

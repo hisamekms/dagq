@@ -1,5 +1,6 @@
 //! Runtime tests: a revise follows only the `worker_question`s asked since
-//! its request; one from before it is the inbox's (task 582).
+//! its request; one from before it is the inbox's (task 582). One open
+//! since it holds the judgment only until a rewritten receipt (task 583).
 use crate::runtime_support;
 
 use dagq::domain::{AskId, AskReason, NewAsk};
@@ -189,4 +190,189 @@ fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_revise_ended(&mut queue, "did not rewrite the receipt within 2 seconds");
+}
+
+/// The start of a worker that, once the revise request arrives, asks a
+/// `worker_question` and does not stop at it.
+const ASKS_AFTER_REVISE: &str = r#"
+commit work; receipt "$(git rev-parse HEAD)"; idle
+while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+"#;
+
+/// The `worker_question` a worker asked during its revise, still open.
+fn open_question(queue: &mut SqliteQueue) -> AskId {
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    let question = asks
+        .iter()
+        .find(|a| a.kind == AskKind::WorkerQuestion)
+        .unwrap_or_else(|| panic!("{asks:?}"));
+    assert!(question.closed_at.is_none(), "{question:?}");
+    question.id
+}
+
+/// A session that asks a question during its revise and goes on to rewrite
+/// its receipt and go idle is judged by the rewritten receipt without the
+/// question's close (task 583): the run lands.
+#[test]
+fn a_receipt_rewritten_after_an_open_question_is_judged() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{ASKS_AFTER_REVISE}\
+             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
+             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+        ),
+    ));
+    let reviewer = Arc::new(TestReviewer::new(&[
+        verdict("revise", &["add a line"], "one gap"),
+        verdict("pass", &[], "fixed"),
+    ]));
+    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    let kinds = event_kinds(&detail);
+    assert!(
+        position(&kinds, "revise_requested") < position(&kinds, "ask_opened"),
+        "{kinds:?}"
+    );
+    open_question(&mut queue);
+}
+
+/// A receipt rewritten after an open question that names another commit
+/// is judged too, as a mismatch, without the question's close (task 583):
+/// the session is asked to fix it, and the run lands on the fixed receipt.
+#[test]
+fn a_mismatched_receipt_rewritten_after_an_open_question_is_judged() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{ASKS_AFTER_REVISE}\
+             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
+             receipt 0123456789012345678901234567890123456789; idle\n\
+             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
+             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+        ),
+    ));
+    let reviewer = Arc::new(TestReviewer::new(&[
+        verdict("revise", &["add a line"], "one gap"),
+        verdict("pass", &[], "fixed"),
+    ]));
+    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    let rejected = payloads(&detail, "revise_receipt_rejected");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["code"], "commit_mismatch", "{}", rejected[0]);
+    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    open_question(&mut queue);
+}
+
+/// A question the session went on past (it rewrote its receipt after it)
+/// holds the revise no longer: once the mismatched receipt is sent back to
+/// be fixed, the session that goes idle without fixing it is judged so
+/// while the question is still open (task 583).
+#[test]
+fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{ASKS_AFTER_REVISE}\
+             receipt 0123456789012345678901234567890123456789; idle\n\
+             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
+             idle; await_exit\n"
+        ),
+    ));
+    let reviewer = Arc::new(TestReviewer::new(&[verdict(
+        "revise",
+        &["add a line"],
+        "one gap",
+    )]));
+    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "revise_receipt_rejected").len(), 1);
+    open_question(&mut queue);
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    let approve = asks
+        .iter()
+        .find(|a| a.kind == AskKind::ApproveLanding)
+        .unwrap_or_else(|| panic!("{asks:?}"));
+    assert!(
+        approve
+            .question
+            .contains("went idle without rewriting the receipt"),
+        "{}",
+        approve.question
+    );
+}
+
+/// A session idle at a question it asked during its revise, its receipt
+/// not rewritten, still waits for the answer past the resume timeout (task
+/// 238): answered, it rewrites the receipt and the run lands.
+#[test]
+fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let mut backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{ASKS_AFTER_REVISE}idle\n\
+             while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; rm \"$MESSAGE\"\n\
+             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
+             receipt \"$(git rev-parse HEAD)\"; idle; await_exit\n"
+        ),
+    );
+    backend.resume_timeout = Duration::from_secs(1);
+    let backend = Arc::new(backend);
+    let reviewer = Arc::new(TestReviewer::new(&[
+        verdict("revise", &["add a line"], "one gap"),
+        verdict("pass", &[], "fixed"),
+    ]));
+    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue
+            .asks(AskQuery::default())
+            .unwrap()
+            .iter()
+            .any(|a| a.kind == AskKind::WorkerQuestion)
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = open_question(&mut queue);
+    // Idle at its question for longer than the resume timeout.
+    thread::sleep(Duration::from_secs(3));
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"exit_requested"), "{kinds:?}");
+    assert!(!kinds.contains(&"revise_finished"), "{kinds:?}");
+    assert_eq!(queue.asks(AskQuery::default()).unwrap().len(), 1);
+
+    queue.answer(ask, "the second").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    assert!(queue.read_ask(ask).unwrap().closed_at.is_some());
 }
