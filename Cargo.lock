@@ -184,6 +184,7 @@ name = "dagq-broker"
 version = "0.4.0-dev"
 dependencies = [
  "dagq-broker-protocol",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

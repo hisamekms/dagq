@@ -89,6 +89,18 @@ impl AuditLog {
         file.write_all(&line)
     }
 
+    /// Whether a line for the day of `at` could be appended now: the day's
+    /// file opens for appending (and is created). The server asks before an
+    /// operation runs, so an operation is not done when its line cannot be
+    /// written.
+    pub fn check(&self, at: SystemTime) -> io::Result<()> {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.file_for(at))
+            .map(drop)
+    }
+
     /// Remove the day files older than [`RETENTION_DAYS`] before `now`, and
     /// return how many were removed. Files that are not day files are left.
     pub fn prune(&self, now: SystemTime) -> io::Result<usize> {

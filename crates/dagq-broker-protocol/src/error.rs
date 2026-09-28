@@ -23,7 +23,8 @@ pub enum ErrorCode {
     WorkspaceViolation,
     /// The process ran out of time and was stopped.
     Timeout,
-    /// The output or the answer was over the limit.
+    /// The output or the answer, or the content to write, was over the
+    /// limit.
     OutputLimit,
     /// fs, process or git failed.
     BackendError,

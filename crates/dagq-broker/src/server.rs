@@ -283,6 +283,19 @@ impl Handler {
             record.path = Some(relative(workspace, path));
         }
 
+        // Nothing is done that cannot be audited: the line is written after
+        // the operation, so see first that it can be.
+        self.audit.check(at).map_err(|error| {
+            eprintln!(
+                "{}: the audit cannot be written before {operation}: {error}",
+                crate::NAME
+            );
+            (
+                ErrorCode::BackendError,
+                "the audit could not be written".to_owned(),
+            )
+        })?;
+
         let call = Call {
             operation,
             claims: &claims,

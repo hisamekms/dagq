@@ -63,6 +63,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - 今（task 828）: protocolの型（下の「protocolの型」）と、serverとclientの骨組み（`dagq-broker --version`・`dagq-broker health`（healthの応答のJSONを出す）、`dagq-broker-client --version`）。未知の引数はexit 2。HTTP・token・backend・MCPは後のtaskが足す。serverとclientの`--version`はまだ`CARGO_PKG_VERSION`で、dagqのbuild識別子（`X.Y.Z-dev+<commit>`）にそろえるのは後のtask。
 - task 829: protocolに`token`（`sign` / `verify` / `check_active`、`SigningKey`・`BrokerSessionToken`・`TokenError`、`TokenClaims::require` / `confine`）、dagqに`src/infrastructure/broker_token.rs`（`ensure_key`・`issue_run_token`・`broker_grants`）。dagqはprotocolに依存する（`=<同じ版>`と`path`）。claimでの発行・token fileと有効な印の書き込み・失効はhost workerの統合のtaskが足す
 - task 830: serverに`dagq-broker serve`（下の「serve」）。HTTPのserver・loopbackだけのbind・health・tokenの認証・default denyのrouting・構造化のerror・audit。fs・process・gitのbackendは`Backend` traitの後ろの`Unimplemented`（全てのopを`backend_error`の「`<op> is not implemented yet`」で返す）で、各backendのtaskが置き換える
+- task 831: serverにfsのbackend（`crates/dagq-broker/src/backends/fs.rs`の`FsBackend`。下の「mountと閉じ込め」の閉じ込め、`fs.read`・`fs.list`・`fs.write`・`fs.edit`、`--fs-limit-bytes`の上限、tmpとrenameのatomicな書き込み）。serverはbackendに渡す前にauditの日のファイルを追記で開けることを確かめ、開けなければopを走らせずに`backend_error`（`the audit could not be written`）で答える。processとgitはまだ`Unimplemented`
 
 ### protocolの型
 
@@ -142,13 +143,14 @@ resolver = "3"
 | `--audit <dir>` | 必須 | auditの置き場所。無ければ作り、起動時に保持の日数を過ぎた日のファイルを消す |
 | `--root <dir>`（複数可） | 必須（1つ以上、絶対パス） | mountしたruns dir。tokenの`workspace`がどのrootの下にも無ければ`workspace_violation` |
 | `--exec-timeout-secs` / `--exec-max-timeout-secs` / `--output-limit-bytes` | 60 / 300 / 1048576 | 上限の既定値（backendに渡す） |
+| `--fs-limit-bytes` | 4194304 | fsの中身の上限（`fs.read`が返す中身、`fs.write`・`fs.edit`が書く中身、`fs.edit`が読むファイル、`fs.list`の応答）。超えれば`output_limit` |
 | `--exec-allow <name>` / `--exec-env <name>`（複数可） | 空 | execのallowlist（backendに渡す） |
 
 - bindしたら`{"listening":"<addr>","build":"<build>"}`の1行をstdoutに出す（port 0で選ばれたportをtestと起動側が読む）
 - HTTPは`std::net`の上の自前の小さなserver（1接続1要求・1接続1 thread で同時に32接続まで（超えた接続は答えずに閉じる）、本体は`Content-Length`だけで`Transfer-Encoding`は拒む、本体は届いた分だけ伸ばして読む、応答は`Connection: close`、要求の全体を読む期限と書きのtimeoutは30秒、要求の頭は16 KiBまで）。以前の例の`tiny_http`はofflineのbuildで使えず、要るのはloopbackで自分のclientと話すことだけなので足さない
 - 判定の順（どれかで拒めば先を見ない）: (1) `GET /v1/health`だけはtokenなしで答える。(2) `Authorization: Bearer <token>`を`verify`（書式・署名・claims・期限）と`check_active`で確かめる（無い・Bearerでない・通らなければ`unauthorized`）。未知のpathもtokenより前には答えない（default deny）。(3) methodとpathを`Operation::route`で引き、無ければ`invalid_request`（`no such operation`。`POST /v1/health`も）。(4) `X-Dagq-Broker-Protocol`が`1`でない・無ければ`invalid_request`。(5) opの要るcapabilityをtokenが持たなければ`capability_denied`。(6) 本体をopの要求の型で読む（未知の欄は`invalid_request`。workerが本体に`run_id`などを書いても未知の欄で拒み、誰の要求かはtokenのclaimsだけで決める）。(7) tokenの`workspace`が`--root`の下か、要求のpath（fsの`path`、gitの`paths`）を`TokenClaims::confine`で字面で閉じ込める（外は`workspace_violation`。symlinkはbackendが解く）。(8) opのbackend（fs・process・git）に渡す
 - 読めない要求（HTTPでない・頭が長すぎる・本体の上限超え・chunked）と、途中で切れた・期限を過ぎた要求（`the request is incomplete`）は`invalid_request`で答え（届けば）、auditに残す。1 byteも送らずに切れた接続は要求ではないので、答えずauditにも残さない
-- auditの行は応答を送る前に書く。書けなければstderrに要求のIDと理由を出し、応答を`backend_error`（`the audit could not be written`）に替える（auditの無い答えを返さない）。backendを持つtaskは、opを走らせる前にauditを書けることを確かめるかを決める
+- auditの行は応答を送る前に書く。書けなければstderrに要求のIDと理由を出し、応答を`backend_error`（`the audit could not be written`）に替える（auditの無い答えを返さない）。backendに渡す前に、auditの日のファイルを追記で開けることを確かめ、開けなければopを走らせずに同じ`backend_error`で答える（書けないauditのままfsの書き込みなどを行わない。task 831）
 
 | method と path | capability | 要求 | 応答 |
 | --- | --- | --- | --- |
@@ -164,7 +166,16 @@ resolver = "3"
 | `POST /v1/git/add` | `git.write` | `{paths}` | `{}` |
 | `POST /v1/git/commit` | `git.write` | `{message}` | `{commit}` |
 
-`fs.edit`は組み込みのEditと同じで、`old_string`が1つだけ見つかるとき（`replace_all`なら1つ以上）に置換し、見つからない・複数あるときは`invalid_request`。
+`fs.edit`は組み込みのEditと同じで、`old_string`が1つだけ見つかるとき（`replace_all`なら1つ以上）に置換し、見つからない・複数あるとき（messageに一致の数、中身は入れない）・`old_string`が空・`old_string`と`new_string`が同じときは`invalid_request`。`replacements`は置換した数。
+
+fsのopの細部（task 831）:
+
+- `fs.read`: UTF-8のテキストの行（`\n`を含めて返す）。`offset`は飛ばす行数（既定0）、`limit`は返す行の上限（既定は上限なし）。`truncated`は返した後にまだ中身があるか。返す中身が`--fs-limit-bytes`を超えれば`output_limit`（`offset` / `limit`で絞って読み直す）。UTF-8でない・通常のファイルでない（dir・FIFOなど。FIFOは`O_NONBLOCK`で開くので止まらない）・無いものは`backend_error`
+- `fs.list`: 1階層だけ。`.`と`..`を除き、名前の順。symlinkは辿らずに`kind: symlink`で出す。workspaceの根の`.git`も名前と種類だけは出す（中は読めない）
+- `fs.write`: 中身が上限を超えれば何も書かずに`output_limit`。同じdirに`.dagq-broker-<uuid>.tmp`を`O_CREAT | O_EXCL | O_NOFOLLOW`で作って書き、`fsync`してから`renameat`で置き換える（途中で失敗すればtmpを消す）。既存のファイルは権限のbit（`0777`の範囲）を引き継ぎ、新しいファイルは`0666`からumaskを引いたもの。`create_dirs`なら無いdirを`mkdirat`で作る（作ったdirもsymlinkを辿らずに開く）。dir・FIFOなど通常のファイルでないものへの書き込みとworkspaceそのものは`backend_error`
+- `fs.edit`: 上限を超えるファイルと、置換後に上限を超えるものは`output_limit`。書き込みは`fs.write`と同じatomicな置き換えで、権限を引き継ぐ
+- mkdir・remove・statの独立したopは無い（ADR-t827-4の道具の形と上の表に従う。dirは`fs.write`の`create_dirs`で作る）
+
 
 ### error
 
@@ -176,7 +187,7 @@ resolver = "3"
 | `capability_denied` | 403 | tokenがopの要るcapabilityを持たない。execのallowlistの外のプログラム、`git`のexec |
 | `workspace_violation` | 403 | workspaceの外、`..`、symlinkの逃げ、worktreeの`.git`、run branchでないHEADでのcommit |
 | `timeout` | 504 | execのtimeout（プロセスは止めた） |
-| `output_limit` | 413 | execの出力かfs・gitの応答が上限を超えた（execはプロセスを止めた） |
+| `output_limit` | 413 | execの出力かfs・gitの応答、`fs.write`・`fs.edit`が書く中身が上限を超えた（execはプロセスを止めた。fsは何も書かない） |
 | `backend_error` | 502 | fs・process・gitの失敗（存在しないファイル、gitのerror） |
 | `invalid_request` | 400 | 未知のpath・未知の欄・型の誤り・protocolの版の違い・本体の上限超え・Editの不一致 |
 
@@ -236,9 +247,10 @@ mountしないもの: `$HOME`、`~/.ssh`、`~/.aws`、`~/.config`（ghのtoken�
 閉じ込め（fsのop）:
 
 1. 要求の`path`はworkspaceからの相対か、workspaceの中の絶対パス。字句で正規化し、workspaceの根より上に出る`..`は拒む
-2. 開くのはworkspaceの根のdir fdからの`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`（Linux）で、確認と開くことの間の競合（親dirをsymlinkに差し替える）を作らない。`openat2`の無いOS（macOSのhostのtest）は要素ごとの`openat(O_NOFOLLOW)`で辿る
-3. workspaceの根の`.git`（worktreeのgitdirを指すファイル）とその下は、読みも書きも拒む。hostのfilesystem（APFS）は大文字と小文字を区別しないので、名前の比較は大文字と小文字を区別せずに行う
-4. どれに当たっても`workspace_violation`
+2. 開くのは、workspaceを含むmountの根（`--root`。supervisorが渡す信頼する値で、ここだけは普通に開く）のdir fdから、workspaceまでと要求のpathの全ての要素を1つずつ、前の要素のfdからの`openat(O_NOFOLLOW)`（dirは`O_DIRECTORY`も）で辿る。確かめたものをそのまま開くので、確認と開くことの間の競合（親dirをsymlinkに差し替える）を作らない。途中の要素・最後の要素・workspaceそのもの（`runs/<run id>/worktree`をsymlinkに差し替えたもの）のどれがsymlinkでも、workspaceの中を指すものも含めて拒む（`RESOLVE_NO_SYMLINKS`と同じ）。`openat`で開けなかったときは`fstatat(AT_SYMLINK_NOFOLLOW)`でsymlinkかを見て`workspace_violation`と`backend_error`を分ける。この辿り方はLinuxでもmacOSでも同じで、`openat2`は使わない（`..`は字句で拒み済み、magic linkは`/proc`だけ）。hard linkは見分けられない（hostのworkerはworkspaceの外のファイルへのhard linkを作れるが、hostで直接書けるので失うものは無い）
+3. workspaceの根の`.git`（worktreeのgitdirを指すファイル）とその下は、読みも書きも拒む（gitのbackendだけが触る）。hostのfilesystem（APFS）は大文字と小文字を区別しないので、名前の比較は大文字と小文字を区別せずに行う（`.GIT`・`.Git`も拒む）。より深い`.git`（`src/.gitignore`などを含む）は普通の名前
+4. `~`は展開しない（workspaceの中の`~`という名前）
+5. どれに当たっても`workspace_violation`
 
 別のrunのworktreeはmountされているが、tokenのworkspaceの外なのでfsのopでは届かない。
 
@@ -345,7 +357,7 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 
 - 置き場所: `<queue dir>/broker/audit/<YYYY-MM-DD>.jsonl`（UTCの日付）。brokerが1要求1行で追記する。30日より古いファイルはbrokerの起動時に消す
 - auditは記録で、改ざんへの耐性は持たない（上の「既知の制限」と、hostのworkerが同じファイルを書けること）
-- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。閉じ込めで拒んだpathは残さない）・`program`（execの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
+- 欄（この順。当てはまらない欄は`null`）: `ts`（RFC 3339のUTC、ミリ秒）・`request_id`・`jti`・`run_id`・`task_id`・`actor_id`・`backend`（`fs`・`process`・`git`。healthと未知のpathは`null`）・`op`（`fs.read`など。healthは`health`、未知のpathは`null`）・`capability`・`path`（workspaceからの相対で、workspaceそのものは`.`。要求のpathが1つのときだけ。字句の閉じ込めで拒んだpathは残さない。字句では中にありbackendがsymlinkなどで拒んだものは、その相対パスを残す）・`program`（execの`argv[0]`のbasename）・`argc`・`argv_sha256`（`argv[1..]`の各引数の後にNULを置いたbyte列のSHA-256、小文字の16進）・`result`（`ok`かerror code）・`exit_code`・`duration_ms`・`bytes_in`（要求の本体）・`bytes_out`（応答の本体）
 - healthの要求も1行残す（`op: health`）
 - `verify`が通らないtoken（書式・署名・claims・期限）の要求は`jti`・`run_id`などをnullにし、`result: unauthorized`だけを残す（claimsを信用しない）。署名の通ったtokenで有効な印だけが無いものは、claimsの`jti`・`run_id`・`task_id`・`actor_id`を残す
 - `argv_sha256`は照合用で、推測しやすい引数はhashから総当たりで戻せる
@@ -364,6 +376,7 @@ exec_env = []                 # execに通すenvの名前
 exec_timeout_secs = 60
 exec_max_timeout_secs = 300
 output_limit_bytes = 1048576
+fs_limit_bytes = 4194304       # serveの --fs-limit-bytes
 ```
 
 `host.toml`（`<queue dir>/host.toml`か`$XDG_CONFIG_HOME/dagq/host.toml`。hostの事情）:

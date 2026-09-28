@@ -1,5 +1,6 @@
 //! `dagq-broker serve` as a host process (no podman) on `127.0.0.1:0`:
-//! health, the refusals of default deny and their audit lines.
+//! health, the refusals of default deny, the fs backend and their audit
+//! lines.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -35,11 +36,18 @@ impl Drop for Broker {
 
 impl Broker {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// Start with `extra` flags after the required ones.
+    fn start_with(extra: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         fs::write(root.join("key"), KEY).unwrap();
         fs::create_dir_all(root.join("active")).unwrap();
         fs::create_dir_all(root.join("runs/run-1/worktree")).unwrap();
+        fs::create_dir_all(root.join("runs/run-2/worktree")).unwrap();
+        fs::write(root.join("runs/run-2/worktree/theirs"), "theirs\n").unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_dagq-broker"))
             .arg("serve")
             .args(["--listen", "127.0.0.1:0"])
@@ -51,6 +59,7 @@ impl Broker {
             .arg(root.join("audit"))
             .arg("--root")
             .arg(root.join("runs"))
+            .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -384,7 +393,7 @@ fn default_deny_refuses_unknown_routes_missing_capabilities_and_foreign_fields()
 }
 
 #[test]
-fn paths_are_confined_and_the_backends_are_not_implemented_yet() {
+fn paths_are_confined_and_process_and_git_are_not_implemented_yet() {
     let broker = Broker::start();
     let claims = broker.claims("jti-all", &BrokerCapability::ALL);
     let token = broker.token(&claims, true);
@@ -406,7 +415,7 @@ fn paths_are_confined_and_the_backends_are_not_implemented_yet() {
     answer.assert_refused(ErrorCode::BackendError);
     assert_eq!(
         answer.error().error.message,
-        "fs.read is not implemented yet"
+        "src/a.rs: no such file or directory"
     );
     let line = answer.audit_line(&broker);
     assert_eq!(line["path"], "src/a.rs");
@@ -534,4 +543,135 @@ fn refuses_to_listen_beyond_loopback_outside_the_container() {
         assert!(stderr.contains("not a loopback address"), "{stderr}");
         assert!(output.stdout.is_empty());
     }
+}
+
+#[test]
+fn fs_operations_work_in_the_workspace_and_every_one_is_audited() {
+    let broker = Broker::start_with(&["--fs-limit-bytes", "64"]);
+    let claims = broker.claims("jti-fs", &BrokerCapability::ALL);
+    let token = broker.token(&claims, true);
+    let workspace = PathBuf::from(broker.workspace());
+    let ok = |path: &str, body: Value| {
+        let answer = broker.post(path, Some(&token), &body.to_string());
+        assert_eq!(answer.status, 200, "{path}: {}", answer.body);
+        let line = broker.audit().pop().expect("an audit line for the request");
+        assert_eq!(line["result"], "ok", "{path}");
+        assert_eq!(line["run_id"], "run-1");
+        assert_eq!(line["backend"], "fs");
+        (serde_json::from_str::<Value>(&answer.body).unwrap(), line)
+    };
+
+    let (written, line) = ok(
+        "/v1/fs/write",
+        serde_json::json!({"path": "src/a.txt", "content": "alpha\nbeta\n", "create_dirs": true}),
+    );
+    assert_eq!(written, serde_json::json!({"bytes": 11}));
+    assert_eq!(line["op"], "fs.write");
+    assert_eq!(line["capability"], "fs.write");
+    assert_eq!(line["path"], "src/a.txt");
+    let (read, line) = ok("/v1/fs/read", serde_json::json!({"path": "src/a.txt"}));
+    assert_eq!(
+        read,
+        serde_json::json!({"content": "alpha\nbeta\n", "lines": 2, "truncated": false})
+    );
+    assert_eq!(line["op"], "fs.read");
+    let (edited, _) = ok(
+        "/v1/fs/edit",
+        serde_json::json!({"path": "src/a.txt", "old_string": "beta", "new_string": "gamma"}),
+    );
+    assert_eq!(edited, serde_json::json!({"replacements": 1}));
+    assert_eq!(
+        fs::read_to_string(workspace.join("src/a.txt")).unwrap(),
+        "alpha\ngamma\n"
+    );
+    let (listed, line) = ok("/v1/fs/list", serde_json::json!({"path": "."}));
+    assert_eq!(
+        listed,
+        serde_json::json!({"entries": [{"name": "src", "kind": "dir", "size": 0}]})
+    );
+    assert_eq!(line["path"], ".");
+
+    std::os::unix::fs::symlink(
+        broker.root().join("runs/run-2/worktree"),
+        workspace.join("other"),
+    )
+    .unwrap();
+    fs::write(workspace.join("dup.txt"), "x x\n").unwrap();
+    let theirs = broker.root().join("runs/run-2/worktree/theirs");
+    let refusals: [(&str, Value, ErrorCode); 7] = [
+        (
+            "/v1/fs/read",
+            serde_json::json!({"path": "../run-2/worktree/theirs"}),
+            ErrorCode::WorkspaceViolation,
+        ),
+        (
+            "/v1/fs/read",
+            serde_json::json!({"path": theirs}),
+            ErrorCode::WorkspaceViolation,
+        ),
+        (
+            "/v1/fs/write",
+            serde_json::json!({"path": "/tmp/x", "content": "x"}),
+            ErrorCode::WorkspaceViolation,
+        ),
+        (
+            "/v1/fs/write",
+            serde_json::json!({"path": "other/theirs", "content": "x"}),
+            ErrorCode::WorkspaceViolation,
+        ),
+        (
+            "/v1/fs/write",
+            serde_json::json!({"path": "big", "content": "x".repeat(65)}),
+            ErrorCode::OutputLimit,
+        ),
+        (
+            "/v1/fs/edit",
+            serde_json::json!({"path": "dup.txt", "old_string": "x", "new_string": "y"}),
+            ErrorCode::InvalidRequest,
+        ),
+        (
+            "/v1/fs/list",
+            serde_json::json!({"path": ".git"}),
+            ErrorCode::WorkspaceViolation,
+        ),
+    ];
+    for (path, body, code) in refusals {
+        let answer = broker.post(path, Some(&token), &body.to_string());
+        answer.assert_refused(code);
+        let line = answer.audit_line(&broker);
+        assert_eq!(line["result"], code.as_str(), "{path} {body}");
+        assert_eq!(line["jti"], "jti-fs");
+        assert_eq!(line["backend"], "fs");
+    }
+    assert_eq!(fs::read_to_string(&theirs).unwrap(), "theirs\n");
+    fs::write(workspace.join("big"), "y".repeat(65)).unwrap();
+    let answer = broker.post("/v1/fs/read", Some(&token), r#"{"path":"big"}"#);
+    answer.assert_refused(ErrorCode::OutputLimit);
+
+    // One line per request, and no content in any of them.
+    let audit = broker.audit();
+    assert_eq!(audit.len(), 12);
+    let text = broker.audit_text();
+    for content in ["alpha", "gamma", "theirs\n", &token] {
+        assert!(!text.contains(content), "{content}");
+    }
+}
+
+#[test]
+fn an_operation_that_cannot_be_audited_is_not_done() {
+    let broker = Broker::start();
+    let claims = broker.claims("jti-noaudit", &BrokerCapability::ALL);
+    let token = broker.token(&claims, true);
+    fs::rename(broker.root().join("audit"), broker.root().join("gone")).unwrap();
+    let answer = broker.post(
+        "/v1/fs/write",
+        Some(&token),
+        r#"{"path":"a.txt","content":"x"}"#,
+    );
+    answer.assert_refused(ErrorCode::BackendError);
+    assert_eq!(
+        answer.error().error.message,
+        "the audit could not be written"
+    );
+    assert!(!PathBuf::from(broker.workspace()).join("a.txt").exists());
 }

@@ -15,6 +15,10 @@ pub const DEFAULT_EXEC_MAX_TIMEOUT_SECS: u64 = 300;
 /// The default of `--output-limit-bytes`, 1 MiB.
 pub const DEFAULT_OUTPUT_LIMIT_BYTES: u64 = 1024 * 1024;
 
+/// The default of `--fs-limit-bytes`, 4 MiB: the most a `fs.read` answers
+/// and a `fs.write` or `fs.edit` writes.
+pub const DEFAULT_FS_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// The limits the backends enforce on the server's side (ADR-t827-2
 /// decision 8), and what `process.exec` may run and receive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +26,9 @@ pub struct Limits {
     pub exec_timeout_secs: u64,
     pub exec_max_timeout_secs: u64,
     pub output_limit_bytes: u64,
+    /// The most bytes of content `fs.read` answers and `fs.write` /
+    /// `fs.edit` write (and `fs.edit` reads).
+    pub fs_limit_bytes: u64,
     /// The basenames `argv[0]` may have; empty refuses every exec.
     pub exec_allow: Vec<String>,
     /// The env names a request may pass to its process.
@@ -34,6 +41,7 @@ impl Default for Limits {
             exec_timeout_secs: DEFAULT_EXEC_TIMEOUT_SECS,
             exec_max_timeout_secs: DEFAULT_EXEC_MAX_TIMEOUT_SECS,
             output_limit_bytes: DEFAULT_OUTPUT_LIMIT_BYTES,
+            fs_limit_bytes: DEFAULT_FS_LIMIT_BYTES,
             exec_allow: Vec::new(),
             exec_env: Vec::new(),
         }
@@ -88,6 +96,7 @@ impl Config {
                 "--exec-timeout-secs" => limits.exec_timeout_secs = number(flag, &value)?,
                 "--exec-max-timeout-secs" => limits.exec_max_timeout_secs = number(flag, &value)?,
                 "--output-limit-bytes" => limits.output_limit_bytes = number(flag, &value)?,
+                "--fs-limit-bytes" => limits.fs_limit_bytes = number(flag, &value)?,
                 "--exec-allow" => limits.exec_allow.push(value),
                 "--exec-env" => limits.exec_env.push(value),
                 _ => return Err(format!("unknown flag `{flag}`")),
@@ -172,6 +181,7 @@ mod tests {
         assert_eq!(config.limits.exec_timeout_secs, 60);
         assert_eq!(config.limits.exec_max_timeout_secs, 300);
         assert_eq!(config.limits.output_limit_bytes, 1_048_576);
+        assert_eq!(config.limits.fs_limit_bytes, 4_194_304);
         assert!(config.limits.exec_allow.is_empty());
     }
 
@@ -198,6 +208,8 @@ mod tests {
             "10",
             "--output-limit-bytes",
             "99",
+            "--fs-limit-bytes",
+            "7",
             "--exec-allow",
             "ls",
             "--exec-allow",
@@ -214,6 +226,7 @@ mod tests {
                 exec_timeout_secs: 5,
                 exec_max_timeout_secs: 10,
                 output_limit_bytes: 99,
+                fs_limit_bytes: 7,
                 exec_allow: vec!["ls".to_owned(), "cat".to_owned()],
                 exec_env: vec!["LANG".to_owned()],
             }
