@@ -1,9 +1,8 @@
 {
-  "description": "Re-orient a dagq inbox or planner session after compaction or /clear by printing the queue's status for its role, and record the session's span (kind, session id, start and end) in the queue.",
+  "description": "Re-orient a dagq inbox or planner session at its start, resume, compaction or /clear by printing the queue's status for its role (the inbox first told to start its watch), keep the inbox from ending a turn without a watch, and record the session's span (kind, session id, start and end) in the queue.",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "compact|clear",
         "hooks": [
           {
             "type": "command",
@@ -16,6 +15,16 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh\" open"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/stop-watch.sh\""
           }
         ]
       }

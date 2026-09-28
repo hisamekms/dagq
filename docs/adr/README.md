@@ -108,6 +108,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t827-3](2026-09-28-t827-3-supervisor-runs-the-broker-container-on-a-dedicated-podman-machine.md) | brokerのcontainerはqueueごとに1つで、supervisorが起動・health・停止の責任を持ち、dagq専用の最小のPodman machineを必要なときにruntimeが冪等にinit・startして、使われなくなれば止め、人の既定のmachineには触らない | 2026-09-28 |
 | [ADR-t827-4](2026-09-28-t827-4-worker-mcp-tools-audit-mode-and-relations.md) | workerはbrokerをclientのMCPの道具で使い（preferredでは組み込みの道具も残す）、brokerの全ての操作をqueue dirのauditにtokenと秘密なしで残し、modeはdisabled・preferred・requiredでrepositoryの方針はdagq.toml・hostの資源はhost.tomlに置き、resource brokerはADR-t728-1の助言的なhostとgoal 38のqueue serviceとは別の層にする | 2026-09-28 |
 | [ADR-t828-1](2026-09-28-t828-1-coverage-gate-covers-the-workspace-with-workspace-flag.md) | coverageの関門はcargo-llvm-covがdefault-membersを見ないので、関門のコマンドに--workspaceを足してbrokerのcrateも80%の行カバレッジに数える（ADR-t827-1決定3をamends） | 2026-09-28 |
+| [ADR-t906-1](2026-09-28-t906-1-guarantee-the-inbox-watch.md) | inboxのwatchの生存を、watcherの記録と可視化・pluginのSessionStart / Stop hook・supervisorによるidleのinboxへの知らせの3層で保証する（ADR-0016決定3とADR-0022決定2をamends） | 2026-09-28 |
 
 ## 置き換え・廃止されたADR
 

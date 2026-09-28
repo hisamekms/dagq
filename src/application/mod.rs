@@ -15,6 +15,7 @@ pub mod execution;
 pub mod forecast;
 mod headless_session;
 pub mod health;
+pub mod inbox_watcher;
 pub mod install;
 pub mod integrate;
 pub mod kpi;

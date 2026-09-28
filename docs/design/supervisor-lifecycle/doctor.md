@@ -12,6 +12,7 @@ related:
   - design-supervisor-lifecycle-landing-branch
   - design-supervisor-lifecycle-language
   - adr-0049
+  - adr-t906-1
 ---
 
 # `doctor`
@@ -28,6 +29,7 @@ related:
 - `language`（既定の出力にも出す）: AIが人に向けて書く文の言語の解決の結果（`tag`（未設定ならnull）・`source`（`repository` / `user` / `unset`）・`user_config`のpath・promptに足す`instruction`、書式の誤りなら`error`）。規則は[Language](language.md#upとdoctor)（ADR-t616-2）。
 - `d2`（既定の出力にも出す）: `graph --format svg`が使う`d2`と`d2plugin-tala`を、`doctor`を打ったプロセスのPATHで解決した結果（`d2` / `tala`のそれぞれに`path`と、linkならその先の`resolved`。見つからなければnull）と、見つからないものを名指す`error`（揃っていれば出さない）。queueの状態に関わらず出す（[当面の依存図](dependency-diagram.md#描画infrastructured2)、ADR-0077の決定4）。
 - `providers`（既定の出力にも出す）: workerのprovider（`claude` / `codex`）を、`doctor`を打ったプロセスのPATHで解決した結果（`provider`・`executable`（見つからなければ名前のまま）・`found`・見つからない理由`error`・このbinaryが動かせる経路`modes`）。supervisorが実際に使うのは登録の`supervisors[].providers`（`up`が固定したpath）で、こちらはその場のPATHの目安。queueの状態に関わらず出す（[Provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)、ADR-t813-2）。
+- `inbox_watcher`（既定の出力にも出す）: inboxのwatcherの有無（`state`（`alive` / `absent`）・`watching`・`last_seen_at`・`absent_secs`・`grace_secs`）。`status`の`inbox_watcher`と同じ判定（`application::inbox_watcher::judge`。heartbeatの新しさで決まり、閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）で、queueのディレクトリのファイルだけを読むので、queueの状態（schemaが拒むときも）に関わらず出す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）。
 - `schema`: `migrate --check`と同じqueueのschemaの状態（`schema_version`、`binary_schema_version`、`floor`、`migrate`が適用する`pending`とその`compatible`、このバイナリがそのまま開けるかの`opens`）。既定の出力にも含める。`migrate`が要るqueueでも、floorがこのバイナリを拒むqueueでも報告する（ADR-0045の決定5）。前者のrunとsupervisorはread-onlyのコピーを`migrate`した上で読む。後者は`supervisors`と`runs`を省き、拒む理由を`error`に書く。どちらでもrepositoryの束縛は先に検査する（`SqliteQueue::inspect_read_only`がschemaの状態と、読めるqueueか、floorが拒むときは束縛だけを読む接続と拒む理由を、1つの接続から返す）。
 
 cmux workspaceの存在は確認しない（cmuxなしで動く）。IDを見てユーザーが`cmux workspace list`で確認する。

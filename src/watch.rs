@@ -14,7 +14,7 @@ use crate::{
         event_attention,
         timeline::{self, Gap},
     },
-    infrastructure::{adapters::SystemProcesses, sqlite::SqliteQueue},
+    infrastructure::{adapters::SystemProcesses, inbox_watchers, sqlite::SqliteQueue},
 };
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -251,8 +251,33 @@ pub struct WatchOptions {
 /// it count, the supervisors' health included. A timeout
 /// returns no events and the cursor unchanged. Never writes and never
 /// integrates.
+///
+/// A `watch --role inbox` also leaves the record of itself that says the
+/// inbox has a watcher (ADR-t906-1): written when it starts, its heartbeat
+/// renewed at every read of the queue, its end written when it returns, in
+/// a file under the queue's directory, never in the queue. A record that
+/// cannot be written does not stop the watch.
 pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
     let queue = SqliteQueue::open(db)?;
+    let clock = queue.generators().clock.clone();
+    let mut record = (options.role == Some(SessionRole::Inbox))
+        .then(|| {
+            let now = clock.system_time();
+            inbox_watchers::WatcherFile::start(
+                &inbox_watchers::dir(db),
+                std::process::id(),
+                clock.now(),
+                now.duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64),
+                i64::try_from(options.timeout.as_secs()).unwrap_or(i64::MAX / 4),
+                i64::try_from(options.interval.as_secs()).unwrap_or(i64::MAX / 4),
+            )
+            .inspect_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "the inbox watcher's record could not be written: {error:#}");
+            })
+            .ok()
+        })
+        .flatten();
     let after = match options.after {
         Some(after) => after,
         None => queue.latest_event_id()?,
@@ -275,6 +300,9 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
         let (events, cursor) = read_events(&queue, &query, upto, options.role)?;
         let registrations = queue.supervisors()?;
         let now = queue.generators().clock.now();
+        if let Some(record) = record.as_mut() {
+            let _ = record.heartbeat(now);
+        }
         let changed =
             for_role(options.role) && pulses(&registrations, now, &SystemProcesses) != baseline;
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -284,6 +312,9 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
             } else {
                 cursor
             };
+            if let Some(record) = record.as_mut() {
+                let _ = record.end(now);
+            }
             return Ok(json!({
                 "events": events,
                 "supervisors_changed": changed,

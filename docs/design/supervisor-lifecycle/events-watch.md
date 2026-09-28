@@ -10,6 +10,7 @@ scope: runtime
 related:
   - design-supervisor-lifecycle
   - design-domain-model
+  - adr-t906-1
 ---
 
 # `events` / `watch`
@@ -20,6 +21,16 @@ attentionイベントの判定は`domain::event_attention(kind, payload)`（候�
 
 task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足した。`--full`は各イベントを`id`、`kind`、`task_id`、`goal_id`、`run_id`（無ければnull）、`payload`（切り詰めない）、`created_at`の全フィールドで返す。task 730から、書いたactorを`actor`（`role`・`id`と、headless jobのverdictを適用したeventでは`requested_by`。[Roles](roles.md)のeventのactor）に足し、actorを記録する前の行には`actor`の欄が無い。絞り込みは`--run RUN`、`--task ID`、`--goal ID`（goalのイベントと、そのgoalのtaskとrunのイベント）、`--kind KIND`（繰り返し可）、`--since` / `--until`（UTCの`YYYY-MM-DD`（その日の0時）か`YYYY-MM-DDTHH:MM:SS[.fff][Z]`。桁と範囲を検査し、合わない値はerror。`since <= created_at < until`）で、どれも組み合わせられ、`--after` / `--limit` / cursorの意味は変わらない。`--kind`を渡すと既定のattentionだけの絞り込みは外れ、そのkindをattentionかどうかに関わらず返す。`--kind`も`--all`も無いときは、`--run` / `--task` / `--goal` / 時刻の絞り込みもattentionのイベントの中で効く（全kindを読むには`--all`を付ける）。条件は`EventFilter`（`src/domain/views.rs`）で、`SqliteQueue::events_between`が1つのSQLで絞る。
 
-`dagq watch [--after <id>] [--timeout SECS（既定600）] [--interval SECS（既定2）] [--role <inbox|planner>]`はqueueをinterval秒ごとに読み、idより後にattentionイベントが1件以上あるか、登録済みsupervisorの健全性（tokenの集合と各`pid`・`alive`・`stale`、`domain::SupervisorPulse`）がwatch開始時のsnapshotと変わるまでblockする。返り値は`{events, supervisors_changed, supervisors, cursor}`で、`supervisors`は`status`と同じ形。timeoutでは`events`が空、`supervisors_changed: false`、`cursor`は渡したままで、exit codeは0。`--after`を省くと開始時の最新idから待つ。`watch`はqueueを読むだけで何も書かず、`integrate`を呼ばない。
+`dagq watch [--after <id>] [--timeout SECS（既定600）] [--interval SECS（既定2）] [--role <inbox|planner>]`はqueueをinterval秒ごとに読み、idより後にattentionイベントが1件以上あるか、登録済みsupervisorの健全性（tokenの集合と各`pid`・`alive`・`stale`、`domain::SupervisorPulse`）がwatch開始時のsnapshotと変わるまでblockする。返り値は`{events, supervisors_changed, supervisors, cursor}`で、`supervisors`は`status`と同じ形。timeoutでは`events`が空、`supervisors_changed: false`、`cursor`は渡したままで、exit codeは0。`--after`を省くと開始時の最新idから待つ。`watch`はqueueを読むだけで何も書かず（`--role inbox`は下の生存の記録をqueueの外のファイルに書く）、`integrate`を呼ばない。
 
 `--role`を渡すと、そのroleに宛てたattentionイベント（`domain::ATTENTION_ROLE`、`status --role`と同じ）だけで起き、supervisorの健全性の変化で起きるのも同じrole（`inbox`）だけ（plannerは`events`が常に空で`supervisors_changed`が常にfalse）。inboxは`watch --role inbox`で`ask_opened`、`ask_answered`、ADR-0016のattention、supervisorの停止を受ける（ADR-0044の決定6）。cursorはrun_eventsのidのままで、askの登録と回答も`ask_opened` / `ask_answered`としてrun_eventsに書かれるのでcursorに乗る（roleの違うwatchが同じcursorを使ってよい）。`events`には`--role`は無い。
+
+## inboxのwatcherの記録（ADR-t906-1）
+
+`watch --role inbox`は実行中、自分の記録を queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`inbox-watchers/<開始のミリ秒>-<pid>.json`に書く（`src/infrastructure/inbox_watchers.rs`）。queue DBには書かず、`watch`はqueueを読むだけのまま。記録は`{pid, started_at, heartbeat_at, ended_at, timeout_secs, interval_secs}`（時刻はunix秒）で、開始時に書き、queueを読むたび（`--interval`ごと。読みが無くても同じ間隔でloopが回る）に`heartbeat_at`を更新し、返るときに`ended_at`を書く（errorで抜けたときもdropで書く）。書き込みは一時ファイルとrenameで、書けなくてもwatchは止まらない（tracingのwarnだけ）。ファイル名が開始時刻とpidを持つので、pidが再利用されても別の記録になり、各watchは自分のファイルだけを書き換える。複数のwatchが同時に走ってよい。開始時に、最後に見えた時刻が7日（`PRUNE_AFTER_SECS`）より前の記録を消す。`--role inbox`以外のwatchは記録を書かない。
+
+判定は`application::inbox_watcher::judge(records, now)`の1か所にあり、`status`・`doctor`・pluginのStop hook（`status`を通して）・後続のsupervisorの知らせが同じものを使う。processの有無は見ず、heartbeatの新しさだけで決める:
+
+- **watching**: `ended_at`が無く、`now - heartbeat_at <= 3 × interval + 10`秒（`HEARTBEAT_INTERVALS`・`HEARTBEAT_SLACK_SECS`。既定の`--interval 2`で16秒）で、かつ`now <= started_at + timeout + 同じ閾値`（自分の`--timeout`を過ぎても返らないwatchは固まっている）。heartbeatが閾値より古ければ、processが残っていても（固まった・queueを読めていない）watchingでない。
+- **state**: watchingのwatchが1つでもあるか、返ってから`END_GRACE_SECS`（120秒）以内のwatchがあれば`alive`、それ以外は`absent`。猶予は、watchが返ってからinboxが報告して次のwatchを張るまでの切れ目を居ないと数えないため。
+- 出力は`{state, watching, last_seen_at, absent_secs, grace_secs}`。`watching`は猶予を含まない今watchingの数（Stop hookはこれが0のときturnを止める）、`last_seen_at`はwatchingがあれば今、無ければ記録の`ended_at`（無ければ`heartbeat_at`）の最大、`absent_secs`は`absent`のときの`now - last_seen_at`（`alive`か記録が一度も無ければnull）。

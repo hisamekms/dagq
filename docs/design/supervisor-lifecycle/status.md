@@ -19,6 +19,7 @@ related:
   - design-supervisor-lifecycle-waiting
   - design-supervisor-lifecycle-claim-defer
   - adr-t610-1
+  - adr-t906-1
 ---
 
 # `status`
@@ -38,3 +39,5 @@ related:
 - ask（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask / answer](ask.md#ask--answer--asks)）: closeされていないaskを`asks`表の順に並べる。未回答のものは`kind: ask_opened`、`status: open`、`next: answer ask <id>`、回答済みのものは`kind: ask_answered`、`status: answered`、`next: read the answer of ask <id> and close it`。ただし回答済みの`worker_question`は`delivering the answer of ask <id> (runtime)`か`send the answer of ask <id> to the worker and close it`（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。回答済みの`approve_landing`で、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`のどれかなら`applying the answer of ask <id> (runtime)`（supervisorが適用する。[Review](review.md#review-supervisor)の6）。項目は`ask_id`を持ち、`run_id`はaskのrun（taskだけのaskはnull）、`last_error`はnull。
 
 `status --role <inbox|planner>`は`attention`をそのroleに宛てたものだけにする（省略時は全部）。attentionはすべてinbox宛て（`domain::ATTENTION_ROLE`、ADR-0044の決定17）で、`--role inbox`は全部、`--role planner`は空になる。`asks`はroleに関わらずopenなask（未回答でcloseされていないもの）の一覧で、各項目は`id`、`kind`、`question`（先頭200文字。切ったときは末尾に`…`）、`task_id`、`run_id`、`asked_by`、`age_secs`（登録からの秒数）。
+
+`status`（`--role`なし）と`status --role inbox`は`inbox_watcher`も返す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）: `{state（alive / absent）, watching, last_seen_at, absent_secs, grace_secs}`。`watch --role inbox`がqueueのディレクトリの`inbox-watchers/`に残した記録を`application::inbox_watcher::judge`で判定したもので、processではなくheartbeatの新しさで決まる（閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）。`--role planner`は返さない。入口は`OneShot::status_of`で、時刻は`OneShot`の`Clock`（testはfakeのclockを渡す）。pluginのStop hookは`watching`が0のinboxのturnの終わりを止める（[plugin integration](../plugin-integration.md)）。

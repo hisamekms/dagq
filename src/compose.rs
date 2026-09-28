@@ -950,7 +950,22 @@ impl OneShot {
         if matches!(role, Some(SessionRole::Inbox | SessionRole::Planner)) {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;
         }
+        if matches!(role, None | Some(SessionRole::Inbox)) {
+            status["inbox_watcher"] = self.inbox_watcher(db);
+        }
         Ok(status)
+    }
+
+    /// Whether the inbox has a watcher now (ADR-t906-1), from the records
+    /// the inbox's watches left under the queue's directory.
+    fn inbox_watcher(&self, db: &Path) -> Value {
+        crate::application::inbox_watcher::judge(
+            &crate::infrastructure::inbox_watchers::read(
+                &crate::infrastructure::inbox_watchers::dir(db),
+            ),
+            self.generators.clock.now(),
+        )
+        .to_json()
     }
 
     /// The language of the checkout `queue` is bound to over the user's
@@ -1005,6 +1020,8 @@ impl OneShot {
             }
         };
         report["schema"] = serde_json::to_value(schema)?;
+        // The inbox's watcher (ADR-t906-1).
+        report["inbox_watcher"] = self.inbox_watcher(db);
         // The resource broker's podman and last recorded state (ADR-t827-3).
         report["broker"] = doctor_broker(db);
         // The host's `[update]`, with what was taken as its default

@@ -134,6 +134,11 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
         expected["actors"] =
             serde_json::to_value(dagq::application::execution::actor_executions().unwrap())
                 .unwrap();
+        // No inbox watch ever ran (ADR-t906-1).
+        expected["inbox_watcher"] = serde_json::json!({
+            "state": "absent", "watching": 0, "last_seen_at": null,
+            "absent_secs": null, "grace_secs": 120,
+        });
         if command == "status" {
             // Nothing supervises a fresh queue; no event exists yet.
             expected["attention"] = serde_json::json!([{

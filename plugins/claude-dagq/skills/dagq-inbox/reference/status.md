@@ -10,6 +10,10 @@ Read this when a field of `status`, `watch` or `show` is unclear.
   - `registered: false`: not a supervisor but a process holding a lease, normally an `integrate` landing a run.
   - Empty: nothing serves this queue; run `up`.
   - A registered entry also has `slots: {used, parallel}` and `waiting: {count, returning, limit}` (see "Runs waiting for a person" below). `used` leaves out waiting and returning runs, and can exceed `parallel` for a moment after a person moved a session on.
+- `inbox_watcher` (also in `doctor`): whether this inbox has a `watch --role inbox` running (ADR-t906-1). Each such watch writes a record under the queue's directory and renews its heartbeat at every read of the queue; the judgment uses the heartbeat, not the process.
+  - `watching`: the watches with a fresh heartbeat now (not older than three `--interval`s plus 10 seconds, and not past their own `--timeout`). `0` means no watch is running: start the loop of `watch.md`. The Stop hook blocks your turn while it is `0`, once; start the loop, then end the turn.
+  - `state`: `alive` while a watch is watching or one returned less than `grace_secs` (120) ago (the gap while you report and start the next one); `absent` otherwise. A watch that hangs or cannot read the queue counts as absent though its process is there.
+  - `last_seen_at` (unix seconds; `null` if no watch ever ran) and `absent_secs` (only while `absent`): how long the inbox has gone unwatched. Tell the person when it was long: asks opened meanwhile reached nobody.
 - `waiting`: the runs outside the slots (below), one entry each.
 - `runs`: unfinished runs with their leases and `worktree_path`.
 - `attention`: each with `run_id`, `task_id`, `status`, `kind` (the run event that brought it there), `last_error` and a fixed `next`:

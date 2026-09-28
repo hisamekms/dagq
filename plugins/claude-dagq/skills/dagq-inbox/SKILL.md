@@ -23,7 +23,7 @@ This session holds no state of its own. After a restart, compaction or `/clear`,
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --after <cursor>` in one loop of `reference/watch.md` under `run_in_background`. Never report an empty timeout (no `events`, cursor unchanged). The loop watches again and ends only with `events` or `supervisors_changed`; handle them (steps 3, 4), then loop from its `cursor`. Keep exactly one watch running; never poll `status` in a loop.
+Run `"$DAGQ" watch --role inbox --after <cursor>` in one loop of `reference/watch.md` under `run_in_background`. Never report an empty timeout (no `events`, cursor unchanged). The loop watches again and ends only with `events` or `supervisors_changed`; handle them (steps 3, 4), then loop from its `cursor`. Keep exactly one watch running; never poll `status` in a loop. When a hook says to start the watch (SessionStart's first line, or the Stop hook blocking your turn), start the loop first. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 

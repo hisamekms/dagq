@@ -299,12 +299,13 @@ fn hooks_manifest() -> Value {
 }
 
 #[test]
-fn hooks_json_runs_the_status_on_compact_and_clear_and_records_every_start_and_end() {
+fn hooks_json_runs_the_status_on_every_start_the_watch_check_on_stop_and_records_every_start_and_end()
+ {
     let hooks = hooks_manifest();
     let events = hooks["hooks"].as_object().expect("hooks object");
     let mut names: Vec<&String> = events.keys().collect();
     names.sort();
-    assert_eq!(names, ["SessionEnd", "SessionStart"]);
+    assert_eq!(names, ["SessionEnd", "SessionStart", "Stop"]);
     let command = |group: &Value| -> String {
         let commands = group["hooks"].as_array().unwrap();
         assert_eq!(commands.len(), 1, "{group}");
@@ -313,11 +314,9 @@ fn hooks_json_runs_the_status_on_compact_and_clear_and_records_every_start_and_e
     };
     let groups = events["SessionStart"].as_array().unwrap();
     assert_eq!(groups.len(), 2);
-    // The status: startup is the session prompt's job; resume keeps its context.
-    let matcher = groups[0]["matcher"].as_str().unwrap();
-    let mut sources: Vec<&str> = matcher.split('|').collect();
-    sources.sort();
-    assert_eq!(sources, ["clear", "compact"]);
+    // The status: every source (ADR-t906-1); the script leaves a planner's
+    // startup and resume alone.
+    assert!(groups[0].get("matcher").is_none(), "{}", groups[0]);
     assert_eq!(
         command(&groups[0]),
         "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\""
@@ -335,7 +334,14 @@ fn hooks_json_runs_the_status_on_compact_and_clear_and_records_every_start_and_e
         command(&ends[0]),
         "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh\" close"
     );
-    for script in ["session-start.sh", "session-event.sh"] {
+    let stops = events["Stop"].as_array().unwrap();
+    assert_eq!(stops.len(), 1);
+    assert!(stops[0].get("matcher").is_none(), "{}", stops[0]);
+    assert_eq!(
+        command(&stops[0]),
+        "\"${CLAUDE_PLUGIN_ROOT}/hooks/stop-watch.sh\""
+    );
+    for script in ["session-start.sh", "session-event.sh", "stop-watch.sh"] {
         let mode = fs::metadata(plugin_root().join("hooks").join(script))
             .unwrap()
             .permissions()
@@ -353,7 +359,7 @@ fn hook_commands_run_from_a_plugin_directory_with_a_space() {
     let root = dir.path().join("plugin root");
     fs::create_dir_all(root.join("hooks")).unwrap();
     fs::create_dir_all(root.join("bin")).unwrap();
-    for script in ["session-start.sh", "session-event.sh"] {
+    for script in ["session-start.sh", "session-event.sh", "stop-watch.sh"] {
         fs::copy(
             plugin_root().join("hooks").join(script),
             root.join("hooks").join(script),
@@ -378,7 +384,7 @@ fn hook_commands_run_from_a_plugin_directory_with_a_space() {
             }
         }
     }
-    assert_eq!(commands.len(), 3);
+    assert_eq!(commands.len(), 4);
     for command in &commands {
         let expanded = command.replace("${CLAUDE_PLUGIN_ROOT}", root.to_str().unwrap());
         let output = Command::new("sh")
@@ -411,6 +417,9 @@ fn hook_commands_run_from_a_plugin_directory_with_a_space() {
         [
             "session-event close",
             "session-event open",
+            // The SessionStart status and the Stop hook's, whose empty
+            // output has no watcher to judge.
+            "status --role inbox",
             "status --role inbox"
         ]
     );
@@ -720,7 +729,8 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
     assert_eq!(span_events(binary, &db, &data_home, &repo).len(), 7);
 }
 
-/// Runs the SessionStart hook with a clean environment plus `env`.
+/// Runs the SessionStart hook with a clean environment plus `env`, and no
+/// input.
 fn session_start(env: &[(&str, &str)], data_home: &Path, cwd: &Path) -> Output {
     let mut command = Command::new(plugin_root().join("hooks/session-start.sh"));
     command
@@ -734,9 +744,43 @@ fn session_start(env: &[(&str, &str)], data_home: &Path, cwd: &Path) -> Output {
     command.bounded_output().unwrap()
 }
 
+/// Runs `script` of the plugin's hooks with a clean environment plus `env`,
+/// the hook's JSON `input` on stdin.
+fn hook_with_input(
+    script: &str,
+    input: &Value,
+    env: &[(&str, &str)],
+    data_home: &Path,
+    cwd: &Path,
+) -> Output {
+    use std::io::Write;
+    let mut command = Command::new(plugin_root().join("hooks").join(script));
+    command
+        .env_clear()
+        .env("XDG_DATA_HOME", data_home)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let _waiting = common::within(common::STEP_LIMIT, format!("the {script} hook to exit"));
+    let mut child = command.spawn().unwrap();
+    // A hook that exits without reading its input closes the pipe first.
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes());
+    child.wait_with_output().unwrap()
+}
+
 /// Splits the hook's stdout for `role` into its leading line of text, which
 /// keeps Claude Code from reading the output as the hook's control JSON, and
-/// the status JSON after it.
+/// the status JSON after it. The inbox's output starts with one more line,
+/// which makes the watch from the status's cursor its first move.
 fn hook_status(output: &Output, role: &str) -> Value {
     assert!(
         output.status.success(),
@@ -745,11 +789,29 @@ fn hook_status(output: &Output, role: &str) -> Value {
     );
     assert_eq!(output.stderr, b"");
     let text = String::from_utf8(output.stdout.clone()).unwrap();
-    let (header, status) = text.split_once('\n').expect("a header line");
+    let (first, rest) = text.split_once('\n').expect("a header line");
+    let (watch_line, (header, status)) = if role == "inbox" {
+        (Some(first), rest.split_once('\n').expect("a header line"))
+    } else {
+        (None, (first, rest))
+    };
     assert!(
         serde_json::from_str::<Value>(&text).is_err(),
         "the whole stdout must not parse as JSON: {text}"
     );
+    if let Some(line) = watch_line {
+        let cursor = serde_json::from_str::<Value>(status).unwrap()["cursor"]
+            .as_i64()
+            .unwrap();
+        assert!(
+            line.starts_with("First move, before anything else: start the watch loop"),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("watch --role inbox --after {cursor},")),
+            "{line}"
+        );
+    }
     assert_eq!(
         header,
         format!(
@@ -803,6 +865,31 @@ fn session_start_hook_prints_status_only_in_the_sessions_up_opens() {
     assert!(status["attention"].is_array());
     assert_eq!(status["attention"][0]["kind"], "supervisor_stopped");
     assert!(status["cursor"].is_number());
+    assert_eq!(status["inbox_watcher"]["watching"], 0, "{status}");
+
+    // The inbox gets the watch line and the status on every source
+    // (ADR-t906-1); a planner's startup and resume get nothing.
+    let planner_env = [("DAGQ_BIN", binary), ("DAGQ_ROLE", "planner")];
+    for source in ["startup", "resume", "clear", "compact"] {
+        let input = serde_json::json!({
+            "session_id": "s",
+            "hook_event_name": "SessionStart",
+            "source": source,
+        });
+        let inbox = hook_status(
+            &hook_with_input("session-start.sh", &input, &inbox_env, &data_home, &repo),
+            "inbox",
+        );
+        assert!(inbox["cursor"].is_number(), "{source}");
+        let planner = hook_with_input("session-start.sh", &input, &planner_env, &data_home, &repo);
+        if matches!(source, "startup" | "resume") {
+            assert!(planner.status.success(), "{source}");
+            assert_eq!(planner.stdout, b"", "{source}");
+            assert_eq!(planner.stderr, b"", "{source}");
+        } else {
+            assert!(hook_status(&planner, "planner")["cursor"].is_number());
+        }
+    }
 
     // The inbox and the planner get the status of their role: every
     // attention is the inbox's, none the planner's.
@@ -927,6 +1014,151 @@ fn session_start_hook_prints_status_only_in_the_sessions_up_opens() {
     assert!(bad.contains("not an executable"), "{bad}");
     let outside = one_line(&session_start(&inbox_env, &data_home, dir.path()));
     assert!(outside.starts_with("dagq status failed: "), "{outside}");
+}
+
+#[test]
+fn stop_hook_blocks_only_an_inbox_without_a_watch() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_home = dir.path().join("xdg");
+    let db = dir.path().join("queue.db");
+    let db = db.to_str().unwrap();
+    let binary = env!("CARGO_BIN_EXE_dagq");
+    let with_db = [("DAGQ_BIN", binary), ("DAGQ_DB", db)];
+    stdout_json(&launcher(&with_db, &data_home, dir.path(), &["init"]));
+    let stop = |active: bool, env: &[(&str, &str)]| {
+        hook_with_input(
+            "stop-watch.sh",
+            &serde_json::json!({
+                "session_id": "s",
+                "hook_event_name": "Stop",
+                "stop_hook_active": active,
+            }),
+            env,
+            &data_home,
+            dir.path(),
+        )
+    };
+    let silent = |output: &Output, case: &str| {
+        assert!(output.status.success(), "{case}");
+        assert_eq!(output.stdout, b"", "{case}");
+        assert_eq!(output.stderr, b"", "{case}");
+    };
+
+    // No watcher: the inbox's turn is blocked with the watch to start.
+    let inbox = [
+        ("DAGQ_BIN", binary),
+        ("DAGQ_ROLE", "inbox"),
+        ("DAGQ_QUEUE", db),
+    ];
+    let output = stop(false, &inbox);
+    assert!(output.status.success());
+    assert_eq!(output.stderr, b"");
+    let control: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(control["decision"], "block", "{control}");
+    let cursor = stdout_json(&launcher(
+        &with_db,
+        &data_home,
+        dir.path(),
+        &["status", "--role", "inbox"],
+    ))["cursor"]
+        .as_i64()
+        .unwrap();
+    let reason = control["reason"].as_str().unwrap();
+    assert!(
+        reason.contains(&format!("\" watch --role inbox --after {cursor}.")),
+        "{reason}"
+    );
+    assert!(reason.contains("run_in_background"), "{reason}");
+
+    // Once blocked, the next stop goes through; so do the other sessions,
+    // and a missing or broken binary or queue.
+    silent(&stop(true, &inbox), "stop_hook_active");
+    silent(
+        &stop(false, &[("DAGQ_BIN", binary), ("DAGQ_QUEUE", db)]),
+        "no role",
+    );
+    for role in ["worker", "planner", "observer"] {
+        silent(
+            &stop(
+                false,
+                &[
+                    ("DAGQ_BIN", binary),
+                    ("DAGQ_ROLE", role),
+                    ("DAGQ_QUEUE", db),
+                ],
+            ),
+            role,
+        );
+    }
+    silent(
+        &stop(false, &[("DAGQ_ROLE", "inbox"), ("DAGQ_QUEUE", db)]),
+        "no dagq",
+    );
+    let bogus = dir.path().join("not-executable");
+    fs::write(&bogus, "").unwrap();
+    silent(
+        &stop(
+            false,
+            &[
+                ("DAGQ_BIN", bogus.to_str().unwrap()),
+                ("DAGQ_ROLE", "inbox"),
+                ("DAGQ_QUEUE", db),
+            ],
+        ),
+        "a binary that cannot run",
+    );
+    let missing = dir.path().join("missing/queue.db");
+    silent(
+        &stop(
+            false,
+            &[
+                ("DAGQ_BIN", binary),
+                ("DAGQ_ROLE", "inbox"),
+                ("DAGQ_QUEUE", missing.to_str().unwrap()),
+            ],
+        ),
+        "a status that fails",
+    );
+
+    // A watch running: nothing to say.
+    let mut watch = Command::new(binary);
+    watch.without_actor_env();
+    let mut watch = watch
+        .args([
+            "--db",
+            db,
+            "watch",
+            "--role",
+            "inbox",
+            "--timeout",
+            "60",
+            "--interval",
+            "1",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let _waiting = common::within(common::STEP_LIMIT, "the watch to be watching");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while stdout_json(&launcher(
+            &with_db,
+            &data_home,
+            dir.path(),
+            &["status", "--role", "inbox"],
+        ))["inbox_watcher"]["watching"]
+            != 1
+        {
+            assert!(std::time::Instant::now() < deadline, "no watcher");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    silent(&stop(false, &inbox), "a watch running");
+    // The test's own child, by its handle.
+    watch.kill().unwrap();
+    let _waiting = common::within(common::STEP_LIMIT, "the killed watch to exit");
+    watch.wait().unwrap();
 }
 
 /// `XDG_DATA_HOME` is always pointed away from the developer's real queues.
