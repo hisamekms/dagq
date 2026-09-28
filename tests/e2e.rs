@@ -50,6 +50,12 @@ const TEST_LIMIT: Duration = Duration::from_secs(1800);
 /// How long the timeout cleanup of a fixture's cmux group or of a supervisor
 /// the test started may take before the test binary exits without it.
 const CLEANUP_LIMIT: Duration = Duration::from_secs(60);
+/// How long a test polls for a state it waits to reach (a status, a
+/// planner's state, a pin in cmux's listing, a process's exit, a landing):
+/// one value for every such wait, long enough for a loaded host (load avg
+/// 10 and more, task 641), so a wait fails only when the state never comes.
+/// The poll ends as soon as the state holds.
+pub(crate) const WAIT_LIMIT: Duration = common::STEP_LIMIT;
 
 /// Stand-in for Claude Code. It accepts the argv the Claude adapter builds and
 /// follows the prompt: work in the cwd worktree, commit, publish the receipt by
@@ -198,7 +204,6 @@ if [ -n "$resume" ]; then
     "$resume" "$commit" > "$receipt.tmp"
   mv "$receipt.tmp" "$receipt"
   printf 'receipt rewritten for %s\n' "$commit"
-  sleep 1
   idle="$add_dir/idle.json"
   printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$resume" > "$idle.tmp"
   mv "$idle.tmp" "$idle"
@@ -261,7 +266,11 @@ printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"pas
   "$session_id" "$commit" > "$receipt.tmp"
 mv "$receipt.tmp" "$receipt"
 printf 'receipt submitted\n'
-sleep 2
+# While a test watches the pass (`supervise_once`), the session stays until
+# the test has seen its workspace listed (every task's at once), not for a
+# fixed time a loaded host may outlast (task 641).
+shared=${E2E_SHARED:-/nonexistent}
+while [ -f "$shared/watching" ] && [ ! -f "$shared/listed" ]; do sleep 0.2; done
 idle="$add_dir/idle.json"
 printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$session_id" > "$idle.tmp"
 mv "$idle.tmp" "$idle"
@@ -351,7 +360,7 @@ fn dagq(env: &Env, args: &[&str]) -> Value {
 /// judged on the first look. Past the deadline the last status is returned,
 /// for the caller's assertions to show.
 fn status_when(env: &Env, condition: impl Fn(&Value) -> bool) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let status = dagq(env, &["status"]);
         if condition(&status) || Instant::now() >= deadline {
@@ -638,13 +647,22 @@ struct Pass {
 
 /// Run `supervise --once` with the given extra arguments and watch the runs of
 /// `tasks` until it exits: their workspace ids must appear in the queue and in
-/// cmux's own list before the sessions end.
+/// cmux's own list before the sessions end. The stub agents of the pass keep
+/// their sessions until the test has seen that (the `watching` and `listed`
+/// files in the run env's `E2E_SHARED`), so it does not depend on how fast
+/// the host is (task 641).
 fn supervise_once(
     fixture: &Fixture,
     extra: &[&str],
     tasks: &[&str],
     guard: &mut WorkspaceGuard,
 ) -> Pass {
+    let shared = fixture.db.with_file_name("shared");
+    fs::create_dir_all(&shared).unwrap();
+    let watching = shared.join("watching");
+    let listed = shared.join("listed");
+    let _ = fs::remove_file(&listed);
+    fs::write(&watching, "").unwrap();
     let started = Instant::now();
     let mut child = ChildGuard::new(
         Command::new(BIN)
@@ -708,11 +726,13 @@ fn supervise_once(
             listed_together = entries.len() == workspaces.len();
             if listed_together {
                 listings = entries;
+                fs::write(&listed, "").unwrap();
             }
         }
         thread::sleep(Duration::from_millis(200));
     };
     let supervise_took = started.elapsed();
+    fs::remove_file(&watching).unwrap();
     let stdout = joined(stdout, "the supervisor's stdout reader");
     let stderr = joined(stderr, "the supervisor's stderr reader");
     eprintln!("supervise finished in {supervise_took:?}\n{stderr}");
@@ -1943,7 +1963,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         repo,
         &["remote", "add", "origin", missing_origin.to_str().unwrap()],
     );
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + WAIT_LIMIT;
     let run_id = loop {
         let detail = dagq(env, &["show", &task_id, "--full"]);
         if let Some(id) = detail["runs"][0]["workspace_id"].as_str() {
@@ -2059,7 +2079,7 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         .bounded_output()
         .unwrap();
     assert!(pin.status.success(), "{pin:?}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WAIT_LIMIT;
     while listed_workspace(cmux, &supervisor_workspace).unwrap()["pinned"] != true {
         assert!(Instant::now() < deadline, "the pin never showed up");
         thread::sleep(Duration::from_millis(200));
@@ -2180,7 +2200,7 @@ fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
 
     // Both planners run at once: each submits its own proposal and goes
     // idle, which `planners` reports from its wrapper and idle marker.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let listed = planners(env);
         if listed.iter().all(|planner| planner["state"] == "idle") && listed.len() == 2 {
@@ -2237,7 +2257,7 @@ fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
     // The first planner is sent /exit: its wrapper records the exit and it
     // is no longer alive; the second is still idle.
     send_exit(cmux, &ids[0]);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WAIT_LIMIT;
     let exited = loop {
         let listed = planners(env);
         if listed[0]["exit_code"] == 0 {
@@ -2433,7 +2453,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
 
     // SIGINT drains the continued supervisor like any other.
     unsafe { libc::kill(pid as i32, libc::SIGINT) };
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WAIT_LIMIT;
     let exit = loop {
         if let Some(exit) = supervisor.0.try_wait().unwrap() {
             supervisor.reaped();
@@ -2621,7 +2641,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     );
 
     unsafe { libc::kill(pid as i32, libc::SIGINT) };
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WAIT_LIMIT;
     let exit = loop {
         if let Some(exit) = supervisor.0.try_wait().unwrap() {
             supervisor.reaped();
@@ -2702,7 +2722,7 @@ fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
             ],
         );
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let in_window: Value = serde_json::from_str(&cmux_ok(
             cmux,

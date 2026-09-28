@@ -136,11 +136,12 @@ pub(crate) fn workspace_listed(cmux: &Path, id: &str) -> bool {
 /// cmux confirms a `workspace close` before the workspace leaves its
 /// listing, so "gone" is waited for rather than asserted on the first look.
 pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + crate::WAIT_LIMIT;
     while workspace_listed(cmux, id) {
         assert!(
             Instant::now() < deadline,
-            "workspace {id} is still listed 30s after it was closed"
+            "workspace {id} is still listed {:?} after it was closed",
+            crate::WAIT_LIMIT
         );
         thread::sleep(Duration::from_millis(200));
     }
