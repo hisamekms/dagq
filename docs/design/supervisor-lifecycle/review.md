@@ -13,6 +13,7 @@ related:
   - adr-0027
   - adr-0050
   - adr-t803-1
+  - adr-t947-1
 ---
 
 # Review (supervisor)
@@ -33,3 +34,31 @@ related:
 8. **reviseの間のaskとダイアログ**（task 238）: `ReviseWatch`は最初のsessionの`SessionWatch`を依頼の時刻から持ち（`SessionWatch::fixing`）、その`deliver_answers`と`watch_prompt`をreviseの待ちでも回す。対象の`worker_question`は、依頼の送信時刻（`revise_requested`・`conflict_precheck`の`sent_at`。`SessionWatch::asks_from`、秒で比べ、同じ秒のaskは含む）以後に作られたものだけにする（task 582）: それより前（validatingやreviewの間、receiptより前）に作られたaskは、回答済みでも自動では送らず（`ask_delivered`を記録しない。`ask_answered`の`runtime_delivers`はfalse、`status`は`deliver the answer`で、inboxが手で配送する）、未closeでもreviseの待ちを止めず（idleなら判定し、`resume_timeout`も数える）、ダイアログの判定も抑えず、slotの外の待ち（[人の答えを待つrun](waiting.md)）にも入れない（`tests/it/runtime_review_questions.rs`）。worker自身のsessionとresumeの待ちは今までどおり、runのすべての`worker_question`を対象にする。対象のcloseされていない`worker_question`がある間は、idleになってもreceiptを書き直さないidleとは見ず（concernにしない）、`resume_timeout`も数えない。ただしsessionが止まらずに依頼より後にreceiptを書き直し、その後にidleになったときは（`idle_after_receipt`）、質問のcloseを待たずに書き直したreceiptで判定する（書き直しか不一致。worker自身のsessionでreceiptがあれば未closeの質問があっても進むのと揃える。task 583）。止めるのは書き直さずにidleになったときのconcernと`resume_timeout`だけで、書き直していないうちはidleの判定もしない。書き直したreceiptを見たら、sessionはそれより前の質問を越えて進んだものとし（`ReviseWatch::questions_from`をreceiptの更新の秒の次の秒にし、`resume_timeout`をそこから数え直す）、以後はその秒以後に作られた`worker_question`だけが段を止める。そのため、不一致でreceiptの直し依頼を送った後も、越えた質問は直しの待ちを止めず、直さずにidleになれば`went idle without rewriting the receipt`になる（越えた質問の答えは今までどおり配送する）。slotの外の待ち（[人の答えを待つrun](waiting.md)）も、依頼より後に書き直されたreceiptで`session_moved`として終える（[ADR-t583-1](../../adr/2026-09-28-t583-1-revise-judges-a-rewritten-receipt-past-an-open-question.md)。`tests/it/runtime_review_questions.rs`の`a_*receipt_rewritten_after_an_open_question_is_judged`・`a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix`・`an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout`）。回答はworkerがaskの後にidleになってから`answer to ask <id>: ...`として送り（`ask_delivered`）、送った時刻から待ち直す: その時刻より古いidle markerはその後の判定に使わず、`resume_timeout`もそこから数え直し、送った回答は依頼と同じく取り込みの確認（`StartCheck`）にかける。人が手で届けた回答や、引き継ぐ前のsupervisorが送った回答も、そのrunの`worker_question`が最後に閉じた秒（最後の入力より後の秒のとき）を入力の時刻として同じく待ち直す。`worker_question`の`ask_answered`の`runtime_delivers`と`status`の`delivering the answer`は、runが`running`のときに加えて、leaseを持つ`awaiting_integration`のrunで最後のreviewの段が送った`revise_requested`か`conflict_precheck`（`requested: true`）で、その後に`exit_requested`が無いとき（`domain::session_takes_answers`）もtrueになる。ただしこの場合はaskの`created_at`がその依頼の`sent_at`（`domain::fix_requested_at`）以後のときだけで、それより前のaskはfalse（task 582）。ダイアログは[ダイアログ待ちの検知](prompt-waiting.md)と同じく`prompt_waiting`を記録して復旧jobとaskに渡す。idle markerは依頼（か最後に送った回答・receiptの直し依頼）より新しいものだけを見る。reviseが終わるとき（書き直し・sessionの終了など。receiptの不一致は直し依頼を送って続くので除く）は、記録したダイアログを`prompt_cleared`にしてaskを閉じ、復旧jobを止める。引き継いだrevise・衝突の依頼（7）は、`SessionWatch::adopt`で引き継ぐ前の記録を持つ: 段の錨（引き継いだreviseの`revise_requested`か`conflict_precheck`のevent）より後に記録され、`prompt_cleared`（とreceiptの`receipt_observed`）で終わっていない最後の`prompt_waiting`の`screen_hash`を記録済みのダイアログとし（`RunHistory::waiting_prompt_hash_after`に錨を渡す）、錨より前の`prompt_waiting`は引き継がない（resumeのwrapperの終了のように`prompt_cleared`を記録せずにダイアログを終える経路や古いバイナリが残した記録で、引き継いだreviseの最初の画面の確認が余分な`prompt_cleared`を記録しないため。task 742）。復旧jobの状態は`RecoveryWatch::adopt`で組み立て直す（`long_background`の渡したmarkerと`stalled`の`wait`。`prompt_waiting`の新しいjobを抑えるのは、開いている`answer_prompt`のask）。同じ画面を二重に`prompt_waiting`にせず、reviseが終わるときはそのダイアログを`prompt_cleared`にして`answer_prompt`のaskを閉じる（task 581。`tests/it/runtime_review_adopt.rs`）。新しく始めるreviseは記録済みのダイアログを持たずに始める。その`worker_question`と`answer_prompt`のaskを待つrunはslotから外れる（[人の答えを待つrun](waiting.md)の「差し戻しと解消依頼の段」、[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)の決定1・15）。待ちのあいだ段の計時は止まり、slotに戻ると`resume_timeout`を戻った時点から数え直す。
 
 `integrate`はreview中のrun（supervisorのleaseがある）を拒否する。
+
+## 差し戻しの分類コード（未実装）
+
+[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、verdictは上の`{"verdict", "reasons", "summary"}`のままで、この節は予定の形を書く。一覧はtask 945の分析（[review-sendback-reasons](../../plans/review-sendback-reasons.md#ラベルの定義案)）を元に、workerの問い（[ask](ask.md#worker_questionの分類コード未実装)）とfollow_up（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード未実装)）の集合と同じ種類の問題の名前を揃えた。
+
+- **verdictの形**: `reasons`の各項目を`{"text": string, "codes": [code, ...]}`にする（`codes`は1つ以上、先頭が主）。文字列だけの項目も読み、`codes`の無い項目として扱う。verdictの主のコードは、verdictを決めた最初の項目の主のコード（止めない注意の項目は主にしない）。
+- **記録**: `review_finished`に`reason_codes`（項目ごとのコードの配列）と`primary_code`を足す。`codes`の欠けた項目は`unlabeled`、一覧に無い値はその値のまま記録する。コードはverdictの判定と適用に使わない。
+- **主の選び方**: 1つの項目が2つ以上に当たるときは、直すのに誰の判断が要るかの重い方を主にする。重い順: `adr_conflict` > `acceptance_conflict` > `acceptance_infeasible` > `adr_design_mismatch` > `acceptance_ambiguous` > `acceptance_unmet` > `out_of_scope_change` > `repo_rule_violation` > `code_defect` > `test_gap` > `docs_drift` > `local_slip` > `other`。
+
+| コード | 定義 | 分析の例（無印はtask 945） |
+|---|---|---|
+| `adr_conflict` | taskの受け入れ条件かdescription、またはそれを満たす唯一のやり方が、acceptedのADR・design・人の決定（goalのconstraints、AGENTS.mdのユーザー決定）と食い違い、両方は満たせない。workerが一方を選んで逸脱している | task 818: 条件の「待つ」がADR-0047決定42と食い違う |
+| `acceptance_conflict` | 同じtaskの受け入れ条件どうし、または条件とdescriptionが両立しない | task 128（task 950のworkerの問い）: newtype化と「tests/cli.rsを変更なしで通す」 |
+| `acceptance_infeasible` | 条件が、事実（権限・環境・ツールの挙動・既存の挙動）のためにそのままでは満たせない | task 460: 条件のgoalへのnoteをworkerの権限で書けない |
+| `adr_design_mismatch` | taskの条件はADRと整合し、整合するやり方もあるのに、実装がacceptedのADR・designの決定と食い違う（新しいADRもamendsも無い） | task 445: ADR-0062と違うeventを書く |
+| `acceptance_ambiguous` | 条件の文言が2通り以上に読め、実装がその一方を選んだ | task 221: 「string literalと比べない」の範囲 |
+| `acceptance_unmet` | 条件やdescriptionが明示した範囲の一部を満たしていない（気づかずの漏れと、follow_upに回した部分の両方） | task 324: 上限の無い待ちが残る |
+| `out_of_scope_change` | 求められていない挙動を変えた（本番の挙動、他のtaskの範囲） | task 567: testのseamのはずが本番のpollを変えた |
+| `repo_rule_violation` | repositoryの手順の規則（AGENTS.mdなど）に反する | task 672: stressの失敗を流し直しで済ませた |
+| `code_defect` | 実装の誤りか回帰 | task 327: 再起動でholdが消える |
+| `test_gap` | 条件が求めるtest、または変えた経路のtestが足りない | task 555: 4つの経路のtestが無い |
+| `docs_drift` | 変えた挙動を説明するdesign・README・skill・コメントが古いまま、または写しの一方だけを直した | task 949: 3つのdesign文書が古い |
+| `local_slip` | 意味を変えない局所の誤り（置き場所、順序、書式、数字の誤記） | task 819: doc commentの位置 |
+| `other` | どれにも当たらない。`text`で説明する | — |
+
+`adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`は、task 945の`acceptance_conflict`を相手（ADR・同じtaskの条件・事実）で3つに分けたもの。境は「workerが、条件を満たすと別の決まりや事実に反すると書いているか」で、書いていればこの3つ、単に届いていなければ`acceptance_unmet`。
+
+- **人の答えからの補い**（ADR-t947-1決定4）: 6の`approve_landing`の答えを適用するとき、supervisorはそのconcernの`review_finished`を指す`review_outcome`（`attempt`、`ask_id`、`outcome`）を記録する。`outcome`は`land` → `deviation_accepted`（reviewの誤りの候補を含む）、`send_back` → `deviation_rejected`（verdictの`reason_codes`を引き継ぐ）、`cancel` → `canceled`。reviewの失敗のaskには記録しない。reviseには人の答えが無いので記録しない。

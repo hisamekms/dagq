@@ -12,6 +12,7 @@ related:
   - adr-0027
   - adr-0022
   - adr-t803-1
+  - adr-t947-3
 ---
 
 # Receipt and session exit
@@ -62,3 +63,24 @@ ADR-0047の決定25、task 555（`ExitRetry`、`application::supervise::exit_ret
   - ダイアログ待ちの片付け（`SessionWatch::idle`、task 844）: 印が段の`input_at`より新しくなければ（最初のsessionでは印が無ければ）推定のidleでも`prompt_cleared`にする（[ダイアログ待ちの検知](prompt-waiting.md)）。agentの死んだrunとcloseされていない`worker_question`を待つrunを先に見て、画面は最後に読む（質問を待つrunの画面は読まない）。
   - 対象外: `long_background`の検知は今も印だけで判定する（画面の推定のbackgroundの表示は`long_background`にかけない）。
 - **test**: `src/application/screen_idle.rs`のunit testが見え方・区間・最後の入力・区間の保存・debug logの読み取りを、`src/infrastructure/claude.rs`の`a_failed_stop_hook_is_found_in_the_debug_log`がClaude Codeのdebug logの行を、`background_on_screen_reads_the_count_under_the_input_box`が実際の画面の抜粋（`3 shells`のstatus line）からbackgroundの表示を、`src/application/supervise/idle.rs`の`an_idle_the_screen_showed_with_background_work_waits_as_the_markers_would`が推定のidleのbackgroundの扱いを、`the_wait_between_captures_grows_while_the_screen_shows_work`が作業中のcaptureの間隔の延び・上限・新しい入力と作業中でない画面（入力待ち・ダイアログ・captureの失敗）での戻りを、`a_session_at_work_is_captured_less_and_its_rest_within_the_limit`が1時間の作業のcaptureの回数と、入力待ちになったsessionが上限以内に読まれ直すことを（task 845）、`tests/it/planner_screen_idle.rs`がfakeのcmuxの画面でplannerの推定・`idle_inferred`・runtimeのplannerの`/exit`と行の片付け・人のplannerに`/exit`を送らないこと・作業中とダイアログとcaptureの失敗で推定しないこと・古い印を確かめ、`a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit`がbackgroundの表示のあるruntimeのplannerに`/exit`を送らず、表示が消えると送ることを確かめる。`tests/it/runtime_screen_idle.rs`が、印の書けないworker（task 475の型。debug logに`Hook Stop`のerror）のreceiptの後のvalidating、receiptの無いidleの促し、resumeとreviseの段の終わり、作業中・ダイアログ・captureの失敗で進めないこと、backgroundの表示があるうちはreceiptの後もvalidatingへ進まず`/exit`も送らないこと（`a_markerless_session_that_shows_background_work_is_not_idle`）、印のあるsessionで推定しないことを確かめる。`tests/it/runtime_screen_idle_input.rs`（task 844）が、印の書けないworkerの`worker_question`の回答が画面の推定で打たれて`ask_delivered`と`idle_inferred`が残ること（最初のsession・resume・revise）、作業中・ダイアログ・captureの失敗では打たないこと、復旧jobの`send_instruction`が推定のidleで適用されること、画面が作業中に戻ればjobの検知が終わって（`alert_cleared`）指示を打たないこと、ダイアログ待ちが印なしで`prompt_cleared`になることを確かめる。
+
+## follow_upsの分類コード（未実装）
+
+[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、receiptの`follow_ups`の要素は`{"title", "description"}`のままで、この節は予定の形を書く。一覧はtask 951の分析（[follow-up-kinds](../../plans/follow-up-kinds.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード未実装)）と同じ種類の問題の名前を揃えた。
+
+- **receiptの形**: `follow_ups`の各要素に`category`（コード1つ）を足す: `{"title", "description", "category"}`。taskの`--kind`（repositoryが名付けるlabel）と混ざらないよう、欄名は`kind`にしない。`category`の無い要素と一覧に無い値もreceiptの受理を変えない（validationは拒まない）。
+- **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md)の10）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けは`unlabeled`、一覧に無い値はそのまま）。runtimeのplannerとの突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計未実装)。
+- **付け方**: 迷ったら、follow_upを片付けたときに何が変わるかで選ぶ（runtimeの挙動が直る → `defect`、testが安定する → `flaky_test`、文書が実装に追いつく → `docs_drift`）。`flaky_test`と`test_gap`はdescriptionにtestの名前（`<module>::<name>`）を書く。重複や採否はコードにしない（ADR-t947-3決定2）。
+
+| コード | 定義 | task 951の例 |
+|---|---|---|
+| `defect` | runtime（またはscript）が決まった仕様どおりに動かない経路。再現の条件か、コードの場所と誤りを書く | 723: 開閉中のwindowでworkspaceの一覧が失敗する |
+| `flaky_test` | 既存のtestが負荷や順序で時々落ちる・時間切れになる | 682: `runtime_adopt::a_supervisor_that_lost_its_lease_stops_touching_the_run` |
+| `test_gap` | 経路にtestが無い、またはtestの作りが弱い（上限の無い待ち、実時計への依存）。今は落ちていない。runのreviewの`test_gap`と同じ種類 | 440: e2eの上限の無い待ち |
+| `docs_drift` | 文書（design・ADRの索引・pluginのskill・AGENTS.md）が実装かacceptedのADRとずれている。runのreviewの`docs_drift`と同じ種類 | 535: supervise.mdの手順11が古い |
+| `remaining_scope` | acceptedのADRかgoalが決めた事のうち、このtaskで実装しなかった残り | 441: ADR-0047決定39・40の残り |
+| `improvement` | 仕様の誤りではないが、よくする案（観測・集計の追加、refactor、速さ、使い勝手） | 509: `land_phases.verify`を検証コマンドごとに分ける |
+| `measurement` | 着地の後か期間の後に数えて確かめる依頼 | 934: 918の着地後の夜の答え待ち |
+| `decision` | 人かplannerの判断が要る問いで、作業の中身が決まっていない | 269: 循環検出でcanceledのtaskを外すか |
+| `ops` | repositoryの変更ではなく、人かinboxがhost・本番queue・外部サービスで行う作業 | 572: `dagq.toml`にKPIの目標を書く |
+| `other` | どれにも当たらない。descriptionで説明する | 160: toolchainを上げるときの1行の注意 |

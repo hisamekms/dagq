@@ -20,6 +20,10 @@ related:
   - adr-0048
   - adr-0079
   - design-supervisor-lifecycle-worker-model
+  - adr-t947-1
+  - adr-t947-2
+  - adr-t947-3
+  - adr-t947-4
 ---
 
 # `kpi`
@@ -115,3 +119,12 @@ related:
 - 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`）、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`parallel=`・`load=`・`build=`と、`--by`で選んだ軸（`--by group`なら`group=`など）。後の窓が今を越えていれば`partial`で判定しない）、`summary`（kind→`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`。kindは`--kind`で選んだもの、無ければ`strata`に`kind=`の層として現れたkindすべて（`unknown`を含む、名前の順）。runtimeは`runtime`などの特定のkindを既定に持たない（ADR-t624-1の決定3）。選び方は`domain::kpi::compare`）。区間は自動では縮めない。
 
 `toolchain=`の層（hostの`rustc`）は、queueのrepositoryがdagqのソースのときだけ出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。
+
+## 分類コードごとの系列（未実装）
+
+[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。[Stats](stats.md#分類コードごとの集計未実装)の集計を期間ごとの窓で読み、コードを層として次の系列を出す予定。良い向きはどれも低い方（採用率だけは持たない）で、目標は今までどおり`dagq.toml`とhost.tomlの`targets`が決める。
+
+- `review.sendback_rate`（`code=<主のコード>`）: reviewにかかったrunのうち、そのコードを主とするreviseかconcernを受けた割合。`plan.revise_rate`も同じく`code=`の層を持つ
+- `ask.worker_question_wait`（`topic=<主のコード>`）: worker_questionの答えまでの秒
+- `plan.follow_up_adoption_rate`（`category=<コード>`）: follow_upのdraftの採用率
+- `plan.cancel_waste`（`reason=<コード>`）: `ready`・`submitted`に進んでから、またはruntimeのplannerを経てcancelされたtaskの数

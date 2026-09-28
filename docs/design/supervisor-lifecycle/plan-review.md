@@ -13,6 +13,7 @@ related:
   - adr-0044
   - adr-0079
   - design-supervisor-lifecycle-actor-model
+  - adr-t947-1
 ---
 
 # Plan review (supervisor)
@@ -38,3 +39,30 @@ related:
 11. **answer**（`decide_plan`、1トランザクション）: 回答済み・未closeの`approve_plan`のask（`plan_answers`）のうち、回答が`ready` / `send_back` / `send_back: <理由>` / `cancel`で、askのtaskのproposalがまだ`submitted`で`review_hold = concern`のものに適用する。`ready`はproposalを`accepted`にしてtaskを`ready`、`send_back`は`revising`にして`revise_reasons`を「人がask Nで差し戻した: <理由>」と直近のverdictのreasonsにし（配送は9）、`cancel`はproposalを`canceled`にしてsubmittedのtaskをcancelする。askを閉じて`plan_decided`（`proposal_id`、`ask_id`、`answer`、`status`）を記録する。proposalが動いていればaskを閉じ、`ask_closed`（`ask_id`、`kind`。task 568）だけを記録する。それ以外の回答は適用せず、`ask_answered`の`runtime_delivers`が`false`なので`read the answer of ask N and close it`のattentionになる。適用できる回答は`runtime_delivers: true`で、`status`では`applying the answer of ask N (runtime)`。
 12. **設定**: runtimeが同時に立てるplannerの上限`runtime_planners`（`supervise --runtime-planners N`の明示 > main checkoutの`dagq.toml`の`[supervisor] runtime_planners` > 既定1。supervisorが各passで読み直し、`up`し直さずに次のpassから効く。`up --runtime-planners N`は明示されたときだけsupervisorに渡す。[Run environment](run-environment.md)の`[supervisor]`、task 941）、`--planner-timeout SECS`（既定3600）、`--plugin-dir PATH`（runtimeが立てるplannerが読むplugin）。`up`は自分の`--plugin-dir`をsupervisorにも渡す。
 13. **test**: `tests/it/plan_review.rs`がstubのheadless provider（台本のverdictを印字する）とcmuxのdoubleで、pass（actionの適用とprompt）、`cancel_duplicate`が`cancel --duplicate-of`と同じ記録になり`show`・`list`・`stats`に出ることと、自分自身・存在しない・canceled・重複としてcancelされた重複先の拒否（task 402）、生きているplannerへのrevise（acceptanceとdescriptionの食い違いの指摘と、先例の回答が載ること）と期限切れのinboxへの通知、閉じたplannerの代わりにruntimeが立てるplannerと同時の数の上限（上限で待つreviseの期限切れを含む）、`tests/it/planner_slots.rs`が、答えを打ち込んだ後でaskのcloseより前にidleになったdraftのplannerが`/exit`されて行が閉じることと打ち込みより前のidleのplannerが残ること、上限で期限を過ぎた持ち主の居ないreviseの`planner_unresponsive`が`holders`と理由を載せ、答え待ちでないidleのplannerが`planner_released`で`/exit`されて終わった後にreviseにruntimeのplannerが立つこと、人の答えを待つplannerは`planner_question_open`として残ること（task 884）、concernのaskとanswer（`ready` / `send_back: 理由` / `cancel`）の適用、reviseの上限超え、jobの失敗と適用できないverdict、保留したproposalの出し直しとbypassによる片付け、interruptの先行、readyのtaskの`reopen`（claimされず、runtimeのplannerが直して出し直す。検査中のproposalのtaskは動かさない）、promptの`ready`のtaskの要約と全文の付き方（同じhotspotを触る`ready`のtaskがあるqueueでは、hotspotの行に両方のtaskが並びそのtaskだけ全文が付き、無いqueueでは`queued_tasks`が空で全文が付かない。`src/application/prompt.rs`の単体testは、落とした件数の表示と、長いfield（約3KB）のreadyのtask 170件で全文の約58万byteに対しpromptが約4.7万byte（8分の1未満）に収まることを確かめる）、promptに載る重複と実装済みの候補（relatedのcompletedのtask、searchのcompleted・canceledのtaskと着地したcommitが載り、proposal自身のtaskは載らず、似たもののないtaskは空）、空白の無い日本語のtitleのproposalのtaskのsearchの候補に、語を共有する日本語のtitleの`completed`のtaskが載ること（task 600。`src/infrastructure/search.rs`の単体testは、日本語だけのtitleから作ったqueryがtitleかdescriptionで語を共有するtaskに当たり、共有しないtaskに当たらないことを確かめる）、検査中に編集されたtaskのproposalのverdict（pass / revise / concern）を適用せずに編集後の内容でかけ直すこと（stubのjobが実行中に`edit_task`する。検査の前の編集と他のproposalのtaskの編集は適用を妨げない）、実行中に`edit_task`してから非0終了したjobが`failed`にならず`interrupted`で閉じ、保留も`plan_review_failed`も無く`plan_review_discarded`（`verdict: null`）を残して編集後の内容でかけ直されること、検査の前の編集や他のproposalのtaskの編集の後の失敗は今までどおり`failed`・`review_hold = failed`・`plan_review_failed`になること（task 596）、重さの予測がtaskごとに記録され、足りない予測と形の崩れた予測は記録されずに`prediction_error`が残ってverdictは適用されること（promptに予測の指示と対象のtaskが載ること）、jobとplannerのmodel / effort（表が無ければ何も渡さず`default`を記録、`[roles.plan_review]`があれば渡す、開き直したplannerは1段上がり`xhigh`で止まる、生きているplannerは上げない。`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`ほか）、promptが記録を読むCLI（`events --full --task ID`と絞り込み、`timeline RUN`）と読むコマンドを打てることを示し、stubが受けた許可toolが`PLAN_REVIEW_TOOLS`（`Read` / `Grep` / `Glob` / `Bash(dagq:*)`）であることを確かめる。`tests/it/cli_roles.rs`の`reviewer_may_only_read_the_queue`は、`DAGQ_ROLE=reviewer`で`events --full`（絞り込み付き）・`search`・`related`・`observe --history`・`timeline`が役割で拒まれず、書き込むコマンドが拒まれることを確かめる（task 420）。
+
+## 差し戻しの分類コード（未実装）
+
+[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、verdictの`reasons`は今の形のままで、この節は予定の形を書く。一覧はtask 945の分析（[review-sendback-reasons](../../plans/review-sendback-reasons.md#plan-review-のラベル)）を元にした。
+
+- **verdictの形と記録**: runの[Review](review.md#差し戻しの分類コード未実装)と同じく、`reasons`の各項目を`{"text", "codes"}`（先頭が主）にし、`plan_review_finished`に`reason_codes`と`primary_code`を足す。欠けは`unlabeled`、一覧に無い値はそのまま記録し、コードはverdictの判定と適用（`actions`・`reopen`など）に使わない。
+- **runのreviewと共通のコード**: `adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`・`acceptance_ambiguous`は定義の文を揃えて[Review](review.md#差し戻しの分類コード未実装)と同じ定義で使う（plan reviewで止められなかったものが後でreviewのconcernやworkerの問いになった割合を追うため）。`task_overlap`はworkerの問い（[ask](ask.md#worker_questionの分類コード未実装)）と同じ定義。
+- **主の選び方**: 重い順に`adr_conflict` > `acceptance_conflict` > `acceptance_infeasible` > `operational_hazard` > `wrong_premise` > `task_overlap` > `missing_dependency` > `stale_adr_reference` > `acceptance_ambiguous` > `incomplete_spec` > `paths_insufficient` > `verification_rule` > `lint_violation` > `other`。
+
+| コード | 定義 | task 945の例・対応 |
+|---|---|---|
+| `adr_conflict` | taskの受け入れ条件かdescription、またはそれを満たす唯一のやり方が、acceptedのADR・design・人の決定（goalのconstraints、AGENTS.mdのユーザー決定）と食い違い、両方は満たせない（新しいADRもamendsも無い） | 945の`adr_conflict`・`goal_constraint_conflict` |
+| `acceptance_conflict` | 同じtaskの受け入れ条件どうし、条件とdescription・contextが食い違う | 945の`inconsistent_text` |
+| `acceptance_infeasible` | 条件が、事実（権限・環境・ツールの挙動・既存の挙動）のためにそのままでは満たせない | 945の`acceptance_infeasible` |
+| `acceptance_ambiguous` | 条件の文言が2通り以上に読める | 945の`incomplete_spec`のうち読み方が割れるもの |
+| `incomplete_spec` | 変える場所・条件が取りこぼされている（plan reviewだけのコード） | 945の`incomplete_spec` |
+| `task_overlap` | 開いた他のtaskか着地した変更と中身が重なる | 945の`task_overlap` |
+| `missing_dependency` | 先に着地すべきtask・goalへの依存が欠けている | 945の`missing_dependency` |
+| `stale_adr_reference` | supersededのADRを引く、amendsの先が誤っている | 945の`stale_adr_reference` |
+| `operational_hazard` | 着地するとqueueや本番の運用を止める | 945の`operational_hazard` |
+| `wrong_premise` | 現状のコード・文書の事実の見立て違い | 945の`wrong_premise` |
+| `paths_insufficient` | `--paths`が変更に要るパスを含まない | 945の`paths_insufficient` |
+| `verification_rule` | verify・evidence・kindがrepositoryの推奨の組み合わせに合わない | 945の`verification_rule` |
+| `lint_violation` | `dagq lint`が見つける形式の誤り | 945の`lint_violation` |
+| `other` | どれにも当たらない（ADRの番号の衝突はADR-t598-1の後は起きないのでここ） | 945の`adr_number_collision` |
+
+- **人の答えからの補い**（ADR-t947-1決定4）: 11の`approve_plan`の答えを適用するとき、そのconcernの`plan_review_finished`を指す`plan_review_outcome`（`plan_review_id`、`ask_id`、`outcome`）を記録する。`ready` → `deviation_accepted`（plan reviewの誤りの候補を含む）、`send_back` → `deviation_rejected`（`reason_codes`を引き継ぐ）、`cancel` → `canceled`。

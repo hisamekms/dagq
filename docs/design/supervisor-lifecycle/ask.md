@@ -12,6 +12,7 @@ related:
   - adr-0022
   - adr-0047
   - design-persistence
+  - adr-t947-2
 ---
 
 # `ask` / `answer` / `asks`
@@ -25,3 +26,24 @@ related:
 - `dagq answer ASK_ID --text <text>`はopenなaskに`answer`と`answered_at`を書き、`ask_opened`と同じtask / runに`ask_answered`（`ask_id`、`kind`）を書く。回答済みかcloseされたaskにはerror。task 325（schema v38）から、回答した者`answered_by`（sessionの`DAGQ_ROLE`、無ければ`person`）と、回答が`options`のどれかと（前後の空白を除いて）一致したときのその番号`option_index`（一致しなければnull）も行に書き、`ask_answered`のpayloadに`answered_by` / `option_index`と選んだ選択肢の文字列`option`を足す。runtimeが自分で閉じる回答（`runtime_closed: true`の`ask_answered`と、supervisorの取り下げ）は`answered_by: runtime`。出力の`Ask`には`answered_by` / `option_index`が常に載り、未回答とv38より前の回答ではnull。集計は[`stats`](stats.md)の`asks`。
 - `dagq ask close ASK_ID`は回答済みのaskに`closed_at`を書き、`ask_closed`（`ask_id`、`kind`）を記録する。inboxが回答を読んで従った印（supervisorが答えを適用して閉じるときも同じ`close_ask`）で、`stats`の`asks.times`は回答の適用として読む（task 468）。runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`）も同じ`ask_closed`をcloseと同じトランザクションで書く（task 568）。attentionではない。未回答のaskはcloseできず（error）、取り下げは`answer`で取り下げた旨を書いてからcloseする。run_eventsでaskを終えるのは`ask_answered`だけで（`worker_question`の送信の`ask_delivered` / `ask_delivery_failed`は後から足したkindで、`stats`の対には使わない）、`stats`はこの2つを`ask_id`で対にして未回答のaskを数えるため、closeだけで閉じたaskが`stats`に残り続けないようにする。回答した時点で同じ（task、run、kind）の新しいaskを登録できる。
 - `dagq asks [--open] [--role <role>] [--all]`はaskを古い順に`{asks}`で返す。既定はcloseされていないもの、`--all`はcloseされたものも、`--open`は未回答のものだけ、`--role`はそのroleが今動かすもの（`Ask::waits_for`: 未回答も回答済みでcloseされていないものもinbox、plannerは無し）。
+
+## worker_questionの分類コード（未実装）
+
+[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、`ask`はこの欄を持たない。一覧はtask 950の分析（[worker-question-topics](../../plans/worker-question-topics.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード未実装)）と同じ種類の問題の名前を揃えた。
+
+- **CLI**: `dagq ask --kind worker_question --because <scope|discard> --topic <code> [--topic <code>]...`。`--topic`は1つ以上必須で、先頭が主、残りが副。一覧に無い値は拒まずにそのまま記録する。`worker_question`以外のkindに`--topic`を付けたら拒む（ADR-t947-2決定6）。
+- **記録**: `ask_opened`のpayloadと`asks`の出力に`topics`（配列、先頭が主）を載せる。`reason_category`（上の「人が要る理由」）とは別の欄で、一方から他方を推さず、食い違っても拒まない。`topics`の無い過去のaskは`unlabeled`として数える。
+- **主の選び方**: 主はworkerが止まったきっかけ（最初に満たせなくなったもの）、副はそれを解くのに一緒に決める必要があるもの。きっかけが2つ同時で決められないときだけ、重い方を主にする。重い順: `discard_work` > `adr_conflict` > `acceptance_conflict` > `acceptance_infeasible` > `out_of_scope_change` > `task_overlap` > `precondition_missing` > `host_environment` > `design_choice` > `other`。
+
+| コード | 定義 | task 950の例 | `reason_category`の目安 |
+|---|---|---|---|
+| `adr_conflict` | taskの受け入れ条件かdescription、またはそれを満たす唯一のやり方が、acceptedのADR・design・人の決定（goalのconstraints、AGENTS.mdのユーザー決定）と食い違い、両方は満たせない（[Review](review.md#差し戻しの分類コード未実装)と同じ定義） | task 392: ADR-0040決定3の「dagq.tomlを置かない」を変える | `scope` |
+| `acceptance_conflict` | 同じtaskの受け入れ条件どうし、または条件とdescriptionが両立しない | task 128: newtype化と「tests/cli.rsを変更なしで通す」 | `scope` |
+| `acceptance_infeasible` | 条件が、調べた事実（ツールの挙動・再現しない現象・権限）のためにそのままでは満たせない | task 770: hangを再現できず「原因の特定」を満たせない | `scope` |
+| `out_of_scope_change` | 条件を満たすのに、taskのpaths・description・verifyに無い変更が要る | task 252: tests/plugin.rsがpathsの外 | `scope` |
+| `task_overlap` | 並行する他のtaskや、直前に着地した変更と重なる・衝突する | task 209: 同じ番号とREADMEを書き換えたtaskが着地 | `scope` |
+| `precondition_missing` | 着手の前提（測る対象のデータ、先行のtaskの着地、必要な件数）がまだ揃っていない | task 460: 導入後の着地が10 runに満たない | `scope` |
+| `host_environment` | hostのツール・設定・版が作業か着地を妨げ、workerはhostに手を入れられない | task 486: globalのmiseのrustの設定 | `scope` |
+| `design_choice` | 条件・ADR・範囲に触れない実装の選び方。AGENTS.mdではaskにせずworkerが決めるもので、付いたaskはpromptの直しどころを示す（ADR-t947-2決定3） | この期間は無し | （人が要る理由が無い） |
+| `discard_work` | できた成果を捨てるか、やり直すか | この期間は無し | `discard` |
+| `other` | どれにも当たらない。問いの文で説明する | この期間は無し | — |

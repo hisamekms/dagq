@@ -113,6 +113,10 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t583-1](2026-09-28-t583-1-revise-judges-a-rewritten-receipt-past-an-open-question.md) | 差し戻しのsessionが未closeのworker_questionを残したまま依頼の後にreceiptを書き直してidleになったら、質問のcloseを待たずにそのreceiptで判定し、slotの外の待ちもその書き直しで終える（ADR-0071決定2・16をamends） | 2026-09-28 |
 | [ADR-t906-1](2026-09-28-t906-1-guarantee-the-inbox-watch.md) | inboxのwatchの生存を、watcherの記録と可視化・pluginのSessionStart / Stop hook・supervisorによるidleのinboxへの知らせの3層で保証する（ADR-0016決定3とADR-0022決定2をamends） | 2026-09-28 |
 | [ADR-t920-1](2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md) | workerの手元のstressをあからさまに不安定なtestを止める軽い見張りに縮め、重い繰り返しをGitHub Actionsの1日1回の定時実行に移し、効果をworkerのtestの時間とintegrateのflaky・resumeの件数で見る（task 767の決定を変える） | 2026-09-28 |
+| [ADR-t947-1](2026-09-28-t947-1-review-verdicts-carry-reason-codes.md) | reviewとplan reviewのjobがverdictのreasonsごとに分類コードを付けてruntimeが記録し、jobが判定できない分類は人のapprove_landing / approve_planの答えからruntimeが補う | 2026-09-28 |
+| [ADR-t947-2](2026-09-28-t947-2-worker-questions-carry-topic-codes.md) | workerがworker_questionのaskを打つときに問いの中身の分類コードを付け、ADR-0047決定41のreason_categoryと併せ持つ | 2026-09-28 |
+| [ADR-t947-3](2026-09-28-t947-3-follow-ups-carry-category-codes.md) | workerがreceiptのfollow_upsに種類の分類コードを付け、runtimeのplannerの判断（採用・不採用・重複・人への問い）と合わせて集計する | 2026-09-28 |
+| [ADR-t947-4](2026-09-28-t947-4-cancel-carries-a-reason-code.md) | taskのcancelに理由の分類コードを必ず持たせ、--duplicate-ofは中身を受け持つtaskを指す欄として残し、runtimeが自分で行うcancelは経路から理由を付ける（ADR-0063決定5をamends） | 2026-09-28 |
 
 ## 置き換え・廃止されたADR
 

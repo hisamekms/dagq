@@ -29,6 +29,7 @@ related:
   - adr-0034
   - adr-0037
   - design-persistence
+  - adr-t947-4
 ---
 
 # Domain model
@@ -148,6 +149,29 @@ IDとcommitはドメインプリミティブのnewtype（`src/domain/ids.rs`、`
 - goalのコマンド: `goal::edit(goal, GoalEdit)`、`goal::ready(goal)`、`goal::close(goal, verdict, &counts, closed_at)`（閉じたgoalは閉じられない、verdictが所属taskのstatusを許すか。成功すると`closed_at`・`verdict`・`updated_at`を設定する）。クエリは`goal::check_accepts_tasks(&goal)`、`Goal::is_closed` / `is_draft`。
 - 値の取り出しは`Task`・`Goal`のメソッド（`id()`、`title()`、`status()`、`goal_id()`、`paths()`、`verdict()`など。文字列と配列は借用で返す）と`task::dependencies_editable(&task)`。`into_title()`はtitleだけを所有権ごと取り出す。
 - `updated_at`はDBの`strftime(...,'now')`が更新のたびに書き（schemaの一部）、storeは保存後に読み直して返す。`goal::close`だけは`closed_at`と`updated_at`を同じ値にするため時刻を引数に取る。
+
+## cancelの理由の分類コード（未実装）
+
+[ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、`cancel`は理由を持たず、`--duplicate-of`（[Current operations](#current-operations)の`cancel TASK --duplicate-of X`）だけが構造の理由である。一覧はtask 952の分析（[cancel-reasons](../plans/cancel-reasons.md#ラベル)）を元にした。
+
+- **CLI**: `dagq cancel TASK --reason <code> [--duplicate-of X] [--note <text>]`。`--reason`か`--duplicate-of`のどちらかは必須（どのactorでも）。`--reason`が`duplicate`・`already_done`・`absorbed`・`re_registered`なら`--duplicate-of`が必須。`--duplicate-of`だけなら、runtimeがcancelの時点のXの状態から`duplicate`（Xが開いている）か`already_done`（Xが`completed`）を補う。`other`は`--note`が必須。一覧に無い値は拒まずにそのまま記録する。
+- **記録**: `task_status_changed`（`to: canceled`）のpayloadに`reason`と、あれば`note`を足す。`show`と`list`はcancelされたtaskの`cancel_reason`を出す。`related`と`search`（ADR-0063）が重複の組として読み、`show`が`canceled (duplicate of X)`、`stats`が`duplicate_cancels`に数えるのは`duplicate`と`already_done`だけにする（ADR-t947-4がADR-0063決定5をamends）。`absorbed`と`re_registered`は`show`と`list`に`cancel_reason`とともに相手を出し、`show X`の`duplicates`には理由を添える。
+- **runtimeの経路の理由**（ADR-t947-4決定3）: plan reviewの`cancel_duplicate`のaction（[Plan review](supervisor-lifecycle/plan-review.md)の5）は`--duplicate-of`と同じく`duplicate` / `already_done`を補う。askの`cancel`の答え（`approve_plan`・`approve_landing`・`decide`）で適用するcancelは`answered_cancel`とそのaskのIDを記録する。
+- **過去の記録**: 理由の無いcancelは書き換えない。集計は`duplicate_of`があれば上の規則で補い、無ければ`unrecorded`として数える。
+
+| コード | 定義 | `--duplicate-of` | task 952の例 |
+|---|---|---|---|
+| `duplicate` | 同じ中身の開いたtask（draft・submitted・ready・in_progress）がある | 必須（開いたtask） | 752・761・788・926 → 641 |
+| `already_done` | 中身は着地したtaskかmainですでに満たされている | 必須（着地したtask） | 704 → 318 |
+| `absorbed` | 中身の一部か全部を、別のtaskの受け入れ条件・description・noteに移して閉じる | 必須（移した先） | 269・270・299 → 304 |
+| `re_registered` | 同じ意図を新しいIDで登録し直した（欄を直せない、番号の衝突、改名） | 必須（新しいtask） | 213 → 215 |
+| `superseded` | 前提の決定や方針が変わり、中身が要らなくなった。変えた決定を`--note`に書く | 後継のtaskがあれば | 367〜373（ADR-t598-1） |
+| `not_worth` | 中身は正しいが、変更と検証の費用に見合わない | — | 725・826 |
+| `decision_moot` | 判断を求めるtaskで、答えがすでに出たか、判断しないことにした | — | 374（ask 88で答え済み） |
+| `not_repo_work` | repositoryの変更ではなく、人かinboxがhost・本番queue・外部サービスで行う作業か、観察だけ | — | 908（初めてのpublish） |
+| `stale` | 前提（役割・ファイル・コマンド）が消えて、中身が意味を持たなくなった。後継の決定が無い | — | 120（maintainerのhookの前提） |
+| `answered_cancel` | runtimeが、askの`cancel`の答えを適用した（人とplannerは選ばない） | — | — |
+| `other` | どれにも当たらない。`--note`で説明する | — | — |
 
 ## 集約: TaskRun
 

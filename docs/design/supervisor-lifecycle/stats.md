@@ -28,6 +28,10 @@ related:
   - design-supervisor-lifecycle-plan-review
   - adr-0070
   - design-supervisor-lifecycle-host-metrics
+  - adr-t947-1
+  - adr-t947-2
+  - adr-t947-3
+  - adr-t947-4
 ---
 
 # `stats`
@@ -266,6 +270,15 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 ## hostの負荷
 
 - **`host`**: supervisorが記録するhostの負荷（[hostの負荷の連続の記録](host-metrics.md)、task 516）の窓の要約。窓は`--since`の時刻（eventのIDならそのeventの時刻。無ければ`asks`と同じwindowの最初のeventの時刻、それも無ければ窓の終わり）から`--until`の時刻（無ければ`asks`と同じwindowの終わり）まで。`{from, until, samples, first, last, metrics}`で、`from` / `until` / `first` / `last`はunix秒、`samples`は窓の中の行数、`metrics`は列ごと（`time`・`unix`と累計の`pageouts`を除き、`pageouts`は10分以内に並ぶ2行の差から求めた`pageouts_per_min`にする。累計が戻った（再起動）組は数えない）の`{samples, mean, max, p90}`（p90はnearest rank、小数2桁）か、値が1つも無ければnull。ファイルが読めなければ`samples: 0`と`error`。`--goal`では絞らない。`stats`はqueueのディレクトリの`host/`を読み取るだけで書かない
+
+## 分類コードごとの集計（未実装）
+
+[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。コードの一覧と記録の欄は各文書が持ち、ここは`stats`の出力の予定の形を書く。どれも窓の中のeventだけから数え、コードの無い過去の記録は書き換えずに`unlabeled`（cancelは`unrecorded`）として数える。一覧に無い値はその値の行として出す。
+
+- `review_reasons`（ADR-t947-1、[Review](review.md#差し戻しの分類コード未実装)）: `review`と`plan_review`の2つに分け、主のコードごとに`verdicts`（revise / concernの回数）、`runs`（`review`）か`proposals`（`plan_review`）の数と、reviewにかかった数に対する`rate`、`revise_secs`（依頼から`revise_finished`まで）、`concern_wait_secs`（askの答えまで）、`send_back_resume_secs`（send_backの後のresume）、答えの結果の内訳（`deviation_accepted` / `deviation_rejected` / `canceled`）を出す。時間は主のコードにだけ付け、`codes`（集合で数えた件数）は別に並べる。
+- `worker_question_topics`（ADR-t947-2、[ask](ask.md#worker_questionの分類コード未実装)）: 主のコードごとに件数、runに対する率、答えまでの秒（中央値と合計、夜と昼）、答えの後の経過（着地・`failed`・reviewのconcern）と、副を含めた件数。`reason_category`との組み合わせの件数も出す。
+- `follow_up_categories`（ADR-t947-3、[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード未実装)）: コードごとにdraftの件数、runtimeのplannerの判断（[Draft planners](draft-planners.md#follow_upの種類と判断の集計未実装)の結末: 採用・不採用・重複・draftのまま・未決、`planner_question`の件数と答え）、着地の件数、draftのままの秒。
+- `cancel_reasons`（ADR-t947-4、[Domain model](../domain-model.md#cancelの理由の分類コード未実装)）: 理由ごとに件数、actor、登録からcancelまでの秒、`ready`以降のcancelの件数、cancelまでに使ったrun・plan review・runtimeのplannerの数、follow_upのdraftなら`category`ごとの内訳。
 
 ## KPIからの読み口
 

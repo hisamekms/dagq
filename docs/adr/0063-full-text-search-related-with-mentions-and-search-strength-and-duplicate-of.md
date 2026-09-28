@@ -4,10 +4,12 @@ type: adr
 title: taskの全文検索（search）と、task番号の言及と検索の一致の強さを含む決まった規則の関連（related）と、重複の記録（cancel --duplicate-of）を持ち、plannerとplan reviewはその候補だけをLLMで判断する（ADR-0046を統合）
 status: accepted
 created: 2026-09-27
-updated: 2026-09-27
+updated: 2026-09-28
 accepted_on: 2026-09-27
 supersedes:
   - adr-0046
+amended_by:
+  - adr-t947-4
 owners:
   - hisamekms
 tags:
