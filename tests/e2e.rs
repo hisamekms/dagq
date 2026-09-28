@@ -1663,6 +1663,9 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
         cmux.to_str().unwrap(),
         "--claude",
         stub.to_str().unwrap(),
+        // The load of a busy host would hold every claim (task 680).
+        NO_LOAD_HOLD[0],
+        NO_LOAD_HOLD[1],
     ];
     let started = Instant::now();
     // A supervisor that never registers is diagnosed from launchd.log,
@@ -1710,6 +1713,10 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     assert!(contents.contains("<string>supervise</string>"));
     assert!(contents.contains(&format!("<string>{}</string>", db.display())));
     assert!(contents.contains("<key>KeepAlive</key>\n\t<true/>"));
+    assert!(
+        contents.contains("\t\t<string>--max-load</string>\n\t\t<string>0</string>\n"),
+        "{contents}"
+    );
     // The launchd-run supervisor wrote its own log.
     let logs: Vec<PathBuf> = fs::read_dir(&log_dir)
         .unwrap()
@@ -1818,6 +1825,9 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         cmux.to_str().unwrap(),
         "--claude",
         stub.to_str().unwrap(),
+        // The load of a busy host would hold every claim (task 680).
+        NO_LOAD_HOLD[0],
+        NO_LOAD_HOLD[1],
     ];
     let started = Instant::now();
     let first = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
@@ -1839,6 +1849,12 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     assert!(workspace_listed(cmux, &supervisor_workspace));
     let pid = u32::try_from(first["supervisor"]["pid"].as_u64().unwrap()).unwrap();
     assert!(pid_alive(pid));
+    let ps = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .bounded_output()
+        .unwrap();
+    let command = String::from_utf8_lossy(&ps.stdout);
+    assert!(command.contains(" --max-load 0"), "{command}");
     assert_eq!(first["inbox"]["outcome"], "created", "{first}");
     let inbox = first["inbox"]["workspace_id"].as_str().unwrap().to_owned();
     // `up` opens no planner (ADR-0041 decision 6); `plan` does.
