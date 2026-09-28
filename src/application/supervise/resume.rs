@@ -456,6 +456,7 @@ impl Supervisor<'_> {
             silent: false,
             exit_for_silence: false,
             stale: None,
+            delivered_closed: None,
             recovery: RecoveryWatch::default(),
             live: Box::new(SessionWatch::fixing(
                 run,
@@ -531,6 +532,7 @@ impl Supervisor<'_> {
         Ok(ResumeWatch {
             live,
             stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
+            delivered_closed: None,
             workspace,
             attempt,
             run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
@@ -857,6 +859,10 @@ pub(super) struct ResumeWatch {
     /// Idle with a receipt for an older commit: the one request of this
     /// attempt to rewrite it (task 357).
     pub(super) stale: Option<StaleNudge>,
+    /// The second this watch's own delivery of an answer closed the last
+    /// `worker_question` in: that close is the answer typed at `input_at`,
+    /// not one delivered by hand, and moves no clock (task 931).
+    pub(super) delivered_closed: Option<i64>,
     /// The recovery job of a session that holds the `/exit` back past the
     /// exit timeout (`stuck_exit`, ADR-0047 decision 39).
     pub(super) recovery: RecoveryWatch,
@@ -1003,8 +1009,12 @@ impl ResumeWatch {
     /// Start the stage's clocks again (ADR-0071 decision 15): the resume
     /// timeout of the request, or before it the wait for a ready input
     /// box, and the timeout of a stale-receipt request not settled yet,
-    /// with the idle that answers it. Nothing is carried over.
-    pub(super) fn restart_clocks(&mut self, files: &dyn RunFiles) {
+    /// with the idle that answers it, from `from`. Nothing is carried over.
+    /// An input typed into the session restarts them from when it was
+    /// typed, not from after the send returned: a session that answered it
+    /// at once wrote its idle marker in between, and a later start left
+    /// that idle unseen until the request's timeout (task 931).
+    pub(super) fn restart_clocks(&mut self, from: SystemTime) {
         let now = Instant::now();
         match &mut self.message_sent {
             Some((sent, _)) => *sent = now,
@@ -1018,7 +1028,7 @@ impl ResumeWatch {
         if let Some(nudge) = &mut self.stale
             && !nudge.settled
         {
-            nudge.at = files.now();
+            nudge.at = from;
         }
     }
 
@@ -1344,12 +1354,13 @@ impl ResumeWatch {
         // told to go on, like an answer typed into it.
         if let Some(typed) = self.live.continue_after_hold(sv, run)? {
             self.live.input_at = Some(typed);
-            self.restart_clocks(&*sv.files);
+            self.restart_clocks(typed);
             self.start = self.live.answer_start.take();
         }
         if let Some(typed) = self.live.deliver_answers(sv, run)? {
             self.live.input_at = Some(typed);
-            self.restart_clocks(&*sv.files);
+            self.restart_clocks(typed);
+            self.delivered_closed = sv.queue.last_worker_question_closed(run.id())?;
             self.start = self.live.answer_start.take();
         }
         if let Some(agent) = processes
@@ -1365,7 +1376,7 @@ impl ResumeWatch {
         // (ADR-0047 decision 31); an instruction the job typed is input.
         if let Some((typed, start)) = self.live.watch_sends(sv, run)? {
             self.live.input_at = Some(typed);
-            self.restart_clocks(&*sv.files);
+            self.restart_clocks(typed);
             self.start = Some(start);
         }
         // A session stopped at its own question waits for its answer,
@@ -1379,19 +1390,24 @@ impl ResumeWatch {
         // other provider, or the run waits in the hold ask.
         match self.live.provider_wall(sv, run)? {
             WallGate::Held => return Ok(None),
-            WallGate::Moved(_) => self.restart_clocks(&*sv.files),
+            WallGate::Moved(_) => self.restart_clocks(sv.files.now()),
             WallGate::Open => (),
         }
         self.watch_idle_processes(sv, run)?;
         // An answer delivered by hand (or by the supervisor this one took
         // the run over from) is input too: its close, in a later second
-        // than the last input, moves the last input there.
+        // than the last input, moves the last input there. The close of an
+        // answer this watch typed is recorded after the send, often in a
+        // later second: it is that input, and restarting the clocks at it
+        // would leave unseen an idle the session wrote right after the
+        // answer (task 931).
         let input_at = self.live.input_at.unwrap_or(sent_at);
         if let Some(closed) = sv.queue.last_worker_question_closed(run.id())?
             && closed > unix_seconds(input_at)
+            && self.delivered_closed.is_none_or(|own| closed > own)
         {
             self.live.input_at = Some(UNIX_EPOCH + Duration::from_secs(closed.max(0) as u64));
-            self.restart_clocks(&*sv.files);
+            self.restart_clocks(sv.files.now());
         }
         let input_at = self.live.input_at.unwrap_or(sent_at).max(sent_at);
         let sent = self

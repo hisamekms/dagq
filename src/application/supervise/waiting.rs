@@ -128,7 +128,7 @@ impl Phase {
     fn restart_stage_clocks(&mut self, files: &dyn RunFiles) {
         match self {
             Phase::Revise(watch) => watch.sent = Instant::now(),
-            Phase::Resume(watch) => watch.restart_clocks(files),
+            Phase::Resume(watch) => watch.restart_clocks(files.now()),
             _ => {}
         }
     }

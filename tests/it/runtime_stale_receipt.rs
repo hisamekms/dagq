@@ -255,6 +255,19 @@ idle; await_exit"#
     let regained = kinds.iter().position(|k| *k == "run_slot_regained");
     let resolved = kinds.iter().position(|k| *k == "stale_receipt_resolved");
     assert!(regained.is_some() && regained < resolved, "{kinds:?}");
+    // The session went idle right after the answer, so the request is
+    // settled by that idle, not by its 120-second timeout: a restart of
+    // the request's clock after the answer's send left that idle unseen
+    // (task 931).
+    let at = |kind: &str| {
+        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
+        dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
+    };
+    let settled_ms = at("stale_receipt_resolved") - at("ask_delivered");
+    assert!(
+        settled_ms < 60_000,
+        "settled {settled_ms} ms after the answer"
+    );
     payloads(&detail, "stale_receipt_resolved")
         .into_iter()
         .cloned()
