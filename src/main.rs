@@ -3104,6 +3104,12 @@ fn main() -> ExitCode {
                 let _ = serde_json::to_writer_pretty(&mut stdout, &kept.report);
                 let _ = writeln!(stdout);
             }
+            // So does an `up` whose handoff some supervisors did not take.
+            if let Some(partial) = dagq::application::lifecycle::PartialHandoff::of(&error) {
+                let mut stdout = io::stdout().lock();
+                let _ = serde_json::to_writer_pretty(&mut stdout, &partial.report);
+                let _ = writeln!(stdout);
+            }
             // The command's own failure, in its log file too; stderr gets
             // the error JSON below as always.
             tracing::error!(

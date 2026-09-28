@@ -1328,8 +1328,15 @@ impl OneShot {
             environment,
             options,
         )
+        .map_err(|mut error| {
+            // A handoff some supervisors failed reports the whole of `up`.
+            if let Some(partial) = error.downcast_mut::<lifecycle::PartialHandoff>() {
+                partial.report["migrated"] = serde_json::to_value(&migrated).unwrap_or(Value::Null);
+            }
+            error
+        })
         .and_then(|mut value| {
-            value["migrated"] = serde_json::to_value(migrated)?;
+            value["migrated"] = serde_json::to_value(&migrated)?;
             Ok(value)
         });
         trace_command("up", &result);

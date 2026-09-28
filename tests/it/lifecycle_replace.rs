@@ -599,6 +599,7 @@ fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
         let launchd = FakeLaunchd::new(&fixture.location.db);
         let processes = FakeProcesses::default();
 
+        auto_update(&mut fixture);
         let report = thread::scope(|scope| {
             scope.spawn(|| take_the_handoff(&fixture, &processes, "old", VERSION));
             up(&fixture, &cmux, &launchd, &processes)
@@ -606,6 +607,11 @@ fn up_hands_a_supervisor_of_another_build_over_without_draining_it() {
         let supervisor = &report["supervisor"];
         assert_eq!(supervisor["outcome"], "restarted", "{report}");
         assert_eq!(supervisor["handoff"], true);
+        assert_eq!(supervisor["auto_update"], true);
+        assert_eq!(supervisor["replaced"][0]["token"], "old");
+        assert_eq!(supervisor["replaced"][0]["previous_token"], "old");
+        assert_eq!(supervisor["replaced"][0]["error"], Value::Null);
+        assert!(auto_update_of(&queue, "old"));
         assert_eq!(supervisor["token"], "old");
         assert_eq!(supervisor["pid"], json!(std::process::id()));
         assert_eq!(supervisor["mode"], "in_cmux");
@@ -867,12 +873,37 @@ fn a_handoff_waits_for_every_supervisor_past_a_failure() {
     assert!(lifecycle::handoff_failures(&handed[1..]).is_none());
 }
 
+/// Make the fixture's repository dagq's source, so `up --auto-update` runs.
+fn auto_update(fixture: &mut Fixture) {
+    fixture.options.auto_update = true;
+    fs::write(
+        fixture.repo.join("Cargo.toml"),
+        "[package]\nname = \"dagq\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+}
+
+fn auto_update_of(queue: &SqliteQueue, token: &str) -> bool {
+    queue
+        .supervisors()
+        .unwrap()
+        .iter()
+        .find(|r| r.token == token)
+        .unwrap_or_else(|| panic!("supervisor {token} is not registered"))
+        .auto_update
+}
+
 /// `up` waits for every supervisor it hands over and fails naming the ones
 /// that did not take the handoff, after the others took it (ADR-t632-1).
+/// It fails only once it has done the rest (task 717): the one that took
+/// it gets `--auto-update` under the token it serves under now, the inbox
+/// is opened, and the report it prints beside the error names what became
+/// of each supervisor.
 #[test]
 fn up_names_the_supervisors_that_did_not_take_the_handoff() {
     let mut fixture = fixture();
     fixture.options.in_cmux = true;
+    auto_update(&mut fixture);
     let queue = two_handoff_supervisors(&fixture);
     let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(&fixture.location.db);
@@ -888,15 +919,18 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
                     .is_some()
             });
             thread::sleep(Duration::from_millis(300));
+            // Its pid registers again under the new build, with a new token.
             queue
-                .resume_registration(&LeaseToken::new("second"), SECOND_PID, VERSION)
+                .register_supervisor(&LeaseToken::new("second-again"), SECOND_PID, 4, VERSION)
+                .unwrap();
+            queue
+                .deregister_supervisor(&LeaseToken::new("second"))
                 .unwrap();
         });
-        format!(
-            "{:#}",
-            try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
-        )
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
     });
+    let partial = lifecycle::PartialHandoff::of(&error).expect("the report beside the error");
+    let error = format!("{error:#}");
     assert!(
         error.contains("1 of the 2 supervisors took the handoff"),
         "{error}"
@@ -905,11 +939,102 @@ fn up_names_the_supervisors_that_did_not_take_the_handoff() {
     assert!(error.contains("came back as 0.0.1"), "{error}");
     assert!(!error.contains("supervisor second"), "{error}");
     assert!(error.contains("`down --force` and `up`"), "{error}");
+
+    let report = &partial.report;
+    let supervisor = &report["supervisor"];
+    assert_eq!(supervisor["outcome"], "partially_handed_off", "{report}");
+    assert!(report.get("migrated").is_some(), "{report}");
+    assert_eq!(supervisor["handoff"], true, "{report}");
+    assert_eq!(supervisor["auto_update"], true, "{report}");
+    let replaced = supervisor["replaced"].as_array().unwrap();
+    assert_eq!(replaced.len(), 2, "{report}");
+    let first = replaced.iter().find(|r| r["token"] == "first").unwrap();
+    assert!(
+        first["error"]
+            .as_str()
+            .unwrap()
+            .contains("came back as 0.0.1"),
+        "{report}"
+    );
+    let second = replaced
+        .iter()
+        .find(|r| r["token"] == "second-again")
+        .unwrap();
+    assert_eq!(second["previous_token"], "second", "{report}");
+    assert_eq!(second["error"], Value::Null, "{report}");
+    assert!(
+        matches!(
+            report["inbox"]["outcome"].as_str(),
+            Some("created" | "reused")
+        ),
+        "{report}"
+    );
+
     let registrations = queue.supervisors().unwrap();
-    let second = registrations.iter().find(|r| r.token == "second").unwrap();
+    let second = registrations
+        .iter()
+        .find(|r| r.token == "second-again")
+        .unwrap();
     assert_eq!(second.binary_version.as_deref(), Some(VERSION));
+    assert!(second.auto_update);
     let first = registrations.iter().find(|r| r.token == "first").unwrap();
     assert_eq!(first.handoff_binary, None);
+    // The one that went on with its old binary is still registered, and
+    // keeps what `up` asked for too.
+    assert!(first.auto_update);
+}
+
+/// When no supervisor takes the handoff, `up` still sets `--auto-update`
+/// and opens the inbox, and fails with the report: `up` replaced no file,
+/// so there is nothing to put back.
+#[test]
+fn up_finishes_its_steps_when_no_supervisor_takes_the_handoff() {
+    let mut fixture = fixture();
+    fixture.options.in_cmux = true;
+    auto_update(&mut fixture);
+    let queue = two_handoff_supervisors(&fixture);
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let error = thread::scope(|scope| {
+        scope.spawn(|| take_the_handoff(&fixture, &processes, "first", "0.0.1"));
+        scope.spawn(|| {
+            let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+            wait_until(&processes, SECOND_PID, || {
+                queue
+                    .handoff_request(&LeaseToken::new("second"))
+                    .unwrap()
+                    .is_some()
+            });
+            queue
+                .resume_registration(&LeaseToken::new("second"), SECOND_PID, "0.0.1")
+                .unwrap();
+        });
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    });
+    let partial = lifecycle::PartialHandoff::of(&error).expect("the report beside the error");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("0 of the 2 supervisors took the handoff"),
+        "{error}"
+    );
+    let report = &partial.report;
+    assert_eq!(
+        report["supervisor"]["outcome"], "handoff_failed",
+        "{report}"
+    );
+    assert_eq!(report["supervisor"]["auto_update"], true, "{report}");
+    let replaced = report["supervisor"]["replaced"].as_array().unwrap();
+    assert!(replaced.iter().all(|r| r["error"].is_string()), "{report}");
+    assert!(
+        matches!(
+            report["inbox"]["outcome"].as_str(),
+            Some("created" | "reused")
+        ),
+        "{report}"
+    );
+    assert!(auto_update_of(&queue, "first"));
+    assert!(auto_update_of(&queue, "second"));
 }
 
 fn gone_registration() -> dagq::domain::SupervisorRegistration {

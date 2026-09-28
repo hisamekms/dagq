@@ -490,6 +490,10 @@ pub fn up(
     let outdated = live
         .iter()
         .any(|registration| registration.binary_version.as_deref() != Some(VERSION));
+    // A handoff some supervisors failed does not stop `up` short: the
+    // others serve under this build, and they get `--auto-update` and the
+    // inbox all the same before `up` fails naming the ones that did not.
+    let mut handoff_failure = None;
     let supervisor = match live.first() {
         // Whoever started it recorded the mode; a supervisor started by
         // hand has none, and `up` does not claim one for it.
@@ -503,7 +507,11 @@ pub fn up(
             "plist": location.launch_agent,
             "log_dir": location.log_dir,
         }),
-        Some(_) if takes_handoff(&up, ports.files, &live) => hand_off_supervisors(&up, &live)?,
+        Some(_) if takes_handoff(&up, ports.files, &live) => {
+            let (supervisor, failure) = hand_off_supervisors(&up, &live)?;
+            handoff_failure = failure;
+            supervisor
+        }
         Some(_) => replace_supervisors(&up, &live)?,
         None => start_supervisor(&up, &existing, false)?,
     };
@@ -540,7 +548,37 @@ pub fn up(
     if run_env.config {
         report["run_env"] = serde_json::to_value(&run_env)?;
     }
-    Ok(report)
+    match handoff_failure {
+        None => Ok(report),
+        Some(message) => Err(PartialHandoff { message, report }.into()),
+    }
+}
+
+/// The error of an `up` whose handoff some or all of the supervisors did
+/// not take: `up` still set `--auto-update` and opened the inbox, and
+/// `report` is what it reports, with the supervisor's outcome
+/// `partially_handed_off` (or `handoff_failed` when none took it) and each
+/// supervisor's result in `replaced`, for the command to print beside the
+/// error. `up` replaces no file, so nothing was put back.
+#[derive(Debug)]
+pub struct PartialHandoff {
+    pub message: String,
+    pub report: Value,
+}
+
+impl std::fmt::Display for PartialHandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PartialHandoff {}
+
+impl PartialHandoff {
+    /// The [`PartialHandoff`] `error` is or wraps.
+    pub fn of(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
 }
 
 /// One `up`'s settled inputs, shared by the ways it starts a supervisor.
@@ -987,8 +1025,13 @@ fn takes_handoff(up: &Up, files: &dyn RunFiles, live: &[SupervisorRegistration])
 /// supervisor is asked to exec this binary, and `up` reports once each of
 /// them is back under this build with its pid and token. `up` replaces no
 /// file, so nothing is put back when one fails: it waits for every one of
-/// them and fails naming the ones that did not take it (ADR-t632-1).
-fn hand_off_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Value> {
+/// them (ADR-t632-1) and returns, beside the report, the error naming the
+/// ones that did not take it, for `up` to fail with once it has done the
+/// rest.
+fn hand_off_supervisors(
+    up: &Up,
+    live: &[SupervisorRegistration],
+) -> Result<(Value, Option<String>)> {
     let handed = hand_off(
         up.queue,
         up.processes,
@@ -999,33 +1042,42 @@ fn hand_off_supervisors(up: &Up, live: &[SupervisorRegistration]) -> Result<Valu
         up.options.handoff_timeout,
         up.options.poll,
     )?;
-    if let Some(error) = handoff_failures(&handed) {
-        let took = handed.iter().filter(|h| h.error.is_none()).count();
-        return Err(error.context(format!(
-            "{took} of the {} supervisors took the handoff to {VERSION}; the ones that did not \
-go on with the binary they had: `down --force` and `up` start them with this one",
-            handed.len()
-        )));
-    }
-    let first = &live[0];
+    let took = handed.iter().filter(|h| h.error.is_none()).count();
+    let failure = handoff_failures(&handed).map(|error| {
+        format!(
+            "{:#}",
+            error.context(format!(
+                "{took} of the {} supervisors took the handoff to {VERSION}; the ones that did \
+not go on with the binary they had: `down --force` and `up` start them with this one",
+                handed.len()
+            ))
+        )
+    });
+    let outcome = match (&failure, took) {
+        (None, _) => "restarted",
+        (Some(_), 0) => "handoff_failed",
+        (Some(_), _) => "partially_handed_off",
+    };
+    let first = &handed[0];
     let previous_version = live
         .iter()
         .find(|registration| registration.binary_version.as_deref() != Some(VERSION))
         .and_then(|registration| registration.binary_version.clone());
-    Ok(json!({
-        "outcome": "restarted",
+    let report = json!({
+        "outcome": outcome,
         "handoff": true,
-        "mode": first.mode.map(SupervisorMode::as_str),
+        "mode": first.registration.mode.map(SupervisorMode::as_str),
         "version": VERSION,
         "previous_version": previous_version,
-        "pid": first.pid,
-        "token": first.token,
-        "workspace_id": first.workspace_id,
+        "pid": first.registration.pid,
+        "token": first.now.as_ref().unwrap_or(&first.registration.token),
+        "workspace_id": first.registration.workspace_id,
         "plist": up.location.launch_agent,
         "log_dir": up.location.log_dir,
         "replaced": handed.iter().map(Handed::report).collect::<Vec<_>>(),
         "supervisor_workspaces": [],
-    }))
+    });
+    Ok((report, failure))
 }
 
 /// What became of one supervisor asked to exec a binary: the registration
@@ -1697,7 +1749,10 @@ fn fresh(registration: &SupervisorRegistration, processes: &dyn ProcessControl, 
 
 /// Write `up`'s `--auto-update` (or its absence) on the registrations of
 /// the supervisors it leaves serving the queue (ADR-0045 decision 17): the
-/// live ones it reused or handed over, or the one it started (which
+/// live ones it reused, the ones it handed over (under the token each
+/// serves under now, which is a new one when its pid registered again, and
+/// also the ones that did not take the handoff and go on under their old
+/// token while they are still registered), or the one it started (which
 /// registered with it already, from `supervise --auto-update`). Reported
 /// as the supervisor's `auto_update`.
 fn set_auto_update(
@@ -1706,8 +1761,20 @@ fn set_auto_update(
     live: &[SupervisorRegistration],
     enabled: bool,
 ) -> Result<Value> {
-    let kept = supervisor["outcome"] == "reused" || supervisor["handoff"] == true;
-    let tokens: Vec<LeaseToken> = if kept {
+    let tokens: Vec<LeaseToken> = if supervisor["handoff"] == true {
+        let registered: HashSet<LeaseToken> = queue
+            .supervisors()?
+            .into_iter()
+            .map(|registration| registration.token)
+            .collect();
+        supervisor["replaced"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|handed| handed["token"].as_str().map(LeaseToken::new))
+            .filter(|token| registered.contains(token))
+            .collect()
+    } else if supervisor["outcome"] == "reused" {
         live.iter()
             .map(|registration| registration.token.clone())
             .collect()
