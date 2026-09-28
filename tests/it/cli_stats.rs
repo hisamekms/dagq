@@ -1099,7 +1099,7 @@ mod stats {
         assert_eq!(summary["first"], now - 240);
         assert_eq!(
             summary["metrics"]["load1"],
-            json!({"samples": 4, "mean": 4.0, "max": 10.0, "p90": 10.0})
+            json!({"samples": 4, "mean": 4.0, "median": 2.0, "max": 10.0, "p90": 10.0})
         );
         assert_eq!(summary["metrics"]["pageouts_per_min"]["mean"], 60.0);
         assert_eq!(summary["metrics"]["swap_used_mb"], Value::Null);

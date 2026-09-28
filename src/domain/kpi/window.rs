@@ -8,12 +8,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float};
+use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float, round3};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskId, TaskKind,
     areas::RunAreas,
     event_attention,
     forecast::score::{self, Scoring, Target},
+    host_metrics::{HostSummary, PROCESS_KINDS},
     marks::{self, Mark},
     plan_quality::plan_quality,
     stats::{
@@ -35,6 +36,9 @@ pub const CANDIDATES_SAMPLED: &str =
 /// The KPIs no record exists for yet, and why.
 const NOT_RECORDED: &str = "not_recorded";
 const NO_SAMPLES: &str = "no_samples";
+const NO_HOST_RECORDS: &str = "no_host_records";
+const NO_CORES: &str = "no_cores";
+const NO_LANDINGS: &str = "no_landings";
 
 /// One window's KPIs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -419,6 +423,77 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// `cpu_per_landing` (all the processes, and `.<kind>` per kind of
+    /// process) and `load_per_core` of the host's load over a window
+    /// (goal 72): the CPU seconds the records stand for over the landings,
+    /// and `load1` over the logical cores. Null without records (or
+    /// landings, or cores).
+    fn host_kpis(
+        &self,
+        host: &HostSummary,
+        landings: usize,
+        put: &mut impl FnMut(&str, &str, Measure),
+        unavailable: &mut BTreeMap<&'static str, &'static str>,
+        details: &mut BTreeMap<&'static str, Value>,
+    ) {
+        let cpu = host.cpu_secs.as_ref();
+        let per_landing = |secs: f64| {
+            #[allow(clippy::cast_precision_loss)]
+            (landings > 0).then(|| secs / landings as f64)
+        };
+        put(
+            "cpu_per_landing",
+            ALL,
+            Measure::total(cpu.and_then(|cpu| per_landing(cpu.total)), landings),
+        );
+        for kind in PROCESS_KINDS {
+            put(
+                &format!("cpu_per_landing.{kind}"),
+                ALL,
+                Measure::total(
+                    cpu.and_then(|cpu| cpu.by_kind.get(kind).copied())
+                        .and_then(per_landing),
+                    landings,
+                ),
+            );
+        }
+        if cpu.is_none() {
+            unavailable.insert("cpu_per_landing", NO_HOST_RECORDS);
+        } else if landings == 0 {
+            unavailable.insert("cpu_per_landing", NO_LANDINGS);
+        }
+        let load = host.metrics.get("load1").copied().flatten();
+        let cores = self.cores.filter(|cores| *cores > 0);
+        #[allow(clippy::cast_precision_loss)]
+        let per_core = |value: f64| cores.map(|cores| round3(value / cores as f64));
+        put(
+            "load_per_core",
+            ALL,
+            Measure {
+                n: load.map_or(0, |load| load.samples),
+                median: load.and_then(|load| per_core(load.median)),
+                p90: load.and_then(|load| per_core(load.p90)),
+                max: load.and_then(|load| per_core(load.max)),
+                has_spread: true,
+                ..Measure::default()
+            },
+        );
+        if load.is_none() {
+            unavailable.insert("load_per_core", NO_HOST_RECORDS);
+        } else if cores.is_none() {
+            unavailable.insert("load_per_core", NO_CORES);
+        }
+        details.insert(
+            "cpu_per_landing",
+            serde_json::json!({
+                "landings": landings,
+                "samples": host.samples,
+                "cpu_secs": cpu,
+                "cores": cores,
+            }),
+        );
+    }
+
     /// The KPIs of the window after `start` up to `end` (unix ms), the
     /// runs split by `axes`.
     pub fn window(&self, start: i64, end: i64, axes: &[Axis]) -> WindowKpis {
@@ -585,6 +660,19 @@ impl<'a> Context<'a> {
                 put("candidates", ALL, Measure::total(None, 0));
                 unavailable.insert("candidates", NO_SAMPLES);
             }
+        }
+
+        // The host's CPU per landing and its load over the cores (goal
+        // 72), from the load the supervisor records: only when the host's
+        // records are read (`kpi` and the reports).
+        if let Some(host) = self.host {
+            self.host_kpis(
+                &host.between(start, end),
+                landed(ALL),
+                &mut put,
+                &mut unavailable,
+                &mut details,
+            );
         }
 
         // Improvements.

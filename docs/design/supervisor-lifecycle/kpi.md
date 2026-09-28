@@ -58,11 +58,12 @@ related:
 
 ### hostの負荷
 
-task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`--compare`の`before` / `after`の`host`に、supervisorが記録したhostの負荷（[hostの負荷の連続の記録](host-metrics.md)）の区間の要約を並べる。形は[`stats`](stats.md#hostの負荷)の`host`と同じ（`from`・`until`・`samples`・`first`・`last`・`metrics`（列→`{samples, mean, max, p90}`か、値の無い列はnull）・読めなかったときの`error`）。
+task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`--compare`の`before` / `after`の`host`に、supervisorが記録したhostの負荷（[hostの負荷の連続の記録](host-metrics.md)）の区間の要約を並べる。形は[`stats`](stats.md#hostの負荷)の`host`と同じ（`from`・`until`・`samples`・`first`・`last`・`metrics`（列→`{samples, mean, median, max, p90}`か、値の無い列はnull）・`cpu_secs`（下の`cpu_per_landing`）・読めなかったときの`error`）。
 
 - **区間**: 期間の`(start, end]`（ms）に合わせ、`start`の秒は含めず`end`の秒は含める（`from` = `start`の秒 + 1、`until` = `end`の秒。`domain::kpi::HostReader::between`）。隣り合う期間の境の秒の行は、そこで終わる期間にだけ入る。
 - **読み方**: `infrastructure::host_metrics::summary(<queue dir>/host, from, until)`（`domain::host_metrics::summarize`）。`src/compose.rs`の`report_setup`が`ReportSetup::host_metrics`に読み手を入れ、`kpi_of`（`dagq kpi`）と日次・週次のレポート（`application::report`。JSONは`kpi`の出力をそのまま載せるので同じ`host`を持つ。HTMLには節を足していない）がそれを`application::kpi::kpi`に渡す。記録の無い期間は`samples: 0`、ファイルが読めなければ`error`を入れ、`kpi`は失敗させない。
-- **参考の値**: KPIではない。`kpis`・`comparison`・`targets`の判定・`breach`・push・observerのfindingの対象にしない（目標割れの検査（`application::push`）とobserverの入力（`observer_kpi`）は読み手を渡さないので`host`を持たない）。ADR-0051の決定3の`max_load_avg`（claim時の記録から導く）の定義も変えない。
+- **参考の値**: `host`そのものはKPIではない。`kpis`・`comparison`・`targets`の判定・`breach`・push・observerのfindingの対象にしない（目標割れの検査（`application::push`）とobserverの入力（`observer_kpi`）は読み手を渡さないので`host`を持たない）。ADR-0051の決定3の`max_load_avg`（claim時の記録から導く）の定義も変えない。
+- **KPIにしたもの**: 同じ区間の要約から`cpu_per_landing`（`.<kind>`を含む）と`load_per_core`を`kpis`に出す（goal 72、task 992。下の表）。読み手のある`kpi`・`--compare`とレポートだけが出し、読み手を渡さない目標割れの検査とobserverの入力にはこれらのKPIが無い（目標を置いても判定されない）。
 
 ## KPIと層
 
@@ -93,6 +94,9 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `landing_utilization.peak` | 期間の始まりから1時間ずつ切った丸ごとの1時間のうち、試行が占めた割合の最大。その時間の始まりは`details.landing_utilization.peak_hour.start` | `all` |
 | `landing_attempt` | 期間に終わった試行1回あたりの占有時間の秒（`median`・`p90`・`min`・`max`。開いたままの試行は数えない） | `all` |
 | `landing_queue_depth` | 着地slotの順番待ちのrun（`landing_queued`から`integration_started`などまで）の数の時間平均（`value`）と同時の最大（`max`）。`n`は期間に待ったrunの数 | `all` |
+| `cpu_per_landing` | 期間にhostのプロセスが使ったCPU秒 ÷ 期間の`landings`（`all`の層の着地数。`--goal`でもCPUはhost全体）。CPU秒はhostの負荷の記録（[host-metrics](host-metrics.md)）の各行の`cpu_total` ÷ 100 × その行が代表する秒の合計（`host.cpu_secs`、`domain::host_metrics::summarize`）。行は前の行からの秒を代表し（区間の最初の行は典型の間隔、ただし区間の始まりより前は数えない）、典型の間隔（区間の中の行の最も短い間隔、つまり記録した間隔。1行しか無ければ既定の30秒。途切れの多い区間でも上がらない）の2倍を上限にするので、supervisorが止まっていた・hostが眠っていたような記録の途切れを次の行の負荷で埋めて過大に数えない。macOSの`%cpu`は減衰する平均なので近似。記録（`cpu_total`のある行）の無い期間と着地の無い期間はnullで、記録が無ければ`unavailable`に`no_host_records`、着地が無ければ`no_landings`。全体のCPU秒・代表した秒・上限・種類ごとのCPU秒・着地数・コア数は`details.cpu_per_landing`。良い向きは小さい | `all` |
+| `cpu_per_landing.<kind>` | 同じ規則のプロセスの種類ごと（`cargo`・`rustc`・`claude`・`dagq`・`other`。列`cpu_<kind>`） | `all` |
+| `load_per_core` | 期間の記録の`load1` ÷ hostの論理コア数の分布（`median`・`p90`・`max`。中央値とp90は`host`の要約と同じnearest rank）。`n`は`load1`のある行の数。記録が無ければnullで`unavailable`に`no_host_records`、コア数が分からなければ`no_cores`。claim時の値の`max_load_avg`（最大）と違い、期間を通じた負荷の広がりを見る。良い向きは小さい | `all` |
 | `candidates` | `candidates_sampled`（`candidates`・`free_slots`・`ready`）の時間で重み付けた平均（`value`）と最大、空きslotがあるのに`candidates`が0で`ready`が残った秒（`details.candidates.starved_secs`） | `all` |
 | `findings_open` / `finding_resolve_time` | 期間の終わりに`open` / `proposed`のfinding（`finding_recorded`と`finding_status_changed`から）、期間に`resolved`になったものの最初の記録からの秒。記録・解決の数は`details.findings` | `all` |
 | `improvement_proposals` | 記録が無い（ADR-0051の決定25の数え方の実装が無い）ので値はnull | `all` |
@@ -104,7 +108,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
 - `landing_utilization`・`landing_utilization.peak`・`landing_attempt`・`landing_queue_depth`は、期間の`(start, end]`（今を超えない）で[stats](stats.md#着地の直列処理の使用率)の`landing_utilization`を呼んで読み（task 991）、同じ値の全体（`busy_secs`・`window_secs`・`attempts`・`landed`・`peak_hour`・`attempt_secs`・`queue`）を`details.landing_utilization`に出す。runに属さないので`all`だけで、`--goal`はそのgoalのtaskの試行と待ちだけを数える。
-- `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（期間に重なる`candidates_sampled`が無い。supervisorはclaimのpassごとに標本を数え、値が変わったときと起動・引き継ぎの直後の最初のpassで記録する（[`supervise`](supervise.md)の5のcandidatesの標本）ので、supervisorの動いていた期間には標本がある。記録を始める前の期間と、supervisorが1度も動いていない期間に出る）、`improvement_proposals`の`not_recorded`。
+- `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（期間に重なる`candidates_sampled`が無い。supervisorはclaimのpassごとに標本を数え、値が変わったときと起動・引き継ぎの直後の最初のpassで記録する（[`supervise`](supervise.md)の5のcandidatesの標本）ので、supervisorの動いていた期間には標本がある。記録を始める前の期間と、supervisorが1度も動いていない期間に出る）、`improvement_proposals`の`not_recorded`、`cpu_per_landing`・`load_per_core`の`no_host_records`、`cpu_per_landing`の`no_landings`とコア数の分からない`load_per_core`の`no_cores`（hostの記録を読むときだけ）。
 - `--goal`はそのgoalのtaskのrun・ask・findingだけを数える（`slot_usage`の分母はqueue全体のまま）。
 
 ### 完了見込みの答え合わせ

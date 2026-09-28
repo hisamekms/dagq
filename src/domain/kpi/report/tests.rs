@@ -163,6 +163,16 @@ fn finding(id: i64, summary: &str) -> Finding {
 /// The report of Thursday, judged at Friday noon with a target on the
 /// landings that three days in a row missed.
 pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
+    report_with_host(now, at, period, None)
+}
+
+/// [`report`] with the host's load read by `host`.
+fn report_with_host(
+    now: i64,
+    at: i64,
+    period: Period,
+    host: Option<crate::domain::kpi::HostReader<'_>>,
+) -> Report {
     let (events, kinds, goals) = events();
     let settings = KpiSettings {
         targets: vec![
@@ -198,7 +208,7 @@ pub(crate) fn report(now: i64, at: i64, period: Period) -> Report {
             utc_offset_secs: JST,
             cores: Some(4),
             config: &config,
-            host: None,
+            host,
         },
         &KpiQuery {
             period,
@@ -565,4 +575,60 @@ fn the_index_lists_the_reports_newest_first() {
     assert!(at("daily/2026-09-22.partial.html") < at("daily/2026-09-21.html"));
     assert!(at("daily/2026-09-21.html") < at("daily/2026-09-20.html"));
     assert!(html.contains("<p class=\"muted\">none yet</p>"));
+}
+
+/// The page shows the host's CPU per landing, per kind of process, and its
+/// load over the cores (goal 72) when the host's records were read, and
+/// says so when the period has none.
+#[test]
+fn a_report_shows_the_host_cpu_per_landing() {
+    use crate::domain::host_metrics::{HostSample, summarize};
+    let thursday = MONDAY + 3 * DAY;
+    let samples: Vec<HostSample> = (1..=10)
+        .map(|index| {
+            let mut sample = HostSample::new(thursday + 30 * index);
+            sample.set("cpu_total", Some(100.0));
+            sample.set("cpu_rustc", Some(100.0));
+            sample.set("load1", Some(8.0));
+            sample
+        })
+        .collect();
+    let read = |from, until| summarize(&samples, from, until);
+    let now = MONDAY + 4 * DAY + 12 * HOUR;
+    let report = report_with_host(
+        now,
+        thursday + 12 * HOUR,
+        Period::Day,
+        Some(crate::domain::kpi::HostReader(&read)),
+    );
+    let json = serde_json::to_value(&report).unwrap();
+    let kpis = &json["periods"][6]["kpis"];
+    assert_eq!(kpis["cpu_per_landing"]["all"]["value"], 300.0);
+    assert_eq!(kpis["cpu_per_landing.rustc"]["all"]["value"], 300.0);
+    assert_eq!(kpis["load_per_core"]["all"]["median"], 2.0);
+    let html = render_html(&report);
+    assert!(html.contains("<h2>Host CPU</h2>"), "{html}");
+    assert!(html.contains(
+        "The processes spent 5m 00s of CPU over 1 landing(s): 5m 00s per landing (cargo 0s, rustc 5m 00s, claude 0s, dagq 0s, other 0s). The 1-minute load over 4 core(s): median 2, p90 2, max 2."
+    ), "{html}");
+    assert!(html.contains("<code>cpu_per_landing</code>"));
+    // Wednesday had no record.
+    let wednesday = report_with_host(
+        now,
+        thursday - 12 * HOUR,
+        Period::Day,
+        Some(crate::domain::kpi::HostReader(&read)),
+    );
+    let html = render_html(&wednesday);
+    assert!(html.contains("No CPU was recorded in the period."));
+    assert!(!html.contains("1-minute load"));
+    // Without the host's records, no such section.
+    assert!(
+        !render_html(&super::tests::report(
+            now,
+            thursday + 12 * HOUR,
+            Period::Day
+        ))
+        .contains("Host CPU")
+    );
 }

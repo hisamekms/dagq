@@ -7,7 +7,10 @@
 use std::fmt::Write;
 
 use super::{Report, ReportFile};
-use crate::domain::kpi::{ALL, Change, Measure, PeriodKpis, TargetReport};
+use crate::domain::{
+    host_metrics::PROCESS_KINDS,
+    kpi::{ALL, Change, Measure, PeriodKpis, TargetReport},
+};
 
 /// The KPIs the trend lists first, in this order; the others follow by name.
 const LEADING: &[&str] = &[
@@ -31,6 +34,8 @@ const LEADING: &[&str] = &[
     "asks_per_landing",
     "ask_wait",
     "max_load_avg",
+    "cpu_per_landing",
+    "load_per_core",
     "findings_open",
 ];
 
@@ -99,6 +104,7 @@ pub fn render_html(report: &Report) -> String {
     if let Some(latest) = latest {
         forecast(&mut page, latest, &report.kpi.targets);
         landing(&mut page, latest);
+        host_cpu(&mut page, latest);
         kpis(&mut page, latest);
     }
     findings(&mut page, report);
@@ -390,6 +396,55 @@ fn landing(page: &mut String, period: &PeriodKpis) {
     );
 }
 
+/// The host's CPU per landing and its load over the cores in the period
+/// (goal 72), when the host's records were read.
+fn host_cpu(page: &mut String, period: &PeriodKpis) {
+    let Some(details) = period.window.details.get("cpu_per_landing") else {
+        return;
+    };
+    page.push_str("<h2>Host CPU</h2><p class=\"meta\">");
+    let all = |kpi: &str| period.window.kpis.get(kpi).and_then(|kpi| kpi.get(ALL));
+    match details["cpu_secs"]["total"].as_f64() {
+        Some(total) => {
+            let kinds: Vec<String> = PROCESS_KINDS
+                .iter()
+                .map(|kind| {
+                    let name = format!("cpu_per_landing.{kind}");
+                    format!(
+                        "{kind} {}",
+                        value(&name, all(&name).and_then(|measure| measure.value))
+                    )
+                })
+                .collect();
+            let _ = write!(
+                page,
+                "The processes spent {} of CPU over {} landing(s): {} per landing ({}).",
+                secs(total),
+                details["landings"].as_u64().unwrap_or(0),
+                value(
+                    "cpu_per_landing",
+                    all("cpu_per_landing").and_then(|measure| measure.value)
+                ),
+                kinds.join(", "),
+            );
+        }
+        None => page.push_str("No CPU was recorded in the period."),
+    }
+    if let Some(load) = all("load_per_core").filter(|load| load.n > 0) {
+        let _ = write!(
+            page,
+            " The 1-minute load over {} core(s): median {}, p90 {}, max {}.",
+            details["cores"]
+                .as_u64()
+                .map_or_else(|| "?".to_owned(), |cores| cores.to_string()),
+            value("load_per_core", load.median),
+            value("load_per_core", load.p90),
+            value("load_per_core", load.max),
+        );
+    }
+    page.push_str("</p>");
+}
+
 fn kpis(page: &mut String, period: &PeriodKpis) {
     let _ = write!(page, "<h2>KPIs of {}</h2>", esc(&period.label));
     let row = |page: &mut String, name: &str, stratum: Option<&str>, measure: &Measure| {
@@ -620,10 +675,12 @@ fn unit(kpi: &str) -> Unit {
         Unit::Ratio
     } else if durations.iter().any(|prefix| kpi.starts_with(prefix))
         || kpi.starts_with("session_active.")
+        || kpi.starts_with("cpu_per_landing.")
         || matches!(
             kpi,
             "lead_time"
                 | "landing_attempt"
+                | "cpu_per_landing"
                 | "ask_wait"
                 | "ask_apply_wait"
                 | "finding_resolve_time"
@@ -723,6 +780,9 @@ mod tests {
         assert_eq!(value("landing_utilization.peak", Some(0.9)), "90.0%");
         assert_eq!(value("landing_attempt", Some(390.0)), "6m 30s");
         assert_eq!(value("landing_queue_depth", Some(1.25)), "1.25");
+        assert_eq!(value("cpu_per_landing", Some(754.0)), "12m 34s");
+        assert_eq!(value("cpu_per_landing.rustc", Some(90.0)), "1m 30s");
+        assert_eq!(value("load_per_core", Some(1.5)), "1.50");
         assert_eq!(value("landings", Some(12.0)), "12");
         assert_eq!(value("forecast.p50_abs_error", Some(5400.0)), "1h 30m");
         assert_eq!(value("forecast.p90_hit_rate", Some(0.75)), "75.0%");

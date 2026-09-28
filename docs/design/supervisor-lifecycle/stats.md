@@ -282,7 +282,7 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 
 ## hostの負荷
 
-- **`host`**: supervisorが記録するhostの負荷（[hostの負荷の連続の記録](host-metrics.md)、task 516）の窓の要約。窓は`--since`の時刻（eventのIDならそのeventの時刻。無ければ`asks`と同じwindowの最初のeventの時刻、それも無ければ窓の終わり）から`--until`の時刻（無ければ`asks`と同じwindowの終わり）まで。`{from, until, samples, first, last, metrics}`で、`from` / `until` / `first` / `last`はunix秒、`samples`は窓の中の行数、`metrics`は列ごと（`time`・`unix`と累計の`pageouts`を除き、`pageouts`は10分以内に並ぶ2行の差から求めた`pageouts_per_min`にする。累計が戻った（再起動）組は数えない）の`{samples, mean, max, p90}`（p90はnearest rank、小数2桁）か、値が1つも無ければnull。ファイルが読めなければ`samples: 0`と`error`。`--goal`では絞らない。`stats`はqueueのディレクトリの`host/`を読み取るだけで書かない
+- **`host`**: supervisorが記録するhostの負荷（[hostの負荷の連続の記録](host-metrics.md)、task 516）の窓の要約。窓は`--since`の時刻（eventのIDならそのeventの時刻。無ければ`asks`と同じwindowの最初のeventの時刻、それも無ければ窓の終わり）から`--until`の時刻（無ければ`asks`と同じwindowの終わり）まで。`{from, until, samples, first, last, metrics}`で、`from` / `until` / `first` / `last`はunix秒、`samples`は窓の中の行数、`metrics`は列ごと（`time`・`unix`と累計の`pageouts`を除き、`pageouts`は10分以内に並ぶ2行の差から求めた`pageouts_per_min`にする。累計が戻った（再起動）組は数えない）の`{samples, mean, median, max, p90}`（中央値とp90はnearest rank、小数2桁）か、値が1つも無ければnull。`cpu_secs`は窓のCPU秒（[host-metrics](host-metrics.md#読み口)の規則。`cpu_total`のある行が無ければnull）。ファイルが読めなければ`samples: 0`と`error`。`--goal`では絞らない。`stats`はqueueのディレクトリの`host/`を読み取るだけで書かない
 
 ## 分類コードごとの集計（未実装）
 

@@ -4,9 +4,10 @@
 //! parsers of what the host's tools print (macOS's `vm_stat` and `sysctl
 //! vm.swapusage`, Linux's `/proc/meminfo` and `/proc/vmstat`, and `ps` on
 //! both), the files the retention removes, and the summary `stats` (and
-//! `kpi`) read of a window: the mean, the maximum and the p90 of each
-//! column. A value the host could not give is an empty cell and counts in
-//! no summary.
+//! `kpi`) read of a window: the mean, the median, the maximum and the p90
+//! of each column, and the CPU seconds the processes spent (goal 72). A
+//! value the host could not give is an empty cell and counts in no
+//! summary.
 
 use std::collections::BTreeMap;
 
@@ -435,11 +436,13 @@ pub fn file_may_hold(day: i64, from: i64, until: i64) -> bool {
     day >= from.div_euclid(86_400) - 1 && day <= until.div_euclid(86_400) + 1
 }
 
-/// The mean, the maximum and the p90 (nearest rank) of a column's values.
+/// The mean, the median, the maximum and the p90 (the median and the p90
+/// by nearest rank) of a column's values.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Summary {
     pub samples: usize,
     pub mean: f64,
+    pub median: f64,
     pub max: f64,
     pub p90: f64,
 }
@@ -456,14 +459,16 @@ impl Summary {
             clippy::cast_sign_loss,
             clippy::cast_precision_loss
         )]
-        let rank = ((count as f64) * 0.9).ceil() as usize;
+        let rank = |share: f64| ((count as f64) * share).ceil() as usize;
+        let at = |share: f64| round2(values[rank(share).clamp(1, count) - 1]);
         #[allow(clippy::cast_precision_loss)]
         let mean = values.iter().sum::<f64>() / count as f64;
         Some(Self {
             samples: count,
             mean: round2(mean),
+            median: at(0.5),
             max: round2(values[count - 1]),
-            p90: round2(values[rank.clamp(1, count) - 1]),
+            p90: at(0.9),
         })
     }
 }
@@ -483,6 +488,9 @@ pub struct HostSummary {
     /// with `pageouts_per_min` between two samples less than 10 minutes
     /// apart); null when no sample had it.
     pub metrics: BTreeMap<&'static str, Option<Summary>>,
+    /// The CPU seconds the processes spent in the window ([`cpu_secs`]);
+    /// null when no sample had `cpu_total`.
+    pub cpu_secs: Option<CpuSecs>,
     /// Why the files could not be read, when they could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -521,8 +529,80 @@ pub fn summarize(samples: &[HostSample], from: i64, until: i64) -> HostSummary {
         first: inside.first().map(|sample| sample.unix),
         last: inside.last().map(|sample| sample.unix),
         metrics,
+        cpu_secs: cpu_secs(&inside, from),
         error: None,
     }
+}
+
+/// The CPU seconds the processes spent over a window (goal 72): each
+/// sample's `%cpu` (100 is one core) times the seconds it stands for.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CpuSecs {
+    /// The seconds the samples with `cpu_total` stand for.
+    pub covered_secs: i64,
+    /// The seconds a sample stands for at most: twice the typical gap
+    /// (the shortest) between two samples of the window.
+    pub max_gap_secs: i64,
+    /// The CPU seconds of all the processes.
+    pub total: f64,
+    /// Per kind of process ([`PROCESS_KINDS`]).
+    pub by_kind: BTreeMap<&'static str, f64>,
+}
+
+/// The CPU seconds of `samples` (in the window from `from`, ascending):
+/// a sample stands for the seconds since the one before it, and the
+/// first for the typical gap (never before `from`). The typical gap is
+/// the shortest gap between two samples of the window, the interval they
+/// were taken at (the default interval without one), so that a window
+/// mostly of gaps does not raise it; a gap is counted up to twice that, so a
+/// stretch the supervisor did not record (it was stopped, or the host
+/// slept) is not counted as if the load of its next sample had lasted
+/// all along. macOS's `%cpu` is a decaying average: an approximation.
+fn cpu_secs(samples: &[&HostSample], from: i64) -> Option<CpuSecs> {
+    #[allow(clippy::cast_possible_wrap)]
+    let typical = samples
+        .windows(2)
+        .map(|pair| pair[1].unix - pair[0].unix)
+        .filter(|gap| *gap > 0)
+        .min()
+        .unwrap_or(DEFAULT_INTERVAL_SECS as i64);
+    let max_gap = typical * 2;
+    let mut total = CpuSecs {
+        covered_secs: 0,
+        max_gap_secs: max_gap,
+        total: 0.0,
+        by_kind: PROCESS_KINDS.iter().map(|kind| (*kind, 0.0)).collect(),
+    };
+    let mut any = false;
+    let mut previous: Option<i64> = None;
+    for sample in samples {
+        let stands_for = previous.map_or_else(
+            || typical.min(sample.unix - from + 1),
+            |previous| sample.unix - previous,
+        );
+        previous = Some(sample.unix);
+        let stands_for = stands_for.clamp(0, max_gap);
+        let Some(cpu) = sample.values.get("cpu_total") else {
+            continue;
+        };
+        any = true;
+        #[allow(clippy::cast_precision_loss)]
+        let secs = stands_for as f64 / 100.0;
+        total.covered_secs += stands_for;
+        total.total += cpu * secs;
+        for (index, kind) in PROCESS_KINDS.iter().enumerate() {
+            if let Some(cpu) = sample.values.get(column_of("cpu_", index, "")) {
+                *total.by_kind.entry(kind).or_default() += cpu * secs;
+            }
+        }
+    }
+    any.then(|| {
+        total.total = round2(total.total);
+        for secs in total.by_kind.values_mut() {
+            *secs = round2(*secs);
+        }
+        total
+    })
 }
 
 /// `YYYY-MM-DDTHH:MM:SS+HH:MM` of the unix second `unix` at the offset.
@@ -726,9 +806,11 @@ garbage line
         assert_eq!((summary.first, summary.last), (Some(1000), Some(1270)));
         let load = summary.metrics["load1"].unwrap();
         assert_eq!(
-            (load.samples, load.mean, load.max, load.p90),
-            (10, 5.5, 10.0, 9.0)
+            (load.samples, load.mean, load.median, load.max, load.p90),
+            (10, 5.5, 5.0, 10.0, 9.0)
         );
+        // No sample had the CPU: no CPU seconds.
+        assert_eq!(summary.cpu_secs, None);
         assert_eq!(summary.metrics["mem_used_mb"], None);
         assert!(!summary.metrics.contains_key(PAGEOUTS));
         // 100 per 30 s, the reboot (a counter going back) skipped.
@@ -739,5 +821,51 @@ garbage line
         assert_eq!(empty.metrics[PAGEOUTS_PER_MIN], None);
         let json = serde_json::to_value(&empty).unwrap();
         assert!(json.get("error").is_none());
+    }
+
+    /// Each sample stands for the seconds since the one before it, the
+    /// first for the usual gap but never before the window; a gap is
+    /// counted up to twice the usual one, so records that stopped for
+    /// hours do not count the next record's load as spent all along.
+    #[test]
+    fn cpu_seconds_count_each_sample_for_its_gap_up_to_twice_the_usual() {
+        let at = |unix: i64, cpu: Option<f64>| {
+            let mut sample = HostSample::new(unix);
+            sample.set("cpu_total", cpu);
+            sample.set("cpu_rustc", cpu.map(|cpu| cpu / 2.0));
+            sample
+        };
+        let samples = vec![
+            at(1000, Some(100.0)),
+            at(1030, Some(100.0)),
+            at(1060, Some(100.0)),
+            // Stopped for ten hours.
+            at(37_060, Some(400.0)),
+            // Without the CPU: stands for nothing, but ends a gap.
+            at(37_090, None),
+            at(37_120, Some(100.0)),
+        ];
+        let cpu = summarize(&samples, 990, 40_000).cpu_secs.unwrap();
+        // 11 s (from 990), 30 s, 30 s, 60 s (not 36,000 s), 30 s.
+        assert_eq!(cpu.max_gap_secs, 60);
+        assert_eq!(cpu.covered_secs, 11 + 30 + 30 + 60 + 30);
+        assert_eq!(cpu.total, 11.0 + 30.0 + 30.0 + 240.0 + 30.0);
+        assert_eq!(cpu.by_kind["rustc"], 170.5);
+        assert_eq!(cpu.by_kind["cargo"], 0.0);
+        // One sample: the default interval.
+        // A window mostly of gaps still counts each for twice the
+        // interval the records were taken at.
+        let sparse = [
+            at(0, Some(100.0)),
+            at(30, Some(100.0)),
+            at(36_030, Some(100.0)),
+            at(72_030, Some(100.0)),
+        ];
+        let cpu = summarize(&sparse, 0, 80_000).cpu_secs.unwrap();
+        assert_eq!(cpu.covered_secs, 1 + 30 + 60 + 60);
+        let one = summarize(&samples[..1], 0, 2000).cpu_secs.unwrap();
+        assert_eq!((one.covered_secs, one.total), (30, 30.0));
+        let json = serde_json::to_value(summarize(&[], 0, 1)).unwrap();
+        assert!(json["cpu_secs"].is_null());
     }
 }

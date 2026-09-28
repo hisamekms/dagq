@@ -442,6 +442,16 @@ fn kpi_summarizes_the_host_load_of_each_span() {
         assert_eq!(period["host"]["samples"], 0, "{period}");
         assert_eq!(period["host"]["metrics"]["load1"], Value::Null);
         assert!(period["host"].get("error").is_none());
+        // Nor CPU per landing or load over the cores (goal 72).
+        assert_eq!(
+            period["kpis"]["cpu_per_landing"]["all"]["value"],
+            Value::Null
+        );
+        assert_eq!(period["unavailable"]["cpu_per_landing"], "no_host_records");
+        assert_eq!(
+            period["kpis"]["load_per_core"]["all"]["median"],
+            Value::Null
+        );
     }
     let base: i64 = 1_790_000_000;
     let host = dir.path().join("host");
@@ -455,6 +465,8 @@ fn kpi_summarizes_the_host_load_of_each_span() {
     ] {
         let mut sample = HostSample::new(unix);
         sample.set("load1", Some(load));
+        sample.set("cpu_total", Some(100.0 * load));
+        sample.set("cpu_claude", Some(100.0 * load));
         text.push_str(&format!("{}\n", sample.row(0)));
     }
     let day_file = host.join(file_name(local_day(base, 0)));
@@ -476,8 +488,16 @@ fn kpi_summarizes_the_host_load_of_each_span() {
     assert_eq!(summary["samples"], 2, "{summary}");
     assert_eq!(
         summary["metrics"]["load1"],
-        json!({"samples": 2, "mean": 3.0, "max": 4.0, "p90": 4.0})
+        json!({"samples": 2, "mean": 3.0, "median": 2.0, "max": 4.0, "p90": 4.0})
     );
+    // 60 s at 2 and 4 cores: 360 CPU s, and no landing to divide by.
+    let cpu = &window["periods"][0]["details"]["cpu_per_landing"];
+    assert_eq!(cpu["cpu_secs"]["total"], 360.0, "{cpu}");
+    assert_eq!(cpu["cpu_secs"]["by_kind"]["claude"], 360.0);
+    let kpis = &window["periods"][0]["kpis"];
+    assert_eq!(kpis["cpu_per_landing"]["all"]["value"], Value::Null);
+    assert_eq!(kpis["load_per_core"]["all"]["n"], 2);
+    assert!(kpis["load_per_core"]["all"]["p90"].is_number(), "{kpis}");
     // The host is no KPI: the target judges only the landings.
     assert!(
         window["targets"]

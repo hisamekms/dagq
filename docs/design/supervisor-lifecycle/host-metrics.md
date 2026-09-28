@@ -4,8 +4,8 @@ type: design
 title: "hostの負荷の連続の記録"
 status: current
 created: 2026-09-28
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -48,8 +48,9 @@ macOSでは`vm_stat`・`sysctl -n hw.memsize`・`sysctl -n vm.swapusage`・`ps -
 
 ## 読み口
 
-- [`stats`](stats.md#hostの負荷)の`host`が窓の要約（列ごとの平均・最大・p90）を出す
-- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。[`kpi`](kpi.md#hostの負荷)はこれを各期間・`--since` / `--until`の窓・`--compare`の前後の窓ごとに読み、`host`として並べる（task 872。日次・週次のレポートのJSONにも載る）。KPIではない参考の値で、目標の判定・breach・push・observerのfindingには使わない
+- [`stats`](stats.md#hostの負荷)の`host`が窓の要約（列ごとの平均・中央値・最大・p90と、CPU秒の`cpu_secs`）を出す
+- **CPU秒**（`cpu_secs`、goal 72、task 992）: 各行の`cpu_total`（と`cpu_<kind>`） ÷ 100 × その行が代表する秒の合計。行は前の行からの秒を代表し、窓の最初の行は典型の間隔（窓の中の行の最も短い間隔、つまり記録した間隔。1行なら既定の30秒。窓の始まりより前は数えない）を代表する。代表する秒は典型の間隔の2倍（`max_gap_secs`）を上限にし、記録の途切れを次の行の負荷で埋めない。`{covered_secs, max_gap_secs, total, by_kind}`で、`cpu_total`のある行が無ければnull。`kpi`の`cpu_per_landing`がこれを着地数で割る
+- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。[`kpi`](kpi.md#hostの負荷)はこれを各期間・`--since` / `--until`の窓・`--compare`の前後の窓ごとに読み、`host`として並べる（task 872。日次・週次のレポートのJSONにも載る）。`host`は参考の値で目標の判定・breach・push・observerのfindingには使わない。そこから`cpu_per_landing`と`load_per_core`をKPIにする（[`kpi`](kpi.md)、task 992）
 - 人はCSVをそのまま読める（1日30秒ごとで約2,900行）
 
 ## 外部のsamplerを止める手順

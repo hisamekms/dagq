@@ -2152,3 +2152,118 @@ fn splits_the_landed_runs_by_their_areas() {
     );
     assert_eq!("area".parse::<Axis>(), Ok(Axis::Area));
 }
+
+/// The host's CPU per landing and its load over the cores (goal 72): the
+/// CPU seconds each record stands for, over the period's landings, in
+/// total and per kind of process; a stretch without records counts only
+/// up to twice the usual gap, so a day the supervisor was stopped for is
+/// not taken as spent at its next record's load; a period without
+/// records, and a report without the host's records, have none.
+#[test]
+fn cpu_per_landing_and_load_per_core_read_the_host_records() {
+    use crate::domain::host_metrics::{HostSample, summarize};
+    // Every 30 s for five minutes, then nothing for almost two hours.
+    let times: Vec<i64> = (1..=11)
+        .map(|index| MONDAY + 30 * index)
+        .chain([MONDAY + 2 * HOUR, MONDAY + 2 * HOUR + 30])
+        .collect();
+    let samples: Vec<HostSample> = times
+        .iter()
+        .enumerate()
+        .map(|(index, unix)| {
+            let mut sample = HostSample::new(*unix);
+            sample.set("cpu_total", Some(200.0));
+            sample.set("cpu_cargo", Some(150.0));
+            sample.set("cpu_other", Some(50.0));
+            sample.set("load1", Some(4.0 * (index as f64 + 1.0)));
+            sample
+        })
+        .collect();
+    let read = |from, until| summarize(&samples, from, until);
+    let mut queue = Queue::default();
+    queue.run(&Run::new(1, None, MONDAY + HOUR, 300));
+    queue.run(&Run::new(2, None, MONDAY + 3 * HOUR, 300));
+    let now = MONDAY + DAY + 2 * HOUR;
+    let query = KpiQuery {
+        period: Period::Day,
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let config = KpiConfig::default();
+    let kpi = queue.kpi_with_host(now, &config, &query, Some(HostReader(&read)));
+    let monday = &kpi.periods[0].window;
+    let all = |kpis: &Kpis<Measure>, name: &str| kpis[name][ALL].clone();
+    // 11 records of 30 s, the one after the gap for 60 s (twice the usual
+    // 30 s, not 1h 55m) and the last for 30 s: 420 s at two cores.
+    let cpu = &monday.details["cpu_per_landing"];
+    assert_eq!(cpu["cpu_secs"]["covered_secs"], 420, "{cpu}");
+    assert_eq!(cpu["cpu_secs"]["max_gap_secs"], 60);
+    assert_eq!(cpu["cpu_secs"]["total"], 840.0);
+    assert_eq!(cpu["landings"], 2);
+    assert_eq!(cpu["cores"], 4);
+    let per_landing = all(&monday.kpis, "cpu_per_landing");
+    assert_eq!((per_landing.n, per_landing.value), (2, Some(420.0)));
+    assert_eq!(
+        all(&monday.kpis, "cpu_per_landing.cargo").value,
+        Some(315.0)
+    );
+    assert_eq!(
+        all(&monday.kpis, "cpu_per_landing.other").value,
+        Some(105.0)
+    );
+    assert_eq!(all(&monday.kpis, "cpu_per_landing.rustc").value, Some(0.0));
+    // load1 is 4, 8, …, 52 over four cores: 1 … 13.
+    let load = all(&monday.kpis, "load_per_core");
+    assert_eq!(
+        (load.n, load.median, load.p90, load.max),
+        (13, Some(7.0), Some(12.0), Some(13.0))
+    );
+    assert!(!monday.unavailable.contains_key("cpu_per_landing"));
+    // Lower is better for both; the direction judges the comparison.
+    assert_eq!(direction("cpu_per_landing"), Some(Direction::Lower));
+    assert_eq!(direction("load_per_core"), Some(Direction::Lower));
+
+    // Tuesday has no record: null, and why.
+    let tuesday = &kpi.periods[1].window;
+    assert_eq!(all(&tuesday.kpis, "cpu_per_landing").value, None);
+    assert_eq!(all(&tuesday.kpis, "cpu_per_landing.cargo").value, None);
+    assert_eq!(all(&tuesday.kpis, "load_per_core").median, None);
+    assert_eq!(tuesday.unavailable["cpu_per_landing"], "no_host_records");
+    assert_eq!(tuesday.unavailable["load_per_core"], "no_host_records");
+    let json = serde_json::to_value(&kpi).unwrap();
+    assert_eq!(
+        json["periods"][1]["kpis"]["cpu_per_landing"]["all"]["value"],
+        Value::Null
+    );
+    assert_eq!(
+        json["periods"][0]["kpis"]["load_per_core"]["all"]["p90"],
+        12.0
+    );
+
+    // A day with records and no landing has none per landing.
+    let mut idle = Queue::default();
+    let idle = idle.kpi_with_host(now, &config, &query, Some(HostReader(&read)));
+    assert_eq!(
+        all(&idle.periods[0].window.kpis, "cpu_per_landing").value,
+        None
+    );
+    assert_eq!(
+        idle.periods[0].window.unavailable["cpu_per_landing"],
+        "no_landings"
+    );
+    // Without the host's records (the breach check, the observer), no
+    // such KPI at all.
+    let without = queue.kpi(now, &config, &query);
+    assert!(
+        !without.periods[0]
+            .window
+            .kpis
+            .contains_key("cpu_per_landing")
+    );
+    assert!(
+        !without.periods[0]
+            .window
+            .details
+            .contains_key("cpu_per_landing")
+    );
+}
