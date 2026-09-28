@@ -20,7 +20,9 @@ impl Supervisor<'_> {
     /// slot (`Phase::AwaitingSlot`): `stats` counts the wait from there to
     /// `integration_started` as its `landing_queue` phase (goal 36). `via`
     /// says what sent it: `exit` (its session exited after a passed review
-    /// or with the run approved) or `resume` (an approved resolved resume).
+    /// or with the run approved) or `resume` (an approved resolved resume);
+    /// a `land` answer records its own with `via: approve`
+    /// ([`Self::apply_landing_answer`]).
     /// Only `stats` reads it, so a failure to record it is only reported:
     /// the step it follows has already changed the run.
     pub(super) fn queue_landing(&mut self, run: &TaskRun, via: &str) {
@@ -766,13 +768,15 @@ impl Supervisor<'_> {
             .context("ask returned no id")
     }
     /// Apply the answered `approve_landing` asks of runs awaiting
-    /// integration that nobody leases (ADR-0027): `land` lands the run in
-    /// the single slot (as an approved one), `send_back` makes it
-    /// `needs_session` for a resume that names the review's reasons, and
-    /// `cancel` fails the run and cancels its task. The ask is closed once
-    /// applied; any other answer is left to the inbox. An error is
-    /// noted and the ask is tried again on a later pass.
-    pub(super) fn apply_landing_answers(&mut self, parallel: usize) -> Result<()> {
+    /// integration that nobody leases (ADR-0027), on every pass whatever the
+    /// slots and the integration slot (task 949): `land` records the
+    /// approval and queues the run to land ([`Self::start_approved_landings`]
+    /// lands it), `send_back` makes it `needs_session` for a resume that
+    /// names the review's reasons, and `cancel` fails the run and cancels
+    /// its task. The ask is closed once applied; any other answer is left
+    /// to the inbox. An error is noted and the ask is tried again on a
+    /// later pass.
+    pub(super) fn apply_landing_answers(&mut self) -> Result<()> {
         for ask in self.queue.landing_answers()? {
             let Some(run_id) = ask.run_id.clone() else {
                 continue;
@@ -785,25 +789,56 @@ impl Supervisor<'_> {
             {
                 continue;
             }
-            // A landing would fail on the missing program (ADR-0049
-            // decision 9), or short of free disk space (task 377): the
-            // answer waits until it is found, or there is room.
-            if answer == "land"
-                && (self.run_env_missing
-                    || self.landing_unresolved
-                    || self.disk.landing_short
-                    || self.used_slots() >= parallel
-                    || !self
-                        .queue
-                        .runs_with_status(RunStatus::Integrating)?
-                        .is_empty())
-            {
-                continue;
-            }
             if let Err(error) = self.apply_landing_answer(&run, ask.id, &answer) {
                 warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id);
             }
         }
+        Ok(())
+    }
+    /// Start the landing of the oldest run queued by a `land` answer
+    /// ([`RunHistory::queued_approval`]): awaiting integration, nobody
+    /// leasing it, once a slot is free, no run integrates, and the landing
+    /// would not fail on a missing program (ADR-0049 decision 9), an
+    /// unresolved landing branch (ADR-t615-1) or short free disk space
+    /// (task 377). Called before new claims, so a queued run lands first;
+    /// the queue is read from the events, so a run approved under another
+    /// supervisor is landed once, with its ask left closed (task 949).
+    pub(super) fn start_approved_landings(&mut self, parallel: usize) -> Result<()> {
+        if self.run_env_missing
+            || self.landing_unresolved
+            || self.disk.landing_short
+            || self.used_slots() >= parallel
+            || !self
+                .queue
+                .runs_with_status(RunStatus::Integrating)?
+                .is_empty()
+        {
+            return Ok(());
+        }
+        let mut queued = Vec::new();
+        for run in self
+            .queue
+            .runs_with_status(RunStatus::AwaitingIntegration)?
+        {
+            if self.queue.run_lease(run.id())?.is_some() {
+                continue;
+            }
+            if let Some(approval) =
+                RunHistory::from_events(&self.queue.run_events(run.id())?).queued_approval()
+            {
+                queued.push((approval, run));
+            }
+        }
+        queued.sort_by_key(|(approval, _)| *approval);
+        let Some((_, run)) = queued.into_iter().next() else {
+            return Ok(());
+        };
+        let main = self.repository.main_head()?;
+        let landing = self.queue.begin_integration(run.id(), &self.token, &main)?;
+        info!(run_id = %run.id(), "run {} lands onto main {main} as approved", run.id());
+        let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
+        self.slots
+            .push(Slot::new(landing, Phase::Landing(Some(handle))));
         Ok(())
     }
     pub(super) fn apply_landing_answer(
@@ -815,24 +850,23 @@ impl Supervisor<'_> {
         let payload = json!({"ask_id": ask_id, "answer": answer});
         match answer {
             "land" => {
-                if !self
-                    .queue
-                    .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?
-                {
+                // Each step is recorded once for the ask, so an answer
+                // applied in part is finished on a later pass.
+                let events = self.queue.run_events(run.id())?;
+                if !RunHistory::from_events(&events).approved_by_ask(ask_id) {
                     self.queue.record_runtime_event(
                         run.id(),
                         EventKind::IntegrationApproved,
                         json!({"status": run.status().as_str(), "pid": self.layout.pid, "push": true, "ask_id": ask_id}),
                     )?;
+                    self.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::LandingQueued,
+                        json!({"via": "approve", "ask_id": ask_id}),
+                    )?;
                 }
-                let main = self.repository.main_head()?;
-                let landing = self.queue.begin_integration(run.id(), &self.token, &main)?;
                 self.queue.close_ask(ask_id)?;
-                info!(run_id = %run.id(), "run {} lands onto main {main} as ask {ask_id} answered", run.id());
-                let handle =
-                    self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
-                self.slots
-                    .push(Slot::new(landing, Phase::Landing(Some(handle))));
+                info!(run_id = %run.id(), "run {} is approved by ask {ask_id} and waits to land", run.id());
             }
             "send_back" => {
                 let reasons = latest_review_reasons(&*self.queue, run.id())?;

@@ -141,6 +141,40 @@ impl<'a> RunHistory<'a> {
         self.has(event_kind::INTEGRATION_APPROVED)
     }
 
+    /// The approval of an `approve_landing` answer that queues the run to
+    /// land (task 949): the latest `integration_approved` naming the ask
+    /// (`ask_id`) when nothing after it started a landing, a review or a
+    /// resume, decided the landing, or opened another `approve_landing`
+    /// ask. The supervisor lands the queued runs by this event, the oldest
+    /// first; `None` when the run is not queued so.
+    pub fn queued_approval(&self) -> Option<EventId> {
+        let approved = self.events.iter().rev().find(|e| {
+            e.kind == event_kind::INTEGRATION_APPROVED
+                && e.payload.get("ask_id").is_some_and(|id| !id.is_null())
+        })?;
+        let moved_on = self.events.iter().any(|e| {
+            e.id > approved.id
+                && (matches!(
+                    e.kind.as_str(),
+                    event_kind::INTEGRATION_STARTED
+                        | event_kind::REVIEW_STARTED
+                        | event_kind::RESUME_STARTED
+                        | event_kind::LANDING_DECIDED
+                ) || e.kind == event_kind::ASK_OPENED
+                    && e.payload.get("kind").and_then(Value::as_str) == Some("approve_landing"))
+        });
+        (!moved_on).then_some(approved.id)
+    }
+
+    /// Whether `integration_approved` was recorded for the answer of ask
+    /// `ask_id`.
+    pub fn approved_by_ask(&self, ask_id: AskId) -> bool {
+        self.events.iter().any(|e| {
+            e.kind == event_kind::INTEGRATION_APPROVED
+                && e.payload.get("ask_id").and_then(Value::as_i64) == Some(ask_id.as_i64())
+        })
+    }
+
     /// Whether landing the run pushes `main`: unless an approving
     /// `integrate --no-push` recorded `push: false`.
     /// `integration_approved` is recorded once; the first one counts.
@@ -692,6 +726,42 @@ mod tests {
         assert!(!history.landing_pushes());
         let events = vec![event(1, "integration_approved", json!({"push": true}))];
         assert!(RunHistory::from_events(&events).landing_pushes());
+    }
+
+    #[test]
+    fn queued_approval_is_the_latest_ask_approval_nothing_moved_on_from() {
+        let approved =
+            |id: i64, ask: Value| event(id, "integration_approved", json!({"ask_id": ask}));
+        let queued = |events: &[RunEvent]| RunHistory::from_events(events).queued_approval();
+        // `integrate`'s own approval names no ask.
+        assert_eq!(queued(&[event(1, "integration_approved", json!({}))]), None);
+        assert_eq!(queued(&[approved(1, json!(null))]), None);
+        let events = [
+            approved(1, json!(3)),
+            event(2, "landing_queued", json!({"via": "approve"})),
+            event(3, "ask_opened", json!({"kind": "worker_question"})),
+        ];
+        assert_eq!(queued(&events), Some(EventId::new(1)));
+        let history = RunHistory::from_events(&events);
+        assert!(history.approved_by_ask(AskId::new(3)));
+        assert!(!history.approved_by_ask(AskId::new(4)));
+        for (kind, payload) in [
+            ("integration_started", json!({})),
+            ("review_started", json!({})),
+            ("resume_started", json!({})),
+            ("landing_decided", json!({})),
+            ("ask_opened", json!({"kind": "approve_landing"})),
+        ] {
+            let events = [approved(1, json!(3)), event(2, kind, payload)];
+            assert_eq!(queued(&events), None, "{kind}");
+        }
+        // A later approval queues the run again.
+        let events = [
+            approved(1, json!(3)),
+            event(2, "integration_started", json!({})),
+            approved(3, json!(5)),
+        ];
+        assert_eq!(queued(&events), Some(EventId::new(3)));
     }
 
     #[test]

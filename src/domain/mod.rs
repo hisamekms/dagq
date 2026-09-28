@@ -1507,6 +1507,10 @@ pub enum AttentionNext {
     ApplyingAnswer {
         ask_id: AskId,
     },
+    /// Not a person's to act on: a `land` answer approved the run, which
+    /// waits unleased for a free slot and the integration slot; the
+    /// supervisor lands it before new claims (task 949).
+    QueuedToLand,
     /// Not a person's to act on: the supervisor triages the `failed`
     /// or `interrupted` run and acts on the verdict (ADR-0024 decision 3).
     Triaging,
@@ -1599,6 +1603,7 @@ impl fmt::Display for AttentionNext {
             Self::ApplyingAnswer { ask_id } => {
                 write!(f, "applying the answer of ask {ask_id} (runtime)")
             }
+            Self::QueuedToLand => f.write_str("queued to land (runtime)"),
             Self::Triaging => f.write_str("triaging (runtime)"),
             Self::TriageByHand => f.write_str("triage by hand"),
             Self::RecoverByHand => f.write_str("recover by hand"),
@@ -2802,6 +2807,7 @@ mod attention_tests {
             .to_string(),
             "applying the answer of ask 7 (runtime)"
         );
+        assert_eq!(QueuedToLand.to_string(), "queued to land (runtime)");
         assert_eq!(RecoverRun.to_string(), "recover run");
         assert_eq!(ExitSession.to_string(), "exit the session");
         assert_eq!(PushMain.to_string(), "push main");

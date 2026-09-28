@@ -5,7 +5,8 @@
 //! starts a phase closes the one before; an event that starts none leaves
 //! the time with the current phase. The push, which follows
 //! `run_integrated`, is measured on its own and is not part of the sum.
-//! The `verify` phase is also split by verification command (task 509).
+//! The `verify` phase is also split by verification command (task 509),
+//! and the `landing_queue` phase by what queued the run (`via`, task 949).
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -52,6 +53,10 @@ const CONFLICT: usize = 3;
 const ASK: usize = 4;
 const RESUME: usize = 5;
 const LANDING_QUEUE: usize = 6;
+/// The `via` of the `landing_queue` an `approve_landing` answer starts.
+const APPROVE_VIA: &str = "approve";
+/// The `via` of a `landing_queued` recorded without one.
+const UNKNOWN_VIA: &str = "unknown";
 const REBASE: usize = 7;
 const VERIFY: usize = 8;
 
@@ -65,6 +70,19 @@ pub struct LandPhases {
     /// all the run's `integrate` attempts, failed commands included. Their
     /// sum does not exceed `verify`.
     pub verify_commands: Vec<CommandSecs>,
+    /// The `landing_queue` phase per what queued the run (task 949): the
+    /// `via` of its `landing_queued` (`exit`, `resume`, `approve`), or
+    /// `approve` from an `approve_landing` answer the runtime applies;
+    /// `unknown` for a `landing_queued` without one. Their sum does not
+    /// exceed `landing_queue` (each is cut to the second).
+    pub landing_queue_via: Vec<ViaSecs>,
+}
+
+/// One `via`'s share of a run's `landing_queue` phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ViaSecs {
+    pub via: String,
+    pub secs: i64,
 }
 
 /// One verification command's share of a run's `verify` phase.
@@ -96,6 +114,7 @@ impl Serialize for LandPhases {
         }
         map.serialize_entry("push", &self.push)?;
         map.serialize_entry("verify_commands", &self.verify_commands)?;
+        map.serialize_entry("landing_queue_via", &self.landing_queue_via)?;
         map.end()
     }
 }
@@ -128,6 +147,17 @@ pub struct LandBreakdown {
     /// The `verify` phase per verification command, by command: each over
     /// the runs that ran it, with a run's attempts added up.
     pub verify_commands: Vec<CommandSummary>,
+    /// The `landing_queue` phase per `via` (task 949): each over the runs
+    /// that waited so, with a run's waits added up.
+    pub landing_queue_via: Vec<ViaSummary>,
+}
+
+/// One `via`'s share of `landing_queue` over a set of runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ViaSummary {
+    pub via: String,
+    #[serde(flatten)]
+    pub phase: PhaseSummary,
 }
 
 /// One verification command's share of `verify` over a set of runs.
@@ -140,7 +170,7 @@ pub struct CommandSummary {
 
 impl Serialize for LandBreakdown {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(PHASES.len() + 5))?;
+        let mut map = serializer.serialize_map(Some(PHASES.len() + 6))?;
         map.serialize_entry("runs", &self.runs)?;
         map.serialize_entry("tail_threshold", &self.tail_threshold)?;
         map.serialize_entry("tail_runs", &self.tail_runs)?;
@@ -149,6 +179,7 @@ impl Serialize for LandBreakdown {
         }
         map.serialize_entry("push", &self.push)?;
         map.serialize_entry("verify_commands", &self.verify_commands)?;
+        map.serialize_entry("landing_queue_via", &self.landing_queue_via)?;
         map.end()
     }
 }
@@ -219,6 +250,24 @@ pub fn breakdown<'a>(runs: impl Iterator<Item = (&'a LandPhases, i64)>) -> LandB
                 })
                 .collect()
         },
+        landing_queue_via: {
+            let mut by_via: BTreeMap<&str, Vec<(i64, bool)>> = BTreeMap::new();
+            for (phases, wait) in &runs {
+                for via in &phases.landing_queue_via {
+                    by_via
+                        .entry(&via.via)
+                        .or_default()
+                        .push((via.secs, tail(*wait)));
+                }
+            }
+            by_via
+                .into_iter()
+                .map(|(via, values)| ViaSummary {
+                    via: via.to_owned(),
+                    phase: phase_summary(&values),
+                })
+                .collect()
+        },
     }
 }
 
@@ -240,6 +289,10 @@ pub struct LandClock {
     /// The last `verification_command` counted, where the next one's
     /// interval starts when it is still in the same `verify`.
     command_mark: i64,
+    /// What queued the run in the current `landing_queue` phase.
+    queue_via: String,
+    /// Per `via`, the milliseconds in `landing_queue`.
+    via_spent: BTreeMap<String, i64>,
 }
 
 fn ask_key(payload: &Value) -> Option<String> {
@@ -263,6 +316,8 @@ impl LandClock {
             push: None,
             commands: BTreeMap::new(),
             command_mark: at,
+            queue_via: UNKNOWN_VIA.to_owned(),
+            via_spent: BTreeMap::new(),
         };
         clock.observe(event, at);
         clock
@@ -353,12 +408,26 @@ impl LandClock {
                 _ => None,
             }
         };
+        // What queued the run, for the `landing_queue` it enters now.
+        let via = match (kind, next) {
+            ("landing_queued", _) => Some(
+                event.payload["via"]
+                    .as_str()
+                    .unwrap_or(UNKNOWN_VIA)
+                    .to_owned(),
+            ),
+            ("ask_answered", Some(LANDING_QUEUE)) => Some(APPROVE_VIA.to_owned()),
+            _ => None,
+        };
         if let Some(next) = next {
             if next != ASK && kind != "ask_answered" {
                 self.asks.clear();
                 self.before_ask = None;
             }
             self.enter(next, at);
+            if let Some(via) = via {
+                self.queue_via = via;
+            }
         }
     }
 
@@ -388,9 +457,19 @@ impl LandClock {
     }
 
     fn enter(&mut self, phase: usize, at: i64) {
-        self.spent[self.phase] += (at - self.since).max(0);
+        self.spend(at);
         self.since = at.max(self.since);
         self.phase = phase;
+    }
+
+    /// Count the time since the current phase began towards it, and
+    /// towards its `via` in `landing_queue`.
+    fn spend(&mut self, at: i64) {
+        let ms = (at - self.since).max(0);
+        self.spent[self.phase] += ms;
+        if self.phase == LANDING_QUEUE {
+            *self.via_spent.entry(self.queue_via.clone()).or_default() += ms;
+        }
     }
 
     /// Whether `run_integrated` ended the wait.
@@ -401,10 +480,11 @@ impl LandClock {
     /// The seconds per phase: up to `run_integrated` for a run that landed,
     /// up to `now` for one still waiting.
     pub fn phases(&self, now: i64) -> LandPhases {
-        let mut spent = self.spent;
-        if self.integrated.is_none() {
-            spent[self.phase] += (now - self.since).max(0);
+        let mut clock = self.clone();
+        if clock.integrated.is_none() {
+            clock.spend(now);
         }
+        let (spent, via_spent) = (clock.spent, clock.via_spent);
         LandPhases {
             secs: spent.map(|ms| ms / 1000),
             push: self.push,
@@ -414,6 +494,13 @@ impl LandClock {
                 .map(|(command, (count, ms))| CommandSecs {
                     command: command.clone(),
                     count: *count,
+                    secs: ms / 1000,
+                })
+                .collect(),
+            landing_queue_via: via_spent
+                .into_iter()
+                .map(|(via, ms)| ViaSecs {
+                    via,
                     secs: ms / 1000,
                 })
                 .collect(),
@@ -577,6 +664,90 @@ mod tests {
         );
         assert_eq!(phases.longest(), Some("ask"));
         assert_eq!(phases.push, None);
+    }
+
+    /// Task 949: the `landing_queue` phase split by what queued the run;
+    /// an answer the runtime applies queues it as `approve`, whether or not
+    /// it recorded its own `landing_queued`.
+    #[test]
+    fn the_landing_queue_splits_by_what_queued_the_run() {
+        let via = |phases: &LandPhases| -> Vec<(String, i64)> {
+            phases
+                .landing_queue_via
+                .iter()
+                .map(|v| (v.via.clone(), v.secs))
+                .collect()
+        };
+        let asked = |queued: Option<i64>| {
+            let mut events = vec![
+                (
+                    "ask_opened",
+                    json!({"ask_id": 9, "kind": "approve_landing"}),
+                    10,
+                ),
+                (
+                    "ask_answered",
+                    json!({"ask_id": 9, "kind": "approve_landing"}),
+                    100,
+                ),
+                ("integration_approved", json!({"ask_id": 9}), 101),
+            ];
+            if let Some(at) = queued {
+                events.push(("landing_queued", json!({"via": "approve", "ask_id": 9}), at));
+            }
+            events.extend([
+                ("integration_started", json!({}), 700),
+                ("integration_rebased", json!({}), 701),
+                ("run_integrated", json!({}), 800),
+            ]);
+            events
+        };
+        for queued in [None, Some(101)] {
+            let (spent, phases) = phases(&asked(queued), 9999);
+            assert_eq!(spent["landing_queue"], 600);
+            assert_eq!(via(&phases), [("approve".to_owned(), 600)]);
+        }
+        // A resume's, then an exit's, then one without a `via`; a run
+        // still waiting counts up to now.
+        let (spent, phases) = phases(
+            &[
+                ("landing_queued", json!({"via": "resume"}), 0),
+                ("integration_started", json!({}), 30),
+                (
+                    "integration_error",
+                    json!({"status": "awaiting_integration"}),
+                    40,
+                ),
+                ("landing_queued", json!({"via": "exit"}), 50),
+                ("integration_started", json!({}), 60),
+                (
+                    "integration_error",
+                    json!({"status": "awaiting_integration"}),
+                    70,
+                ),
+                ("landing_queued", json!({}), 80),
+            ],
+            100,
+        );
+        assert_eq!(spent["landing_queue"], 30 + 10 + 20);
+        assert_eq!(
+            via(&phases),
+            [
+                ("exit".to_owned(), 10),
+                ("resume".to_owned(), 30),
+                ("unknown".to_owned(), 20),
+            ]
+        );
+        let json = serde_json::to_value(&phases).unwrap();
+        assert_eq!(
+            json["landing_queue_via"][0],
+            json!({"via": "exit", "secs": 10})
+        );
+        let result = breakdown([(&phases, 100)].into_iter());
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["landing_queue_via"][1],
+            json!({"via": "resume", "count": 1, "total": 30, "median": 30, "p90": 30, "max": 30, "tail_total": 30})
+        );
     }
 
     #[test]
@@ -912,6 +1083,7 @@ mod tests {
                     secs: *secs,
                 })
                 .collect(),
+            landing_queue_via: Vec::new(),
         };
         let runs = [
             run(100, &[("fmt", 2), ("llvm-cov", 90)]),
@@ -941,6 +1113,7 @@ mod tests {
             }),
             push,
             verify_commands: Vec::new(),
+            landing_queue_via: Vec::new(),
         };
         let runs: Vec<LandPhases> = (1..=10)
             .map(|n| {

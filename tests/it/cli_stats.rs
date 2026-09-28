@@ -513,6 +513,8 @@ mod stats {
                     "push": null,
                     // Task 509: no verification command was recorded.
                     "verify_commands": [],
+                    // Task 949: nor a wait for the landing slot.
+                    "landing_queue_via": [],
                 },
                 // Task 466: the times, the landings and the resumes. The
                 // title comes from the queue, not the events.

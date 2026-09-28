@@ -1171,8 +1171,14 @@ impl Supervisor<'_> {
         self.adopt_stale_runs(parallel)?;
         // Takes no slot: a dead run goes to the triage below.
         self.recover_dead_runs()?;
-        if self.used_slots() < parallel {
-            self.apply_landing_answers(parallel)?;
+        // Whatever the slots: a `land` answer only queues the run, which
+        // lands below, before new claims, once there is room (task 949).
+        self.apply_landing_answers()?;
+        // Like a landing answer before: an error (an `integrate` that took
+        // the integration slot since the check, a main that did not
+        // resolve) is noted, and the run stays queued for a later pass.
+        if let Err(error) = self.start_approved_landings(parallel) {
+            warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
         }
         self.apply_triage_answers()?;
         // Resumes and triage read the landing branch: they wait with the

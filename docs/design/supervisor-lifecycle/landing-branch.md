@@ -4,8 +4,8 @@ type: design
 title: "Landing branch"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -95,7 +95,7 @@ push = false
 
 - **`up`**: cmux・Claude・trust・`[run.env]`のプログラムの検査と同じpreflightで、supervisorを起動する前に解決する。次のどれかならsupervisorを起動せず、何が解決できなかったかと、`dagq.toml`の`[repository]`に`branch`（と`remote`）を書く案内を付けたerrorで止まる: `dagq.toml`が読めない・`[repository]`の書式が誤っている、`branch`が解決できない、書いた`branch`がローカルに無い、書いた`remote`が無い（`push = false`なら`remote`は見ない）。通れば出力に`repository`（`branch`・`branch_source`・`remote`・`remote_source`・`remote_exists`・`push`）が付く。
 - **`doctor`**: 状態を変えずに同じ解決を行い、`repository`の欄に上の欄と、解決できなければ`error`（`up`のerrorと同じ文面）を出す。既定の出力にも出す。
-- **ほかのコマンド**: `supervise`（起動時）・`integrate`など着地先を読むコマンドは、解決できなければ同じ文面のerrorで止まる（既定のbranchを仮定しない）。`stats`は`conflict_hotspots`の`history`を`unavailable`（`reason`に同じ文面）にして残りを出す。`plan`・`rebind`・`review`は着地先を読まない。supervisorが走っている間に解決できなくなったときは、pass の先頭の検査（`check_landing_branch`）で変化を1度warnし、解決するまでclaimと着地（review が pass した run の着地と、`approve_landing`の`land`の適用）を始めない（`[run.env]`のプログラムが見つからないときと同じ扱い）。
+- **ほかのコマンド**: `supervise`（起動時）・`integrate`など着地先を読むコマンドは、解決できなければ同じ文面のerrorで止まる（既定のbranchを仮定しない）。`stats`は`conflict_hotspots`の`history`を`unavailable`（`reason`に同じ文面）にして残りを出す。`plan`・`rebind`・`review`は着地先を読まない。supervisorが走っている間に解決できなくなったときは、pass の先頭の検査（`check_landing_branch`）で変化を1度warnし、解決するまでclaimと着地（review が pass した run の着地と、`approve_landing`の`land`の答えで着地の列に並んだrunの着地の開始（`start_approved_landings`））を始めない（`[run.env]`のプログラムが見つからないときと同じ扱い）。`land`の答えそのものは解決しない間もその場で適用してaskを閉じ、runを列に並べる（task 949、[Review](review.md#review-supervisor)の6）。
 
 ## 既存のqueueの互換
 

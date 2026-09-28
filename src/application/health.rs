@@ -808,6 +808,26 @@ pub fn attention(
             continue;
         }
         let events = queue.run_events(run.id())?;
+        // A run a `land` answer approved waits for the supervisor to land
+        // it (task 949), not for a person's `integrate`.
+        if run.status() == RunStatus::AwaitingIntegration
+            && !leased
+            && RunHistory::from_events(&events).queued_approval().is_some()
+        {
+            attention.push(Attention {
+                run_id: Some(run.id().clone()),
+                task_id: Some(run.task_id()),
+                pid: None,
+                ask_id: None,
+                reason_category: None,
+                status: run.status().as_str().into(),
+                kind: event_kind::LANDING_QUEUED.to_owned(),
+                last_error: None,
+                last_error_code: None,
+                next: AttentionNext::QueuedToLand,
+            });
+            continue;
+        }
         // A live session whose recovery job failed under a runtime from
         // before ADR-t609-1 waits for a person to recover it by hand
         // (ADR-0047 decision 40), whatever its status; a failed job opens

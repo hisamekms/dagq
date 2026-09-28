@@ -4,8 +4,8 @@ type: design
 title: "空き容量を確かめる（claimと着地の検証の前）"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - adr-t639-1
@@ -43,7 +43,7 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 
 1. 空きがclaimかlandingの閾値の大きい方を下回れば、掃除を自動で走らせる（60秒に1回まで）: 終わったrunのビルド成果物の消し残しと、`completed` / `canceled`のtaskのworktreeの消し残し（[Run worktrees](run-worktrees.md)の`clean_ended_worktrees`と同じ）、`git worktree prune`。掃除はloopの外のjobが行い（[Run worktrees](run-worktrees.md#loopの外で掃除する)、task 405）、そのjobが終わるまでclaimと着地は控えるが、控えのeventもaskも記録しない。jobが終われば、何か消えればqueueイベント`auto_repaired`（`repair: disk_cleanup`、`layer: runtime`、`bytes`、`conditions: {free_bytes, needed_bytes, free_bytes_after}`、`detail: {bytes, runs}`、`supervisor`）を記録する。その後の周回で読み直した空きで判定する
 2. claim: `fill_slots`の`hold_claims`が、空きとclaimの閾値を`ClaimHold::judge`に渡す。足りなければ理由`disk_space`で控え（load averageより先に判定する）、`claim_held`（`value`は空きbytes、`threshold`は要るbytes）を記録する。空きが戻れば`claim_resumed`
-3. 着地: 着地slotを待つrun（`Phase::AwaitingSlot`）は、空きが着地の閾値を下回る間`begin_integration`をしない。runは`awaiting_integration`のままleaseを持ち、rebaseも検証も始めない。`approve_landing`の`land`のanswerも適用を待つ。着地を待つrunがあり足りない間はqueueイベント`landing_held`（payloadは`claim_held`と同じ。`message`は着地の文）を、空きが戻るか待つrunが無くなれば`landing_resumed`を記録する（`domain::claim_hold::LANDINGS`、`transition_of`）。着地の控えはhostのものではなく記録したsupervisorのslotのものなので、別の生きているsupervisorは`landing_resumed`で終えない（そのsupervisorが止まれば終えてよい）。drainやhandoffのsupervisorは待たず、leaseを返してrunを`awaiting_integration`のまま人に残す（`[run.env]`のprogramが無いときと同じ）
+3. 着地: 着地slotを待つrun（`Phase::AwaitingSlot`）は、空きが着地の閾値を下回る間`begin_integration`をしない。runは`awaiting_integration`のままleaseを持ち、rebaseも検証も始めない。`approve_landing`の`land`のanswerは足りない間もその場で適用してaskを閉じ、runを着地の列に並べる。列のrunの着地の開始（`start_approved_landings`）だけが、空きが戻るまで待つ（task 949、[Review](review.md#review-supervisor)の6）。着地を待つrunがあり足りない間はqueueイベント`landing_held`（payloadは`claim_held`と同じ。`message`は着地の文）を、空きが戻るか待つrunが無くなれば`landing_resumed`を記録する（`domain::claim_hold::LANDINGS`、`transition_of`）。着地の控えはhostのものではなく記録したsupervisorのslotのものなので、別の生きているsupervisorは`landing_resumed`で終えない（そのsupervisorが止まれば終えてよい）。drainやhandoffのsupervisorは待たず、leaseを返してrunを`awaiting_integration`のまま人に残す（`[run.env]`のprogramが無いときと同じ）
 
 走っているrun（session・validation・review・resume・triage）には触れない。
 

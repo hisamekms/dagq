@@ -52,6 +52,12 @@ pub struct AskWaits {
     pub to_apply: Spread,
     /// From `ask_answered` to the answer applied, of the same asks.
     pub answer_to_apply: Spread,
+    /// [`Self::answer_to_apply`] less the time the ask's run waited for a
+    /// free slot in between (the `slot_wait_secs` of its
+    /// `run_slot_regained`, ADR-0071 decision 8), of the same asks: what
+    /// delayed the answer other than the `--parallel` slots being taken
+    /// (task 949).
+    pub answer_to_apply_without_slot_wait: Spread,
     /// Of the asks with no `ask_answered` by the window's end (opened in
     /// the window or before), how long they have waited by then.
     pub open: Spread,
@@ -84,6 +90,7 @@ struct WaitSecs {
     to_answer: Vec<i64>,
     to_apply: Vec<i64>,
     answer_to_apply: Vec<i64>,
+    answer_to_apply_without_slot_wait: Vec<i64>,
     open: Vec<i64>,
 }
 
@@ -99,6 +106,8 @@ impl WaitSecs {
         self.to_answer.extend(&other.to_answer);
         self.to_apply.extend(&other.to_apply);
         self.answer_to_apply.extend(&other.answer_to_apply);
+        self.answer_to_apply_without_slot_wait
+            .extend(&other.answer_to_apply_without_slot_wait);
         self.open.extend(&other.open);
     }
 
@@ -107,6 +116,7 @@ impl WaitSecs {
             to_answer: Spread::of(self.to_answer),
             to_apply: Spread::of(self.to_apply),
             answer_to_apply: Spread::of(self.answer_to_apply),
+            answer_to_apply_without_slot_wait: Spread::of(self.answer_to_apply_without_slot_wait),
             open: Spread::of(self.open),
         }
     }
@@ -125,6 +135,11 @@ struct AskTrack {
     applied: Option<(EventId, Option<i64>)>,
     /// The first answer was the runtime's own (`runtime_closed`).
     runtime_closed: bool,
+    /// The run the ask is about.
+    run: Option<String>,
+    /// The seconds its run waited for a free slot between the answer and
+    /// its application.
+    slot_wait: i64,
 }
 
 /// The events that do not apply an answer, though they name the ask: the
@@ -280,7 +295,18 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
     // By the ask's id alone: the events that apply an answer name the ask
     // but may sit on another run or none.
     let mut by_id: HashMap<String, AskKey> = HashMap::new();
+    // The runs back in a slot: the event, the run and how long it waited.
+    let mut regained: Vec<(EventId, String, i64)> = Vec::new();
     for event in events.iter().filter(|event| event.id <= upto) {
+        if event.kind == "run_slot_regained"
+            && let Some(run) = &event.run_id
+        {
+            regained.push((
+                event.id,
+                run.as_str().to_owned(),
+                event.payload["slot_wait_secs"].as_i64().unwrap_or(0),
+            ));
+        }
         let at = || (event.id, timestamp_millis(&event.created_at));
         match event.kind.as_str() {
             "ask_opened" => {
@@ -299,6 +325,8 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
                         answered: None,
                         applied: None,
                         runtime_closed: false,
+                        run: event.run_id.as_ref().map(|run| run.as_str().to_owned()),
+                        slot_wait: 0,
                     },
                 );
             }
@@ -330,6 +358,17 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
                 }
             }
             _ => {}
+        }
+    }
+    for track in tracks.values_mut() {
+        if let (Some(run), Some((answered, _)), Some((applied, _))) =
+            (&track.run, track.answered, track.applied)
+        {
+            track.slot_wait = regained
+                .iter()
+                .filter(|(id, of, _)| of == run && *id > answered && *id <= applied)
+                .map(|(_, _, secs)| secs)
+                .sum();
         }
     }
     tracks
@@ -392,7 +431,11 @@ fn times(
             && id > after
         {
             own.to_apply.extend(secs(track.opened_ms, at));
-            own.answer_to_apply.extend(secs(answered, at));
+            if let Some(answer_to_apply) = secs(answered, at) {
+                own.answer_to_apply.push(answer_to_apply);
+                own.answer_to_apply_without_slot_wait
+                    .push((answer_to_apply - track.slot_wait).max(0));
+            }
         }
         if own.is_empty() {
             continue;
@@ -812,5 +855,85 @@ mod tests {
             task.is_none()
         });
         assert_eq!(none.times, AskTimes::default());
+    }
+
+    /// Task 949: `answer_to_apply` less the slot wait of the ask's run
+    /// between the answer and its application; another run's slot wait,
+    /// and one before the answer, are not taken off.
+    #[test]
+    fn answer_to_apply_without_slot_wait_takes_off_the_runs_slot_wait() {
+        let on = |run: &str, event: RunEvent| RunEvent {
+            run_id: Some(crate::domain::RunId::new(run).unwrap()),
+            ..event
+        };
+        let regained = |id, run, secs, at_secs| {
+            on(
+                run,
+                at(
+                    id,
+                    "run_slot_regained",
+                    json!({"slot_wait_secs": secs, "over_parallel": false}),
+                    at_secs,
+                ),
+            )
+        };
+        let events = [
+            on(
+                "r1",
+                at(
+                    1,
+                    "ask_opened",
+                    json!({"ask_id": 1, "kind": "worker_question", "asked_by": "worker"}),
+                    0,
+                ),
+            ),
+            regained(2, "r1", 50, 5),
+            on(
+                "r1",
+                at(
+                    3,
+                    "ask_answered",
+                    json!({"ask_id": 1, "kind": "worker_question"}),
+                    100,
+                ),
+            ),
+            regained(4, "r2", 70, 200),
+            regained(5, "r1", 300, 400),
+            on("r1", at(6, "ask_delivered", json!({"ask_id": 1}), 410)),
+            on(
+                "r2",
+                at(
+                    7,
+                    "ask_opened",
+                    json!({"ask_id": 2, "kind": "approve_landing", "asked_by": "supervisor"}),
+                    500,
+                ),
+            ),
+            on(
+                "r2",
+                at(
+                    8,
+                    "ask_answered",
+                    json!({"ask_id": 2, "kind": "approve_landing"}),
+                    600,
+                ),
+            ),
+            on(
+                "r2",
+                at(9, "integration_approved", json!({"ask_id": 2}), 601),
+            ),
+        ];
+        let times = asks(&events, EventId::new(0), EventId::new(9), 0, |_| true).times;
+        let question = &times.by_kind["worker_question"];
+        assert_eq!(question.answer_to_apply.max, Some(310));
+        assert_eq!(question.answer_to_apply_without_slot_wait.max, Some(10));
+        let landing = &times.by_kind["approve_landing"];
+        assert_eq!(landing.answer_to_apply.max, Some(1));
+        assert_eq!(landing.answer_to_apply_without_slot_wait.max, Some(1));
+        let json = serde_json::to_value(&times).unwrap();
+        assert_eq!(
+            json["by_asked_by"]["worker"]["answer_to_apply_without_slot_wait"]["count"],
+            1
+        );
     }
 }
