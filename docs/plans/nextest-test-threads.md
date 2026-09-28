@@ -4,7 +4,7 @@ type: plan
 title: NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方
 status: active
 created: 2026-09-27
-updated: 2026-09-27
+updated: 2026-09-28
 owners:
   - hisamekms
 tags:
@@ -151,3 +151,59 @@ goal 36の発端（並列4、target分離前の設定）では、load averageが
 - test段は縮んだが、llvm-covの段の全体が縮まない（test段の後が伸びて打ち消す）。このときは並列度ではなくtest段の後を先に見る（task 564）。
 
 値を戻すときは、`dagq.toml`の`[run.env]`の2つを同じ値にそろえ、AGENTS.mdの`dagq.toml`の項とこの文書に結果を書く。
+
+## 7. 変更後（8）
+
+task 563が、6章の方法で8の期間の値を取った（565のfollow-upを引き受けた）。対象はtask 567（統合testの共通の待ちの短縮）の着地（event 15046、2026-09-26 13:23:44Z）の後から、event 21344（2026-09-27 02:05:05Z）までに着地したrunのうち、llvm-covを流したもの69件で、全部がnextest（`NEXTEST_TEST_THREADS=8`）だった。範囲は`dagq stats --since 15046 --until 21344 --full`で、`--parallel`は3、期間内に`[run.env]`とtoolchainの変更は無い。runごとの値・遅いtest・比較の前提は[nextest-measurement](nextest-measurement.md)の6章にある。1〜5章の4の期間の値は変えていない。
+
+8の期間の値は、並列度8と567の待ちの短縮の効果を合算したものである。566〜567の間に着地した7件（8、待ちの短縮なし）はtest段100件あたりが17.5秒で、567の後の最初の10件（17.7秒）とほぼ同じだったので、縮んだ分の大半は並列度8から来たと見る（nextest-measurementの6.5節）。
+
+### 7.1 指標の並び
+
+| 指標 | 4の期間（1〜5章） | 8の期間 | 変化 |
+| --- | --- | --- | --- |
+| llvm-covの段（nextest） | 301秒（266〜307）、3件 | 208秒（145〜393）、69件 | 約93秒短い |
+| build | 43秒（23〜62） | 35秒（26〜137） | ほぼ同じ |
+| test段（nextestの`Summary`） | 200秒（170〜238） | 163秒（112〜312） | 短い |
+| test段 100件あたり | 23.0〜31.6秒（testは737〜754件） | 17.3秒（13.5〜33.7、testは798〜1081件） | 約36%短い |
+| `Summary`÷（testごとの合計÷並列度） | 1.00〜1.01 | 1.01〜1.06。SLOWのtestが出た8件は1.31〜1.60 | 最長のtestが律速になるrunが出た |
+| test段の後 | 23・109・7秒 | 6秒（4〜20） | 短い |
+| `land_phases.verify` | 296秒（242〜372、旧コマンドを含む17 run） | 224秒（152〜1010） | 短い |
+| `backend_call_failed` | 2件（`exists` 2、exhausted 0） | 35件（`capture` 17、`exists` 16、`create_named` 1、`listed_workspace_ids` 1。retryで回復28、exhausted 7） | 増えた |
+| cmuxのcaptureの時間切れ | 0件 | 17件（exhausted 2）。llvm-covの段と重なったのは3件 | 出た |
+| `backend_call_failed`のload帯 | 8-16が1件、16-32が1件 | 0-4が1件、8-16が2件、16-32が11件、32-64が21件（eventの`load_avg`の最大57.6） | 高いloadで起きている |
+| `verification_failed`（時間の上限・競合によるもの） | 0件 | 5件（llvm-covを流した69 runの7.2%）。時間の上限3件、eventの読みの競合2件。どれも2回目の試行で着地 | 出た |
+| `verification_failed`（変更の中身・環境によるもの） | 1件（325） | 4件（295・418・375のmigrationの巻き戻し、624のSQLiteの`disk I/O error`） | — |
+| load1（llvm-covの段の間の平均の中央値） | 5.8（旧コマンド）・6.5（nextest） | 13.5（6.3〜27.3） | 約2.2倍 |
+| load1（llvm-covの段の間の最大） | 15.7 | 46.6 | 約3倍 |
+| load1（期間全体、`metrics.csv`） | 平均5.9、中央値4.9、p90 11.2、最大20.3 | 平均10.8、中央値8.7、p90 22.4、最大56.9（1430標本） | 約2倍 |
+
+時間の上限と競合で落ちたtestは次のとおり（どれもそのrunが足したtestではない）。
+
+- 時間の上限: `runtime_waiting::a_wrapper_that_goes_silent_during_a_wait_sends_the_run_back_for_its_exit`（task 573、30秒）、`runtime_repair::a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask`（433、30秒）、`runtime_repair::a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree`（432、600秒）
+- 競合: `runtime_handoff::auto_update_builds_runtime_landings_and_retries_on_the_answer`（621）、`runtime_claim::resident_supervisor_without_runs_is_listed_until_it_stops`（476）
+
+`backend_call_failed`の35件のうち、llvm-covの段と時間が重なったのは14件だけだった。残りは段の外の、主にload 30〜57の時間帯に固まって起きている（04:00〜04:02 JST、05:39〜05:41、06:18〜06:24）。llvm-covの段の間はhostがほぼ埋まっていた（`cpu_idle`の中央値4%）。このとき8本のtestのprocessのCPUは中央値0.69コアで、同じ時間帯にworkerのbuildが走っていた（`rust_n`の中央値6）。
+
+### 7.2 6章の目安に照らした見立て
+
+| 6章の目安 | 8の期間 | 当たるか |
+| --- | --- | --- |
+| test段（nextest）の中央値が4の期間（200秒）より縮む | 163秒（100件あたり約36%短い） | 縮んだ |
+| captureの時間切れが出る、`backend_call_failed`が段と重なって増える、`exhausted`が出る | captureの時間切れ17件、段と重なったもの14件、exhausted 7件 | 当たる |
+| 段の間のload1の平均の中央値が12前後を超える、または最大が20を大きく超える | 13.5、最大46.6 | 当たる |
+| 時間の上限を持つtestの失敗で`verification_failed`のresumeが出る | 3件（競合を合わせて5件） | 当たる |
+| test段は縮んだが段の全体が縮まない | 段も約93秒縮んだ | 当たらない |
+
+**見立て**: 目安を字のとおりに当てはめると「6に戻す」になる。test段と段の全体は縮んでいるが、悪化を示す3つの目安（captureの時間切れ、load、時間の上限による失敗）がそろって当たっている。ただし、次の点から、悪化のすべてが`NEXTEST_TEST_THREADS=8`によるとは言えない。
+
+- `backend_call_failed`の6割とcaptureの時間切れの8割は、llvm-covの段の外で起きている。
+- 期間の中でtestは35%増え、567でtestのCPUが約1割増えた。
+- 時間の上限と競合による失敗は、1件ずつ見るとeventの読みの競合や30秒の待ちで、loadが上がると露わになる不安定なtestである。期間の後にはtask 762が不安定なtestを直し、nextestの`retries = 1`（ADR-t768-1）で、不安定なtestだけの失敗はworkerに返らなくなった。
+
+そこで、次の順にするのがよいと見る。
+
+1. 両方の値を6に下げる（`dagq.toml`の`[run.env]`の2つをそろえる）。下げたら、7.1節と同じ指標を10 run以上で取る。100件あたりのtest段が8より約1/3伸びる代わりに、段の間のloadとcaptureの時間切れが4の期間の水準（段の間のloadの中央値12未満、capture 0件）に戻るかを見る。戻らなければ、並列度ではなくhostの他の負荷（段の外のloadの山）を先に調べる。
+2. 1と並べて、`runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged`の約127秒の分岐を直す。このtestは8の期間の8 run（期間の後の直近では31件のうち14件）で最長のtestになってtest段を決め、そのrunの段を約110秒延ばしている（段の中央値は308秒と198秒）（nextest-measurementの6.4節）。
+
+値を戻すtaskはこの文書からは登録しない（receiptのfollow_upsに書く）。
