@@ -107,7 +107,9 @@ pub enum ScreenLook {
         transcript: u64,
         background: Option<bool>,
     },
-    /// At work, a dialog or no input box.
+    /// At work under its input box, without a dialog.
+    Working,
+    /// A dialog or no input box.
     Busy,
     /// cmux could not read it.
     Unreadable,
@@ -195,6 +197,11 @@ pub fn look_of(signals: &dyn AgentSignals, screen: &str) -> ScreenLook {
             transcript: fingerprint(&signals.transcript(screen)),
             background: signals.screen_background(screen),
         }
+    } else if signals.input_ready(screen)
+        && signals.working(screen)
+        && signals.detect_prompt(screen).is_none()
+    {
+        ScreenLook::Working
     } else {
         ScreenLook::Busy
     }
@@ -210,9 +217,8 @@ fn fingerprint(text: &str) -> u64 {
 /// The span after a capture at `now` that showed `look`, from `previous`:
 /// an idle look extends a span that began after `last_input` with the same
 /// transcript and the same background work and begins a new one otherwise
-/// (background work that ends starts the idle over); a busy look ends the
-/// span;
-/// an unreadable one leaves it as it was.
+/// (background work that ends starts the idle over); a working or busy
+/// look ends the span; an unreadable one leaves it as it was.
 pub fn observe(
     previous: Option<Observation>,
     now: i64,
@@ -221,7 +227,7 @@ pub fn observe(
 ) -> Option<Observation> {
     match look {
         ScreenLook::Unreadable => previous,
-        ScreenLook::Busy => None,
+        ScreenLook::Working | ScreenLook::Busy => None,
         ScreenLook::Idle {
             transcript,
             background,
@@ -326,6 +332,19 @@ impl ScreenProbe<'_> {
         now: i64,
         last_input: i64,
     ) -> Option<Inference> {
+        self.probe(workspace, idle_marker, marker, now, last_input)
+            .1
+    }
+
+    /// [`ScreenProbe::infer`], with what the capture showed.
+    pub fn probe(
+        &self,
+        workspace: &str,
+        idle_marker: &Path,
+        marker: MarkerState,
+        now: i64,
+        last_input: i64,
+    ) -> (ScreenLook, Option<Inference>) {
         let kept = match self.mode {
             ScreenIdle::Record(spans) => spans.get(idle_marker),
             ScreenIdle::Peek => None,
@@ -344,9 +363,10 @@ impl ScreenProbe<'_> {
         // A screen that could not be read now infers nothing, whatever the
         // span kept.
         if look == ScreenLook::Unreadable {
-            return None;
+            return (look, None);
         }
-        span.filter(|span| span.idle(self.threshold))
+        let inference = span
+            .filter(|span| span.idle(self.threshold))
             .map(|span| Inference {
                 source: "screen",
                 marker,
@@ -355,7 +375,8 @@ impl ScreenProbe<'_> {
                 captures: span.captures,
                 background_running: span.background,
                 unrecorded: !span.recorded,
-            })
+            });
+        (look, inference)
     }
 }
 
@@ -438,7 +459,8 @@ mod tests {
     fn the_screen_looks_idle_only_ready_at_rest_without_a_dialog() {
         assert!(matches!(idle("a"), ScreenLook::Idle { .. }));
         assert_ne!(idle("a"), idle("b"));
-        for busy in ["working", "dialog", "booting"] {
+        assert_eq!(look_of(&Signals, "working"), ScreenLook::Working);
+        for busy in ["dialog", "booting"] {
             assert_eq!(look_of(&Signals, busy), ScreenLook::Busy, "{busy}");
         }
     }
@@ -462,6 +484,7 @@ mod tests {
             Some(second)
         );
         assert_eq!(observe(Some(second), 140, ScreenLook::Busy, 50), None);
+        assert_eq!(observe(Some(second), 140, ScreenLook::Working, 50), None);
         // Another transcript, or an input after the span began, starts over.
         let other = observe(Some(second), 140, idle("b"), 50).unwrap();
         assert_eq!((other.first_seen, other.captures), (140, 1));

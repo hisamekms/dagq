@@ -397,8 +397,19 @@ receipt \"$(git rev-parse HEAD)\"; await_exit",
     let run = detail.runs[0].clone();
     assert_landed(&repo, &run, "test task", &base);
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    // One event per span. The revise watch counts the rewritten receipt as
+    // an input and the prompt watch of the same session does not, so a
+    // span the prompt watch saw begin before the receipt's second can be
+    // started over by the revise watch and recorded again.
     let events = inferred(&detail);
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0]["phase"], "revise");
-    assert_eq!(events[0]["marker"], "stale");
+    assert!((1..=2).contains(&events.len()), "{events:?}");
+    for event in &events {
+        assert_eq!(event["phase"], "revise");
+        assert_eq!(event["marker"], "stale");
+    }
+    let since: Vec<i64> = events
+        .iter()
+        .map(|e| e["since"].as_i64().unwrap())
+        .collect();
+    assert!(since.windows(2).all(|pair| pair[0] < pair[1]), "{events:?}");
 }

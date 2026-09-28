@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::application::screen_idle::{
-    self, Inference, MarkerState, RESUME_DEBUG_LOG, ScreenIdle, ScreenProbe,
+    self, Inference, MarkerState, RESUME_DEBUG_LOG, ScreenIdle, ScreenLook, ScreenProbe,
 };
 
 pub(super) struct IdleMarker {
@@ -168,13 +168,42 @@ pub(super) fn probe_interval(screen_idle_secs: i64) -> Duration {
     Duration::from_secs(u64::try_from((screen_idle_secs / 2).clamp(0, 60)).unwrap_or(0))
 }
 
-/// The last capture of each session judged by its screen, by idle marker,
-/// and what it inferred.
+/// How many [`probe_interval`]s the wait between captures grows to while
+/// the screen keeps showing the session at work (task 845).
+const PROBE_BACKOFF_LIMIT: u32 = 4;
+
+/// The longest wait between two captures of a session whose screen keeps
+/// showing it at work: [`PROBE_BACKOFF_LIMIT`] [`probe_interval`]s, four
+/// minutes at most. A session that comes to rest is captured within it.
+pub(super) fn max_probe_interval(screen_idle_secs: i64) -> Duration {
+    probe_interval(screen_idle_secs) * PROBE_BACKOFF_LIMIT
+}
+
+/// The last capture of a session judged by its screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Probe {
+    at: SystemTime,
+    /// What it inferred.
+    inference: Option<Inference>,
+    /// The session's last input then, in Unix seconds.
+    floor: i64,
+    /// Whether the screen showed the session at work.
+    working: bool,
+    /// How long after `at` the screen is captured again, unless an input
+    /// comes first.
+    wait: Duration,
+}
+
+/// The last capture of each session judged by its screen, by idle marker.
+/// While capture after capture shows the session at work since the same
+/// input, the wait before the next one doubles from [`probe_interval`] up
+/// to [`max_probe_interval`]; any other look (at rest, a dialog, no input
+/// box, a screen cmux cannot read), and a new input, bring it back.
 #[derive(Default)]
-pub(super) struct ScreenProbes(std::sync::Mutex<HashMap<PathBuf, (SystemTime, Option<Inference>)>>);
+pub(super) struct ScreenProbes(std::sync::Mutex<HashMap<PathBuf, Probe>>);
 
 impl ScreenProbes {
-    fn get(&self, idle_marker: &Path) -> Option<(SystemTime, Option<Inference>)> {
+    fn get(&self, idle_marker: &Path) -> Option<Probe> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -182,11 +211,60 @@ impl ScreenProbes {
             .copied()
     }
 
-    fn set(&self, idle_marker: &Path, at: SystemTime, inference: Option<Inference>) {
+    /// The inference of the last capture of the session of `idle_marker`
+    /// while its screen is not to be captured again at `now`, the
+    /// session's last input at `floor`; an input after that capture
+    /// brings the wait back to `base`.
+    fn kept(
+        &self,
+        idle_marker: &Path,
+        now: SystemTime,
+        floor: i64,
+        base: Duration,
+    ) -> Option<Option<Inference>> {
+        let probe = self.get(idle_marker)?;
+        let wait = if floor > probe.floor {
+            probe.wait.min(base)
+        } else {
+            probe.wait
+        };
+        (now < probe.at + wait).then(|| probe.inference.filter(|inference| inference.since > floor))
+    }
+
+    /// Keep a capture at `now` that showed `look` and inferred `inference`,
+    /// the session's last input at `floor`, and the wait before the next.
+    #[allow(clippy::too_many_arguments)]
+    fn capture(
+        &self,
+        idle_marker: &Path,
+        now: SystemTime,
+        floor: i64,
+        look: ScreenLook,
+        inference: Option<Inference>,
+        base: Duration,
+        limit: Duration,
+    ) -> Duration {
+        let working = look == ScreenLook::Working;
+        let wait = match self.get(idle_marker) {
+            Some(previous) if working && previous.working && previous.floor == floor => {
+                previous.wait.saturating_mul(2).min(limit).max(base)
+            }
+            _ => base,
+        };
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(idle_marker.to_owned(), (at, inference));
+            .insert(
+                idle_marker.to_owned(),
+                Probe {
+                    at: now,
+                    inference,
+                    floor,
+                    working,
+                    wait,
+                },
+            );
+        wait
     }
 }
 
@@ -220,23 +298,30 @@ impl Supervisor<'_> {
         };
         let now = self.files.now();
         let floor = unix_seconds(last_input);
-        let inference = match self.screen_probes.get(idle_marker) {
-            Some((at, inference)) if now < at + probe_interval(self.stall.screen_idle_secs) => {
-                inference.filter(|inference| inference.since > floor)
-            }
-            _ => {
-                let inference = ScreenProbe {
+        let base = probe_interval(self.stall.screen_idle_secs);
+        let inference = match self.screen_probes.kept(idle_marker, now, floor, base) {
+            Some(inference) => inference,
+            None => {
+                let (look, inference) = ScreenProbe {
                     cmux: self.cmux,
                     signals: self.signals,
                     files: &*self.files,
                     mode: ScreenIdle::Record(&self.screen_spans),
                     threshold: self.stall.screen_idle_secs,
                 }
-                .infer(workspace, idle_marker, state, unix_seconds(now), floor)
-                .map(|inference| {
+                .probe(workspace, idle_marker, state, unix_seconds(now), floor);
+                let inference = inference.map(|inference| {
                     self.record_idle_inferred(run, workspace, idle_marker, phase, inference)
                 });
-                self.screen_probes.set(idle_marker, now, inference);
+                self.screen_probes.capture(
+                    idle_marker,
+                    now,
+                    floor,
+                    look,
+                    inference,
+                    base,
+                    max_probe_interval(self.stall.screen_idle_secs),
+                );
                 inference
             }
         };
@@ -546,5 +631,90 @@ mod tests {
         assert_eq!(probe_interval(600), Duration::from_secs(60));
         assert_eq!(probe_interval(10), Duration::from_secs(5));
         assert_eq!(probe_interval(1), Duration::ZERO);
+    }
+
+    const IDLE_LOOK: ScreenLook = ScreenLook::Idle {
+        transcript: 1,
+        background: Some(false),
+    };
+
+    fn at(secs: u64) -> SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// Task 845: capture after capture at work since the same input, the
+    /// wait doubles from the probe interval up to four of them; a new
+    /// input, or any other look, brings it back.
+    #[test]
+    fn the_wait_between_captures_grows_while_the_screen_shows_work() {
+        let base = probe_interval(120);
+        let limit = max_probe_interval(120);
+        assert_eq!(limit, Duration::from_secs(240));
+        assert_eq!(max_probe_interval(1), Duration::ZERO);
+        let marker = Path::new("/run/idle.json");
+        let probes = ScreenProbes::default();
+        let capture = |now: u64, floor: i64, look: ScreenLook| {
+            probes
+                .capture(marker, at(now), floor, look, None, base, limit)
+                .as_secs()
+        };
+        let waits: Vec<u64> = (0..5)
+            .map(|n| capture(n * 100, 10, ScreenLook::Working))
+            .collect();
+        assert_eq!(waits, [60, 120, 240, 240, 240]);
+        // Not captured again before the wait is out.
+        assert_eq!(probes.kept(marker, at(639), 10, base), Some(None));
+        assert_eq!(probes.kept(marker, at(640), 10, base), None);
+        // An input after the capture brings the wait back at once.
+        assert_eq!(probes.kept(marker, at(461), 20, base), None);
+        assert_eq!(probes.kept(marker, at(459), 20, base), Some(None));
+        // ... and starts the growth over.
+        assert_eq!(capture(500, 20, ScreenLook::Working), 60);
+        assert_eq!(capture(560, 20, ScreenLook::Working), 120);
+        // Any look but work brings it back: at rest, a dialog or no
+        // input box, a screen that cannot be read.
+        for other in [IDLE_LOOK, ScreenLook::Busy, ScreenLook::Unreadable] {
+            assert!(capture(700, 20, ScreenLook::Working) > 60);
+            assert_eq!(capture(1000, 20, other), 60, "{other:?}");
+            assert_eq!(capture(1100, 20, ScreenLook::Working), 60, "{other:?}");
+        }
+    }
+
+    /// A session at work for an hour is captured a quarter as often as
+    /// every probe interval, and once it comes to rest, its screen is
+    /// captured within the longest wait and then every probe interval.
+    #[test]
+    fn a_session_at_work_is_captured_less_and_its_rest_within_the_limit() {
+        let (base, limit) = (probe_interval(120), max_probe_interval(120));
+        let marker = Path::new("/run/idle.json");
+        let probes = ScreenProbes::default();
+        let rest = 3600;
+        let mut captures = Vec::new();
+        // The supervisor looks every few seconds.
+        for now in (0..rest + 600).step_by(5) {
+            if probes.kept(marker, at(now), 0, base).is_some() {
+                continue;
+            }
+            let look = if now < rest {
+                ScreenLook::Working
+            } else {
+                IDLE_LOOK
+            };
+            probes.capture(marker, at(now), 0, look, None, base, limit);
+            captures.push(now);
+        }
+        let working = captures.iter().filter(|&&now| now < rest).count();
+        assert!(working <= 18, "{working}: {captures:?}");
+        let first_rest = captures.iter().find(|&&now| now >= rest).unwrap();
+        assert!(*first_rest < rest + limit.as_secs(), "{captures:?}");
+        let after: Vec<u64> = captures
+            .windows(2)
+            .filter(|pair| pair[0] >= rest)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        assert!(
+            after.iter().all(|&wait| wait == base.as_secs()),
+            "{after:?}"
+        );
     }
 }

@@ -726,7 +726,8 @@ struct Supervisor<'a> {
     screen_spans: crate::application::screen_idle::Spans,
     /// The last capture of each worker session judged by its screen, and
     /// what it inferred, so a session is captured at most once per
-    /// [`idle::probe_interval`] ([`Supervisor::session_idle`]).
+    /// [`idle::probe_interval`], and less often while its screen keeps
+    /// showing it at work ([`Supervisor::session_idle`], task 845).
     screen_probes: idle::ScreenProbes,
     /// The binary a handoff asked this process to exec (ADR-0045 decision
     /// 10): no new work starts, and the loop ends once every slot rests at

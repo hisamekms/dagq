@@ -1506,7 +1506,16 @@ fn two_supervisors_racing_for_one_stale_lease_adopt_it_once() {
 #[test]
 fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    // The session works until the lease changed hands, so the original
+    // cannot take the run on to validation before it notices.
+    let taken = PathBuf::from(format!("{}.taken", db.display()));
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "n=0; while [ ! -f \"$DB.taken\" ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done; {IDLE_AGENT}"
+        ),
+    ));
     let options = supervise_options(2, false);
     let original = {
         let (db, repo, backend, options) =
@@ -1534,6 +1543,7 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
             [&run.id()],
         )
         .unwrap();
+    fs::write(&taken, "").unwrap();
     // The original notices within a tick, drops the run and, draining with
     // nothing active, exits.
     let outcome = joined(original, "the first supervisor thread to return").unwrap();
