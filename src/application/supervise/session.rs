@@ -236,6 +236,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             stale: None,
             recovery: RecoveryWatch::default(),
             input_at: None,
+            answered_at: None,
             asks_from: 0,
             stage: Stage::Session,
         })
@@ -293,8 +294,17 @@ pub(super) struct SessionWatch {
     /// The last input typed into a session that had gone idle before (a
     /// revise request, or an answer typed during it): an idle marker no
     /// newer than this is from before it, so the session works (task 238).
-    /// `None` for a worker's own session, where any idle marker counts.
+    /// `None` for a worker's own session, where any idle marker counts
+    /// but for one from before the last answer typed (`answered_at`).
     pub(super) input_at: Option<SystemTime>,
+    /// When [`SessionWatch::poll`] last typed an answer of a
+    /// `worker_question` into a worker's own session: only an idle marker
+    /// newer than it counts for [`SessionWatch::marked_idle`], so the
+    /// screen is read for a dialog after the answer (task 870). Kept apart
+    /// from `input_at`, whose `None` marks a worker's own session (the park
+    /// of its recovery job, the move to headless Codex). A watch of a
+    /// revise or a resume types answers into `input_at` instead.
+    pub(super) answered_at: Option<SystemTime>,
     /// The `worker_question`s this watch follows (their answers typed, the
     /// session waiting on them) are those created at or after this (unix
     /// seconds): for a revise or a conflict request, when it was sent; the
@@ -359,6 +369,7 @@ impl SessionWatch {
             stale: None,
             recovery: RecoveryWatch::default(),
             input_at: Some(input_at),
+            answered_at: None,
             asks_from: 0,
             stage,
         })
@@ -402,9 +413,10 @@ impl SessionWatch {
     }
 
     /// Whether the session is idle by its idle marker: one exists, written
-    /// after the last input typed when one is known.
+    /// after the last input typed when one is known (the stage's input, or
+    /// the last answer typed into a worker's own session).
     fn marked_idle(&self, sv: &Supervisor<'_>) -> bool {
-        match self.input_at {
+        match self.input_at.max(self.answered_at) {
             Some(at) => sv
                 .files
                 .modified(&self.idle_marker)
@@ -641,7 +653,9 @@ impl SessionWatch {
                         // the session may wait again, and a later silence
                         // is recorded again (task 606).
                         self.silent = false;
-                        self.deliver_answers(sv, run)?;
+                        if let Some(typed) = self.deliver_answers(sv, run)? {
+                            self.answered_at = Some(typed);
+                        }
                         // A request to rewrite a stale receipt is typed
                         // after the receipt.
                         let rewrite_asked = self.stale.is_some_and(|n| !n.settled);

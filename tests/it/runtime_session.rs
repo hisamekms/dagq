@@ -1023,6 +1023,9 @@ fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
         "{events}"
     );
 
+    // The dialog is gone by the time the answer is typed: the screen is
+    // read after it, until the session goes idle again (task 870).
+    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
     fs::write(
         exit_request_path(run.run_dir().unwrap()).with_extension("idle"),
         "",
@@ -1362,20 +1365,25 @@ await_exit
 /// answers it and lets the worker go idle, and returns once `until` held
 /// and the run went on to its end (`$EXIT.go` written): the backend, the
 /// run's events and the supervisor's outcome. `quick_confirm` has the
-/// send confirmed after 1 second (`[stall].send_confirm_secs`).
+/// send confirmed after 1 second (`[stall].send_confirm_secs`);
+/// `prompt_wait`, when given, replaces the backend's.
 fn answer_over(
     script: &str,
     before: Option<&str>,
     after: Option<&str>,
     after_confirm: Option<&str>,
     quick_confirm: bool,
+    prompt_wait: Option<Duration>,
     until: impl Fn(&mut SqliteQueue) -> bool,
 ) -> (Arc<TestWorkspace>, dagq::domain::TaskDetail, Value) {
     let (_dir, repo, db) = fixture();
     if quick_confirm {
         fs::write(repo.join("dagq.toml"), "[stall]\nsend_confirm_secs = 1\n").unwrap();
     }
-    let backend = TestWorkspace::new(&db, false, script);
+    let mut backend = TestWorkspace::new(&db, false, script);
+    if let Some(wait) = prompt_wait {
+        backend.prompt_wait = wait;
+    }
     *backend.screen_after_text.lock().unwrap() = after.map(str::to_owned);
     *backend.screen_after_confirm.lock().unwrap() = after_confirm.map(str::to_owned);
     let backend = Arc::new(backend);
@@ -1392,12 +1400,20 @@ fn answer_over(
     if let Some(before) = before {
         *backend.screen.lock().unwrap() = before.into();
     }
-    queue.answer(ask.id, "use blue").unwrap();
+    // The worker goes idle before the answer, so the answer is not typed
+    // (on an idle screen) before its idle marker lands after it.
     fs::write(
         exit_request_path(run.run_dir().unwrap()).with_extension("idle"),
         "",
     )
     .unwrap();
+    let marker = run.idle_marker_path().unwrap();
+    let started = Instant::now();
+    while !marker.exists() {
+        assert!(started.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(20));
+    }
+    queue.answer(ask.id, "use blue").unwrap();
     wait_until(&db, Duration::from_secs(30), until);
     // The session goes back to work, and the run to its end.
     *backend.screen.lock().unwrap() = WORK_SCREEN.into();
@@ -1427,6 +1443,7 @@ fn an_answer_is_typed_after_the_settings_panel_over_the_box_is_closed() {
         None,
         None,
         false,
+        None,
         |queue| has_event(queue, "ask_delivered"),
     );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -1453,6 +1470,7 @@ fn a_settings_panel_over_a_typed_answer_is_closed_with_escape() {
         Some(SETTINGS_SCREEN),
         None,
         false,
+        None,
         |queue| has_event(queue, "ask_delivered"),
     );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -1476,6 +1494,7 @@ fn a_settings_panel_found_by_the_start_check_is_closed_with_escape() {
         None,
         Some(SETTINGS_SCREEN),
         true,
+        None,
         |queue| has_event(queue, "auto_repaired"),
     );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -1487,9 +1506,11 @@ fn a_settings_panel_found_by_the_start_check_is_closed_with_escape() {
     assert!(payloads(&detail, "submit_not_started").is_empty());
 }
 
-/// A dialog not on the list that came up over the typed answer gets no key:
-/// the session shows no sign of the answer, `submit_not_started` with the
-/// dialog, as before.
+/// A dialog not on the list that came up over the typed answer gets no key.
+/// An idle marker from before the answer does not count for idle, so the
+/// screen is read after `prompt_wait` and the dialog is recorded as
+/// `prompt_waiting`, without waiting for the answer's `submit_not_started`
+/// (task 870).
 #[test]
 fn an_unknown_dialog_over_a_typed_answer_gets_no_key() {
     let (backend, detail, outcome) = answer_over(
@@ -1498,15 +1519,91 @@ fn an_unknown_dialog_over_a_typed_answer_gets_no_key() {
         Some(DIALOG_SCREEN),
         None,
         true,
-        |queue| has_event(queue, "submit_not_started"),
+        Some(Duration::from_millis(300)),
+        |queue| has_event(queue, "prompt_waiting"),
     );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(backend.keys.lock().unwrap().is_empty());
     assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
-    let not_started = payloads(&detail, "submit_not_started");
-    assert_eq!(not_started[0]["dialog"], "choice", "{not_started:?}");
+    let waiting = payloads(&detail, "prompt_waiting");
+    assert_eq!(waiting[0]["prompt"], "choice", "{waiting:?}");
+    let position = |kind: &str| detail.events.iter().position(|e| e.kind == kind);
+    let delivered = position("ask_delivered").unwrap();
+    let recorded = position("prompt_waiting").unwrap();
+    assert!(delivered < recorded);
+    assert!(
+        position("submit_not_started").is_none_or(|not_started| recorded < not_started),
+        "{:?}",
+        event_kinds(&detail)
+    );
     assert!(payloads(&detail, "auto_repaired").is_empty());
     assert!(payloads(&detail, "known_dialog_unanswered").is_empty());
+}
+
+/// [`HOLDING_ASKING_AGENT`] that goes idle again once it took its answer,
+/// and marks that with `$EXIT.took`.
+const IDLE_AFTER_ANSWER_AGENT: &str = r#"
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
+idle
+while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+sleep 1
+idle
+: > "$EXIT.took"
+while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
+cp "$MESSAGE" answer.txt
+git add answer.txt
+git commit -q -m answer
+receipt "$(git rev-parse HEAD)"
+idle
+await_exit
+"#;
+
+/// An idle marker written after the typed answer counts for idle as
+/// before (task 870): a dialog-like screen then is not read or recorded.
+#[test]
+fn an_idle_marker_after_a_typed_answer_counts_for_idle() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AFTER_ANSWER_AGENT);
+    backend.prompt_wait = Duration::from_millis(300);
+    let backend = Arc::new(backend);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise(&db, &repo, &backend))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !queue.asks(Default::default()).unwrap().is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = queue.asks(Default::default()).unwrap().remove(0);
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let exit = exit_request_path(run.run_dir().unwrap());
+    queue.answer(ask.id, "use blue").unwrap();
+    fs::write(exit.with_extension("idle"), "").unwrap();
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        has_event(queue, "ask_delivered")
+    });
+    let started = Instant::now();
+    while !exit.with_extension("took").exists() {
+        assert!(started.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(20));
+    }
+    // A poll that looked at the marker just before it was written, and may
+    // still read the screen, is over well past `prompt_wait`.
+    thread::sleep(Duration::from_millis(1000));
+    let captured = backend.captures.load(Ordering::SeqCst);
+    *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
+    // Well past `prompt_wait`, when the screen would otherwise be read.
+    thread::sleep(Duration::from_millis(1000));
+    assert_eq!(backend.captures.load(Ordering::SeqCst), captured);
+    *backend.screen.lock().unwrap() = WORK_SCREEN.into();
+    fs::write(exit.with_extension("go"), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(payloads(&detail, "prompt_waiting").is_empty());
 }
 
 /// An unanswered `/exit` is recorded once and raised as one `stuck_exit` ask
