@@ -2,10 +2,12 @@
 id: adr-t624-1
 type: adr
 title: taskのkindをdagqのrepositoryの構成の4値から、repositoryが自分で名付ける小文字の自由なlabelにし、特定のkindに頼る既定をruntimeに持たない（ADR-0051決定5・15をamends）
-status: accepted
+status: superseded
 created: 2026-09-27
 updated: 2026-09-27
 accepted_on: 2026-09-27
+superseded_by: adr-t980-1
+superseded_on: 2026-09-29
 amends:
   - adr-0051 decision 5
   - adr-0051 decision 15
@@ -24,6 +26,8 @@ related:
 ---
 
 # ADR-t624-1: taskのkindをdagqのrepositoryの構成の4値から、repositoryが自分で名付ける小文字の自由なlabelにし、特定のkindに頼る既定をruntimeに持たない（ADR-0051決定5・15をamends）
+
+> **置き換え済み（2026-09-29）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t980-1](2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)を読む。
 
 ## Context
 

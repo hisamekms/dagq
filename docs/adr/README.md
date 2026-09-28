@@ -4,8 +4,8 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 tags:
   - architecture
   - documentation
@@ -89,7 +89,6 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t617-2](2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md) | runtimeが開くsessionはinstallしたpluginを使い、upとplanに--plugin-dirを付けるのはpluginを開発するとき（dagqのrepository）だけにする | 2026-09-27 |
 | [ADR-t618-1](2026-09-27-t618-1-release-update-by-ask-from-crates-io.md) | リリースのバイナリで動くsupervisorは、crates.ioのsparse indexで新しいリリースを検知してinboxのaskで知らせ、答えでcargo installからinstallと同じ確認・差し替え・引き継ぎまでを行い、人に聞かない入れ替えはhostの設定のopt-inにする（ADR-0073決定14をamends） | 2026-09-27 |
 | [ADR-t618-2](2026-09-27-t618-2-plugin-follows-the-release-update.md) | リリースの更新はバイナリを先に入れ替え、その後にinstallしたpluginを同じリリースへ上げ、どちらか片方だけが古いときも同じaskで揃える | 2026-09-27 |
-| [ADR-t624-1](2026-09-27-t624-1-task-kind-is-a-free-label.md) | taskのkindをdagqのrepositoryの構成の4値から、repositoryが自分で名付ける小文字の自由なlabelにし、特定のkindに頼る既定をruntimeに持たない（ADR-0051決定5・15をamends） | 2026-09-27 |
 | [ADR-t632-1](2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md) | 引き継ぎ（install・up・auto-updateのhand_offと見張り）で、binaryを前に戻すのは引き継がせた全員が失敗したときだけにし、一部の失敗では新しいbinaryを残して失敗したsupervisorを人に知らせる（ADR-0073決定13・14・15・17をamends） | 2026-09-27 |
 | [ADR-t639-1](2026-09-27-t639-1-retry-verification-failures-of-the-host-once.md) | 着地の検証コマンドの失敗のうちhostの分類（disk_full・killed・timeout）はworkerのsessionをresumeせず同じ試行で1回やり直し、なお落ちればrunを着地待ちに戻して原因付きで人に知らせる | 2026-09-27 |
 | [ADR-t728-1](2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md) | 信頼する制御側（supervisor・wrapper・integrator・user）と信頼しないAI actor（inbox・desk・planner・worker・jobごとのactor・observer）を分け、actorをActorRoleとTrustLevelの型で表し、状態変更をapplicationの境界でdefault denyの静的なcapabilityのpolicyで認可する。host実行は助言的でsandboxではなく、この段では各roleの今の権限を変えない | 2026-09-27 |
@@ -117,6 +116,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t947-2](2026-09-28-t947-2-worker-questions-carry-topic-codes.md) | workerがworker_questionのaskを打つときに問いの中身の分類コードを付け、ADR-0047決定41のreason_categoryと併せ持つ | 2026-09-28 |
 | [ADR-t947-3](2026-09-28-t947-3-follow-ups-carry-category-codes.md) | workerがreceiptのfollow_upsに種類の分類コードを付け、runtimeのplannerの判断（採用・不採用・重複・人への問い）と合わせて集計する | 2026-09-28 |
 | [ADR-t947-4](2026-09-28-t947-4-cancel-carries-a-reason-code.md) | taskのcancelに理由の分類コードを必ず持たせ、--duplicate-ofは中身を受け持つtaskを指す欄として残し、runtimeが自分で行うcancelは経路から理由を付ける（ADR-0063決定5をamends） | 2026-09-28 |
+| [ADR-t980-1](2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md) | taskのkindを廃止し、plannerが宣言する変更の種類（change）と着地の差分から読むときに求める変更の対象（area）の2軸でrunを分類する（ADR-t624-1を置き換え、ADR-0051決定5・15をamends） | 2026-09-29 |
 
 ## 置き換え・廃止されたADR
 
@@ -150,3 +150,4 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-0046](0046-full-text-search-related-and-duplicate-of.md) | superseded | [ADR-0063](0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md) | 2026-09-27 |
 | [ADR-0062](0062-runs-waiting-for-a-person-leave-the-slot.md) | superseded | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 2026-09-26 |
 | [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | superseded | [ADR-0080](0080-supervisor-rereads-conflicts-config.md) | 2026-09-27 |
+| [ADR-t624-1](2026-09-27-t624-1-task-kind-is-a-free-label.md) | superseded | [ADR-t980-1](2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md) | 2026-09-29 |
