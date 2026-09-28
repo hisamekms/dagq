@@ -1711,6 +1711,10 @@ pub const QUEUE_EVENT_KINDS: &[&str] = &[
     // A planner of the runtime's nothing was seen of within the planner
     // timeout (task 805); the revise's is on its proposal's task.
     event_kind::PLANNER_UNRESPONSIVE,
+    // An idle planner of the runtime's asked to exit so that a revise with
+    // no planner, waiting past the planner timeout, gets its place (task
+    // 884).
+    event_kind::PLANNER_RELEASED,
     "session_turns",
     "supervisor_started",
     "supervisor_stopped",

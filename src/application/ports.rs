@@ -2015,8 +2015,27 @@ pub trait DraftPlannerStore {
     ) -> Result<()>;
     /// Whether the answer of `ask` was typed into `workspace`.
     fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool>;
+    /// When the latest claim of the typing of the answer of `ask` into
+    /// `workspace` was taken (`planner_answer_claimed`): a time before the
+    /// typing, unlike the ask's close after it. `None` without a claim (an
+    /// answer a new planner carried in its prompt).
+    fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>>;
     /// Whether typing the answer of `ask` ever failed.
     fn ask_delivery_failed(&self, ask: AskId) -> Result<bool>;
+}
+
+/// A planner of the runtime's that holds a place under
+/// `--runtime-planners` while a revise with no planner waits (task 884):
+/// its state and why the supervisor does not end it (`busy`, empty when it
+/// is about to be asked to exit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannerHold {
+    pub planner_id: PlannerId,
+    pub state: String,
+    pub busy: Vec<&'static str>,
+    pub proposal_id: Option<ProposalId>,
+    pub draft_task_id: Option<TaskId>,
+    pub finding_id: Option<FindingId>,
 }
 
 /// A plan review job the queue recorded (ADR-0041 decision 11): the
@@ -2168,12 +2187,14 @@ pub trait PlanReviewStore {
     ) -> Result<()>;
     /// No planner submitted the proposal again within the timeout
     /// (`planner_unresponsive`, the inbox's), once per revise; `planner`
-    /// is `None` when none took the revise yet.
+    /// is `None` when none took the revise yet, and `holders` are then the
+    /// runtime's planners that fill the limit it waits on (task 884).
     fn planner_unresponsive(
         &mut self,
         proposal: ProposalId,
         planner: Option<PlannerId>,
         waited_secs: i64,
+        holders: &[PlannerHold],
     ) -> Result<()>;
     /// End the submitted proposals none of whose tasks waits for plan
     /// review any more (a person readied them with the bypass or canceled

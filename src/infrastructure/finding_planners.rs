@@ -295,6 +295,23 @@ impl SqliteQueue {
         )?)
     }
 
+    /// When the latest claim of the typing of the answer of `ask` into
+    /// `workspace` was taken (`planner_answer_claimed`): the claim that
+    /// typed it, as an older one is taken over only when its supervisor
+    /// ended before typing.
+    pub fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT MAX(json_extract(payload,'$.claimed_at')) FROM run_events WHERE kind='{}'
+             AND json_extract(payload,'$.ask_id')=?1
+             AND json_extract(payload,'$.workspace_id')=?2",
+                event_kind::PLANNER_ANSWER_CLAIMED
+            ),
+            params![ask, workspace],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Whether typing the answer of `ask` ever failed (`ask_delivery_failed`).
     pub fn ask_delivery_failed(&self, ask: AskId) -> Result<bool> {
         Ok(self.conn.query_row(

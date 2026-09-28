@@ -13,7 +13,8 @@ use crate::domain::ActorContext;
 use crate::domain::language::with_instruction;
 use crate::{
     application::{
-        PlanReviewApply, PlanReviewJob, StatusFilter, TaskListItem, TaskQuery,
+        PlanReviewApply, PlanReviewJob, PlannerHold, RevisingProposal, StatusFilter, TaskListItem,
+        TaskQuery,
         planner::{
             PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
             planner_last_activity, planner_view,
@@ -27,7 +28,7 @@ use crate::{
     },
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
-        PlannerOrigin, PlannerState, Proposal, Task, TaskDetail,
+        PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
         actor_model::{ActorLaunch, ModelRole},
         claim_defer::expected_files,
         next_to_review,
@@ -554,6 +555,7 @@ impl Supervisor<'_> {
                             proposal,
                             Some(planner_id),
                             now - sent_at,
+                            &[],
                         )?;
                     }
                 }
@@ -568,10 +570,12 @@ impl Supervisor<'_> {
                         && revise.revised_at.is_some_and(|at| now - at > timeout) =>
                 {
                     let waited = now - revise.revised_at.unwrap_or(now);
+                    let holders = self.planner_holds(&views)?;
                     warn!(
                         "proposal {proposal}: its revise waited {waited} seconds for a planner; the inbox is told"
                     );
-                    self.queue.planner_unresponsive(proposal, None, waited)?;
+                    self.queue
+                        .planner_unresponsive(proposal, None, waited, &holders)?;
                 }
                 _ => {}
             }
@@ -580,6 +584,9 @@ impl Supervisor<'_> {
             .iter()
             .filter(|view| view.planner.origin == PlannerOrigin::Runtime && view.alive)
             .count();
+        // A revise with no planner that waited at the limit past the
+        // timeout (task 884).
+        let mut starved = None;
         for revise in self.queue.revising_proposals()? {
             if revise.sent_at.is_some() {
                 continue;
@@ -657,8 +664,13 @@ impl Supervisor<'_> {
                     )?;
                     views = self.planner_views()?;
                 }
-                // At the limit: the revise waits for a runtime planner to end.
-                _ => {}
+                // At the limit: the revise waits for a runtime planner to
+                // end, and past the timeout frees a place (task 884).
+                _ => {
+                    if starved.is_none() && revise.revised_at.is_some_and(|at| now - at > timeout) {
+                        starved = Some(proposal.id());
+                    }
+                }
             }
         }
         // Then the drafts the runtime or a job registered (ADR-0041
@@ -671,7 +683,140 @@ impl Supervisor<'_> {
         self.settle_findings()?;
         self.open_finding_planners(options, &mut runtime_open)?;
         self.tell_of_silent_planners(timeout, &views)?;
-        self.end_runtime_planners(&views)
+        self.end_runtime_planners(&views)?;
+        if let Some(proposal) = starved {
+            self.release_runtime_planner(proposal, timeout, &views)?;
+        }
+        Ok(())
+    }
+
+    /// The runtime's planners alive, each with why it is not ended
+    /// ([`Self::busy_reasons`]): what holds the limit a revise with no
+    /// planner waits on (task 884).
+    fn planner_holds(&mut self, views: &[PlannerView]) -> Result<Vec<PlannerHold>> {
+        let revising = self.queue.revising_proposals()?;
+        views
+            .iter()
+            .filter(|view| view.planner.origin == PlannerOrigin::Runtime && view.alive)
+            .map(|view| {
+                Ok(PlannerHold {
+                    planner_id: view.planner.id,
+                    state: view.state.as_str().to_owned(),
+                    busy: self
+                        .busy_reasons(view, &revising)?
+                        .into_iter()
+                        .map(PlannerBusy::as_str)
+                        .collect(),
+                    proposal_id: view.planner.proposal_id,
+                    draft_task_id: view.planner.draft_task_id,
+                    finding_id: view.planner.finding_id,
+                })
+            })
+            .collect()
+    }
+
+    /// Free a place under the limit for the revise of `proposal`, which
+    /// waited past the timeout with no planner (task 884): ask one idle
+    /// planner of the runtime's to exit whose busy reasons do not include
+    /// a question waiting on a person or an answer not typed yet, and nothing of which was seen within
+    /// the timeout (no input, no idle marker). One at a time: none while a
+    /// planner of the runtime's is already asked to exit, which frees its
+    /// place anyway.
+    fn release_runtime_planner(
+        &mut self,
+        proposal: ProposalId,
+        timeout: i64,
+        views: &[PlannerView],
+    ) -> Result<()> {
+        let now = self.generators.clock.now();
+        let runtime = |view: &&PlannerView| view.planner.origin == PlannerOrigin::Runtime;
+        if views.iter().filter(runtime).any(|view| {
+            self.planner_exits
+                .iter()
+                .any(|(id, _)| *id == view.planner.id)
+        }) {
+            return Ok(());
+        }
+        let revising = self.queue.revising_proposals()?;
+        for view in views
+            .iter()
+            .filter(runtime)
+            .filter(|view| view.alive && view.state == PlannerState::Idle)
+        {
+            let Some(workspace) = view.planner.workspace_id.clone() else {
+                continue;
+            };
+            let busy = self.busy_reasons(view, &revising)?;
+            // An answer not typed yet may be left to the inbox (its typing
+            // failed), which types it into this workspace by hand.
+            if busy.is_empty()
+                || busy.contains(&PlannerBusy::QuestionOpen)
+                || busy.contains(&PlannerBusy::AnswerUndelivered)
+            {
+                continue;
+            }
+            let last = planner_last_activity(&*self.files, &view.dir, view.planner.created_at)?;
+            if now - last <= timeout {
+                continue;
+            }
+            let id = view.planner.id;
+            let reasons: Vec<_> = busy.into_iter().map(PlannerBusy::as_str).collect();
+            let reason = format!(
+                "planner {id} of the runtime was idle for {} seconds holding a place ({}) while the revise of proposal {proposal} waited past {timeout} seconds for one; it is asked to exit",
+                now - last,
+                reasons.join(", ")
+            );
+            submit_input(self.cmux, self.signals, &workspace, Input::Exit)?;
+            self.planner_exits.push((id, Instant::now()));
+            self.queue.record_queue_event(
+                event_kind::PLANNER_RELEASED,
+                json!({
+                    "planner_id": id,
+                    "workspace_id": workspace,
+                    "proposal_id": proposal,
+                    "busy": reasons,
+                    "last_activity": last,
+                    "idle_since": view.idle_since,
+                    "reason": reason,
+                }),
+            )?;
+            warn!("{reason}");
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// Why the planner of `view` is not ended: at work, a revise of its
+    /// own, or its `planner_question` ([`Self::question_wait`]), or already
+    /// asked to exit. Empty for an idle planner that is done.
+    fn busy_reasons(
+        &mut self,
+        view: &PlannerView,
+        revising: &[RevisingProposal],
+    ) -> Result<Vec<PlannerBusy>> {
+        let id = view.planner.id;
+        let workspace = view.planner.workspace_id.as_deref();
+        let mut busy = Vec::new();
+        if view.state != PlannerState::Idle {
+            busy.push(PlannerBusy::AtWork);
+        }
+        if revising.iter().any(|revise| revise.planner_id == Some(id)) {
+            busy.push(PlannerBusy::Revise);
+        }
+        if revising.iter().any(|revise| {
+            revise.sent_at.is_none()
+                && workspace.is_some()
+                && revise.proposal.owner().workspace_id.as_deref() == workspace
+        }) {
+            busy.push(PlannerBusy::RevisePending);
+        }
+        if let Some(wait) = self.question_wait(view)? {
+            busy.push(wait);
+        }
+        if self.planner_exits.iter().any(|(sent, _)| *sent == id) {
+            busy.push(PlannerBusy::Exiting);
+        }
+        Ok(busy)
     }
 
     /// Tell the inbox, once per planner, of a planner of the runtime's
@@ -697,7 +842,7 @@ impl Supervisor<'_> {
             }
             let last = planner_last_activity(&*self.files, &view.dir, view.planner.created_at)?;
             let waited = now - last;
-            if waited <= timeout || self.waits_on_question(view)? {
+            if waited <= timeout || self.question_wait(view)?.is_some() {
                 continue;
             }
             let reason = format!(
@@ -895,15 +1040,7 @@ impl Supervisor<'_> {
                 );
                 continue;
             }
-            let busy = revising.iter().any(|revise| {
-                revise.planner_id == Some(id)
-                    || (revise.sent_at.is_none()
-                        && revise.proposal.owner().workspace_id.is_some()
-                        && revise.proposal.owner().workspace_id == workspace)
-            }) || self.waits_on_question(view)?;
-            if view.state == PlannerState::Idle
-                && !busy
-                && asked.is_none()
+            if self.busy_reasons(view, &revising)?.is_empty()
                 && let Some(workspace) = &workspace
             {
                 submit_input(self.cmux, self.signals, workspace, Input::Exit)?;
@@ -915,17 +1052,56 @@ impl Supervisor<'_> {
     }
 }
 
+/// Why a planner of the runtime's is not ended (task 884), as the
+/// `busy` of a [`PlannerHold`] and of `planner_released` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannerBusy {
+    /// Not idle: at work, or not seen idle.
+    AtWork,
+    /// A revise went to it and it did not submit again yet.
+    Revise,
+    /// The revise of a proposal whose workspace is its own waits for it to
+    /// be idle.
+    RevisePending,
+    /// Its `planner_question` waits for a person's answer.
+    QuestionOpen,
+    /// The answer of its `planner_question` waits to be typed.
+    AnswerUndelivered,
+    /// The answer was typed into it and it has not stopped since.
+    AnswerTyped,
+    /// It was asked to exit.
+    Exiting,
+}
+
+impl PlannerBusy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AtWork => "at_work",
+            Self::Revise => "revise",
+            Self::RevisePending => "revise_pending",
+            Self::QuestionOpen => "planner_question_open",
+            Self::AnswerUndelivered => "planner_answer_undelivered",
+            Self::AnswerTyped => "planner_answer_typed",
+            Self::Exiting => "exiting",
+        }
+    }
+}
+
 impl Supervisor<'_> {
-    /// Whether a planner of the runtime's still waits on a
-    /// `planner_question` about its draft: one nobody closed (unanswered,
-    /// or its answer not typed yet), or one whose answer the supervisor
-    /// typed into this planner's workspace after its agent last stopped (it
-    /// is at work on the answer). An ask closed without a typing holds
-    /// nothing.
-    fn waits_on_question(&mut self, view: &PlannerView) -> Result<bool> {
+    /// Whether, and how, a planner of the runtime's still waits on a
+    /// `planner_question` about its draft or finding: one not answered
+    /// yet, one answered whose answer is not typed yet, or one whose answer
+    /// was typed into this planner's workspace and its agent has not
+    /// stopped since the typing (task 884). The typing is timed by its
+    /// claim (`planner_answer_claimed`), taken before it, not by the ask's
+    /// close after it, so an agent that took the answer up and stopped
+    /// before the close is done; an answer a new planner carried in its
+    /// prompt is timed by the planner's opening. An ask closed without a
+    /// typing holds nothing.
+    fn question_wait(&mut self, view: &PlannerView) -> Result<Option<PlannerBusy>> {
         let (draft, finding) = (view.planner.draft_task_id, view.planner.finding_id);
         if draft.is_none() && finding.is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         // A finding's planner asks about the finding, a draft's about the
         // draft.
@@ -944,24 +1120,35 @@ impl Supervisor<'_> {
                     }
             })
             .collect();
+        if asks
+            .iter()
+            .any(|ask| ask.closed_at.is_none() && ask.answered_at.is_none())
+        {
+            return Ok(Some(PlannerBusy::QuestionOpen));
+        }
         if asks.iter().any(|ask| ask.closed_at.is_none()) {
-            return Ok(true);
+            return Ok(Some(PlannerBusy::AnswerUndelivered));
         }
         let Some(workspace) = view.planner.workspace_id.as_deref() else {
-            return Ok(false);
+            return Ok(None);
         };
         for ask in &asks {
-            // The typing happened when the ask closed; an agent idle since
-            // before it has not taken the answer up yet.
-            if ask
-                .closed_at
-                .is_some_and(|closed| view.idle_since.is_none_or(|since| since <= closed))
-                && self.queue.ask_delivered_to(ask.id, workspace)?
-            {
-                return Ok(true);
+            if !self.queue.ask_delivered_to(ask.id, workspace)? {
+                continue;
+            }
+            // An agent idle since before the typing has not taken the
+            // answer up yet. Its second counts as before: the views of a
+            // pass are taken before the pass types, and an agent does not
+            // take an answer up within the second it was typed.
+            let typed = self
+                .queue
+                .answer_claimed_at(ask.id, workspace)?
+                .unwrap_or(view.planner.created_at);
+            if view.idle_since.is_none_or(|since| since <= typed) {
+                return Ok(Some(PlannerBusy::AnswerTyped));
             }
         }
-        Ok(false)
+        Ok(None)
     }
 }
 

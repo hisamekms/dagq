@@ -24,7 +24,7 @@ use super::{
 use crate::{
     application::{
         PlanDecided, PlanReviewApplied, PlanReviewApply, PlanReviewHold, PlanReviewJob,
-        PlanReviewStore, ReopenedTask, RevisingProposal,
+        PlanReviewStore, PlannerHold, ReopenedTask, RevisingProposal,
     },
     domain::{
         Ask, AskId, AskKind, HEARTBEAT_TIMEOUT_SECS, PlanAnswer, PlanReviewAction,
@@ -936,6 +936,7 @@ impl PlanReviewStore for SqliteQueue {
         proposal_id: ProposalId,
         planner: Option<PlannerId>,
         waited_secs: i64,
+        holders: &[PlannerHold],
     ) -> Result<()> {
         let now = self.generators.clock.now();
         let tx = self
@@ -947,25 +948,49 @@ impl PlanReviewStore for SqliteQueue {
             params![proposal_id, now],
         )?;
         if changed == 1 {
+            let mut payload = json!({
+                "proposal_id": proposal_id,
+                "planner_id": planner,
+                "waited_secs": waited_secs,
+            });
             let reason = match planner {
                 Some(planner) => format!(
                     "planner {planner} did not submit proposal {proposal_id} again within {waited_secs} seconds of its revise"
                 ),
-                None => format!(
-                    "the revise of proposal {proposal_id} waited {waited_secs} seconds for a planner to take it"
-                ),
+                None => {
+                    // Why the revise waits: the runtime's planners that
+                    // fill the limit, each with why it is not ended.
+                    payload["holders"] = serde_json::to_value(holders)?;
+                    let held = holders
+                        .iter()
+                        .map(|hold| {
+                            let busy = if hold.busy.is_empty() {
+                                "done".to_owned()
+                            } else {
+                                hold.busy.join(", ")
+                            };
+                            format!("planner {} ({busy})", hold.planner_id)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut reason = format!(
+                        "the revise of proposal {proposal_id} waited {waited_secs} seconds for a planner to take it"
+                    );
+                    if !held.is_empty() {
+                        reason.push_str(&format!(
+                            "; the runtime's planners at the limit: {}",
+                            held.join("; ")
+                        ));
+                    }
+                    reason
+                }
             };
+            payload["reason"] = json!(reason);
             event(
                 &tx,
                 anchor(&tx, proposal_id)?,
                 None,
                 event_kind::PLANNER_UNRESPONSIVE,
-                json!({
-                    "proposal_id": proposal_id,
-                    "planner_id": planner,
-                    "waited_secs": waited_secs,
-                    "reason": reason,
-                }),
+                payload,
             )?;
         }
         tx.commit()?;

@@ -434,6 +434,9 @@ impl DraftPlannerStore for SqliteQueue {
     fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool> {
         SqliteQueue::ask_delivered_to(self, ask, workspace)
     }
+    fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
+        SqliteQueue::answer_claimed_at(self, ask, workspace)
+    }
     fn ask_delivery_failed(&self, ask: AskId) -> Result<bool> {
         SqliteQueue::ask_delivery_failed(self, ask)
     }

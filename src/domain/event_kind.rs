@@ -87,6 +87,7 @@ pub const OBSERVE_FINISHED: &str = "observe_finished";
 pub const OBSERVE_STARTED: &str = "observe_started";
 pub const PLANNER_ANSWER_CLAIMED: &str = "planner_answer_claimed";
 pub const PLANNER_ANSWER_CLOSED: &str = "planner_answer_closed";
+pub const PLANNER_RELEASED: &str = "planner_released";
 pub const PLANNER_UNRESPONSIVE: &str = "planner_unresponsive";
 pub const PLAN_DECIDED: &str = "plan_decided";
 pub const PLAN_REVIEW_DISCARDED: &str = "plan_review_discarded";

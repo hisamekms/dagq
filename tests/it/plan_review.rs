@@ -119,7 +119,11 @@ pub(crate) fn add(
 
 /// Submit `tasks` as a new proposal owned by `workspace` (a person's
 /// planner, or none).
-fn submit(queue: &mut SqliteQueue, tasks: &[TaskId], workspace: Option<&str>) -> ProposalId {
+pub(crate) fn submit(
+    queue: &mut SqliteQueue,
+    tasks: &[TaskId],
+    workspace: Option<&str>,
+) -> ProposalId {
     queue
         .submit(Submission {
             tasks: tasks.to_vec(),

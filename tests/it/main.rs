@@ -41,6 +41,7 @@ mod location;
 mod main_checkout;
 mod plan_review;
 mod planner_screen_idle;
+mod planner_slots;
 mod planner_timeout;
 mod queue_dependencies;
 mod queue_goals;
