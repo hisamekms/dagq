@@ -4,7 +4,7 @@ type: design
 title: "`install`"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
+updated: 2026-09-29
 last_verified: 2026-09-28
 scope: runtime
 related:
@@ -12,6 +12,7 @@ related:
   - design-supervisor-lifecycle-up-down
   - adr-0045
   - adr-t632-1
+  - adr-t963-1
   - adr-t618-1
   - design-persistence
 ---
@@ -39,3 +40,7 @@ related:
 - `install::release_binary`: `<to>`の`--version`がすでにVERSIONならそのfileを元にし（cargoを打たない）、そうでなければ`cargo install --locked dagq@VERSION --root <queue dir>/update/release --target-dir <queue dir>/update/target`（`infrastructure::binaries::CargoInstaller`、出力は`<queue dir>/logs/install-release-VERSION.log`）の`<root>/bin/dagq`を元にする。cargoが見つからない・失敗したら何も置き換えずに`install release VERSION: …`のerror。隠しflagの`--cargo`はtestがstubを渡す。
 - その後は上の2〜6と同じ（`Source::Binary`）。非互換のmigrationは`--allow-breaking`が無ければerror、あればdrain。結果は`install`の結果に`release`（VERSION）と`log`を足したもの。
 - test: `tests/it/cli_install_release.rs`がstubの`cargo`で、失敗で置き換えないこと、成功で`--root`と`--target-dir`の引数と置き換え（`.previous`）、リリースでないVERSIONの拒否を確かめる。
+
+## 今後: 入れ替えの前のe2eの関門（未実装）
+
+[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定1。**この節はまだ実装されていない**。元がcheckout（`--from <dir>`か省略時のmain checkout）で、そのcheckoutがdagqのソース（[Source repository](source-repository.md)）のとき、1のビルドの後、2の確認の前に、そのcheckoutと同じtargetで全部のe2e（`cargo test --locked --test e2e -- --ignored`）を流し、落ちれば何も置き換えずにerrorで止まる（落ちたtestとlogのpathを出す）。人が明示したときだけ`--skip-e2e`で飛ばし、結果の`e2e`に`{"status":"skipped"}`を書く（通れば`{"status":"passed","secs"}`）。`--from <binary file>`（自動更新の`approve_update`の`staged`のbinaryは、jobの関門を通ったもの）・`--rollback`・`--release`は関門を持たず、結果の`e2e`は`{"status":"not_applicable"}`。

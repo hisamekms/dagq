@@ -4,13 +4,14 @@ type: design
 title: "Validation"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
+updated: 2026-09-29
 last_verified: 2026-09-27
 scope: runtime
 related:
   - design-supervisor-lifecycle
   - adr-0040
   - adr-0029
+  - adr-t963-1
 ---
 
 # Validation
@@ -29,3 +30,13 @@ related:
 結果は`validation_finished`イベント（`status`、`result_commit`、`reason`、receiptの内容、7で外れたときだけ`scope_violation`と`allowed_paths`、8で欠けたときだけ`evidence_missing`、`receipt_observed`からこの検証までのload averageの`load_avg_mean` / `load_avg_max`（task 197。[`supervise`](supervise.md)の7））と`task_runs.result_commit`/`last_error`に保存する。4以降で拒否した場合もcommitは確認済みなので`result_commit`を残す。成功しても`awaiting_integration`はTaskを`in_progress`のまま保持し、着地まで依存taskを解放しない。
 
 その後: `awaiting_integration`のrunは[Review](review.md#review-supervisor)に進む（leaseとsessionはそのまま）。`integration_approved`のあるrun（`integrate`が呼ばれた後にresumeしたrun）はreviewを待たずに`/exit`→close→着地する（ADR-0027の決定3）。`needs_session`（宣言外のパス、evidenceの欠落）は`/exit`→closeしてleaseを外す。`failed`は`/exit`を送り、workspaceは調査のため閉じずにleaseを外す。
+
+## 今後: 差分から決めるe2eのevidence（未実装）
+
+[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3。**この節はまだ実装されていない**（goal 66の後続のtaskが、[Auto-update](auto-update.md)の入れ替えの前のe2eの関門を着地させた後に実装する）。今は8の要求はtaskの`required_evidence`だけで決まる。
+
+- **設定**: main checkoutの`dagq.toml`の`[e2e]`の`paths`（globの配列。書式は`add --paths`と同じで、repository rootから、`*`は1階層、`**`は任意の深さ）。無ければ空で、差分からは何も要求しない。runtimeが読むのは`[run.env]`と同じくmain checkoutの作業ファイル。`[e2e]`を知らない古いバイナリは`dagq.toml`を読めなくなるので、固定バイナリが対応してから足す。
+- **判定**: 8で、要求するcheckを「taskの`required_evidence`」と「7と同じrunの差分（merge-baseからreceiptの`commit`まで、`GitRepository::changed_paths`）のどれかが`[e2e].paths`のどれかに合えば`e2e`」の和にする。以降の扱い（`needs_session`、`evidence_missing`、resume）は今の8と同じ。`validation_finished`と`evidence_missing`に、`e2e`を要求した出どころ（`task` / `paths`）と、`paths`のときは合ったpathを載せる。範囲の外のrunは、receiptの`e2e`が`not_applicable`（理由つき）でも着地できる（要求されていないcheckの扱い、2）。
+- **workerに知らせる**: workerのprompt（[Prompt](prompt.md)）に、`[e2e].paths`があればそのglobと、差分がそれに触れたらe2eが必須であることを書く。taskに`--evidence e2e`を明示したときは今までどおり必須と書く。
+- **この repository で置く範囲**（実装のtaskがそのときのファイルの配置で確かめて`dagq.toml`に書く候補）: cmuxのadapter（`src/infrastructure/adapters.rs`）、process（`src/infrastructure/process.rs`・`src/infrastructure/sessions.rs`）、launchd（`src/infrastructure/launchd.rs`）、lifecycle（`src/application/lifecycle.rs`・`src/application/supervise/handoff.rs`）、integrate（`src/application/integrate.rs`）、install（`src/application/install.rs`・`src/infrastructure/binaries.rs`）、update（`src/application/update.rs`・`src/application/supervise/update.rs`）、actorの起動（`src/application/actor_executor.rs`・`src/application/session.rs`・`src/application/headless_session.rs`・`src/infrastructure/claude.rs`・`src/infrastructure/codex.rs`）と、e2eそのもの（`tests/e2e.rs`）。`src/application/supervise/`の判断の部分は含めない（runtimeのcommitの多くが触るので狭める効果が消え、fakeのcmuxのin-processのtest（`tests/it/runtime_*`）が確かめ、実物との組み合わせは入れ替えの前の関門が確かめる。ADR-t963-1決定3）。
+- **test**: `domain::scope`の判定のunit testと、`tests/it/runtime_*`に、`[e2e].paths`に触れるrunが`e2e`の`not_applicable`で`evidence_missing`になり、触れないrunは着地し、`--evidence e2e`のtaskは触れなくても必須のままであることを足す。

@@ -4,7 +4,7 @@ type: design
 title: "Auto-update"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
+updated: 2026-09-29
 last_verified: 2026-09-28
 scope: runtime
 related:
@@ -15,6 +15,7 @@ related:
   - adr-0045
   - adr-0073
   - adr-t632-1
+  - adr-t963-1
   - design-persistence
 ---
 
@@ -51,3 +52,13 @@ related:
 リリースのバイナリ（`X.Y.Z`）で動く外部のprojectの更新は、source buildではなくcrates.ioのリリースの検知とaskで行う（[Release update](release-update.md)、ADR-t618-1）。jobの確認から見張りまでは同じ`put_in_place`（`src/application/update.rs`）を通る。
 
 `up --auto-update`のsource buildは、queueのrepositoryがdagqのソースのときだけ動く（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。ソースでないrepositoryでは`up --auto-update`がerrorで止まり、自動更新の設定を持つsupervisorもbuildに進まない。判定と対象の一覧は[Source repository](source-repository.md)にある。`up`はpreflightで`--auto-update`とソースでないrepositoryの組み合わせを`--auto-update builds dagq from the repository's sources, and <checkout> is not dagq's source (...); leave --auto-update off and update dagq with `cargo install dagq`, or with `dagq install --from <binary or checkout>`; the supervisor was not started`で止める（`lifecycle::auto_update_refused`）。登録の`auto_update`が真のsupervisorは、見る回ごとに判定し、ソースでなければ`update_failed`のaskの答えの適用もjobの起動もせずに戻り、ソースでなくなった最初の回だけ警告をlogに出す。
+
+## 今後: 入れ替えの前のe2eの関門（未実装）
+
+[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定1。**この節はまだ実装されていない**（goal 66の後続のtaskが実装し、実装したらこの節を上の本文に移す）。今のjobは上の1〜6のとおりe2eを流さない。
+
+- **段**: jobの1（ビルド）の後、2（非互換のmigration）と3（入れ替え）より前に、`<queue dir>/update/checkout`で`CARGO_TARGET_DIR=<queue dir>/update/target`のまま、全部のe2e（`cargo test --locked --test e2e -- --ignored`）を流す。envは[Run environment](run-environment.md)の`[run.env]`を渡す。出力は`logs/update-<unix時刻>-<commit 12桁>.e2e.log`（他のlogと同じく14日で消える）。testのためにコマンドを置き換える隠しflag（`--update-e2e-command`。`--update-build-command`と同じ形）と、上限（`--update-e2e-timeout`、既定1800秒）を持たせる。
+- **通れば**`update_e2e_passed`（`commit`・`secs`・`log`）を書いて2へ進む。`update_e2e_passed`は`update_started` / `update_built` / `update_restored`と同じくjobの途中の段（`JOB_STEPS`）に入れ、jobがここで死んで残ればinterruptedになる。`status`の`auto_update.state`に`testing`（`update_built`の後、e2eの最中）を足す。
+- **落ちれば**（1件でも失敗、上限切れ、cmuxが使えずe2eを始められない）入れ替えず、非互換のmigrationのビルドも`staged`に置かず`approve_update`を開かない。`update_failed`（`stage: e2e`、`error`に落ちたtestの名前か始められなかった理由、`log`）を書き、今の`update_failed`のask（`retry` / `skip`）を開く。新しいaskのkindは作らない。askの問いに落ちたtestとlogのpathを書く。`stats`の`updates.failed_by_stage`に`e2e`が現れる。
+- e2eのfixtureはqueueのcmuxのworkspace groupを`[dagq-e2e]`と名付ける。同じ名前のgroupはworkerの手元のe2eも作るので、jobは名前でgroupを選んで消さない。後始末は各fixtureの`GroupGuard`に任せ、残ったものを消すなら関門のe2eが作ったgroup（使い捨てのqueueのhashのexternal ID）だけにする。
+- **test**: `tests/it/lifecycle_install.rs`にfakeのe2eのコマンドで、通れば入れ替え、落ちれば入れ替えずに`update_failed`（`stage: e2e`）のaskを開き、非互換のビルドでも落ちれば`approve_update`を開かないことを足す。
