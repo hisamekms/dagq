@@ -400,7 +400,9 @@ impl SessionWatch {
                 }))
             }
             LiveStep::Escalate(attempt, escalation) => {
-                self.escalate_send(sv, run, send, attempt, &escalation)?;
+                sv.for_escalation(run, RecoveryAlert::Stalled, attempt, &escalation, |sv| {
+                    self.escalate_send(sv, run, send, attempt, &escalation)
+                })?;
                 Ok(None)
             }
         }

@@ -1147,33 +1147,28 @@ impl StallWatch {
                 }))
             }
             LiveStep::Escalate(attempt, escalation) => {
-                let note = escalation.note(run, RecoveryAlert::Stalled, attempt);
+                let alert = RecoveryAlert::Stalled;
+                let note = escalation.note(run, alert, attempt);
                 let extra = json!({"reason": why});
-                // A `stalled` ask another alert opened meanwhile already
-                // has a person looking.
-                if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
-                    escalation.record(
-                        sv,
-                        run,
-                        RecoveryAlert::Stalled,
-                        attempt,
-                        &note,
-                        None,
-                        extra,
-                    )?;
-                    return Ok(None);
-                }
-                let id =
-                    self.open_ask(sv, run, workspace, idle, idle_secs, nudge, now, Some(&note))?;
-                escalation.record(
-                    sv,
-                    run,
-                    RecoveryAlert::Stalled,
-                    attempt,
-                    &note,
-                    Some(id),
-                    extra,
-                )?;
+                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+                    // A `stalled` ask another alert opened meanwhile
+                    // already has a person looking.
+                    let id = if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
+                        None
+                    } else {
+                        Some(self.open_ask(
+                            sv,
+                            run,
+                            workspace,
+                            idle,
+                            idle_secs,
+                            nudge,
+                            now,
+                            Some(&note),
+                        )?)
+                    };
+                    escalation.record(sv, run, alert, attempt, &note, id, extra)
+                })?;
                 Ok(None)
             }
         }

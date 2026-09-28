@@ -220,6 +220,20 @@ impl Escalation {
         }
     }
 
+    /// The recovery job whose verdict this escalation carries out (its
+    /// `escalate`, a `repair` of low confidence, or one refused), to record
+    /// as `requested_by`; `None` when no job asked for it (it failed, or
+    /// the alert used its jobs up).
+    pub(super) fn requester(
+        &self,
+        run: &TaskRun,
+        alert: RecoveryAlert,
+        attempt: usize,
+    ) -> Option<ActorContext> {
+        self.verdict()
+            .map(|_| ActorContext::recovery_job(run.id(), alert.as_str(), attempt))
+    }
+
     /// What the inbox is told (ADR-0047 decision 40): the reason category
     /// is the job's `discard` or `scope`, else `recovery_failed`.
     pub(super) fn note(&self, run: &TaskRun, alert: RecoveryAlert, attempt: usize) -> Note {
@@ -336,6 +350,27 @@ impl Escalation {
         sv.queue
             .record_runtime_event(run.id(), event_kind::RECOVERY_FINISHED, payload)?;
         Ok(())
+    }
+}
+
+impl Supervisor<'_> {
+    /// Carry out `escalation` of the live `alert`'s job `attempt`: the
+    /// `recovery_finished` and the ask written meanwhile record the job as
+    /// `requested_by` when its verdict asked for the escalation
+    /// ([`Escalation::requester`], task 782); a failed job's are the
+    /// supervisor's own.
+    pub(super) fn for_escalation<T>(
+        &mut self,
+        run: &TaskRun,
+        alert: RecoveryAlert,
+        attempt: usize,
+        escalation: &Escalation,
+        apply: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        match escalation.requester(run, alert, attempt) {
+            Some(job) => self.for_job(&job, apply),
+            None => apply(self),
+        }
     }
 }
 
@@ -800,15 +835,17 @@ pub(super) fn leave_idle_to_phase(
     let alert = RecoveryAlert::IdleProcess;
     let note = escalation.note(run, alert, attempt);
     warn!(run_id = %run.id(), "run {}: idle processes: {}; left to the {phase} phase's own timeout", run.id(), note.why);
-    escalation.record(
-        sv,
-        run,
-        alert,
-        attempt,
-        &note,
-        None,
-        json!({"outcome": "left_to_phase", "phase": phase}),
-    )
+    sv.for_escalation(run, alert, attempt, escalation, |sv| {
+        escalation.record(
+            sv,
+            run,
+            alert,
+            attempt,
+            &note,
+            None,
+            json!({"outcome": "left_to_phase", "phase": phase}),
+        )
+    })
 }
 
 /// When the `wait` of the job's applied verdict ends, from its
@@ -1438,6 +1475,23 @@ impl SessionWatch {
         escalation: Escalation,
     ) -> Result<()> {
         let alert = RecoveryAlert::LongBackground;
+        sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+            self.ask_background(sv, run, attempt, marker, idle_secs, &escalation)
+        })
+    }
+
+    /// [`Self::escalate_background`] with the job recorded as the
+    /// requester when its verdict asked for it.
+    fn ask_background(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        attempt: usize,
+        marker: SystemTime,
+        idle_secs: i64,
+        escalation: &Escalation,
+    ) -> Result<()> {
+        let alert = RecoveryAlert::LongBackground;
         let note = escalation.note(run, alert, attempt);
         let extra = json!({"marker_at_ms": millis(marker)});
         // A `stalled` ask opened meanwhile (the idle detection's) already
@@ -1550,6 +1604,20 @@ impl SessionWatch {
         attempt: usize,
         escalation: &Escalation,
     ) -> Result<()> {
+        sv.for_escalation(run, RecoveryAlert::IdleProcess, attempt, escalation, |sv| {
+            self.ask_idle(sv, run, attempt, escalation)
+        })
+    }
+
+    /// [`Self::escalate_idle`] with the job recorded as the requester when
+    /// its verdict asked for it.
+    fn ask_idle(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        attempt: usize,
+        escalation: &Escalation,
+    ) -> Result<()> {
         let alert = RecoveryAlert::IdleProcess;
         let note = escalation.note(run, alert, attempt);
         if sv.queue.has_unclosed_ask(run.id(), AskKind::Stalled)? {
@@ -1650,22 +1718,17 @@ impl SessionWatch {
                 }
             }
             LiveStep::Escalate(attempt, escalation) => {
-                let note = escalation.note(run, RecoveryAlert::StuckExit, attempt);
+                let alert = RecoveryAlert::StuckExit;
+                let note = escalation.note(run, alert, attempt);
                 let after = stuck_exit_after(
                     self.exit_for_silence,
                     "The run stays running, and goes on to validating once the session exits",
                 );
                 let workspace = self.workspace.clone();
-                let id = ask_stuck_exit(sv, run, &workspace, &after, Some(&note))?;
-                escalation.record(
-                    sv,
-                    run,
-                    RecoveryAlert::StuckExit,
-                    attempt,
-                    &note,
-                    Some(id),
-                    json!({}),
-                )?;
+                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+                    let id = ask_stuck_exit(sv, run, &workspace, &after, Some(&note))?;
+                    escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
+                })?;
                 self.exit_asked = true;
             }
         }
@@ -1705,18 +1768,13 @@ impl SessionWatch {
         match step {
             LiveStep::Pending | LiveStep::Repaired(_) => {}
             LiveStep::Escalate(attempt, escalation) => {
-                let note = escalation.note(run, RecoveryAlert::PromptWaiting, attempt);
+                let alert = RecoveryAlert::PromptWaiting;
+                let note = escalation.note(run, alert, attempt);
                 let workspace = self.workspace.clone();
-                let id = ask_answer_prompt(sv, run, &workspace, kind, excerpt, Some(&note))?;
-                escalation.record(
-                    sv,
-                    run,
-                    RecoveryAlert::PromptWaiting,
-                    attempt,
-                    &note,
-                    Some(id),
-                    json!({}),
-                )?;
+                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+                    let id = ask_answer_prompt(sv, run, &workspace, kind, excerpt, Some(&note))?;
+                    escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
+                })?;
             }
         }
         Ok(())

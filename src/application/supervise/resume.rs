@@ -1268,20 +1268,18 @@ impl ResumeWatch {
                 );
                 let note = escalation.note(run, RecoveryAlert::StuckExit, attempt);
                 let workspace = self.workspace.clone();
-                match ask_stuck_exit(sv, run, &workspace, &after, Some(&note)) {
-                    Ok(id) => escalation.record(
-                        sv,
-                        run,
-                        RecoveryAlert::StuckExit,
-                        attempt,
-                        &note,
-                        Some(id),
-                        json!({}),
-                    )?,
-                    Err(error) => {
-                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "stuck_exit ask for {} could not be opened: {error:#}", run.id());
+                let alert = RecoveryAlert::StuckExit;
+                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+                    match ask_stuck_exit(sv, run, &workspace, &after, Some(&note)) {
+                        Ok(id) => {
+                            escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
+                        }
+                        Err(error) => {
+                            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "stuck_exit ask for {} could not be opened: {error:#}", run.id());
+                            Ok(())
+                        }
                     }
-                }
+                })?;
                 return Ok(Some(ResumeVerdict {
                     kind: ResumeOutcome::Unresolved,
                     head: sv.repository.head(worktree).ok(),

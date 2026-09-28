@@ -264,6 +264,57 @@ fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
     assert_eq!(finished[0]["confidence"], "low");
 }
 
+/// Task 782: the escalation of a live run that its recovery job's verdict
+/// asked for (here `escalate`) is recorded at the job's request: its
+/// `recovery_finished` and the `stalled` ask's `ask_opened` are the
+/// supervisor's with the job as `requested_by`. A job that failed asked
+/// for nothing: the same events are the supervisor's own.
+#[test]
+fn a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_failed() {
+    let escalate = recovery_verdict(&json!({
+        "verdict": "escalate",
+        "confidence": "high",
+        "diagnosis": "a person should look",
+        "actions": [],
+    }));
+    for (script, by_job) in [
+        (escalate.as_str(), true),
+        ("echo broken >&2; exit 3", false),
+    ] {
+        let (_dir, repo, db) = fixture();
+        let (backend, _reviewer, supervisor) = supervise_long_background(&db, &repo, script);
+        let (ask, detail) = escalated_long_background(&db, &backend, supervisor);
+        let run = &detail.runs[0];
+        let finished = payloads(&detail, "recovery_finished");
+        assert_eq!(finished.len(), 1, "{finished:?}");
+        assert_eq!(finished[0]["ask_id"], json!(ask.id));
+        assert_eq!(
+            finished[0]["outcome"] == "job_failed",
+            !by_job,
+            "{finished:?}"
+        );
+        let expected = (
+            "supervisor".to_owned(),
+            format!("supervisor:{}", std::process::id()),
+            by_job.then(|| format!("recovery-job:{}:long_background:1", run.id())),
+        );
+        for kind in ["recovery_finished", "ask_opened"] {
+            let events: Vec<_> = detail
+                .events
+                .iter()
+                .filter(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+                .collect();
+            assert_eq!(events.len(), 1, "{kind}: {events:?}");
+            let actor = events[0].actor.clone().expect("an actor");
+            assert_eq!(
+                (actor.role, actor.id, actor.requested_by),
+                expected,
+                "{kind}"
+            );
+        }
+    }
+}
+
 /// The worker of the `idle_process` tests: it commits, leaves an orphan in
 /// its worktree (`child`, its pid in `bg.pid` of the run directory), polls
 /// for it without going idle (short `sleep`s, never one process that

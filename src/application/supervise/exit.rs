@@ -334,16 +334,11 @@ impl ExitWatch {
                     Some(why) => format!("{EXIT_UNSENT} ({why}). {}", self.after(run)),
                     None => self.after(run),
                 };
-                let id = ask_stuck_exit(sv, run, workspace, &after, Some(&note))?;
-                escalation.record(
-                    sv,
-                    run,
-                    RecoveryAlert::StuckExit,
-                    attempt,
-                    &note,
-                    Some(id),
-                    json!({}),
-                )?;
+                let alert = RecoveryAlert::StuckExit;
+                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+                    let id = ask_stuck_exit(sv, run, workspace, &after, Some(&note))?;
+                    escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
+                })?;
                 self.exit_asked = true;
                 Ok(false)
             }
