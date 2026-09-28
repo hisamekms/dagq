@@ -108,9 +108,7 @@ fn a_long_background_alert_is_repaired_by_stopping_the_orphan_of_the_worktree() 
             "actions": [{"action": "stop_processes", "pids": ["PID"]}],
         })),
     );
-    let outcome = supervisor.join().unwrap().unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    finished(&db, &backend, supervisor);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = &detail.runs[0];
@@ -192,9 +190,7 @@ fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_rec
             "actions": [{"action": "stop_processes", "pids": ["PID"]}],
         }))],
     );
-    let outcome = supervisor.join().unwrap().unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    finished(&db, &backend, supervisor);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Completed);
@@ -262,9 +258,7 @@ fn escalated_long_background(
         .arg(pid.to_string())
         .status()
         .unwrap();
-    let outcome = supervisor.join().unwrap().unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    finished(db, backend, supervisor);
     (ask, queue.show(TaskId::new(1)).unwrap())
 }
 
@@ -449,9 +443,7 @@ fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job(
             "actions": [{"action": "stop_processes", "pids": ["PID"]}],
         }))],
     );
-    let outcome = supervisor.join().unwrap().unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    finished(&db, &backend, supervisor);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Completed);
@@ -506,9 +498,7 @@ fn a_long_process_that_uses_cpu_time_is_not_an_idle_process_alert() {
         idle_process_stall(),
         &[],
     );
-    let outcome = supervisor.join().unwrap().unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    finished(&db, &backend, supervisor);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Completed);

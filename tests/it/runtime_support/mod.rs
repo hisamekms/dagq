@@ -1615,6 +1615,28 @@ pub fn other_asks(queue: &mut SqliteQueue, all: bool) -> Vec<dagq::domain::Ask> 
         .collect()
 }
 
+/// Wait for the supervisor thread and its sessions and check it recorded no
+/// error; a wait past its limit prints the queue's events first, so that
+/// where the run stalled can be read from the failure (task 679).
+pub fn finished(
+    db: &Path,
+    backend: &TestWorkspace,
+    supervisor: thread::JoinHandle<Result<Value>>,
+) -> Value {
+    let _dump = common::on_timeout(
+        Duration::from_secs(10),
+        format!("print the events of the queue {}", db.display()),
+        {
+            let db = db.to_owned();
+            move || print_queue_events(&db)
+        },
+    );
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    outcome
+}
+
 /// Join `thread`, failing the test with `what` if it has not returned
 /// within [`common::STEP_LIMIT`]; a panic in it fails the test as is.
 pub fn joined<T>(thread: thread::JoinHandle<T>, what: impl Into<String>) -> T {

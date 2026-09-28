@@ -102,28 +102,6 @@ fn supervise_thread(
     })
 }
 
-/// Wait for the supervisor thread and its sessions.
-/// Wait for the supervisor thread and its sessions; a wait past its limit
-/// prints the queue's events first.
-fn finished(
-    db: &Path,
-    backend: &TestWorkspace,
-    supervisor: thread::JoinHandle<Result<Value>>,
-) -> Value {
-    let _dump = common::on_timeout(
-        Duration::from_secs(10),
-        format!("print the events of the queue {}", db.display()),
-        {
-            let db = db.to_owned();
-            move || print_queue_events(&db)
-        },
-    );
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    outcome
-}
-
 fn detail(db: &Path, task: TaskId) -> dagq::domain::TaskDetail {
     SqliteQueue::open(db).unwrap().show(task).unwrap()
 }
