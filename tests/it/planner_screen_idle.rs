@@ -59,6 +59,17 @@ const WORKING: &str = "\
   ? for shortcuts
 ";
 
+/// Claude Code at rest with background shells still running, as its
+/// status line under the input box counts them.
+const BACKGROUND: &str = "\
+⏺ Done.
+
+──────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · 1 shell · ← for agents · ↓ to manage
+";
+
 /// Claude Code holding a dialog over its input.
 const DIALOG: &str = "\
  Do you want to proceed?
@@ -204,6 +215,7 @@ fn a_runtime_planner_without_its_marker_is_ended_by_its_screen() {
     assert_eq!(event["source"], "screen");
     assert_eq!(event["marker"], "missing");
     assert_eq!(event["captures"], 2);
+    assert_eq!(event["background_running"], false);
     // The wall clock may tick between the passes.
     assert!(event["observed_secs"].as_i64().unwrap() >= SCREEN_IDLE_SECS);
     assert_eq!(
@@ -329,4 +341,57 @@ fn a_persons_planner_shows_idle_by_its_screen_and_is_not_asked_to_exit() {
     assert_eq!(state(17 + SCREEN_IDLE_SECS).0, PlannerState::Working);
     *backend.screen.lock().unwrap() = Some(Ok(DIALOG.into()));
     assert_eq!(state(18 + SCREEN_IDLE_SECS).0, PlannerState::Idle);
+}
+
+/// Task 823: a planner of the runtime's without its marker whose screen
+/// shows background shells running is not sent a `/exit` (it would stop at
+/// Claude Code's "Background work is running" dialog), however long the
+/// screen stays so: it is `working`, and `idle_inferred` says what the
+/// screen showed. Once the shells are done it is idle and asked to exit.
+#[test]
+fn a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let draft = runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::GoalGap,
+        json!({"findings": ["the acceptance names a check nobody runs"]}),
+    );
+    let backend = PlanWorkspace::default();
+    let clock = Arc::new(Ahead::default());
+    supervise(&fx, &backend, &clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    let workspace = planner.workspace_id.clone().unwrap();
+    queue.transition(draft, TaskAction::Cancel).unwrap();
+    queue
+        .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    *backend.screen.lock().unwrap() = Some(Ok(BACKGROUND.into()));
+
+    for at in [2, 2 + SCREEN_IDLE_SECS, 3 + SCREEN_IDLE_SECS * 3] {
+        supervise(&fx, &backend, &clock, at);
+        assert!(backend.exits.lock().unwrap().is_empty(), "at {at}");
+    }
+    let view = &views(&fx, &backend, &clock, ScreenIdle::Peek)[0];
+    assert_eq!(view.state, PlannerState::Working);
+    assert_eq!(view.idle_since, None);
+    let events = inferred(&queue);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["background_running"], true);
+    assert_eq!(events[0]["marker"], "missing");
+
+    // The shells are done: the screen at rest starts a new span, and the
+    // planner is asked to exit once it is long enough.
+    *backend.screen.lock().unwrap() = Some(Ok(READY.into()));
+    supervise(&fx, &backend, &clock, 4 + SCREEN_IDLE_SECS * 3);
+    assert!(backend.exits.lock().unwrap().is_empty());
+    supervise(&fx, &backend, &clock, 4 + SCREEN_IDLE_SECS * 4);
+    assert_eq!(*backend.exits.lock().unwrap(), [workspace]);
+    let events = inferred(&queue);
+    assert_eq!(events.len(), 2, "{events:?}");
+    // The latest first.
+    assert_eq!(events[0]["background_running"], false, "{events:?}");
 }

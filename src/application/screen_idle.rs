@@ -6,7 +6,10 @@
 //! work ([`AgentSignals::working`]) and no dialog
 //! ([`AgentSignals::detect_prompt`]), with the same transcript, on two
 //! captures or more spaced over `[stall].screen_idle_secs`. A screen cmux
-//! cannot read infers nothing.
+//! cannot read infers nothing. Each capture also reads whether the screen
+//! shows background work the agent keeps running
+//! ([`AgentSignals::screen_background`]): a span keeps one reading, and the
+//! idle it infers carries it, as the marker's `background_running` would.
 //!
 //! The supervisor keeps the captures in memory ([`Spans`],
 //! [`ScreenIdle::Record`]) and copies them to [`SCREEN_IDLE_FILE`] next to
@@ -97,8 +100,13 @@ impl Spans {
 /// What one capture of the screen showed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenLook {
-    /// Input box ready, no work and no dialog, with this transcript.
-    Idle { transcript: u64 },
+    /// Input box ready, no work and no dialog, with this transcript, and
+    /// background work shown running or not (`None`: the screen does not
+    /// tell).
+    Idle {
+        transcript: u64,
+        background: Option<bool>,
+    },
     /// At work, a dialog or no input box.
     Busy,
     /// cmux could not read it.
@@ -136,6 +144,10 @@ pub struct Observation {
     pub captures: u32,
     /// The fingerprint of the transcript every capture of the span showed.
     pub transcript: u64,
+    /// Whether every capture of the span showed background work running
+    /// (`None`: the screen does not tell).
+    #[serde(default)]
+    pub background: Option<bool>,
     /// Whether the span's inference was recorded as an event.
     #[serde(default)]
     pub recorded: bool,
@@ -153,6 +165,9 @@ pub struct Inference {
     /// The seconds the span covers.
     pub observed_secs: i64,
     pub captures: u32,
+    /// Background work the screen showed running over the span; `None`
+    /// from a provider whose screen does not tell.
+    pub background_running: Option<bool>,
     /// Whether the span's inference is not recorded yet.
     #[serde(skip)]
     pub unrecorded: bool,
@@ -178,6 +193,7 @@ pub fn look_of(signals: &dyn AgentSignals, screen: &str) -> ScreenLook {
     {
         ScreenLook::Idle {
             transcript: fingerprint(&signals.transcript(screen)),
+            background: signals.screen_background(screen),
         }
     } else {
         ScreenLook::Busy
@@ -193,7 +209,9 @@ fn fingerprint(text: &str) -> u64 {
 
 /// The span after a capture at `now` that showed `look`, from `previous`:
 /// an idle look extends a span that began after `last_input` with the same
-/// transcript and begins a new one otherwise; a busy look ends the span;
+/// transcript and the same background work and begins a new one otherwise
+/// (background work that ends starts the idle over); a busy look ends the
+/// span;
 /// an unreadable one leaves it as it was.
 pub fn observe(
     previous: Option<Observation>,
@@ -204,8 +222,15 @@ pub fn observe(
     match look {
         ScreenLook::Unreadable => previous,
         ScreenLook::Busy => None,
-        ScreenLook::Idle { transcript } => Some(match previous {
-            Some(span) if span.first_seen > last_input && span.transcript == transcript => {
+        ScreenLook::Idle {
+            transcript,
+            background,
+        } => Some(match previous {
+            Some(span)
+                if span.first_seen > last_input
+                    && span.transcript == transcript
+                    && span.background == background =>
+            {
                 if now > span.last_seen {
                     Observation {
                         last_seen: now,
@@ -221,6 +246,7 @@ pub fn observe(
                 last_seen: now,
                 captures: 1,
                 transcript,
+                background,
                 recorded: false,
             },
         }),
@@ -327,6 +353,7 @@ impl ScreenProbe<'_> {
                 since: span.first_seen,
                 observed_secs: span.last_seen - span.first_seen,
                 captures: span.captures,
+                background_running: span.background,
                 unrecorded: !span.recorded,
             })
     }
@@ -366,7 +393,8 @@ mod tests {
     use std::time::Duration;
 
     /// Screens are `ready`, `working`, `dialog` or anything else (no box),
-    /// the transcript the text after `ready ` (or none).
+    /// the transcript the text after `ready ` (or none); `ready shells`
+    /// shows background work.
     struct Signals;
 
     impl AgentSignals for Signals {
@@ -390,6 +418,9 @@ mod tests {
         }
         fn working(&self, screen: &str) -> bool {
             screen == "working"
+        }
+        fn screen_background(&self, screen: &str) -> Option<bool> {
+            Some(screen.ends_with("shells"))
         }
         fn idle_hook_failure(&self, log: &str) -> Option<String> {
             log.lines()
@@ -437,6 +468,37 @@ mod tests {
         let typed = observe(Some(second), 140, idle("a"), 110).unwrap();
         assert_eq!((typed.first_seen, typed.captures), (140, 1));
         assert!(!typed.recorded);
+    }
+
+    #[test]
+    fn background_work_on_the_screen_is_kept_by_the_span_and_its_end_starts_over() {
+        let shells = idle("a shells");
+        assert_eq!(
+            shells,
+            ScreenLook::Idle {
+                transcript: fingerprint("ready a shells"),
+                background: Some(true),
+            }
+        );
+        let first = observe(None, 100, shells, 50).unwrap();
+        let running = observe(Some(first), 130, shells, 50).unwrap();
+        assert_eq!(running.background, Some(true));
+        assert!(running.idle(30));
+        // The same transcript without the background work is a new span.
+        let same = ScreenLook::Idle {
+            transcript: fingerprint("ready a shells"),
+            background: Some(false),
+        };
+        let done = observe(Some(running), 140, same, 50).unwrap();
+        assert_eq!(
+            (done.first_seen, done.captures, done.background),
+            (140, 1, Some(false))
+        );
+        // A span written before the screen told keeps none.
+        let old: Observation =
+            serde_json::from_str(r#"{"first_seen":1,"last_seen":2,"captures":2,"transcript":3}"#)
+                .unwrap();
+        assert_eq!(old.background, None);
     }
 
     #[test]

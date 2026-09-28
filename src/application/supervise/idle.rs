@@ -6,8 +6,12 @@
 //!
 //! Only while the marker is missing, or older than the session's last
 //! input, does the screen stand in for it ([`Supervisor::session_idle`],
-//! ADR-t803-1): an idle inferred there knows no background work, and is
-//! taken for an idle without any.
+//! ADR-t803-1): an idle inferred there carries the background work the
+//! screen showed ([`AgentSignals::screen_background`]) as the marker's
+//! `background_running`, so a session that shows background work is waited
+//! for as one whose marker says so, and not sent a `/exit` that would stop
+//! at the agent's dialog. It lists no background task, and a provider whose
+//! screen does not tell is taken for one without background work.
 
 use super::*;
 use crate::application::screen_idle::{
@@ -43,14 +47,15 @@ impl IdleMarker {
     }
 
     /// The idle the screen showed for the marker at `path` (ADR-t803-1):
-    /// written, as it were, when the screen's span began, with no
-    /// background work known, and the inference in its evidence.
+    /// written, as it were, when the screen's span began, with the
+    /// background work the screen showed (none listed), and the inference
+    /// in its evidence.
     fn inferred(path: &Path, inference: Inference) -> Self {
         Self {
             path: path.to_owned(),
             modified: UNIX_EPOCH + Duration::from_secs(u64::try_from(inference.since).unwrap_or(0)),
             hook: IdleHook {
-                background_running: false,
+                background_running: inference.background_running == Some(true),
                 background_tasks: Vec::new(),
                 evidence: vec![
                     ("source", json!(inference.source)),
@@ -78,11 +83,12 @@ impl IdleMarker {
         self.hook.background_running
     }
 
-    /// Background work left running, as evidence: `null` for an idle the
-    /// screen showed, which does not tell.
+    /// Background work left running, as evidence: for an idle the screen
+    /// showed, what the screen read, `null` from a provider whose screen
+    /// does not tell.
     pub(super) fn background_running_evidence(&self) -> Value {
         match self.inferred {
-            Some(_) => Value::Null,
+            Some(inference) => json!(inference.background_running),
             None => json!(self.background_running()),
         }
     }
@@ -127,7 +133,8 @@ impl IdleMarker {
         for (name, value) in &self.hook.evidence {
             evidence.insert((*name).into(), value.clone());
         }
-        // The screen does not show background work: unknown, not none.
+        // What the screen read of background work; unknown, not none, from
+        // a provider whose screen does not tell.
         evidence.insert(
             "background_running".into(),
             self.background_running_evidence(),
@@ -246,6 +253,7 @@ impl Supervisor<'_> {
             "since": inference.since,
             "observed_secs": inference.observed_secs,
             "captures": inference.captures,
+            "background_running": inference.background_running,
         });
         // A resumed session writes its own debug log.
         let logs = [
@@ -435,6 +443,41 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_the_screen_showed_with_background_work_waits_as_the_markers_would() {
+        let files = MemoryFiles::default();
+        let receipt = Path::new("/run/receipt.json");
+        files.write(receipt, b"{}").unwrap();
+        let since = unix_seconds(files.now()) + 1;
+        for (read, running) in [(Some(true), true), (Some(false), false)] {
+            let idle = IdleMarker::inferred(
+                Path::new("/run/idle.json"),
+                Inference {
+                    source: "screen",
+                    marker: MarkerState::Missing,
+                    since,
+                    observed_secs: 60,
+                    captures: 2,
+                    background_running: read,
+                    unrecorded: false,
+                },
+            );
+            assert_eq!(idle.background_running(), running);
+            assert!(idle.background_tasks().is_empty());
+            assert_eq!(idle.background_running_evidence(), json!(running));
+            assert_eq!(idle.idle_since(UNIX_EPOCH), !running);
+            assert_eq!(
+                idle.idle_after_receipt(&files, receipt).unwrap().is_some(),
+                !running
+            );
+            let stopped = idle
+                .stopped_after_receipt(&files, receipt)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stopped["background_running"], running);
+        }
+    }
+
+    #[test]
     fn an_idle_the_screen_showed_counts_from_its_span_without_background_known() {
         let files = MemoryFiles::default();
         let receipt = Path::new("/run/receipt.json");
@@ -448,6 +491,7 @@ mod tests {
                 since,
                 observed_secs: 130,
                 captures: 3,
+                background_running: None,
                 unrecorded: false,
             },
         );

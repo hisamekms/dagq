@@ -79,7 +79,7 @@ fn a_first_session_whose_hook_could_not_write_its_marker_is_validated_by_its_scr
     assert_eq!(observed.len(), 1, "{observed:?}");
     assert_eq!(observed[0]["source"], "screen");
     assert_eq!(observed[0]["marker"], "missing");
-    assert_eq!(observed[0]["background_running"], Value::Null);
+    assert_eq!(observed[0]["background_running"], false);
     assert!(observed[0]["captures"].as_i64().unwrap() >= 2);
     assert!(
         observed[0]["marker_modified"].as_i64().unwrap()
@@ -92,6 +92,7 @@ fn a_first_session_whose_hook_could_not_write_its_marker_is_validated_by_its_scr
     assert_eq!(last["source"], "screen");
     assert_eq!(last["marker"], "missing");
     assert_eq!(last["workspace_id"], WORKSPACE_ID);
+    assert_eq!(last["background_running"], false);
     assert!(last["observed_secs"].as_i64().unwrap() >= SCREEN_IDLE_SECS);
     assert!(
         last["hook_error"]
@@ -166,7 +167,7 @@ receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
     let nudged = payloads(&detail, "stall_nudged");
     assert_eq!(nudged.len(), 1, "{nudged:?}");
     assert_eq!(nudged[0]["phase"], "session");
-    assert_eq!(nudged[0]["background_running"], Value::Null);
+    assert_eq!(nudged[0]["background_running"], false);
     let events = inferred(&detail);
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["phase"], "session");
@@ -234,6 +235,66 @@ fn a_markerless_session_at_a_dialog_is_not_idle() {
 #[test]
 fn a_markerless_session_whose_screen_cannot_be_read_is_not_idle() {
     a_markerless_session_is_held_by(None);
+}
+
+/// Claude Code at rest with background shells still running, as its
+/// status line under the input box counts them.
+const BACKGROUND_SCREEN: &str = "\
+⏺ Done.
+
+──────────────────────────────────────────────────────────────────────
+❯\x20
+──────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · 2 shells · ← for agents · ↓ to manage
+";
+
+/// Task 823: a markerless session after its receipt whose screen shows
+/// background shells running is inferred idle with its background work,
+/// and is not taken for idle (it waits as a marker's background work
+/// would); once the shells are done, the screen at rest starts a new span
+/// and the run goes on to validation.
+#[test]
+fn a_markerless_session_that_shows_background_work_is_not_idle() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, &markerless_agent());
+    *backend.screen.lock().unwrap() = BACKGROUND_SCREEN.into();
+    let backend = Arc::new(backend);
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options()))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !inferred(&queue.show(TaskId::new(1)).unwrap()).is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(inferred(&detail)[0]["background_running"], true);
+    // Well past the threshold, with captures on the way.
+    let captured = backend.captures.load(Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(
+        u64::try_from(SCREEN_IDLE_SECS).unwrap() * 2500,
+    ));
+    assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(kinds.contains(&"receipt_observed"), "{kinds:?}");
+    assert!(!kinds.contains(&"session_idle_observed"), "{kinds:?}");
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    *backend.screen.lock().unwrap() = READY_SCREEN.into();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let observed = payloads(&detail, "session_idle_observed");
+    assert_eq!(observed[0]["source"], "screen");
+    assert_eq!(observed[0]["background_running"], false);
+    let events = inferred(&detail);
+    assert_eq!(
+        events.last().unwrap()["background_running"],
+        false,
+        "{events:?}"
+    );
+    assert!(events.len() >= 2, "{events:?}");
 }
 
 /// A resumed session that rewrote its receipt but wrote no marker ends its

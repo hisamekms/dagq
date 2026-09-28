@@ -215,8 +215,8 @@ impl ExitWatch {
         workspace: &str,
     ) -> Result<bool> {
         // A marker older than the session's last input is not its latest
-        // stop: the screen that shows it idle knows no background work
-        // (ADR-t803-1), and the /exit goes.
+        // stop: the screen that shows it idle stands in (ADR-t803-1), with
+        // the background work it shows, waited for as the marker's.
         let Some(idle) = sv.session_idle(
             run,
             workspace,

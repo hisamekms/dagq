@@ -1219,7 +1219,7 @@ impl StallWatch {
             settled: false,
         });
         self.nudges = self.nudges.saturating_add(1);
-        let text = stall_nudge(run, idle_secs, background)?;
+        let text = stall_nudge(run, idle_secs, background, idle.background_running())?;
         let sent_at = sv.files.now();
         match submit(sv, run, workspace, Input::Text(&text), "nudge") {
             Ok(submission) => {

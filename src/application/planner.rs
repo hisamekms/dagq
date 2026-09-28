@@ -464,7 +464,8 @@ pub struct PlannerView {
     pub alive: bool,
     pub idle_since: Option<i64>,
     /// The idle inferred from the screen (ADR-t803-1), when the idle
-    /// marker could not tell.
+    /// marker could not tell: while the state is `idle`, or while the
+    /// screen shows background work, which keeps it `working`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_inferred: Option<Inference>,
     pub dir: PathBuf,
@@ -550,7 +551,10 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
                         now,
                         super::unix_seconds(last_input),
                     );
-                    probe.screen_idle = inferred.map(|inference| inference.since);
+                    probe.screen_idle = inferred.map(|inference| IdleProbe {
+                        since: inference.since,
+                        background_running: inference.background_running == Some(true),
+                    });
                 }
             }
         } else if let Ok(idle) = marker {
@@ -565,9 +569,12 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
         idle_since: probe
             .idle
             .map(|idle| idle.since)
-            .or(probe.screen_idle)
+            .or(probe.screen_idle.map(|idle| idle.since))
             .filter(|_| idle),
-        idle_inferred: inferred.filter(|_| idle),
+        // Also while the screen shows background work: it is why the
+        // planner is `working`, and its span is recorded.
+        idle_inferred: inferred
+            .filter(|inference| idle || inference.background_running == Some(true)),
         dir,
         planner,
     })

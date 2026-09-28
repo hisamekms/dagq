@@ -945,6 +945,7 @@ impl Supervisor<'_> {
             "since": inference.since,
             "observed_secs": inference.observed_secs,
             "captures": inference.captures,
+            "background_running": inference.background_running,
         });
         if let Some(line) = screen_idle::hook_failure(
             &*self.files,

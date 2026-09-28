@@ -1189,11 +1189,14 @@ pub(crate) fn stale_receipt_nudge(
 /// The one nudge the supervisor types into a worker's session that stayed
 /// idle without a receipt for `idle_secs` (ADR-0043 decision 1): commit and
 /// write the receipt, ask with `dagq ask`, or say what background work it
-/// waits for. `background` names the tasks its idle marker lists as running.
+/// waits for. `background` names the tasks its idle marker lists as running;
+/// `running` says background work runs even when none is listed (an idle
+/// read from a screen that shows it, task 823).
 pub(crate) fn stall_nudge(
     run: &TaskRun,
     idle_secs: i64,
     background: &[crate::domain::stall::BackgroundTask],
+    running: bool,
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let minutes = idle_secs / 60;
@@ -1227,7 +1230,9 @@ pub(crate) fn stall_nudge(
         "dagq: run {} has been idle for {minutes} minutes without a receipt.",
         run.id()
     )];
-    if background.is_empty() {
+    if background.is_empty() && running {
+        lines.push("Background work was still running when you stopped.".to_owned());
+    } else if background.is_empty() {
         lines.push("No background task was running when you stopped.".to_owned());
     } else {
         lines.push("Background tasks still running when you stopped:".to_owned());
@@ -2540,6 +2545,21 @@ mod tests {
         );
     }
 
+    /// Task 823: an idle read from a screen that shows background work
+    /// lists no task but does not tell the worker nothing was running.
+    #[test]
+    fn the_nudge_says_background_work_ran_even_when_none_is_listed() {
+        let run = run_on(Provider::Claude, WorkerMode::Interactive);
+        let none = stall_nudge(&run, 600, &[], false).unwrap();
+        assert!(none.contains("No background task was running"), "{none}");
+        let running = stall_nudge(&run, 600, &[], true).unwrap();
+        assert!(
+            running.contains("Background work was still running when you stopped."),
+            "{running}"
+        );
+        assert!(!running.contains("No background task"), "{running}");
+    }
+
     /// Task 7's claimed run, whose worker is `provider` in `mode`.
     fn run_on(provider: Provider, mode: WorkerMode) -> TaskRun {
         TaskRun::restore(RunRecord {
@@ -2591,7 +2611,7 @@ mod tests {
         texts.push(revise_mismatch_request(run, "the revise", "stale").unwrap());
         let head = CommitSha::try_from("2222222222222222222222222222222222222222").unwrap();
         texts.push(stale_receipt_nudge(run, SHA, &head).unwrap());
-        texts.push(stall_nudge(run, 600, &[]).unwrap());
+        texts.push(stall_nudge(run, 600, &[], false).unwrap());
         texts.push(answer_text(run, 3, "blue"));
         texts.push(recovery_instruction(run, "stalled", "write the receipt"));
         texts.push(continue_text(run));

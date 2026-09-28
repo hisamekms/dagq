@@ -715,6 +715,13 @@ pub trait AgentSignals {
     fn input_pending(&self, screen: &str, text: &str) -> bool;
     /// Whether the screen shows the agent at work on a turn.
     fn working(&self, screen: &str) -> bool;
+    /// Whether `screen` shows background work the agent keeps running
+    /// (Claude Code's count of background shells under its input box): a
+    /// `/exit` sent now stops at the agent's own dialog. `None` from a
+    /// provider whose screen does not tell, which counts as none.
+    fn screen_background(&self, _screen: &str) -> Option<bool> {
+        None
+    }
     /// The part of `screen` only the agent's work changes (its
     /// transcript), compared for a sign of work after a submit: what the
     /// TUI redraws by itself (a clock, a cost, a notification) is left

@@ -390,6 +390,43 @@ pub fn input_pending(screen: &str, text: &str) -> bool {
             .contains(&tail)
 }
 
+/// The kinds of background work Claude Code counts in the status line
+/// under its input box (`⏵⏵ auto mode on · 3 shells · ↓ to manage`), each
+/// after its number: a `/exit` sent while one runs stops at its
+/// "Background work is running" dialog.
+const BACKGROUND_COUNTS: &[&str] = &[
+    "shell",
+    "shells",
+    "background task",
+    "background tasks",
+    "monitor",
+    "monitors",
+    "agent",
+    "agents",
+];
+
+/// Whether the lines under Claude Code's input box count background work
+/// it keeps running: a `·`-separated item of a number above zero and one
+/// of [`BACKGROUND_COUNTS`] (`3 shells`). The hints (`← for agents`, `↓ to
+/// manage`) have no number, and what the transcript above the box says is
+/// not read. A screen without the box shows none.
+pub fn background_on_screen(screen: &str) -> bool {
+    let lines = framed_lines(screen);
+    let Some((_, close)) = input_box_rows(&lines) else {
+        return false;
+    };
+    lines[close + 1..]
+        .iter()
+        .flat_map(|line| line.split('·'))
+        .any(|item| {
+            let item = item.trim();
+            item.split_once(' ').is_some_and(|(count, kind)| {
+                count.parse::<u32>().is_ok_and(|count| count > 0)
+                    && BACKGROUND_COUNTS.contains(&kind.trim().to_lowercase().as_str())
+            })
+        })
+}
+
 /// Whether the agent is at work: Claude Code shows `esc to interrupt`
 /// next to its spinner while it runs a turn.
 pub fn agent_working(screen: &str) -> bool {
@@ -516,6 +553,10 @@ impl AgentSignals for ClaudeCode {
 
     fn working(&self, screen: &str) -> bool {
         agent_working(screen)
+    }
+
+    fn screen_background(&self, screen: &str) -> Option<bool> {
+        Some(background_on_screen(screen))
     }
 
     fn transcript(&self, screen: &str) -> String {
@@ -747,6 +788,61 @@ worktree on  dagq/68a96a60 took 8h32m49s
             Some("2026-09-27T01:02:00Z [DEBUG] Hook Stop (Stop) error: No space left on device")
         );
         assert_eq!(stop_hook_failure("Hook Stop (Stop) success\n"), None);
+    }
+
+    /// Claude Code 2.x idle after a turn that left three background
+    /// shells running, as `cmux read-screen` captured it (2026-09-28).
+    const IDLE_WITH_SHELLS: &str = "\
+⏺ I'm pausing briefly so a background capture can record the idle screen with background shells
+  running.
+
+✻ Worked for 1m 5s · done 9:41 · 3 shells still running
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+❯\x20
+───────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · 3 shells · ← for agents · ↓ to manage
+";
+
+    /// The same session at work on a turn with one shell running.
+    const WORKING_WITH_A_SHELL: &str = "\
+✽ Swirling… (50s · ↓ 3.1k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+❯\x20
+───────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · 1 shell · esc to interrupt · ← for agents · ↓ to manage
+";
+
+    #[test]
+    fn background_on_screen_reads_the_count_under_the_input_box() {
+        assert!(background_on_screen(IDLE_WITH_SHELLS));
+        assert!(input_ready(IDLE_WITH_SHELLS) && !agent_working(IDLE_WITH_SHELLS));
+        assert!(background_on_screen(WORKING_WITH_A_SHELL));
+        assert_eq!(
+            ClaudeCode {
+                executable: "claude".into()
+            }
+            .screen_background(IDLE_WITH_SHELLS),
+            Some(true)
+        );
+        // Once the shells are done the count is gone; the hints stay.
+        let done = IDLE_WITH_SHELLS.replace("· 3 shells ", "");
+        assert!(!background_on_screen(&done));
+        for other in ["2 background tasks", "1 monitor", "1 agent"] {
+            let screen = IDLE_WITH_SHELLS.replace("3 shells", other);
+            assert!(background_on_screen(&screen), "{other}");
+        }
+        for none in ["0 shells", "shells", "12 files"] {
+            let screen = IDLE_WITH_SHELLS.replace("3 shells", none);
+            assert!(!background_on_screen(&screen), "{none}");
+        }
+        // The transcript above the box is not read, nor a screen without it.
+        let above = "3 shells still running\n· 2 shells ·\n";
+        assert!(!background_on_screen(above));
+        let only_above = format!("· 2 shells ·\n{done}");
+        assert!(!background_on_screen(&only_above));
     }
 
     #[test]
