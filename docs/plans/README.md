@@ -19,6 +19,7 @@ tags:
 - [ADR 0001〜0034の棚卸しと統合ADRの組](adr-inventory.md)
 - [cargo llvm-cov nextestへの切り替え前後のintegrateのverifyの所要時間と遅いtest](nextest-measurement.md)（ADR-0076決定6の測定）
 - [cargo llvm-cov nextestのtest段の後（一覧・profrawのmerge・report）の内訳](nextest-post-test-stage.md)（task 564）
+- [着地の検証でcoverageの計測をやめたときの短縮の見積もり](coverage-at-landing.md)（task 967）
 - [sccache導入前後のintegrateのllvm-covの所要時間とhit率](sccache-measurement.md)（ADR-0049決定10の導入後の測定、task 460）
 - [NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方](nextest-test-threads.md)（task 566の前後の比較）
 - [遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり](slow-test-waits.md)（goal 68、task 975）
