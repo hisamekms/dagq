@@ -1,6 +1,7 @@
-//! The git operations: `git.status`, `git.diff`, `git.log` (capability
-//! `git.read`), `git.add` and `git.commit` (capability `git.write`). There is
-//! no push, fetch, remote, config or branch operation.
+//! The git operations: `git.status`, `git.diff`, `git.log`, `git.show`
+//! (capability `git.read`), `git.add`, `git.commit` and `git.restore`
+//! (capability `git.write`). There is no push, fetch, remote, config or
+//! branch operation.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +71,28 @@ pub struct Commit {
     pub subject: String,
 }
 
+/// `POST /v1/git/show`: one commit of the run branch's history (its
+/// message and patch).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShowRequest {
+    /// A revision that names a commit `HEAD` reaches; `HEAD` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Only the patch of these paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShowResponse {
+    /// The full commit id shown.
+    pub commit: String,
+    pub show: String,
+    pub truncated: bool,
+}
+
 /// `POST /v1/git/add`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +116,20 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub commit: String,
 }
+
+/// `POST /v1/git/restore`: the worktree's paths back from the index, or
+/// with `staged`, the index's paths back from `HEAD` (unstage).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreRequest {
+    #[serde(default)]
+    pub staged: bool,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreResponse {}
 
 #[cfg(test)]
 mod tests {
@@ -119,6 +156,25 @@ mod tests {
         );
         assert_eq!(text(&LogRequest { limit: Some(3) }), r#"{"limit":3}"#);
         assert_eq!(decode::<LogRequest>(b"{}").unwrap(), LogRequest::default());
+        assert_eq!(text(&ShowRequest::default()), "{}");
+        let show = ShowRequest {
+            commit: Some("HEAD~1".to_owned()),
+            paths: vec!["a".to_owned()],
+        };
+        assert_eq!(text(&show), r#"{"commit":"HEAD~1","paths":["a"]}"#);
+        assert_eq!(decode::<ShowRequest>(text(&show).as_bytes()).unwrap(), show);
+        let restore = RestoreRequest {
+            staged: true,
+            paths: vec!["a".to_owned()],
+        };
+        assert_eq!(text(&restore), r#"{"staged":true,"paths":["a"]}"#);
+        assert_eq!(
+            decode::<RestoreRequest>(br#"{"paths":["a"]}"#).unwrap(),
+            RestoreRequest {
+                staged: false,
+                paths: vec!["a".to_owned()]
+            }
+        );
         assert_eq!(
             text(&AddRequest {
                 paths: vec!["a".to_owned()]
@@ -164,6 +220,15 @@ mod tests {
         assert_eq!(text(&log), json);
         assert_eq!(decode::<LogResponse>(json.as_bytes()).unwrap(), log);
         assert_eq!(text(&AddResponse {}), "{}");
+        assert_eq!(text(&RestoreResponse {}), "{}");
+        let show = ShowResponse {
+            commit: "c".to_owned(),
+            show: "s".to_owned(),
+            truncated: true,
+        };
+        let json = r#"{"commit":"c","show":"s","truncated":true}"#;
+        assert_eq!(text(&show), json);
+        assert_eq!(decode::<ShowResponse>(json.as_bytes()).unwrap(), show);
         assert_eq!(
             text(&CommitResponse {
                 commit: "c".to_owned()
@@ -177,6 +242,9 @@ mod tests {
         assert!(decode::<StatusRequest>(br#"{"remote":"origin"}"#).is_err());
         assert!(decode::<DiffRequest>(br#"{"ext_diff":true}"#).is_err());
         assert!(decode::<LogRequest>(br#"{"all":true}"#).is_err());
+        assert!(decode::<ShowRequest>(br#"{"commit":"main","ext_diff":true}"#).is_err());
+        assert!(decode::<RestoreRequest>(br#"{"paths":["a"],"source":"main"}"#).is_err());
+        assert!(decode::<RestoreRequest>(br#"{"staged":true}"#).is_err());
         assert!(decode::<AddRequest>(br#"{"paths":[],"force":true}"#).is_err());
         assert!(decode::<CommitRequest>(br#"{"message":"m","no_verify":true}"#).is_err());
         assert!(decode::<CommitRequest>(br#"{"message":"m","push":true}"#).is_err());

@@ -65,7 +65,8 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 836: dagqに`src/application/broker.rs`（machine・image・container・healthの判定と引数。podmanは`Podman` portの後ろ）と`src/infrastructure/broker_podman.rs`（podmanの実行・`flock`・healthのHTTP・imageのbuild contextの用意・`state.json`）、`dagq broker status|start|stop`、`doctor`の`broker`、`containers/broker/Containerfile`（下の「containerとPodman machine」）。supervisorの起動とclaimの前の`ensure`・tickのhealth・attention・`down`での停止・`up`のpreflightは後のtask
 - task 830: serverに`dagq-broker serve`（下の「serve」）。HTTPのserver・loopbackだけのbind・health・tokenの認証・default denyのrouting・構造化のerror・audit。fs・process・gitのbackendは`Backend` traitの後ろの`Unimplemented`（全てのopを`backend_error`の「`<op> is not implemented yet`」で返す）で、各backendのtaskが置き換える
 - task 831: serverにfsのbackend（`crates/dagq-broker/src/backends/fs.rs`の`FsBackend`。下の「mountと閉じ込め」の閉じ込め、`fs.read`・`fs.list`・`fs.write`・`fs.edit`、`--fs-limit-bytes`の上限、tmpとrenameのatomicな書き込み）。serverはbackendに渡す前にauditの日のファイルを追記で開けることを確かめ、開けなければopを走らせずに`backend_error`（`the audit could not be written`）で答える。processとgitはまだ`Unimplemented`
-- task 832: serverにprocessのbackend（`crates/dagq-broker/src/backends/process.rs`の`ProcessBackend`。下の「process.exec」のargvの実行、workspaceのcwd、envの消毒、timeoutと出力とstdinの上限、process groupの停止）。gitはまだ`Unimplemented`
+- task 832: serverにprocessのbackend（`crates/dagq-broker/src/backends/process.rs`の`ProcessBackend`。下の「process.exec」のargvの実行、workspaceのcwd、envの消毒、timeoutと出力とstdinの上限、process groupの停止）
+- task 833: serverにgitのbackend（`crates/dagq-broker/src/backends/git.rs`の`GitBackend`。下の「git」）。`git.status`・`git.diff`・`git.log`・`git.show`・`git.add`・`git.commit`・`git.restore`をtokenのworktreeだけで行う（show・restoreはtask 833の受け入れ条件が求め、2026-09-28に人がreviewの差し戻しで決めた。ADR-t827-2決定7の「status・diff・add・commit・logの類」に入るrun branchの読み書きとして足す）
 
 ### protocolの型
 
@@ -81,7 +82,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 | `HealthResponse` | `{"status":"ok","build","protocol"}` |
 | `fs::{Read,List,Write,Edit}{Request,Response}` | 下の表の欄。`offset` / `limit`は無ければ省く。`create_dirs` / `replace_all`は既定`false`で常に出す。`List`の`entries`は`{name, kind, size}`で`kind`は`file` / `dir` / `symlink` / `other` |
 | `process::{ExecRequest,ExecResponse}` | `env`は`BTreeMap`で空なら省く。`stdin` / `timeout_secs`は無ければ省く。`exit_code`はsignalで終わったとき`null` |
-| `git::*` | `status`の応答は`{branch, entries:[{path, status}]}`（`branch`はdetachedで`null`、`status`はporcelainの2文字）。`diff`の要求は`staged`（常に出す）と`paths`（空なら省く）。`log`の`commits`は`{commit, author, time, subject}`。`add`の応答と`status`の要求は`{}` |
+| `git::*` | `status`の応答は`{branch, entries:[{path, status}]}`（`branch`はdetachedで`null`、`status`はporcelainの2文字）。`diff`の要求は`staged`（常に出す）と`paths`（空なら省く）。`log`の`commits`は`{commit, author, time, subject}`。`show`の要求は`commit`（無ければ省く）と`paths`（空なら省く）、応答は`{commit, show, truncated}`。`restore`の要求は`staged`（常に出す）と`paths`。`add`・`restore`の応答と`status`の要求は`{}` |
 
 ### workspaceと検証
 
@@ -165,8 +166,10 @@ resolver = "3"
 | `POST /v1/git/status` | `git.read` | `{}` | `{branch, entries}` |
 | `POST /v1/git/diff` | `git.read` | `{staged?, paths?}` | `{diff, truncated}` |
 | `POST /v1/git/log` | `git.read` | `{limit?}`（既定20、上限200） | `{commits}` |
+| `POST /v1/git/show` | `git.read` | `{commit?, paths?}`（既定`HEAD`） | `{commit, show, truncated}` |
 | `POST /v1/git/add` | `git.write` | `{paths}` | `{}` |
 | `POST /v1/git/commit` | `git.write` | `{message}` | `{commit}` |
+| `POST /v1/git/restore` | `git.write` | `{staged?, paths}` | `{}` |
 
 `fs.edit`は組み込みのEditと同じで、`old_string`が1つだけ見つかるとき（`replace_all`なら1つ以上）に置換し、見つからない・複数あるとき（messageに一致の数、中身は入れない）・`old_string`が空・`old_string`と`new_string`が同じときは`invalid_request`。`replacements`は置換した数。
 
@@ -271,10 +274,19 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 
 ## git
 
-- brokerのgitは次の設定で走らせる: `-c core.hooksPath=/dev/null -c credential.helper= -c core.fsmonitor=false -c protocol.allow=never -c core.sshCommand=false -c core.pager=cat -c safe.directory=<workspace>`、diffとlogは`--no-ext-diff --no-textconv`、env `GIT_TERMINAL_PROMPT=0`・`GIT_CONFIG_NOSYSTEM=1`・`HOME=<一時のdir>`、authorとcommitterはtokenの`committer`
-- opは`status`・`diff`・`log`・`add`・`commit`だけ。push・fetch・pull・remote・config・checkout・branch・reset・rebase・tag・credentialは持たない
-- `commit`は`git symbolic-ref HEAD`がtokenの`branch`（`refs/heads/dagq/<run id>`）のときだけ行う。違えば`workspace_violation`
-- `add`の`paths`はfsと同じ閉じ込めを通す
+- brokerは`git`の実行ファイルをtokenのworkspaceでだけ走らせる（workerはrepositoryを選べない）。gitを走らせる前に、(1) fsと同じ辿り方でworkspaceを`--root`からsymlinkを辿らずに開き、(2) workspaceの根の`.git`が通常のファイル（worktreeのgitdirを指すファイル）であることを`fstatat(AT_SYMLINK_NOFOLLOW)`で確かめ（symlink・dirは`workspace_violation`、無ければ`backend_error`）、`O_NOFOLLOW`で1回だけ読む。(3) 中身の`gitdir: <絶対パス>`が指すgitdirは、どの`--root`の下にも無い`<common>/worktrees/<name>`で、その`commondir`が`<common>`に解決し、その`gitdir`ファイルがworkspaceの`.git`を指し返すこと（どれか違えば`workspace_violation`）。workerが`.git`を書き換えてmainのcheckout・別のrunのworktreeのgitdir・workspaceの中に自分で作ったrepository（configを握れる）を指させても、opはそこに届かない。(4) 以後の全てのgitのプロセスには解決した`GIT_DIR`（gitdir）・`GIT_COMMON_DIR`・`GIT_WORK_TREE`（workspace）をenvで渡し、`.git`を読み直させない（確かめてから走らせるまでの間の書き換えを効かせない）。共通dirは、containerでも同じ絶対パスでmountされている（ADR-t827-2決定5）
+- 環境: envは空にしてから、`PATH`（brokerの`PATH`）・`HOME=<opごとに作って消す一時のdir>`・`LC_ALL=C`・`GIT_CONFIG_NOSYSTEM=1`・`GIT_CONFIG_GLOBAL=/dev/null`・`GIT_TERMINAL_PROMPT=0`・`GIT_OPTIONAL_LOCKS=0`・`GIT_PAGER=cat`・`GIT_EDITOR=false`・`GIT_TRACE2*=0`・`GIT_ALLOW_PROTOCOL=`（空。どのtransportも許さない）・`GIT_NO_LAZY_FETCH=1`・`GIT_NO_REPLACE_OBJECTS=1`と、上の`GIT_DIR`など、authorとcommitter（`GIT_AUTHOR_*`・`GIT_COMMITTER_*`、tokenの`committer`）だけを置く
+- 設定（`-c`）: `core.hooksPath=/dev/null`・`credential.helper=`・`core.askPass=`・`core.fsmonitor=false`・`core.untrackedCache=false`・`core.pager=cat`・`core.editor=false`・`core.quotePath=false`・`core.sshCommand=false`・`core.attributesFile=/dev/null`・`core.excludesFile=/dev/null`・`protocol.allow=never`と`protocol.<file|ext|ssh|git|http|https>.allow=never`（repositoryのconfigのprotocolごとの`allow`に上書きさせない）・`commit.gpgSign=false`・`log.showSignature=false`・`diff.ignoreSubmodules=all`・`color.ui=false`・`gc.auto=0`・`maintenance.auto=false`・`safe.directory=<workspace>`。repositoryのconfigが定義するfilterのdriverは、opの前に`git config --get-regexp '^filter\..*\.'`で名前を読み、driverごとに`filter.<driver>.clean=`・`smudge=`・`process=`・`required=false`で消す（`.gitattributes`はworkerが書けるので、addとstatusでclean filterを走らせない）。diffは`--no-ext-diff --no-textconv --no-color`
+- opは`status`・`diff`・`log`・`show`・`add`・`commit`・`restore`だけ。push・fetch・pull・remote・config・checkout・branch・reset・rebase・tag・credentialは持たない（`/v1/git/push`などは`invalid_request`の`no such operation`）
+- `status`: `branch`は`git symbolic-ref -q --short HEAD`（detachedで`null`）、`entries`は`git status --porcelain=v1 -z --untracked-files=all --ignore-submodules=all --no-renames`の各行
+- `diff`: `paths`は下の閉じ込めを通して`:(top,literal)<workspaceからの相対>`のpathspecにする（workspaceそのものは`:(top)`。workerのpathspecのmagicは効かない）。`staged`は`--cached`
+- `log`: `limit`は既定20で、200を超える値は200にする。`--no-show-signature`
+- `show`: 1つのcommitのmessageとpatch（`git show --no-ext-diff --no-textconv --no-color --no-show-signature --ignore-submodules=all --format=medium <commit> -- <pathspec>`）。`commit`は既定`HEAD`の任意のrevisionで、空・`-`で始まる（optionとして読まれうる）ものは`invalid_request`。`git rev-parse --verify -q <commit>^{commit}`で解き（commitにならなければ`backend_error`）、`git merge-base --is-ancestor <解いたcommit> HEAD`でHEADの履歴にあるものだけを見せる（mainのbaseまでの履歴は見え、別のrunのbranchのcommitは`workspace_violation`）。`paths`はdiffと同じpathspec。応答の`commit`は解いた完全なid。出力の上限はdiffと同じで`truncated`
+- `add`: `paths`は1つ以上（空は`invalid_request`）。diffと同じpathspec。workspaceの根の`.git`（大文字小文字を問わない）は`workspace_violation`。symlinkの先は辿らない（gitが拒む）
+- `restore`: `paths`は1つ以上（空は`invalid_request`）で、diffと同じpathspec。`staged`が無い・falseなら`git restore --worktree`（worktreeをindexから戻す）、trueなら`git restore --staged --source=HEAD`（indexをHEADから戻す＝unstage。worktreeは変えない）。別のrevision（`--source`）からは戻せない。書き込みはgitが行い、symlinkの先へは書かない（gitが拒んで`backend_error`）。smudge filterは上の設定で消える
+- `commit`: `git symbolic-ref -q HEAD`がtokenの`branch`（`refs/heads/dagq/<run id>`）のときだけ行い、違う・detachedなら`workspace_violation`。`git commit`ではなくplumbingで作る: `write-tree`、親（`refs/heads/<branch>`のcommit）のtreeと同じなら`backend_error`（nothing to commit）、`commit-tree --no-gpg-sign <tree> -p <親>`（messageは前後の空白を除いて末尾に改行を付け、stdinで渡す。空は`invalid_request`）、`update-ref -m "commit (dagq-broker)" refs/heads/<branch> <commit> <親>`（古い値つきなので、動かすのはrun branchだけで、読んだ親からだけ）。hookは走らない
+- 上限: gitの各プロセスは`--exec-timeout-secs`（既定60秒）で、超えればprocess groupにSIGKILLを送って`timeout`。gitが終わった後もpipeを持ち続ける子孫は同じ期限まで待ってからprocess groupごと止め、期限の後もpipeを読むthreadは待たない（要求を止めない）。stdoutは`--output-limit-bytes`（既定1 MiB）までで、`diff`と`show`は文字の境界で切って`truncated: true`、他は`output_limit`
+- errorのmessageは、gitのstderrのうち最初の`fatal:` / `error:`の行（200文字まで）か終了の状態だけで、diffやファイルの中身を入れない。auditは他のopと同じ1要求1行で、commit message・diff・pathspecの外のpathは残さない（`paths`が1つのときだけ`path`）
 - `process.exec`の`argv[0]`のbasenameが`git`なら、allowlistに関わらず`capability_denied`。これは誤りを止めるもので、`sh -c`・`env`・複製したバイナリからは通る
 
 ## process.exec
@@ -382,10 +394,10 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
   ```
 
   を`HostActorExecutor`がClaude Codeの`--mcp-config <file>`で渡す。envにtokenの値は入れない
-- 道具（`mcp__dagq-broker__<name>`）: `read_file`（`path`・`offset`・`limit`）、`list_dir`（`path`）、`write_file`（`path`・`content`）、`edit_file`（`path`・`old_string`・`new_string`・`replace_all`。組み込みのEditと同じ）、`exec`（`argv`・`env`・`stdin`・`timeout_secs`）、`git_status`、`git_diff`（`staged`・`paths`）、`git_log`（`limit`）、`git_add`（`paths`）、`git_commit`（`message`）。errorはMCPの`isError`とerror codeを返す
+- 道具（`mcp__dagq-broker__<name>`）: `read_file`（`path`・`offset`・`limit`）、`list_dir`（`path`）、`write_file`（`path`・`content`）、`edit_file`（`path`・`old_string`・`new_string`・`replace_all`。組み込みのEditと同じ）、`exec`（`argv`・`env`・`stdin`・`timeout_secs`）、`git_status`、`git_diff`（`staged`・`paths`）、`git_log`（`limit`）、`git_show`（`commit`・`paths`）、`git_add`（`paths`）、`git_commit`（`message`）、`git_restore`（`staged`・`paths`）。errorはMCPの`isError`とerror codeを返す
 - workerのsettingsの`permissions.allow`にserver単位の`mcp__dagq-broker`を足す。`preferred`では組み込みの道具を拒まない
 - workerのpromptに、brokerの道具があるときだけ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先する」段落を足す
-- 人の診断のCLI: `dagq-broker-client health`、`fs read|list|write|edit`、`exec`、`git status|diff|log|add|commit`、`token inspect`（token fileのclaimsだけを出し、tokenと署名は出さない）。`--url`と`--token-file`（無ければenv）
+- 人の診断のCLI: `dagq-broker-client health`、`fs read|list|write|edit`、`exec`、`git status|diff|log|show|add|commit|restore`、`token inspect`（token fileのclaimsだけを出し、tokenと署名は出さない）。`--url`と`--token-file`（無ければenv）
 
 ## audit
 

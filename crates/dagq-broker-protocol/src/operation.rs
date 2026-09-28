@@ -17,13 +17,15 @@ pub enum Operation {
     GitStatus,
     GitDiff,
     GitLog,
+    GitShow,
     GitAdd,
     GitCommit,
+    GitRestore,
 }
 
 impl Operation {
     /// Every operation, in order.
-    pub const ALL: [Operation; 11] = [
+    pub const ALL: [Operation; 13] = [
         Self::Health,
         Self::FsRead,
         Self::FsList,
@@ -33,8 +35,10 @@ impl Operation {
         Self::GitStatus,
         Self::GitDiff,
         Self::GitLog,
+        Self::GitShow,
         Self::GitAdd,
         Self::GitCommit,
+        Self::GitRestore,
     ];
 
     /// The name in the audit, `fs.read` and so on.
@@ -49,8 +53,10 @@ impl Operation {
             Self::GitStatus => "git.status",
             Self::GitDiff => "git.diff",
             Self::GitLog => "git.log",
+            Self::GitShow => "git.show",
             Self::GitAdd => "git.add",
             Self::GitCommit => "git.commit",
+            Self::GitRestore => "git.restore",
         }
     }
 
@@ -74,8 +80,10 @@ impl Operation {
             Self::GitStatus => "/v1/git/status",
             Self::GitDiff => "/v1/git/diff",
             Self::GitLog => "/v1/git/log",
+            Self::GitShow => "/v1/git/show",
             Self::GitAdd => "/v1/git/add",
             Self::GitCommit => "/v1/git/commit",
+            Self::GitRestore => "/v1/git/restore",
         }
     }
 
@@ -87,8 +95,10 @@ impl Operation {
             Self::FsRead | Self::FsList => Some(BrokerCapability::FsRead),
             Self::FsWrite | Self::FsEdit => Some(BrokerCapability::FsWrite),
             Self::ProcessExec => Some(BrokerCapability::ProcessExec),
-            Self::GitStatus | Self::GitDiff | Self::GitLog => Some(BrokerCapability::GitRead),
-            Self::GitAdd | Self::GitCommit => Some(BrokerCapability::GitWrite),
+            Self::GitStatus | Self::GitDiff | Self::GitLog | Self::GitShow => {
+                Some(BrokerCapability::GitRead)
+            }
+            Self::GitAdd | Self::GitCommit | Self::GitRestore => Some(BrokerCapability::GitWrite),
         }
     }
 
@@ -148,8 +158,10 @@ mod tests {
                 ("git.status", Some("git.read")),
                 ("git.diff", Some("git.read")),
                 ("git.log", Some("git.read")),
+                ("git.show", Some("git.read")),
                 ("git.add", Some("git.write")),
                 ("git.commit", Some("git.write")),
+                ("git.restore", Some("git.write")),
             ]
         );
     }

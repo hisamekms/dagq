@@ -383,7 +383,11 @@ fn replace(
 
 /// Open the regular file `name` in `dir` for reading, not following a
 /// symlink, not blocking on a FIFO and not taking a terminal.
-fn open_regular(dir: &OwnedFd, name: &OsStr, shown: &str) -> Result<(File, libc::stat), Failure> {
+pub(crate) fn open_regular(
+    dir: &OwnedFd,
+    name: &OsStr,
+    shown: &str,
+) -> Result<(File, libc::stat), Failure> {
     let fd = open_at(
         dir,
         name,
@@ -537,7 +541,7 @@ fn unlink_at(dir: &OwnedFd, name: &OsStr) -> io::Result<()> {
     cvt(unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) }).map(drop)
 }
 
-fn lstat_at(dir: &OwnedFd, name: &OsStr) -> io::Result<libc::stat> {
+pub(crate) fn lstat_at(dir: &OwnedFd, name: &OsStr) -> io::Result<libc::stat> {
     let name = c_name(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `dir` is open, `name` NUL-terminated and `stat` large enough;

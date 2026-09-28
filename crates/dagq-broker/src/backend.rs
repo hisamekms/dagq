@@ -30,8 +30,10 @@ impl BackendKind {
             Operation::GitStatus
             | Operation::GitDiff
             | Operation::GitLog
+            | Operation::GitShow
             | Operation::GitAdd
-            | Operation::GitCommit => Some(Self::Git),
+            | Operation::GitCommit
+            | Operation::GitRestore => Some(Self::Git),
         }
     }
 
@@ -55,8 +57,10 @@ pub enum BackendRequest {
     GitStatus(git::StatusRequest),
     GitDiff(git::DiffRequest),
     GitLog(git::LogRequest),
+    GitShow(git::ShowRequest),
     GitAdd(git::AddRequest),
     GitCommit(git::CommitRequest),
+    GitRestore(git::RestoreRequest),
 }
 
 impl BackendRequest {
@@ -73,8 +77,10 @@ impl BackendRequest {
             Operation::GitStatus => Self::GitStatus(decode(body).ok()?),
             Operation::GitDiff => Self::GitDiff(decode(body).ok()?),
             Operation::GitLog => Self::GitLog(decode(body).ok()?),
+            Operation::GitShow => Self::GitShow(decode(body).ok()?),
             Operation::GitAdd => Self::GitAdd(decode(body).ok()?),
             Operation::GitCommit => Self::GitCommit(decode(body).ok()?),
+            Operation::GitRestore => Self::GitRestore(decode(body).ok()?),
         };
         Some(request)
     }
@@ -89,6 +95,8 @@ impl BackendRequest {
             Self::FsEdit(request) => vec![&request.path],
             Self::GitDiff(request) => request.paths.iter().map(String::as_str).collect(),
             Self::GitAdd(request) => request.paths.iter().map(String::as_str).collect(),
+            Self::GitShow(request) => request.paths.iter().map(String::as_str).collect(),
+            Self::GitRestore(request) => request.paths.iter().map(String::as_str).collect(),
             Self::ProcessExec(_) | Self::GitStatus(_) | Self::GitLog(_) | Self::GitCommit(_) => {
                 Vec::new()
             }
@@ -219,6 +227,8 @@ mod tests {
                 Some("git"),
                 Some("git"),
                 Some("git"),
+                Some("git"),
+                Some("git"),
             ]
         );
         for operation in Operation::ALL.into_iter().skip(1) {
@@ -229,7 +239,7 @@ mod tests {
 
     #[test]
     fn decodes_each_request_and_names_its_paths() {
-        let cases: [(Operation, &str, Vec<&str>); 10] = [
+        let cases: [(Operation, &str, Vec<&str>); 12] = [
             (Operation::FsRead, r#"{"path":"a"}"#, vec!["a"]),
             (Operation::FsList, r#"{"path":"d"}"#, vec!["d"]),
             (
@@ -246,6 +256,8 @@ mod tests {
             (Operation::GitStatus, "{}", vec![]),
             (Operation::GitDiff, r#"{"paths":["p","q"]}"#, vec!["p", "q"]),
             (Operation::GitLog, "{}", vec![]),
+            (Operation::GitShow, r#"{"paths":["s"]}"#, vec!["s"]),
+            (Operation::GitRestore, r#"{"paths":["t"]}"#, vec!["t"]),
             (Operation::GitAdd, r#"{"paths":["r"]}"#, vec!["r"]),
             (Operation::GitCommit, r#"{"message":"m"}"#, vec![]),
         ];

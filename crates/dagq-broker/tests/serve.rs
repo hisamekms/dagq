@@ -1,6 +1,6 @@
 //! `dagq-broker serve` as a host process (no podman) on `127.0.0.1:0`:
-//! health, the refusals of default deny, the fs and process backends and
-//! their audit lines.
+//! health, the refusals of default deny, the fs, process and git backends
+//! and their audit lines.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -399,7 +399,7 @@ fn default_deny_refuses_unknown_routes_missing_capabilities_and_foreign_fields()
 }
 
 #[test]
-fn paths_are_confined_and_git_is_not_implemented_yet() {
+fn paths_are_confined_and_a_workspace_that_is_no_worktree_fails_git() {
     let broker = Broker::start();
     let claims = broker.claims("jti-all", &BrokerCapability::ALL);
     let token = broker.token(&claims, true);
@@ -445,6 +445,7 @@ fn paths_are_confined_and_git_is_not_implemented_yet() {
     assert_eq!(line["argc"], 2);
     assert_eq!(line["argv_sha256"].as_str().unwrap().len(), 64);
 
+    // This workspace is a plain directory, not a git worktree.
     let answer = broker.post("/v1/git/add", Some(&token), r#"{"paths":["x","y"]}"#);
     answer.assert_refused(ErrorCode::BackendError);
     let line = answer.audit_line(&broker);
@@ -821,6 +822,190 @@ fn process_exec_runs_argv_in_the_workspace_within_the_limits_and_is_audited() {
         "ALLOWED",
         HOST_SECRET_VALUE,
     ] {
+        assert!(!text.contains(secret), "{secret}");
+    }
+}
+
+/// `git <args>` in `dir` as a person would, outside the broker.
+fn host_git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Host")
+        .env("GIT_AUTHOR_EMAIL", "host@example.com")
+        .env("GIT_COMMITTER_NAME", "Host")
+        .env("GIT_COMMITTER_EMAIL", "host@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn git_operations_work_on_the_run_branch_and_every_one_is_audited() {
+    let broker = Broker::start();
+    let repo = broker.root().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    host_git(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("README"), "hello\n").unwrap();
+    host_git(&repo, &["add", "README"]);
+    host_git(&repo, &["commit", "-q", "-m", "first"]);
+    let marker = broker.root().join("credential-ran");
+    host_git(
+        &repo,
+        &[
+            "config",
+            "credential.helper",
+            &format!("!touch {}", marker.display()),
+        ],
+    );
+    let upstream = broker.root().join("upstream.git");
+    host_git(&broker.root(), &["init", "-q", "--bare", "upstream.git"]);
+    host_git(
+        &repo,
+        &["remote", "add", "origin", upstream.to_str().unwrap()],
+    );
+    let workspace = PathBuf::from(broker.workspace());
+    fs::remove_dir(&workspace).unwrap();
+    host_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "dagq/run-1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    let claims = broker.claims("jti-git", &BrokerCapability::ALL);
+    let token = broker.token(&claims, true);
+    let ok = |path: &str, body: Value| {
+        let answer = broker.post(path, Some(&token), &body.to_string());
+        assert_eq!(answer.status, 200, "{path}: {}", answer.body);
+        let line = broker.audit().pop().expect("an audit line for the request");
+        assert_eq!(line["result"], "ok", "{path}");
+        assert_eq!(line["run_id"], "run-1");
+        assert_eq!(line["jti"], "jti-git");
+        assert_eq!(line["backend"], "git");
+        (serde_json::from_str::<Value>(&answer.body).unwrap(), line)
+    };
+
+    fs::write(workspace.join("README"), "hello\nsecret-content\n").unwrap();
+    let (status, line) = ok("/v1/git/status", serde_json::json!({}));
+    assert_eq!(
+        status,
+        serde_json::json!({"branch": "dagq/run-1", "entries": [{"path": "README", "status": " M"}]})
+    );
+    assert_eq!(
+        (line["op"].as_str(), line["capability"].as_str()),
+        (Some("git.status"), Some("git.read"))
+    );
+    let (added, line) = ok("/v1/git/add", serde_json::json!({"paths": ["README"]}));
+    assert_eq!(added, serde_json::json!({}));
+    assert_eq!(line["op"], "git.add");
+    assert_eq!(line["capability"], "git.write");
+    assert_eq!(line["path"], "README");
+    let (diff, line) = ok("/v1/git/diff", serde_json::json!({"staged": true}));
+    assert!(diff["diff"].as_str().unwrap().contains("+secret-content"));
+    assert_eq!(line["op"], "git.diff");
+    let (committed, line) = ok(
+        "/v1/git/commit",
+        serde_json::json!({"message": "secret-message"}),
+    );
+    let commit = committed["commit"].as_str().unwrap().to_owned();
+    assert_eq!(host_git(&repo, &["rev-parse", "dagq/run-1"]), commit);
+    assert_eq!(line["op"], "git.commit");
+    let (log, line) = ok("/v1/git/log", serde_json::json!({"limit": 1}));
+    assert_eq!(log["commits"][0]["commit"], commit.as_str());
+    assert_eq!(log["commits"][0]["author"], "A");
+    assert_eq!(line["op"], "git.log");
+    let (shown, line) = ok("/v1/git/show", serde_json::json!({}));
+    assert_eq!(shown["commit"], commit.as_str());
+    assert!(shown["show"].as_str().unwrap().contains("secret-message"));
+    assert_eq!(line["op"], "git.show");
+    assert_eq!(line["capability"], "git.read");
+    fs::write(workspace.join("README"), "scratch\n").unwrap();
+    let (restored, line) = ok("/v1/git/restore", serde_json::json!({"paths": ["README"]}));
+    assert_eq!(restored, serde_json::json!({}));
+    assert_eq!(
+        fs::read_to_string(workspace.join("README")).unwrap(),
+        "hello\nsecret-content\n"
+    );
+    assert_eq!(line["op"], "git.restore");
+    assert_eq!(line["capability"], "git.write");
+    assert_eq!(line["path"], "README");
+
+    // No push, fetch, remote or config operation exists.
+    for op in [
+        "push",
+        "fetch",
+        "pull",
+        "remote",
+        "config",
+        "checkout",
+        "reset",
+        "branch",
+        "credential",
+        "clone",
+        "rebase",
+    ] {
+        let answer = broker.post(
+            &format!("/v1/git/{op}"),
+            Some(&token),
+            r#"{"remote":"origin"}"#,
+        );
+        answer.assert_refused(ErrorCode::InvalidRequest);
+        assert_eq!(answer.error().error.message, "no such operation");
+        let line = answer.audit_line(&broker);
+        assert_eq!(line["result"], "invalid_request");
+        assert_eq!(line["jti"], "jti-git");
+    }
+    let answer = broker.post(
+        "/v1/git/commit",
+        Some(&token),
+        r#"{"message":"m","push":true}"#,
+    );
+    answer.assert_refused(ErrorCode::InvalidRequest);
+    assert_eq!(host_git(&upstream, &["for-each-ref"]), "");
+    assert!(!marker.exists());
+
+    // Another run's worktree is out of reach, and only git.read / git.write
+    // open the operations.
+    let answer = broker.post(
+        "/v1/git/add",
+        Some(&token),
+        r#"{"paths":["../run-2/worktree/theirs"]}"#,
+    );
+    answer.assert_refused(ErrorCode::WorkspaceViolation);
+    assert_eq!(answer.audit_line(&broker)["backend"], "git");
+    host_git(&workspace, &["checkout", "-q", "-b", "elsewhere"]);
+    fs::write(workspace.join("b"), "b\n").unwrap();
+    ok("/v1/git/add", serde_json::json!({"paths": ["b"]}));
+    let answer = broker.post("/v1/git/commit", Some(&token), r#"{"message":"m"}"#);
+    answer.assert_refused(ErrorCode::WorkspaceViolation);
+    assert_eq!(answer.audit_line(&broker)["result"], "workspace_violation");
+    assert_eq!(host_git(&repo, &["rev-parse", "dagq/run-1"]), commit);
+    let read_only = broker.claims("jti-git-read", &[BrokerCapability::GitRead]);
+    let read_only = broker.token(&read_only, true);
+    let answer = broker.post("/v1/git/commit", Some(&read_only), r#"{"message":"m"}"#);
+    answer.assert_refused(ErrorCode::CapabilityDenied);
+    let answer = broker.post(
+        "/v1/git/restore",
+        Some(&read_only),
+        r#"{"paths":["README"]}"#,
+    );
+    answer.assert_refused(ErrorCode::CapabilityDenied);
+
+    let text = broker.audit_text();
+    for secret in ["secret-content", "secret-message", token.as_str()] {
         assert!(!text.contains(secret), "{secret}");
     }
 }

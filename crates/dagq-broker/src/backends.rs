@@ -1,6 +1,6 @@
 //! The backends that do the operations behind the [`crate::backend::Backend`]
-//! trait. fs and process are here; git is still
-//! [`crate::backend::Unimplemented`].
+//! trait: fs, process and git.
 
 pub mod fs;
+pub mod git;
 pub mod process;
