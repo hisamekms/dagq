@@ -156,14 +156,18 @@ use Capability as C;
 
 /// The `dagq` subcommands that change state, and every capability a form
 /// of each may need (`docs/design/authorization.md`). A role that has none
-/// of them gets the command denied in its Claude settings. Commands whose
-/// forms read (`observe --history`, `graph`) are not listed.
+/// of them gets the command denied in its Claude settings. A command with a
+/// form that only reads (`observe --history`, `graph` without `--out`) is
+/// not listed, as a rule on its name would deny that form too; the CLI
+/// refuses its other form. A test in `main.rs` checks that every
+/// subcommand is here or on its list of the commands left out.
 pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("init", &[C::QueueAdmin]),
     ("migrate", &[C::QueueAdmin]),
     ("rebind", &[C::QueueAdmin]),
     ("install", &[C::BinaryInstall]),
     ("auto-update", &[C::BinaryInstall]),
+    ("release-update", &[C::BinaryInstall]),
     ("up", &[C::ServiceLifecycle]),
     ("down", &[C::ServiceLifecycle]),
     ("broker start", &[C::ServiceLifecycle]),

@@ -3292,6 +3292,19 @@ mod tests {
                     "--commit", "c", "--token", "t", "--to", "/t", "--repo", "/r", "--log", "/l",
                 ],
             ),
+            (
+                "release-update",
+                &[
+                    "--release",
+                    "1.0.0",
+                    "--token",
+                    "t",
+                    "--to",
+                    "/t",
+                    "--log",
+                    "/l",
+                ],
+            ),
             ("up", &[]),
             ("down", &[]),
             ("broker start", &[]),
@@ -3377,6 +3390,113 @@ mod tests {
                     assert!(needs.contains(&capability), "{argv:?} needs {capability}");
                 }
             }
+        }
+    }
+
+    /// The subcommands `DAGQ_COMMANDS` leaves out, each for a reason: the
+    /// ones that only read, and the ones with a form that reads, which a
+    /// rule on the name would deny as well (the CLI refuses the other
+    /// form). A subcommand on neither list fails
+    /// [`every_subcommand_is_denied_or_left_out_on_purpose`].
+    const LEFT_OUT_COMMANDS: &[&str] = &[
+        // Read the queue.
+        "locate",
+        "list",
+        "show",
+        "lint",
+        "proposal list",
+        "proposal show",
+        "goal list",
+        "goal show",
+        "notes",
+        "marks",
+        "findings",
+        "search",
+        "related",
+        "candidates",
+        "planners",
+        "status",
+        "asks",
+        "events",
+        "timeline",
+        "stats",
+        "kpi",
+        "forecast",
+        "doctor",
+        "broker status",
+        // Follow the queue's events (`queue.watch`).
+        "watch",
+        // Write a file out of the queue (`queue.export`), not the queue.
+        "report",
+        // Forms that read: `graph` without `--out` and `observe --history`.
+        "graph",
+        "observe",
+    ];
+
+    /// Every subcommand clap knows, nested ones by their path (`goal
+    /// close`), is in `DAGQ_COMMANDS` or on [`LEFT_OUT_COMMANDS`] (task
+    /// 851): a new command that changes state is not left out of the
+    /// Claude settings' deny rules unnoticed. A parent's entry in
+    /// `DAGQ_COMMANDS` covers its subcommands (`dependency`), and a parent
+    /// that only groups subcommands (`goal`) needs no entry of its own.
+    #[test]
+    fn every_subcommand_is_denied_or_left_out_on_purpose() {
+        // Building clap's command needs more than a test thread's stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(every_subcommand_is_listed)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn every_subcommand_is_listed() {
+        use clap::CommandFactory;
+        use dagq::application::execution::DAGQ_COMMANDS;
+        // Each subcommand's path, and whether it only groups others (`goal`
+        // runs nothing of its own; `ask` does).
+        fn paths(command: &clap::Command, prefix: &str, out: &mut Vec<(String, bool)>) {
+            for sub in command.get_subcommands() {
+                let path = format!("{prefix}{}", sub.get_name());
+                out.push((path.clone(), sub.is_subcommand_required_set()));
+                paths(sub, &format!("{path} "), out);
+            }
+        }
+        let mut found = Vec::new();
+        paths(&Cli::command(), "", &mut found);
+        let listed = |path: &str| {
+            DAGQ_COMMANDS.iter().any(|(command, _)| *command == path)
+                || LEFT_OUT_COMMANDS.contains(&path)
+        };
+        for (path, groups) in &found {
+            // A parent's entry in DAGQ_COMMANDS denies its subcommands too;
+            // a group with no entry of its own is covered by its children's.
+            let covered = listed(path)
+                || path.match_indices(' ').any(|(at, _)| {
+                    DAGQ_COMMANDS
+                        .iter()
+                        .any(|(command, _)| *command == &path[..at])
+                });
+            assert!(
+                covered || *groups,
+                "`dagq {path}` is neither in DAGQ_COMMANDS nor in LEFT_OUT_COMMANDS"
+            );
+        }
+        let all: Vec<&String> = found.iter().map(|(path, _)| path).collect();
+        for path in DAGQ_COMMANDS
+            .iter()
+            .map(|(command, _)| *command)
+            .chain(LEFT_OUT_COMMANDS.iter().copied())
+        {
+            assert!(
+                all.iter().any(|known| *known == path),
+                "no command `{path}`"
+            );
+            assert!(
+                !(DAGQ_COMMANDS.iter().any(|(command, _)| *command == path)
+                    && LEFT_OUT_COMMANDS.contains(&path)),
+                "`{path}` is on both lists"
+            );
         }
     }
 }

@@ -190,8 +190,16 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 
 多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（task 738。`src/application/execution.rs`の`permission_deny(role)`）。
 
-- `DAGQ_COMMANDS`は状態を変える`dagq`のsubcommandと、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit testが確かめる。
+- `DAGQ_COMMANDS`は状態を変える`dagq`のsubcommandと、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit test（`the_denied_commands_need_what_the_table_says`）が確かめる。clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り（`broker status`を含む）、`watch`、ファイルを書き出す`report`、読み取りの形を持つ`graph`・`observe`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`、task 851）が確かめ、どちらにも無いsubcommandを足すと落ちる。状態を変えるsubcommandを足したら表に入れる（task 851の列挙で、隠しcommandの`release-update`（`service.install`）を足した）。
 - actorを名指す変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`）の書き換え（`<名前>=...`・`export`・`env <名前>=`・`env -u`・`unset`）も全roleで拒む。
 - 順は`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後。
 
 これはguardrailでenforcementではない。Claude Codeの規則はコマンドの先頭の形しか見ないので、pathで打つ`~/.local/bin/dagq integrate`、pluginのskillが使う`"$DAGQ" ...`や`${CLAUDE_PLUGIN_ROOT}/bin/dagq ...`、subcommandの前にglobalのflagを置く`dagq --db X integrate`、`sh -c`、scriptの中からの呼び出しは通る。拒む判定はCLIの`Authorizer`（上の「適用の範囲」）がする。どちらもhostではadvisoryで、隔離は将来のsandboxのbackend（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）が担う。
+
+このすり抜けを塞ぐために、規則をwildcardで広げること（例: `Bash(* integrate*)`や`Bash(*dagq* integrate:*)`で`"$DAGQ" integrate`・`${CLAUDE_PLUGIN_ROOT}/bin/dagq integrate`・`dagq --db X integrate`も拒む）はしない（2026-09-28 plannerの判断、task 851）。理由:
+
+1. 誤検出が大きい。subcommandの名前は日常の語なので、workerが作業で打つ`cargo test --locked --test it integrate::`・`git log --grep integrate`・`rg integrate`・`rg 'ready'`なども拒まれ、作業が止まる。
+2. 広げてもenforcementにならない。`sh -c`・script・変数に入れたcommandの名前からは今までどおり通るので、守れる範囲は少ししか増えない。
+3. 拒む判定はCLIの`Authorizer`がすでにする。guardrailは「間違いで打つのを先に止める」ためのもので、pathやglobal flagの形で打った呼び出しもCLIが拒み、`authorization_denied`に記録する。
+
+規則の形は`Bash(dagq <command>:*)`と識別の変数の書き換えのままにする。
