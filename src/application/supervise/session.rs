@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::exit::CAUSE_EXIT_TIMEOUT;
 use crate::domain::language::with_instruction;
 
 impl Supervisor<'_> {
@@ -209,6 +210,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             receipt_seen_at: None,
             exit_requested: None,
             exit_timed_out: false,
+            exit_retry: Box::default(),
             first_commit_seen: false,
             agent_seen: None,
             prompt_checked: None,
@@ -242,6 +244,9 @@ pub(super) struct SessionWatch {
     pub(super) exit_requested: Option<Instant>,
     /// `exit_request_timed_out` is recorded once per run; the lease is kept.
     pub(super) exit_timed_out: bool,
+    /// The retries of the `/exit` after its timeout (ADR-0047 decision 25),
+    /// boxed to keep the phase small.
+    pub(super) exit_retry: Box<ExitRetry>,
     /// `first_commit_observed` is recorded (also by a previous supervisor).
     pub(super) first_commit_seen: bool,
     /// When this supervisor first saw the agent registered.
@@ -250,7 +255,7 @@ pub(super) struct SessionWatch {
     pub(super) prompt_checked: Option<Instant>,
     /// `screen_hash` of the dialog last recorded as `prompt_waiting` and not
     /// cleared since.
-    pub(super) prompt_hash: Option<String>,
+    pub(super) prompt_hash: Option<Box<str>>,
     /// The `stuck_exit` ask of the exit timeout is registered (also by a
     /// previous supervisor).
     pub(super) exit_asked: bool,
@@ -328,6 +333,7 @@ impl SessionWatch {
             receipt_seen_at: None,
             exit_requested: None,
             exit_timed_out: false,
+            exit_retry: Box::default(),
             first_commit_seen: true,
             agent_seen: None,
             prompt_checked: None,
@@ -363,7 +369,7 @@ impl SessionWatch {
         let events = queue.run_events(run.id())?;
         self.prompt_hash = RunHistory::from_events(&events)
             .waiting_prompt_hash_after(anchor)
-            .map(str::to_owned);
+            .map(Box::from);
         self.recovery = RecoveryWatch::adopt(queue, run)?;
         Ok(())
     }
@@ -563,6 +569,8 @@ impl SessionWatch {
                 }
                 // Nobody needs to send /exit to a session that exited, nor
                 // answer its dialog.
+                let workspace = self.workspace.clone();
+                self.exit_retry.exited(sv, run, &workspace);
                 for ask in sv
                     .queue
                     .close_stuck_exit_asks(run.id(), STUCK_EXIT_CLOSED)?
@@ -680,20 +688,28 @@ impl SessionWatch {
             } else if requested.elapsed() >= timeout {
                 // Something in the session (for example a dialog) held the
                 // /exit back. Keep the lease and keep watching: the run
-                // proceeds to validation once the session exits. /exit is not
-                // sent again, since it could pick another option of a dialog;
-                // the recovery job looks at it (ADR-0047 decision 39).
+                // proceeds to validation once the session exits. /exit is
+                // retried only where the screen shows it safe (ADR-0047
+                // decision 25); past the retries the recovery job looks at
+                // it (decision 39).
                 sv.queue.record_runtime_event(
                     run.id(),
                     EventKind::ExitRequestTimedOut,
                     json!({"code": ReasonCode::ExitTimeout, "workspace_id": self.workspace, "timeout_secs": timeout.as_secs()}),
                 )?;
-                warn!(run_id = %run.id(), "session for {} did not exit within {}s of the exit request in workspace {}; keeping the run for its recovery job", run.id(), timeout.as_secs(), self.workspace);
+                warn!(run_id = %run.id(), "session for {} did not exit within {}s of the exit request in workspace {}; keeping the run and retrying its /exit", run.id(), timeout.as_secs(), self.workspace);
                 self.exit_timed_out = true;
+                self.exit_retry.start(CAUSE_EXIT_TIMEOUT);
             }
         }
         if self.exit_timed_out && !self.exit_asked {
-            self.recover_stuck_exit(sv, run)?;
+            // A run that has not been reviewed is not closed to go on
+            // (ADR-0047 decision 25): past its retries, its recovery job.
+            let workspace = self.workspace.clone();
+            let typed = self.exit_requested.is_some();
+            if self.exit_retry.poll(sv, run, &workspace, typed)? != RetryStep::Waiting {
+                self.recover_stuck_exit(sv, run)?;
+            }
         }
         Ok(None)
     }
@@ -841,7 +857,7 @@ impl SessionWatch {
                         }),
                     )?;
                     info!(run_id = %run.id(), "run {} waits at a {} dialog in workspace {}; its recovery job looks at it", run.id(), kind, self.workspace);
-                    self.prompt_hash = Some(hash);
+                    self.prompt_hash = Some(hash.into());
                 }
                 // A changed screen under an open ask keeps that ask, so a
                 // ticking line cannot flood the inbox.

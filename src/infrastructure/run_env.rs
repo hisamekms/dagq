@@ -9,7 +9,8 @@
 //! merged in (ADR-0068 decision 2). `[disk]` holds how much free disk
 //! space a claim and a landing need (ADR-0047 decision 44, task 377).
 //! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
-//! decision 24). `[worker.trial]` turns on the limited trial of the worker's model
+//! decision 24). `[exit]` holds the retries of a `/exit` the session held
+//! back and the wait after each (ADR-0047 decision 25). `[worker.trial]` turns on the limited trial of the worker's model
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the model and effort of a
 //! session other than the worker's (ADR-0079 decision 7). `[supervisor]`
 //! holds `parallel` and `max_waiting` of a supervisor started without the
@@ -22,6 +23,7 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use crate::{
@@ -29,6 +31,7 @@ use crate::{
     domain::{
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         disk::DiskConfig,
+        exit::ExitConfig,
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
         resume::ResumeConfig,
@@ -50,6 +53,7 @@ const CONFLICTS_TABLE: &str = "conflicts";
 const RECHECK_TABLE: &str = "recheck";
 const DISK_TABLE: &str = "disk";
 const RESUME_TABLE: &str = "resume";
+const EXIT_TABLE: &str = "exit";
 /// `[repository]`: the landing branch and its push (ADR-t615-1).
 const REPOSITORY_TABLE: &str = "repository";
 /// The keys of `[repository]`.
@@ -72,13 +76,14 @@ const ROLES_TABLE: &str = "roles";
 const LANGUAGE_TABLE: &str = "language";
 /// `[supervisor]`: `parallel` and `max_waiting` (task 698).
 const SUPERVISOR_TABLE: &str = "supervisor";
-const TABLES: [&str; 10] = [
+const TABLES: [&str; 11] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
     RECHECK_TABLE,
     DISK_TABLE,
     RESUME_TABLE,
+    EXIT_TABLE,
     REPOSITORY_TABLE,
     WORKER_TRIAL_TABLE,
     LANGUAGE_TABLE,
@@ -112,7 +117,8 @@ pub fn parse_run_env(text: &str) -> Result<Vec<(String, String)>> {
 
 /// What the file holds: `[run.env]`, `[stall]` (ADR-0043 decision 4),
 /// `[conflicts]`, `[recheck]` (ADR-0068 decision 2), `[disk]` (ADR-0047
-/// decision 44), `[resume]` (ADR-0047 decision 24) and `[kpi]` (ADR-0051
+/// decision 44), `[resume]` (ADR-0047 decision 24), `[exit]` (ADR-0047
+/// decision 25) and `[kpi]` (ADR-0051
 /// decisions 17 and 19).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
@@ -128,6 +134,8 @@ pub struct Config {
     pub disk: DiskConfig,
     /// `[resume]`, the default for the key it does not set.
     pub resume: ResumeConfig,
+    /// `[exit]`, the defaults for the keys it does not set.
+    pub exit: ExitConfig,
     /// `[kpi]` and its `[kpi.targets."<kpi>"]`; `None` without any.
     pub kpi: Option<KpiSettings>,
     /// `[repository]`: the landing branch, the push remote and whether
@@ -151,6 +159,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut conflict_keys: Vec<String> = Vec::new();
     let mut disk_keys: Vec<String> = Vec::new();
     let mut resume_keys: Vec<String> = Vec::new();
+    let mut exit_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
     let mut supervisor_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
@@ -195,7 +204,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -395,6 +404,29 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 config.resume.conflict_only_limit = usize::try_from(limit).with_context(with)?;
                 resume_keys.push(key.to_owned());
             }
+            Some(EXIT_TABLE) => {
+                ensure!(
+                    ExitConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{EXIT_TABLE}]; the keys are {}",
+                    ExitConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !exit_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                if key == "retries" {
+                    let retries = parse_whole(rest.trim()).with_context(with)?;
+                    config.exit.retries = usize::try_from(retries).with_context(with)?;
+                } else {
+                    config.exit.intervals = parse_seconds_list(rest.trim())
+                        .with_context(with)?
+                        .into_iter()
+                        .map(Duration::from_secs)
+                        .collect();
+                }
+                exit_keys.push(key.to_owned());
+            }
             Some(CONFLICTS_TABLE) => {
                 ensure!(
                     ConflictConfig::KEYS.contains(&key),
@@ -426,7 +458,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -444,6 +476,28 @@ pub(super) fn parse_positive(text: &str, what: &str) -> Result<i64> {
         .with_context(|| format!("expected a whole {what}, not {digits}"))?;
     ensure!(value > 0, "must be a positive {what}, not {value}");
     Ok(value)
+}
+
+/// A non-empty array of positive whole numbers of seconds (`[30, 60]`),
+/// followed by nothing but an optional comment.
+fn parse_seconds_list(text: &str) -> Result<Vec<u64>> {
+    let list = strip_comment(text);
+    ensure!(!list.is_empty(), "missing value");
+    let inner = list
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .with_context(|| format!("expected an array of seconds like [30, 60], not {list}"))?;
+    ensure!(!inner.trim().is_empty(), "the array is empty");
+    let values = inner
+        .split(',')
+        .map(str::trim)
+        .map(|item| {
+            let secs = parse_positive(item, "number of seconds")?;
+            u64::try_from(secs).context("seconds out of range")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(!values.is_empty(), "the array is empty");
+    Ok(values)
 }
 
 /// A whole number, 0 or more, followed by nothing but an optional comment.
@@ -509,6 +563,20 @@ pub fn load_resume_config(root: &Path) -> Result<Option<ResumeConfig>> {
         parse_config(&text)
             .with_context(|| format!("parse {}", path.display()))?
             .resume,
+    ))
+}
+
+/// `[exit]` of the `dagq.toml` in `root` (ADR-0047 decision 25), `None`
+/// when there is no file; no table or no key is the default.
+pub fn load_exit_config(root: &Path) -> Result<Option<ExitConfig>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        parse_config(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .exit,
     ))
 }
 
@@ -1244,6 +1312,71 @@ LITERAL = 'no \n escapes # here'
             let error = format!("{:#}", parse_run_env(text).unwrap_err());
             assert!(error.contains(message), "{text:?}: {error}");
         }
+    }
+
+    #[test]
+    fn parses_and_loads_the_exit_table() {
+        use crate::domain::exit::ExitConfig;
+        let secs = |list: &[u64]| {
+            list.iter()
+                .map(|secs| Duration::from_secs(*secs))
+                .collect::<Vec<_>>()
+        };
+        let config = parse_config(
+            "[exit] # retries\nretries = 2 # fewer\nretry_intervals_secs = [5, 10] # apart\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.exit,
+            ExitConfig {
+                retries: 2,
+                intervals: secs(&[5, 10]),
+            }
+        );
+        assert_eq!(parse_config("").unwrap().exit, ExitConfig::default());
+        let config = parse_config("[exit]\nretries = 0\n").unwrap();
+        assert_eq!(config.exit.retries, 0);
+        assert_eq!(config.exit.intervals, secs(&[30, 60, 120]));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_exit_config(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[exit]\nretry_intervals_secs = [1,2,3,4]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_exit_config(dir.path()).unwrap(),
+            Some(ExitConfig {
+                retries: 3,
+                intervals: secs(&[1, 2, 3, 4]),
+            })
+        );
+        for (text, message) in [
+            ("[exit]\nx = 1", "dagq.toml:2: unknown key x in [exit]"),
+            ("[exit]\nretries = -1", "must be 0 or more"),
+            (
+                "[exit]\nretries = 1\nretries = 2",
+                "retries is defined twice",
+            ),
+            (
+                "[exit]\nretry_intervals_secs = 30",
+                "expected an array of seconds",
+            ),
+            ("[exit]\nretry_intervals_secs = []", "the array is empty"),
+            ("[exit]\nretry_intervals_secs = [0]", "must be a positive"),
+            (
+                "[exit]\nretry_intervals_secs = [a]",
+                "expected a whole number of seconds",
+            ),
+            ("[exit]\nretry_intervals_secs = ", "missing value"),
+            ("[exit]\nretry_intervals_secs = [30,,60]", "missing value"),
+            ("[exit]\n[exit]", "[exit] is defined twice"),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(message), "{text:?}: {error}");
+        }
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[exit]\nretries = x\n").unwrap();
+        assert!(load_exit_config(dir.path()).is_err());
     }
 
     #[test]

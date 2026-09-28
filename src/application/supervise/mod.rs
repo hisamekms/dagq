@@ -105,6 +105,7 @@ mod dialog;
 mod disk;
 mod draft_planner;
 mod exit;
+mod exit_retry;
 mod finding_planner;
 mod forecast;
 mod goal_review;
@@ -140,8 +141,8 @@ pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::{
-    deliver::*, dialog::*, exit::*, headless::*, idle::*, jobs::*, recovery::*, resume::*,
-    revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
+    deliver::*, dialog::*, exit::*, exit_retry::*, headless::*, idle::*, jobs::*, recovery::*,
+    resume::*, revise::*, session::*, stale::*, stall::*, sweep::*, waiting::*,
 };
 
 /// How often the supervisor records the finished transcript turns of the
@@ -234,6 +235,9 @@ pub struct LoopSettings {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     pub resume: ResumeConfig,
+    /// `[exit]`: the retries of a `/exit` a session held back (ADR-0047
+    /// decision 25).
+    pub exit: crate::domain::exit::ExitConfig,
 }
 
 /// Where the supervisor works and what it starts: the queue database and
@@ -605,6 +609,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         defer: claim_defer::DeferWatch::default(),
         disk_config: settings.disk,
         resume_config: settings.resume,
+        exit_config: settings.exit.clone(),
         free_space: ports.free_space,
         disk: disk::DiskWatch::default(),
         free: None,
@@ -796,6 +801,9 @@ struct Supervisor<'a> {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     resume_config: ResumeConfig,
+    /// `[exit]`: the retries of a `/exit` a session held back (ADR-0047
+    /// decision 25).
+    exit_config: crate::domain::exit::ExitConfig,
     /// Reads the free bytes of the file system of a path.
     free_space: fn(&Path) -> Option<u64>,
     /// The disk between passes (task 377).

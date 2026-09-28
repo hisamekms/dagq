@@ -221,6 +221,9 @@ impl Supervisor<'_> {
                 // Only the latest request's timeout and ask count: a run
                 // resumed and stuck again is asked again (task 240).
                 let exit_timed_out = history.latest_exit_timed_out();
+                // The retries recorded are not made again (ADR-0047
+                // decision 25).
+                let exit_retry = Box::new(ExitRetry::adopt(&history, since));
                 let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
                 // A dialog recorded before adoption is not recorded again
                 // while the same screen stays up; one the receipt ended is
@@ -231,7 +234,7 @@ impl Supervisor<'_> {
                 } else {
                     history.waiting_prompt_hash()
                 }
-                .map(str::to_owned);
+                .map(Box::from);
                 Phase::Session(SessionWatch {
                     workspace: run
                         .workspace_id()
@@ -248,6 +251,7 @@ impl Supervisor<'_> {
                         .map(since),
                     exit_requested,
                     exit_timed_out,
+                    exit_retry,
                     first_commit_seen,
                     agent_seen: None,
                     prompt_checked: None,
@@ -255,7 +259,10 @@ impl Supervisor<'_> {
                     // A timeout recorded without its ask (by a binary that
                     // made none, or a supervisor that died between the two)
                     // still gets one; one asked before is not asked again.
-                    exit_asked: !exit_timed_out || history.latest_exit_asked(),
+                    // A request that has not timed out yet is asked about
+                    // (after its retries) once the adopter's own timeout
+                    // passes.
+                    exit_asked: history.latest_exit_asked(),
                     // Only a run whose wrapper heartbeats is adopted.
                     silent: false,
                     exit_for_silence: false,
@@ -479,7 +486,12 @@ impl Supervisor<'_> {
         // A timeout recorded without its ask still gets one; one asked
         // about the same request is not asked again (as for a running run,
         // task 104), one about an earlier request is (task 240).
-        watch.exit_asked = !watch.timed_out || history.latest_exit_asked();
+        watch.exit_asked = history.latest_exit_asked();
+        // Its retries recorded are not made again (ADR-0047 decision 25).
+        if watch.timed_out {
+            let now = Instant::now();
+            watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
+        }
         // A /exit that never got there, whose close to land the previous
         // supervisor decided but did not record, is judged again now
         // (task 464) rather than waited out as one the session held back.
@@ -548,7 +560,11 @@ impl Supervisor<'_> {
         let history = RunHistory::from_events(events);
         watch.timed_out =
             after(event_kind::EXIT_REQUEST_TIMED_OUT) && history.latest_exit_timed_out();
-        watch.exit_asked = !watch.timed_out || history.latest_exit_asked();
+        watch.exit_asked = history.latest_exit_asked();
+        if watch.timed_out {
+            let now = Instant::now();
+            watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
+        }
         Ok(Some(Phase::Exiting(watch)))
     }
     /// The last `approve_landing` ask the supervisor opened after event
@@ -582,7 +598,7 @@ impl Supervisor<'_> {
     /// The instant, on the monotonic clock whose `now` is `now`, at which
     /// `event` was recorded on the files' wall clock: an adopted wait keeps
     /// the time already waited.
-    fn instant_of(&self, event: &RunEvent, now: Instant) -> Instant {
+    pub(super) fn instant_of(&self, event: &RunEvent, now: Instant) -> Instant {
         let ago = self
             .files
             .now()

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::exit::{CAUSE_BACKEND_TIMEOUT, CAUSE_EXIT_TIMEOUT};
 
 /// Asks the run's session to `/exit` once (unless it ended already) and
 /// waits for its wrapper to exit; then the supervisor closes the workspace
@@ -12,8 +13,11 @@ use crate::domain::EventKind;
 /// receipt (task 242): its work has run the resume timeout since, and
 /// waiting again would put the `stuck_exit` ask twice as far off. A session that
 /// holds the `/exit` back past the exit timeout is recorded as
-/// `exit_request_timed_out` and waited for, keeping the lease, as before
-/// (ADR-0027 leaves it unchanged).
+/// `exit_request_timed_out` and waited for, keeping the lease (ADR-0027
+/// leaves it unchanged), while the `/exit` is retried ([`ExitRetry`],
+/// ADR-0047 decision 25). Retries used up close the workspace of a run that
+/// lands when its receipt still holds ([`landable_without_exit`]); any
+/// other run goes to its `stuck_exit` recovery job.
 pub(super) struct ExitWatch {
     pub(super) session: Option<SessionRef>,
     /// When the watch began, for the wait on background work.
@@ -36,6 +40,8 @@ pub(super) struct ExitWatch {
     /// The recovery job of a session that holds the `/exit` back
     /// (`stuck_exit`, ADR-0047 decision 39).
     pub(super) recovery: RecoveryWatch,
+    /// The retries of the `/exit` after its timeout (ADR-0047 decision 25).
+    pub(super) retry: ExitRetry,
     pub(super) then: AfterExit,
 }
 
@@ -56,6 +62,7 @@ impl ExitWatch {
             exit_for_silence: false,
             unsent: None,
             recovery: RecoveryWatch::default(),
+            retry: ExitRetry::default(),
             then,
         }
     }
@@ -116,6 +123,11 @@ impl ExitWatch {
             }
             // Nobody needs to send /exit to a session that exited, nor
             // anything else.
+            // Only a session that recorded its exit took a retry; a
+            // wrapper that died did not.
+            if wrapper.is_some_and(|w| w.exited_at.is_some()) {
+                self.retry.exited(sv, run, &session.workspace);
+            }
             self.recovery.stop(sv, run);
             close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
             for ask in sv
@@ -192,15 +204,58 @@ impl ExitWatch {
                     EventKind::ExitRequestTimedOut,
                     json!({"code": ReasonCode::ExitTimeout, "workspace_id": session.workspace, "timeout_secs": timeout.as_secs()}),
                 )?;
-                warn!(run_id = %run.id(), "session for {} did not exit within {}s of the exit request in workspace {}; keeping the run for its recovery job", run.id(), timeout.as_secs(), session.workspace);
+                warn!(run_id = %run.id(), "session for {} did not exit within {}s of the exit request in workspace {}; keeping the run and retrying its /exit", run.id(), timeout.as_secs(), session.workspace);
                 self.timed_out = true;
+                self.retry.start(CAUSE_EXIT_TIMEOUT);
             }
             Some(_) => (),
         }
         if self.timed_out && !self.exit_asked {
-            return self.recover(sv, run, &session.workspace);
+            return self.after_timeout(sv, run, &session.workspace);
         }
         Ok(false)
+    }
+
+    /// Past the `/exit`'s timeout: its retries ([`ExitRetry`]) first. Once
+    /// they are used up, a run that lands whose receipt still holds against
+    /// its clean worktree ([`landable_without_exit`]) has its workspace
+    /// closed and goes on to land (`true`, ADR-0047 decision 25); any other
+    /// run, or one whose workspace cannot be closed, goes to its recovery
+    /// job and the `stuck_exit` ask ([`Self::recover`]).
+    fn after_timeout(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        workspace: &str,
+    ) -> Result<bool> {
+        // Its cause, restored on a takeover, says whether the /exit reached
+        // the session.
+        let exit_typed = self.requested.is_some() && !self.retry.unsent;
+        match self.retry.poll(sv, run, workspace, exit_typed)? {
+            RetryStep::Waiting => return Ok(false),
+            RetryStep::UsedUp { retried: true } if matches!(self.then, AfterExit::Land) => {
+                let mut held = landable_without_exit(sv, run);
+                if held.is_none()
+                    && let Err(error) = close_unless_gone(sv.cmux, workspace)
+                {
+                    held = Some(format!("its workspace could not be closed: {error:#}"));
+                }
+                match held {
+                    None => {
+                        let cause = self.retry.cause();
+                        let attempts = self.retry.attempts as u64;
+                        self.closed_to_land(sv, run, workspace, cause, attempts, false)?;
+                        info!(run_id = %run.id(), "session of {} held its /exit back through {attempts} retries; its receipt still holds against its clean worktree, so its workspace {workspace} was closed and it goes on to land", run.id());
+                        return Ok(true);
+                    }
+                    Some(why) => {
+                        warn!(run_id = %run.id(), "session of {} held its /exit back through its retries, and it cannot land without its exit ({why}); its recovery job looks at it", run.id());
+                    }
+                }
+            }
+            RetryStep::UsedUp { .. } | RetryStep::Over => (),
+        }
+        self.recover(sv, run, workspace)
     }
 
     /// Whether the `/exit` waits for background work: the idle marker shows
@@ -382,13 +437,14 @@ impl ExitWatch {
                 sv,
                 run,
                 workspace,
+                CAUSE_BACKEND_TIMEOUT,
                 u64::from(sv.cmux.call_attempts().max(1)),
                 false,
             )?;
             info!(run_id = %run.id(), "/exit could not be sent to {} in workspace {workspace}; it lands and its receipt still holds against its clean worktree, so its workspace was closed and it goes on to land", run.id());
             return Ok(true);
         };
-        warn!(run_id = %run.id(), "/exit could not be sent to {} in workspace {workspace} and the run cannot land without its exit ({why}); its recovery job looks at it", run.id());
+        warn!(run_id = %run.id(), "/exit could not be sent to {} in workspace {workspace} and the run cannot land without its exit ({why}); it is retried, then its recovery job looks at it", run.id());
         let timeout = sv.cmux.exit_timeout();
         sv.queue.record_runtime_event(
             run.id(),
@@ -397,7 +453,8 @@ impl ExitWatch {
         )?;
         self.timed_out = true;
         self.unsent = Some(why);
-        self.recover(sv, run, workspace)
+        self.retry.start(CAUSE_BACKEND_TIMEOUT);
+        self.after_timeout(sv, run, workspace)
     }
 }
 
@@ -411,8 +468,9 @@ impl ExitWatch {
     /// the watch has no session left, so the run goes on to land. When it
     /// does not, or the close fails, the run takes the path of an
     /// `exit_unsent` that could not land: `exit_request_timed_out` (with
-    /// `unsent` and `adopted`) and the `stuck_exit` recovery job and ask,
-    /// which the watch's first poll starts.
+    /// `unsent` and `adopted`), the retries of the `/exit` and then the
+    /// `stuck_exit` recovery job and ask, which the watch's first poll
+    /// starts.
     pub(super) fn adopt_unsent(
         &mut self,
         sv: &mut Supervisor<'_>,
@@ -430,7 +488,7 @@ impl ExitWatch {
             held = Some(format!("its workspace could not be closed: {error:#}"));
         }
         let Some(why) = held else {
-            self.closed_to_land(sv, run, workspace, attempts, true)?;
+            self.closed_to_land(sv, run, workspace, CAUSE_BACKEND_TIMEOUT, attempts, true)?;
             info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent and before its workspace {workspace} was recorded closed; its receipt still holds against its clean worktree, so the workspace is closed and it goes on to land", run.id());
             return Ok(());
         };
@@ -444,13 +502,17 @@ impl ExitWatch {
         self.timed_out = true;
         self.exit_asked = false;
         self.unsent = Some(why);
+        self.retry.start(CAUSE_BACKEND_TIMEOUT);
         Ok(())
     }
 
     /// The workspace of a run landing without its session's exit is closed:
     /// `workspace_closed` is recorded (the resume's, for a resumed session),
     /// the session's dialog asks are closed as for one that exited, and the
-    /// watch keeps no session. `attempts` is how often the `/exit` was tried.
+    /// watch keeps no session. `attempts` is how often the `/exit` was tried,
+    /// `cause` why it did not get the session to exit: cmux timed out on it
+    /// (`backend_timeout`, the `/exit` never reached the session) or the
+    /// session held it back through its retries (`exit_timeout`).
     /// Closing the workspace to land is a repair
     /// (ADR-0047 decisions 25 and 38), `adopted` when an adopter did it; the
     /// workspace is closed, so a record of it that fails is only noted.
@@ -459,6 +521,7 @@ impl ExitWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
         workspace: &str,
+        cause: &str,
         attempts: u64,
         adopted: bool,
     ) -> Result<()> {
@@ -474,9 +537,9 @@ impl ExitWatch {
         }
         close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
         let mut conditions = json!({
-            "cause": ReasonCode::BackendTimeout,
+            "cause": cause,
             "attempts": attempts,
-            "exit_reached": false,
+            "exit_reached": cause != CAUSE_BACKEND_TIMEOUT,
             "then": "land",
             "review": "pass",
             "receipt_holds": true,
@@ -519,9 +582,31 @@ pub(super) const EXIT_UNSENT: &str = "The supervisor's /exit timed out in cmux o
 /// Why `run` cannot land without its session's exit, `None` when it can:
 /// its receipt still stands against its worktree (the commit it names is
 /// the head of the run branch checked out there, the worktree is clean, and
-/// the evidence and scope hold, as validation checked) and that head is the
-/// commit the review passed. A check that fails to run holds it too.
+/// the evidence and scope hold, as validation checked), that head is the
+/// commit the review passed, no rebase is in progress in the worktree and
+/// no `worker_question` of the run is open (ADR-0047 decision 25). A check
+/// that fails to run holds it too.
 pub(super) fn landable_without_exit(sv: &mut Supervisor<'_>, run: &TaskRun) -> Option<String> {
+    if let Some(worktree) = run.worktree_path() {
+        match sv.repository.rebase_in_progress(Path::new(worktree)) {
+            Ok(false) => (),
+            Ok(true) => return Some("a rebase is in progress in its worktree".to_owned()),
+            Err(error) => {
+                return Some(format!(
+                    "whether a rebase is in progress could not be read: {error:#}"
+                ));
+            }
+        }
+    }
+    match sv.queue.has_unclosed_ask(run.id(), AskKind::WorkerQuestion) {
+        Ok(false) => (),
+        Ok(true) => return Some("a worker_question ask of the run is open".to_owned()),
+        Err(error) => {
+            return Some(format!(
+                "its worker_question asks could not be read: {error:#}"
+            ));
+        }
+    }
     let checked = sv
         .queue
         .show(run.task_id())

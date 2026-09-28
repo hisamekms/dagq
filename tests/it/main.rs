@@ -68,6 +68,7 @@ mod runtime_cleanup;
 mod runtime_codex;
 mod runtime_disk;
 mod runtime_evidence;
+mod runtime_exit_retry;
 mod runtime_forecast;
 mod runtime_handoff;
 mod runtime_headless;

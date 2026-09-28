@@ -231,6 +231,30 @@ impl<'a> RunHistory<'a> {
             })
     }
 
+    /// The timeout of the run's latest `/exit` request: its last
+    /// `exit_request_timed_out` after the last `exit_requested`, if any.
+    pub fn latest_exit_timeout(&self) -> Option<&'a RunEvent> {
+        let requested = self.last(event_kind::EXIT_REQUESTED)?;
+        self.events
+            .iter()
+            .rev()
+            .find(|e| e.id > requested.id && e.kind == event_kind::EXIT_REQUEST_TIMED_OUT)
+    }
+
+    /// The retries of the run's latest `/exit` request (ADR-0047 decision
+    /// 25): its `exit_retried` after the last `exit_requested`, oldest
+    /// first. Retries of an earlier request, before the run was resumed and
+    /// asked to exit again, do not count.
+    pub fn latest_exit_retries(&self) -> Vec<&'a RunEvent> {
+        let Some(requested) = self.last(event_kind::EXIT_REQUESTED) else {
+            return Vec::new();
+        };
+        self.events
+            .iter()
+            .filter(|e| e.id > requested.id && e.kind == event_kind::EXIT_RETRIED)
+            .collect()
+    }
+
     /// Whether a `stuck_exit` ask was opened about the run's latest `/exit`
     /// request: an `ask_opened` of that kind after its last
     /// `exit_requested`. One about an earlier request does not count, so a
@@ -721,6 +745,33 @@ mod tests {
         assert_eq!(history(&again), (true, false));
         again.push(stuck(8));
         assert_eq!(history(&again), (true, true));
+    }
+
+    #[test]
+    fn exit_retries_count_from_the_latest_exit_request() {
+        let plain = |id, kind| event(id, kind, json!({}));
+        let retries = |events: &[RunEvent]| {
+            let history = RunHistory::from_events(events);
+            (
+                history.latest_exit_retries().len(),
+                history.latest_exit_timeout().map(|e| e.id.as_i64()),
+            )
+        };
+        assert_eq!(retries(&[]), (0, None));
+        assert_eq!(retries(&[plain(1, "exit_retried")]), (0, None));
+        let mut events = vec![
+            plain(1, "exit_requested"),
+            plain(2, "exit_request_timed_out"),
+            plain(3, "exit_retried"),
+            plain(4, "exit_retried"),
+        ];
+        assert_eq!(retries(&events), (2, Some(2)));
+        events.push(plain(5, "resume_started"));
+        events.push(plain(6, "exit_requested"));
+        assert_eq!(retries(&events), (0, None));
+        events.push(plain(7, "exit_request_timed_out"));
+        events.push(plain(8, "exit_retried"));
+        assert_eq!(retries(&events), (1, Some(7)));
     }
 
     #[test]

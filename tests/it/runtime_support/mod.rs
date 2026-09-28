@@ -1433,6 +1433,13 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
         // No Codex worker unless a test gives its stub: the host's `codex`
         // is not these tests'.
         codex: PathBuf::from("/nonexistent/codex"),
+        // No retries of a held /exit (ADR-0047 decision 25) unless a test
+        // asks for them: a test's exit timeout goes on to the stuck_exit
+        // path at once, as it did before the retries.
+        exit: Some(dagq::domain::exit::ExitConfig {
+            retries: 0,
+            intervals: Vec::new(),
+        }),
         ..SuperviseOptions::new(parallel, once)
     }
 }

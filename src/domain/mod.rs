@@ -706,6 +706,7 @@ pub mod disk;
 mod error;
 pub mod event_kind;
 pub use event_kind::EventKind;
+pub mod exit;
 pub mod finding;
 pub mod follow_up;
 pub mod forecast;

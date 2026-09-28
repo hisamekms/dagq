@@ -321,6 +321,14 @@ impl Supervisor<'_> {
                 watch.timed_out = timed_out;
                 watch.exit_asked = exit_asked;
                 watch.exit_for_silence = exit_for_silence;
+                // The retries of the `/exit` are read from the events, as
+                // an adopter reads them (ADR-0047 decision 25).
+                if timed_out {
+                    let events = self.queue.run_events(run.id())?;
+                    let history = RunHistory::from_events(&events);
+                    let now = Instant::now();
+                    watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
+                }
                 Phase::Exiting(watch)
             }
         })

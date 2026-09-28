@@ -65,6 +65,7 @@ event_kinds! {
     EvidenceMissing => "evidence_missing",
     ExitRequestTimedOut => "exit_request_timed_out",
     ExitRequested => "exit_requested",
+    ExitRetried => "exit_retried",
     ExitUnsent => "exit_unsent",
     FindingPlannerExhausted => "finding_planner_exhausted",
     FindingPlannerOpened => "finding_planner_opened",
@@ -406,6 +407,11 @@ pub const DRAFT_PLANNER_OPENED: &str = EventKind::DraftPlannerOpened.as_str();
 pub const EVIDENCE_MISSING: &str = EventKind::EvidenceMissing.as_str();
 pub const EXIT_REQUESTED: &str = EventKind::ExitRequested.as_str();
 pub const EXIT_REQUEST_TIMED_OUT: &str = EventKind::ExitRequestTimedOut.as_str();
+/// A retry of a `/exit` the session held back (ADR-0047 decision 25):
+/// `attempt`, `cause` (`exit_timeout` / `backend_timeout`), `screen`
+/// (`input_ready` / `input_pending` / `dialog` / `not_ready` /
+/// `unreadable`) and what it will `send`, recorded before it is sent.
+pub const EXIT_RETRIED: &str = EventKind::ExitRetried.as_str();
 pub const EXIT_UNSENT: &str = EventKind::ExitUnsent.as_str();
 pub const FINDING_PLANNER_EXHAUSTED: &str = EventKind::FindingPlannerExhausted.as_str();
 pub const FINDING_PLANNER_OPENED: &str = EventKind::FindingPlannerOpened.as_str();
@@ -613,6 +619,7 @@ mod tests {
             (EventKind::EvidenceMissing, "evidence_missing"),
             (EventKind::ExitRequestTimedOut, "exit_request_timed_out"),
             (EventKind::ExitRequested, "exit_requested"),
+            (EventKind::ExitRetried, "exit_retried"),
             (EventKind::ExitUnsent, "exit_unsent"),
             (
                 EventKind::FindingPlannerExhausted,
