@@ -376,6 +376,21 @@ impl<'a> RunHistory<'a> {
         .and_then(|e| e.payload["screen_hash"].as_str())
     }
 
+    /// [`RunHistory::waiting_prompt_hash`] counted only after `anchor` (the
+    /// event that started the stage whose watch is adopted, such as the
+    /// revise's `revise_requested` or `conflict_precheck`): a dialog
+    /// recorded before it is left behind, since some paths end a dialog
+    /// without recording `prompt_cleared` (task 742).
+    pub fn waiting_prompt_hash_after(&self, anchor: EventId) -> Option<&'a str> {
+        self.last_of(&[
+            event_kind::PROMPT_WAITING,
+            event_kind::PROMPT_CLEARED,
+            event_kind::RECEIPT_OBSERVED,
+        ])
+        .filter(|e| e.kind == event_kind::PROMPT_WAITING && e.id > anchor)
+        .and_then(|e| e.payload["screen_hash"].as_str())
+    }
+
     /// The `screen_hash` of the dialog the session waited at when its
     /// receipt was observed: a `prompt_waiting` with no `prompt_cleared`
     /// since and a `receipt_observed` after it. Its `answer_prompt` ask is
@@ -1142,6 +1157,29 @@ mod tests {
         assert_eq!(history.push_failure(), Some("new"));
         let events = kinds(&["prompt_waiting", "prompt_cleared"]);
         assert_eq!(RunHistory::from_events(&events).waiting_prompt_hash(), None);
+    }
+
+    #[test]
+    fn a_dialog_is_carried_over_only_after_the_anchor() {
+        let hash = |events: &[RunEvent], anchor: i64| {
+            RunHistory::from_events(events)
+                .waiting_prompt_hash_after(EventId::new(anchor))
+                .map(str::to_owned)
+        };
+        let old = event(1, "prompt_waiting", json!({"screen_hash": "old"}));
+        let anchor = event(2, "revise_requested", json!({}));
+        // A dialog left open before the anchor is not carried over.
+        assert_eq!(hash(&[old.clone(), anchor.clone()], 2), None);
+        let new = event(3, "prompt_waiting", json!({"screen_hash": "new"}));
+        let events = [old.clone(), anchor.clone(), new.clone()];
+        assert_eq!(hash(&events, 2), Some("new".into()));
+        // Ended after the anchor by `prompt_cleared` or the receipt.
+        for kind in ["prompt_cleared", "receipt_observed"] {
+            let end = event(4, kind, json!({}));
+            let events = [old.clone(), anchor.clone(), new.clone(), end];
+            assert_eq!(hash(&events, 2), None);
+        }
+        assert_eq!(hash(&[], 2), None);
     }
 
     #[test]

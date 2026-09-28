@@ -351,7 +351,7 @@ impl Supervisor<'_> {
                         sent_at,
                         start,
                     )?;
-                    watch.live.adopt(&*self.queue, run)?;
+                    watch.live.adopt(&*self.queue, run, anchor.id)?;
                     return Ok(Phase::Revise(watch));
                 }
                 None
@@ -382,7 +382,7 @@ impl Supervisor<'_> {
                         sent_at,
                         start,
                     )?;
-                    watch.live.adopt(&*self.queue, run)?;
+                    watch.live.adopt(&*self.queue, run, anchor.id)?;
                     return Ok(Phase::Revise(watch));
                 }
                 None

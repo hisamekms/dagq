@@ -47,8 +47,24 @@ fn an_adopted_revise_in_its_slot_does_not_record_its_dialog_again() {
     adopt_revise_at_dialog(0);
 }
 
-fn adopt_revise_at_dialog(max_waiting: usize) {
-    let (_dir, repo, db) = fixture();
+/// A revise under a dead supervisor whose session committed its work and
+/// waits for the revise's request: the run is `awaiting_integration` with
+/// `before` recorded after its validation, then the review's revise verdict
+/// and its `revise_requested`, then `after`. The session commits the fix
+/// and rewrites its receipt once `$EXIT.go` exists.
+fn revise_under_dead_supervisor(
+    screen: Option<&str>,
+    before: Vec<(&str, Value)>,
+    after: Vec<(&str, Value)>,
+) -> (
+    Fixture,
+    PathBuf,
+    PathBuf,
+    String,
+    Arc<TestWorkspace>,
+    TaskRun,
+) {
+    let (dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
     let mut backend = TestWorkspace::new(
         &db,
@@ -59,7 +75,9 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
          receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     backend.prompt_wait = Duration::from_millis(300);
-    *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
+    if let Some(screen) = screen {
+        *backend.screen.lock().unwrap() = screen.into();
+    }
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let idle = run.idle_marker_path().unwrap();
@@ -83,12 +101,14 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    for (kind, payload) in [
-        (
-            "validation_finished",
-            json!({"status": "awaiting_integration"}),
-        ),
+    let queue = SqliteQueue::open(&db).unwrap();
+    let events = [(
+        "validation_finished",
+        json!({"status": "awaiting_integration"}),
+    )]
+    .into_iter()
+    .chain(before)
+    .chain([
         ("review_started", json!({"attempt": 1})),
         (
             "review_finished",
@@ -98,26 +118,89 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
             "revise_requested",
             json!({"attempt": 1, "reasons": ["add a line"], "sent_at": sent_at}),
         ),
-        (
-            "prompt_waiting",
-            json!({
-                "workspace_id": WORKSPACE_ID,
-                "excerpt": "Auto mode is available",
-                "screen_hash": screen_hash(DIALOG_SCREEN),
-                "prompt": "choice",
-            }),
-        ),
-        (
-            "recovery_requested",
-            json!({"alert": "prompt_waiting", "attempt": 1}),
-        ),
-        (
-            "recovery_finished",
-            json!({"alert": "prompt_waiting", "attempt": 1, "outcome": "escalated"}),
-        ),
-    ] {
+    ])
+    .chain(after);
+    for (kind, payload) in events {
         queue.record_runtime_event(run.id(), kind, payload).unwrap();
     }
+    age_lease(&db, &run, 31);
+    (dir, repo, db, base, backend, run)
+}
+
+/// Supervise the queue in a thread with a reviewer that passes the revise.
+fn adopter(
+    db: &Path,
+    repo: &Path,
+    backend: &Arc<TestWorkspace>,
+    max_waiting: usize,
+) -> thread::JoinHandle<Value> {
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fixed")]));
+    let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
+    thread::spawn(move || {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        let outcome = runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &*backend,
+            &claude_stub(&db),
+            &*reviewer,
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &SuperviseOptions {
+                max_waiting: Some(max_waiting),
+                ..supervise_options(4, true)
+            },
+        )
+        .unwrap();
+        backend.join();
+        outcome
+    })
+}
+
+/// Wait for the adoption and for several screen checks after it.
+fn adopted_and_checked(db: &Path, backend: &TestWorkspace) {
+    wait_until(db, Duration::from_secs(30), |queue| {
+        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
+    });
+    let captures = backend.captures.load(Ordering::SeqCst);
+    wait_until(db, Duration::from_secs(30), |_| {
+        backend.captures.load(Ordering::SeqCst) >= captures + 3
+    });
+}
+
+/// Let the session rewrite its receipt.
+fn let_the_session_fix(run: &TaskRun) {
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+}
+
+fn adopt_revise_at_dialog(max_waiting: usize) {
+    let (_dir, repo, db, base, backend, run) = revise_under_dead_supervisor(
+        Some(DIALOG_SCREEN),
+        vec![],
+        vec![
+            (
+                "prompt_waiting",
+                json!({
+                    "workspace_id": WORKSPACE_ID,
+                    "excerpt": "Auto mode is available",
+                    "screen_hash": screen_hash(DIALOG_SCREEN),
+                    "prompt": "choice",
+                }),
+            ),
+            (
+                "recovery_requested",
+                json!({"alert": "prompt_waiting", "attempt": 1}),
+            ),
+            (
+                "recovery_finished",
+                json!({"alert": "prompt_waiting", "attempt": 1, "outcome": "escalated"}),
+            ),
+        ],
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .ask(NewAsk {
             kind: AskKind::AnswerPrompt,
@@ -131,49 +214,16 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
         })
         .unwrap()
         .ask;
-    age_lease(&db, &run, 31);
-    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fixed")]));
-    let supervisor = {
-        let (db, repo, backend, reviewer) =
-            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
-        thread::spawn(move || {
-            let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
-            let outcome = runtime::supervise_with_reviewer(
-                &db,
-                &repo,
-                &*backend,
-                &claude_stub(&db),
-                &*reviewer,
-                Path::new(env!("CARGO_BIN_EXE_dagq")),
-                &SuperviseOptions {
-                    max_waiting: Some(max_waiting),
-                    ..supervise_options(4, true)
-                },
-            )
-            .unwrap();
-            backend.join();
-            outcome
-        })
-    };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
-    });
+    let supervisor = adopter(&db, &repo, &backend, max_waiting);
     // Several screen checks later, the dialog still up is the one recorded.
-    let captures = backend.captures.load(Ordering::SeqCst);
-    wait_until(&db, Duration::from_secs(30), |_| {
-        backend.captures.load(Ordering::SeqCst) >= captures + 3
-    });
+    adopted_and_checked(&db, &backend);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(payloads(&detail, "prompt_waiting").len(), 1);
     assert_eq!(payloads(&detail, "recovery_requested").len(), 1);
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
 
     // The session rewrites its receipt, the dialog left on its screen.
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
+    let_the_session_fix(&run);
     let outcome = joined(supervisor, "the supervisor thread to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
@@ -192,6 +242,45 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
+}
+
+/// A dialog recorded before the revise's `revise_requested` and never
+/// cleared (a path such as the end of a resume's wrapper records no
+/// `prompt_cleared`) is not carried over into the adopted revise: its
+/// first screen check, with no dialog on the screen, records no
+/// `prompt_cleared`, and the run lands (task 742).
+#[test]
+fn an_adopted_revise_leaves_a_dialog_recorded_before_its_request() {
+    let (_dir, repo, db, base, backend, run) = revise_under_dead_supervisor(
+        None,
+        vec![(
+            "prompt_waiting",
+            json!({
+                "workspace_id": WORKSPACE_ID,
+                "excerpt": "Auto mode is available",
+                "screen_hash": screen_hash(DIALOG_SCREEN),
+                "prompt": "choice",
+            }),
+        )],
+        vec![],
+    );
+    let supervisor = adopter(&db, &repo, &backend, 0);
+    adopted_and_checked(&db, &backend);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(payloads(&detail, "prompt_cleared").is_empty(), "{kinds:?}");
+
+    let_the_session_fix(&run);
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    let kinds = event_kinds(&detail);
+    assert_eq!(payloads(&detail, "prompt_waiting").len(), 1, "{kinds:?}");
+    assert!(payloads(&detail, "prompt_cleared").is_empty(), "{kinds:?}");
+    assert!(backend.texts().is_empty(), "{:?}", backend.texts());
 }
 
 /// A passed run whose `/exit` never got there, adopted after its supervisor

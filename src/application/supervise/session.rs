@@ -346,14 +346,22 @@ impl SessionWatch {
 
     /// Carry over into the watch of a revise the supervisor adopted what the
     /// previous one recorded for its session, as an adopted worker's own
-    /// session does: the dialog recorded as `prompt_waiting` and not cleared
-    /// since, so the same screen is not recorded again and the revise's end
-    /// clears it (closing its `answer_prompt` ask), and the recovery watch
-    /// rebuilt from its events ([`RecoveryWatch::adopt`]) (task 581).
-    pub(super) fn adopt(&mut self, queue: &dyn Queue, run: &TaskRun) -> Result<()> {
+    /// session does: the dialog recorded as `prompt_waiting` after `anchor`
+    /// (the event that started the revise) and not cleared since, so the
+    /// same screen is not recorded again and the revise's end clears it
+    /// (closing its `answer_prompt` ask), and the recovery watch rebuilt
+    /// from its events ([`RecoveryWatch::adopt`]) (task 581). A dialog
+    /// recorded before the anchor is not carried over: some paths end one
+    /// without `prompt_cleared` (task 742).
+    pub(super) fn adopt(
+        &mut self,
+        queue: &dyn Queue,
+        run: &TaskRun,
+        anchor: EventId,
+    ) -> Result<()> {
         let events = queue.run_events(run.id())?;
         self.prompt_hash = RunHistory::from_events(&events)
-            .waiting_prompt_hash()
+            .waiting_prompt_hash_after(anchor)
             .map(str::to_owned);
         self.recovery = RecoveryWatch::adopt(queue, run)?;
         Ok(())
