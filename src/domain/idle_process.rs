@@ -46,10 +46,27 @@ struct Track {
     command: String,
     /// The last sample at which it made progress, or the first sample of it.
     active_ms: i64,
+    /// When the CPU time used since is measured from: `active_ms`, except
+    /// for a quiet new child that took its parent's `active_ms` and is
+    /// measured from when it was first seen.
+    measured_ms: i64,
     /// Its CPU time then.
     active_cpu_ms: u64,
     /// Its CPU time at the latest sample.
     cpu_ms: u64,
+}
+
+impl Track {
+    /// A process that makes progress at `now_ms`.
+    fn fresh(process: &ProcessInfo, cpu_ms: u64, now_ms: i64) -> Self {
+        Self {
+            command: process.command.clone(),
+            active_ms: now_ms,
+            measured_ms: now_ms,
+            active_cpu_ms: cpu_ms,
+            cpu_ms,
+        }
+    }
 }
 
 /// A process that has made no progress for the threshold, with its
@@ -79,42 +96,110 @@ pub struct CpuWatch {
     /// Processes already handed to a recovery job, with the progress they
     /// had then: they are not idle again until they make progress.
     handed: HashMap<u32, i64>,
+    /// When each process of the last sample, with its descendants then,
+    /// last made progress: what a quiet new child of it takes.
+    subtree_ms: HashMap<u32, i64>,
 }
 
 impl CpuWatch {
     /// Take the sample `processes` (the run's processes) read at `now_ms`.
-    /// A process not in it is forgotten, a new one (or a pid now running
-    /// another command) starts its idle time here, and one whose CPU time
-    /// grew by more than [`PROGRESS_CPU_PER_MILLE`] of the time since it
-    /// last made progress makes progress now. A process whose CPU time
-    /// could not be read is left out.
+    /// A process not in it is forgotten, and one whose CPU time grew by
+    /// more than [`PROGRESS_CPU_PER_MILLE`] of the time since it last made
+    /// progress makes progress now. A new process (or a pid now running
+    /// another command, or whose CPU time went down) starts its idle time
+    /// here when it is a root of `processes` or used more than
+    /// [`PROGRESS_CPU_PER_MILLE`] of its own elapsed time; a quiet new
+    /// child takes the last progress of its nearest ancestor in
+    /// `processes` instead, so a poll that forks a new `sleep` at every
+    /// sample is not progress (task 646). The ancestor's last progress is
+    /// that of its subtree in the previous sample, so the next step of a
+    /// pipeline caught at birth after a busy step ended is not idle at once. Its own later progress is
+    /// measured from when it was first seen, not from the ancestor's
+    /// progress. A process whose CPU time could not be read is left out,
+    /// and a quiet child of it starts over.
     pub fn observe(&mut self, processes: &[ProcessInfo], now_ms: i64) {
+        let by_pid: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();
         let mut tracks = HashMap::new();
+        let mut new = Vec::new();
         for process in processes {
             let Some(cpu_ms) = process.cpu_ms else {
                 continue;
             };
-            let fresh = Track {
-                command: process.command.clone(),
-                active_ms: now_ms,
-                active_cpu_ms: cpu_ms,
-                cpu_ms,
-            };
-            let track = match self.tracks.remove(&process.pid) {
+            match self.tracks.remove(&process.pid) {
                 Some(track) if track.command == process.command && cpu_ms >= track.cpu_ms => {
-                    let wall = u64::try_from(now_ms - track.active_ms).unwrap_or(0);
+                    let wall = u64::try_from(now_ms - track.measured_ms).unwrap_or(0);
                     let used = cpu_ms - track.active_cpu_ms;
-                    if used.saturating_mul(1000) > wall.saturating_mul(PROGRESS_CPU_PER_MILLE) {
-                        fresh
+                    let track = if used.saturating_mul(1000)
+                        > wall.saturating_mul(PROGRESS_CPU_PER_MILLE)
+                    {
+                        Track::fresh(process, cpu_ms, now_ms)
                     } else {
                         Track { cpu_ms, ..track }
-                    }
+                    };
+                    tracks.insert(process.pid, track);
                 }
-                _ => fresh,
+                _ => new.push(process),
+            }
+        }
+        // Parents before children: a quiet new child may take the progress
+        // of a new parent.
+        let depth = |process: &ProcessInfo| {
+            let mut depth = 0;
+            let mut pid = process.ppid;
+            while let Some(parent) = by_pid.get(&pid).filter(|p| p.pid != p.ppid) {
+                depth += 1;
+                if depth > by_pid.len() {
+                    break;
+                }
+                pid = parent.ppid;
+            }
+            depth
+        };
+        new.sort_by_key(|p| depth(p));
+        for process in new {
+            let Some(cpu_ms) = process.cpu_ms else {
+                continue;
+            };
+            let elapsed_ms = process.elapsed_secs.saturating_mul(1000);
+            let quiet =
+                cpu_ms.saturating_mul(1000) <= elapsed_ms.saturating_mul(PROGRESS_CPU_PER_MILLE);
+            let parent = by_pid
+                .get(&process.ppid)
+                .filter(|parent| parent.pid != process.pid);
+            let track = match parent {
+                Some(parent) if quiet => match tracks.get(&parent.pid) {
+                    Some(track) => Track {
+                        command: process.command.clone(),
+                        // The parent's subtree in the last sample: a child
+                        // that made progress and ended since still counts.
+                        active_ms: self
+                            .subtree_ms
+                            .get(&parent.pid)
+                            .map_or(track.active_ms, |&ms| ms.max(track.active_ms)),
+                        measured_ms: now_ms,
+                        active_cpu_ms: cpu_ms,
+                        cpu_ms,
+                    },
+                    None => Track::fresh(process, cpu_ms, now_ms),
+                },
+                _ => Track::fresh(process, cpu_ms, now_ms),
             };
             tracks.insert(process.pid, track);
         }
         self.handed.retain(|pid, _| tracks.contains_key(pid));
+        let mut subtree_ms: HashMap<u32, i64> = HashMap::new();
+        for (&pid, track) in &tracks {
+            let mut member = pid;
+            for _ in 0..=by_pid.len() {
+                let ms = subtree_ms.entry(member).or_insert(i64::MIN);
+                *ms = (*ms).max(track.active_ms);
+                match by_pid.get(&member) {
+                    Some(p) if p.ppid != p.pid && by_pid.contains_key(&p.ppid) => member = p.ppid,
+                    _ => break,
+                }
+            }
+        }
+        self.subtree_ms = subtree_ms;
         self.tracks = tracks;
     }
 
@@ -344,8 +429,12 @@ mod tests {
     fn a_handed_process_whose_quiet_child_ended_is_not_idle_again() {
         let mut watch = CpuWatch::default();
         watch.observe(&[process(10, 1, Some(0))], 0);
-        let both = [process(10, 1, Some(0)), process(11, 10, Some(0))];
-        watch.observe(&both, 5 * MIN);
+        // A child that used CPU when first seen makes progress.
+        watch.observe(
+            &[process(10, 1, Some(0)), process(11, 10, Some(1000))],
+            5 * MIN,
+        );
+        let both = [process(10, 1, Some(0)), process(11, 10, Some(1000))];
         watch.observe(&both, 35 * MIN);
         let idle = watch.idle(&both, 35 * MIN, 30 * 60);
         assert_eq!(idle[0].active_ms, 5 * MIN);
@@ -353,6 +442,109 @@ mod tests {
         let parent = [process(10, 1, Some(0))];
         watch.observe(&parent, 36 * MIN);
         assert!(watch.idle(&parent, 36 * MIN, 30 * 60).is_empty());
+    }
+
+    fn child(pid: u32, ppid: u32, cpu_ms: u64, elapsed_secs: u64) -> ProcessInfo {
+        ProcessInfo {
+            elapsed_secs,
+            command: "sleep 5".to_owned(),
+            ..process(pid, ppid, Some(cpu_ms))
+        }
+    }
+
+    #[test]
+    fn a_poll_that_forks_a_quiet_child_at_every_sample_is_idle() {
+        let mut watch = CpuWatch::default();
+        let mut last = Vec::new();
+        for minute in 0..=31 {
+            // `while ! cond; do sleep 5; done`: a new `sleep` at every sample,
+            // under a quiet shell under a quiet agent's tool call.
+            last = vec![
+                process(10, 1, Some(100)),
+                process(11, 10, Some(20)),
+                child(100 + minute as u32, 11, 1, 2),
+            ];
+            watch.observe(&last, minute * MIN);
+            if minute < 30 {
+                assert!(watch.idle(&last, minute * MIN, 30 * 60).is_empty());
+            }
+        }
+        let idle = watch.idle(&last, 31 * MIN, 30 * 60);
+        assert_eq!(idle.len(), 1, "{idle:?}");
+        assert_eq!(idle[0].pid, 10);
+        assert_eq!(idle[0].descendants, [11, 131]);
+        assert_eq!(idle[0].idle_secs, 31 * 60);
+        assert_eq!(idle[0].active_ms, 0);
+        // A new quiet child of a new quiet child takes the same progress.
+        let deeper = [
+            process(10, 1, Some(100)),
+            process(11, 10, Some(20)),
+            child(201, 200, 0, 0),
+            child(200, 11, 0, 0),
+        ];
+        watch.observe(&deeper, 32 * MIN);
+        let idle = watch.idle(&deeper, 32 * MIN, 30 * 60);
+        assert_eq!(idle.len(), 1, "{idle:?}");
+        assert_eq!(idle[0].active_ms, 0);
+        // A quiet new root starts over.
+        let root = [child(300, 1, 0, 0)];
+        watch.observe(&root, 33 * MIN);
+        assert!(watch.idle(&root, 33 * MIN, 30 * 60).is_empty());
+    }
+
+    #[test]
+    fn a_new_child_that_uses_cpu_is_progress_after_a_long_quiet_parent() {
+        let mut watch = CpuWatch::default();
+        let quiet = [process(10, 1, Some(100))];
+        watch.observe(&quiet, 0);
+        watch.observe(&quiet, 29 * MIN);
+        // A build started by the poll: busy when first seen.
+        let build = |cpu_ms: u64, elapsed_secs: u64| {
+            [
+                process(10, 1, Some(100)),
+                child(50, 10, cpu_ms, elapsed_secs),
+            ]
+        };
+        let sample = build(20_000, 30);
+        watch.observe(&sample, 29 * MIN + 30_000);
+        watch.observe(&sample, 31 * MIN);
+        assert!(watch.idle(&sample, 31 * MIN, 30 * 60).is_empty());
+        // Started just before a sample, quiet when first seen, then busy: its
+        // progress is measured from when it was seen, not from the parent's
+        // old progress, so 2% of a minute counts.
+        let mut watch = CpuWatch::default();
+        watch.observe(&quiet, 0);
+        let sample = build(0, 0);
+        watch.observe(&sample, 29 * MIN);
+        assert_eq!(watch.tracks[&50].active_ms, 0);
+        let sample = build(1200, 60);
+        watch.observe(&sample, 30 * MIN);
+        assert_eq!(watch.tracks[&50].active_ms, 30 * MIN);
+        watch.observe(&sample, 31 * MIN);
+        assert!(watch.idle(&sample, 31 * MIN, 30 * 60).is_empty());
+        // A reused pid is new too: busy, it is progress.
+        let mut reused = child(50, 10, 60_000, 60);
+        reused.command = "cargo test".to_owned();
+        let sample = [process(10, 1, Some(100)), reused];
+        watch.observe(&sample, 70 * MIN);
+        assert_eq!(watch.tracks[&50].active_ms, 70 * MIN);
+    }
+
+    #[test]
+    fn a_quiet_new_child_takes_the_progress_of_a_child_that_ended() {
+        let mut watch = CpuWatch::default();
+        // cargo waits while rustc A works, then A ends and B is caught at
+        // birth.
+        let cargo = process(10, 1, Some(100));
+        watch.observe(&[cargo.clone(), child(11, 10, 0, 0)], 0);
+        for minute in 1..=40 {
+            let sample = [cargo.clone(), child(11, 10, minute as u64 * 30_000, 60)];
+            watch.observe(&sample, minute * MIN);
+        }
+        let sample = [cargo.clone(), child(12, 10, 0, 0)];
+        watch.observe(&sample, 41 * MIN);
+        assert!(watch.idle(&sample, 41 * MIN, 30 * 60).is_empty());
+        assert_eq!(watch.tracks[&12].active_ms, 40 * MIN);
     }
 
     #[test]
