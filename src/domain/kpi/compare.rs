@@ -13,6 +13,7 @@ use super::{
     COMPARE_AXES, Change, CompareSpec, DAY_MS, KpiQuery, Kpis, Measure, cursor_ms, window::Context,
 };
 use crate::domain::{
+    host_metrics::HostSummary,
     marks::{self, MARK_RETRACTED, Mark},
     stats::{Cursor, timestamp_millis},
 };
@@ -26,6 +27,9 @@ pub struct WindowSpan {
     pub partial: bool,
     /// The runs that finished in it.
     pub runs: usize,
+    /// The host's load in it, as a period's `host` (task 872).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostSummary>,
 }
 
 /// The change split at, when `--compare` names a mark or a time.
@@ -218,6 +222,7 @@ pub(super) fn compare(
         end: marks::utc_text(end),
         partial: end > now_ms,
         runs,
+        host: context.host.map(|host| host.between(start, end)),
     };
     let empty = Measure::default();
     let after_partial = after.1 > now_ms;

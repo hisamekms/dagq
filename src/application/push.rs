@@ -101,6 +101,7 @@ pub fn check_breaches(
                 last: 2,
                 ..KpiQuery::default()
             },
+            None,
         )?;
         for target in &kpi.targets {
             if let Some(started) = push::breach_started(period.as_str(), target)

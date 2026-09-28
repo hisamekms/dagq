@@ -24,6 +24,7 @@ related:
   - adr-t947-2
   - adr-t947-3
   - adr-t947-4
+  - design-supervisor-lifecycle-host-metrics
 ---
 
 # `kpi`
@@ -37,10 +38,19 @@ related:
 
 ## 期間と比較
 
-- 既定は日で、`--at`（無ければ今）を含む期間を最後に`--last`（既定7）期間を古い順に並べる（`periods`）。各期間は`label`（`YYYY-MM-DD`か`YYYY-Www`）、`start` / `end`（UTC）、`partial`（まだ終わっていない。値は途中までで、目標の判定に使わない）、`runs`（その期間に終わったrun）、`kpis`、`details`、`unavailable`、`marks`（その期間に効いた印。[変更の印](marks.md)の`marks`と同じ形）、`comparison`を持つ。
+- 既定は日で、`--at`（無ければ今）を含む期間を最後に`--last`（既定7）期間を古い順に並べる（`periods`）。各期間は`label`（`YYYY-MM-DD`か`YYYY-Www`）、`start` / `end`（UTC）、`partial`（まだ終わっていない。値は途中までで、目標の判定に使わない）、`runs`（その期間に終わったrun）、`kpis`、`details`、`unavailable`、`marks`（その期間に効いた印。[変更の印](marks.md)の`marks`と同じ形）、`comparison`、`host`（下の[hostの負荷](#hostの負荷)）を持つ。
 - `comparison`はKPIと層ごとに、前の同じ長さの期間の値（`previous`）、差（`delta`）、比（`ratio`。前が0ならnull）、日なら直前7日の日ごとの値の中央値（`baseline_7d`）、判定できたか（`judged`）とその理由（`reason`: `no_value` / `small_sample` / `partial`。まだ終わっていない期間は値と差を出すが判定しない）、良い向きのあるKPIの`verdict`（`improved` / `worsened` / `unchanged`）。比べる値は、値（`value`）を持つKPIはその値、分布だけのKPIは中央値。どちらかの`n`が`min_samples`に満たなければ判定しない（数えるKPI（`landings`など）は`n`によらず判定する）。
 - `--since` / `--until`は1つの窓（`label: window`、`period: window`）を出し、同じ長さの直前の窓と比べる。`--at`とは併用できない。
+- `--since` / `--until`の窓も`host`を持つ（直前の比べる窓は並べないので出ない）。
 - `--kind`は`kind=`の層をその種類だけに絞って出す（`all`と他の軸は残る）。比較の`summary`の種類にもなる。値はtaskのkindのlabel（[domain-model](../domain-model.md)の`TaskKind`の形）か、kindの無いtaskの`unknown`で、それ以外の形はclapの`parse_kpi_kind`が拒む。
+
+### hostの負荷
+
+task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`--compare`の`before` / `after`の`host`に、supervisorが記録したhostの負荷（[hostの負荷の連続の記録](host-metrics.md)）の区間の要約を並べる。形は[`stats`](stats.md#hostの負荷)の`host`と同じ（`from`・`until`・`samples`・`first`・`last`・`metrics`（列→`{samples, mean, max, p90}`か、値の無い列はnull）・読めなかったときの`error`）。
+
+- **区間**: 期間の`(start, end]`（ms）に合わせ、`start`の秒は含めず`end`の秒は含める（`from` = `start`の秒 + 1、`until` = `end`の秒。`domain::kpi::HostReader::between`）。隣り合う期間の境の秒の行は、そこで終わる期間にだけ入る。
+- **読み方**: `infrastructure::host_metrics::summary(<queue dir>/host, from, until)`（`domain::host_metrics::summarize`）。`src/compose.rs`の`report_setup`が`ReportSetup::host_metrics`に読み手を入れ、`kpi_of`（`dagq kpi`）と日次・週次のレポート（`application::report`。JSONは`kpi`の出力をそのまま載せるので同じ`host`を持つ。HTMLには節を足していない）がそれを`application::kpi::kpi`に渡す。記録の無い期間は`samples: 0`、ファイルが読めなければ`error`を入れ、`kpi`は失敗させない。
+- **参考の値**: KPIではない。`kpis`・`comparison`・`targets`の判定・`breach`・push・observerのfindingの対象にしない（目標割れの検査（`application::push`）とobserverの入力（`observer_kpi`）は読み手を渡さないので`host`を持たない）。ADR-0051の決定3の`max_load_avg`（claim時の記録から導く）の定義も変えない。
 
 ## KPIと層
 
@@ -116,7 +126,7 @@ related:
 
 - `--compare <event id>`はその印（`dagq mark`の`--at`の印は効いた時刻。導く印はそれを読んだclaimの`run_claimed`のevent ID（`marks`の`detail.claim_event`）で指す）、`--compare <時刻のcursor>`はその時刻を境に、前後に`--window`日（既定7）の窓を作る。`--compare A..B,C..D`は2つの窓を明示する（前の窓が後の窓より前で、どちらも始まりが終わりより前）。
 - 印の並び（取り消された印と取り消しの印を除く、記録する印と導く印）を時刻の順にたどり、前の印からその印までに終わったrunが`min_samples`に満たなければ同じ「重なった変更」にまとめる（3つ以上も1つに。`domain::kpi::compare::overlapping_groups`）。境の印がまとまった変更に入っていれば、その最初の印の前と最後の印の後で比べ、`split.separable: false`で「含まれる印を分けられない」ことを示す。
-- 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`）、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`parallel=`・`load=`・`build=`と、`--by`で選んだ軸（`--by group`なら`group=`など）。後の窓が今を越えていれば`partial`で判定しない）、`summary`（kind→`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`。kindは`--kind`で選んだもの、無ければ`strata`に`kind=`の層として現れたkindすべて（`unknown`を含む、名前の順）。runtimeは`runtime`などの特定のkindを既定に持たない（ADR-t624-1の決定3）。選び方は`domain::kpi::compare`）。区間は自動では縮めない。
+- 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`、窓の`host`（[hostの負荷](#hostの負荷)））、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`parallel=`・`load=`・`build=`と、`--by`で選んだ軸（`--by group`なら`group=`など）。後の窓が今を越えていれば`partial`で判定しない）、`summary`（kind→`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`。kindは`--kind`で選んだもの、無ければ`strata`に`kind=`の層として現れたkindすべて（`unknown`を含む、名前の順）。runtimeは`runtime`などの特定のkindを既定に持たない（ADR-t624-1の決定3）。選び方は`domain::kpi::compare`）。区間は自動では縮めない。
 
 `toolchain=`の層（hostの`rustc`）は、queueのrepositoryがdagqのソースのときだけ出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。
 

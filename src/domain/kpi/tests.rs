@@ -208,6 +208,16 @@ impl Queue {
     }
 
     fn kpi(&mut self, now: i64, config: &KpiConfig, query: &KpiQuery) -> Kpi {
+        self.kpi_with_host(now, config, query, None)
+    }
+
+    fn kpi_with_host(
+        &mut self,
+        now: i64,
+        config: &KpiConfig,
+        query: &KpiQuery,
+        host: Option<HostReader<'_>>,
+    ) -> Kpi {
         self.sort();
         kpi(
             &KpiInput {
@@ -220,6 +230,7 @@ impl Queue {
                 utc_offset_secs: JST,
                 cores: Some(4),
                 config,
+                host,
             },
             query,
         )
@@ -911,6 +922,7 @@ fn compares_two_explicit_windows() {
             utc_offset_secs: 0,
             cores: None,
             config: &KpiConfig::default(),
+            host: None,
         },
         &KpiQuery {
             compare: Some(backwards),
@@ -1073,6 +1085,7 @@ fn one_window_of_any_length() {
             utc_offset_secs: 0,
             cores: None,
             config: &KpiConfig::default(),
+            host: None,
         },
         &KpiQuery {
             since: query.until,
@@ -1781,4 +1794,136 @@ fn details_split_the_backend_failures_into_retried_and_exhausted() {
         details["backend_failures_exhausted"],
         json!({"count": 2, "by_op": {"capture": 1, "close": 1}})
     );
+}
+
+/// Each period, the `--since`/`--until` window and both sides of a
+/// comparison carry the host's load of their span (task 872): a sample at
+/// a boundary belongs to the period that ends there, a period without one
+/// has none, a reader's error is carried, and nothing is judged on it.
+#[test]
+fn periods_windows_and_comparisons_carry_the_host_load_of_their_span() {
+    use crate::domain::host_metrics::{HostSample, summarize};
+    let samples: Vec<HostSample> = [
+        (MONDAY, 1.0),
+        (MONDAY + 1, 2.0),
+        (MONDAY + DAY, 4.0),
+        (MONDAY + DAY + HOUR, 8.0),
+    ]
+    .into_iter()
+    .map(|(unix, load)| {
+        let mut sample = HostSample::new(unix);
+        sample.set("load1", Some(load));
+        sample
+    })
+    .collect();
+    let read = |from, until| summarize(&samples, from, until);
+    let mut queue = Queue::default();
+    queue.run(&Run::new(1, None, MONDAY + HOUR, 300));
+    let config = KpiConfig::merge(
+        Some(&KpiSettings {
+            targets: vec![Target {
+                kpi: "landings".into(),
+                kind: None,
+                stat: None,
+                min: Some(5.0),
+                max: None,
+            }],
+            ..KpiSettings::default()
+        }),
+        None,
+    );
+    let now = MONDAY + DAY + 2 * HOUR;
+    let query = KpiQuery {
+        period: Period::Day,
+        last: 4,
+        ..KpiQuery::default()
+    };
+    let with = queue.kpi_with_host(now, &config, &query, Some(HostReader(&read)));
+    let without = queue.kpi(now, &config, &query);
+    let counts: Vec<usize> = with
+        .periods
+        .iter()
+        .map(|period| {
+            let host = period.host.as_ref().unwrap();
+            let start = timestamp_millis(&period.start).unwrap() / 1000;
+            assert_eq!(host.from, start + 1, "{}", period.label);
+            assert_eq!(host.until, period.end_ms() / 1000, "{}", period.label);
+            host.samples
+        })
+        .collect();
+    assert_eq!(counts.iter().sum::<usize>(), samples.len(), "{counts:?}");
+    assert!(counts.contains(&0), "{counts:?}");
+    // Every sample is in exactly one period: none is counted at both
+    // sides of a boundary.
+    for sample in &samples {
+        let holding = with
+            .periods
+            .iter()
+            .filter(|period| {
+                let host = period.host.as_ref().unwrap();
+                (host.from..=host.until).contains(&sample.unix)
+            })
+            .count();
+        assert_eq!(holding, 1, "{}", sample.unix);
+    }
+    // The host is a reference only: the targets are judged the same.
+    assert_eq!(with.targets, without.targets);
+    assert!(without.periods.iter().all(|period| period.host.is_none()));
+    let json = serde_json::to_value(&without).unwrap();
+    assert!(json["periods"][0].get("host").is_none());
+
+    // The `--since` / `--until` window: a boundary sample goes to the
+    // window that ends at it, not the one that starts there.
+    let window = queue.kpi_with_host(
+        now,
+        &config,
+        &KpiQuery {
+            since: Some(Cursor::Time((MONDAY + 1) * 1000)),
+            until: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+            ..KpiQuery::default()
+        },
+        Some(HostReader(&read)),
+    );
+    let host = window.periods[0].host.as_ref().unwrap();
+    assert_eq!(
+        (host.from, host.until, host.samples),
+        (MONDAY + 2, MONDAY + DAY, 1)
+    );
+    assert_eq!(host.metrics["load1"].unwrap().max, 4.0);
+
+    // Both sides of a comparison.
+    let compared = queue.kpi_with_host(
+        now,
+        &config,
+        &KpiQuery {
+            compare: Some(CompareSpec::Windows([
+                (
+                    Cursor::Time((MONDAY - 1) * 1000),
+                    Cursor::Time((MONDAY + 1) * 1000),
+                ),
+                (
+                    Cursor::Time((MONDAY + 1) * 1000),
+                    Cursor::Time((MONDAY + DAY + HOUR) * 1000),
+                ),
+            ])),
+            ..query.clone()
+        },
+        Some(HostReader(&read)),
+    );
+    let compare = compared.compare.as_ref().unwrap();
+    assert_eq!(compare.before.host.as_ref().unwrap().samples, 2);
+    assert_eq!(compare.after.host.as_ref().unwrap().samples, 2);
+
+    // A reader that failed: the error is carried and the KPIs are made.
+    let failing = |from, until| crate::domain::host_metrics::HostSummary {
+        error: Some("unreadable".into()),
+        ..summarize(&[], from, until)
+    };
+    let failed = queue.kpi_with_host(now, &config, &query, Some(HostReader(&failing)));
+    let host = failed.periods[0].host.as_ref().unwrap();
+    assert_eq!(
+        (host.samples, host.error.as_deref()),
+        (0, Some("unreadable"))
+    );
+    assert_eq!(failed.targets, without.targets);
 }

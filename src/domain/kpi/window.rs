@@ -85,6 +85,8 @@ pub(super) struct Context<'a> {
     /// The forecast snapshots scored against the finishes (ADR-0070
     /// decision 4).
     forecast: Scoring,
+    /// The host's load read for a window (task 872).
+    pub host: Option<super::HostReader<'a>>,
 }
 
 fn event_ms(event: &RunEvent) -> Option<i64> {
@@ -276,6 +278,7 @@ impl<'a> Context<'a> {
             marks: marks::marks(events, None, None),
             min_samples: input.config.min_samples,
             forecast: Scoring::default(),
+            host: input.host,
         };
         context.forecast = score::score(events, &context.marks);
         let everything = context.stats(None, None);

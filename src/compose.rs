@@ -1176,6 +1176,10 @@ impl OneShot {
             setup.host,
             &setup.config,
             query,
+            setup
+                .host_metrics
+                .as_ref()
+                .map(|read| crate::domain::kpi::HostReader(read.0.as_ref())),
         )?)?)
     }
 
@@ -1234,6 +1238,7 @@ impl OneShot {
                     last,
                     ..KpiQuery::default()
                 },
+                None,
             )
         };
         let (day, week) = (of(Period::Day, 7)?, of(Period::Week, 4)?);
@@ -2067,7 +2072,17 @@ fn report_setup(
         keep: load_host_report(queue_dir, host_wide)?,
         build: crate::VERSION.to_owned(),
         diagram: d2_renderer(std::env::var_os("PATH")),
+        host_metrics: Some(host_metrics_reader(
+            queue_dir.join(crate::domain::host_metrics::HOST_DIR),
+        )),
     })
+}
+
+/// Summarizes the host's load records under `dir` (task 872).
+fn host_metrics_reader(dir: PathBuf) -> crate::application::report::HostMetrics {
+    crate::application::report::HostMetrics(std::sync::Arc::new(move |from, until| {
+        crate::infrastructure::host_metrics::summary(&dir, from, until)
+    }))
 }
 
 /// Draws the reports' dependency diagram with d2 and TALA on `path_var`

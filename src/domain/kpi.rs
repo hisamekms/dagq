@@ -15,6 +15,7 @@ use serde::ser::SerializeMap;
 
 use super::{
     DraftOrigin, GoalId, RunEvent, TaskId, TaskKind,
+    host_metrics::HostSummary,
     marks::{self, Mark},
     stats::{Cursor, landing::p90, median, median_f64, timestamp_millis},
 };
@@ -306,6 +307,26 @@ impl Default for KpiQuery {
     }
 }
 
+/// Reads the summary of the host's load between two unix seconds, both
+/// inclusive ([`crate::infrastructure::host_metrics::summary`], task 872).
+#[derive(Clone, Copy)]
+pub struct HostReader<'a>(pub &'a dyn Fn(i64, i64) -> HostSummary);
+
+impl std::fmt::Debug for HostReader<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HostReader")
+    }
+}
+
+impl HostReader<'_> {
+    /// The summary of a KPI window (unix ms, `start` exclusive and `end`
+    /// inclusive like the windows' runs): the samples of the seconds after
+    /// `start` up to `end`, so that two adjacent periods never share one.
+    pub fn between(self, start_ms: i64, end_ms: i64) -> HostSummary {
+        (self.0)(start_ms.div_euclid(1000) + 1, end_ms.div_euclid(1000))
+    }
+}
+
 /// What `kpi` derives from.
 #[derive(Debug, Clone, Copy)]
 pub struct KpiInput<'a> {
@@ -326,6 +347,9 @@ pub struct KpiInput<'a> {
     /// The host's logical cores, for the `load` axis.
     pub cores: Option<usize>,
     pub config: &'a KpiConfig,
+    /// The host's load, a reference next to each window's KPIs (task 872):
+    /// never a KPI, judged or pushed; `None` reads none.
+    pub host: Option<HostReader<'a>>,
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value
@@ -600,6 +624,10 @@ pub struct PeriodKpis {
     pub marks: Vec<Mark>,
     /// Each KPI next to the previous period's (and a day's 7-day baseline).
     pub comparison: Kpis<Change>,
+    /// The host's load in the period, as `stats`' `host` (task 872): a
+    /// reference, not a KPI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostSummary>,
 }
 
 /// The settings the KPIs were judged by, and where each came from.
@@ -765,6 +793,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
                 Some(Cursor::Time(span.end)),
             ),
             comparison,
+            host: input.host.map(|host| host.between(span.start, span.end)),
         });
     }
     let judged: Vec<config::JudgedPeriod<'_>> = spans

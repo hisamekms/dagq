@@ -293,6 +293,7 @@ mod tests {
                 })
                 .collect(),
             comparison,
+            host: None,
         }
     }
 

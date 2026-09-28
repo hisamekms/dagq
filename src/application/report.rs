@@ -22,8 +22,9 @@ use serde_json::json;
 use super::{Queue, RunFiles, kpi::Host};
 use crate::domain::{
     FindingQuery,
+    host_metrics::HostSummary,
     kpi::{
-        DAY_MS, KpiConfig, KpiQuery, Period,
+        DAY_MS, HostReader, KpiConfig, KpiQuery, Period,
         report::{self, DiagramSection, INDEX_FILE, Keep, Report, ReportFile},
     },
     marks,
@@ -56,6 +57,19 @@ pub struct ReportSetup {
     pub keep: Keep,
     pub build: String,
     pub diagram: DiagramRenderer,
+    /// What summarizes the host's load next to each period (task 872);
+    /// `None` reads none.
+    pub host_metrics: Option<HostMetrics>,
+}
+
+/// Summarizes the host's load between two unix seconds (task 872).
+#[derive(Clone)]
+pub struct HostMetrics(pub Arc<dyn Fn(i64, i64) -> HostSummary + Send + Sync>);
+
+impl std::fmt::Debug for HostMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostMetrics")
+    }
 }
 
 /// One report written.
@@ -141,6 +155,10 @@ fn make_with(
             at,
             ..KpiQuery::default()
         },
+        setup
+            .host_metrics
+            .as_ref()
+            .map(|read| HostReader(read.0.as_ref())),
     )?;
     let findings: Vec<_> = queue
         .findings(&FindingQuery::default())?

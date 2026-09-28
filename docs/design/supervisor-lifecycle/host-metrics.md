@@ -49,7 +49,7 @@ macOSでは`vm_stat`・`sysctl -n hw.memsize`・`sysctl -n vm.swapusage`・`ps -
 ## 読み口
 
 - [`stats`](stats.md#hostの負荷)の`host`が窓の要約（列ごとの平均・最大・p90）を出す
-- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。[`kpi`](kpi.md)はこれを読む（KPIへの組み込みはtask 430）
+- `infrastructure::host_metrics::summary(dir, from, until)`（`domain::host_metrics::summarize`）が任意の区間の要約を返す。[`kpi`](kpi.md#hostの負荷)はこれを各期間・`--since` / `--until`の窓・`--compare`の前後の窓ごとに読み、`host`として並べる（task 872。日次・週次のレポートのJSONにも載る）。KPIではない参考の値で、目標の判定・breach・push・observerのfindingには使わない
 - 人はCSVをそのまま読める（1日30秒ごとで約2,900行）
 
 ## 外部のsamplerを止める手順

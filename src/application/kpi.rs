@@ -3,7 +3,7 @@
 use anyhow::{Result, anyhow};
 
 use super::Queue;
-use crate::domain::kpi::{Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
+use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
 /// logical cores.
@@ -13,13 +13,16 @@ pub struct Host {
     pub cores: Option<usize>,
 }
 
-/// The KPIs `query` asks for, at the unix second `now`, judged by `config`.
+/// The KPIs `query` asks for, at the unix second `now`, judged by `config`,
+/// with the host's load of each window when `host_metrics` reads it (task
+/// 872; `kpi` and the reports do, the breach check and the observer do not).
 pub fn kpi(
     queue: &dyn Queue,
     now: i64,
     host: Host,
     config: &KpiConfig,
     query: &KpiQuery,
+    host_metrics: Option<HostReader<'_>>,
 ) -> Result<Kpi> {
     let events = queue.all_events()?;
     let goals = queue.task_goals()?;
@@ -41,6 +44,7 @@ pub fn kpi(
             utc_offset_secs: host.utc_offset_secs,
             cores: host.cores,
             config,
+            host: host_metrics,
         },
         query,
     )

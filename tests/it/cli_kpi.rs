@@ -279,6 +279,9 @@ fn report_writes_the_html_and_json_and_returns_their_paths() {
     let json: Value =
         serde_json::from_slice(&std::fs::read(today["json"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(json["report"]["label"], label);
+    // The host's load of the period rides along, as `kpi` prints it.
+    let periods = json["periods"].as_array().unwrap();
+    assert_eq!(periods.last().unwrap()["host"]["samples"], 0, "{json}");
     assert!(Path::new(today["index"].as_str().unwrap()).exists());
 
     // A finished week, into another directory.
@@ -410,4 +413,110 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
     );
     let summary = asked["compare"]["summary"].as_object().unwrap();
     assert_eq!(summary.keys().collect::<Vec<_>>(), ["frontend"]);
+}
+
+/// `dagq kpi` puts the host's load the supervisor recorded under the
+/// queue's `host/` next to each period, the `--since`/`--until` window
+/// and both sides of `--compare` (task 872): cut at the spans' bounds (the
+/// start exclusive), empty where nothing was recorded, and with the reason
+/// when the records cannot be read, without failing `kpi` or judging a
+/// target on it.
+#[test]
+fn kpi_summarizes_the_host_load_of_each_span() {
+    use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        dir.path().join("host.toml"),
+        "[kpi.targets.landings]\nmin = 5\n",
+    )
+    .unwrap();
+    // Nothing recorded yet: an empty summary per period.
+    let empty = kpi_ok(&db, &config, &["--last", "2"]);
+    for period in empty["periods"].as_array().unwrap() {
+        assert_eq!(period["host"]["samples"], 0, "{period}");
+        assert_eq!(period["host"]["metrics"]["load1"], Value::Null);
+        assert!(period["host"].get("error").is_none());
+    }
+    let base: i64 = 1_790_000_000;
+    let host = dir.path().join("host");
+    std::fs::create_dir_all(&host).unwrap();
+    let mut text = format!("{}\n", header());
+    for (unix, load) in [
+        (base, 1.0),
+        (base + 60, 2.0),
+        (base + 120, 4.0),
+        (base + 180, 8.0),
+    ] {
+        let mut sample = HostSample::new(unix);
+        sample.set("load1", Some(load));
+        text.push_str(&format!("{}\n", sample.row(0)));
+    }
+    let day_file = host.join(file_name(local_day(base, 0)));
+    std::fs::write(&day_file, text).unwrap();
+
+    let window = kpi_ok(
+        &db,
+        &config,
+        &[
+            "--since",
+            &format!("@{base}"),
+            "--until",
+            &format!("@{}", base + 120),
+        ],
+    );
+    let summary = &window["periods"][0]["host"];
+    assert_eq!(summary["from"], base + 1);
+    assert_eq!(summary["until"], base + 120);
+    assert_eq!(summary["samples"], 2, "{summary}");
+    assert_eq!(
+        summary["metrics"]["load1"],
+        json!({"samples": 2, "mean": 3.0, "max": 4.0, "p90": 4.0})
+    );
+    // The host is no KPI: the target judges only the landings.
+    assert!(
+        window["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|target| target["kpi"] == "landings")
+    );
+
+    let compared = kpi_ok(
+        &db,
+        &config,
+        &[
+            "--compare",
+            &format!("@{}..@{base},@{base}..@{}", base - 60, base + 180),
+        ],
+    );
+    assert_eq!(compared["compare"]["before"]["host"]["samples"], 1);
+    assert_eq!(compared["compare"]["after"]["host"]["samples"], 3);
+    assert_eq!(
+        compared["compare"]["after"]["host"]["metrics"]["load1"]["max"],
+        8.0
+    );
+
+    // A file that cannot be read: the reason, and `kpi` still answers.
+    std::fs::remove_file(&day_file).unwrap();
+    std::fs::create_dir(&day_file).unwrap();
+    let unreadable = kpi_ok(
+        &db,
+        &config,
+        &[
+            "--since",
+            &format!("@{base}"),
+            "--until",
+            &format!("@{}", base + 120),
+        ],
+    );
+    let summary = &unreadable["periods"][0]["host"];
+    assert_eq!(summary["samples"], 0);
+    assert!(
+        summary["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "{summary}"
+    );
 }
