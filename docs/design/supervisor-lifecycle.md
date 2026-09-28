@@ -193,7 +193,7 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ### Run environment
 
 - [Run environment](supervisor-lifecycle/run-environment.md)
-- [Worker model](supervisor-lifecycle/worker-model.md)（workerのmodel / effortの明示と記録、`[worker.trial]`の限定の試し）
+- [Worker model](supervisor-lifecycle/worker-model.md)（workerのmodel / effortの明示と記録、`[worker.trial]`の限定の試し、taskに由来する失敗の後の段上げ）
 - [Actor model](supervisor-lifecycle/actor-model.md)（worker以外のアクターの`[roles.<role>]`、差し戻しで開き直すplannerの段上げ、`launch`の記録）
 
 ### Stall thresholds

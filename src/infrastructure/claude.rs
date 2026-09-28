@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::adapters::ClaudeCode;
 use crate::{
     application::{AgentSignals, DialogAnswer, IdleHook, InputSource, KnownDialog},
-    domain::{queue_hold::Wall, stall::BackgroundTask},
+    domain::{queue_hold::Wall, stall::BackgroundTask, worker_model::WorkerSession},
 };
 
 /// `prompt_waiting` carries this many last non-empty lines of the screen.
@@ -522,6 +522,17 @@ impl AgentSignals for ClaudeCode {
 
     fn job_wall(&self, output: &str) -> Option<Wall> {
         job_wall(output)
+    }
+
+    /// `/model <model>` when the model changes, then `/effort <effort>`:
+    /// a model switch may reset the effort, so it goes last.
+    fn model_switch(&self, from: &WorkerSession, to: &WorkerSession) -> Option<Vec<String>> {
+        let mut inputs = Vec::new();
+        if from.model != to.model {
+            inputs.push(format!("/model {}", to.model));
+        }
+        inputs.push(format!("/effort {}", to.effort));
+        Some(inputs)
     }
 
     fn screen_excerpt(&self, screen: &str) -> String {
@@ -1083,6 +1094,30 @@ worktree on  dagq/68a96a60 took 8h32m49s
             executable: "claude".into(),
         };
         assert_eq!(claude.transcript(SUBMITTED), transcript(SUBMITTED_TICKED));
+    }
+
+    /// A live session is switched with its own commands: the model only
+    /// when it changes, the effort last (ADR-0079 decision 5).
+    #[test]
+    fn a_live_session_switches_with_model_and_effort_commands() {
+        use crate::domain::worker_model::{TrialGroup, WorkerSession};
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        let sonnet = WorkerSession::of_group(TrialGroup::Treatment);
+        let opus = sonnet.raised().unwrap();
+        assert_eq!(
+            claude.model_switch(&sonnet, &opus),
+            Some(vec![
+                "/model claude-opus-5-5".to_owned(),
+                "/effort medium".to_owned()
+            ])
+        );
+        let high = opus.raised().unwrap();
+        assert_eq!(
+            claude.model_switch(&opus, &high),
+            Some(vec!["/effort high".to_owned()])
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ use crate::application::{
 };
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker::Worker;
-use crate::domain::worker_model::{WorkerSession, WorkerTrial};
+use crate::domain::worker_model::{self, WorkerTrial};
 use crate::domain::{
     AskId, ClaimOutcome, CommitSha, DomainError, EventFilter, EventId, GoalId, PlannerId,
     PlannerOrigin, PlannerSession, ProposalId, Reason, ReasonCode, RunEvent, RunHistory, RunId,

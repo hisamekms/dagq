@@ -291,9 +291,10 @@ fn drive_agent(
         None => SessionAgent::Resume { run },
         Some(prompt) => SessionAgent::Worker { run, prompt },
     };
-    // The model and effort the claim chose (ADR-0079 decision 3); a resume
-    // keeps them.
-    let session = WorkerSession::of_run(&queue.run_events(run.id())?);
+    // The model and effort the claim chose (ADR-0079 decision 3), or the
+    // ones the resume recorded, raised after a failure the task caused
+    // (decision 5).
+    let session = WorkerSession::current(&queue.run_events(run.id())?);
     let mut child = HostActorExecutor::new(db)
         .with_provider(provider)
         .with_spawner(spawner)

@@ -528,7 +528,10 @@ mod stats {
                     "attempt": 1, "reason": "unknown",
                     "started_at": "2026-09-23T12:13:00.000Z",
                     "secs": null, "resolved": null,
+                    // Task 578: not raised.
+                    "escalated_from": null, "escalated_to": null,
                 }],
+                "revise_escalations": [],
                 // Task 575: no prediction; the actual repeats the counts.
                 "prediction": null,
                 "actual": {

@@ -453,12 +453,8 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
     assert_eq!(requested.len(), 1);
     assert_eq!(requested[0]["attempt"], 1);
     assert_eq!(requested[0]["reasons"], json!(["add a line to change.txt"]));
-    // The live session goes on with the claim's model and effort (ADR-0079
-    // decision 3).
-    assert_eq!(
-        (&requested[0]["model"], &requested[0]["effort"]),
-        (&json!("claude-opus-5-5"), &json!("medium"))
-    );
+    // Switched one step up before the request (ADR-0079 decision 5).
+    crate::worker_escalation::assert_raised_by_revise(requested[0], &backend, &db);
     let revised = payloads(&detail, "revise_finished");
     assert_eq!(revised.len(), 1);
     let head = git_out(
@@ -520,6 +516,7 @@ fn a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it() {
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
     assert_eq!(payloads(&detail, "revise_requested").len(), 2);
+    crate::worker_escalation::assert_revises_raised(&detail, &backend);
     assert_eq!(payloads(&detail, "revise_finished").len(), 2);
     assert_eq!(payloads(&detail, "review_finished").len(), 3);
     assert_eq!(backend.texts().len(), 2);

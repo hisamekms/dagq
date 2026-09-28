@@ -109,4 +109,5 @@ mod runtime_waiting;
 mod runtime_waiting_stages;
 mod source_repository;
 mod test_actor_env;
+mod worker_escalation;
 mod worker_model;

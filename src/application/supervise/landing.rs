@@ -7,6 +7,7 @@ use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
+use crate::domain::worker_model::{self, Escalation};
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
 /// ask of a run with when a later review of the run asks again: it failed
@@ -311,15 +312,55 @@ impl Supervisor<'_> {
                     &run_dir.join(format!("revise-{attempt}.txt")),
                     message.as_bytes(),
                 )?;
+                // A revise is rework the task caused: the live session is
+                // switched one step up before the request (ADR-0079 decision
+                // 5). One that cannot be switched goes on as it is, and why
+                // is recorded.
+                let current = WorkerSession::current(&events);
+                let (worker, raise, skipped) = match current.raised() {
+                    None => (current, None, None),
+                    Some(raised) => {
+                        match self.switch_live_session(run, &live.workspace, &current, &raised) {
+                            Ok(()) => (
+                                raised,
+                                Some(Escalation {
+                                    from: current,
+                                    reason: worker_model::REVISE.to_owned(),
+                                }),
+                                None,
+                            ),
+                            Err(Unswitched::Untouched(why)) => {
+                                warn!(run_id = %run.id(), "run {}: the session was not raised to {} for revise {attempt}: {why}", run.id(), raised.label());
+                                (current, None, Some((raised, why)))
+                            }
+                            // Typing the revise now could land it on the
+                            // input left in the box, or in a dialog, and
+                            // the session may run with half a switch: a
+                            // person decides, as for a revise not sent.
+                            Err(Unswitched::Unsettled(why)) => {
+                                let why = format!(
+                                    "the session could not be switched to {} before revise {attempt}: {why}",
+                                    raised.label()
+                                );
+                                warn!(run_id = %run.id(), "run {}: {why}", run.id());
+                                return Ok(ask(Some(why), verdict, session));
+                            }
+                        }
+                    }
+                };
                 let sent_at = self.files.now();
                 // Recorded before it is typed: a supervisor that stops in
                 // between leaves an adopter that waits for the session
                 // rather than sending the request a second time.
-                // The live session goes on with the model and effort it was
-                // started with (ADR-0079 decision 3).
                 let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": unix_seconds(sent_at)});
                 if let Some(requested) = requested.as_object_mut() {
-                    requested.extend(WorkerSession::of_run(&events).fields());
+                    requested.extend(worker.fields_raised(raise.as_ref()));
+                    if let Some((raised, why)) = skipped {
+                        requested.insert(
+                            "escalation_skipped".to_owned(),
+                            json!({"model": raised.model, "effort": raised.effort, "reason": worker_model::REVISE, "why": why}),
+                        );
+                    }
                 }
                 self.queue
                     .record_runtime_event(run.id(), EventKind::ReviseRequested, requested)?;
@@ -358,6 +399,45 @@ impl Supervisor<'_> {
                 )?))
             }
         }
+    }
+    /// Switch the live session of `run` in `workspace` from `from` to `to`
+    /// (ADR-0079 decision 5): the agent's switch inputs, each typed and
+    /// submitted. A headless session needs none, its next turn starting
+    /// with the session recorded last. Why it could not, when it could not.
+    fn switch_live_session(
+        &mut self,
+        run: &TaskRun,
+        workspace: &str,
+        from: &WorkerSession,
+        to: &WorkerSession,
+    ) -> std::result::Result<(), Unswitched> {
+        if headless(run) {
+            return Ok(());
+        }
+        let Some(inputs) = self.signals.model_switch(from, to) else {
+            return Err(Unswitched::Untouched(
+                "the agent cannot switch its model or effort inside a live session".to_owned(),
+            ));
+        };
+        for (index, input) in inputs.iter().enumerate() {
+            let unsettled = match submit(self, run, workspace, Input::Text(input), "model switch") {
+                Ok(Submission::Submitted(_) | Submission::Queued) => continue,
+                Ok(Submission::Dialog(_)) => format!("a dialog was on the screen after `{input}`"),
+                Ok(Submission::Stuck(_)) => format!("`{input}` stayed in the input box"),
+                Ok(Submission::Unsent) => format!("`{input}` was not sent"),
+                // A typing that failed left nothing in the box (one that
+                // left it there is `Stuck`): before any input got through,
+                // the session is as it was.
+                Err(error) if index == 0 => {
+                    return Err(Unswitched::Untouched(format!(
+                        "`{input}` could not be typed: {error:#}"
+                    )));
+                }
+                Err(error) => format!("`{input}` could not be typed: {error:#}"),
+            };
+            return Err(Unswitched::Unsettled(unsettled));
+        }
+        Ok(())
     }
     /// Before a passed run's session is asked to exit, judge with `git
     /// merge-tree` whether its head conflicts with the current main,
@@ -789,4 +869,13 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
+}
+
+/// Why a live session was not switched before a revise.
+enum Unswitched {
+    /// Nothing reached the session: the revise goes on at the step it was.
+    Untouched(String),
+    /// An input may be left in the box or a dialog on the screen, or the
+    /// session took part of the switch.
+    Unsettled(String),
 }

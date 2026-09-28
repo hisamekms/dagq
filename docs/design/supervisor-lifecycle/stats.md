@@ -147,7 +147,8 @@ related:
 - **`integrate_attempts`**: `integration_started`の数。**`deferrals`**: `integration_deferred`のpayloadの`code`ごとの数（コードの無い古いイベントは`unknown`）。**`conflict_files`**: `integration_deferred`の`conflicts`（rebaseが衝突したファイル）の和集合を昇順で。
 - **`broken_by`**: `code`が`rebase_conflict` / `verification_failed` / `rebase_empty`（mainが動いたことで起きうる延期）の`integration_deferred`ごとに、rebase先のmain（payloadの`main`、無ければその試行の`integration_started`の`main`）を、`run_integrated`の`result_commit`（無ければ`commit`）がそのcommitの着地に結び付け、`{task_id, run_id, landed_at, main, code}`を載せる。同じ着地は1回だけ（最初の延期の`code`）。自分の着地と、runtimeの外で動いたmain（どの着地の`result_commit`でもない）は結び付けない。着地は全イベントから探すので、windowの外の着地にも結び付く。
 - **`broke_runs`**: そのrunの着地を`broken_by`に持つ他のrunの数。
-- **`resume_attempts`**: `resume_started`ごとの`{attempt, reason, started_at, secs, resolved}`。`reason`はその前に最後にrunを止めたイベント（`integration_deferred`・`integration_error`・`evidence_missing`・`scope_violation`・`landing_decided`・`triage_finished`・`triage_decided`。supervisorの`resume_reason`と同じ）の`code`（`rebase_conflict`・`verification_failed`・`evidence_missing`・`triage_resume`など。無ければ`unknown`）。`secs`は`resume_started`→`resume_finished`（無ければnull）。`resolved`は1回で解けたか: `resume_finished`の`outcome`が`resolved`で、その後に（次の`resume_started`まで）payloadの`status`が`needs_session`のイベント（`integration_error`と`resume_finished`を除く。`needs_session`の数え方と同じ）が来なければtrue、`outcome`が`resolved`でないか、来ればfalse、`resume_finished`が無ければnull。
+- **`resume_attempts`**: `resume_started`ごとの`{attempt, reason, started_at, secs, resolved}`。`reason`はその前に最後にrunを止めたイベント（`integration_deferred`・`integration_error`・`evidence_missing`・`scope_violation`・`landing_decided`・`triage_finished`・`triage_decided`。supervisorの`resume_reason`と同じ）の`code`（`rebase_conflict`・`verification_failed`・`evidence_missing`・`triage_resume`など。無ければ`unknown`）。`secs`は`resume_started`→`resume_finished`（無ければnull）。`resolved`は1回で解けたか: `resume_finished`の`outcome`が`resolved`で、その後に（次の`resume_started`まで）payloadの`status`が`needs_session`のイベント（`integration_error`と`resume_finished`を除く。`needs_session`の数え方と同じ）が来なければtrue、`outcome`が`resolved`でないか、来ればfalse、`resume_finished`が無ければnull。`escalated_from` / `escalated_to`は、そのresumeがtaskに由来する失敗の後にworkerのsessionを1段上げたとき（`resume_started`の`escalated_from`。[Worker model](worker-model.md#段上げ決定5)）の前と後の`model/effort`で、上げなかったresumeはどちらもnull。
+- **`revise_escalations`**: reviewの`revise`でsessionを上げた、または上げようとした`revise_requested`ごとの`{attempt, from, to, switched}`（`from` / `to`は`model/effort`）。`switched`は切り替えたらtrue、切り替えられず直前のまま差し戻した（`escalation_skipped`）ならfalse。上限（Opus xhigh）で上げなかったもの、同じattemptの`revise_unsent`で取り下げたもの、task 578より前のものは載らない。
 - **`resume_outcomes`**（`goals`と`overall`）: `attempts`（数）、`resolved` / `unresolved`（`resolved`がtrue / falseの数）、`resolved_percent`（`resolved / (resolved + unresolved)`の百分率の切り捨て。どちらも0ならnull）、`secs`（`{count, total, median, p90, max}`。`p90`は`land_phases`と同じnearest-rank）と、`reason`ごとの同じ形の`by_reason`。
 
 ## 版と負荷と検証コマンド
@@ -204,6 +205,13 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 
 - 各群は`{group, sessions, runs, tasks, lead_time, work, model_secs, output_tokens, task_rework, task_rework_rate}`。`sessions`はrunの`worker_model/worker_effort`ごとの件数、`runs` / `tasks`は件数、`lead_time`はclaim→着地（`claimed_at`→`landed_at`）の秒、`work`は`work`、`model_secs`と`output_tokens`は`actual`の同名の値で、どれも`{count, total, median}`（値の無いrunは数えない）。`task_rework`は`actual.task_rework`（ADR-0079の決定1の数え方）がtrueのrunの数、`task_rework_rate`はその`runs`に対する百分率（小数1桁）
 - 判定（1群45件前後、`task_rework_rate`の差（treatment − control）が+5ポイント以内か）は人とplannerが`stats --full`（か`--since`で試しを有効にした時点から）で読む。期間ごとの推移と前後比較は`kpi --by group`（`model` / `effort` / `nature`も。[kpi](kpi.md#kpiと層)、task 740）のrunの層で、`landings`・`lead_time`・`phase.*`・`revise_rate`・`verification_failed_rate`・`resumes_per_run`などを群ごとに読む
+
+## workerのsessionの段上げ
+
+[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定5（task 578）。**`escalations`**は、`runs`と同じページのrunの`resume_attempts`と`revise_escalations`から、taskに由来する失敗の後にworkerのsessionを1段上げた件数と、上げたresumeがその1回で解けたかをまとめる（[Worker model](worker-model.md#段上げ決定5)）。集計は`domain::stats::escalations`。
+
+- `{count, by_reason, by_step, resumes, revises, revises_not_switched}`。`count`は上げたresumeと切り替えたreviseの数、`by_reason`はその理由（resumeは`reason`のcode: `verification_failed` / `sent_back`、reviseは`revise`）ごと、`by_step`は`<前のmodel/effort> -> <後のmodel/effort>`ごとの件数。`resumes`は上げたresumeだけの`resume_outcomes`と同じ形（`attempts`・`resolved`・`unresolved`・`resolved_percent`・`secs`。`by_reason`は無い）で、`resolved`は`resume_attempts`の`resolved`（その1回で解けたか）。`revises`は切り替えたrevise、`revises_not_switched`は切り替えられなかったreviseの数
+- retryのclaimで引き継いだ段（`run_claimed`の`escalation_inherited`）は数えない。runの層の`--by effort`（[kpi](kpi.md#kpiと層)）はclaimの値なので、引き継いだ段はそこに出る
 
 ## draftの流入と流出
 

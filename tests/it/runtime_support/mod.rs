@@ -568,6 +568,14 @@ pub struct TestWorkspace {
     pub resume_tags: Mutex<Vec<WorkspaceTags>>,
     /// `send_text` calls: the workspace and the text.
     pub texts: Mutex<Vec<(String, String)>>,
+    /// The inputs that switched a live session's model or effort
+    /// (`/model`, `/effort`; ADR-0079 decision 5): the workspace and the
+    /// input. The session takes them as the agent does, without working.
+    pub switches: Mutex<Vec<(String, String)>>,
+    /// A switch input fails to be typed, the other texts going on.
+    pub switch_fails: bool,
+    /// A switch input stays in the input box, whatever Enter is sent.
+    pub switch_stuck: bool,
     /// `send_text` records the call and then fails, as a `cmux send` to a
     /// workspace that went away does.
     pub text_fails: bool,
@@ -641,6 +649,9 @@ impl TestWorkspace {
             resumes: Mutex::new(Vec::new()),
             resume_tags: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
+            switches: Mutex::new(Vec::new()),
+            switch_fails: false,
+            switch_stuck: false,
             text_fails: false,
             exists_fails: false,
             listed: Mutex::new(Vec::new()),
@@ -670,6 +681,9 @@ impl TestWorkspace {
     }
     pub fn texts(&self) -> Vec<(String, String)> {
         self.texts.lock().unwrap().clone()
+    }
+    pub fn switches(&self) -> Vec<(String, String)> {
+        self.switches.lock().unwrap().clone()
     }
     /// Agent script for one task; other tasks use the default script.
     pub fn script_for(&self, task_id: i64, script: &str) {
@@ -887,6 +901,19 @@ impl WorkspaceBackend for TestWorkspace {
         Ok(workspace)
     }
     fn send_text(&self, workspace_id: &str, text: &str) -> Result<()> {
+        if text.starts_with("/model ") || text.starts_with("/effort ") {
+            self.switches
+                .lock()
+                .unwrap()
+                .push((workspace_id.into(), text.into()));
+            if self.switch_fails || self.text_fails {
+                bail!("injected cmux send failure");
+            }
+            if self.switch_stuck {
+                *self.screen.lock().unwrap() = pending_screen(text);
+            }
+            return Ok(());
+        }
         self.texts
             .lock()
             .unwrap()
@@ -1865,6 +1892,23 @@ pub fn git_out(repo: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&result.stderr)
     );
     String::from_utf8(result.stdout).unwrap().trim().to_owned()
+}
+
+/// `dagq stats --full` of the queue at `db`, as the CLI prints it.
+pub fn stats_full(db: &Path) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .arg("--db")
+        .arg(db)
+        .args(["stats", "--full"])
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 /// `integrate` as the CLI runs it without `--no-push`: pushing through the

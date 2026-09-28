@@ -5,13 +5,21 @@
 //! `expected_output_tokens` in the lower third of the latest predictions),
 //! whose first claims alternate between the control (Opus 5.5 medium) and
 //! the treatment (Sonnet 5 medium). The group stays with the task.
+//!
+//! A session opened after a failure the task caused (decision 5: a failed
+//! verification, a review's `revise`, a concern a person sent back) is
+//! raised one step of [`LADDER`], up to Opus 5.5 at `xhigh`; a conflict, a
+//! kill or any other reason keeps the step. The raised step stays with the
+//! task's later runs.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::{
-    DomainError, RunEvent, TaskId, event_kind,
+    DomainError, ReasonCode, RunEvent, TaskId, event_kind,
     prediction::{PREDICTION_WINDOW, TaskNature, percentile, window},
+    reason::event_code,
+    resume,
 };
 
 /// The model of the control and of every session outside the trial.
@@ -20,6 +28,36 @@ pub const OPUS: &str = "claude-opus-5-5";
 pub const SONNET: &str = "claude-sonnet-5";
 /// The effort of both groups.
 pub const MEDIUM: &str = "medium";
+/// The efforts above [`MEDIUM`] a task-caused failure raises Opus to.
+pub const HIGH: &str = "high";
+pub const XHIGH: &str = "xhigh";
+/// The steps a worker session is raised by (ADR-0079 decision 5), lowest
+/// first; the last is the top, which stays.
+pub const LADDER: [(&str, &str); 4] = [
+    (SONNET, MEDIUM),
+    (OPUS, MEDIUM),
+    (OPUS, HIGH),
+    (OPUS, XHIGH),
+];
+/// The reason of a raise for a review's `revise`: the other reasons are
+/// the codes that parked the run ([`raises`]).
+pub const REVISE: &str = "revise";
+/// The events that open a worker session and record its model and effort.
+pub const SESSION_EVENTS: [&str; 3] = [
+    event_kind::RUN_CLAIMED,
+    event_kind::RESUME_STARTED,
+    event_kind::REVISE_REQUESTED,
+];
+
+/// Whether a run parked with `code` resumes one step higher: a failed
+/// verification (`integrate`'s or the landing recheck's) or a review's
+/// concern a person sent back, the task-caused rework of ADR-0079's
+/// decision 1. A conflict, a kill, `evidence_missing`, `scope_violation`
+/// and the rest keep the step.
+pub const fn raises(code: ReasonCode) -> bool {
+    matches!(code, ReasonCode::VerificationFailed | ReasonCode::SentBack)
+}
+
 /// The highest percentile of the lower third (ADR-0079 decision 4); the
 /// percentile is rounded to one decimal.
 pub const LOWER_THIRD: f64 = 33.3;
@@ -128,6 +166,162 @@ impl WorkerSession {
             _ => Self::default(),
         }
     }
+}
+
+impl WorkerSession {
+    /// `model/effort`, as `stats` names a session.
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.model, self.effort)
+    }
+
+    /// Where the session is on [`LADDER`]; `None` off it.
+    pub fn step(&self) -> Option<usize> {
+        LADDER
+            .iter()
+            .position(|&(model, effort)| self.model == model && self.effort == effort)
+    }
+
+    /// The session one step up [`LADDER`], in the same group; `None` at the
+    /// top, or for a session off the ladder.
+    pub fn raised(&self) -> Option<Self> {
+        let &(model, effort) = LADDER.get(self.step()? + 1)?;
+        Some(Self {
+            model: model.to_owned(),
+            effort: effort.to_owned(),
+            group: self.group,
+        })
+    }
+
+    /// The session opened last: `model`, `effort` and `group` of the latest
+    /// of [`SESSION_EVENTS`] among `events` (a run's, or a task's, oldest
+    /// first) that records them; the default without one.
+    pub fn current(events: &[RunEvent]) -> Self {
+        Self::latest(events).unwrap_or_default()
+    }
+
+    /// [`Self::current`], `None` without a recorded session.
+    fn latest(events: &[RunEvent]) -> Option<Self> {
+        openings(events)
+            .into_iter()
+            .rev()
+            .find_map(|index| Self::recorded(&events[index].payload))
+    }
+
+    fn recorded(payload: &Value) -> Option<Self> {
+        Some(Self {
+            model: payload["model"].as_str()?.to_owned(),
+            effort: payload["effort"].as_str()?.to_owned(),
+            group: group_of(payload),
+        })
+    }
+
+    /// The session a new run of the task starts with, `self` being the one
+    /// the claim chose: once a session of the task was raised, the latest
+    /// session among `task_events` (the task's) when it is higher, in
+    /// `self`'s group (ADR-0079 decision 5: a raise stays with the task's
+    /// later runs, retries included). Whether it was inherited.
+    pub fn inheriting(self, task_events: &[RunEvent]) -> (Self, bool) {
+        // Only a raise stays: a task claimed at the default before it
+        // joined the trial keeps its group's session.
+        let raised = openings(task_events)
+            .into_iter()
+            .any(|index| task_events[index].payload["escalated_from"].is_object());
+        let Some(last) = Self::latest(task_events).filter(|_| raised) else {
+            return (self, false);
+        };
+        match (last.step(), self.step()) {
+            (Some(last_step), Some(step)) if last_step > step => (
+                Self {
+                    group: self.group,
+                    ..last
+                },
+                true,
+            ),
+            _ => (self, false),
+        }
+    }
+
+    /// [`Self::fields`] with the raise that led to the session, if any:
+    /// `escalated_from` (the model and effort before) and
+    /// `escalation_reason`.
+    pub fn fields_raised(&self, raise: Option<&Escalation>) -> Map<String, Value> {
+        let mut fields = self.fields();
+        if let Some(raise) = raise {
+            fields.insert(
+                "escalated_from".to_owned(),
+                json!({"model": raise.from.model, "effort": raise.from.effort}),
+            );
+            fields.insert("escalation_reason".to_owned(), json!(raise.reason));
+        }
+        fields
+    }
+}
+
+/// A raise of a worker session: the session before it and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Escalation {
+    pub from: WorkerSession,
+    pub reason: String,
+}
+
+/// The session a resume of the run opens, from the run's `events` (oldest
+/// first) before its `resume_started`: the session opened last, one step
+/// higher when the latest event that parked the run came after it and
+/// carries a code that [`raises`]; with the raise, when there was one. A
+/// run parked again without a new session in between (a resume that ended
+/// without one) is not raised twice for one failure.
+pub fn for_resume(events: &[RunEvent]) -> (WorkerSession, Option<Escalation>) {
+    let current = WorkerSession::current(events);
+    let opened = openings(events).last().copied();
+    let parked = events.iter().rposition(resume::parks);
+    let code = match (parked, opened) {
+        (Some(parked), Some(opened)) if parked > opened => event_code(&events[parked]),
+        (Some(parked), None) => event_code(&events[parked]),
+        _ => None,
+    };
+    match code.filter(|&code| raises(code)).and_then(|code| {
+        let raised = current.raised()?;
+        Some((raised, code))
+    }) {
+        Some((raised, code)) => (
+            raised,
+            Some(Escalation {
+                from: current,
+                reason: code.as_str().to_owned(),
+            }),
+        ),
+        None => (current, None),
+    }
+}
+
+/// The indexes of `events` that opened a worker session, oldest first: the
+/// [`SESSION_EVENTS`], but a `revise_requested` the supervisor withdrew
+/// (a `revise_unsent` of the same run and attempt), whose request and raise
+/// never reached the session.
+fn openings(events: &[RunEvent]) -> Vec<usize> {
+    let withdrawn: Vec<(Option<&str>, &Value)> = events
+        .iter()
+        .filter(|event| event.kind == event_kind::REVISE_UNSENT)
+        .map(|event| {
+            (
+                event.run_id.as_ref().map(|id| id.as_str()),
+                &event.payload["attempt"],
+            )
+        })
+        .collect();
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            SESSION_EVENTS.contains(&event.kind.as_str())
+                && !(event.kind == event_kind::REVISE_REQUESTED
+                    && withdrawn.contains(&(
+                        event.run_id.as_ref().map(|id| id.as_str()),
+                        &event.payload["attempt"],
+                    )))
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn group_of(payload: &Value) -> Option<TrialGroup> {
@@ -409,6 +603,198 @@ mod tests {
         ));
         odd.push(event(12, 6, "run_claimed", json!({"group": "other"})));
         assert_eq!(choose(&on(), t(6), &odd).session, WorkerSession::default());
+    }
+
+    fn opened(id: i64, kind: &str, model: &str, effort: &str) -> RunEvent {
+        event(
+            id,
+            1,
+            kind,
+            json!({"model": model, "effort": effort, "group": null}),
+        )
+    }
+
+    fn session(model: &str, effort: &str) -> WorkerSession {
+        WorkerSession {
+            model: model.to_owned(),
+            effort: effort.to_owned(),
+            group: None,
+        }
+    }
+
+    #[test]
+    fn the_ladder_raises_one_step_up_to_opus_xhigh() {
+        let mut treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let mut steps = vec![treatment.label()];
+        while let Some(next) = treatment.raised() {
+            assert_eq!(next.group, Some(TrialGroup::Treatment));
+            steps.push(next.label());
+            treatment = next;
+        }
+        assert_eq!(
+            steps,
+            [
+                "claude-sonnet-5/medium",
+                "claude-opus-5-5/medium",
+                "claude-opus-5-5/high",
+                "claude-opus-5-5/xhigh"
+            ]
+        );
+        assert_eq!(WorkerSession::default().step(), Some(1));
+        // Off the ladder: not raised.
+        assert_eq!(session("other", "medium").raised(), None);
+        assert_eq!(session(OPUS, "low").step(), None);
+        assert!(raises(ReasonCode::VerificationFailed));
+        assert!(raises(ReasonCode::SentBack));
+        for code in [
+            ReasonCode::RebaseConflict,
+            ReasonCode::SessionKilled,
+            ReasonCode::EvidenceMissing,
+            ReasonCode::ScopeViolation,
+            ReasonCode::MigrationNumberTaken,
+            ReasonCode::TriageResume,
+        ] {
+            assert!(!raises(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_current_session_is_the_one_opened_last() {
+        assert_eq!(WorkerSession::current(&[]), WorkerSession::default());
+        let events = [
+            opened(1, "run_claimed", SONNET, MEDIUM),
+            opened(2, "resume_started", OPUS, MEDIUM),
+            opened(3, "revise_requested", OPUS, HIGH),
+            // Not a session's event, and one without its values.
+            opened(4, "agent_started", OPUS, XHIGH),
+            event(5, 1, "resume_started", json!({"attempt": 2})),
+        ];
+        assert_eq!(WorkerSession::current(&events), session(OPUS, HIGH));
+        let raise = Escalation {
+            from: session(OPUS, MEDIUM),
+            reason: REVISE.to_owned(),
+        };
+        assert_eq!(
+            Value::Object(session(OPUS, HIGH).fields_raised(Some(&raise))),
+            json!({"model": OPUS, "effort": HIGH, "group": null,
+                   "escalated_from": {"model": OPUS, "effort": MEDIUM},
+                   "escalation_reason": "revise"})
+        );
+        assert_eq!(
+            session(OPUS, HIGH).fields_raised(None),
+            session(OPUS, HIGH).fields()
+        );
+    }
+
+    #[test]
+    fn a_resume_is_raised_once_for_a_failure_the_task_caused() {
+        let parked = |id, code: &str| {
+            event(
+                id,
+                1,
+                "integration_deferred",
+                json!({"code": code, "status": "needs_session"}),
+            )
+        };
+        let claim = opened(1, "run_claimed", OPUS, MEDIUM);
+        // A failed verification after the claim raises it.
+        let (next, raise) = for_resume(&[claim.clone(), parked(2, "verification_failed")]);
+        assert_eq!(next, session(OPUS, HIGH));
+        let raise = raise.unwrap();
+        assert_eq!(
+            (raise.from, raise.reason.as_str()),
+            (session(OPUS, MEDIUM), "verification_failed")
+        );
+        // A conflict does not.
+        assert_eq!(
+            for_resume(&[claim.clone(), parked(2, "rebase_conflict")]),
+            (session(OPUS, MEDIUM), None)
+        );
+        // A park before the session opened last is not raised again.
+        let events = [
+            claim.clone(),
+            parked(2, "verification_failed"),
+            opened(3, "resume_started", OPUS, HIGH),
+        ];
+        assert_eq!(for_resume(&events), (session(OPUS, HIGH), None));
+        // The landing recheck's failed verification raises too; at the top
+        // the step stays.
+        let recheck = event(
+            4,
+            1,
+            "landing_recheck_failed",
+            json!({"action": "resumed", "code": "verification_failed"}),
+        );
+        let top = [opened(1, "run_claimed", OPUS, XHIGH), recheck.clone()];
+        assert_eq!(for_resume(&top), (session(OPUS, XHIGH), None));
+        // Without any session recorded, the park is still read.
+        assert_eq!(for_resume(&[recheck]).0, session(OPUS, HIGH));
+        assert_eq!(for_resume(&[]), (WorkerSession::default(), None));
+    }
+
+    /// A revise the supervisor withdrew never reached the session: its
+    /// raise does not count, and a person's `send_back` after it raises
+    /// from the session that ran.
+    #[test]
+    fn a_withdrawn_revise_opens_no_session() {
+        let mut requested = opened(2, "revise_requested", OPUS, HIGH);
+        requested.payload["attempt"] = json!(1);
+        requested.payload["escalated_from"] = json!({"model": OPUS, "effort": MEDIUM});
+        let unsent = event(3, 1, "revise_unsent", json!({"attempt": 1}));
+        let sent_back = event(
+            4,
+            1,
+            "landing_decided",
+            json!({"code": "sent_back", "status": "needs_session"}),
+        );
+        let events = [
+            opened(1, "run_claimed", OPUS, MEDIUM),
+            requested.clone(),
+            unsent.clone(),
+            sent_back,
+        ];
+        assert_eq!(WorkerSession::current(&events[..3]), session(OPUS, MEDIUM));
+        let (next, raise) = for_resume(&events);
+        assert_eq!(next, session(OPUS, HIGH));
+        assert_eq!(raise.unwrap().from, session(OPUS, MEDIUM));
+        // Nor does it stay with the task.
+        assert_eq!(
+            session(OPUS, MEDIUM).inheriting(&[requested.clone(), unsent]),
+            (session(OPUS, MEDIUM), false)
+        );
+        // A revise of another attempt that was sent stays.
+        assert_eq!(WorkerSession::current(&[requested]), session(OPUS, HIGH));
+    }
+
+    #[test]
+    fn a_raised_step_stays_with_the_task() {
+        let raised = event(
+            3,
+            1,
+            "resume_started",
+            json!({"model": OPUS, "effort": XHIGH, "group": "treatment",
+                   "escalated_from": {"model": OPUS, "effort": HIGH}}),
+        );
+        let treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let (session_now, inherited) = treatment
+            .clone()
+            .inheriting(&[opened(1, "run_claimed", SONNET, MEDIUM), raised.clone()]);
+        assert!(inherited);
+        assert_eq!(session_now.label(), "claude-opus-5-5/xhigh");
+        assert_eq!(session_now.group, Some(TrialGroup::Treatment));
+        // Nothing raised: the claim's choice, even below the last session.
+        let unraised = [opened(1, "run_claimed", OPUS, MEDIUM)];
+        assert_eq!(
+            treatment.clone().inheriting(&unraised),
+            (treatment.clone(), false)
+        );
+        assert_eq!(
+            treatment.clone().inheriting(&[]),
+            (treatment.clone(), false)
+        );
+        // A choice as high as the raise keeps the choice.
+        let high = session(OPUS, XHIGH);
+        assert_eq!(high.clone().inheriting(&[raised]), (high, false));
     }
 
     #[test]

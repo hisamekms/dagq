@@ -1743,6 +1743,12 @@ pub(super) fn claim_task(
     };
     let task = task::claim(ready.swap_remove(preferred))?;
     let choice = worker_model::choose(trial, task.id(), &trial_events(tx, trial)?);
+    // A step the task was raised to stays with its later runs (ADR-0079
+    // decision 5).
+    let (session, inherited) = choice
+        .session
+        .clone()
+        .inheriting(&session_events(tx, task.id())?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
     let run = TaskRun::new(run_id, &task, base_commit, now.clone())?;
@@ -1784,9 +1790,12 @@ pub(super) fn claim_task(
             payload.insert("provider_version".to_owned(), version);
         }
         if let Some(payload) = payload.as_object_mut() {
-            payload.extend(choice.session.fields());
+            payload.extend(session.fields());
             if let Some(percentile) = choice.percentile {
                 payload.insert("trial_percentile".to_owned(), json!(percentile));
+            }
+            if inherited {
+                payload.insert("escalation_inherited".to_owned(), json!(true));
             }
         }
         payload
@@ -1809,6 +1818,20 @@ fn trial_events(conn: &Connection, trial: &WorkerTrial) -> Result<Vec<RunEvent>>
             event_kind::RUN_CLAIMED
         ))?
         .query_map([], event_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The events of `task`'s earlier runs that opened a worker session
+/// (`worker_model::SESSION_EVENTS`), oldest first.
+fn session_events(conn: &Connection, task: TaskId) -> Result<Vec<RunEvent>> {
+    let kinds = worker_model::SESSION_EVENTS
+        .map(|kind| format!("'{kind}'"))
+        .join(",");
+    Ok(conn
+        .prepare(&format!(
+            "SELECT * FROM run_events WHERE task_id=?1 AND kind IN ({kinds}) ORDER BY id"
+        ))?
+        .query_map([task], event_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 

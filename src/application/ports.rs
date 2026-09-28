@@ -691,6 +691,16 @@ pub trait AgentSignals {
     fn job_wall(&self, _output: &str) -> Option<crate::domain::queue_hold::Wall> {
         None
     }
+    /// The inputs that switch a live worker session from `from` to `to`
+    /// (ADR-0079 decision 5), each typed and submitted in turn before a
+    /// request; `None` when the agent cannot switch inside a session.
+    fn model_switch(
+        &self,
+        _from: &crate::domain::worker_model::WorkerSession,
+        _to: &crate::domain::worker_model::WorkerSession,
+    ) -> Option<Vec<String>> {
+        None
+    }
     /// The last lines of `screen` an ask and `prompt_waiting` carry.
     fn screen_excerpt(&self, screen: &str) -> String;
     /// What the idle marker's content says. A content the adapter cannot

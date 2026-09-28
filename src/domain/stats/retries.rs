@@ -58,6 +58,25 @@ pub struct ResumeAttempt {
     /// (`outcome: resolved`) and the run was not parked for a session
     /// again afterwards. Null without a `resume_finished`.
     pub resolved: Option<bool>,
+    /// The session (`model/effort`) before this resume raised it a step
+    /// after a failure the task caused (ADR-0079 decision 5), and the one
+    /// it opened; both null when it was not raised.
+    pub escalated_from: Option<String>,
+    pub escalated_to: Option<String>,
+}
+
+/// A `revise_requested` that raised the live session a step (ADR-0079
+/// decision 5), or would have but could not switch it; one withdrawn by a
+/// `revise_unsent` is left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviseEscalation {
+    pub attempt: i64,
+    /// `model/effort` before and after the raise.
+    pub from: String,
+    pub to: String,
+    /// Whether the session was switched; false when it went on as it was
+    /// (`escalation_skipped`).
+    pub switched: bool,
 }
 
 /// The landings of one run, as its events and the other runs' landings
@@ -77,6 +96,8 @@ pub struct Retries {
     /// How many other runs this run's landing broke.
     pub broke_runs: i64,
     pub resume_attempts: Vec<ResumeAttempt>,
+    /// The revises that raised the live session, or tried to.
+    pub revise_escalations: Vec<ReviseEscalation>,
 }
 
 #[derive(Default)]
@@ -97,6 +118,24 @@ struct Walk {
 
 fn text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned)
+}
+
+/// `model/effort` of `value` (an object with both).
+fn session_label(value: &Value) -> Option<String> {
+    Some(format!(
+        "{}/{}",
+        value["model"].as_str()?,
+        value["effort"].as_str()?
+    ))
+}
+
+/// The raise a session's event records: `escalated_from` and the session
+/// it opened; `None` without one.
+fn escalation(payload: &Value) -> Option<(String, String)> {
+    Some((
+        session_label(&payload["escalated_from"])?,
+        session_label(payload)?,
+    ))
 }
 
 /// The retries of every run of `events` (ascending id).
@@ -143,6 +182,7 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
             }
             "resume_started" => {
                 let attempts = &mut walk.retries.resume_attempts;
+                let (escalated_from, escalated_to) = escalation(&event.payload).unzip();
                 attempts.push(ResumeAttempt {
                     attempt: event.payload["attempt"]
                         .as_i64()
@@ -151,9 +191,38 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                     started_at: event.created_at.clone(),
                     secs: None,
                     resolved: None,
+                    escalated_from,
+                    escalated_to,
                 });
                 walk.resume_start = at;
                 walk.watching = None;
+            }
+            "revise_requested" => {
+                let payload = &event.payload;
+                let raise = escalation(payload)
+                    .map(|(from, to)| (from, to, true))
+                    .or_else(|| {
+                        Some((
+                            session_label(payload)?,
+                            session_label(&payload["escalation_skipped"])?,
+                            false,
+                        ))
+                    });
+                if let Some((from, to, switched)) = raise {
+                    walk.retries.revise_escalations.push(ReviseEscalation {
+                        attempt: payload["attempt"].as_i64().unwrap_or_default(),
+                        from,
+                        to,
+                        switched,
+                    });
+                }
+            }
+            // A withdrawn revise never reached the session.
+            "revise_unsent" => {
+                let attempt = event.payload["attempt"].as_i64().unwrap_or_default();
+                walk.retries
+                    .revise_escalations
+                    .retain(|revise| revise.attempt != attempt);
             }
             "resume_finished" => {
                 let index = walk.retries.resume_attempts.len().checked_sub(1);
@@ -236,7 +305,7 @@ pub struct ResumeBreakdown {
     pub by_reason: BTreeMap<String, ResumeSummary>,
 }
 
-fn resume_summary(attempts: &[&ResumeAttempt]) -> ResumeSummary {
+pub(super) fn resume_summary(attempts: &[&ResumeAttempt]) -> ResumeSummary {
     let mut secs: Vec<i64> = attempts.iter().filter_map(|a| a.secs).collect();
     let resolved = attempts.iter().filter(|a| a.resolved == Some(true)).count();
     let unresolved = attempts
@@ -456,6 +525,101 @@ mod tests {
         assert_eq!(
             resume_breakdown(std::iter::empty()).all.resolved_percent,
             None
+        );
+    }
+
+    #[test]
+    fn raised_resumes_and_revises_are_read() {
+        let opus = |effort: &str| json!({"model": "claude-opus-5-5", "effort": effort});
+        let events = [
+            event(
+                1,
+                A,
+                1,
+                "integration_deferred",
+                json!({"code": "verification_failed", "status": "needs_session"}),
+                10,
+            ),
+            event(
+                2,
+                A,
+                1,
+                "resume_started",
+                json!({"attempt": 1, "model": "claude-opus-5-5", "effort": "high",
+                       "escalated_from": opus("medium"), "escalation_reason": "verification_failed"}),
+                20,
+            ),
+            event(
+                3,
+                A,
+                1,
+                "resume_finished",
+                json!({"outcome": "resolved"}),
+                30,
+            ),
+            event(
+                4,
+                A,
+                1,
+                "revise_requested",
+                json!({"attempt": 1, "model": "claude-opus-5-5", "effort": "xhigh",
+                       "escalated_from": opus("high"), "escalation_reason": "revise"}),
+                40,
+            ),
+            event(
+                5,
+                A,
+                1,
+                "revise_requested",
+                json!({"attempt": 2, "model": "claude-opus-5-5", "effort": "xhigh",
+                       "escalation_skipped": {"model": "x", "effort": "y", "why": "no"}}),
+                50,
+            ),
+            // At the top, or before the raises were recorded: nothing.
+            event(6, A, 1, "revise_requested", json!({"attempt": 3}), 60),
+            // Withdrawn: not a raise.
+            event(
+                7,
+                A,
+                1,
+                "revise_requested",
+                json!({"attempt": 4, "model": "claude-opus-5-5", "effort": "xhigh",
+                       "escalated_from": opus("high")}),
+                70,
+            ),
+            event(8, A, 1, "revise_unsent", json!({"attempt": 4}), 71),
+        ];
+        let all = retries(&events);
+        let a = &all[&RunId::new(A).unwrap()];
+        let resume = &a.resume_attempts[0];
+        assert_eq!(
+            (
+                resume.escalated_from.as_deref(),
+                resume.escalated_to.as_deref(),
+                resume.resolved
+            ),
+            (
+                Some("claude-opus-5-5/medium"),
+                Some("claude-opus-5-5/high"),
+                Some(true)
+            )
+        );
+        assert_eq!(
+            a.revise_escalations,
+            [
+                ReviseEscalation {
+                    attempt: 1,
+                    from: "claude-opus-5-5/high".into(),
+                    to: "claude-opus-5-5/xhigh".into(),
+                    switched: true,
+                },
+                ReviseEscalation {
+                    attempt: 2,
+                    from: "claude-opus-5-5/xhigh".into(),
+                    to: "x/y".into(),
+                    switched: false,
+                },
+            ]
         );
     }
 }

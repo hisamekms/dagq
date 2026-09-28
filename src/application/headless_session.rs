@@ -117,8 +117,6 @@ impl Turns<'_> {
         // request, its untaken requests) before it opened this workspace.
         self.files.create_dir_all(&turns_dir(&run_dir))?;
         let events = self.queue.run_events(self.run.id())?;
-        // The model and effort the claim chose (ADR-0079 decision 3).
-        let session = WorkerSession::of_run(&events);
         let mut created = events
             .iter()
             .any(|e| e.kind == event_kind::TURN_FINISHED && e.payload["session_created"] == true);
@@ -167,6 +165,10 @@ impl Turns<'_> {
                 _ => prompt,
             };
             turn += 1;
+            // Each turn is a process of its own: it starts with the session
+            // recorded last (the claim's, a resume's or a revise's, raised
+            // after a failure the task caused; ADR-0079 decisions 3 and 5).
+            let session = WorkerSession::current(&self.queue.run_events(self.run.id())?);
             let ended = self.turn(
                 &run_dir,
                 turn,

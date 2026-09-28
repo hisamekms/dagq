@@ -103,6 +103,12 @@ impl History {
     }
 }
 
+/// Whether `event` parked its run for a session (or decided what it
+/// resumes with): one of the parking events, or a landing recheck's park.
+pub fn parks(event: &RunEvent) -> bool {
+    PARKING.contains(&event.kind.as_str()) || recheck::parks(event)
+}
+
 fn history(events: &[RunEvent]) -> History {
     let mut history = History::default();
     for event in events {

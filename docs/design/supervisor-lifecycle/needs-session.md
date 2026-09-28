@@ -16,6 +16,8 @@ related:
   - adr-0047
   - adr-0068
   - adr-t803-1
+  - adr-0079
+  - design-supervisor-lifecycle-worker-model
 ---
 
 # `needs_session`
@@ -23,6 +25,8 @@ related:
 衝突（4）と再検証の失敗（5。宣言外のパスを含む）は`defer_integration`でrunを`needs_session`にし、理由を`last_error`、詳細（衝突ファイル、Gitの出力の末尾、rebase後のheadなど）を`integration_deferred`イベントに書いて、lease行を消しスロットを空ける。worktreeは衝突なら検証済みhead、再検証の失敗ならrebase済みのheadに置いたまま残す。検証コマンドの失敗のうちhostの分類（`disk_full`・`killed`・`timeout`）は`needs_session`にせず、integrateが同じ試行で1回やり直し、なお落ちればrunを`awaiting_integration`に戻して（`integration_held`）inboxに知らせる（task 639。[`integrate`](integrate.md#integrate)の5）。resumeの回数は使わない。runはTaskを占有し続け、`ready`/`cancel`はできない。
 
 着地待ちのrun（`awaiting_integration`）は、着地の後のlanding recheck（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)）でも`needs_session`になる。parkのイベントは`action: resumed`の`landing_recheck_failed`（code `rebase_conflict`か`verification_failed`、payloadの`status: needs_session`）で、resumeの依頼文は`ResumeKind::Recheck`、試行の数え方ではcode `rebase_conflict`ならreviewのverdictを問わず衝突だけのresumeになる（下の「試行の数え方」。使い切ったときの引き継ぐretryはreviewがpassしたかapproveされたrunだけ）。resumeが解決したrunに閉じていない`approve_landing`のaskがあれば、`validating`の後にreviewをやり直さず、sessionを閉じて答えを待つ。
+
+resumeで開くworkerのsessionは、直前のsessionのmodel / effortを引き継ぐ。runを`needs_session`にした最新のeventのcodeが`verification_failed`（integrateかlanding recheckの検証の失敗）か`sent_back`（`approve_landing`の`send_back`）なら1段上げ（Opus 5.5 medium → high → xhigh、xhighが上限）、衝突（`rebase_conflict`）・kill（復旧jobの`triage_resume`）・`evidence_missing`・`scope_violation`などでは上げない。`begin_resume`が`resume_started`に`model`・`effort`・`group`と、上げたなら`escalated_from`・`escalation_reason`を書く（[Worker model](worker-model.md#段上げ決定5)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定5）。
 
 `integrate`は呼ばれた時点で、runに`integration_approved`イベント（`status`: 呼ばれた時のrunのstatus、`pid`、`push`: `--no-push`でなければtrue）を1回だけ記録する。supervisorが承認済みのrunを着地させるときは、この`push`に従ってmainを`origin`へpushする（`integrate`と同じ`push_main`）。`integrate`を呼ぶことが着地の承認で（ADR-0016の決定5）、runtimeが自分で着地させるのは承認済みのrun、reviewがpassしたrun、`approve_landing`に`land`と答えたrun（`integration_approved`に`ask_id`を付けて記録する）だけ（[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。`integration_deferred`のpayloadには`resumes_left`（supervisorが残り何回resumeするか。3から数える試行（下の「試行の数え方」）の件数を引いた値で、0未満にならない）が付く。
 

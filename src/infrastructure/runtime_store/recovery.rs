@@ -280,11 +280,13 @@ impl SqliteQueue {
             EventKind::LeaseAcquired,
             json!({"pid": std::process::id(), "reason": "resume", "previous_token": previous}),
         )?;
-        // The resumed session keeps the model and effort of the claim
-        // (ADR-0079 decision 3).
+        // The resumed session keeps the model and effort of the last one,
+        // raised a step after a failure the task caused (ADR-0079 decisions
+        // 3 and 5).
+        let (session, raise) = worker_model::for_resume(&events);
         let mut started = json!({"attempt": attempt, "counted": counted, "reason": reason.or(run.last_error()), "main": main});
         if let Some(started) = started.as_object_mut() {
-            started.extend(WorkerSession::of_run(&events).fields());
+            started.extend(session.fields_raised(raise.as_ref()));
         }
         run_event(&tx, id, EventKind::ResumeStarted, started)?;
         if let Some(basis) = basis {

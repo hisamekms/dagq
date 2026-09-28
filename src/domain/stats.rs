@@ -18,6 +18,7 @@ pub mod asks;
 pub mod auto_repairs;
 pub mod conflicts;
 pub mod drafts;
+pub mod escalations;
 pub mod failed_tests;
 pub mod landing;
 pub mod measures;
@@ -440,6 +441,10 @@ pub struct Stats {
     /// decisions 4 and 6): how fast, and how often their task caused
     /// rework. Runs outside the trial are not listed.
     pub trial_groups: Vec<trial::TrialGroupStats>,
+    /// The raises of those runs' worker sessions after failures their task
+    /// caused (ADR-0079 decision 5), and whether the raised resumes
+    /// resolved.
+    pub escalations: escalations::Escalations,
     /// The time each verification command of `integrate` took, in the same
     /// window as `backend_failures` (task 197).
     pub verification_commands: Vec<CommandStats>,
@@ -778,6 +783,7 @@ pub fn stats(
     let versions = measures::versions(&page);
     let load_bands = measures::load_bands(&page);
     let trial_groups = trial::trial_groups(&page);
+    let escalations = escalations::escalations(&page);
 
     let mut alerts = Vec::new();
     let considered = finished.iter().chain(open.iter()).collect::<Vec<_>>();
@@ -1034,6 +1040,7 @@ pub fn stats(
         versions,
         load_bands,
         trial_groups,
+        escalations,
         verification_commands,
         verification_failures,
         failed_tests,
