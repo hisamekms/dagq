@@ -1,14 +1,17 @@
 //! Planners the runtime opens for drafts (ADR-0041 decision 16, which
-//! replaced the follow-up triage job of ADR-0037): every draft the runtime
-//! or a job registered (a follow_up of a landed receipt, a goal's gap) gets
-//! a planner of the runtime's, within `runtime_planners` of [`LoopSettings::limits`]
-//! (shared with the planners opened for revises), oldest draft first. The
-//! planner adopts the draft (completes and submits it, so plan review
-//! checks it), drops it (cancels it with a note) or asks the inbox a
-//! `planner_question`, whose answer the supervisor types into its
-//! workspace (or hands to a new planner when that one is gone). A planner
-//! that ends with the draft undecided is followed by another, at most
-//! [`crate::domain::MAX_DRAFT_PLANNERS`] per draft.
+//! replaced the follow-up triage job of ADR-0037): the drafts the runtime
+//! or a job registered (a follow_up of a landed receipt, a goal's gap, a
+//! reopened task) get a planner of the runtime's, one per bundle (ADR-t807-1:
+//! the drafts waiting at once that came from the same run's receipt, goal
+//! review or withdrawal), within `runtime_planners` of [`LoopSettings::limits`]
+//! (shared with the planners opened for revises; a bundle counts one), the
+//! bundle of the oldest draft first. The planner adopts each draft
+//! (completes and submits it, so plan review checks it), drops it (cancels
+//! it with a note) or asks the inbox a `planner_question` about it, whose
+//! answer the supervisor types into its workspace (or hands to a new
+//! planner when that one is gone). The drafts a planner leaves undecided
+//! make the next bundle, at most [`crate::domain::MAX_DRAFT_PLANNERS`]
+//! planners per draft.
 
 use super::*;
 use crate::domain::EventKind;
@@ -18,7 +21,7 @@ use crate::{
         planner::{PlannerView, open_draft_planner},
         prompt::{DraftPlannerMaterial, draft_planner_prompt},
     },
-    domain::{Ask, DraftOrigin, DraftTarget, PlannerState},
+    domain::{Ask, BundleKey, DraftOrigin, DraftTarget, PlannerState, follow_up::bundles},
 };
 
 impl Supervisor<'_> {
@@ -98,7 +101,21 @@ impl Supervisor<'_> {
                 PlannerAnswerRoute::NewPlanner
                     if *runtime_open < self.limits.runtime_planners.value =>
                 {
-                    if let Some(workspace) = self.start_draft_planner(task, Some(&ask))? {
+                    // The drafts of its bundle that wait go with it.
+                    let mut drafts = vec![task];
+                    if let Some(origin) = self.queue.draft_origin(task)? {
+                        let key = BundleKey::of(origin.0, &origin.1, task);
+                        drafts.extend(
+                            self.queue
+                                .planner_drafts()?
+                                .into_iter()
+                                .filter(|target| {
+                                    target.task.id() != task && target.bundle_key() == key
+                                })
+                                .map(|target| target.task.id()),
+                        );
+                    }
+                    if let Some(workspace) = self.start_draft_planner(&drafts, Some(&ask))? {
                         *runtime_open += 1;
                         self.queue.ask_delivered(ask.id, &workspace)?;
                     }
@@ -125,45 +142,55 @@ impl Supervisor<'_> {
         }))
     }
 
-    /// Open a planner for each draft waiting for one, oldest first, while
-    /// the runtime's planners are below the limit.
+    /// Open a planner for each bundle of drafts waiting for one, the
+    /// bundle of the oldest draft first, while the runtime's planners are
+    /// below the limit.
     pub(super) fn open_draft_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
-        for target in self.queue.planner_drafts()? {
+        for bundle in bundles(self.queue.planner_drafts()?) {
             if *runtime_open >= self.limits.runtime_planners.value {
                 break;
             }
-            if self.start_draft_planner(target.task.id(), None)?.is_some() {
+            let drafts: Vec<TaskId> = bundle.iter().map(|target| target.task.id()).collect();
+            if self.start_draft_planner(&drafts, None)?.is_some() {
                 *runtime_open += 1;
             }
         }
         Ok(())
     }
 
-    /// Record a planner for `draft` (carrying `answer`), write its prompt
-    /// and open its workspace; the workspace's UUID, or `None` when the
-    /// draft was not taken (another supervisor took it, it moved on, or its
-    /// planners are used up).
+    /// Record a planner for the bundle of `drafts` (carrying `answer`,
+    /// about the first), write its prompt and open its workspace; the
+    /// workspace's UUID, or `None` when no draft was taken (another
+    /// supervisor took them, they moved on, or their planners are used up).
     fn start_draft_planner(
         &mut self,
-        draft: TaskId,
+        drafts: &[TaskId],
         answer: Option<&Ask>,
     ) -> Result<Option<String>> {
-        let (planner, target, attempt) = match self
+        let (planner, key, members, exhausted) = match self
             .queue
-            .open_draft_planner(draft, answer.map(|ask| ask.id))?
+            .open_draft_planner(drafts, answer.map(|ask| ask.id))?
         {
             DraftPlannerStart::Skipped => return Ok(None),
-            DraftPlannerStart::Exhausted { attempts } => {
-                warn!(task_id = %draft, "draft task {draft}: {attempts} planners of the runtime's ended without deciding it; the inbox is told");
+            DraftPlannerStart::Exhausted { drafts } => {
+                warn!(
+                    "draft tasks {drafts:?}: planners of the runtime's ended without deciding them; the inbox is told"
+                );
                 return Ok(None);
             }
             DraftPlannerStart::Opened {
                 planner,
-                target,
-                attempt,
-            } => (planner, target, attempt),
+                key,
+                members,
+                exhausted,
+            } => (planner, key, members, exhausted),
         };
-        let prompt = match self.draft_planner_material(&target, attempt, answer) {
+        if !exhausted.is_empty() {
+            warn!(
+                "draft tasks {exhausted:?}: planners of the runtime's ended without deciding them; the inbox is told"
+            );
+        }
+        let prompt = match self.draft_planner_material(&key, &members, answer) {
             Ok(prompt) => prompt,
             Err(error) => {
                 self.queue
@@ -172,31 +199,36 @@ impl Supervisor<'_> {
             }
         };
         let id = planner.id;
-        let opened = open_draft_planner(&self.planner_launch(), planner, &prompt)?;
+        let opened = open_draft_planner(&self.planner_launch(), *planner, &prompt)?;
         let workspace = opened.planner.workspace_id.clone().unwrap_or_default();
-        info!(task_id = %draft, "draft task {draft} ({}): opened planner {id} {attempt} in workspace {workspace}", target.origin.as_str());
+        let ids: Vec<TaskId> = members.iter().map(|(target, _)| target.task.id()).collect();
+        info!(
+            "draft tasks {ids:?} ({} {}): opened planner {id} in workspace {workspace}",
+            key.kind.as_str(),
+            key.value
+        );
         Ok(Some(workspace))
     }
 
-    /// The initial prompt of the planner for `target`, from the queue as it
-    /// is now.
+    /// The initial prompt of the planner for the bundle `members` of `key`,
+    /// from the queue as it is now.
     fn draft_planner_material(
         &mut self,
-        target: &DraftTarget,
-        attempt: usize,
+        key: &BundleKey,
+        members: &[(DraftTarget, usize)],
         answer: Option<&Ask>,
     ) -> Result<String> {
-        let source = match target
-            .material
-            .get("source_task_id")
-            .and_then(Value::as_i64)
-        {
+        let first = &members
+            .first()
+            .context("a bundle of drafts has at least one")?
+            .0;
+        let source = match first.material.get("source_task_id").and_then(Value::as_i64) {
             Some(id) => Some(self.queue.show(TaskId::new(id))?.task),
             None => None,
         };
         let receipt = match (
-            target.origin,
-            target.material.get("source_run_id").and_then(Value::as_str),
+            first.origin,
+            first.material.get("source_run_id").and_then(Value::as_str),
         ) {
             (DraftOrigin::FollowUp, Some(run)) => self
                 .queue
@@ -207,25 +239,34 @@ impl Supervisor<'_> {
                 .map(|event| event.payload["receipt"].clone()),
             _ => None,
         };
-        let goal = match target.task.goal_id() {
-            Some(id) => Some(self.queue.show_goal(id)?),
-            None => None,
-        };
-        let siblings: Vec<_> = goal
-            .iter()
-            .flat_map(|detail| detail.tasks.iter())
-            .filter(|task| task.id != target.task.id())
-            .cloned()
-            .collect();
+        let ids: Vec<TaskId> = members.iter().map(|(target, _)| target.task.id()).collect();
+        let mut goals = Vec::new();
+        for (target, _) in members {
+            let Some(goal) = target.task.goal_id() else {
+                continue;
+            };
+            if goals
+                .iter()
+                .any(|(known, _, _): &(crate::domain::Goal, bool, Vec<_>)| known.id() == goal)
+            {
+                continue;
+            }
+            let detail = self.queue.show_goal(goal)?;
+            let siblings = detail
+                .tasks
+                .iter()
+                .filter(|task| !ids.contains(&task.id))
+                .cloned()
+                .collect();
+            goals.push((detail.goal, detail.closed, siblings));
+        }
         draft_planner_prompt(&DraftPlannerMaterial {
             db: &self.layout.db,
-            target,
-            attempt,
+            key,
+            members,
             source: source.as_ref(),
             receipt: receipt.as_ref(),
-            goal: goal.as_ref().map(|detail| &detail.goal),
-            goal_closed: goal.as_ref().is_some_and(|detail| detail.closed),
-            siblings: &siblings,
+            goals: &goals,
             answer,
         })
     }

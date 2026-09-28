@@ -1105,8 +1105,13 @@ impl Supervisor<'_> {
         if draft.is_none() && finding.is_none() {
             return Ok(None);
         }
+        // The drafts of its bundle (ADR-t807-1).
+        let drafts = match draft {
+            Some(_) => self.queue.planner_draft_tasks(view.planner.id)?,
+            None => Vec::new(),
+        };
         // A finding's planner asks about the finding, a draft's about the
-        // draft.
+        // drafts of its bundle.
         let asks: Vec<_> = self
             .queue
             .asks(crate::application::AskQuery {
@@ -1118,7 +1123,10 @@ impl Supervisor<'_> {
                 ask.kind == AskKind::PlannerQuestion
                     && match finding {
                         Some(finding) => ask.finding_id == Some(finding),
-                        None => ask.finding_id.is_none() && ask.task_id == draft,
+                        None => {
+                            ask.finding_id.is_none()
+                                && ask.task_id.is_some_and(|task| drafts.contains(&task))
+                        }
                     }
             })
             .collect();

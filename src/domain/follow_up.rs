@@ -94,6 +94,86 @@ pub struct DraftTarget {
     pub planners: usize,
 }
 
+impl DraftTarget {
+    /// The bundle the draft is planned in (ADR-t807-1).
+    pub fn bundle_key(&self) -> BundleKey {
+        BundleKey::of(self.origin, &self.material, self.task.id())
+    }
+}
+
+// What makes drafts one bundle (ADR-t807-1): the one piece of work that made
+// them together. A draft whose material names none is a bundle of its own
+// (`task_id`).
+string_enum!(BundleKeyKind {
+    SourceRun => "source_run_id",
+    GoalReview => "goal_review_id",
+    ReviewedProposal => "reviewed_proposal_id",
+    Task => "task_id",
+});
+
+/// The key of a bundle of drafts (ADR-t807-1): the drafts of one origin
+/// that the same run's `integrate` (`follow_up`), the same goal review
+/// (`goal_gap`) or the same withdrawal of a proposal plan review reopened
+/// tasks into (`reopened`) made. One planner of the runtime's takes the
+/// drafts of one key that wait at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleKey {
+    pub kind: BundleKeyKind,
+    pub value: String,
+}
+
+impl BundleKey {
+    /// The key of the draft `task` of `origin` with `material`: its
+    /// origin's field, or the task itself when the material has none.
+    pub fn of(origin: DraftOrigin, material: &serde_json::Value, task: super::TaskId) -> Self {
+        let kind = match origin {
+            DraftOrigin::FollowUp => BundleKeyKind::SourceRun,
+            DraftOrigin::GoalGap => BundleKeyKind::GoalReview,
+            DraftOrigin::Reopened => BundleKeyKind::ReviewedProposal,
+        };
+        match material.get(kind.as_str()) {
+            Some(serde_json::Value::String(value)) if !value.is_empty() => Self {
+                kind,
+                value: value.clone(),
+            },
+            Some(value @ serde_json::Value::Number(_)) => Self {
+                kind,
+                value: value.to_string(),
+            },
+            _ => Self {
+                kind: BundleKeyKind::Task,
+                value: task.to_string(),
+            },
+        }
+    }
+}
+
+/// The drafts waiting for a planner grouped by their [`BundleKey`], in the
+/// order of each bundle's oldest draft (the targets come by ID).
+pub fn bundles(targets: Vec<DraftTarget>) -> Vec<Vec<DraftTarget>> {
+    let mut bundles: Vec<(BundleKey, Vec<DraftTarget>)> = Vec::new();
+    for target in targets {
+        let key = target.bundle_key();
+        match bundles.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(target),
+            None => bundles.push((key, vec![target])),
+        }
+    }
+    bundles.into_iter().map(|(_, members)| members).collect()
+}
+
+// What became of one draft of a bundle when its planner ended
+// (ADR-t807-1): submitted into a proposal, canceled (as a duplicate of
+// another task, or not), kept as a draft by a person's answer, or left
+// undecided (a later planner takes it again).
+string_enum!(DraftOutcome {
+    Submitted => "submitted",
+    Canceled => "canceled",
+    Duplicate => "duplicate",
+    KeepDraft => "keep_draft",
+    Undecided => "undecided",
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +197,73 @@ mod tests {
         let why = adopt_needs_person(FollowUpFacts { depth: 3, ..open }).unwrap();
         assert!(why.contains("3 steps"), "{why}");
         assert!(why.contains("at most 2"), "{why}");
+    }
+
+    fn target(id: i64, origin: DraftOrigin, material: serde_json::Value) -> DraftTarget {
+        let task = crate::domain::Task::new(
+            crate::domain::TaskId::new(id),
+            crate::domain::NewTask {
+                title: format!("t{id}"),
+                description: String::new(),
+                acceptance: String::new(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                kind: None,
+                goal_id: None,
+                context: String::new(),
+                provider: None,
+                worker_mode: None,
+            },
+            "2026-09-28T00:00:00.000Z".into(),
+        )
+        .unwrap();
+        DraftTarget {
+            task,
+            origin,
+            material,
+            planners: 0,
+        }
+    }
+
+    /// The drafts one run's integrate, one goal review or one withdrawal
+    /// made are one bundle each; a draft whose material names none is a
+    /// bundle of its own (ADR-t807-1).
+    #[test]
+    fn drafts_are_bundled_by_what_made_them() {
+        use serde_json::json;
+        let targets = vec![
+            target(1, DraftOrigin::FollowUp, json!({"source_run_id": "r1"})),
+            target(2, DraftOrigin::GoalGap, json!({"goal_review_id": 4})),
+            target(3, DraftOrigin::FollowUp, json!({"source_run_id": "r2"})),
+            target(4, DraftOrigin::FollowUp, json!({"source_run_id": "r1"})),
+            target(5, DraftOrigin::FollowUp, json!({"source_run_id": null})),
+            target(6, DraftOrigin::FollowUp, json!({})),
+            target(7, DraftOrigin::Reopened, json!({"reviewed_proposal_id": 4})),
+            target(8, DraftOrigin::GoalGap, json!({"goal_review_id": 4})),
+        ];
+        let ids: Vec<Vec<i64>> = bundles(targets)
+            .iter()
+            .map(|b| b.iter().map(|t| t.task.id().as_i64()).collect())
+            .collect();
+        assert_eq!(
+            ids,
+            [vec![1, 4], vec![2, 8], vec![3], vec![5], vec![6], vec![7]]
+        );
+        let key = target(9, DraftOrigin::Reopened, json!({"reviewed_proposal_id": 4})).bundle_key();
+        assert_eq!(
+            (key.kind.as_str(), key.value.as_str()),
+            ("reviewed_proposal_id", "4")
+        );
+        let key = target(9, DraftOrigin::FollowUp, json!({"source_run_id": ""})).bundle_key();
+        assert_eq!((key.kind, key.value.as_str()), (BundleKeyKind::Task, "9"));
+        assert_eq!(
+            "duplicate".parse::<DraftOutcome>().unwrap(),
+            DraftOutcome::Duplicate
+        );
     }
 
     #[test]

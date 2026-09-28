@@ -37,12 +37,24 @@ impl SqliteQueue {
 
     /// Give the planner up: its workspace failed to open (`error`), or is
     /// gone. Closing a closed planner keeps the first close.
+    /// Close the planner's row; a planner of the runtime's opened for a
+    /// bundle of drafts records what became of each (ADR-t807-1) in the
+    /// same transaction.
     pub fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
-        self.conn.execute(
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let now = self.generators.clock.now();
+        let closed = tx.execute(
             "UPDATE planners SET closed_at=?2, error=coalesce(error, ?3)
              WHERE id=?1 AND closed_at IS NULL",
-            params![id, self.generators.clock.now(), error],
+            params![id, now, error],
         )?;
+        if closed == 1 {
+            super::draft_planners::settle_bundle(&tx, id, now)?;
+        }
+        tx.commit()?;
         self.planner(id)
     }
 

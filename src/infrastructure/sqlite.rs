@@ -728,6 +728,8 @@ impl TaskStore for SqliteQueue {
         let processes = super::runtime_store::processes_for_task(&tx, task_id)?;
         let duplicate_of = duplicate_target(&tx, task_id)?;
         let duplicates = duplicates_of(&tx, task_id)?;
+        let origin = super::draft_planners::task_origin(&tx, task_id)?;
+        let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
         tx.commit()?;
         Ok(TaskDetail {
             task,
@@ -738,6 +740,8 @@ impl TaskStore for SqliteQueue {
             runs,
             events,
             processes,
+            origin,
+            follow_up_drafts,
         })
     }
 
@@ -1994,25 +1998,28 @@ fn apply_transition(
         // again from 1 (ADR-0037 decision 6, kept by ADR-0041 decision 16).
         conn.execute("UPDATE tasks SET follow_up_depth=0 WHERE id=?1", [task_id])?;
     }
-    event(
-        conn,
-        task_id,
-        None,
-        EventKind::TaskStatusChanged,
-        match duplicate {
-            Some(Duplicate {
-                duplicate_of,
-                by: Some(by),
-            }) => {
-                json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of, "by": by})
-            }
-            Some(Duplicate {
-                duplicate_of,
-                by: None,
-            }) => json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of}),
-            None => json!({"from": from, "to": task.status()}),
-        },
-    )?;
+    let mut payload = match duplicate {
+        Some(Duplicate {
+            duplicate_of,
+            by: Some(by),
+        }) => {
+            json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of, "by": by})
+        }
+        Some(Duplicate {
+            duplicate_of,
+            by: None,
+        }) => json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of}),
+        None => json!({"from": from, "to": task.status()}),
+    };
+    // A draft the runtime or a job made carries where it came from into
+    // its cancel, so the cancel is found from its source (ADR-t807-1).
+    if from == TaskStatus::Draft
+        && task.status() == TaskStatus::Canceled
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.extend(super::draft_planners::origin_fields(conn, task_id)?);
+    }
+    event(conn, task_id, None, EventKind::TaskStatusChanged, payload)?;
     // A person skipped plan review (ADR-0041 decision 8).
     if action == TaskAction::BypassReview {
         event(

@@ -469,6 +469,10 @@ pub struct PlannerView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_inferred: Option<Inference>,
     pub dir: PathBuf,
+    /// The bundle of drafts a planner of the runtime's was opened for
+    /// (ADR-t807-1), with what became of each draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<crate::domain::DraftBundleView>,
 }
 
 /// What judging a planner reads: cmux for its workspace and screen, the
@@ -577,6 +581,7 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
             .filter(|inference| idle || inference.background_running == Some(true)),
         dir,
         planner,
+        bundle: None,
     })
 }
 
@@ -605,7 +610,13 @@ pub fn planner_views(
     queue
         .planners(all)?
         .into_iter()
-        .map(|planner| planner_view(probes, planner))
+        .map(|planner| {
+            let bundle = queue.draft_bundle(planner.id)?;
+            Ok(PlannerView {
+                bundle,
+                ..planner_view(probes, planner)?
+            })
+        })
         .collect()
 }
 

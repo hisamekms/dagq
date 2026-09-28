@@ -416,7 +416,8 @@ impl SqliteQueue {
             .prepare(
                 "SELECT * FROM run_events WHERE id>?1 AND id<=?2
                  AND (?3 IS NULL OR kind IN (SELECT value FROM json_each(?3)))
-                 AND (?4 IS NULL OR run_id=?4) AND (?5 IS NULL OR task_id=?5)
+                 AND (?4 IS NULL OR run_id=?4 OR json_extract(payload,'$.source_run_id')=?4)
+                 AND (?5 IS NULL OR task_id=?5)
                  AND (?6 IS NULL OR goal_id=?6
                       OR task_id IN (SELECT id FROM tasks WHERE goal_id=?6))
                  AND (?7 IS NULL OR julianday(created_at)>=julianday(?7))

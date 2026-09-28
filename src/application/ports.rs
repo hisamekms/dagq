@@ -1905,17 +1905,20 @@ pub struct AskQuery {
 /// How [`DraftPlannerStore::open_draft_planner`] ended.
 #[derive(Debug, Clone)]
 pub enum DraftPlannerStart {
-    /// A planner of the runtime's is recorded for the draft, its
-    /// `attempt`-th; the caller opens its workspace.
+    /// A planner of the runtime's is recorded for the bundle of drafts of
+    /// `key` (ADR-t807-1): each member with which planner this is for it
+    /// (1-based), oldest first; the caller opens its workspace. `exhausted`
+    /// are the drafts left out as below.
     Opened {
-        planner: PlannerSession,
-        target: Box<DraftTarget>,
-        attempt: usize,
+        planner: Box<PlannerSession>,
+        key: crate::domain::BundleKey,
+        members: Vec<(DraftTarget, usize)>,
+        exhausted: Vec<TaskId>,
     },
     /// [`crate::domain::MAX_DRAFT_PLANNERS`] planners ended without
-    /// deciding the draft: `draft_planner_exhausted` is recorded and a
-    /// person decides.
-    Exhausted { attempts: usize },
+    /// deciding each of these drafts: `draft_planner_exhausted` is
+    /// recorded and a person decides.
+    Exhausted { drafts: Vec<TaskId> },
     /// Not now: the draft moved on, or another planner took it.
     Skipped,
 }
@@ -1977,15 +1980,22 @@ pub trait DraftPlannerStore {
     /// `planner_question` about it nobody closed, not kept as a draft by
     /// an answer and not exhausted.
     fn planner_drafts(&self) -> Result<Vec<DraftTarget>>;
-    /// Record a planner of the runtime's for `draft` (`draft_planner_opened`)
-    /// after re-checking it in the same write transaction. With `answer`,
-    /// the planner carries that answered `planner_question` about the draft,
-    /// whose planner is gone, instead of the draft being a target.
+    /// Record a planner of the runtime's for the bundle of `drafts`
+    /// (ADR-t807-1: `draft_bundles`, `draft_bundle_members`, and
+    /// `draft_planner_opened` on each) after re-checking them in the same
+    /// write transaction: a draft that no longer waits, or whose bundle key
+    /// is not the first one's, is left out. With `answer`, the planner
+    /// carries that answered `planner_question` about the first draft,
+    /// whose planner is gone, instead of that draft being a target.
     fn open_draft_planner(
         &mut self,
-        draft: TaskId,
+        drafts: &[TaskId],
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart>;
+    /// The drafts a planner of the runtime's works on (its bundle's).
+    fn planner_draft_tasks(&self, planner: PlannerId) -> Result<Vec<TaskId>>;
+    /// The bundle a planner of the runtime's was opened for, if any.
+    fn draft_bundle(&self, planner: PlannerId) -> Result<Option<crate::domain::DraftBundleView>>;
     /// Answered `planner_question` asks nobody closed, oldest first.
     fn planner_answers(&self) -> Result<Vec<Ask>>;
     /// Where the answer of an answered `planner_question` goes.

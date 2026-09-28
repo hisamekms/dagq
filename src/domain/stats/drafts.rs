@@ -4,7 +4,8 @@
 //! (adopted, canceled, kept as a draft), the drafts still waiting at the
 //! window's end with the oldest one's age, and the drafts registered per
 //! landing, so that whether the drafts pile up faster than they are
-//! settled can be read from one place. Derived from `run_events` and the
+//! settled can be read from one place; and the bundles of drafts the
+//! runtime's planners were opened for (ADR-t807-1) with their sizes. Derived from `run_events` and the
 //! origin each such draft has (`draft_origins`); no table of its own.
 use std::collections::{BTreeMap, HashMap};
 
@@ -30,6 +31,11 @@ pub struct DraftFlow {
     pub inflow_per_outflow: Option<f64>,
     /// Per origin (`follow_up`, `goal_gap`), the same counts.
     pub by_origin: BTreeMap<&'static str, OriginFlow>,
+    /// The planners of the runtime's opened for bundles of drafts in the
+    /// window (ADR-t807-1): their `draft_planner_opened` by `planner_id`.
+    pub bundles: i64,
+    /// How many of `bundles` had each number of drafts.
+    pub bundle_sizes: BTreeMap<usize, i64>,
 }
 
 /// The drafts of one origin (or of all) in a window.
@@ -121,10 +127,21 @@ pub fn draft_flow(
     }
     let mut flow = DraftFlow::default();
     let mut kept: Vec<TaskId> = Vec::new();
+    // Each bundle's planner, with its drafts: the members its events name
+    // (one event per draft; a planner opened before bundles names none).
+    let mut bundles: BTreeMap<i64, usize> = BTreeMap::new();
     for event in events {
         let in_window = event.id > after && event.id <= upto && counts(event.task_id);
         if event.kind == "run_integrated" && in_window {
             flow.landings += 1;
+        }
+        if event.kind == "draft_planner_opened"
+            && in_window
+            && let Some(planner) = event.payload["planner_id"].as_i64()
+        {
+            let size = event.payload["members"].as_array().map_or(1, Vec::len);
+            let known = bundles.entry(planner).or_default();
+            *known = (*known).max(size);
         }
         let Some(draft) = event.task_id.and_then(|task_id| drafts.get_mut(&task_id)) else {
             continue;
@@ -179,6 +196,10 @@ pub fn draft_flow(
             let age = (end - at).max(0) / 1000;
             add(task_id, &|f| f.waiting(task_id, age));
         }
+    }
+    flow.bundles = i64::try_from(bundles.len()).unwrap_or(i64::MAX);
+    for size in bundles.into_values() {
+        *flow.bundle_sizes.entry(size).or_default() += 1;
     }
     flow.drafts_per_landing = flow.all.per_landing(flow.landings);
     flow.inflow_per_outflow = ratio(flow.all.registered, flow.all.adopted + flow.all.canceled);
@@ -330,5 +351,41 @@ mod tests {
         assert_eq!(one.drafts_per_landing, None);
         assert_eq!(one.inflow_per_outflow, None);
         assert!(!one.by_origin.contains_key("follow_up"));
+    }
+
+    /// A bundle of three follow_ups and one of one draft in the window
+    /// (with a planner opened before bundles, naming no members), and one
+    /// bundle before it (ADR-t807-1).
+    #[test]
+    fn counts_the_bundles_and_their_sizes() {
+        let opened = |id, task, planner, members: Value| {
+            event(
+                id,
+                task,
+                "draft_planner_opened",
+                json!({"planner_id": planner, "members": members}),
+                id,
+            )
+        };
+        let events = [
+            opened(1, 5, 1, json!([5, 6])),
+            opened(2, 6, 1, json!([5, 6])),
+            opened(3, 10, 2, json!([10, 11, 12])),
+            opened(4, 11, 2, json!([10, 11, 12])),
+            opened(5, 12, 2, json!([10, 11, 12])),
+            opened(6, 13, 3, Value::Null),
+        ];
+        let flow = draft_flow(
+            &events,
+            &HashMap::new(),
+            EventId::new(2),
+            EventId::new(6),
+            10_000,
+            |_| true,
+        );
+        assert_eq!(flow.bundles, 2);
+        assert_eq!(flow.bundle_sizes, BTreeMap::from([(1, 1), (3, 1)]));
+        let json = serde_json::to_value(&flow).unwrap();
+        assert_eq!(json["bundle_sizes"]["3"], 1);
     }
 }

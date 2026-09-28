@@ -780,7 +780,10 @@ pub use finding::{
     FindingTarget, FindingUpdate, FindingView, Impact, ImprovementLimit, MAX_FINDING_PLANNERS,
     NewFinding, PROPOSE_OPTION, improvement_running,
 };
-pub use follow_up::{DraftOrigin, DraftTarget, MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS};
+pub use follow_up::{
+    BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftTarget, MAX_DRAFT_PLANNERS,
+    PLANNER_QUESTION_OPTIONS,
+};
 pub use goal::{Goal, StrandedDependency};
 pub use ids::{
     AskId, CommitSha, EventId, FindingId, GoalId, LeaseToken, PlannerId, ProposalId, RunId, TaskId,
@@ -801,9 +804,10 @@ pub use run::{
 };
 pub use task::{Task, TaskAction};
 pub use views::{
-    ClaimOutcome, EventActor, EventFilter, GoalDetail, GoalPredecessor, GoalSummary, GoalTask,
-    IntegrationOutcome, Predecessor, RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess,
-    SupervisorRegistration, TaskDetail, TaskStatusCounts,
+    ClaimOutcome, DraftBundleMember, DraftBundleView, EventActor, EventFilter, FollowUpDraft,
+    GoalDetail, GoalPredecessor, GoalSummary, GoalTask, IntegrationOutcome, Predecessor,
+    RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess, SupervisorRegistration,
+    TaskDetail, TaskOrigin, TaskStatusCounts,
 };
 
 /// A question for a person (ADR-0022): about a task, or one of its runs when

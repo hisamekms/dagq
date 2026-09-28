@@ -139,6 +139,62 @@ pub struct TaskDetail {
     pub runs: Vec<TaskRun>,
     pub events: Vec<RunEvent>,
     pub processes: Vec<RunProcess>,
+    /// Where the draft came from when the runtime or a job made it
+    /// (ADR-t807-1): null for a task a person added.
+    pub origin: Option<TaskOrigin>,
+    /// The follow_up drafts the receipts of this task's runs proposed, with
+    /// their status now (ADR-t807-1).
+    pub follow_up_drafts: Vec<FollowUpDraft>,
+}
+
+/// Where a draft the runtime or a job made came from (ADR-t807-1): its
+/// origin and material, for a follow_up the task and run whose receipt
+/// proposed it and which of its follow_ups it was, the key of the bundle it
+/// is planned in and the bundles (planners of the runtime's) that took it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TaskOrigin {
+    pub origin: crate::domain::DraftOrigin,
+    pub material: serde_json::Value,
+    pub source_task_id: Option<TaskId>,
+    pub source_run_id: Option<String>,
+    pub index: Option<i64>,
+    pub bundle_key: crate::domain::BundleKey,
+    pub bundles: Vec<DraftBundleView>,
+}
+
+/// A bundle of drafts one planner of the runtime's was opened for
+/// (ADR-t807-1), with its drafts and what became of each.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DraftBundleView {
+    pub planner_id: crate::domain::PlannerId,
+    pub origin: String,
+    pub key_kind: String,
+    pub key_value: String,
+    pub created_at: i64,
+    pub members: Vec<DraftBundleMember>,
+}
+
+/// One draft of a bundle: which planner of the runtime's the bundle's is
+/// for it, what became of it when the planner ended (null while it works)
+/// and its status now.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DraftBundleMember {
+    pub task_id: TaskId,
+    pub attempt: i64,
+    pub outcome: Option<String>,
+    pub proposal_id: Option<i64>,
+    pub duplicate_of: Option<TaskId>,
+    pub status: String,
+}
+
+/// A follow_up draft a receipt of the task's runs proposed (ADR-t807-1).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FollowUpDraft {
+    pub run_id: Option<String>,
+    pub index: Option<i64>,
+    pub task_id: TaskId,
+    pub title: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

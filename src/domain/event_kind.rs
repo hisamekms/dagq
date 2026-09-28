@@ -62,6 +62,7 @@ event_kinds! {
     DraftAdopted => "draft_adopted",
     DraftPlannerExhausted => "draft_planner_exhausted",
     DraftPlannerOpened => "draft_planner_opened",
+    DraftPlannerSettled => "draft_planner_settled",
     EvidenceMissing => "evidence_missing",
     ExitRequestTimedOut => "exit_request_timed_out",
     ExitRequested => "exit_requested",
@@ -411,6 +412,7 @@ pub const DEPENDENCY_STRANDED: &str = EventKind::DependencyStranded.as_str();
 pub const DRAFT_ADOPTED: &str = EventKind::DraftAdopted.as_str();
 pub const DRAFT_PLANNER_EXHAUSTED: &str = EventKind::DraftPlannerExhausted.as_str();
 pub const DRAFT_PLANNER_OPENED: &str = EventKind::DraftPlannerOpened.as_str();
+pub const DRAFT_PLANNER_SETTLED: &str = EventKind::DraftPlannerSettled.as_str();
 pub const EVIDENCE_MISSING: &str = EventKind::EvidenceMissing.as_str();
 pub const EXIT_REQUESTED: &str = EventKind::ExitRequested.as_str();
 pub const EXIT_REQUEST_TIMED_OUT: &str = EventKind::ExitRequestTimedOut.as_str();
@@ -645,6 +647,7 @@ mod tests {
             (EventKind::DraftAdopted, "draft_adopted"),
             (EventKind::DraftPlannerExhausted, "draft_planner_exhausted"),
             (EventKind::DraftPlannerOpened, "draft_planner_opened"),
+            (EventKind::DraftPlannerSettled, "draft_planner_settled"),
             (EventKind::EvidenceMissing, "evidence_missing"),
             (EventKind::ExitRequestTimedOut, "exit_request_timed_out"),
             (EventKind::ExitRequested, "exit_requested"),

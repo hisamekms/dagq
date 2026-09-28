@@ -1119,6 +1119,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP TABLE draft_reopens;
              DROP TABLE goal_reviews;
              DROP TABLE headless_jobs;
+             DROP TABLE draft_bundles;
+             DROP TABLE draft_bundle_members;
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
@@ -1197,6 +1199,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP TABLE draft_reopens;
              DROP TABLE goal_reviews;
              DROP TABLE headless_jobs;
+             DROP TABLE draft_bundles;
+             DROP TABLE draft_bundle_members;
              ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;

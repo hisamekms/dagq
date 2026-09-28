@@ -27,6 +27,7 @@ mod cli_roles;
 mod cli_stats;
 mod cli_tasks;
 mod cli_version;
+mod draft_bundles;
 mod finding_planner;
 mod goal_review;
 mod inbox_watcher;

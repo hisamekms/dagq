@@ -3,9 +3,12 @@
 //! runtime or a job registered came from (`draft_origins`), the planners of
 //! the runtime's opened for it (`planners.draft_task_id`), the answers of
 //! their `planner_question` asks, and the `follow_up_depth` that limits
-//! what such a planner submits without a person. Opening a planner is one
-//! write transaction that re-checks the draft first, so two supervisors
-//! never open one for the same draft.
+//! what such a planner submits without a person. The drafts the same piece
+//! of work made that wait at once are one bundle, taken by one planner
+//! (ADR-t807-1: `draft_bundles`, `draft_bundle_members`, and what became of
+//! each draft when the planner ended). Opening a planner is one write
+//! transaction that re-checks the drafts first, so two supervisors never
+//! open one for the same draft.
 use crate::domain::event_kind::{self, EventKind};
 use std::collections::HashMap;
 
@@ -21,9 +24,10 @@ use crate::application::{
     DraftPlannerStart, DraftPlannerStore, FindingPlannerStart, PlannerAnswerRoute,
 };
 use crate::domain::{
-    Ask, AskId, AskKind, DraftOrigin, DraftTarget, Finding, FindingId, FindingQuery, FindingStatus,
-    FindingView, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession, Task,
-    TaskId, TaskStatus,
+    Ask, AskId, AskKind, BundleKey, DraftBundleMember, DraftBundleView, DraftOrigin, DraftOutcome,
+    DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView, FollowUpDraft,
+    GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession, Task, TaskId, TaskOrigin,
+    TaskStatus,
     follow_up::{FollowUpFacts, adopt_needs_person},
 };
 
@@ -36,7 +40,8 @@ pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 /// proposal (or in one withdrawn: a canceled proposal holds no draft), with an origin (in `draft_origins`, or `reopened` in `draft_reopens`), no planner of the runtime's open for it, no
 /// planner of the runtime's still open for the withdrawn proposal it was
 /// in, no `planner_question` about it nobody closed, not kept as a draft by an
-/// answer and not exhausted. A `follow_up` ask the retired triage left
+/// answer and not exhausted. (A draft whose bundle key an open planner's
+/// bundle has waits too: [`waiting`].) A `follow_up` ask the retired triage left
 /// holds a draft back only when answered `keep_draft`: nothing applies its
 /// other answers any more. Drafts registered before this existed match too (the
 /// migration gave them their origin).
@@ -49,7 +54,8 @@ fn targets() -> String {
     AND t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
         WHERE x.id=t.proposal_id AND x.status!='canceled')
     AND NOT EXISTS(SELECT 1 FROM planners p WHERE p.closed_at IS NULL
-        AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)))
+        AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
+             OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id)))
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.task_id=t.id AND a.run_id IS NULL
         AND ((a.kind='planner_question' AND a.closed_at IS NULL)
              OR (a.kind IN ('planner_question','follow_up') AND trim(a.answer)='keep_draft')))
@@ -121,83 +127,163 @@ impl SqliteQueue {
             .prepare(&format!("{} ORDER BY t.id", targets()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter().map(|id| target(&self.conn, id)).collect()
+        let open = open_bundle_keys(&self.conn)?;
+        Ok(ids
+            .into_iter()
+            .map(|id| target(&self.conn, id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|target| !open.contains(&target.bundle_key()))
+            .collect())
     }
 
-    /// See [`DraftPlannerStore::open_draft_planner`]. A draft that had
-    /// [`MAX_DRAFT_PLANNERS`] planners records `draft_planner_exhausted`
-    /// (the inbox's attention) instead.
+    /// See [`DraftPlannerStore::open_draft_planner`]. A draft of the
+    /// bundle that had [`MAX_DRAFT_PLANNERS`] planners records
+    /// `draft_planner_exhausted` (the inbox's attention) and is left out
+    /// of it.
     pub fn open_draft_planner(
         &mut self,
-        draft: TaskId,
+        drafts: &[TaskId],
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let eligible = match answer {
-            None => is_target(&tx, draft)?,
+        let Some(&lead) = drafts.first() else {
+            return Ok(DraftPlannerStart::Skipped);
+        };
+        let lead_target = match answer {
+            None => waiting(&tx, lead)?,
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
-                ask.task_id == Some(draft) && route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
+                if ask.task_id == Some(lead)
+                    && route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
+                {
+                    // One planner per bundle key: an answer about a draft
+                    // of a key an open planner has waits for it to end.
+                    let target = target(&tx, lead)?;
+                    (!open_bundle_keys(&tx)?.contains(&target.bundle_key())).then_some(target)
+                } else {
+                    None
+                }
             }
         };
-        if !eligible {
+        let Some(lead_target) = lead_target else {
             return Ok(DraftPlannerStart::Skipped);
+        };
+        let key = lead_target.bundle_key();
+        let mut candidates = vec![lead_target];
+        for &other in &drafts[1..] {
+            if candidates.iter().any(|t| t.task.id() == other) {
+                continue;
+            }
+            // A draft that moved on, or is of another bundle now, is left
+            // out; the rest are planned together.
+            if let Some(target) = waiting(&tx, other)?
+                && target.bundle_key() == key
+            {
+                candidates.push(target);
+            }
         }
-        let task = read_task(&tx, draft)?;
-        let opened = planners_opened(&tx, draft)?;
-        // A person's answer is carried past the limit: it was promised to
-        // the runtime (`runtime_delivers`), and the planner it opens has
-        // the person's decision to apply.
-        if opened >= MAX_DRAFT_PLANNERS && answer.is_none() {
-            event(
-                &tx,
-                draft,
-                None,
-                EventKind::DraftPlannerExhausted,
-                json!({
-                    "planners": opened,
-                    "ask_id": answer,
-                    "reason": format!(
-                        "{opened} planners of the runtime's ended without deciding the draft (at most {MAX_DRAFT_PLANNERS})"
-                    ),
-                }),
-            )?;
+        let mut members = Vec::new();
+        let mut exhausted = Vec::new();
+        for candidate in candidates {
+            let id = candidate.task.id();
+            let opened = planners_opened(&tx, id)?;
+            // A person's answer is carried past the limit: it was promised
+            // to the runtime (`runtime_delivers`), and the planner it opens
+            // has the person's decision to apply.
+            if opened >= MAX_DRAFT_PLANNERS && !(answer.is_some() && id == lead) {
+                event(
+                    &tx,
+                    id,
+                    None,
+                    EventKind::DraftPlannerExhausted,
+                    json!({
+                        "planners": opened,
+                        "ask_id": null,
+                        "reason": format!(
+                            "{opened} planners of the runtime's ended without deciding the draft (at most {MAX_DRAFT_PLANNERS})"
+                        ),
+                    }),
+                )?;
+                exhausted.push(id);
+            } else {
+                members.push((id, opened + 1));
+            }
+        }
+        if members.is_empty() {
             tx.commit()?;
-            return Ok(DraftPlannerStart::Exhausted { attempts: opened });
+            return Ok(DraftPlannerStart::Exhausted { drafts: exhausted });
         }
+        let now = self.generators.clock.now();
         tx.execute(
             "INSERT INTO planners(origin, draft_task_id, created_at) VALUES (?1, ?2, ?3)",
-            params![
-                PlannerOrigin::Runtime.as_str(),
-                draft,
-                self.generators.clock.now()
-            ],
+            params![PlannerOrigin::Runtime.as_str(), members[0].0, now],
         )?;
         let planner = PlannerId::new(tx.last_insert_rowid());
-        let attempt = opened + 1;
-        let (origin, _) = draft_origin(&tx, draft)?.context("the draft has no origin")?;
-        event(
-            &tx,
-            draft,
-            None,
-            EventKind::DraftPlannerOpened,
-            json!({
+        let (origin, _) = draft_origin(&tx, members[0].0)?.context("the draft has no origin")?;
+        tx.execute(
+            "INSERT INTO draft_bundles(planner_id, origin, key_kind, key_value, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![planner, origin.as_str(), key.kind.as_str(), key.value, now],
+        )?;
+        let ids: Vec<TaskId> = members.iter().map(|(id, _)| *id).collect();
+        for &(id, attempt) in &members {
+            tx.execute(
+                "INSERT INTO draft_bundle_members(planner_id, task_id, attempt) VALUES (?1, ?2, ?3)",
+                params![planner, id, i64::try_from(attempt)?],
+            )?;
+            let task = read_task(&tx, id)?;
+            let mut payload = json!({
                 "planner_id": planner,
                 "attempt": attempt,
                 "origin": origin,
-                "ask_id": answer,
+                "ask_id": if id == lead { answer } else { None },
                 "goal_id": task.goal_id(),
-            }),
-        )?;
-        let target = target(&tx, draft)?;
+                "members": ids,
+            });
+            extend(&mut payload, origin_fields(&tx, id)?);
+            event(&tx, id, None, EventKind::DraftPlannerOpened, payload)?;
+        }
+        let members = members
+            .into_iter()
+            .map(|(id, attempt)| Ok((target(&tx, id)?, attempt)))
+            .collect::<Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(DraftPlannerStart::Opened {
-            planner: self.planner(planner)?,
-            target: Box::new(target),
-            attempt,
+            planner: Box::new(self.planner(planner)?),
+            key,
+            members,
+            exhausted,
         })
+    }
+
+    /// The drafts a planner of the runtime's works on: its bundle's, or the
+    /// draft it was opened for before bundles.
+    pub fn planner_draft_tasks(&self, planner: PlannerId) -> Result<Vec<TaskId>> {
+        let members: Vec<TaskId> = self
+            .conn
+            .prepare(
+                "SELECT task_id FROM draft_bundle_members WHERE planner_id=?1 ORDER BY task_id",
+            )?
+            .query_map([planner], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !members.is_empty() {
+            return Ok(members);
+        }
+        Ok(self.planner(planner)?.draft_task_id.into_iter().collect())
+    }
+
+    /// The bundle `planner` was opened for, with what became of each draft.
+    pub fn draft_bundle(&self, planner: PlannerId) -> Result<Option<DraftBundleView>> {
+        bundle_view(&self.conn, planner)
+    }
+
+    /// Where the task came from, if the runtime or a job made it
+    /// (ADR-t807-1).
+    pub fn task_origin(&self, task: TaskId) -> Result<Option<TaskOrigin>> {
+        task_origin(&self.conn, task)
     }
 
     pub fn planner_answers(&self) -> Result<Vec<Ask>> {
@@ -346,10 +432,16 @@ impl DraftPlannerStore for SqliteQueue {
     }
     fn open_draft_planner(
         &mut self,
-        draft: TaskId,
+        drafts: &[TaskId],
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart> {
-        SqliteQueue::open_draft_planner(self, draft, answer)
+        SqliteQueue::open_draft_planner(self, drafts, answer)
+    }
+    fn planner_draft_tasks(&self, planner: PlannerId) -> Result<Vec<TaskId>> {
+        SqliteQueue::planner_draft_tasks(self, planner)
+    }
+    fn draft_bundle(&self, planner: PlannerId) -> Result<Option<DraftBundleView>> {
+        SqliteQueue::draft_bundle(self, planner)
     }
     fn planner_answers(&self) -> Result<Vec<Ask>> {
         SqliteQueue::planner_answers(self)
@@ -443,6 +535,241 @@ fn is_target(conn: &Connection, draft: TaskId) -> Result<bool> {
     )?)
 }
 
+/// The draft as a target when it waits for a planner: [`is_target`], and no
+/// open planner's bundle has its key (a draft of a piece of work whose
+/// other drafts a planner takes waits for it to end, and is then planned
+/// with what that planner left undecided).
+fn waiting(conn: &Connection, draft: TaskId) -> Result<Option<DraftTarget>> {
+    if !is_target(conn, draft)? {
+        return Ok(None);
+    }
+    let target = target(conn, draft)?;
+    Ok((!open_bundle_keys(conn)?.contains(&target.bundle_key())).then_some(target))
+}
+
+/// The keys of the bundles whose planner is not closed.
+fn open_bundle_keys(conn: &Connection) -> Result<Vec<BundleKey>> {
+    let rows: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT b.key_kind, b.key_value FROM draft_bundles b
+             JOIN planners p ON p.id=b.planner_id WHERE p.closed_at IS NULL",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(kind, value)| {
+            Some(BundleKey {
+                kind: kind.parse().ok()?,
+                value,
+            })
+        })
+        .collect())
+}
+
+/// Add the fields of `more` to the object `payload`.
+fn extend(payload: &mut Value, more: serde_json::Map<String, Value>) {
+    if let Some(object) = payload.as_object_mut() {
+        object.extend(more);
+    }
+}
+
+/// What the events about a draft carry of where it came from (ADR-t807-1),
+/// so `events --task` and `events --run` lead from the origin to the end:
+/// its `bundle_key` and the fields of its material that name the source
+/// (`source_task_id`, `source_run_id`, `index`, `goal_review_id`,
+/// `reviewed_proposal_id`). Empty for a task without an origin.
+pub(super) fn origin_fields(
+    conn: &Connection,
+    task: TaskId,
+) -> Result<serde_json::Map<String, Value>> {
+    match draft_origin(conn, task)? {
+        Some((origin, material)) => material_fields(origin, &material, task),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+/// [`origin_fields`] of a draft of `origin` with `material`.
+fn material_fields(
+    origin: DraftOrigin,
+    material: &Value,
+    task: TaskId,
+) -> Result<serde_json::Map<String, Value>> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("origin".into(), json!(origin));
+    fields.insert(
+        "bundle_key".into(),
+        serde_json::to_value(BundleKey::of(origin, material, task))?,
+    );
+    for name in [
+        "source_task_id",
+        "source_run_id",
+        "index",
+        "goal_review_id",
+        "reviewed_proposal_id",
+    ] {
+        if let Some(value) = material.get(name).filter(|v| !v.is_null()) {
+            fields.insert(name.into(), value.clone());
+        }
+    }
+    Ok(fields)
+}
+
+/// Record what became of each draft of `planner`'s bundle not settled yet
+/// (`draft_bundle_members.outcome`, `draft_planner_settled`), inside the
+/// caller's write transaction, as the planner ends (ADR-t807-1).
+pub(super) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> Result<()> {
+    let members: Vec<TaskId> = conn
+        .prepare(
+            "SELECT task_id FROM draft_bundle_members
+             WHERE planner_id=?1 AND outcome IS NULL ORDER BY task_id",
+        )?
+        .query_map([planner], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for task_id in members {
+        let task = read_task(conn, task_id)?;
+        let proposal: Option<i64> = conn.query_row(
+            "SELECT proposal_id FROM tasks WHERE id=?1",
+            [task_id],
+            |r| r.get(0),
+        )?;
+        let (outcome, proposal, duplicate_of) = match task.status() {
+            TaskStatus::Draft => {
+                let kept: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM asks WHERE task_id=?1 AND run_id IS NULL
+                     AND kind IN ('planner_question','follow_up') AND trim(answer)='keep_draft')",
+                    [task_id],
+                    |r| r.get(0),
+                )?;
+                let outcome = if kept {
+                    DraftOutcome::KeepDraft
+                } else {
+                    DraftOutcome::Undecided
+                };
+                (outcome, None, None)
+            }
+            TaskStatus::Canceled => match super::sqlite::duplicate_target(conn, task_id)? {
+                Some(target) => (DraftOutcome::Duplicate, None, Some(target)),
+                None => (DraftOutcome::Canceled, None, None),
+            },
+            _ => (DraftOutcome::Submitted, proposal, None),
+        };
+        conn.execute(
+            "UPDATE draft_bundle_members SET outcome=?3, proposal_id=?4, duplicate_of=?5, settled_at=?6
+             WHERE planner_id=?1 AND task_id=?2",
+            params![planner, task_id, outcome.as_str(), proposal, duplicate_of, now],
+        )?;
+        let mut payload = json!({
+            "planner_id": planner,
+            "outcome": outcome,
+            "proposal_id": proposal,
+            "duplicate_of": duplicate_of,
+            "status": task.status(),
+        });
+        extend(&mut payload, origin_fields(conn, task_id)?);
+        event(conn, task_id, None, EventKind::DraftPlannerSettled, payload)?;
+    }
+    Ok(())
+}
+
+/// The bundle `planner` was opened for, with its drafts.
+fn bundle_view(conn: &Connection, planner: PlannerId) -> Result<Option<DraftBundleView>> {
+    let row: Option<(String, String, String, i64)> = conn
+        .query_row(
+            "SELECT origin, key_kind, key_value, created_at FROM draft_bundles WHERE planner_id=?1",
+            [planner],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((origin, key_kind, key_value, created_at)) = row else {
+        return Ok(None);
+    };
+    let members = conn
+        .prepare(
+            "SELECT m.task_id, m.attempt, m.outcome, m.proposal_id, m.duplicate_of, t.status
+             FROM draft_bundle_members m JOIN tasks t ON t.id=m.task_id
+             WHERE m.planner_id=?1 ORDER BY m.task_id",
+        )?
+        .query_map([planner], |r| {
+            Ok(DraftBundleMember {
+                task_id: r.get(0)?,
+                attempt: r.get(1)?,
+                outcome: r.get(2)?,
+                proposal_id: r.get(3)?,
+                duplicate_of: r.get(4)?,
+                status: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(Some(DraftBundleView {
+        planner_id: planner,
+        origin,
+        key_kind,
+        key_value,
+        created_at,
+        members,
+    }))
+}
+
+/// Where the task came from (ADR-t807-1), with the bundles that took it;
+/// `None` for a task without an origin.
+pub(super) fn task_origin(conn: &Connection, task: TaskId) -> Result<Option<TaskOrigin>> {
+    let Some((origin, material)) = draft_origin(conn, task)? else {
+        return Ok(None);
+    };
+    let planners: Vec<PlannerId> = conn
+        .prepare(
+            "SELECT planner_id FROM draft_bundle_members WHERE task_id=?1 ORDER BY planner_id",
+        )?
+        .query_map([task], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let bundles = planners
+        .into_iter()
+        .map(|planner| bundle_view(conn, planner))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(Some(TaskOrigin {
+        origin,
+        source_task_id: material
+            .get("source_task_id")
+            .and_then(Value::as_i64)
+            .map(TaskId::new),
+        source_run_id: material
+            .get("source_run_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        index: material.get("index").and_then(Value::as_i64),
+        bundle_key: BundleKey::of(origin, &material, task),
+        material,
+        bundles,
+    }))
+}
+
+/// The follow_up drafts the receipts of `task`'s runs proposed, by ID, with
+/// their status now (ADR-t807-1).
+pub(super) fn follow_up_drafts(conn: &Connection, task: TaskId) -> Result<Vec<FollowUpDraft>> {
+    Ok(conn
+        .prepare(
+            "SELECT o.task_id, json_extract(o.material,'$.source_run_id'),
+                    json_extract(o.material,'$.index'), t.title, t.status
+             FROM draft_origins o JOIN tasks t ON t.id=o.task_id
+             WHERE o.origin='follow_up' AND json_extract(o.material,'$.source_task_id')=?1
+             ORDER BY o.task_id",
+        )?
+        .query_map([task], |r| {
+            Ok(FollowUpDraft {
+                task_id: r.get(0)?,
+                run_id: r.get(1)?,
+                index: r.get(2)?,
+                title: r.get(3)?,
+                status: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 fn target(conn: &Connection, draft: TaskId) -> Result<DraftTarget> {
     let (origin, material) = draft_origin(conn, draft)?.context("the draft has no origin")?;
     Ok(DraftTarget {
@@ -516,7 +843,8 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
 }
 
 /// Where the answer of `ask` goes: the planner of the runtime's not closed
-/// that works on its task (opened for it as a draft, or for its proposal);
+/// that works on its task (opened for its bundle of drafts, or for its
+/// proposal);
 /// else closed by the supervisor for `keep_draft` (nothing to apply) or a
 /// draft that moved on; else a new planner for a draft that still waits
 /// (unless its planners are used up); else a person's.
@@ -536,7 +864,8 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         .query_row(
             "SELECT p.id FROM planners p JOIN tasks t ON t.id=?1
              WHERE p.origin='runtime' AND p.closed_at IS NULL
-             AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id))
+             AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
+                  OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id))
              ORDER BY p.id DESC LIMIT 1",
             [task_id],
             |r| r.get(0),
@@ -731,21 +1060,31 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         if recorded {
             continue;
         }
-        event(
-            conn,
-            adoption.task,
-            None,
-            kind,
-            json!({
-                "task_id": adoption.task,
-                "origin": origin,
-                "source_task_id": adoption.material.get("source_task_id"),
-                "source_run_id": adoption.material.get("source_run_id"),
-                "by": if adoption.by_person { "person" } else { "planner" },
-                "ask_id": adoption.ask,
-                "depth": depth,
-            }),
-        )?;
+        // The bundle's planner that submits it, if one works on it.
+        let planner: Option<i64> = conn
+            .query_row(
+                "SELECT m.planner_id FROM draft_bundle_members m JOIN planners p ON p.id=m.planner_id
+                 WHERE m.task_id=?1 AND p.closed_at IS NULL ORDER BY m.planner_id DESC LIMIT 1",
+                [adoption.task],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut payload = json!({
+            "task_id": adoption.task,
+            "origin": origin,
+            "source_task_id": adoption.material.get("source_task_id"),
+            "source_run_id": adoption.material.get("source_run_id"),
+            "by": if adoption.by_person { "person" } else { "planner" },
+            "ask_id": adoption.ask,
+            "depth": depth,
+            "planner_id": planner,
+        });
+        let mut fields = material_fields(origin, &adoption.material, adoption.task)?;
+        fields.retain(|name, _| {
+            !matches!(name.as_str(), "source_task_id" | "source_run_id" | "origin")
+        });
+        extend(&mut payload, fields);
+        event(conn, adoption.task, None, kind, payload)?;
     }
     Ok(())
 }
@@ -908,7 +1247,7 @@ mod tests {
         // A canceled draft waits for no planner.
         assert!(queue.planner_drafts().unwrap().is_empty());
         assert!(matches!(
-            queue.open_draft_planner(task, None).unwrap(),
+            queue.open_draft_planner(&[task], None).unwrap(),
             DraftPlannerStart::Skipped
         ));
     }
@@ -1035,7 +1374,7 @@ mod tests {
         let answered = queue.answer(open.id, "adopt").unwrap();
         // A planner working on the draft gets it typed.
         let DraftPlannerStart::Opened { planner, .. } =
-            queue.open_draft_planner(runtime, Some(open.id)).unwrap()
+            queue.open_draft_planner(&[runtime], Some(open.id)).unwrap()
         else {
             panic!("no planner opened");
         };
@@ -1062,7 +1401,7 @@ mod tests {
         assert_eq!(queue.planner_drafts().unwrap().len(), 1);
         for _ in 0..MAX_DRAFT_PLANNERS {
             let DraftPlannerStart::Opened { planner, .. } =
-                queue.open_draft_planner(task, None).unwrap()
+                queue.open_draft_planner(&[task], None).unwrap()
             else {
                 panic!("no planner opened");
             };
@@ -1071,8 +1410,8 @@ mod tests {
         let asked = question(&mut queue, task, AskKind::PlannerQuestion);
         queue.answer(asked.id, "cancel").unwrap();
         assert!(matches!(
-            queue.open_draft_planner(task, Some(asked.id)).unwrap(),
-            DraftPlannerStart::Opened { attempt, .. } if attempt == MAX_DRAFT_PLANNERS + 1
+            queue.open_draft_planner(&[task], Some(asked.id)).unwrap(),
+            DraftPlannerStart::Opened { members, .. } if members[0].1 == MAX_DRAFT_PLANNERS + 1
         ));
     }
 }
