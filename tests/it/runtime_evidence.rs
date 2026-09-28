@@ -90,7 +90,7 @@ fn missing_required_evidence_parks_the_run_for_a_resumed_session() {
     assert_eq!(
         payloads(&detail, "evidence_missing"),
         [
-            &json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "evidence missing: e2e"})
+            &json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "evidence missing: e2e", "e2e_requirement": {"required": true, "source": "task"}})
         ]
     );
     // The worker's workspace was closed: the resume opens its own.
@@ -146,7 +146,7 @@ fn a_required_check_reported_failed_parks_the_run_instead_of_failing_it() {
     assert_eq!(
         payloads(&detail, "evidence_missing"),
         [
-            &json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "evidence missing: e2e"})
+            &json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "evidence missing: e2e", "e2e_requirement": {"required": true, "source": "task"}})
         ]
     );
     assert_eq!(
@@ -236,6 +236,122 @@ fn a_resume_or_integrate_without_the_required_evidence_does_not_land() {
     assert_eq!(run.last_error(), Some("evidence missing: e2e"));
     let parked = payloads(&detail, "integration_deferred");
     assert_eq!(parked.last().unwrap()["checks"], json!(["e2e"]));
+}
+
+/// Write `[e2e] paths` of `dagq.toml` in the main checkout and commit it
+/// (ADR-t963-1 decision 2).
+fn with_e2e_paths(repo: &Path, globs: &str) {
+    fs::write(repo.join("dagq.toml"), format!("[e2e]\npaths = {globs}\n")).unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    git(repo, &["commit", "-q", "-m", "e2e paths"]);
+}
+
+/// A run of a task without `--evidence e2e` whose diff touches `[e2e]
+/// paths` owes e2e: a receipt reporting it `not_applicable` parks the run
+/// (`evidence_missing`, with the source and the path matched), and the
+/// resume that adds it brings the run to `awaiting_integration`.
+#[test]
+fn a_diff_touching_the_e2e_paths_parks_the_run_without_e2e() {
+    let (_dir, repo, db) = evidence_fixture(&[]);
+    with_e2e_paths(&repo, "[\"change.txt\", 'tests/e2e.rs']");
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{RECEIPT_E2E}commit work; receipt_e2e \"$(git rev-parse HEAD)\" not_applicable 'no e2e path changed'"
+        ),
+    );
+    backend.resume_script_for(
+        2,
+        &format!(
+            "{RECEIPT_E2E}await_message; receipt_e2e \"$(git rev-parse HEAD)\" passed 'e2e: 3 passed'; idle; await_exit"
+        ),
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    let run = &detail.runs[0];
+    let prompt = read_prompt(run);
+    assert!(
+        prompt.contains("E2E evidence is decided by your diff"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("change.txt, tests/e2e.rs"), "{prompt}");
+    assert!(!prompt.contains("Required evidence:"), "{prompt}");
+    let requirement = json!({"required": true, "source": "paths", "paths": ["change.txt"]});
+    let validated = payloads(&detail, "validation_finished");
+    assert_eq!(validated.len(), 2);
+    assert_eq!(validated[0]["status"], "needs_session");
+    assert_eq!(validated[0]["evidence_missing"], json!(["e2e"]));
+    assert_eq!(validated[0]["e2e_requirement"], requirement);
+    assert_eq!(
+        payloads(&detail, "evidence_missing"),
+        [
+            &json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "evidence missing: e2e", "e2e_requirement": requirement})
+        ]
+    );
+    assert_eq!(
+        payloads(&detail, "resume_finished")[0]["outcome"],
+        "resolved"
+    );
+    assert_eq!(validated[1]["status"], "awaiting_integration");
+    assert_eq!(validated[1]["e2e_requirement"], requirement);
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+}
+
+/// A run whose diff stays outside `[e2e] paths` owes no e2e: its receipt
+/// reporting it `not_applicable` is accepted and the run lands; the same
+/// repository still holds a task that requires e2e to it.
+#[test]
+fn a_diff_outside_the_e2e_paths_lands_without_e2e_unless_the_task_requires_it() {
+    for (evidence, requirement) in [
+        (Vec::new(), json!({"required": false})),
+        (
+            vec![EvidenceCheck::E2e],
+            json!({"required": true, "source": "task"}),
+        ),
+    ] {
+        let (_dir, repo, db) = evidence_fixture(&evidence);
+        with_e2e_paths(&repo, "[\"src/**\"]");
+        let backend = TestWorkspace::new(
+            &db,
+            false,
+            &format!(
+                "{RECEIPT_E2E}commit work; receipt_e2e \"$(git rev-parse HEAD)\" not_applicable 'no e2e path changed'"
+            ),
+        );
+        backend.resume_script_for(
+            2,
+            &format!(
+                "{RECEIPT_E2E}await_message; receipt_e2e \"$(git rev-parse HEAD)\" passed 'e2e: 3 passed'; idle; await_exit"
+            ),
+        );
+        let outcome = supervise(&db, &repo, &backend).unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        let detail = SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(2))
+            .unwrap();
+        let validated = payloads(&detail, "validation_finished");
+        assert_eq!(validated[0]["e2e_requirement"], requirement, "{evidence:?}");
+        if evidence.is_empty() {
+            assert_eq!(validated.len(), 1);
+            assert_eq!(validated[0]["status"], "awaiting_integration");
+            assert!(!event_kinds(&detail).contains(&"evidence_missing"));
+            assert!(!event_kinds(&detail).contains(&"resume_started"));
+            let landed = integrate(&db, 2, &repo).unwrap();
+            assert_eq!(landed["outcome"], "integrated", "{landed}");
+        } else {
+            assert_eq!(validated[0]["status"], "needs_session");
+            assert_eq!(validated[0]["evidence_missing"], json!(["e2e"]));
+            assert_eq!(validated[1]["status"], "awaiting_integration");
+        }
+    }
 }
 
 /// A fixture whose only ready task declares `paths` (ADR-0029).

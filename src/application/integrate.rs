@@ -41,7 +41,7 @@ use crate::domain::{
     measure::{LoadSummary, LoadWindow},
     required_of,
     scope::{out_of_scope, scope_violation_reason},
-    validation::{self, CheckedOut, Fact, Judgement, ReceiptFacts, ReceiptFile},
+    validation::{self, CheckedOut, E2eRequirement, Fact, Judgement, ReceiptFacts, ReceiptFile},
     verify_failure,
 };
 use crate::migration_numbers;
@@ -60,11 +60,25 @@ pub struct Rejection {
     /// The changed paths outside the task's `paths` (ADR-0029), when the
     /// run is otherwise sound: it waits for a session to take them out.
     pub scope_violation: Vec<String>,
+    /// Whether `e2e` was required and why, when validation got that far
+    /// (ADR-t963-1 decision 2).
+    pub e2e_requirement: Option<E2eRequirement>,
+}
+
+/// A receipt validation accepted: the receipt, the commit it names and
+/// whether `e2e` was required of it (ADR-t963-1 decision 2).
+#[derive(Debug)]
+pub struct Accepted {
+    pub receipt: Receipt,
+    pub commit: CommitSha,
+    pub e2e_requirement: E2eRequirement,
 }
 
 /// Cross-check the agent's receipt against Git: the receipt names the
 /// clean head of the run branch, new work on top of the base commit, within
-/// the task's paths and with the task's required evidence. The domain
+/// the task's paths and with the task's required evidence, and with `e2e`
+/// when the diff touches `e2e_paths`, the repository's `[e2e] paths`
+/// (ADR-t963-1 decision 2). The domain
 /// judges ([`validation::judge`]) and says which fact it needs next; this
 /// gathers it from the run files and Git. `Ok(Err(_))` is a verdict on the
 /// run; `Err` a failure of the checks themselves.
@@ -73,7 +87,8 @@ pub fn check_receipt(
     files: &dyn RunFiles,
     task: &Task,
     run: &TaskRun,
-) -> Result<std::result::Result<(Receipt, CommitSha), Rejection>> {
+    e2e_paths: &[String],
+) -> Result<std::result::Result<Accepted, Rejection>> {
     let receipt_path = run.receipt_path().context("missing receipt path")?;
     let required = required_of(task.required_evidence(), run.actual_provider());
     let mut facts = ReceiptFacts::new(
@@ -82,18 +97,28 @@ pub fn check_receipt(
         &required,
         task.paths(),
         receipt_path,
-    );
+    )
+    .with_e2e_paths(e2e_paths);
     let worktree =
         || -> Result<&Path> { Ok(Path::new(run.worktree_path().context("missing worktree")?)) };
     loop {
         let fact = match validation::judge(&facts) {
             Judgement::Need(fact) => fact,
             Judgement::Accept(commit) => {
+                let e2e_requirement = facts
+                    .e2e_requirement()
+                    .context("accepted without knowing whether e2e is required")?;
                 let receipt = facts.into_receipt().context("accepted without a receipt")?;
-                return Ok(Ok((receipt, commit)));
+                return Ok(Ok(Accepted {
+                    receipt,
+                    commit,
+                    e2e_requirement,
+                }));
             }
             Judgement::Reject(rejection) => {
+                let e2e_requirement = facts.e2e_requirement();
                 return Ok(Err(Rejection {
+                    e2e_requirement,
                     reason: rejection.reason,
                     code: rejection.code,
                     commit: rejection.commit,
@@ -2194,9 +2219,14 @@ mod tests {
         let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
         write_receipt(&files, dir, "passed");
         let repository = FakeRepository::sound();
-        let (receipt, commit) = check_receipt(&repository, &files, &task(&[]), &run(dir))
+        let Accepted {
+            receipt,
+            commit,
+            e2e_requirement,
+        } = check_receipt(&repository, &files, &task(&[]), &run(dir), &[])
             .unwrap()
             .unwrap_or_else(|rejection| panic!("{}", rejection.reason));
+        assert!(!e2e_requirement.required);
         assert_eq!(commit, sha(HEAD));
         assert_eq!(
             repository.calls.borrow().as_slice(),
@@ -2220,6 +2250,7 @@ mod tests {
             &files,
             task,
             &run(dir),
+            &[],
         )
         .unwrap()
         {
@@ -2254,6 +2285,30 @@ mod tests {
         assert_eq!(evidence.evidence_missing, [EvidenceCheck::Tests]);
     }
 
+    /// The repository's `[e2e] paths` (ADR-t963-1 decision 2): a diff that
+    /// touches them owes `e2e`, one that does not lands without it.
+    #[test]
+    fn check_receipt_requires_e2e_of_a_diff_touching_the_e2e_paths() {
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        write_receipt(&files, dir, "passed");
+        let (repository, run) = (FakeRepository::sound(), run(dir));
+        let touching = ["src/**".to_owned()];
+        let Err(rejection) =
+            check_receipt(&repository, &files, &task(&[]), &run, &touching).unwrap()
+        else {
+            panic!("the diff touches src/");
+        };
+        assert_eq!(rejection.evidence_missing, [EvidenceCheck::E2e]);
+        let requirement = rejection.e2e_requirement.unwrap();
+        assert_eq!(requirement.paths, ["src/lib.rs"]);
+        let outside = ["tests/e2e.rs".to_owned()];
+        let Ok(accepted) = check_receipt(&repository, &files, &task(&[]), &run, &outside).unwrap()
+        else {
+            panic!("the diff stays outside the e2e paths");
+        };
+        assert!(!accepted.e2e_requirement.required);
+    }
+
     /// A Codex worker has no subagent: its receipt reports subagent_review
     /// not_applicable with a reason, and passes validation for a task that
     /// requires the evidence; the same receipt of a Claude run waits for it.
@@ -2263,7 +2318,9 @@ mod tests {
         write_receipt(&files, dir, "passed");
         let task = task_requiring(&[], &[EvidenceCheck::Tests, EvidenceCheck::SubagentReview]);
         let codex = run_on(dir, RunStatus::Validating, Provider::Codex);
-        let (receipt, commit) = check_receipt(&FakeRepository::sound(), &files, &task, &codex)
+        let Accepted {
+            receipt, commit, ..
+        } = check_receipt(&FakeRepository::sound(), &files, &task, &codex, &[])
             .unwrap()
             .unwrap_or_else(|rejection| panic!("{}", rejection.reason));
         assert_eq!(commit, sha(HEAD));
@@ -2272,7 +2329,7 @@ mod tests {
             crate::domain::CheckStatus::NotApplicable
         );
         let claude = run_on(dir, RunStatus::Validating, Provider::Claude);
-        let rejection = check_receipt(&FakeRepository::sound(), &files, &task, &claude)
+        let rejection = check_receipt(&FakeRepository::sound(), &files, &task, &claude, &[])
             .unwrap()
             .expect_err("a Claude run owes the subagent review");
         assert_eq!(rejection.evidence_missing, [EvidenceCheck::SubagentReview]);

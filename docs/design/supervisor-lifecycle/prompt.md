@@ -5,9 +5,10 @@ title: "Prompt"
 status: current
 created: 2026-09-26
 updated: 2026-09-29
-last_verified: 2026-09-28
+last_verified: 2026-09-29
 scope: runtime
 related:
+  - adr-t963-1
   - design-supervisor-lifecycle
   - adr-0009
   - adr-0038
@@ -34,7 +35,7 @@ related:
 
 verification commandsは`Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):`の見出しで一覧を見せ、その直後に`local_checks`の一文を置く: worktreeで流すのはrepositoryの指示（AGENTS.mdかCLAUDE.md）がworkerに求める検証で、それはverification commandsの一部をintegrateに任せてよく、指示が何も求めないときはverification commandsを流す。同じ一文をresume（`evidence_missing`・`scope_violation`・`sent_back`・triage・rebase（`Landing`）・reviewのpass後の衝突（`Precheck`））とreviseの手順2にも載せ（そこではverification commandsをJSONの一覧で書く）、integrateのrebase（`Landing`）の手順2には「reasonがintegrateのrebase後に落ちた検証コマンドなら、そのコマンドを手元で流して再現して直してよい」を足す。retryが引き継いだrunの節も「上の検証を流し直す」と書く。runtimeはcargoやllvm-covなど特定のツールの名前を決め打ちしない（dagqは他のrepositoryでも動く。どの検証をintegrateだけに任せるかはrepositoryの指示が決める）（task 510）。新しいADRは作らない: [ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定1の「同じcommitのverificationはintegrateの1回が正」に沿ってpromptの文面を直すだけで、決定は変わらないため。
 
-taskに`required_evidence`があれば、verification commandsの直後（4節の前）に`Required evidence: e2e, tests (each must be passed with evidence in the receipt, or the run waits for a session to add it)`の1行を載せ、workerに事前に知らせる（無ければ行ごと出さない）。taskに`paths`があれば、その次に`Paths you may change (globs from the repository root; ...): docs/**, *.md. A commit that changes any other path is not accepted: the run waits for a session to take it out. If the task needs another path, ask instead of changing it.`の1行を載せる（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)。無ければ行ごと出さない）。
+taskに`required_evidence`があれば、verification commandsの直後（4節の前）に`Required evidence: e2e, tests (each must be passed with evidence in the receipt, or the run waits for a session to add it)`の1行を載せ、workerに事前に知らせる（無ければ行ごと出さない）。taskに`paths`があれば、その次に`Paths you may change (globs from the repository root; ...): docs/**, *.md. A commit that changes any other path is not accepted: the run waits for a session to take it out. If the task needs another path, ask instead of changing it.`の1行を載せる（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)。無ければ行ごと出さない）。main checkoutの`dagq.toml`に`[e2e] paths`（[Run environment](run-environment.md)）があり、taskの要るevidenceに`e2e`が無ければ、`Required evidence:`の行の次に`E2E evidence is decided by your diff: validation requires `e2e` ... when the change from the base commit touches any of these paths from the repository's dagq.toml [e2e] paths: <globs>. Expected for this task: <見込み>; when it touches none, report `e2e` as not_applicable with that reason.`の1行を載せる（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2、task 965。`prompt::e2e_expectation`）。見込みは差分が決まる前にtaskの`paths`から読み、全ての`paths`がglobの文字（`*` `?`）を含まない具体のpathでどの`[e2e] paths`にも合わなければ`not required (its paths touch none of them)`、それ以外（`paths`が無い、globを含む、合うものがある）は`required only if your diff touches one of them`。要否を決めるのは[Validation](validation.md)の8の差分。taskが`e2e`を要るなら今までどおり`Required evidence:`の行だけで、この行は出さない。
 
 4節の後に「担当はこのtaskだけ。兄弟taskの範囲を変えず、範囲外の仕事を見つけたら受け持たずにreceiptの`follow_ups`に書く」の一文を置き、receipt JSONの例に任意の`follow_ups`（`{title, description, category}`の配列。`Receipt::check`は配列であることだけを見る）を含める。その後の「follow_ups is optional」の行に、`follow_up_categories_line`が種類の一覧（`FOLLOW_UP_CATEGORIES`のコードと短い定義）と付け方（迷ったら片付けたときに何が変わるかで選ぶ、重複は種類にしない）を足す（[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)、[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。
 

@@ -6,9 +6,25 @@ use crate::domain::EventKind;
 use crate::domain::exit::{CAUSE_BACKEND_TIMEOUT, CAUSE_EXIT_TIMEOUT};
 use crate::domain::language::with_instruction;
 use crate::domain::{
-    ParkCause, RunEvent, required_of,
+    ParkCause, RunEvent, Task, required_of,
     run::{RunWorkspace, run_workspaces},
 };
+
+/// The checks a resumed session's receipt must back: the task's, and
+/// `e2e` when the run's latest validation required it from its diff
+/// (ADR-t963-1 decision 2).
+fn resume_required(task: &Task, run: &TaskRun, events: &[RunEvent]) -> Vec<EvidenceCheck> {
+    let mut required = required_of(task.required_evidence(), run.actual_provider());
+    let by_diff = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == event_kind::VALIDATION_FINISHED)
+        .is_some_and(|e| e.payload["e2e_requirement"]["required"] == true);
+    if by_diff && !required.contains(&EvidenceCheck::E2e) {
+        required.push(EvidenceCheck::E2e);
+    }
+    required
+}
 
 impl Supervisor<'_> {
     /// Resume `needs_session` runs with attempts left (ADR-0019 decision 1),
@@ -161,9 +177,10 @@ impl Supervisor<'_> {
         if receipt.run_id() != run.id().as_str()
             || receipt.result() != ReceiptResult::Succeeded
             || !receipt
-                .missing_evidence(&required_of(
-                    task.required_evidence(),
-                    run.actual_provider(),
+                .missing_evidence(&resume_required(
+                    &task,
+                    run,
+                    &self.queue.run_events(run.id())?,
                 ))
                 .is_empty()
         {
@@ -452,7 +469,7 @@ impl Supervisor<'_> {
             exit_typed: false,
             exit_timed_out: false,
             retry: ExitRetry::default(),
-            required_evidence: required_of(task.required_evidence(), run.actual_provider()),
+            required_evidence: resume_required(&task, run, &self.queue.run_events(run.id())?),
             approved: self
                 .queue
                 .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
@@ -584,7 +601,7 @@ impl Supervisor<'_> {
             exit_typed: false,
             exit_timed_out,
             retry,
-            required_evidence: required_of(task.required_evidence(), run.actual_provider()),
+            required_evidence: resume_required(&task, run, &events),
             approved,
             silent: false,
             exit_for_silence,

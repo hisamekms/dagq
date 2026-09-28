@@ -2656,6 +2656,12 @@ pub trait Verifier {
     fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {
         Ok(crate::domain::worker_model::WorkerTrial::default())
     }
+    /// The paths whose change requires `e2e` of a run (`[e2e] paths` of
+    /// `dagq.toml`, ADR-t963-1 decision 2), as globs; none by default,
+    /// which leaves `e2e` to the task's `required_evidence`.
+    fn e2e_paths(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// The model and effort of the roles other than the worker
     /// (`[roles.<role>]` of `dagq.toml`, ADR-0079 decision 7); none by
     /// default, which starts every role as before.

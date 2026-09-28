@@ -15,7 +15,18 @@ impl Supervisor<'_> {
             self.repository.clone(),
             self.files.clone(),
             run,
+            self.e2e_paths(),
         )
+    }
+    /// `[e2e] paths` of `dagq.toml` (ADR-t963-1 decision 2). A file that
+    /// cannot be read leaves `e2e` to the task, as without the table, with
+    /// a warning: the gate before the fixed binary is replaced still runs
+    /// every e2e.
+    pub(super) fn e2e_paths(&self) -> Vec<String> {
+        self.verifier.e2e_paths().unwrap_or_else(|error| {
+            warn!("[e2e] paths of dagq.toml could not be read; e2e is required by the task only: {error:#}");
+            Vec::new()
+        })
     }
     /// The executor every AI actor the supervisor starts goes through: its
     /// workspaces through cmux, its agents through the review provider and
@@ -110,6 +121,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
                     &goal_predecessors,
                     &siblings,
                     inherited.as_ref(),
+                    &self.e2e_paths(),
                 )?,
                 self.verifier.language().as_ref(),
             )

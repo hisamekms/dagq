@@ -100,14 +100,20 @@ pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Record
             }),
         ));
     } else if status == RunStatus::NeedsSession {
-        events.push(NewRunEvent::new(
-            EventKind::EvidenceMissing,
-            json!({
-                "code": ReasonCode::EvidenceMissing,
-                "checks": validation.evidence_missing,
-                "reason": validation.reason,
-            }),
-        ));
+        let mut payload = json!({
+            "code": ReasonCode::EvidenceMissing,
+            "checks": validation.evidence_missing,
+            "reason": validation.reason,
+        });
+        // Why `e2e` was required (ADR-t963-1 decision 2), when it was.
+        if let Some(e2e) = validation
+            .e2e_requirement
+            .as_ref()
+            .filter(|e2e| e2e.required)
+        {
+            payload["e2e_requirement"] = json!(e2e);
+        }
+        events.push(NewRunEvent::new(EventKind::EvidenceMissing, payload));
     }
     Ok((run, events))
 }
@@ -295,6 +301,7 @@ mod tests {
                 vec!["src/**".into()]
             },
             scope_violation,
+            e2e_requirement: None,
             load: LoadSummary::default(),
         }
     }

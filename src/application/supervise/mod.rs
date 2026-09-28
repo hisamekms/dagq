@@ -2485,21 +2485,23 @@ fn spawn_validation(
     repository: Arc<dyn Repository + Send + Sync>,
     files: Arc<dyn RunFiles>,
     run: TaskRun,
+    e2e_paths: Vec<String>,
 ) -> thread::JoinHandle<Result<Validation>> {
     spawn_traced(move || {
         let mut queue = queues.open()?;
         let task = queue.show(run.task_id())?.task;
-        let checked = check_receipt(&*repository, &*files, &task, &run)?;
+        let checked = check_receipt(&*repository, &*files, &task, &run, &e2e_paths)?;
         Ok(match checked {
-            Ok((receipt, commit)) => Validation {
+            Ok(accepted) => Validation {
                 accepted: true,
-                result_commit: Some(commit),
+                result_commit: Some(accepted.commit),
                 reason: None,
                 code: None,
-                receipt: serde_json::to_value(receipt)?,
+                receipt: serde_json::to_value(accepted.receipt)?,
                 evidence_missing: Vec::new(),
                 scope_violation: Vec::new(),
                 allowed_paths: Vec::new(),
+                e2e_requirement: Some(accepted.e2e_requirement),
                 load: LoadSummary::default(),
             },
             Err(rejection) => {
@@ -2521,6 +2523,7 @@ fn spawn_validation(
                         task.paths().to_vec()
                     },
                     scope_violation: rejection.scope_violation,
+                    e2e_requirement: rejection.e2e_requirement,
                     load: LoadSummary::default(),
                 }
             }

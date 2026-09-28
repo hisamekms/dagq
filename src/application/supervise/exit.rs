@@ -657,15 +657,16 @@ pub(super) fn landable_without_exit(sv: &mut Supervisor<'_>, run: &TaskRun) -> O
     if let Some(why) = session_holds(sv, run) {
         return Some(why);
     }
-    let checked = sv
-        .queue
-        .show(run.task_id())
-        .and_then(|detail| check_receipt(&*sv.repository, &*sv.files, &detail.task, run));
+    let e2e_paths = sv.e2e_paths();
+    let checked = sv.queue.show(run.task_id()).and_then(|detail| {
+        check_receipt(&*sv.repository, &*sv.files, &detail.task, run, &e2e_paths)
+    });
     match checked {
-        Ok(Ok((_, commit))) => match run.result_commit() {
-            Some(reviewed) if *reviewed == commit => None,
+        Ok(Ok(accepted)) => match run.result_commit() {
+            Some(reviewed) if *reviewed == accepted.commit => None,
             Some(reviewed) => Some(format!(
-                "the head {commit} is not the reviewed commit {reviewed}"
+                "the head {} is not the reviewed commit {reviewed}",
+                accepted.commit
             )),
             None => Some("the run has no reviewed commit".to_owned()),
         },

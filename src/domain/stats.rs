@@ -221,6 +221,10 @@ pub struct RunStats {
     /// does not have; not listed without `[areas]` ([`with_areas`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub areas: Option<Vec<String>>,
+    /// Whether its latest validation required `e2e` and why (ADR-t963-1
+    /// decision 2): `task`, `paths` or `not_required`; null for a run
+    /// validated before validation recorded it, or never validated.
+    pub e2e: Option<String>,
     /// When the run was claimed (`run_claimed`), first validated
     /// (`validation_finished`) and landed (`run_integrated`).
     pub claimed_at: Option<String>,
@@ -312,6 +316,17 @@ pub struct KindStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChangeStats {
     pub change: Option<TaskChange>,
+    #[serde(flatten)]
+    pub intervals: Intervals,
+}
+
+/// The runs by whether validation required `e2e` of them and why
+/// (ADR-t963-1 decision 2), as [`KindStats`] groups them by kind: `e2e` is
+/// `task`, `paths` or `not_required`, and null for the runs validated
+/// before validation recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct E2eStats {
+    pub e2e: Option<String>,
     #[serde(flatten)]
     pub intervals: Intervals,
 }
@@ -445,6 +460,10 @@ pub struct Stats {
     /// ([`with_areas`]); not listed without `[areas]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub areas: Vec<AreaStats>,
+    /// The runs by whether validation required `e2e` of them (ADR-t963-1
+    /// decision 2): `task`, `paths`, `not_required`, and those validated
+    /// before it was recorded last.
+    pub e2e: Vec<E2eStats>,
     pub overall: Intervals,
     pub alerts: Vec<Alert>,
     /// Failed backend calls after `--since` (up to `next_cursor`); without
@@ -861,6 +880,7 @@ pub fn stats(
         .collect::<Vec<_>>();
     let page = finished.iter().map(|t| &t.stats).collect::<Vec<_>>();
     let overall = intervals(&page);
+    let e2e = e2e_groups(&page);
     let versions = measures::versions(&page);
     let load_bands = measures::load_bands(&page);
     let trial_groups = trial::trial_groups(&page);
@@ -1131,6 +1151,7 @@ pub fn stats(
         kinds: Vec::new(),
         changes: Vec::new(),
         areas: Vec::new(),
+        e2e,
         overall,
         alerts,
         backend_failures,
@@ -1713,6 +1734,33 @@ pub fn with_areas(stats: &mut Stats, areas: Option<&crate::domain::areas::RunAre
         .collect();
 }
 
+/// `runs` grouped by [`RunStats::e2e`]: the known ones by name, then
+/// those validated before it was recorded.
+fn e2e_groups(runs: &[&RunStats]) -> Vec<E2eStats> {
+    let mut by_e2e: BTreeMap<(bool, Option<&str>), Vec<&RunStats>> = BTreeMap::new();
+    for run in runs {
+        let e2e = run.e2e.as_deref();
+        by_e2e.entry((e2e.is_none(), e2e)).or_default().push(run);
+    }
+    by_e2e
+        .iter()
+        .map(|((_, e2e), runs)| E2eStats {
+            e2e: e2e.map(str::to_owned),
+            intervals: intervals(runs),
+        })
+        .collect()
+}
+
+/// What a `validation_finished` says of `e2e` (ADR-t963-1 decision 2),
+/// `None` for one recorded before it did.
+fn e2e_of(payload: &Value) -> Option<String> {
+    let requirement = payload.get("e2e_requirement")?;
+    Some(match requirement.get("source").and_then(Value::as_str) {
+        Some(source) if requirement["required"] == true => source.to_owned(),
+        _ => "not_required".to_owned(),
+    })
+}
+
 fn intervals(runs: &[&RunStats]) -> Intervals {
     Intervals {
         runs: runs.len(),
@@ -1786,6 +1834,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     kind: None,
                     change: None,
                     areas: None,
+                    e2e: None,
                     claimed_at: None,
                     validated_at: None,
                     landed_at: None,
@@ -1813,6 +1862,14 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
             clock.observe(event, at);
         }
         let run = &mut track.stats;
+        // The latest validation that recorded it decides: a resumed run's
+        // diff may differ, and one refused before its diff was read (a
+        // dirty worktree) leaves the earlier decision.
+        if event.kind == "validation_finished"
+            && let Some(e2e) = e2e_of(&event.payload)
+        {
+            run.e2e = Some(e2e);
+        }
         match event.kind.as_str() {
             "run_claimed" => {
                 track.claimed = track.claimed.or(at);
@@ -2884,6 +2941,76 @@ mod tests {
         assert_eq!(
             Cursor::Time(T * 1000 + 99_999).event_id(&events),
             EventId::new(1)
+        );
+    }
+
+    /// The runs by whether validation required e2e (ADR-t963-1 decision
+    /// 2): the latest `validation_finished` that recorded it decides, and a
+    /// run validated before it was recorded is null, listed last.
+    #[test]
+    fn runs_are_grouped_by_whether_e2e_was_required() {
+        let mut events = Vec::new();
+        for (index, (run, task, validations)) in [
+            (
+                R1,
+                1,
+                vec![
+                    json!({"e2e_requirement": {"required": true, "source": "paths", "paths": ["a"]}}),
+                    json!({"e2e_requirement": {"required": true, "source": "paths", "paths": ["a"]}}),
+                ],
+            ),
+            (R2, 2, vec![json!({"e2e_requirement": {"required": false}})]),
+            (R3, 3, vec![json!({})]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = index as i64 * 10;
+            let at = T + id * 100;
+            let with = move |event: RunEvent| RunEvent {
+                task_id: Some(TaskId::new(task)),
+                ..event
+            };
+            events.push(with(run_event(id + 1, run, "run_claimed", json!({}), at)));
+            events.push(with(run_event(id + 2, run, "receipt_observed", json!({}), at + 50)));
+            for (n, payload) in validations.into_iter().enumerate() {
+                events.push(with(run_event(
+                    id + 3 + n as i64,
+                    run,
+                    "validation_finished",
+                    payload,
+                    at + 60,
+                )));
+            }
+            events.push(with(run_event(id + 6, run, "run_integrated", json!({}), at + 90)));
+        }
+        let all = stats(
+            &events,
+            &HashMap::new(),
+            T + 5000,
+            SlotSnapshot::default(),
+            &StatsQuery {
+                full: true,
+                ..StatsQuery::default()
+            },
+            &LiveSnapshot::default(),
+        );
+        let json = serde_json::to_value(&all).unwrap();
+        let e2e: Vec<_> = json["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["e2e"].clone())
+            .collect();
+        assert_eq!(e2e, [json!("paths"), json!("not_required"), Value::Null]);
+        let groups = json["e2e"].as_array().unwrap();
+        let names: Vec<_> = groups.iter().map(|g| g["e2e"].clone()).collect();
+        assert_eq!(names, [json!("not_required"), json!("paths"), Value::Null]);
+        assert!(groups.iter().all(|g| g["runs"] == 1));
+        assert_eq!(groups[1]["work"]["total"], 50);
+        assert_eq!(
+            e2e_of(&json!({"e2e_requirement": {"required": true, "source": "task"}})).as_deref(),
+            Some("task")
         );
     }
 

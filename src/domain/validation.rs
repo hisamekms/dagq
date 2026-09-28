@@ -10,8 +10,76 @@ use serde::Serialize;
 use super::{
     CommitSha, DomainError, EvidenceCheck, ReasonCode, Receipt, RunId, evidence_missing_reason,
     measure::LoadSummary,
-    scope::{out_of_scope, scope_violation_reason},
+    scope::{glob_matches, out_of_scope, scope_violation_reason},
 };
+
+/// Why validation requires `e2e` of a run (ADR-t963-1 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum E2eSource {
+    /// The task's `required_evidence` (`add --evidence e2e`).
+    Task,
+    /// The run's diff touches `[e2e] paths` of `dagq.toml`.
+    Paths,
+}
+
+impl E2eSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Paths => "paths",
+        }
+    }
+}
+
+/// Whether validation requires `e2e` of a run, and why: recorded with
+/// `validation_finished` (as `e2e_requirement`) and `evidence_missing`, and
+/// read by `stats`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct E2eRequirement {
+    pub required: bool,
+    /// `None` when it is not required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<E2eSource>,
+    /// The changed paths `[e2e] paths` matched, for [`E2eSource::Paths`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+impl E2eRequirement {
+    /// `required` holds `e2e` when the task asks for it; otherwise the run
+    /// needs it when a path of `changes` matches a glob of `globs`. No
+    /// globs, no requirement from the diff.
+    pub fn of(required: &[EvidenceCheck], globs: &[String], changes: &[String]) -> Self {
+        if required.contains(&EvidenceCheck::E2e) {
+            return Self {
+                required: true,
+                source: Some(E2eSource::Task),
+                paths: Vec::new(),
+            };
+        }
+        let paths: Vec<String> = changes
+            .iter()
+            .filter(|path| globs.iter().any(|glob| glob_matches(glob, path)))
+            .cloned()
+            .collect();
+        Self {
+            required: !paths.is_empty(),
+            source: (!paths.is_empty()).then_some(E2eSource::Paths),
+            paths,
+        }
+    }
+
+    /// `required` with `e2e` added when this requires it and the task did
+    /// not.
+    pub fn checks(&self, required: &[EvidenceCheck]) -> Vec<EvidenceCheck> {
+        let mut checks = required.to_vec();
+        if self.required && !checks.contains(&EvidenceCheck::E2e) {
+            checks.push(EvidenceCheck::E2e);
+        }
+        checks
+    }
+}
 
 /// Outcome of supervisor-side receipt validation. `result_commit` is kept on
 /// rejection too when the commit itself was verified, so inspection can start there.
@@ -35,6 +103,10 @@ pub struct Validation {
     pub scope_violation: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allowed_paths: Vec<String>,
+    /// Whether `e2e` was required and why (ADR-t963-1 decision 2); `None`
+    /// when validation stopped before it could tell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub e2e_requirement: Option<E2eRequirement>,
     /// The load average from `receipt_observed` to this validation (task
     /// 197): the supervisor's samples, filled in when it records the result.
     #[serde(flatten)]
@@ -99,13 +171,15 @@ pub enum Fact {
 
 /// What the application gathered so far for one validation, and what it
 /// knew up front: the run, its base commit, the task's required evidence
-/// and paths, and where the receipt should be.
+/// and paths, the repository's `[e2e] paths` (ADR-t963-1 decision 2), and
+/// where the receipt should be.
 #[derive(Debug)]
 pub struct ReceiptFacts<'a> {
     pub run_id: &'a RunId,
     pub base: &'a CommitSha,
     pub required: &'a [EvidenceCheck],
     pub paths: &'a [String],
+    pub e2e_paths: &'a [String],
     pub receipt_path: &'a str,
     pub receipt: Option<ReceiptFile>,
     pub checked_out: Option<CheckedOut>,
@@ -129,6 +203,7 @@ impl<'a> ReceiptFacts<'a> {
             base,
             required,
             paths,
+            e2e_paths: &[],
             receipt_path,
             receipt: None,
             checked_out: None,
@@ -136,6 +211,29 @@ impl<'a> ReceiptFacts<'a> {
             descends: None,
             status: None,
             changes: None,
+        }
+    }
+
+    /// With the repository's `[e2e] paths` (ADR-t963-1 decision 2).
+    pub fn with_e2e_paths(mut self, e2e_paths: &'a [String]) -> Self {
+        self.e2e_paths = e2e_paths;
+        self
+    }
+
+    /// Whether the diff decides `e2e`: the repository names paths and the
+    /// task does not require it anyway.
+    fn diff_decides_e2e(&self) -> bool {
+        !self.e2e_paths.is_empty() && !self.required.contains(&EvidenceCheck::E2e)
+    }
+
+    /// Whether `e2e` is required and why, once the facts tell; `None`
+    /// while the diff that decides it is not read.
+    pub fn e2e_requirement(&self) -> Option<E2eRequirement> {
+        if self.diff_decides_e2e() {
+            let changes = self.changes.as_deref()?;
+            Some(E2eRequirement::of(self.required, self.e2e_paths, changes))
+        } else {
+            Some(E2eRequirement::of(self.required, &[], &[]))
         }
     }
 
@@ -189,7 +287,9 @@ fn reject(code: ReasonCode, reason: String, commit: Option<&CommitSha>) -> Judge
 /// base; the worktree is clean; the diff stays in the task's paths; the
 /// required evidence is there. Only a run sound in everything else waits
 /// for a session over its paths or its evidence (ADR-0029, ADR-0019
-/// decision 5).
+/// decision 5). The evidence required is the task's, and `e2e` when the
+/// diff touches the repository's `[e2e] paths` (ADR-t963-1 decision 2):
+/// until the diff is read, a reported `e2e` is held to that only then.
 pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
     let receipt = match &facts.receipt {
         None => return Judgement::Need(Fact::Receipt),
@@ -209,7 +309,19 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
         }
         Some(ReceiptFile::Parsed(receipt)) => receipt,
     };
-    if let Err(error) = receipt.check_requiring(facts.run_id, facts.required) {
+    // Until the diff tells whether `e2e` is required, its report is
+    // checked as a required one's, and again below once it is known.
+    let lenient = if facts.diff_decides_e2e() {
+        E2eRequirement {
+            required: true,
+            source: None,
+            paths: Vec::new(),
+        }
+        .checks(facts.required)
+    } else {
+        facts.required.to_vec()
+    };
+    if let Err(error) = receipt.check_requiring(facts.run_id, &lenient) {
         return reject(
             ReasonCode::of_receipt_error(&error),
             format!("{error:#}"),
@@ -273,11 +385,12 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
             Some(head),
         );
     }
-    // A task without paths may change anything, so its diff is not read.
-    if !facts.paths.is_empty() {
-        let Some(changes) = &facts.changes else {
-            return Judgement::Need(Fact::Changes);
-        };
+    // A task without paths may change anything, so its diff is not read
+    // unless it decides `e2e`.
+    if (!facts.paths.is_empty() || facts.diff_decides_e2e()) && facts.changes.is_none() {
+        return Judgement::Need(Fact::Changes);
+    }
+    if let Some(changes) = &facts.changes {
         let outside = out_of_scope(facts.paths, changes);
         if !outside.is_empty() {
             return Judgement::Reject(Rejection {
@@ -289,7 +402,22 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
             });
         }
     }
-    let missing = receipt.missing_evidence(facts.required);
+    let required = match facts.e2e_requirement() {
+        Some(e2e) => e2e.checks(facts.required),
+        None => facts.required.to_vec(),
+    };
+    // An `e2e` the diff did not require is held to what any check that is
+    // not required is: not `failed`, and explained.
+    if facts.diff_decides_e2e()
+        && let Err(error) = receipt.check_requiring(facts.run_id, &required)
+    {
+        return reject(
+            ReasonCode::of_receipt_error(&error),
+            format!("{error:#}"),
+            Some(head),
+        );
+    }
+    let missing = receipt.missing_evidence(&required);
     if !missing.is_empty() {
         return Judgement::Reject(Rejection {
             reason: evidence_missing_reason(&missing),
@@ -350,9 +478,21 @@ mod tests {
     /// gathering each fact the judge asks for; the facts it asked for, in
     /// order, come back with the verdict.
     fn run(world: &World, required: &[EvidenceCheck], paths: &[String]) -> (Vec<Fact>, Judgement) {
+        run_with_e2e(world, required, paths, &[]).0
+    }
+
+    /// [`run`] for a repository whose `[e2e] paths` are `e2e_paths`, with
+    /// the requirement the facts told.
+    fn run_with_e2e(
+        world: &World,
+        required: &[EvidenceCheck],
+        paths: &[String],
+        e2e_paths: &[String],
+    ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
         let id = RunId::new("r1").unwrap();
         let base = sha(BASE);
-        let mut facts = ReceiptFacts::new(&id, &base, required, paths, "/runs/r1/receipt.json");
+        let mut facts = ReceiptFacts::new(&id, &base, required, paths, "/runs/r1/receipt.json")
+            .with_e2e_paths(e2e_paths);
         let mut asked = Vec::new();
         loop {
             match judge(&facts) {
@@ -375,7 +515,7 @@ mod tests {
                         Fact::Changes => facts.changes = Some(world.changes.clone()),
                     }
                 }
-                verdict => return (asked, verdict),
+                verdict => return ((asked, verdict), facts.e2e_requirement()),
             }
         }
     }
@@ -623,10 +763,122 @@ mod tests {
                 evidence_missing,
                 scope_violation,
                 allowed_paths: Vec::new(),
+                e2e_requirement: None,
                 load: LoadSummary::default(),
             };
         assert!(!validation(Vec::new(), Vec::new()).resumable());
         assert!(validation(vec![EvidenceCheck::E2e], Vec::new()).resumable());
         assert!(validation(Vec::new(), vec!["x".into()]).resumable());
+    }
+
+    fn globs(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_diff_touching_the_e2e_paths_requires_e2e() {
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
+            changes: vec!["docs/a.md".into(), "src/infrastructure/process.rs".into()],
+            ..sound()
+        };
+        let e2e = globs(&["src/infrastructure/process.rs", "tests/e2e.rs"]);
+        let ((asked, verdict), requirement) = run_with_e2e(&world, &[], &[], &e2e);
+        assert_eq!(asked, ALL);
+        let refused = rejection(verdict);
+        assert_eq!(refused.code, ReasonCode::EvidenceMissing);
+        assert_eq!(refused.evidence_missing, [EvidenceCheck::E2e]);
+        let requirement = requirement.unwrap();
+        assert!(requirement.required);
+        assert_eq!(requirement.source, Some(E2eSource::Paths));
+        assert_eq!(requirement.paths, ["src/infrastructure/process.rs"]);
+
+        // A failed e2e the diff requires waits for a session too.
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "failed")),
+            ..world
+        };
+        let ((_, verdict), _) = run_with_e2e(&world, &[], &[], &e2e);
+        assert_eq!(rejection(verdict).code, ReasonCode::EvidenceMissing);
+    }
+
+    #[test]
+    fn a_diff_outside_the_e2e_paths_lands_without_e2e() {
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
+            changes: vec!["src/domain/stats.rs".into()],
+            ..sound()
+        };
+        let e2e = globs(&["src/infrastructure/**", "tests/e2e.rs"]);
+        let ((asked, verdict), requirement) = run_with_e2e(&world, &[], &[], &e2e);
+        assert_eq!(asked, ALL);
+        assert_eq!(verdict, Judgement::Accept(sha(HEAD)));
+        assert_eq!(
+            requirement,
+            Some(E2eRequirement {
+                required: false,
+                source: None,
+                paths: Vec::new(),
+            })
+        );
+
+        // An e2e that is not required still may not fail.
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "failed")),
+            ..world
+        };
+        let ((_, verdict), _) = run_with_e2e(&world, &[], &[], &e2e);
+        let refused = rejection(verdict);
+        assert_eq!(refused.code, ReasonCode::EvidenceFailed);
+        assert_eq!(refused.commit, Some(sha(HEAD)));
+    }
+
+    #[test]
+    fn a_task_that_requires_e2e_keeps_it_whatever_the_diff() {
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
+            changes: vec!["docs/a.md".into()],
+            ..sound()
+        };
+        let e2e = globs(&["src/**"]);
+        let ((asked, verdict), requirement) =
+            run_with_e2e(&world, &[EvidenceCheck::E2e], &[], &e2e);
+        // The task decides, so a task without paths does not read the diff.
+        assert_eq!(asked, ALL[..5]);
+        assert_eq!(rejection(verdict).evidence_missing, [EvidenceCheck::E2e]);
+        assert_eq!(requirement.unwrap().source, Some(E2eSource::Task));
+    }
+
+    #[test]
+    fn without_e2e_paths_the_diff_requires_nothing() {
+        let world = World {
+            receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
+            ..sound()
+        };
+        let ((asked, verdict), requirement) = run_with_e2e(&world, &[], &[], &[]);
+        assert_eq!(asked, ALL[..5]);
+        assert_eq!(verdict, Judgement::Accept(sha(HEAD)));
+        assert!(!requirement.unwrap().required);
+    }
+
+    #[test]
+    fn the_requirement_adds_e2e_to_the_task_checks_once() {
+        let paths = E2eRequirement::of(&[], &globs(&["src/*.rs"]), &globs(&["src/a.rs"]));
+        assert_eq!(
+            paths.checks(&[EvidenceCheck::Tests]),
+            [EvidenceCheck::Tests, EvidenceCheck::E2e]
+        );
+        let task = E2eRequirement::of(&[EvidenceCheck::E2e], &[], &[]);
+        assert_eq!(task.checks(&[EvidenceCheck::E2e]), [EvidenceCheck::E2e]);
+        assert_eq!(E2eSource::Paths.as_str(), "paths");
+        assert_eq!(E2eSource::Task.as_str(), "task");
+        assert_eq!(
+            serde_json::to_value(&paths).unwrap(),
+            serde_json::json!({"required": true, "source": "paths", "paths": ["src/a.rs"]})
+        );
+        assert_eq!(
+            serde_json::to_value(E2eRequirement::of(&[], &[], &[])).unwrap(),
+            serde_json::json!({"required": false})
+        );
     }
 }

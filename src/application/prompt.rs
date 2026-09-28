@@ -23,7 +23,7 @@ use super::{
 };
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
-    Ask, BundleKey, CommitSha, DraftOrigin, DraftTarget, FindingView, Goal, GoalId,
+    Ask, BundleKey, CommitSha, DraftOrigin, DraftTarget, EvidenceCheck, FindingView, Goal, GoalId,
     GoalPredecessor, GoalTask, LintViolation, MAX_DRAFT_PLANNERS, MAX_FINDING_PLANNERS,
     MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId,
     Provider, Receipt, RunEvent, RunId, RunStatus, TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId,
@@ -399,6 +399,7 @@ pub(crate) fn local_checks(verify: &str) -> String {
 /// Context, Predecessor and Sibling sections are always present, `none`
 /// when empty, so the prompt keeps one shape whether or not a task has a
 /// goal, a context, dependencies or company.
+#[allow(clippy::too_many_arguments)]
 pub fn prompt(
     task: &Task,
     run: &TaskRun,
@@ -407,6 +408,7 @@ pub fn prompt(
     goal_predecessors: &[GoalPredecessorSummary],
     siblings: &[Task],
     inherited: Option<&Inheritance>,
+    e2e_paths: &[String],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let inherited = inherited.map(Inheritance::section).unwrap_or_default();
@@ -484,7 +486,7 @@ pub fn prompt(
     // Known up front, so the receipt carries it (ADR-0019 decision 5): what
     // this run's provider must back.
     let required = required_of(task.required_evidence(), run.actual_provider());
-    let evidence = if required.is_empty() {
+    let mut evidence = if required.is_empty() {
         String::new()
     } else {
         let names: Vec<&str> = required.iter().map(|c| c.as_str()).collect();
@@ -493,6 +495,7 @@ pub fn prompt(
             names.join(", ")
         )
     };
+    evidence.push_str(&e2e_expectation(&required, task.paths(), e2e_paths));
     // The declared scope (ADR-0029): changing anything else parks the run.
     let paths = if task.paths().is_empty() {
         String::new()
@@ -559,6 +562,34 @@ pub fn prompt(
         local_checks = local_checks("above"),
         categories = follow_up_categories_line(),
     ))
+}
+
+/// Whether the run owes `e2e` when its task does not require it
+/// (ADR-t963-1 decision 2): the repository's `[e2e] paths` decide from the
+/// diff at validation. Before the diff is made, the expectation reads the
+/// task's own `paths`: none of them can touch an e2e path when each is a
+/// plain path no e2e glob matches. Empty when the task requires `e2e`
+/// (the Required evidence line says so) or the repository names no paths.
+fn e2e_expectation(required: &[EvidenceCheck], paths: &[String], e2e_paths: &[String]) -> String {
+    if e2e_paths.is_empty() || required.contains(&EvidenceCheck::E2e) {
+        return String::new();
+    }
+    let outside = !paths.is_empty()
+        && paths.iter().all(|path| {
+            !path.contains(['*', '?'])
+                && !e2e_paths
+                    .iter()
+                    .any(|glob| crate::domain::scope::glob_matches(glob, path))
+        });
+    let expected = if outside {
+        "Expected for this task: not required (its paths touch none of them)"
+    } else {
+        "Expected for this task: required only if your diff touches one of them"
+    };
+    format!(
+        "E2E evidence is decided by your diff: validation requires `e2e` (passed with evidence in the receipt, or the run waits for a session to add it) when the change from the base commit touches any of these paths from the repository's dagq.toml [e2e] paths: {}. {expected}; when it touches none, report `e2e` as not_applicable with that reason.\n",
+        e2e_paths.join(", ")
+    )
 }
 
 /// What the worker's prompt says of a follow_up's `category` (ADR-t947-3):
@@ -2373,7 +2404,17 @@ mod tests {
 
         let waiting = task(9, "downstream", TaskStatus::InProgress);
         let own_run = run(9, RunStatus::Claimed, None);
-        let text = prompt(&waiting, &own_run, None, &[], &[landed, empty], &[], None).unwrap();
+        let text = prompt(
+            &waiting,
+            &own_run,
+            None,
+            &[],
+            &[landed, empty],
+            &[],
+            None,
+            &[],
+        )
+        .unwrap();
         assert!(
             text.contains(&format!(
                 "Predecessor tasks (their changes are already in your base commit):\n\
@@ -2383,9 +2424,46 @@ mod tests {
             )),
             "{text}"
         );
-        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None).unwrap();
+        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[]).unwrap();
         assert!(alone.contains("Predecessor tasks: none\n"));
         assert!(!alone.contains("Carried over from run"));
+    }
+
+    /// With `[e2e] paths` (ADR-t963-1 decision 2) the worker prompt says
+    /// the diff decides e2e and what it expects before the diff is made; a
+    /// task that requires e2e keeps its Required evidence line alone.
+    #[test]
+    fn the_worker_prompt_says_whether_its_diff_is_expected_to_owe_e2e() {
+        let own_run = run(7, RunStatus::Claimed, None);
+        let e2e = [
+            "src/infrastructure/**".to_owned(),
+            "tests/e2e.rs".to_owned(),
+        ];
+        let decided = "E2E evidence is decided by your diff";
+        let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let text = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e).unwrap();
+        assert!(text.contains(decided), "{text}");
+        assert!(
+            text.contains("src/infrastructure/**, tests/e2e.rs"),
+            "{text}"
+        );
+        assert!(text.contains("required only if your diff touches one of them"));
+        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        assert!(!none.contains(decided), "{none}");
+
+        assert_eq!(
+            e2e_expectation(&[], &["docs/**".to_owned()], &e2e),
+            e2e_expectation(&[], &[], &e2e),
+            "a glob of the task may touch anything"
+        );
+        assert!(
+            e2e_expectation(&[], &["src/domain/stats.rs".to_owned()], &e2e)
+                .contains("not required (its paths touch none of them)")
+        );
+        assert!(
+            e2e_expectation(&[], &["tests/e2e.rs".to_owned()], &e2e).contains("required only if")
+        );
+        assert_eq!(e2e_expectation(&[EvidenceCheck::E2e], &[], &e2e), "");
     }
 
     /// The worker, resume and revise prompts show the verification commands
@@ -2398,7 +2476,7 @@ mod tests {
         let own_run = run(7, RunStatus::Claimed, None);
         let checks = "the repository's instructions (AGENTS.md or CLAUDE.md) ask a worker to run";
 
-        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None).unwrap();
+        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[]).unwrap();
         assert!(worker.contains(
             "Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n[\n  \"make gate\"\n]\n"
         ));
@@ -2418,7 +2496,17 @@ mod tests {
             receipt_path: None,
             summary: "earlier".into(),
         };
-        let retried = prompt(&verified, &own_run, None, &[], &[], &[], Some(&inheritance)).unwrap();
+        let retried = prompt(
+            &verified,
+            &own_run,
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&inheritance),
+            &[],
+        )
+        .unwrap();
         let (before, carried) = retried.split_once("Carried over from run").unwrap();
         assert!(before.contains(checks));
         assert!(carried.contains("rerun your checks in the worktree as above"));
@@ -2743,7 +2831,7 @@ mod tests {
     /// request, the revise, the receipt mismatch, the stale receipt, the
     /// nudge, an answer and a recovery job's instruction.
     fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
-        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None).unwrap()];
+        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None, &[]).unwrap()];
         for kind in [
             ResumeKind::Landing,
             ResumeKind::EvidenceMissing,

@@ -2225,7 +2225,7 @@ pub fn start_run_under_dead_supervisor(
     let task = queue.show(run.task_id()).unwrap().task;
     fs::write(
         run_dir.join("prompt.txt"),
-        runtime::prompt(&task, &run, None, &[], &[], &[], None).unwrap(),
+        runtime::prompt(&task, &run, None, &[], &[], &[], None, &[]).unwrap(),
     )
     .unwrap();
     repository.create_worktree(&run).unwrap();

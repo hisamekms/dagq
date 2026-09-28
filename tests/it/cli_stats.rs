@@ -509,6 +509,11 @@ mod stats {
             first.as_object_mut().unwrap().remove("change"),
             Some(Value::Null)
         );
+        // ADR-t963-1: its validation recorded no e2e requirement.
+        assert_eq!(
+            first.as_object_mut().unwrap().remove("e2e"),
+            Some(Value::Null)
+        );
         assert_eq!(
             first,
             json!({

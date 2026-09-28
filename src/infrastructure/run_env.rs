@@ -17,6 +17,8 @@
 //! started without the flags (task 698, task 941). `[areas]` maps the
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
 //! and `[tasks] changes` names the set of changes a task declares one of.
+//! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
+//! a run (ADR-t963-1 decision 2).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -41,6 +43,7 @@ use crate::{
         landing_branch::RepositoryConfig,
         resume::ResumeConfig,
         run_env::{RunEnvCheck, RunEnvProgram},
+        scope::{dedup_globs, validate_path_globs},
         slot_limits::SupervisorConfig,
         stall::StallConfig,
         stats::ConflictConfig,
@@ -88,7 +91,12 @@ const AREAS_TABLE: &str = "areas";
 const TASKS_TABLE: &str = "tasks";
 /// The one key of `[tasks]`.
 const TASKS_CHANGES: &str = "changes";
-const TABLES: [&str; 13] = [
+/// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
+/// (ADR-t963-1 decision 2).
+const E2E_TABLE: &str = "e2e";
+/// The one key of `[e2e]`.
+const E2E_PATHS: &str = "paths";
+const TABLES: [&str; 14] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -102,6 +110,7 @@ const TABLES: [&str; 13] = [
     SUPERVISOR_TABLE,
     AREAS_TABLE,
     TASKS_TABLE,
+    E2E_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -166,6 +175,8 @@ pub struct Config {
     pub areas: Option<AreaMap>,
     /// `[tasks] changes` (ADR-t980-1); `None` without it.
     pub changes: Option<ChangeSet>,
+    /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
+    pub e2e_paths: Vec<String>,
 }
 
 /// Parse the whole file.
@@ -185,6 +196,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut role_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
+    let mut e2e_paths_seen: Option<usize> = None;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -223,7 +235,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -273,6 +285,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .map_err(anyhow::Error::msg)
                         .with_context(with)?,
                 );
+            }
+            Some(E2E_TABLE) => {
+                ensure!(
+                    key == E2E_PATHS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{E2E_TABLE}]; the key is {E2E_PATHS}"
+                );
+                ensure!(
+                    e2e_paths_seen.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                e2e_paths_seen = Some(number);
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let globs = parse_string_array(rest.trim()).with_context(with)?;
+                validate_path_globs(&globs).with_context(with)?;
+                config.e2e_paths = dedup_globs(&globs);
             }
             Some(KPI_TABLE) => kpi
                 .entry(key, rest.trim())
@@ -805,6 +832,18 @@ pub fn load_change_set(root: &Path) -> Result<Option<ChangeSet>> {
     })
 }
 
+/// `[e2e] paths` of the `dagq.toml` in `root` (ADR-t963-1 decision 2);
+/// no file, no table or no key is none.
+pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .e2e_paths)
+}
+
 /// `[roles.<role>]` of the `dagq.toml` in `root` (ADR-0079 decision 7);
 /// no file is no role's.
 pub fn load_role_models(root: &Path) -> Result<RoleModels> {
@@ -1109,6 +1148,9 @@ impl Verifier for ShellVerifier {
     fn worker_trial(&self) -> Result<WorkerTrial> {
         load_worker_trial(&self.checkout)
     }
+    fn e2e_paths(&self) -> Result<Vec<String>> {
+        load_e2e_paths(&self.checkout)
+    }
     fn role_models(&self) -> Result<RoleModels> {
         load_role_models(&self.checkout)
     }
@@ -1214,6 +1256,52 @@ mod tests {
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[areas]\nX = [\"a\"]\n").unwrap();
         assert!(load_area_map(dir.path()).is_err());
+    }
+
+    /// `[e2e] paths` names the globs whose change requires e2e
+    /// (ADR-t963-1 decision 2); a mistake in it is refused with its line.
+    #[test]
+    fn parses_the_paths_of_the_e2e_table() {
+        let config = parse_config(
+            "[run.env]\nA = \"1\"\n[e2e]\npaths = [\"src/infrastructure/**\", 'tests/e2e.rs', \"tests/e2e.rs\"] # narrow\n",
+        )
+        .unwrap();
+        assert_eq!(config.e2e_paths, ["src/infrastructure/**", "tests/e2e.rs"]);
+        assert!(parse_config("[e2e]\n").unwrap().e2e_paths.is_empty());
+        assert!(parse_config("").unwrap().e2e_paths.is_empty());
+        for (text, expected) in [
+            ("[e2e]\nglobs = [\"a\"]\n", "dagq.toml:2: unknown key globs"),
+            (
+                "[e2e]\npaths = [\"a\"]\npaths = [\"b\"]\n",
+                "dagq.toml:3: paths is defined twice",
+            ),
+            ("[e2e]\npaths = \"src/**\"\n", "dagq.toml:2: value of paths"),
+            (
+                "\n[e2e]\npaths = [\"/src/**\"]\n",
+                "dagq.toml:3: value of paths",
+            ),
+            (
+                "[e2e]\npaths = [\"src/../x\"]\n",
+                "dagq.toml:2: value of paths",
+            ),
+            (
+                "[e2e]\npaths = [\"a\"]\n[e2e]\n",
+                "dagq.toml:3: [e2e] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_e2e_paths(dir.path()).unwrap().is_empty());
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[e2e]\npaths = [\"tests/e2e.rs\"]\n",
+        )
+        .unwrap();
+        assert_eq!(load_e2e_paths(dir.path()).unwrap(), ["tests/e2e.rs"]);
+        fs::write(dir.path().join(CONFIG_FILE_NAME), "[e2e]\npaths = 1\n").unwrap();
+        assert!(load_e2e_paths(dir.path()).is_err());
     }
 
     /// `[tasks] changes` names the repository's set of changes (ADR-t980-1).
@@ -1764,7 +1852,7 @@ LITERAL = 'no \n escapes # here'
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
-            error.contains("[supervisor], [areas], [tasks] and [kpi]"),
+            error.contains("[supervisor], [areas], [tasks], [e2e] and [kpi]"),
             "{error}"
         );
     }
