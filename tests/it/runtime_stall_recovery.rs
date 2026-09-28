@@ -723,3 +723,85 @@ await_exit
         ]
     );
 }
+
+/// Task 672: after its nudge the session ends a turn, then takes a
+/// person's input whose turn is interrupted (Esc: no `Stop` hook, so no
+/// idle marker follows the input marker). Past `idle_without_receipt_secs`
+/// from the input, with the screen at rest, the idle goes to its recovery
+/// job, and the session counts as at its prompt: the job's
+/// `send_instruction` is applied, not refused for a session not idle.
+#[test]
+fn an_instruction_reaches_a_session_whose_interrupted_turn_left_no_idle_marker() {
+    let (_dir, repo, db) = fixture();
+    let (backend, _reviewer, supervisor) = supervise_stalled(
+        &db,
+        &repo,
+        r#"
+commit work; idle_bg
+while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
+rm -f "$MESSAGE"; idle_bg
+sleep 0.3
+INPUT="$(dirname "$IDLE")/prompt-submit.json"
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"hold on"}' > "$INPUT.tmp"
+mv "$INPUT.tmp" "$INPUT"
+until grep -q "recovery job" "$MESSAGE" 2>/dev/null || [ -f "$EXIT.go" ]; do sleep 0.05; done
+receipt "$(git rev-parse HEAD)"; idle; await_exit
+"#,
+        idle_second(),
+        &[repair(
+            json!({"action": "send_instruction", "instruction": "write the receipt"}),
+            "the person stopped the turn",
+        )],
+    );
+    // Esc stopped the turn the input started: the screen is at rest again
+    // (the nudge put it at work).
+    let started = Instant::now();
+    loop {
+        let detail = SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap();
+        // A run is claimed before it is planned: its run directory comes
+        // with the plan.
+        if let Some(run) = detail.runs.first().filter(|run| run.run_dir().is_some()) {
+            let input =
+                Path::new(&run.idle_marker_path().unwrap()).with_file_name("prompt-submit.json");
+            if input.exists() {
+                break;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "no input taken"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    *backend.screen.lock().unwrap() = READY_SCREEN.into();
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        !payloads(&queue.show(TaskId::new(1)).unwrap(), "recovery_finished").is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let applied = queue.show(TaskId::new(1)).unwrap();
+    // Released either way, so a refused instruction fails here, not by
+    // the supervisor's timeout.
+    let outcome = release(&db, &backend, supervisor);
+    assert_eq!(outcome["runs"][0]["status"], "integrated");
+    let finished = payloads(&applied, "recovery_finished");
+    assert_eq!(
+        finished[0]["applied"],
+        json!(["send_instruction"]),
+        "{finished:?}"
+    );
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let requested = payloads(&detail, "recovery_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["reason"], "idle_without_receipt");
+    let finished = payloads(&detail, "recovery_finished");
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert_eq!(finished[0]["applied"], json!(["send_instruction"]));
+    assert_eq!(finished[0]["escalated"], false);
+    let texts = backend.texts();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[1].1.contains("write the receipt"), "{texts:?}");
+    assert!(stalled_asks(&queue).is_empty());
+}

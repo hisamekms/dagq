@@ -104,16 +104,86 @@ fn situation(send: &RunEvent) -> String {
     )
 }
 
+/// Whether the turn an input the session took at `input` started was left
+/// open long enough to take the session for idle at its prompt (task 672):
+/// no idle marker (`marker`) ended it, it was taken after the last text
+/// the supervisor typed (`after_sends`) and the last input of the stage
+/// (`input_at`), and `threshold_secs` passed since it by `now`. The screen
+/// is read only past this.
+fn turn_left_open(
+    input: SystemTime,
+    marker: Option<SystemTime>,
+    after_sends: bool,
+    input_at: Option<SystemTime>,
+    now: SystemTime,
+    threshold_secs: i64,
+) -> bool {
+    let waited = now
+        .duration_since(input)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    marker.is_none_or(|marker| marker <= input)
+        && after_sends
+        && input_at.is_none_or(|at| input >= at)
+        && waited >= threshold_secs
+}
+
 impl SessionWatch {
     /// Whether the session is idle at its prompt, for `send_instruction`:
-    /// no dialog recorded, and a turn ended since the last input (the last
-    /// text the supervisor typed, and for a session asked to fix its run
-    /// the last input of its stage).
+    /// no dialog recorded, and either a turn ended since the last input
+    /// (the last text the supervisor typed, the last input it took by its
+    /// input marker, and for a session asked to fix its run the last input
+    /// of its stage), or its last input started a turn that never ended
+    /// ([`Self::interrupted`]).
     pub(super) fn at_prompt(&self, sv: &Supervisor<'_>) -> bool {
-        self.prompt_hash.is_none()
-            && sv.files.modified(&self.idle_marker).is_ok_and(|marker| {
-                self.stall.turn_since_input(marker) && self.input_at.is_none_or(|at| marker > at)
-            })
+        if self.prompt_hash.is_some() {
+            return false;
+        }
+        // The idle marker is read first: an input taken after this read
+        // shows newer than it, never a turn it started taken for ended. An
+        // input marker that cannot be read is taken for none, as before
+        // there was one.
+        let marker = sv.files.modified(&self.idle_marker).ok();
+        let input = InputMarker::read(&*sv.files, sv.signals, &self.idle_marker)
+            .ok()
+            .flatten();
+        if marker.is_some_and(|marker| {
+            self.stall.turn_since_input(marker)
+                && self.input_at.is_none_or(|at| marker > at)
+                && input.is_none_or(|input| marker > input.modified)
+        }) {
+            return true;
+        }
+        input.is_some_and(|input| self.interrupted(sv, input, marker))
+    }
+
+    /// Whether the turn the session's last input (`input`, its input
+    /// marker) started ended with no idle marker (`marker` no newer): a
+    /// turn a person interrupted with Esc, which runs no `Stop` hook (task
+    /// 672). By the rule of the [`StallWatch`] for such a turn, the session
+    /// is at its prompt once `idle_without_receipt_secs` passed since the
+    /// input, the input was taken after the last text the supervisor typed
+    /// and the last input of the stage, and its screen shows neither the
+    /// agent at work nor a dialog. A screen that cannot be read tells
+    /// nothing.
+    fn interrupted(
+        &self,
+        sv: &Supervisor<'_>,
+        input: InputMarker,
+        marker: Option<SystemTime>,
+    ) -> bool {
+        if !turn_left_open(
+            input.modified,
+            marker,
+            self.stall.taken_after_sends(input.modified),
+            self.input_at,
+            sv.files.now(),
+            sv.stall.idle_without_receipt_secs,
+        ) {
+            return false;
+        }
+        sv.cmux.capture(&self.workspace).is_ok_and(|screen| {
+            !sv.signals.working(&screen) && sv.signals.detect_prompt(&screen).is_none()
+        })
     }
 
     /// One look at the first session's idle without a receipt: the nudge,
@@ -557,5 +627,31 @@ mod tests {
             situation(&dialog),
             "a permission dialog came up after the supervisor sent the answer of ask 4"
         );
+    }
+
+    /// Task 672: a turn an input started and nothing ended (Esc) leaves the
+    /// session at its prompt only past the threshold from the input, and
+    /// only for an input taken after the last text the supervisor typed
+    /// and the last input of the stage.
+    #[test]
+    fn a_turn_left_open_counts_as_at_the_prompt_only_past_the_threshold() {
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        let open = |marker, after_sends, input_at, now| {
+            turn_left_open(at(100), marker, after_sends, input_at, at(now), 60)
+        };
+        assert!(
+            !open(Some(at(50)), true, None, 159),
+            "short of the threshold"
+        );
+        assert!(open(Some(at(50)), true, None, 160));
+        assert!(open(None, true, Some(at(100)), 160));
+        assert!(!open(Some(at(101)), true, None, 500), "a turn that ended");
+        assert!(!open(Some(at(50)), false, None, 500), "a send not taken");
+        assert!(
+            !open(Some(at(50)), true, Some(at(101)), 500),
+            "before the stage"
+        );
+        // An input stamped after now waited nothing.
+        assert!(!turn_left_open(at(100), None, true, None, at(90), 1));
     }
 }

@@ -73,6 +73,7 @@ mod runtime_host_metrics;
 mod runtime_integrate;
 mod runtime_job_verdicts;
 mod runtime_observer;
+mod runtime_open_turn;
 mod runtime_precheck;
 mod runtime_push;
 mod runtime_queue_hold;

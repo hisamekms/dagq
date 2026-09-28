@@ -1365,6 +1365,12 @@ impl ResumeWatch {
         .flatten()
         .fold(UNIX_EPOCH, SystemTime::max);
         let idle = sv.session_idle(run, &self.workspace, &self.idle_marker, after, RESUME_PHASE)?;
+        // An input the session took since its marker (read after it: a
+        // notice that its background work ended, or a prompt) started a
+        // turn that is still running: the stage ends at the idle that ends
+        // it, and no /exit is sent before (task 672).
+        let input = InputMarker::read(&*sv.files, sv.signals, &self.idle_marker)?;
+        let idle = idle.filter(|idle| !idle.turn_open_after(input.as_ref()));
         let head = sv.repository.head(worktree)?;
         let clean = sv.repository.status(worktree)?.trim().is_empty();
         // Resolved (or failed) and idle after the receipt; or idle

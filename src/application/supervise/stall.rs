@@ -423,6 +423,13 @@ impl StallWatch {
         })
     }
 
+    /// Whether the session took an input at `input` (its input marker) no
+    /// earlier than the last text the supervisor typed: the text, if any,
+    /// is not still waiting to be taken.
+    pub(super) fn taken_after_sends(&self, input: SystemTime) -> bool {
+        self.last_input.is_none_or(|at| input >= at)
+    }
+
     /// Whether the session ended a turn (its idle marker `marker`) since the
     /// last text the supervisor typed and the last input it took.
     pub(super) fn turn_since_input(&self, marker: SystemTime) -> bool {

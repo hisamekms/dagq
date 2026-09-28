@@ -93,6 +93,16 @@ impl IdleMarker {
         }
     }
 
+    /// Whether the session took an input (`input`, its input marker) after
+    /// the agent wrote this marker: the input started a turn that has not
+    /// ended, whatever its source (a person's prompt, a text the
+    /// supervisor typed, or the agent's own notice that its background
+    /// work ended), so this idle is not the session's latest (task 672).
+    /// An idle the screen showed began after the last input, and is never.
+    pub(super) fn turn_open_after(&self, input: Option<&InputMarker>) -> bool {
+        self.inferred.is_none() && input.is_some_and(|input| input.modified > self.modified)
+    }
+
     /// Idle, by a marker written after `since`.
     pub(super) fn idle_since(&self, since: SystemTime) -> bool {
         !self.background_running() && self.modified > since
@@ -378,6 +388,23 @@ mod tests {
     #[test]
     fn the_transcript_is_the_whole_screen_by_default() {
         assert_eq!(Signals.transcript("work\n❯\n12:04"), "work\n❯\n12:04");
+    }
+
+    #[test]
+    fn an_input_after_the_marker_leaves_its_turn_open() {
+        let files = MemoryFiles::default();
+        let idle = Path::new("/run/idle.json");
+        files.put(idle, UNIX_EPOCH + Duration::from_secs(100), "{}");
+        let marker = IdleMarker::read(&files, &Signals, idle).unwrap().unwrap();
+        let input = |secs| InputMarker {
+            modified: UNIX_EPOCH + Duration::from_secs(secs),
+            source: InputSource::Agent,
+            text: None,
+        };
+        assert!(!marker.turn_open_after(None));
+        assert!(!marker.turn_open_after(Some(&input(100))));
+        assert!(!marker.turn_open_after(Some(&input(99))));
+        assert!(marker.turn_open_after(Some(&input(101))));
     }
 
     #[test]

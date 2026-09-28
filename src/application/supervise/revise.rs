@@ -225,15 +225,21 @@ impl ReviseWatch {
             .files
             .modified(receipt)
             .map_or(input_at, |modified| modified.max(input_at));
-        let idle = sv
-            .session_idle(
-                run,
-                &self.session.workspace,
-                &run.idle_marker_path()?,
-                after,
-                REVISE_PHASE,
-            )?
-            .filter(|idle| idle.modified() > input_at);
+        let idle_marker = run.idle_marker_path()?;
+        let idle = sv.session_idle(
+            run,
+            &self.session.workspace,
+            &idle_marker,
+            after,
+            REVISE_PHASE,
+        )?;
+        // An input the session took since its marker (read after it: a
+        // notice that its background work ended, or a prompt) started a
+        // turn that is still running: only the idle that ends it ends the
+        // revise (task 672).
+        let input = InputMarker::read(&*sv.files, sv.signals, &idle_marker)?;
+        let idle =
+            idle.filter(|idle| idle.modified() > input_at && !idle.turn_open_after(input.as_ref()));
         let rewritten = sv
             .files
             .modified(receipt)
