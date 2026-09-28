@@ -26,7 +26,7 @@ pub const WAIT: &str = "wait";
 pub const DAGQ: &str = "dagq";
 pub const GIT: &str = "git";
 pub const OTHER_COMMAND: &str = "other_command";
-/// Commands joined with `&&`, `||`, `;` or a newline that run two or more
+/// Commands joined with `&&`, `||`, `;`, `&` or a newline that run two or more
 /// heavy kinds (say fmt, clippy and llvm-cov in one line).
 pub const CHAIN: &str = "chain";
 /// Other tools (reading, editing, searching files).
@@ -70,7 +70,7 @@ const WAIT_TOOLS: [&str; 4] = ["ScheduleWakeup", "Monitor", "TaskOutput", "BashO
 /// The category of a shell `command`: the heaviest of its parts, or
 /// [`CHAIN`] when two or more parts are heavy of different kinds.
 pub fn classify(command: &str) -> &'static str {
-    let mut kinds: Vec<&'static str> = parts(command).map(rank).collect();
+    let mut kinds: Vec<&'static str> = parts(command).iter().map(|part| rank(part)).collect();
     kinds.sort_unstable_by_key(|kind| RANKS.iter().position(|k| k == kind));
     kinds.dedup();
     if kinds.iter().filter(|kind| HEAVY.contains(kind)).count() >= 2 {
@@ -92,90 +92,454 @@ const RANKS: [&str; 9] = [
     OTHER_COMMAND,
 ];
 
-/// The parts of a command joined with `&&`, `||`, `;` or a newline.
-fn parts(command: &str) -> impl Iterator<Item = &str> {
-    command
-        .split(['\n', ';'])
-        .flat_map(|line| line.split("&&"))
-        .flat_map(|part| part.split("||"))
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
+/// A word of a shell command: its text without the quotes and escapes,
+/// and where its first quoted character is (`None` when none is).
+#[derive(Debug, Default)]
+struct Word {
+    text: String,
+    quoted_from: Option<usize>,
 }
 
-/// The first rule `text` matches: e2e > llvm-cov > test > build/clippy >
-/// fmt > wait > dagq > git > other.
-fn rank(text: &str) -> &'static str {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let has = |word: &str| words.contains(&word);
-    let after_cargo = cargo_subcommand(&words);
-    if words
-        .windows(2)
-        .any(|pair| pair[0] == "--test" && pair[1] == "e2e")
-        || has("--test=e2e")
-    {
+impl Word {
+    fn quote(&mut self) {
+        self.quoted_from.get_or_insert(self.text.len());
+    }
+}
+
+/// The simple commands of one part: split at a pipe, and at a subshell's
+/// or a command substitution's bounds (`(`, `$(`, `` ` ``, `)`).
+type Part = Vec<Vec<Word>>;
+
+/// The parts of a command, split at `&&`, `||`, `;`, `&` and newlines
+/// outside quotes. Quoted text stays in its word, the body of a heredoc
+/// (`<<EOF`, `<<'EOF'`, `<<-EOF`) and a `#` comment are dropped.
+fn parts(command: &str) -> Vec<Part> {
+    Splitter::default().split(command)
+}
+
+#[derive(Default)]
+struct Splitter {
+    parts: Vec<Part>,
+    part: Part,
+    simple: Vec<Word>,
+    word: Option<Word>,
+    /// The simple commands a `(`, `$(` or `` ` `` suspended, and whether
+    /// the substitution was in double quotes (`"$(…)"`), which go on after
+    /// its `)`.
+    outer: Vec<(Vec<Word>, bool)>,
+    in_backtick: bool,
+    /// The delimiters of the heredocs whose body starts at the next
+    /// newline, and whether leading tabs are stripped (`<<-`).
+    heredocs: Vec<(String, bool)>,
+}
+
+impl Splitter {
+    fn split(mut self, command: &str) -> Vec<Part> {
+        let chars: Vec<char> = command.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            match c {
+                '\n' => {
+                    self.end_part();
+                    i = self.skip_heredocs(&chars, i + 1);
+                    continue;
+                }
+                ' ' | '\t' | '\r' => self.end_word(),
+                '#' if self.word.is_none() => {
+                    while i + 1 < chars.len() && chars[i + 1] != '\n' {
+                        i += 1;
+                    }
+                }
+                '\'' => {
+                    let word = self.word.get_or_insert_default();
+                    word.quote();
+                    i += 1;
+                    while i < chars.len() && chars[i] != '\'' {
+                        word.text.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                '"' => {
+                    i = self.double_quoted(&chars, i + 1);
+                    continue;
+                }
+                '\\' => {
+                    if next == Some('\n') {
+                        i += 1;
+                    } else if let Some(escaped) = next {
+                        let word = self.word.get_or_insert_default();
+                        // `\cargo` still runs cargo; `\;` is no separator.
+                        if !escaped.is_alphanumeric() {
+                            word.quote();
+                        }
+                        word.text.push(escaped);
+                        i += 1;
+                    }
+                }
+                '&' if next == Some('&') => {
+                    self.end_part();
+                    i += 1;
+                }
+                '&' if next == Some('>')
+                    || self
+                        .word
+                        .as_ref()
+                        .is_some_and(|w| w.text.ends_with(['>', '<'])) =>
+                {
+                    self.word.get_or_insert_default().text.push(c);
+                }
+                '&' | ';' => self.end_part(),
+                '|' if next == Some('|') => {
+                    self.end_part();
+                    i += 1;
+                }
+                '|' => {
+                    self.end_simple();
+                    if next == Some('&') {
+                        i += 1;
+                    }
+                }
+                // An arithmetic `$((…))` runs nothing and has no heredoc.
+                '(' if next == Some('(')
+                    && self
+                        .word
+                        .as_ref()
+                        .is_some_and(|w| w.quoted_from.is_none() && w.text.ends_with('$')) =>
+                {
+                    let word = self.word.get_or_insert_default();
+                    let mut depth = 0;
+                    while let Some(&c) = chars.get(i) {
+                        depth += match c {
+                            '(' => 1,
+                            ')' => -1,
+                            _ => 0,
+                        };
+                        word.text.push(c);
+                        i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                '(' => {
+                    if let Some(word) = self.word.as_mut()
+                        && word.quoted_from.is_none()
+                        && word.text.ends_with('$')
+                    {
+                        word.text.pop();
+                    }
+                    self.open(false);
+                }
+                ')' => {
+                    if self.close() {
+                        i = self.double_quoted(&chars, i + 1);
+                        continue;
+                    }
+                }
+                '`' if self.in_backtick => {
+                    self.in_backtick = false;
+                    self.close();
+                }
+                '`' => {
+                    self.in_backtick = true;
+                    self.open(false);
+                }
+                '<' if next == Some('<') && chars.get(i + 2) == Some(&'<') => {
+                    self.word.get_or_insert_default().text.push_str("<<<");
+                    i += 2;
+                }
+                '<' if next == Some('<') => {
+                    self.end_word();
+                    i = self.heredoc(&chars, i + 2);
+                    continue;
+                }
+                _ => self.word.get_or_insert_default().text.push(c),
+            }
+            i += 1;
+        }
+        self.end_word();
+        while let Some((outer, _)) = self.outer.pop() {
+            self.end_simple();
+            self.simple = outer;
+        }
+        self.end_part();
+        self.parts
+    }
+
+    fn end_word(&mut self) {
+        if let Some(word) = self.word.take()
+            && (!word.text.is_empty() || word.quoted_from.is_some())
+        {
+            self.simple.push(word);
+        }
+    }
+
+    fn end_simple(&mut self) {
+        self.end_word();
+        if !self.simple.is_empty() {
+            self.part.push(std::mem::take(&mut self.simple));
+        }
+    }
+
+    fn end_part(&mut self) {
+        self.end_simple();
+        if !self.part.is_empty() {
+            self.parts.push(std::mem::take(&mut self.part));
+        }
+    }
+
+    fn open(&mut self, in_double: bool) {
+        self.end_word();
+        self.outer
+            .push((std::mem::take(&mut self.simple), in_double));
+    }
+
+    /// Ends a substitution or a subshell; whether it was in double quotes.
+    fn close(&mut self) -> bool {
+        self.end_simple();
+        let (outer, in_double) = self.outer.pop().unwrap_or_default();
+        self.simple = outer;
+        in_double
+    }
+
+    /// Reads double-quoted text from `at` into the word, up to the closing
+    /// quote or a `$(`, whose commands run (and are read as commands);
+    /// returns where the command goes on.
+    fn double_quoted(&mut self, chars: &[char], mut at: usize) -> usize {
+        self.word.get_or_insert_default().quote();
+        while let Some(&c) = chars.get(at) {
+            let next = chars.get(at + 1).copied();
+            match c {
+                '"' => return at + 1,
+                '\\' if matches!(next, Some('"' | '\\' | '$' | '`')) => {
+                    self.word.get_or_insert_default().text.extend(next);
+                    at += 2;
+                }
+                '$' if next == Some('(') && chars.get(at + 2) != Some(&'(') => {
+                    self.open(true);
+                    return at + 2;
+                }
+                _ => {
+                    self.word.get_or_insert_default().text.push(c);
+                    at += 1;
+                }
+            }
+        }
+        at
+    }
+
+    /// Reads a heredoc's delimiter from `at` (after `<<`); returns where
+    /// the rest of the line goes on.
+    fn heredoc(&mut self, chars: &[char], mut at: usize) -> usize {
+        let strip_tabs = chars.get(at) == Some(&'-');
+        if strip_tabs {
+            at += 1;
+        }
+        while matches!(chars.get(at), Some(' ' | '\t')) {
+            at += 1;
+        }
+        let mut delimiter = String::new();
+        while let Some(&c) = chars.get(at) {
+            if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                break;
+            }
+            if !matches!(c, '\'' | '"' | '\\') {
+                delimiter.push(c);
+            }
+            at += 1;
+        }
+        if !delimiter.is_empty() {
+            self.heredocs.push((delimiter, strip_tabs));
+        }
+        at
+    }
+
+    /// Skips the bodies of the pending heredocs, from the line at `at`;
+    /// returns where the command goes on.
+    fn skip_heredocs(&mut self, chars: &[char], mut at: usize) -> usize {
+        for (delimiter, strip_tabs) in std::mem::take(&mut self.heredocs) {
+            while at < chars.len() {
+                let end = chars[at..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(chars.len(), |n| at + n);
+                let line: String = chars[at..end].iter().collect();
+                let line = if strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    &line
+                };
+                at = (end + 1).min(chars.len());
+                if line.trim_end() == delimiter {
+                    break;
+                }
+            }
+        }
+        at
+    }
+}
+
+/// What a simple command runs: the keywords and prefixes before it
+/// (`until`, `time`, `env`...), the name of the command word (its file
+/// name), and its arguments. Assignments (`VAR=x`) before it are skipped;
+/// a quoted word is not a command.
+struct Run<'a> {
+    lead: Vec<&'a str>,
+    name: &'a str,
+    args: &'a [Word],
+}
+
+const KEYWORDS: [&str; 11] = [
+    "if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "done",
+];
+
+/// Commands that run the command after them, with their flags that take
+/// a value in the next word; `timeout` also takes a duration.
+const PREFIXES: [(&str, &[&str]); 10] = [
+    ("time", &[]),
+    ("nohup", &[]),
+    ("command", &[]),
+    ("exec", &["-a"]),
+    (
+        "env",
+        &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+    ),
+    ("timeout", &["-s", "--signal", "-k", "--kill-after"]),
+    ("nice", &["-n", "--adjustment"]),
+    (
+        "sudo",
+        &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"],
+    ),
+    (
+        "xargs",
+        &[
+            "-n", "-I", "-J", "-L", "-P", "-R", "-S", "-d", "-E", "-s", "-a",
+        ],
+    ),
+    ("caffeinate", &["-t", "-w"]),
+];
+
+fn run(simple: &[Word]) -> Option<Run<'_>> {
+    let mut lead = Vec::new();
+    let mut at = 0;
+    while let Some(word) = simple.get(at) {
+        at += 1;
+        if assignment(word) {
+            continue;
+        }
+        if word.quoted_from.is_some() {
+            return None;
+        }
+        let name = word.text.rsplit('/').next().unwrap_or_default();
+        if KEYWORDS.contains(&name) {
+            lead.push(name);
+        } else if let Some((_, valued)) = PREFIXES.iter().find(|(prefix, _)| *prefix == name) {
+            lead.push(name);
+            while let Some(flag) = simple.get(at).filter(|w| w.text.starts_with('-')) {
+                at += 1;
+                if valued.contains(&flag.text.as_str()) {
+                    at += 1;
+                }
+            }
+            if name == "timeout" {
+                at += 1;
+            }
+        } else {
+            return Some(Run {
+                lead,
+                name,
+                args: &simple[at..],
+            });
+        }
+    }
+    None
+}
+
+/// Whether a word is a shell assignment (`NAME=value`), its name unquoted.
+fn assignment(word: &Word) -> bool {
+    let Some(eq) = word.text.find('=') else {
+        return false;
+    };
+    let name = &word.text[..eq];
+    word.quoted_from.is_none_or(|from| from > eq)
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The first `cargo` a part runs, and its subcommand (a `+toolchain`
+/// skipped) with the words after it.
+fn cargo(part: &Part) -> Option<(&str, &[Word])> {
+    let run = part
+        .iter()
+        .filter_map(|simple| run(simple))
+        .find(|run| run.name == "cargo")?;
+    let at = run
+        .args
+        .iter()
+        .position(|word| !word.text.starts_with('+'))?;
+    Some((run.args[at].text.as_str(), &run.args[at + 1..]))
+}
+
+/// The first rule a part matches: e2e > llvm-cov > test > build/clippy >
+/// fmt > wait > dagq > git > other. Only the words in command position
+/// count as what it runs.
+fn rank(part: &Part) -> &'static str {
+    let cargo = cargo(part);
+    let sub = cargo.map(|(sub, _)| sub);
+    let e2e = cargo.is_some_and(|(_, args)| {
+        args.windows(2)
+            .any(|pair| pair[0].text == "--test" && pair[1].text == "e2e")
+            || args.iter().any(|word| word.text == "--test=e2e")
+    });
+    let runs: Vec<Run> = part.iter().filter_map(|simple| run(simple)).collect();
+    let runs_named = |name: &str| runs.iter().any(|run| run.name == name);
+    if e2e {
         E2E
-    } else if after_cargo == Some("llvm-cov") {
+    } else if sub == Some("llvm-cov") {
         LLVM_COV
-    } else if matches!(after_cargo, Some("test" | "nextest")) {
+    } else if matches!(sub, Some("test" | "nextest")) {
         TEST
-    } else if matches!(after_cargo, Some("build" | "clippy" | "check" | "run")) {
+    } else if matches!(sub, Some("build" | "clippy" | "check" | "run")) {
         BUILD
-    } else if after_cargo == Some("fmt") {
+    } else if sub == Some("fmt") {
         FMT
-    } else if has("sleep")
-        || has("uptime")
-        || has("until")
-        || (text.contains("sysctl") && text.contains("loadavg"))
-    {
+    } else if runs.iter().any(|run| {
+        matches!(run.name, "sleep" | "uptime")
+            || run.lead.contains(&"until")
+            || run.name == "sysctl" && run.args.iter().any(|w| w.text.contains("loadavg"))
+    }) {
         WAIT
-    } else if words.iter().any(|word| command_word(word) == Some("dagq")) {
+    } else if runs_named("dagq") {
         DAGQ
-    } else if words.iter().any(|word| command_word(word) == Some("git")) {
+    } else if runs_named("git") {
         GIT
     } else {
         OTHER_COMMAND
     }
 }
 
-/// The name a word runs as a command: its file name, without the shell's
-/// punctuation around it.
-fn command_word(word: &str) -> Option<&str> {
-    let word = word.trim_start_matches(['(', '|', '&', '`', '$']);
-    word.rsplit('/').next().filter(|name| !name.is_empty())
+/// Whether a shell command runs the whole test suite in one of its parts:
+/// `cargo test` (or `cargo nextest run`) with only flags before `--`, none
+/// of them choosing a target or filtering, except `--test it` (or
+/// `--test=it`) as the only target: the one integration test binary runs
+/// nearly every test the llvm-cov gate runs (ADR-0078). A filter word
+/// (`--test it runtime_claim::`) or another target beside it makes the
+/// part narrowed.
+pub fn full_test(command: &str) -> bool {
+    parts(command).iter().any(runs_full_test)
 }
 
-/// The subcommand after the first `cargo` (a `+toolchain` skipped).
-fn cargo_subcommand<'a>(words: &[&'a str]) -> Option<&'a str> {
-    let at = words
-        .iter()
-        .position(|word| command_word(word) == Some("cargo"))?;
-    words[at + 1..]
-        .iter()
-        .find(|word| !word.starts_with('+'))
-        .copied()
-}
-
-/// Whether a part runs the whole test suite: `cargo test` (or `cargo
-/// nextest run`) with only flags before `--`, none of them choosing a
-/// target or filtering, except `--test it` (or `--test=it`) as the only
-/// target: the one integration test binary runs nearly every test the
-/// llvm-cov gate runs (ADR-0078). A filter word (`--test it runtime_claim::`)
-/// or another target beside it makes the part narrowed.
-pub fn full_test(part: &str) -> bool {
-    let words: Vec<&str> = part.split_whitespace().collect();
-    let Some(at) = words
-        .iter()
-        .position(|word| command_word(word) == Some("cargo"))
-    else {
+fn runs_full_test(part: &Part) -> bool {
+    let Some((sub, args)) = cargo(part) else {
         return false;
     };
-    let mut rest = words[at + 1..]
-        .iter()
-        .copied()
-        .skip_while(|word| word.starts_with('+'));
-    match rest.next() {
-        Some("test") => {}
-        Some("nextest") if rest.next() == Some("run") => {}
+    let mut rest = args.iter().map(|word| word.text.as_str());
+    match sub {
+        "test" => {}
+        "nextest" if rest.next() == Some("run") => {}
         _ => return false,
     }
     const TARGETED: [&str; 9] = [
@@ -189,10 +553,19 @@ pub fn full_test(part: &str) -> bool {
         "-p",
         "-E",
     ];
-    let words: Vec<&str> = rest
-        .take_while(|word| !matches!(*word, "--" | "|" | "&" | ">") && !word.starts_with('>'))
-        .filter(|word| !word.starts_with("2>"))
-        .collect();
+    let mut words = Vec::new();
+    let mut rest = rest.take_while(|word| *word != "--");
+    while let Some(word) = rest.next() {
+        // A redirection (`2>&1`, `> out.txt`) is not an argument.
+        let operator = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if operator.starts_with(['>', '<']) {
+            if operator.trim_start_matches(['>', '<', '|']).is_empty() {
+                rest.next();
+            }
+            continue;
+        }
+        words.push(word);
+    }
     let mut index = 0;
     while index < words.len() {
         let word = words[index];
@@ -218,10 +591,11 @@ pub fn full_test(part: &str) -> bool {
 /// whole test suite, the e2e test.
 fn verification_classes(command: &str) -> Vec<&'static str> {
     let mut classes: Vec<&'static str> = parts(command)
+        .iter()
         .filter_map(|part| match rank(part) {
             LLVM_COV => Some(LLVM_COV),
             E2E => Some(E2E),
-            TEST if full_test(part) => Some("full_test"),
+            TEST if runs_full_test(part) => Some("full_test"),
             _ => None,
         })
         .collect();
@@ -488,11 +862,9 @@ pub fn breakdown(
                     .any(|class| wanted.contains(class))
             })
             .count(),
-        full_tests: shell()
-            .filter(|command| parts(command).any(full_test))
-            .count(),
+        full_tests: shell().filter(|command| full_test(command)).count(),
         llvm_cov_runs: shell()
-            .filter(|command| parts(command).any(|p| rank(p) == LLVM_COV))
+            .filter(|command| parts(command).iter().any(|p| rank(p) == LLVM_COV))
             .count(),
         commands,
     }
@@ -672,6 +1044,93 @@ mod tests {
     }
 
     #[test]
+    fn existing_rules_hold_with_command_positions() {
+        assert_eq!(classify("cargo fmt && cargo test"), TEST);
+        assert_eq!(classify("cargo build && cargo test"), CHAIN);
+        assert_eq!(
+            classify("cd x && cargo test --locked --test it foo::"),
+            TEST
+        );
+        assert_eq!(classify("cargo test 2>&1 | tail"), TEST);
+        assert_eq!(classify("RUSTC_WRAPPER=sccache cargo build"), BUILD);
+        assert_eq!(classify("FOO=\"a b\" cargo build"), BUILD);
+        assert_eq!(classify("git commit -m \"cargo test\""), GIT);
+        assert_eq!(classify("time cargo test --lib x"), TEST);
+        assert_eq!(classify("env -i A=1 cargo clippy"), BUILD);
+        assert_eq!(classify("timeout -s KILL 600 cargo test"), TEST);
+        assert_eq!(classify("nohup cargo build >/dev/null 2>&1 &"), BUILD);
+        assert_eq!(classify("echo start | cargo test"), TEST);
+        assert_eq!(classify("X=$(cargo check --message-format json)"), BUILD);
+        assert_eq!(classify("echo `git rev-parse HEAD`"), GIT);
+        assert_eq!(classify("(cd x; cargo fmt)"), FMT);
+        assert_eq!(classify("until [ -f done ]; do sleep 5; done"), WAIT);
+        assert_eq!(classify("sysctl -n vm.loadavg"), WAIT);
+        assert_eq!(classify("cargo build & cargo test"), CHAIN);
+        assert_eq!(classify("echo a \\\n  && cargo test"), TEST);
+        // Prefixes and their flags that take a value.
+        assert_eq!(classify("nice -n 10 cargo test"), TEST);
+        assert_eq!(classify("ls | xargs -n 1 cargo fmt"), FMT);
+        assert_eq!(classify("env -u X cargo build"), BUILD);
+        assert_eq!(classify("timeout --signal KILL 600 cargo test"), TEST);
+        assert_eq!(classify(r"\cargo build"), BUILD);
+        // A substitution in double quotes runs its commands.
+        assert_eq!(
+            classify("OUT=\"$(cargo test --locked 2>&1)\"; echo $OUT"),
+            TEST
+        );
+        assert!(full_test("OUT=\"$(cargo test --locked 2>&1)\""));
+        // An arithmetic `<<` is no heredoc.
+        assert_eq!(classify("echo $((1<<2))\ncargo build"), BUILD);
+    }
+
+    #[test]
+    fn quotes_heredocs_and_arguments_are_not_commands() {
+        // A question quoting a command runs dagq only (manual-smoke, task 547).
+        assert_eq!(
+            classify(
+                "dagq ask --run R --kind worker_question --because scope --question \
+                 'Step 5 requires `sleep 40 && cargo build --release`; ok?'"
+            ),
+            DAGQ
+        );
+        assert_eq!(classify("dagq note \"a && cargo test; cargo build\""), DAGQ);
+        // A heredoc's body is text, not commands.
+        let receipt = "cat > receipt.json.tmp <<'EOF'\n\
+            {\"summary\": \"cargo build (bg, ok), cargo test (bg, ok) && more\"}\n\
+            EOF\n";
+        assert_eq!(classify(receipt), OTHER_COMMAND);
+        assert_eq!(
+            classify(&format!("{receipt}mv receipt.json.tmp receipt.json")),
+            OTHER_COMMAND
+        );
+        assert_eq!(
+            classify("cat <<-END > x\n\tcargo test\n\tEND\ncargo fmt"),
+            FMT
+        );
+        assert_eq!(classify("cat <<\"EOF\"\ncargo build\nEOF"), OTHER_COMMAND);
+        // A commit message in a heredoc in `"$(…)"`, with an odd quote.
+        assert_eq!(
+            classify(
+                "git commit -m \"$(cat <<'EOF'\nfix: handle \"x\n\ncargo test passes\nEOF\n)\""
+            ),
+            GIT
+        );
+        // A here-string is not a heredoc.
+        assert_eq!(classify("grep x <<< 'y'\ncargo fmt"), FMT);
+        // A word that is not in command position does not run.
+        assert_eq!(classify("echo cargo test"), OTHER_COMMAND);
+        assert_eq!(classify("which cargo git dagq"), OTHER_COMMAND);
+        assert_eq!(classify("'cargo' test"), OTHER_COMMAND);
+        assert_eq!(classify("echo \"$(date) cargo test\""), OTHER_COMMAND);
+        assert_eq!(classify("# cargo test\nls"), OTHER_COMMAND);
+        assert_eq!(classify("echo 'sleep 5'"), OTHER_COMMAND);
+        assert_eq!(classify(r"echo \; cargo test"), OTHER_COMMAND);
+        // Quoted separators do not split.
+        assert_eq!(parts("echo 'a && b; c || d' && ls").len(), 2);
+        assert_eq!(parts("echo \"a\nb\"").len(), 1);
+    }
+
+    #[test]
     fn the_whole_suite_is_cargo_test_with_flags_only() {
         assert!(full_test("cargo test --locked"));
         assert!(full_test("cargo test --locked 2>&1 | tail -5"));
@@ -689,6 +1148,10 @@ mod tests {
         assert!(!full_test("cargo test -p=dagq"));
         assert!(!full_test("cargo build"));
         assert!(!full_test("ls"));
+        assert!(full_test("cd x && cargo test --locked"));
+        assert!(!full_test("git commit -m 'cargo test --locked'"));
+        assert!(!full_test("cat <<EOF\ncargo test\nEOF"));
+        assert!(!full_test("cargo test --locked > out.txt stats"));
     }
 
     /// A session of several turns with foreground and background commands,
