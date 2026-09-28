@@ -22,6 +22,9 @@ use crate::domain::{
     waiting::{RUN_SLOT_REGAINED, RUN_WAITING_STARTED},
 };
 
+/// The `group=` of a run claimed outside the worker model trial.
+const NONE: &str = "none";
+
 /// A sample of what the supervisor could claim (ADR-0051 decision 3):
 /// `candidates`, `free_slots` and `ready`, recorded when they change.
 pub const CANDIDATES_SAMPLED: &str = "candidates_sampled";
@@ -337,6 +340,20 @@ impl<'a> Context<'a> {
             Axis::Provider => text(&measures.provider),
             Axis::Route => text(&measures.route),
             Axis::Codex => text(&measures.codex_version),
+            // A claim that recorded the worker's session always wrote its
+            // group, null outside the trial.
+            Axis::Group => match (&measures.trial_group, &measures.worker_model) {
+                (Some(group), _) => group.clone(),
+                (None, Some(_)) => NONE.to_owned(),
+                (None, None) => UNKNOWN.to_owned(),
+            },
+            Axis::Model => text(&measures.worker_model),
+            Axis::Effort => text(&measures.worker_effort),
+            Axis::Nature => text(
+                &run.prediction
+                    .as_ref()
+                    .and_then(|p| p.prediction.get("nature")?.as_str().map(str::to_owned)),
+            ),
             Axis::Parallel => measures
                 .claim_parallel
                 .map_or_else(|| UNKNOWN.to_owned(), |parallel| parallel.to_string()),

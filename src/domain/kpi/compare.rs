@@ -1,7 +1,7 @@
 //! The comparison across a change (ADR-0051 decisions 14–16): a window
 //! before the mark and one after it, every other mark in and between them
 //! listed next to the numbers (`confounders`), both split by the kind,
-//! `parallel`, the load band and the build, and marks too close to split
+//! `parallel`, the load band, the build and the axes of `--by`, and marks too close to split
 //! (fewer finished runs between them than `min_samples`) taken as one
 //! overlapping change. Nothing is removed automatically: a person narrows
 //! the windows with `--compare A..B,C..D`.
@@ -205,7 +205,14 @@ pub(super) fn compare(
         })
         .cloned()
         .collect();
-    let windows = [before, after].map(|(start, end)| context.window(start, end, &COMPARE_AXES));
+    let mut axes = COMPARE_AXES.to_vec();
+    for axis in &query.by {
+        if !axes.contains(axis) {
+            axes.push(*axis);
+        }
+    }
+    axes.sort_unstable();
+    let windows = [before, after].map(|(start, end)| context.window(start, end, &axes));
     let span = |(start, end): (i64, i64), runs: usize| WindowSpan {
         start: marks::utc_text(start),
         end: marks::utc_text(end),

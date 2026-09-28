@@ -165,10 +165,21 @@ pub enum Axis {
     /// Codex's version at the claim; `unknown` when the supervisor ran no
     /// Codex worker.
     Codex,
+    /// The worker model trial's group at the run's first claim (ADR-0079
+    /// decisions 2 and 6): `control` / `treatment`, `none` outside the
+    /// trial, `unknown` for a claim that recorded no worker session.
+    Group,
+    /// The worker's model at the run's first claim.
+    Model,
+    /// The worker's effort at the run's first claim.
+    Effort,
+    /// The `nature` of the task's last weight prediction before the run
+    /// started; `unknown` without one.
+    Nature,
 }
 
 impl Axis {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::Kind,
         Self::Build,
         Self::Parallel,
@@ -179,6 +190,10 @@ impl Axis {
         Self::Provider,
         Self::Route,
         Self::Codex,
+        Self::Group,
+        Self::Model,
+        Self::Effort,
+        Self::Nature,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -193,6 +208,10 @@ impl Axis {
             Self::Provider => "provider",
             Self::Route => "route",
             Self::Codex => "codex",
+            Self::Group => "group",
+            Self::Model => "model",
+            Self::Effort => "effort",
+            Self::Nature => "nature",
         }
     }
 }
@@ -213,7 +232,8 @@ impl std::str::FromStr for Axis {
     }
 }
 
-/// The axes a comparison across a mark is split by (decision 15).
+/// The axes a comparison across a mark is split by (decision 15), besides
+/// those `--by` names.
 pub const COMPARE_AXES: [Axis; 4] = [Axis::Kind, Axis::Parallel, Axis::Load, Axis::Build];
 
 /// What `--compare` names (decision 14): a mark (its event id) or any

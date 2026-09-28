@@ -4,8 +4,8 @@ type: design
 title: "Worker model"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -19,7 +19,7 @@ related:
 
 # Worker model
 
-workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4、task 576）。予測の記録は[plan review](plan-review.md)の6、読み方は[stats](stats.md#workerのmodelと試しの群)。段上げ（決定5）はまだ無い。worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md)。
+workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4、task 576）。予測の記録は[plan review](plan-review.md)の6、読み方は[stats](stats.md#workerのmodelと試しの群)と[kpi](kpi.md#kpiと層)の`--by group`。段上げ（決定5）はまだ無い。worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md)。
 
 ## 既定: Opus 5.5・effort mediumを明示して渡す
 
@@ -60,7 +60,7 @@ window = 60      # 既定 60（domain::prediction::PREDICTION_WINDOW）
 
 ## 判定
 
-群ごとの比較は`stats`の`trial_groups`（[stats](stats.md#workerのmodelと試しの群)）で読む。判定（1群45件前後、taskに由来する手戻りの率の差（treatment − control）が+5ポイント以内か、途中で止める目安）は人とplannerが行い、runtimeは自動で止めたり全面適用したりしない（ADR-0079の決定6）。止めるのは`enabled = false`に戻すこと。
+群ごとの比較は`stats`の`trial_groups`（[stats](stats.md#workerのmodelと試しの群)）と、`kpi --by group`（`model` / `effort` / `nature`も。runの最初の`run_claimed`の値で層別する。[kpi](kpi.md#kpiと層)）のrunの層で読む。判定（1群45件前後、taskに由来する手戻りの率の差（treatment − control）が+5ポイント以内か、途中で止める目安）は人とplannerが行い、runtimeは自動で止めたり全面適用したりしない（ADR-0079の決定6）。止めるのは`enabled = false`に戻すこと。
 
 ## テスト
 

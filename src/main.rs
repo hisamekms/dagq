@@ -1003,7 +1003,7 @@ enum Command {
         #[arg(long = "kind", value_parser = parse_kpi_kind)]
         kinds: Vec<String>,
         /// Also split the runs by these attributes of the claim.
-        #[arg(long, value_parser = ["kind", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex"])]
+        #[arg(long, value_parser = ["kind", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
         by: Vec<String>,
         /// A mark's event id or a time to compare before and after, or two windows A..B,C..D.
         #[arg(long)]

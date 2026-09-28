@@ -202,7 +202,7 @@ task 199で足した集計。Claude sessionの区間が閉じるとき、runtime
 [ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4・6（task 576）。**`trial_groups`**は、`runs`と同じページのrunのうち試しの群（`trial_group`）を持つものを群ごとに（名前の昇順。群の無いrunは出さない）並べる。集計は`domain::stats::trial`。
 
 - 各群は`{group, sessions, runs, tasks, lead_time, work, model_secs, output_tokens, task_rework, task_rework_rate}`。`sessions`はrunの`worker_model/worker_effort`ごとの件数、`runs` / `tasks`は件数、`lead_time`はclaim→着地（`claimed_at`→`landed_at`）の秒、`work`は`work`、`model_secs`と`output_tokens`は`actual`の同名の値で、どれも`{count, total, median}`（値の無いrunは数えない）。`task_rework`は`actual.task_rework`（ADR-0079の決定1の数え方）がtrueのrunの数、`task_rework_rate`はその`runs`に対する百分率（小数1桁）
-- 判定（1群45件前後、`task_rework_rate`の差（treatment − control）が+5ポイント以内か）は人とplannerが`stats --full`（か`--since`で試しを有効にした時点から）で読む。`kpi`の層（`group=`など）はまだ無い
+- 判定（1群45件前後、`task_rework_rate`の差（treatment − control）が+5ポイント以内か）は人とplannerが`stats --full`（か`--since`で試しを有効にした時点から）で読む。期間ごとの推移と前後比較は`kpi --by group`（`model` / `effort` / `nature`も。[kpi](kpi.md#kpiと層)、task 740）のrunの層で、`landings`・`lead_time`・`phase.*`・`revise_rate`・`verification_failed_rate`・`resumes_per_run`などを群ごとに読む
 
 ## draftの流入と流出
 
