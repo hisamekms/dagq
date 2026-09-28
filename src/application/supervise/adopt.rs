@@ -613,17 +613,24 @@ impl Supervisor<'_> {
         let requested = events
             .iter()
             .rfind(|e| e.kind == event_kind::EXIT_REQUESTED && of(e))?;
-        let restarted = events.iter().rev().find(|e| {
-            e.id > requested.id
-                && e.kind == event_kind::AUTO_REPAIRED
-                && (e.payload["repair"] == DIALOG_ANSWERED
-                    || e.payload["alert"] == RecoveryAlert::StuckExit.as_str()
-                        && [RECOVERY_DIALOG_ANSWERED, "stop_processes"]
-                            .iter()
-                            .any(|repair| e.payload["repair"] == *repair))
-        });
+        let restarted = events
+            .iter()
+            .rev()
+            .find(|e| e.id > requested.id && restarts_exit_timeout(e));
         Some(self.instant_of(restarted.unwrap_or(requested), now))
     }
+}
+
+/// Whether `event` gave a held `/exit` its timeout again: a known dialog
+/// answered by rule (ADR-0047 decision 29), or a `stuck_exit` recovery job
+/// that answered the dialog or stopped the processes holding it back.
+pub(super) fn restarts_exit_timeout(event: &RunEvent) -> bool {
+    event.kind == event_kind::AUTO_REPAIRED
+        && (event.payload["repair"] == DIALOG_ANSWERED
+            || event.payload["alert"] == RecoveryAlert::StuckExit.as_str()
+                && [RECOVERY_DIALOG_ANSWERED, "stop_processes"]
+                    .iter()
+                    .any(|repair| event.payload["repair"] == *repair))
 }
 
 /// When an adopted revise or conflict request was recorded as sent.

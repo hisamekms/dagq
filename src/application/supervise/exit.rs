@@ -620,7 +620,7 @@ impl ExitWatch {
 /// Close `workspace` unless cmux no longer lists it: one closed already, by
 /// a previous supervisor or a person, counts as closed, and so does one
 /// that is gone after a close that failed.
-fn close_unless_gone(cmux: &dyn WorkspaceBackend, workspace: &str) -> Result<()> {
+pub(super) fn close_unless_gone(cmux: &dyn WorkspaceBackend, workspace: &str) -> Result<()> {
     if matches!(cmux.exists(workspace), Ok(false)) {
         return Ok(());
     }
@@ -654,25 +654,8 @@ fn rechecked_on_landing(why: &str) -> bool {
 /// no `worker_question` of the run is open (ADR-0047 decision 25). A check
 /// that fails to run holds it too.
 pub(super) fn landable_without_exit(sv: &mut Supervisor<'_>, run: &TaskRun) -> Option<String> {
-    if let Some(worktree) = run.worktree_path() {
-        match sv.repository.rebase_in_progress(Path::new(worktree)) {
-            Ok(false) => (),
-            Ok(true) => return Some("a rebase is in progress in its worktree".to_owned()),
-            Err(error) => {
-                return Some(format!(
-                    "whether a rebase is in progress could not be read: {error:#}"
-                ));
-            }
-        }
-    }
-    match sv.queue.has_unclosed_ask(run.id(), AskKind::WorkerQuestion) {
-        Ok(false) => (),
-        Ok(true) => return Some("a worker_question ask of the run is open".to_owned()),
-        Err(error) => {
-            return Some(format!(
-                "its worker_question asks could not be read: {error:#}"
-            ));
-        }
+    if let Some(why) = session_holds(sv, run) {
+        return Some(why);
     }
     let checked = sv
         .queue
@@ -688,6 +671,85 @@ pub(super) fn landable_without_exit(sv: &mut Supervisor<'_>, run: &TaskRun) -> O
         },
         Ok(Err(rejection)) => Some(format!("{RECEIPT_NO_LONGER_HOLDS}: {}", rejection.reason)),
         Err(error) => Some(format!("{RECEIPT_NOT_CHECKED}: {error:#}")),
+    }
+}
+
+/// Why a resumed session that held its `/exit` back through its retries
+/// cannot have its workspace closed and go on as if it had exited, `None`
+/// when it can (ADR-0047 decision 25): the run's latest review passed, the
+/// worktree is clean, the receipt at `receipt_path` is the run's and names
+/// its head, no rebase is in progress and no `worker_question` of the run
+/// is open. A run whose review did not pass (a resume before validation)
+/// never is: its `stuck_exit` recovery job looks at it. A check that fails
+/// to run holds it too.
+pub(super) fn resumed_closable_without_exit(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    receipt_path: &Path,
+) -> Option<String> {
+    match sv.queue.run_events(run.id()) {
+        Ok(events) => {
+            let passed = RunHistory::from_events(&events)
+                .last(event_kind::REVIEW_FINISHED)
+                .is_some_and(|review| review.payload["verdict"] == "pass");
+            if !passed {
+                return Some("its latest review did not pass".to_owned());
+            }
+        }
+        Err(error) => return Some(format!("its review could not be read: {error:#}")),
+    }
+    if let Some(why) = session_holds(sv, run) {
+        return Some(why);
+    }
+    let Some(worktree) = run.worktree_path().map(Path::new) else {
+        return Some("the run has no worktree".to_owned());
+    };
+    match sv.repository.status(worktree) {
+        Ok(status) if status.trim().is_empty() => (),
+        Ok(_) => return Some("its worktree is not clean".to_owned()),
+        Err(error) => return Some(format!("its worktree could not be read: {error:#}")),
+    }
+    let head = match sv.repository.head(worktree) {
+        Ok(head) => head,
+        Err(error) => return Some(format!("its head could not be read: {error:#}")),
+    };
+    let receipt = sv
+        .files
+        .read_to_string(receipt_path)
+        .ok()
+        .and_then(|text| Receipt::parse(&text).ok());
+    match receipt {
+        Some(receipt) if receipt.run_id() != run.id().as_str() => {
+            Some("its receipt is another run's".to_owned())
+        }
+        Some(receipt) if receipt.names_commit(head.as_str()) => None,
+        Some(_) => Some(format!("its receipt does not name the head {head}")),
+        None => Some("its receipt could not be read".to_owned()),
+    }
+}
+
+/// Why the run's session must exit by itself before its workspace is
+/// closed, whatever its receipt says: a rebase in progress in its worktree
+/// or an open `worker_question` of the run. `None` when neither; a check
+/// that fails to run holds it too.
+fn session_holds(sv: &mut Supervisor<'_>, run: &TaskRun) -> Option<String> {
+    if let Some(worktree) = run.worktree_path() {
+        match sv.repository.rebase_in_progress(Path::new(worktree)) {
+            Ok(false) => (),
+            Ok(true) => return Some("a rebase is in progress in its worktree".to_owned()),
+            Err(error) => {
+                return Some(format!(
+                    "whether a rebase is in progress could not be read: {error:#}"
+                ));
+            }
+        }
+    }
+    match sv.queue.has_unclosed_ask(run.id(), AskKind::WorkerQuestion) {
+        Ok(false) => None,
+        Ok(true) => Some("a worker_question ask of the run is open".to_owned()),
+        Err(error) => Some(format!(
+            "its worker_question asks could not be read: {error:#}"
+        )),
     }
 }
 

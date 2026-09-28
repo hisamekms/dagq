@@ -91,6 +91,7 @@ mod runtime_repair;
 mod runtime_report;
 mod runtime_resume;
 mod runtime_resume_adopt;
+mod runtime_resume_exit_retry;
 mod runtime_review;
 mod runtime_review_adopt;
 mod runtime_review_questions;

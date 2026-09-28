@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::exit::{CAUSE_BACKEND_TIMEOUT, CAUSE_EXIT_TIMEOUT};
 use crate::domain::language::with_instruction;
 use crate::domain::{
     ParkCause, RunEvent, required_of,
@@ -449,6 +450,8 @@ impl Supervisor<'_> {
             start: None,
             exit_requested: None,
             exit_typed: false,
+            exit_timed_out: false,
+            retry: ExitRetry::default(),
             required_evidence: required_of(task.required_evidence(), run.actual_provider()),
             approved: self
                 .queue
@@ -529,6 +532,28 @@ impl Supervisor<'_> {
             )
             .unwrap_or(now)
         });
+        // A timeout recorded for that /exit, with no restart of it since,
+        // is not recorded again. Its retries recorded are not made again,
+        // nor started anew after a restart of its timeout (a known dialog a
+        // retry answered, a recovery job's repair): at most `[exit]
+        // retries` per stage (ADR-0047 decisions 25 and 38).
+        let history = RunHistory::from_events(&events);
+        let timeout = exit_requested
+            .and(history.latest_exit_timeout())
+            .filter(|timeout| {
+                anchor.is_none_or(|anchor| timeout.id > anchor)
+                    && timeout.payload["resume_attempt"].as_u64() == Some(attempt as u64)
+            });
+        let exit_timed_out = timeout.is_some_and(|timeout| {
+            !events
+                .iter()
+                .any(|e| e.id > timeout.id && super::adopt::restarts_exit_timeout(e))
+        });
+        let retry = if timeout.is_some() {
+            ExitRetry::adopt(&history, |event| self.instant_of(event, now))
+        } else {
+            ExitRetry::default()
+        };
         Ok(ResumeWatch {
             live,
             stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
@@ -557,6 +582,8 @@ impl Supervisor<'_> {
             // "Background work is running" dialog is left to the stuck_exit
             // ask (ADR-0047 decision 29).
             exit_typed: false,
+            exit_timed_out,
+            retry,
             required_evidence: required_of(task.required_evidence(), run.actual_provider()),
             approved,
             silent: false,
@@ -644,15 +671,16 @@ impl Supervisor<'_> {
         // A session let go after the exit timeout still runs: its
         // workspace stays, and blocks the next attempt until it ends. A
         // session going on to review keeps it until the verdict.
-        let closed = !verdict.exit_timed_out
-            && !reviewed
-            && match self.cmux.close(workspace) {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: resume workspace {workspace} could not be closed: {error:#}", slot.run.id());
-                    false
-                }
-            };
+        let closed = verdict.closed
+            || !verdict.exit_timed_out
+                && !reviewed
+                && match self.cmux.close(workspace) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: resume workspace {workspace} could not be closed: {error:#}", slot.run.id());
+                        false
+                    }
+                };
         let mut payload = json!({
             "attempt": attempt,
             "outcome": verdict.outcome(),
@@ -663,6 +691,9 @@ impl Supervisor<'_> {
         });
         if verdict.exit_timed_out {
             payload["exit_timed_out"] = json!(true);
+        }
+        if verdict.closed {
+            payload["exit_forced_close"] = json!(true);
         }
         if reviewed {
             payload["session_live"] = json!(verdict.live);
@@ -689,13 +720,12 @@ impl Supervisor<'_> {
                 )?;
                 let handle = self.validate(run.clone());
                 slot.run = run;
-                slot.phase = Phase::Validating(
-                    Some(handle),
-                    Some(SessionRef {
-                        workspace: workspace.to_owned(),
-                        resume: Some(attempt),
-                    }),
-                );
+                // A workspace closed to go on has no session left.
+                let session = (!verdict.closed).then(|| SessionRef {
+                    workspace: workspace.to_owned(),
+                    resume: Some(attempt),
+                });
+                slot.phase = Phase::Validating(Some(handle), session);
                 return Ok(Step::Continue);
             }
             ResumeOutcome::Failed(reason) => self.queue.finish_resume(
@@ -844,6 +874,11 @@ pub(super) struct ResumeWatch {
     /// The `/exit` of `exit_requested` was typed: past the resume timeout
     /// it is not typed over a dialog, which is then not answered either.
     pub(super) exit_typed: bool,
+    /// `exit_request_timed_out` is recorded for the `/exit` of
+    /// `exit_requested` (also by a previous supervisor).
+    pub(super) exit_timed_out: bool,
+    /// The retries of the `/exit` after its timeout (ADR-0047 decision 25).
+    pub(super) retry: ExitRetry,
     /// The task's required checks: a rewritten receipt still without them
     /// has not resolved the run.
     pub(super) required_evidence: Vec<EvidenceCheck>,
@@ -935,6 +970,10 @@ pub(super) struct ResumeVerdict {
     /// The session resolved the run and is still running, never asked to
     /// exit: it goes on to validation and review (ADR-0027 decision 3).
     pub(super) live: bool,
+    /// The session held its `/exit` back through its retries and its
+    /// workspace was closed to go on (ADR-0047 decision 25): it is not
+    /// closed again.
+    pub(super) closed: bool,
 }
 
 impl ResumeVerdict {
@@ -964,12 +1003,130 @@ impl ResumeWatch {
             }),
         )?;
         self.end_live(sv, run)?;
-        if typed {
-            submit(sv, run, &self.workspace, Input::Exit, "/exit")?;
-            self.exit_typed = true;
-        }
         self.exit_requested = Some(Instant::now());
+        self.exit_timed_out = false;
+        if typed {
+            let workspace = self.workspace.clone();
+            if submit(sv, run, &workspace, Input::Exit, "/exit")? == Submission::Unsent {
+                // Waiting out the exit timeout would not help: the session
+                // was never asked. Its retries start now (ADR-0047 decision
+                // 25), as for a session that held the /exit back.
+                warn!(run_id = %run.id(), "/exit could not be sent to the resumed session of {} in workspace {workspace}; it is retried, then its recovery job looks at it", run.id());
+                self.timed_out(sv, run, CAUSE_BACKEND_TIMEOUT)?;
+            } else {
+                self.exit_typed = true;
+            }
+        }
         Ok(())
+    }
+
+    /// The `/exit` timed out (`cause`: held back past its timeout, or it
+    /// never reached the session): `exit_request_timed_out` is recorded
+    /// once and its retries start ([`ExitRetry`], ADR-0047 decision 25).
+    fn timed_out(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        cause: &'static str,
+    ) -> Result<()> {
+        let mut payload = json!({
+            "code": ReasonCode::ExitTimeout,
+            "workspace_id": self.workspace,
+            "timeout_secs": sv.cmux.exit_timeout().as_secs(),
+            "resume_attempt": self.attempt,
+        });
+        if cause == CAUSE_BACKEND_TIMEOUT {
+            payload["unsent"] = json!(true);
+        }
+        sv.queue
+            .record_runtime_event(run.id(), EventKind::ExitRequestTimedOut, payload)?;
+        self.exit_timed_out = true;
+        self.retry.start(cause);
+        Ok(())
+    }
+
+    /// The retries of the session's `/exit` are used up and it still runs:
+    /// when the run may go on without its exit
+    /// ([`resumed_closable_without_exit`]), its screen is kept, its
+    /// workspace closed (`workspace_closed`, `auto_repaired` with `repair:
+    /// exit_forced_close`) and the resume judged as for a session that
+    /// exited, keeping the lease (ADR-0047 decision 25). `None` otherwise,
+    /// or when the workspace cannot be closed: the `stuck_exit` recovery
+    /// job looks at it.
+    fn close_to_go_on(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+    ) -> Result<Option<ResumeVerdict>> {
+        let workspace = self.workspace.clone();
+        let screen = sv.cmux.capture(&workspace).ok();
+        let mut held = resumed_closable_without_exit(sv, run, &self.receipt_path);
+        if held.is_none()
+            && let Err(error) = close_unless_gone(sv.cmux, &workspace)
+        {
+            held = Some(format!("its workspace could not be closed: {error:#}"));
+        }
+        if let Some(why) = held {
+            warn!(run_id = %run.id(), "resumed session of {} held its /exit back through its retries, and it cannot go on without its exit ({why}); its recovery job looks at it", run.id());
+            return Ok(None);
+        }
+        if let Some(screen) = screen {
+            sv.files.write(
+                &self
+                    .run_dir
+                    .join(format!("terminal-resume-{}.txt", self.attempt)),
+                screen.as_bytes(),
+            )?;
+        }
+        sv.queue.record_runtime_event(
+            run.id(),
+            EventKind::WorkspaceClosed,
+            json!({"workspace_id": workspace, "resume_attempt": self.attempt}),
+        )?;
+        self.recovery.stop(sv, run);
+        self.live.recovery.stop(sv, run);
+        close_answer_prompt_asks(sv, run, PROMPT_EXITED_CLOSED)?;
+        if let Some(nudge) = &mut self.stale {
+            nudge.settle(sv, run, RESUME_PHASE, Some(self.attempt), "run_ended")?;
+        }
+        // The workspace is closed, so a record of the repair that fails is
+        // only noted.
+        let cause = self.retry.cause();
+        let attempts = self.retry.attempts;
+        if let Err(error) = sv.queue.record_runtime_event(
+            run.id(),
+            EventKind::AutoRepaired,
+            json!({
+                "layer": "runtime",
+                "repair": "exit_forced_close",
+                "conditions": {
+                    "cause": cause,
+                    "attempts": attempts,
+                    "exit_reached": cause != CAUSE_BACKEND_TIMEOUT,
+                    "then": "resume_verdict",
+                    "review": "pass",
+                    "receipt_holds": true,
+                    "resume_attempt": self.attempt,
+                },
+                "detail": {"workspace_id": workspace},
+            }),
+        ) {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
+        }
+        let worktree = Path::new(run.worktree_path().context("missing worktree")?);
+        let head = sv.repository.head(worktree).ok();
+        let clean = sv
+            .repository
+            .status(worktree)
+            .is_ok_and(|status| status.trim().is_empty());
+        info!(run_id = %run.id(), "resumed session of {} held its /exit back through {attempts} retries; its review passed and its receipt names its clean head, so its workspace {workspace} was closed and the resume is judged", run.id());
+        Ok(Some(ResumeVerdict {
+            kind: self.verdict(&*sv.files, run, head.as_ref().filter(|_| clean)),
+            head,
+            exit_timed_out: false,
+            live: false,
+            closed: true,
+        }))
     }
 
     /// The resumed session's processes before its `/exit` (task 469): the
@@ -1208,6 +1365,9 @@ impl ResumeWatch {
         };
         let worktree = Path::new(run.worktree_path().context("missing worktree")?);
         if wrapper.exited_at.is_some() {
+            // It exited during the retries of its /exit: they repaired it.
+            let workspace = self.workspace.clone();
+            self.retry.exited(sv, run, &workspace);
             // Nobody needs to send anything to a session that exited.
             self.recovery.stop(sv, run);
             self.live.recovery.stop(sv, run);
@@ -1242,6 +1402,7 @@ impl ResumeWatch {
                 head,
                 exit_timed_out: false,
                 live: false,
+                closed: false,
             }));
         }
         let pulse = wrapper_pulse(
@@ -1269,58 +1430,78 @@ impl ResumeWatch {
         }
         if let Some(requested) = self.exit_requested {
             let workspace = self.workspace.clone();
-            if requested.elapsed() >= sv.cmux.exit_timeout()
-                && answer_exit_dialog(sv, run, &workspace, self.exit_typed)?
-            {
-                // A known dialog answered by rule gets the exit timeout
-                // again (ADR-0047 decision 29).
-                self.exit_requested = Some(Instant::now());
-            } else if requested.elapsed() >= sv.cmux.exit_timeout() {
-                // /exit is not resent (it could pick a dialog's option): its
-                // recovery job looks at the session first (ADR-0047
-                // decision 39).
-                let live = Live {
-                    workspace: &self.workspace,
-                    run_dir: &self.run_dir,
-                    allowed: &STUCK_EXIT_HELD_ACTIONS,
-                    exit_typed: self.exit_typed,
-                    at_prompt: false,
-                    lands: false,
-                    park: false,
-                };
-                let (timeout, attempt) = (sv.cmux.exit_timeout().as_secs(), self.attempt);
-                let step = self
+            if !self.exit_timed_out {
+                if requested.elapsed() < sv.cmux.exit_timeout() {
+                    return Ok(None);
+                }
+                if answer_exit_dialog(sv, run, &workspace, self.exit_typed)? {
+                    // A known dialog answered by rule gets the exit timeout
+                    // again (ADR-0047 decision 29).
+                    self.exit_requested = Some(Instant::now());
+                    return Ok(None);
+                }
+                warn!(run_id = %run.id(), "resumed session of {} did not exit within {}s of the exit request in workspace {workspace}; retrying its /exit", run.id(), sv.cmux.exit_timeout().as_secs());
+                self.timed_out(sv, run, CAUSE_EXIT_TIMEOUT)?;
+            }
+            // Its retries first, each sending only what the screen shows
+            // to be safe (ADR-0047 decision 25); used up, a run that may go
+            // on without the exit has its workspace closed.
+            match self.retry.poll(sv, run, &workspace, self.exit_typed)? {
+                RetryStep::Waiting => return Ok(None),
+                RetryStep::UsedUp { retried: true } => {
+                    if let Some(verdict) = self.close_to_go_on(sv, run)? {
+                        return Ok(Some(verdict));
+                    }
+                }
+                RetryStep::UsedUp { .. } | RetryStep::Over => (),
+            }
+            // Then its recovery job looks at the session (ADR-0047
+            // decision 39).
+            let live = Live {
+                workspace: &self.workspace,
+                run_dir: &self.run_dir,
+                allowed: &STUCK_EXIT_HELD_ACTIONS,
+                exit_typed: self.exit_typed,
+                at_prompt: false,
+                lands: false,
+                park: false,
+            };
+            let (timeout, attempt) = (sv.cmux.exit_timeout().as_secs(), self.attempt);
+            let step = self
                     .recovery
                     .follow(sv, run, &live, RecoveryAlert::StuckExit, || {
                         json!({"timeout_secs": timeout, "exit_typed": self.exit_typed, "resume_attempt": attempt})
                     })?;
-                let (attempt, escalation) = match step {
-                    LiveStep::Pending => return Ok(None),
-                    LiveStep::Repaired(applied) => {
-                        if applied.exit_again {
-                            self.exit_requested = Some(Instant::now());
-                        }
-                        return Ok(None);
+            let (attempt, escalation) = match step {
+                LiveStep::Pending => return Ok(None),
+                LiveStep::Repaired(applied) => {
+                    // The exit timeout again, without retrying again
+                    // (ADR-0047 decision 38).
+                    if applied.exit_again {
+                        self.exit_requested = Some(Instant::now());
+                        self.exit_timed_out = false;
                     }
-                    LiveStep::Escalate(attempt, escalation) => (attempt, escalation),
-                };
-                warn!(run_id = %run.id(), "resumed session of {} did not exit within {}s of the exit request; letting it go as unresolved (its workspace {} is kept)", run.id(), sv.cmux.exit_timeout().as_secs(), self.workspace);
-                // Its dialog stays until someone answers it: raise it to
-                // the inbox, as for the worker's session (task 104). The
-                // next pass closes the ask once the session ended. A failed
-                // ask is only noted: the verdict stands without it.
-                let after = stuck_exit_after(
-                    self.exit_for_silence,
-                    if resumes_exhausted(&*sv.queue, run.id(), sv.resume_config) {
-                        "The run stays needs_session after its last resume attempt, and goes to its recovery job once the session exits"
-                    } else {
-                        "The run stays needs_session, and the supervisor resumes it again once the session exits"
-                    },
-                );
-                let note = escalation.note(run, RecoveryAlert::StuckExit, attempt);
-                let workspace = self.workspace.clone();
-                let alert = RecoveryAlert::StuckExit;
-                sv.for_escalation(run, alert, attempt, &escalation, |sv| {
+                    return Ok(None);
+                }
+                LiveStep::Escalate(attempt, escalation) => (attempt, escalation),
+            };
+            warn!(run_id = %run.id(), "resumed session of {} did not exit within {}s of the exit request; letting it go as unresolved (its workspace {} is kept)", run.id(), sv.cmux.exit_timeout().as_secs(), self.workspace);
+            // Its dialog stays until someone answers it: raise it to
+            // the inbox, as for the worker's session (task 104). The
+            // next pass closes the ask once the session ended. A failed
+            // ask is only noted: the verdict stands without it.
+            let after = stuck_exit_after(
+                self.exit_for_silence,
+                if resumes_exhausted(&*sv.queue, run.id(), sv.resume_config) {
+                    "The run stays needs_session after its last resume attempt, and goes to its recovery job once the session exits"
+                } else {
+                    "The run stays needs_session, and the supervisor resumes it again once the session exits"
+                },
+            );
+            let note = escalation.note(run, RecoveryAlert::StuckExit, attempt);
+            let workspace = self.workspace.clone();
+            let alert = RecoveryAlert::StuckExit;
+            sv.for_escalation(run, alert, attempt, &escalation, |sv| {
                     match ask_stuck_exit(sv, run, &workspace, &after, Some(&note)) {
                         Ok(id) => {
                             escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))
@@ -1331,14 +1512,13 @@ impl ResumeWatch {
                         }
                     }
                 })?;
-                return Ok(Some(ResumeVerdict {
-                    kind: ResumeOutcome::Unresolved,
-                    head: sv.repository.head(worktree).ok(),
-                    exit_timed_out: true,
-                    live: false,
-                }));
-            }
-            return Ok(None);
+            return Ok(Some(ResumeVerdict {
+                kind: ResumeOutcome::Unresolved,
+                head: sv.repository.head(worktree).ok(),
+                exit_timed_out: true,
+                live: false,
+                closed: false,
+            }));
         }
         let Some((_, sent_at)) = self.message_sent else {
             // A headless session starts no agent before its first request.
@@ -1466,6 +1646,7 @@ impl ResumeWatch {
                 head: Some(head),
                 exit_timed_out: false,
                 live: true,
+                closed: false,
             }));
         }
         // Once the session was asked to rewrite a stale receipt, only an
