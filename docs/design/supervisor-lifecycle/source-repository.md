@@ -4,8 +4,8 @@ type: design
 title: "Source repository"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -47,7 +47,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 
 ソースでないrepositoryのqueueで記録も出力もしないもの。
 
-- worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。
+- worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`。filterの無い`--test it`も含む）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。
 - `stats`の`work_breakdown`の`test_with_llvm_cov`（`src/domain/stats/work.rs`）。
 - claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）と、`stats`の`versions.rustc`、[`kpi`](kpi.md)の`toolchain=`の層。
 

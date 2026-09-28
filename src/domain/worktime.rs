@@ -157,7 +157,10 @@ fn cargo_subcommand<'a>(words: &[&'a str]) -> Option<&'a str> {
 
 /// Whether a part runs the whole test suite: `cargo test` (or `cargo
 /// nextest run`) with only flags before `--`, none of them choosing a
-/// target or filtering.
+/// target or filtering, except `--test it` (or `--test=it`) as the only
+/// target: the one integration test binary runs nearly every test the
+/// llvm-cov gate runs (ADR-0078). A filter word (`--test it runtime_claim::`)
+/// or another target beside it makes the part narrowed.
 pub fn full_test(part: &str) -> bool {
     let words: Vec<&str> = part.split_whitespace().collect();
     let Some(at) = words
@@ -186,14 +189,29 @@ pub fn full_test(part: &str) -> bool {
         "-p",
         "-E",
     ];
-    rest.take_while(|word| !matches!(*word, "--" | "|" | "&" | ">") && !word.starts_with('>'))
+    let words: Vec<&str> = rest
+        .take_while(|word| !matches!(*word, "--" | "|" | "&" | ">") && !word.starts_with('>'))
         .filter(|word| !word.starts_with("2>"))
-        .all(|word| {
-            word.starts_with('-')
-                && !TARGETED
+        .collect();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index];
+        if word == "--test" && words.get(index + 1) == Some(&"it") {
+            index += 2;
+            continue;
+        }
+        let whole = word == "--test=it";
+        if !word.starts_with('-')
+            || !whole
+                && TARGETED
                     .iter()
                     .any(|t| word == *t || word.starts_with(&format!("{t}=")))
-        })
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// What a command runs that `integrate` also runs: the llvm-cov gate, the
@@ -659,7 +677,13 @@ mod tests {
         assert!(full_test("cargo test --locked 2>&1 | tail -5"));
         assert!(full_test("cargo nextest run --workspace"));
         assert!(full_test("cargo test -- --ignored"));
-        assert!(!full_test("cargo test --locked --test cli_stats"));
+        assert!(full_test("cargo test --locked --test it"));
+        assert!(full_test("cargo test --locked --test=it 2>&1 | tail"));
+        assert!(!full_test("cargo test --locked --test it runtime_claim::"));
+        assert!(!full_test("cargo test --locked --test e2e -- --ignored"));
+        assert!(!full_test("cargo test --locked --test plugin"));
+        assert!(!full_test("cargo test --locked --test it --lib"));
+        assert!(!full_test("cargo test --locked --test it cli_stats::"));
         assert!(!full_test("cargo test --lib domain::worktime"));
         assert!(!full_test("cargo test stats"));
         assert!(!full_test("cargo test -p=dagq"));
@@ -688,7 +712,7 @@ mod tests {
             call(90, "t3", "Agent", json!({"description": "review"})),
             result(91, "t3", "Async agent launched", false),
             // 91..95 the model; a failing foreground test 95..125.
-            bash(95, "t4", "cargo test --locked --test cli_stats", false),
+            bash(95, "t4", "cargo test --locked --test it cli_stats::", false),
             result(125, "t4", "Exit code 101\nfailures", true),
             call(130, "t5", "Read", json!({"file_path": "x"})),
             result(131, "t5", "text", false),
