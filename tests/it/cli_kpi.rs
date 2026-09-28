@@ -103,6 +103,10 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     assert_eq!(landings["parallel=unknown"]["value"], 2.0);
     assert_eq!(today["kpis"]["phase.work"]["all"]["n"], 2);
     assert!(today["kpis"]["lead_time"]["all"]["median"].is_number());
+    // Landed without an `integrate` attempt: the slot was never held.
+    assert_eq!(today["kpis"]["landing_utilization"]["all"]["value"], 0.0);
+    assert_eq!(today["kpis"]["landing_attempt"]["all"]["n"], 0);
+    assert_eq!(today["details"]["landing_utilization"]["attempts"], 0);
     assert_eq!(
         today["unavailable"]["improvement_proposals"],
         "not_recorded"

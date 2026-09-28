@@ -24,6 +24,10 @@ const LEADING: &[&str] = &[
     "failed_rate",
     "resumes_per_run",
     "slot_usage",
+    "landing_utilization",
+    "landing_utilization.peak",
+    "landing_attempt",
+    "landing_queue_depth",
     "asks_per_landing",
     "ask_wait",
     "max_load_avg",
@@ -94,6 +98,7 @@ pub fn render_html(report: &Report) -> String {
     marks(&mut page, &report.kpi.periods);
     if let Some(latest) = latest {
         forecast(&mut page, latest, &report.kpi.targets);
+        landing(&mut page, latest);
         kpis(&mut page, latest);
     }
     findings(&mut page, report);
@@ -343,6 +348,48 @@ fn marks(page: &mut String, periods: &[PeriodKpis]) {
     page.push_str("</table></div>");
 }
 
+/// The single integration slot of the period (goal 72): how much of it
+/// the `integrate` attempts held, landed or not, and its busiest hour.
+fn landing(page: &mut String, period: &PeriodKpis) {
+    let Some(details) = period.window.details.get("landing_utilization") else {
+        return;
+    };
+    let number = |key: &str| details.get(key).and_then(serde_json::Value::as_u64);
+    let time = |key: &str| {
+        secs(
+            details
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0),
+        )
+    };
+    let peak = details.get("peak_hour").filter(|peak| !peak.is_null());
+    let _ = write!(
+        page,
+        "<h2>Integration slot</h2><p class=\"meta\">The <code>integrate</code> attempts held the single slot {} of {} ({}), {} attempt(s), {} landed; the busiest hour{}. Runs waiting for it: {} on average, {} at most.</p>",
+        time("busy_secs"),
+        time("window_secs"),
+        value(
+            "landing_utilization",
+            details
+                .get("utilization")
+                .and_then(serde_json::Value::as_f64)
+        ),
+        number("attempts").unwrap_or(0),
+        number("landed").unwrap_or(0),
+        peak.map_or_else(
+            || " —".to_owned(),
+            |peak| format!(
+                " from {} at {}",
+                esc(peak["start"].as_str().unwrap_or("")),
+                value("landing_utilization.peak", peak["utilization"].as_f64())
+            )
+        ),
+        value("landing_queue_depth", details["queue"]["mean"].as_f64()),
+        details["queue"]["max"].as_u64().unwrap_or(0),
+    );
+}
+
 fn kpis(page: &mut String, period: &PeriodKpis) {
     let _ = write!(page, "<h2>KPIs of {}</h2>", esc(&period.label));
     let row = |page: &mut String, name: &str, stratum: Option<&str>, measure: &Measure| {
@@ -561,7 +608,13 @@ enum Unit {
 fn unit(kpi: &str) -> Unit {
     let durations = ["phase.", "land_phase.", "verify_command.", "session_open."];
     if kpi.ends_with("_rate")
-        || matches!(kpi, "slot_usage" | "forecast.p50_error_ratio")
+        || matches!(
+            kpi,
+            "slot_usage"
+                | "landing_utilization"
+                | "landing_utilization.peak"
+                | "forecast.p50_error_ratio"
+        )
         || kpi.starts_with("session_active_ratio.")
     {
         Unit::Ratio
@@ -570,6 +623,7 @@ fn unit(kpi: &str) -> Unit {
         || matches!(
             kpi,
             "lead_time"
+                | "landing_attempt"
                 | "ask_wait"
                 | "ask_apply_wait"
                 | "finding_resolve_time"
@@ -665,6 +719,10 @@ mod tests {
         assert_eq!(value("first_pass_rate", Some(0.625)), "62.5%");
         assert_eq!(value("session_active_ratio.planner", Some(0.5)), "50.0%");
         assert_eq!(value("slot_usage", Some(1.0)), "100.0%");
+        assert_eq!(value("landing_utilization", Some(0.5)), "50.0%");
+        assert_eq!(value("landing_utilization.peak", Some(0.9)), "90.0%");
+        assert_eq!(value("landing_attempt", Some(390.0)), "6m 30s");
+        assert_eq!(value("landing_queue_depth", Some(1.25)), "1.25");
         assert_eq!(value("landings", Some(12.0)), "12");
         assert_eq!(value("forecast.p50_abs_error", Some(5400.0)), "1h 30m");
         assert_eq!(value("forecast.p90_hit_rate", Some(0.75)), "75.0%");

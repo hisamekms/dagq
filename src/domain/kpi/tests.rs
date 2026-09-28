@@ -1927,3 +1927,86 @@ fn periods_windows_and_comparisons_carry_the_host_load_of_their_span() {
     );
     assert_eq!(failed.targets, without.targets);
 }
+
+/// The integration slot (goal 72): every `integrate` attempt holds it,
+/// landed or not, one at a time, so the day's total never exceeds the
+/// day; the peak is the busiest hour, and a day not over yet counts up
+/// to now.
+#[test]
+fn landing_utilization_counts_every_attempt_within_the_day() {
+    let mut queue = Queue::default();
+    // Lands at 01:00 + 30m + 100s, its attempt from 40s before the end.
+    let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, 30 * 60));
+    let id = format!("{:08x}-0000-4000-8000-{:012x}", 2, MONDAY + HOUR);
+    let (task, id) = (Some(2), Some(id.as_str()));
+    queue.kinds.insert(TaskId::new(2), None);
+    queue.goals.insert(TaskId::new(2), None);
+    queue.push(task, id, "run_claimed", json!({}), MONDAY + HOUR);
+    queue.push(
+        task,
+        id,
+        "landing_queued",
+        json!({"via": "exit"}),
+        landed - 200,
+    );
+    // Deferred after 10 minutes: it held the slot all the same.
+    queue.push(task, id, "integration_started", json!({}), landed);
+    queue.push(
+        task,
+        id,
+        "integration_deferred",
+        json!({"code": "verification_failed", "status": "needs_session"}),
+        landed + 600,
+    );
+    // Attempts back to back for 50 hours' worth cannot fill more than the
+    // day: a run whose attempts never recorded an end is cut by the next.
+    for hour in 3..24 {
+        queue.push(
+            task,
+            id,
+            "integration_started",
+            json!({}),
+            MONDAY + hour * HOUR,
+        );
+    }
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + 12 * HOUR, &KpiConfig::default(), &query);
+    let day = result.periods.last().unwrap();
+    let details = &day.window.details["landing_utilization"];
+    let busy = details["busy_secs"].as_i64().unwrap();
+    assert!(busy <= details["window_secs"].as_i64().unwrap());
+    assert_eq!(details["window_secs"], json!(DAY));
+    // 60s landed, 600s deferred, 21 hours of attempts from 03:00.
+    assert_eq!(busy, 60 + 600 + 21 * HOUR);
+    assert_eq!(details["attempts"], json!(23));
+    assert_eq!(details["landed"], json!(1));
+    let utilization = measure(day, "landing_utilization", ALL);
+    assert_eq!(utilization.value, Some(round3(float(busy) / float(DAY))));
+    assert_eq!(utilization.max, Some(1.0));
+    assert_eq!(
+        measure(day, "landing_utilization.peak", ALL).value,
+        Some(1.0)
+    );
+    assert_eq!(
+        details["peak_hour"]["start"],
+        marks::utc_text((MONDAY + 3 * HOUR) * 1000)
+    );
+    // The last attempt is still open at the day's end: 22 ended in it.
+    let attempt = measure(day, "landing_attempt", ALL);
+    assert_eq!((attempt.n, attempt.median), (22, Some(float(HOUR))));
+    assert_eq!(attempt.min, Some(60.0));
+    let waiting = measure(day, "landing_queue_depth", ALL);
+    assert_eq!((waiting.n, waiting.max), (1, Some(1.0)));
+    assert_eq!(waiting.value, Some(round3(200.0 / float(DAY))));
+
+    // Monday not over yet at 04:00: three hours of attempts in four.
+    let result = queue.kpi(MONDAY + 4 * HOUR, &KpiConfig::default(), &query);
+    let partial = result.periods.last().unwrap();
+    assert!(partial.partial);
+    let details = &partial.window.details["landing_utilization"];
+    assert_eq!(details["window_secs"], json!(4 * HOUR));
+    assert_eq!(details["busy_secs"], json!(60 + 600 + HOUR));
+}

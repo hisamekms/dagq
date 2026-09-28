@@ -922,6 +922,56 @@ mod stats {
         );
     }
 
+    /// `landing_utilization` (goal 72): the `integrate` attempts, landed
+    /// or deferred, hold the single slot one at a time over the window in
+    /// time, so their total stays within it.
+    #[test]
+    fn landing_utilization_counts_every_attempt_over_the_window() {
+        let mut events = Events::default();
+        events.run(1, "a", "run_claimed", 0);
+        events.push(1, Some("a"), "landing_queued", 10, json!({"via": "exit"}));
+        events.run(1, "a", "integration_started", 20);
+        events.status(1, "a", "integration_deferred", 30, "needs_session");
+        events.run(2, "b", "run_claimed", 0);
+        events.push(2, Some("b"), "landing_queued", 15, json!({"via": "exit"}));
+        events.run(2, "b", "integration_started", 40);
+        // Never ended: the next start ends it.
+        events.run(1, "a", "integration_started", 50);
+        events.status(1, "a", "run_integrated", 70, "integrated");
+        let query = StatsQuery {
+            since: Some(dagq::domain::stats::Cursor::Time(at(0) * 1000)),
+            until: Some(dagq::domain::stats::Cursor::Time(at(60) * 1000)),
+            goal_id: None,
+            full: true,
+        };
+        let report = value(&stats(
+            &events.0,
+            &goals([(1, None), (2, None)]),
+            at(120),
+            SlotSnapshot::default(),
+            &query,
+            &LiveSnapshot::default(),
+        ));
+        let used = &report["landing_utilization"];
+        assert_eq!(used["window_secs"], 3600);
+        // 10 minutes deferred, 10 cut by the next start, 10 up to --until.
+        assert_eq!(used["busy_secs"], 1800);
+        assert!(used["busy_secs"].as_i64() <= used["window_secs"].as_i64());
+        assert_eq!(used["utilization"], 0.5);
+        assert_eq!(used["attempts"], 3);
+        assert_eq!(used["landed"], 0);
+        assert_eq!(used["peak_hour"]["utilization"], 0.5);
+        assert_eq!(used["attempt_secs"]["count"], 2);
+        assert_eq!(used["attempt_secs"]["median"], 600);
+        assert_eq!(used["queue"]["max"], 2);
+        assert_eq!(used["queue"]["runs"], 2);
+        // 10 and 25 minutes waiting in the hour, both from 12:15.
+        assert_eq!(
+            used["queue"]["mean"],
+            json!(((35.0_f64 / 60.0) * 1000.0).round() / 1000.0)
+        );
+    }
+
     #[test]
     fn cli_stats_reads_the_queue_and_since_returns_only_new_runs() {
         use dagq::{

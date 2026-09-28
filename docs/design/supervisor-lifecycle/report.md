@@ -4,8 +4,8 @@ type: design
 title: "KPIのレポート（`report`）"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -23,7 +23,7 @@ related:
 ## 中身
 
 - **JSON**は`dagq kpi --period <day|week> --at <その期間>`（`--last`は既定の7、期間は古い順で最後がレポートの期間）と同じ形に、`report`（`period`・`label`・`partial`・`generated_at`・`build`（書いたバイナリのbuild識別子））、`findings_open`（`open` / `proposed`のfindingの数）、`findings`（そのうち`findings`の順（影響の大きい順）で先頭10件。どれもレポートを書いた時点の値で、遡って書いた日のレポートでもその日の値ではないの`id`・`kind`・`target`・`subject`・`summary`・`impact`・`status`・`occurrences`・`last_seen_at`）と、`diagram`（[当面の依存図](#当面の依存図)の`tasks`（描いたtaskのID、昇順）・`d2_source`（d2のソースを作ったか）・`reason`（HTMLに図が無いときだけ、その理由）。SVGはJSONに入れない）を足したもの。`domain::kpi::report::Report`。
-- **HTML**（`domain::kpi::report::render_html`）は1ファイルで、CSSと小さなグラフ（inline SVG）を埋め込み、script・外部のCSS・font・画像・CDNを読まない（JavaScriptを使わない）。上から: 見出し（期間、区間、終わったrunの数、生成時刻、build、`partial`の印）、目標（`breach` → `missed` → `not_judged` → `ok`の順に、KPI・層・stat・目標・最新の値・状態・連続・始まり・設定の出どころ）、推移（`all`の層に値のあるKPIごとに、並べた期間の棒グラフ、最新・前・差・判定。印のある期間の上に三角、`partial`の期間は薄い棒）、変更の印の一覧、見込みの誤差（ADR-0070の決定5。レポートの期間に終わった対象の答え合わせ（[kpi](kpi.md#完了見込みの答え合わせ)）の標本数・印のある標本数・除いた行の数と、層（`all` → `target=` → `kind=` → `band=` → `marks=` → `method=`）ごとの`n`・p50の誤差の中央値（符号つき）・絶対値の中央値・残り時間に対する比の中央値・p90の的中率・遅れと早いの割合・偏り（`late_rate`と`early_rate`の大きい方、同じなら`even`）・`forecast.*`の目標の最も悪い状態（`breach` → `missed` → `not_judged` → `ok`）。標本が0なら表を出さない）、レポートの期間のKPIの表（`all`の層の`n`・`value`・`median`・`p90`・前・差・7日の基準・判定と、`<details>`に他の層）、open なfindingの上位、当面の依存図（「Near-term dependencies」。図か、描けなかった理由）、記録の無いKPI（`unavailable`）。値は秒のKPIを`1h 02m`の形、割合を`%`（差は`pt`）で出す。文字列はHTMLのescapeをする。
+- **HTML**（`domain::kpi::report::render_html`）は1ファイルで、CSSと小さなグラフ（inline SVG）を埋め込み、script・外部のCSS・font・画像・CDNを読まない（JavaScriptを使わない）。上から: 見出し（期間、区間、終わったrunの数、生成時刻、build、`partial`の印）、目標（`breach` → `missed` → `not_judged` → `ok`の順に、KPI・層・stat・目標・最新の値・状態・連続・始まり・設定の出どころ）、推移（`all`の層に値のあるKPIごとに（`landings`・`lead_time`・`phase.*`・手戻りの率・`slot_usage`・`landing_utilization`・`landing_utilization.peak`・`landing_attempt`・`landing_queue_depth`・`asks_per_landing`などを先に、他は名前の順）、並べた期間の棒グラフ、最新・前・差・判定。印のある期間の上に三角、`partial`の期間は薄い棒）、変更の印の一覧、見込みの誤差（ADR-0070の決定5。レポートの期間に終わった対象の答え合わせ（[kpi](kpi.md#完了見込みの答え合わせ)）の標本数・印のある標本数・除いた行の数と、層（`all` → `target=` → `kind=` → `band=` → `marks=` → `method=`）ごとの`n`・p50の誤差の中央値（符号つき）・絶対値の中央値・残り時間に対する比の中央値・p90の的中率・遅れと早いの割合・偏り（`late_rate`と`early_rate`の大きい方、同じなら`even`）・`forecast.*`の目標の最も悪い状態（`breach` → `missed` → `not_judged` → `ok`）。標本が0なら表を出さない）、着地slot（「Integration slot」。goal 72、task 991。レポートの期間の`details.landing_utilization`から、試行が占めた時間と期間の長さと使用率、試行の数と着地した数、最も混んだ1時間の始まりと使用率、順番待ちのrunの数の平均と最大）、レポートの期間のKPIの表（`all`の層の`n`・`value`・`median`・`p90`・前・差・7日の基準・判定と、`<details>`に他の層）、open なfindingの上位、当面の依存図（「Near-term dependencies」。図か、描けなかった理由）、記録の無いKPI（`unavailable`）。値は秒のKPIを`1h 02m`の形、割合を`%`（差は`pt`）で出す。文字列はHTMLのescapeをする。
 - HTMLに外部の資源を読むものが無いことはtestで検査する（依存図のSVGを含めて。`domain::kpi::report::external_references`と、SVGの外の部分に`url(`・`@font-face`・`http://`などの文字列が無いこと）。
 - `index.html`（`index_html`）は日・週のレポートへの相対リンクを新しい順に並べ、書くたびに書き直す。
 

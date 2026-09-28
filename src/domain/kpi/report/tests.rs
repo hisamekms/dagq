@@ -234,6 +234,11 @@ fn a_report_carries_the_kpis_the_header_and_the_top_findings() {
     assert_eq!(json["period"], "day");
     assert_eq!(json["periods"].as_array().unwrap().len(), 7);
     assert_eq!(json["periods"][6]["kpis"]["landings"]["all"]["value"], 1.0);
+    // The day's one attempt held the integration slot for a minute.
+    let kpis = &json["periods"][6]["kpis"];
+    assert_eq!(kpis["landing_utilization"]["all"]["value"], 0.001);
+    assert_eq!(kpis["landing_utilization.peak"]["all"]["value"], 0.017);
+    assert_eq!(kpis["landing_attempt"]["all"]["median"], 60.0);
     let landings = json["targets"]
         .as_array()
         .unwrap()
@@ -258,6 +263,10 @@ fn a_report_carries_the_kpis_the_header_and_the_top_findings() {
     assert!(html.contains("work &lt;slow&gt; 1"));
     assert!(html.contains("<tr class=\"breach\"><td><code>landings</code>"));
     assert!(html.contains("class=\"mark\""));
+    assert!(html.contains("<code>landing_utilization</code>"));
+    assert!(html.contains(
+        "1m 00s of 1d 00h (0.1%), 1 attempt(s), 1 landed; the busiest hour from 2026-09-24T01:00:00.000Z at 1.7%"
+    ));
     assert!(
         html.contains("12 open or proposed when the report was generated; the first 10 by impact")
     );

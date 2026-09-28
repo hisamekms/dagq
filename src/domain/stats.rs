@@ -21,6 +21,7 @@ pub mod drafts;
 pub mod escalations;
 pub mod failed_tests;
 pub mod landing;
+pub mod landing_utilization;
 pub mod measures;
 pub mod predictions;
 pub mod providers;
@@ -496,6 +497,11 @@ pub struct Stats {
     /// runtime and its jobs registered (task 470): by origin, how they were
     /// settled, the backlog at the window's end and the drafts per landing.
     pub draft_flow: drafts::DraftFlow,
+    /// The use of the single integration slot over the window of `host`
+    /// in time (goal 72): the share the `integrate` attempts held it,
+    /// landed or not, its busiest hour, each attempt's time and the runs
+    /// waiting for it.
+    pub landing_utilization: landing_utilization::LandingUtilization,
     /// The host's load (task 516) over the window of `asks` in time, from
     /// the files the supervisor records under `<queue dir>/host/`: the
     /// mean, the maximum and the p90 of each column. Set by the caller
@@ -916,6 +922,13 @@ pub fn stats(
         })
         .unwrap_or(window_until)
         .min(window_until);
+    let landing_utilization = landing_utilization::landing_utilization(
+        events,
+        window_from,
+        window_until,
+        now * 1000,
+        counts,
+    );
     let auto_repairs = auto_repairs::auto_repairs(events, window_start, next_cursor, counts);
     let provider_switches = providers::provider_switches(events, window_start, next_cursor, counts);
     let updates = updates::updates(events, window_start, next_cursor, counts);
@@ -1068,6 +1081,7 @@ pub fn stats(
         provider_switches,
         updates,
         draft_flow,
+        landing_utilization,
         host: None,
         next_cursor,
         window_ms: (window_from, window_until),

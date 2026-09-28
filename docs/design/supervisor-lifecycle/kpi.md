@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -77,6 +77,10 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `auto_repairs` | 期間の`auto_repaired`の数。`layer`ごとは`details.auto_repairs_by_layer` | `all` |
 | `verify_command.<コマンド>` | `integrate`の検証コマンドごとの秒 | `all` |
 | `slot_usage` | runがslotを占めた時間 ÷ （`parallel` × supervisorが生きていた時間）。runはclaimから終わり（`run_integrated`、`succeeded` / `failed` / `interrupted`）まで、`run_waiting_started`→`run_slot_regained`を除く。supervisorは`supervisor_started`から、次のうち最も早いものまで: 次の`supervisor_started`（どのsupervisorでも）、同じsupervisorの`supervisor_stopped`（`up` / `down`が登録を消したときの印は`last_heartbeat_at`の時刻）、`supervisors`表に残る登録のheartbeatがstale（`HEARTBEAT_TIMEOUT_SECS`より古い）ならその`heartbeat_at`、今。どれも無く登録も消えている（停止の印を残さずに行が消えた）supervisorは、そのsupervisorの名を`supervisor`に持つ最後のeventで閉じる。生きているsupervisor（heartbeatが新しい登録）は今まで開いたまま。runの占有はsupervisorが生きていた区間に限る（印の記録より前と、終わりの記録が無いrunを数えない）。supervisorを複数同時に動かすと分母が小さく出る。`n`は占有のあったrun | `all` |
+| `landing_utilization` | 期間に`integrate`の試行が1本だけの着地slotを占めた時間の合計 ÷ 期間の長さ（まだ終わっていない期間は今まで）。試行は`integration_started`からその試行の終わり（`run_integrated`・延期・hold・error・失敗）までで、着地しなかった試行も数える。試行は重ならないので1を超えない（規則は[stats](stats.md#着地の直列処理の使用率)と同じ関数`stats::landing_utilization`）。`max`は`landing_utilization.peak`と同じ。`n`は期間に重なった試行の数。良い向きは持たない（制約を見る値）。既定の目標は持たない | `all` |
+| `landing_utilization.peak` | 期間の始まりから1時間ずつ切った丸ごとの1時間のうち、試行が占めた割合の最大。その時間の始まりは`details.landing_utilization.peak_hour.start` | `all` |
+| `landing_attempt` | 期間に終わった試行1回あたりの占有時間の秒（`median`・`p90`・`min`・`max`。開いたままの試行は数えない） | `all` |
+| `landing_queue_depth` | 着地slotの順番待ちのrun（`landing_queued`から`integration_started`などまで）の数の時間平均（`value`）と同時の最大（`max`）。`n`は期間に待ったrunの数 | `all` |
 | `candidates` | `candidates_sampled`（`candidates`・`free_slots`・`ready`）の時間で重み付けた平均（`value`）と最大、空きslotがあるのに`candidates`が0で`ready`が残った秒（`details.candidates.starved_secs`） | `all` |
 | `findings_open` / `finding_resolve_time` | 期間の終わりに`open` / `proposed`のfinding（`finding_recorded`と`finding_status_changed`から）、期間に`resolved`になったものの最初の記録からの秒。記録・解決の数は`details.findings` | `all` |
 | `improvement_proposals` | 記録が無い（ADR-0051の決定25の数え方の実装が無い）ので値はnull | `all` |
@@ -87,6 +91,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` | 計画の品質（下の[計画の品質](#計画の品質)） | 計画の層 |
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
+- `landing_utilization`・`landing_utilization.peak`・`landing_attempt`・`landing_queue_depth`は、期間の`(start, end]`（今を超えない）で[stats](stats.md#着地の直列処理の使用率)の`landing_utilization`を呼んで読み（task 991）、同じ値の全体（`busy_secs`・`window_secs`・`attempts`・`landed`・`peak_hour`・`attempt_secs`・`queue`）を`details.landing_utilization`に出す。runに属さないので`all`だけで、`--goal`はそのgoalのtaskの試行と待ちだけを数える。
 - `unavailable`は記録の無いKPIとその理由: `candidates`の`no_samples`（期間に重なる`candidates_sampled`が無い。supervisorはclaimのpassごとに標本を数え、値が変わったときと起動・引き継ぎの直後の最初のpassで記録する（[`supervise`](supervise.md)の5のcandidatesの標本）ので、supervisorの動いていた期間には標本がある。記録を始める前の期間と、supervisorが1度も動いていない期間に出る）、`improvement_proposals`の`not_recorded`。
 - `--goal`はそのgoalのtaskのrun・ask・findingだけを数える（`slot_usage`の分母はqueue全体のまま）。
 

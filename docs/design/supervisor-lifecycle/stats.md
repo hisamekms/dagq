@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - adr-t639-1
@@ -110,6 +110,7 @@ related:
 - **`auto_repairs`**: `{count, by_layer: {<layer>: {count, by_repair}}, recovery_jobs: {count, applied, escalated, by_verdict, by_confidence, by_outcome, by_alert: {<alert>: {count, applied, escalated, by_verdict}}}, by_day: {<YYYY-MM-DD>: {auto_repaired, by_repair, asks_opened, asks_by_reason, recovery_jobs, recovery_applied, recovery_escalated}}}`（ADR-0047の決定45、task 362、task 557）。`asks`と同じwindowと`--goal`の絞り込みで、runtimeと復旧jobが人を待たずに直した（記録の失敗はlogに書くだけでrunの進行を止めない）`auto_repaired`を`layer`（`runtime` / `recovery`）と`repair`ごとに数え、`by_day`はイベントの`created_at`のUTCの日ごとに、その日の`auto_repaired`（`repair`ごと）と`ask_opened`（`reason_category`ごと）を並べる。自動で直した件数とinboxに届いたaskの件数を日ごとに並べて、inboxに来る件数が減ったかを読む。集計は`domain::stats::auto_repairs`がrun_eventsから再導出する。記録している`repair`: `dialog_answered`（既知のダイアログ、[Prompt waiting](prompt-waiting.md#既知のダイアログ)）、`submit_enter_retry`（入力欄に残った文や`/exit`がEnterの送り直しで入力欄を離れたことを画面で確かめたとき。`conditions`に`input`・`retries`。残ったまま・ダイアログ・画面が読めないときは記録しない）、`receipt_rewrite_requested`（古いreceiptの書き直しの促しが入力欄を離れたとき。入力欄に残るかダイアログならaskの経路に進み記録しない。`conditions`に`receipt_commit`・`head`）、`conflict_resume_uncounted`（衝突だけの`needs_session`のresumeを上限に数えずに始めたとき。`resume_started`と同じトランザクション。`conditions`に数えなかった根拠の`review_passed`・`landing_approved`・`rechecked`）、`resume_adopted`（入れ替え後のsupervisorが`handoff.json`から、またはstaleなleaseの`needs_session`のrunをadoptしてrun_eventsから、resumeしたsessionの監視を引き継いだとき。`conditions`に`handoff`・`attempt`・`request_sent`。task 356）、`inherit_retry`（[Needs session](needs-session.md)）、復旧jobの`stop_processes` / `send_instruction`など（`layer: recovery`）。`exit_forced_close`（着地するrunのreceiptがcleanなworktreeのHEADに対して成り立つので、workspaceを閉じて着地へ進めたとき。cmuxの時間切れで`/exit`がどの試行でもsessionに届かなかった`exit_unsent`の`action: close_and_land`（task 354、`cause: backend_timeout`）と、決定25の`/exit`の再試行を使い切ったとき（task 555、`cause: exit_timeout`か`backend_timeout`）。resumeのsessionで再試行を使い切り、reviewがpassなどの条件がそろってworkspaceを閉じてresumeの判定へ進めたときも（task 936、`then: resume_verdict`）。`conditions`に`cause`・`attempts`）、`exit_retry`（`exit_request_timed_out`か届かなかった`exit_unsent`の後に間隔を空けて`/exit`（かEnter）を送り直し、その再試行の間にsessionが終わったとき。`conditions`に`attempts`・`cause`・`screen`。[Receipt and session exit](receipt-and-session-exit.md#exitの再試行)、task 555）、`disk_cleanup`（[Disk](disk.md)）。`/exit`のcmuxの呼び出しの再試行そのもの（1回の送信の中の試行）は数えない。
   - `recovery_jobs`は同じwindowと`--goal`の絞り込みで、復旧jobの`recovery_finished`を1件ずつ数える（ADR-0047の決定45、task 557）。`by_verdict`は`verdict`（`repair` / `escalate`）ごと、`by_confidence`は`confidence`（`high` / `low`）ごと、`by_outcome`は`outcome`（`already_asked`・`job_failed`・止めたjobの理由の`dialog_cleared` / `session_ended`、`left_to_phase`など）ごと、`by_alert`は`alert`（`failed` / `interrupted` / `resume_exhausted` / `stuck_exit` / `prompt_waiting` / `long_background`など、記録の無い古いeventは`unknown`）ごとの件数。payloadに無い（または`null`の）`verdict`・`confidence`・`outcome`は`none`に数えるので、jobが失敗した・人が見ているaskがすでにある・止めたなどverdictの無い`recovery_finished`も数え落とさない（`outcome`が`none`は、verdictを適用したかaskに上げた回と、`outcome`を記録する前の古いevent）。`applied`は`applied`が空でない件数（runtimeが適用した。`wait`も含む）、`escalated`は`escalated: true`（inboxのaskに上げた。開いてあった同じaskを使ったものも含む）件数。`by_day`の`recovery_jobs` / `recovery_applied` / `recovery_escalated`は日ごとの同じ件数で、`auto_repaired`・`asks_opened`と並べて読む。`recovery_finished`は`auto_repaired`とは別に数え、`count`には入らない。新しい表は持たず、run_eventsから再導出する。
 - **`draft_flow`**: `{landings, registered, adopted, canceled, kept_draft, backlog, oldest_backlog_secs, oldest_backlog_task_id, drafts_per_landing, inflow_per_outflow, by_origin: {<origin>: {registered, adopted, canceled, kept_draft, backlog, oldest_backlog_secs, oldest_backlog_task_id}}}`（task 470）。`asks`と同じwindowと`--goal`の絞り込みで、着地の数とruntimeやjobが登録したdraftの流入・流出・滞留を並べる（下の[draftの流入と流出](#draftの流入と流出)）
+- **`landing_utilization`**: `{window_secs, busy_secs, utilization, peak_hour: {start, utilization}, attempts, landed, attempt_secs: {count, min, median, p90, max}, queue: {mean, max, runs}}`（goal 72、task 991）。`host`と同じ時間の窓（下の[着地の直列処理の使用率](#着地の直列処理の使用率)）で、`integrate`の試行が1本だけの着地slotを占めた割合と、試行の時間、slotの順番待ちのrunの数
 - **`sessions`**: `{window: {after, upto}, by_kind: {<kind>: {count, open, active, active_ratio, open_now, inferred, active_unavailable, tokens, models}}}`。`backend_failures`と同じwindowと重なるClaude sessionの区間をkindごとに数える（下の[Claude session](#claude-session)）
 
 ## 着地待ちの内訳
@@ -144,6 +145,17 @@ related:
 - **runの行**: `verify_commands: [{command, count, secs}]`（コマンド文字列の昇順）。`count`はそのコマンドが流れた回数（試行と、hostの失敗の再試行（task 639）を含む）、`secs`はその合計。
 - **`goals` / `overall`（と`kinds` / `versions`）**: `verify_commands: [{command, count, total, median, p90, max, tail_total}]`（コマンド文字列の昇順）。工程と同じ形で、値はrunごとの`secs`、`count`はそのコマンドを流した着地したrunの数（流していないrunは0として数えない）、`tail_total`は`wait_to_land`の長い裾のrunだけの合計。
 - トップレベルの`verification_commands`（task 197）は着地待ちと切り離したwindowのコマンドごとの所要時間で、こちらは着地したrunの`verify`の内訳として同じ時間を位置づけたもの。
+
+## 着地の直列処理の使用率
+
+着地（`integrate`）はqueueで1本ずつ直列に流れるので、その使用率が1に近づくと着地数が頭打ちになる（goal 72、task 991）。集計は`domain::stats::landing_utilization`がrun_eventsから再導出し、新しい表もeventも持たない。[`kpi`](kpi.md)も期間ごとの窓で同じ関数を呼ぶ。
+
+- **試行**: `integration_started`から、同じrunの試行の終わり（`run_integrated`・`integration_deferred`・`integration_error`・`integration_held`・`integration_failed`・`runtime_error`・`run_adopted`・`run_recovered`・`resume_started`か、payloadの`status`が`needs_session` / `failed` / `interrupted` / `canceled`のevent。timelineの`integrating`の区間と同じ終わり）まで。着地しなかった試行も数える。終わりの記録が無い試行は、次の（どのrunの）`integration_started`で終わり、それも無ければ今まで開いている。次の試行は前の試行の終わりより前には始めない（時刻が前後しても）ので、試行は重ならず、窓の中の合計は窓の長さを超えない。
+- **窓**: `host`と同じ時間の窓（`--since`の時刻か窓の最初のeventの時刻から、`--until`の時刻か窓の終わりまで。今を超えない）。`window_secs`はその長さ、`busy_secs`は試行が窓に重なった時間の合計、`utilization`は`busy_secs ÷ window_secs`（窓が0ならnull。小数3桁）。
+- **`peak_hour`**: 窓の始まりから1時間ずつ切った丸ごとの1時間（窓が1時間より短ければ窓全体）のうち、占めた割合が最も大きいもの（同じなら早いもの）の始まり（UTC）とその割合。窓が0ならnull。
+- **`attempts`**: 窓に重なった試行の数、`landed`はそのうち窓の中で`run_integrated`で終わったもの。`attempt_secs`は窓の中で終わった（開いたままでない）試行の長さの`count`・`min`・`median`・`p90`（最近順位法）・`max`。
+- **`queue`**: 着地slotの順番待ちのrunの数。runは`landing_queued`から、次の`integration_started`・`run_integrated`・`resume_started`・`revise_requested`・`run_adopted`・`run_recovered`か、`status`が`needs_session` / `failed` / `interrupted` / `canceled`のeventまで待つ（`land_phases`の`landing_queue`と同じ始まり）。`mean`は待っていたrunの数の時間平均（待ちの時間の合計 ÷ `window_secs`）、`max`は同時に待っていた数の最大、`runs`は窓に待ちが重なったrunの数（同じrunが2度待っても1つ）。
+- `--goal`はそのgoalのtaskの試行と待ちだけを数える（終わりの記録の無い試行を切る次の`integration_started`はqueue全体から読む）。storeは`integrating`のrunを同時に1つしか許さないので、次の`integration_started`で切るのは終わりの記録が欠けたときだけ。
 
 ## 着地の延期とresume
 
@@ -282,6 +294,6 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 
 ## KPIからの読み口
 
-[`kpi`](kpi.md)（ADR-0051）は期間ごとの窓でこの`stats`を`full`に呼び、同じ区間・`land_phases`・`retries`・sessionを使う。KPIのために、同じ走査を共有する読み口を2つ足した: `stats::asks::human_waits`（`asks`と同じ`ask_opened` / `ask_answered` / 適用のeventの対応から、人が答えたaskの答えまでと適用までの秒を並べる。`runtime_closed`で閉じたaskは除く）と`stats::measures::verification_durations`（`verification_commands`と同じeventの選び方で、`integrate`の検証コマンドごとの秒を並べる）。`stats`の出力は変わらない。
+[`kpi`](kpi.md)（ADR-0051）は期間ごとの窓でこの`stats`を`full`に呼び、同じ区間・`land_phases`・`retries`・sessionを使う。KPIのために、同じ走査を共有する読み口を2つ足した: `stats::asks::human_waits`（`asks`と同じ`ask_opened` / `ask_answered` / 適用のeventの対応から、人が答えたaskの答えまでと適用までの秒を並べる。`runtime_closed`で閉じたaskは除く）と`stats::measures::verification_durations`（`verification_commands`と同じeventの選び方で、`integrate`の検証コマンドごとの秒を並べる）。`landing_utilization`は`stats`の時間の窓の代わりにKPIの期間の`(start, end]`で同じ`stats::landing_utilization::landing_utilization`を呼ぶ。`stats`の出力は変わらない。
 
 cargoとdagqの検証の形に依る計測（worktimeの`e2e`・`llvm_cov`・`test`の分類と`full_tests`・`llvm_cov_runs`・`verification_repeats`、`work_breakdown`の`test_with_llvm_cov`、claimの`rustc_release`・`rustc_host`と`versions.rustc`）は、queueのrepositoryがdagqのソースのときだけ記録して出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。

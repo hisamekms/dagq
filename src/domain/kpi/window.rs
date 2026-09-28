@@ -17,7 +17,8 @@ use crate::domain::{
     plan_quality::plan_quality,
     stats::{
         self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery, asks::human_waits,
-        landing::PHASES, measures::verification_durations, timestamp_millis,
+        landing::PHASES, landing_utilization::landing_utilization,
+        measures::verification_durations, timestamp_millis,
     },
     waiting::{RUN_SLOT_REGAINED, RUN_WAITING_STARTED},
 };
@@ -514,6 +515,43 @@ impl<'a> Context<'a> {
         put("slot_usage", ALL, Measure::total(slot_usage, runs_holding));
         let mut unavailable = BTreeMap::new();
         let mut details: BTreeMap<&'static str, Value> = BTreeMap::new();
+
+        // The single integration slot (goal 72): the share of the window
+        // the `integrate` attempts held it, landed or not, its busiest
+        // hour, each attempt's time and the runs waiting for it, as
+        // `stats`' `landing_utilization` derives them over this window.
+        let landing = landing_utilization(events, start, end, self.now * 1000, |task| {
+            self.counts(task)
+        });
+        let peak = landing.peak_hour.as_ref().map(|hour| hour.utilization);
+        let mut utilization = Measure::total(landing.utilization, landing.attempts);
+        utilization.max = peak;
+        utilization.has_spread = true;
+        put("landing_utilization", ALL, utilization);
+        put(
+            "landing_utilization.peak",
+            ALL,
+            Measure::total(peak, landing.attempts),
+        );
+        let secs = &landing.attempt_secs;
+        put(
+            "landing_attempt",
+            ALL,
+            Measure {
+                n: secs.count,
+                median: secs.median.map(float),
+                p90: secs.p90.map(float),
+                max: secs.max.map(float),
+                min: secs.min.map(float),
+                has_spread: true,
+                ..Measure::default()
+            },
+        );
+        let mut queued = Measure::total(landing.queue.mean, landing.queue.runs);
+        queued.max = Some(float(landing.queue.max as i64));
+        queued.has_spread = true;
+        put("landing_queue_depth", ALL, queued);
+        details.insert("landing_utilization", json(&landing));
         match self.candidates(start, end) {
             Some((mean, max, starved, samples)) => {
                 let mut measure = Measure::total(Some(mean), samples);

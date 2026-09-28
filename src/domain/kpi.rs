@@ -517,6 +517,9 @@ pub fn direction(kpi: &str) -> Option<Direction> {
         | "improvement_proposals"
         | "candidates"
         | "plan.follow_up_adoption_rate" => None,
+        // How much of the integration slot the attempts held (goal 72): a
+        // constraint to watch, neither better higher nor lower.
+        _ if kpi.starts_with("landing_utilization") => None,
         _ if kpi.starts_with("session_active") => None,
         // The forecast's errors (ADR-0070 decision 4): only the size of
         // the error is better lower; the ratio and the rates have a target
