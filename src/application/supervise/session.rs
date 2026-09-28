@@ -221,6 +221,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             recovery: RecoveryWatch::default(),
             input_at: None,
             asks_from: 0,
+            stage: Stage::Session,
         })
     }
 }
@@ -281,6 +282,28 @@ pub(super) struct SessionWatch {
     /// asks from before it are the inbox's to deliver by hand (task 582).
     /// 0 follows every ask of the run.
     pub(super) asks_from: i64,
+    /// The stage the session is watched in, as its `idle_inferred` names
+    /// it.
+    pub(super) stage: Stage,
+}
+
+/// The stage a [`SessionWatch`] watches its session in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stage {
+    Session,
+    Resume,
+    Revise,
+}
+
+impl Stage {
+    /// Its `phase`, as the stage's own events name it.
+    pub(super) const fn phase(self) -> &'static str {
+        match self {
+            Self::Session => SESSION_PHASE,
+            Self::Resume => RESUME_PHASE,
+            Self::Revise => REVISE_PHASE,
+        }
+    }
 }
 
 impl SessionWatch {
@@ -288,7 +311,12 @@ impl SessionWatch {
     /// review or a conflict named ([`ReviseWatch`]), or what parked its run
     /// ([`ResumeWatch`]): only the answers of its `worker_question`s and its
     /// dialogs are followed (task 238, ADR-0071 decision 17).
-    pub(super) fn fixing(run: &TaskRun, workspace: &str, input_at: SystemTime) -> Result<Self> {
+    pub(super) fn fixing(
+        run: &TaskRun,
+        workspace: &str,
+        input_at: SystemTime,
+        stage: Stage,
+    ) -> Result<Self> {
         Ok(SessionWatch {
             workspace: workspace.to_owned(),
             run_dir: PathBuf::from(run.run_dir().context("missing run directory")?),
@@ -312,6 +340,7 @@ impl SessionWatch {
             recovery: RecoveryWatch::default(),
             input_at: Some(input_at),
             asks_from: 0,
+            stage,
         })
     }
 
@@ -344,9 +373,9 @@ impl SessionWatch {
             .has_unclosed_worker_question_since(run.id(), self.asks_from)
     }
 
-    /// Whether the session is idle: an idle marker exists, written after
-    /// the last input typed when one is known.
-    fn idle(&self, sv: &Supervisor<'_>) -> bool {
+    /// Whether the session is idle by its idle marker: one exists, written
+    /// after the last input typed when one is known.
+    fn marked_idle(&self, sv: &Supervisor<'_>) -> bool {
         match self.input_at {
             Some(at) => sv
                 .files
@@ -354,6 +383,45 @@ impl SessionWatch {
                 .is_ok_and(|modified| modified > at),
             None => sv.files.exists(&self.idle_marker),
         }
+    }
+
+    /// Whether, without such a marker, its screen shows it idle
+    /// (ADR-t803-1). A screen that cannot be read, or a marker that
+    /// cannot be read, shows nothing.
+    fn screen_shows_idle(&self, sv: &Supervisor<'_>, run: &TaskRun) -> bool {
+        self.screen_idle(sv, run, self.last_input())
+            .is_ok_and(|idle| idle.is_some())
+    }
+
+    /// The last input the supervisor knows the session was given: the
+    /// stage's request and the last text it typed.
+    pub(super) fn last_input(&self) -> SystemTime {
+        [self.input_at, self.stall.last_send()]
+            .into_iter()
+            .flatten()
+            .fold(UNIX_EPOCH, SystemTime::max)
+    }
+
+    /// The idle the session's screen shows after `after` while its idle
+    /// marker is missing or older than its last input
+    /// ([`Supervisor::session_idle`], recorded as `idle_inferred` with the
+    /// watch's phase); `None` when the marker tells, or the screen does not
+    /// look idle.
+    pub(super) fn screen_idle(
+        &self,
+        sv: &Supervisor<'_>,
+        run: &TaskRun,
+        after: SystemTime,
+    ) -> Result<Option<IdleMarker>> {
+        Ok(sv
+            .session_idle(
+                run,
+                &self.workspace,
+                &self.idle_marker,
+                after,
+                self.stage.phase(),
+            )?
+            .filter(IdleMarker::is_inferred))
     }
 
     /// The session's idle marker once it has its receipt, or, without a
@@ -704,7 +772,13 @@ impl SessionWatch {
             // `receipt_observed` ended the dialog ([`SessionWatch::poll`]).
             return Ok(());
         }
-        if self.idle(sv) || !sv.processes.alive(agent.pid) || self.waits_for_question(sv, run)? {
+        // The screen is read for the idle last: a session that waits for an
+        // answer is not captured.
+        if self.marked_idle(sv)
+            || !sv.processes.alive(agent.pid)
+            || self.waits_for_question(sv, run)?
+            || self.screen_shows_idle(sv, run)
+        {
             // The agent finished a response, is gone, or stopped at an ask
             // that waits for its answer: no dialog holds it now, and a
             // recorded one must not stay an attention.
@@ -788,17 +862,38 @@ impl SessionWatch {
         if answers.is_empty() {
             return Ok(None);
         }
+        let failed = RunHistory::from_events(&sv.queue.run_events(run.id())?).failed_deliveries();
+        answers.retain(|ask| !failed.contains(&ask.id));
+        if answers.is_empty() {
+            return Ok(None);
+        }
         // Background work does not hold an answer back: typing into the
         // prompt opens no dialog, only /exit does.
         let idle_at = match sv.files.modified(&self.idle_marker) {
-            Ok(modified) => unix_seconds(modified),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(modified) => Some(unix_seconds(modified)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error).context("inspect idle marker"),
         };
+        let latest = answers.iter().map(|ask| ask.created_at).max().unwrap_or(0);
+        // Without a marker as new as the latest ask, the screen stands in
+        // for it (ADR-t803-1): idle since after the ask and the last input
+        // the supervisor gave.
+        let idle_at = match idle_at {
+            Some(at) if at >= latest => at,
+            marker => {
+                let asked = UNIX_EPOCH + Duration::from_secs(u64::try_from(latest).unwrap_or(0));
+                match self.screen_idle(sv, run, self.last_input().max(asked))? {
+                    Some(idle) => unix_seconds(idle.modified()),
+                    None => match marker {
+                        Some(at) => at,
+                        None => return Ok(None),
+                    },
+                }
+            }
+        };
         let mut typed = None;
-        let failed = RunHistory::from_events(&sv.queue.run_events(run.id())?).failed_deliveries();
         for ask in answers {
-            if failed.contains(&ask.id) || idle_at < ask.created_at {
+            if idle_at < ask.created_at {
                 continue;
             }
             let text = answer_text(run, ask.id, ask.answer.as_deref().unwrap_or_default());

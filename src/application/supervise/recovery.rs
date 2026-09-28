@@ -1387,7 +1387,7 @@ impl SessionWatch {
             run_dir: &self.run_dir,
             allowed: &LONG_BACKGROUND_ACTIONS,
             exit_typed: false,
-            at_prompt: self.at_prompt(sv),
+            at_prompt: self.at_prompt(sv, run),
             lands: false,
             park: false,
         };
@@ -1438,7 +1438,7 @@ impl SessionWatch {
             run_dir: &run_dir,
             allowed: &LONG_BACKGROUND_ACTIONS,
             exit_typed: false,
-            at_prompt: self.at_prompt(sv),
+            at_prompt: self.at_prompt(sv, run),
             lands: false,
             park: false,
         };
@@ -1567,7 +1567,7 @@ impl SessionWatch {
             run_dir: &self.run_dir,
             allowed: &IDLE_PROCESS_ACTIONS,
             exit_typed: false,
-            at_prompt: self.at_prompt(sv),
+            at_prompt: self.at_prompt(sv, run),
             lands: false,
             park: false,
         };

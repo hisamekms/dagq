@@ -5,7 +5,7 @@ use super::*;
 
 /// The phase an idle the screen showed during a revise or a conflict
 /// request is recorded with (`idle_inferred`).
-const REVISE_PHASE: &str = "revise";
+pub(super) const REVISE_PHASE: &str = "revise";
 
 /// A `revise` verdict, or a conflict the precheck found, sent to the live
 /// session: it is waited for until the session rewrites its receipt and
@@ -87,7 +87,12 @@ impl ReviseWatch {
         sent_at: SystemTime,
         start: Option<StartCheck>,
     ) -> Result<Self> {
-        let mut live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at)?);
+        let mut live = Box::new(SessionWatch::fixing(
+            run,
+            &session.workspace,
+            sent_at,
+            Stage::Revise,
+        )?);
         // A question from before the request (asked during validation or
         // the review, or left open before the receipt) is the inbox's to
         // deliver by hand: it neither gets its answer typed here nor holds

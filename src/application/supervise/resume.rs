@@ -453,7 +453,12 @@ impl Supervisor<'_> {
             exit_for_silence: false,
             stale: None,
             recovery: RecoveryWatch::default(),
-            live: Box::new(SessionWatch::fixing(run, &workspace, self.files.now())?),
+            live: Box::new(SessionWatch::fixing(
+                run,
+                &workspace,
+                self.files.now(),
+                Stage::Resume,
+            )?),
         })
     }
     /// A [`ResumeWatch`] that goes on watching a resumed session another
@@ -486,6 +491,7 @@ impl Supervisor<'_> {
             run,
             &workspace,
             message_sent_at.unwrap_or(started_at),
+            Stage::Resume,
         )?);
         Ok(ResumeWatch {
             live,

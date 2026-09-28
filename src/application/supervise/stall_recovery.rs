@@ -133,8 +133,10 @@ impl SessionWatch {
     /// (the last text the supervisor typed, the last input it took by its
     /// input marker, and for a session asked to fix its run the last input
     /// of its stage), or its last input started a turn that never ended
-    /// ([`Self::interrupted`]).
-    pub(super) fn at_prompt(&self, sv: &Supervisor<'_>) -> bool {
+    /// ([`Self::interrupted`]), or, while its idle marker is missing or
+    /// older than its last input, its screen shows it idle
+    /// ([`Supervisor::session_idle`], ADR-t803-1).
+    pub(super) fn at_prompt(&self, sv: &Supervisor<'_>, run: &TaskRun) -> bool {
         if self.prompt_hash.is_some() {
             return false;
         }
@@ -151,6 +153,16 @@ impl SessionWatch {
                 && self.input_at.is_none_or(|at| marker > at)
                 && input.is_none_or(|input| marker > input.modified)
         }) {
+            return true;
+        }
+        // Without a marker as new as its last input, the screen stands in
+        // for it (ADR-t803-1): idle since after the stage's request and the
+        // last text the supervisor typed. A screen at work, at a dialog or
+        // unreadable shows nothing.
+        if self
+            .screen_idle(sv, run, self.last_input())
+            .is_ok_and(|idle| idle.is_some())
+        {
             return true;
         }
         input.is_some_and(|input| self.interrupted(sv, input, marker))
@@ -206,7 +218,7 @@ impl SessionWatch {
                 &STALLED_ACTIONS
             },
             exit_typed: false,
-            at_prompt: self.at_prompt(sv),
+            at_prompt: self.at_prompt(sv, run),
             lands: false,
             park: self.input_at.is_none(),
         };
@@ -369,7 +381,7 @@ impl SessionWatch {
             run_dir: &self.run_dir,
             allowed: &STALLED_ACTIONS,
             exit_typed: false,
-            at_prompt: self.at_prompt(sv),
+            at_prompt: self.at_prompt(sv, run),
             lands: false,
             park: self.input_at.is_none(),
         };

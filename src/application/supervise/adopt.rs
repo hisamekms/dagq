@@ -264,6 +264,7 @@ impl Supervisor<'_> {
                     recovery: RecoveryWatch::adopt(&*self.queue, run)?,
                     input_at: None,
                     asks_from: 0,
+                    stage: Stage::Session,
                 })
             }
         })

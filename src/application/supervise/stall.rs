@@ -410,6 +410,11 @@ impl StallWatch {
         }
     }
 
+    /// When the supervisor last typed a text into the session.
+    pub(super) fn last_send(&self) -> Option<SystemTime> {
+        self.last_input
+    }
+
     /// Whether a text the supervisor typed explains `input`: the same text
     /// typed no later than a second after it (an answer the session took
     /// only after its turn), or any text typed within the window of

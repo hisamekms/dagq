@@ -68,6 +68,12 @@ impl IdleMarker {
         }
     }
 
+    /// Whether the screen showed this idle rather than the agent's hook
+    /// writing it.
+    pub(super) fn is_inferred(&self) -> bool {
+        self.inferred.is_some()
+    }
+
     /// When the agent wrote it.
     pub(super) fn modified(&self) -> SystemTime {
         self.modified
