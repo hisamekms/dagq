@@ -12,6 +12,7 @@
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
+use crate::domain::tokens::TokenUsage;
 use crate::domain::turn::{TurnFailure, TurnResult, TurnSignal, shortened};
 
 /// The permission mode a headless worker's turn is started in: tools that
@@ -236,11 +237,31 @@ impl TurnReader for ClaudeTurnReader {
                 .flatten()
                 .map(|denial| denial["tool_name"].as_str().unwrap_or("unknown").to_owned())
                 .collect(),
+            tokens: result.and_then(|r| turn_tokens(&r["usage"], r["total_cost_usd"].as_f64())),
+            tokens_cumulative: false,
             // Claude's session is the run's: a missing one is started
             // by `turn_session_exists` instead.
             session_missing: false,
         }
     }
+}
+
+/// The tokens of a turn from the `usage` of its `result` (every call of
+/// the turn together) and its `total_cost_usd`: the same kinds as a
+/// transcript's message (`input_tokens` without the cache,
+/// `cache_read_input_tokens`, `cache_creation_input_tokens`,
+/// `output_tokens`); `None` when the input and output counts are not
+/// numbers.
+fn turn_tokens(usage: &Value, cost_usd: Option<f64>) -> Option<TokenUsage> {
+    let count = |key: &str| usage[key].as_i64();
+    Some(TokenUsage {
+        input: count("input_tokens")?,
+        output: count("output_tokens")?,
+        cache_read: count("cache_read_input_tokens").unwrap_or(0),
+        cache_creation: count("cache_creation_input_tokens").unwrap_or(0),
+        messages: 1,
+        cost_usd,
+    })
 }
 
 #[cfg(test)]
@@ -310,6 +331,13 @@ mod tests {
             (Some(3), Some(1200), Some(0.04))
         );
         assert_eq!(result.usage["output_tokens"], 5);
+        assert_eq!(
+            result.tokens.map(|tokens| tokens.payload()),
+            Some(
+                json!({"input": 10, "output": 5, "cache_read": 0, "cache_creation": 0,
+                        "messages": 1, "cost_usd": 0.04})
+            )
+        );
         assert_eq!(result.permission_denials, ["Bash"]);
     }
 

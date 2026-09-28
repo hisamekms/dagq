@@ -40,7 +40,7 @@ related:
 
 ## KPIと層
 
-`kpis`はKPIの名前→層→値。層は`all`、`kind=<label>`（taskの`kind`のlabelをそのまま。runtimeは値の集合を持たない（[ADR-t624-1](../../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)）。`kind`がnullのtaskは推さずに`unknown`）と、`--by`の軸`build=`（build識別子）・`parallel=`・`slot=`（claim時の使用中のslot ÷ `parallel`が`low` <0.5 / `mid` <1 / `full`）・`load=`（claim時のload average ÷ hostの論理コア数が`low` <1 / `mid` <2 / `high` <4 / `extreme`。コア数はclaim時に記録されていないので計算時のhostの値）・`toolchain=`（`rustc`のreleaseとhost）・`claude=`。記録の無い属性は`unknown`。値は`n`（標本数）と、値のKPIは`value`、分布のKPIは`median`・`p90`・`min`・`max`（中央値とp90は`stats`と同じ規則）。記録の無い値はnullで、0と区別する。
+`kpis`はKPIの名前→層→値。層は`all`、`kind=<label>`（taskの`kind`のlabelをそのまま。runtimeは値の集合を持たない（[ADR-t624-1](../../adr/2026-09-27-t624-1-task-kind-is-a-free-label.md)）。`kind`がnullのtaskは推さずに`unknown`）と、`--by`の軸`build=`（build識別子）・`parallel=`・`slot=`（claim時の使用中のslot ÷ `parallel`が`low` <0.5 / `mid` <1 / `full`）・`load=`（claim時のload average ÷ hostの論理コア数が`low` <1 / `mid` <2 / `high` <4 / `extreme`。コア数はclaim時に記録されていないので計算時のhostの値）・`toolchain=`（`rustc`のreleaseとhost）・`claude=`（Claude Codeのversion）・`provider=`（workerのprovider。`claude` / `codex`）・`route=`（workerの経路。`interactive` / `headless`）・`codex=`（Codexのversion）。後の3つはclaimの`provider` / `worker_mode` / `codex_version`（ADR-t813-2の決定7）。記録の無い属性は`unknown`。値は`n`（標本数）と、値のKPIは`value`、分布のKPIは`median`・`p90`・`min`・`max`（中央値とp90は`stats`と同じ規則）。記録の無い値はnullで、0と区別する。
 
 | KPI | 規則 | 層 |
 | --- | --- | --- |

@@ -347,14 +347,25 @@ const RUSTC_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The versions a claim records (task 197): Claude Code's from the file
 /// `claude` resolves to (`<...>/versions/<version>`, where its installer
-/// keeps each version; null for any other path), and `release` and `host`
-/// of `rustc -vV` run in `checkout`, so that its toolchain file applies
-/// (null when it cannot be run).
-pub fn host_versions(claude: &Path, checkout: &Path) -> HostVersions {
-    let versions = HostVersions {
+/// keeps each version; null for any other path), Codex's from `codex
+/// --version` when `codex` is given (null when it cannot be run;
+/// ADR-t813-2 decision 7), and `release` and `host` of `rustc -vV` run in
+/// `checkout`, so that its toolchain file applies (null when it cannot be
+/// run).
+pub fn host_versions(claude: &Path, codex: Option<&Path>, checkout: &Path) -> HostVersions {
+    let mut versions = HostVersions {
         claude_version: claude_version(claude),
         ..HostVersions::default()
     };
+    if let Some(codex) = codex {
+        versions = match capture(
+            Command::new(codex).arg("--version").stdin(Stdio::null()),
+            RUSTC_VERSION_TIMEOUT,
+        ) {
+            Ok((status, stdout, _)) if status.success() => versions.with_codex_version(&stdout),
+            _ => versions,
+        };
+    }
     match capture(
         Command::new("rustc").arg("-vV").current_dir(checkout),
         RUSTC_VERSION_TIMEOUT,
@@ -3763,6 +3774,7 @@ esac
     /// Claude Code's version is the name of the versioned file `claude`
     /// resolves to, through a link; any other path names none. `rustc -vV`
     /// runs in the checkout, and a directory it cannot run in gives none.
+    /// Codex's is asked of `codex` only when it is given.
     #[test]
     fn host_versions_come_from_the_claude_path_and_rustc() {
         let dir = tempfile::tempdir().unwrap();
@@ -3777,10 +3789,19 @@ esac
         let other = dir.path().join("claude-stub");
         fs::write(&other, "").unwrap();
         assert_eq!(claude_version(&other), None);
-        let host = host_versions(&link, dir.path());
+        let host = host_versions(&link, None, dir.path());
         assert_eq!(host.claude_version.as_deref(), Some("2.1.3"));
+        assert_eq!(host.codex_version, None);
         assert!(host.rustc_release.is_some(), "{host:?}");
-        let missing = host_versions(&other, &dir.path().join("missing"));
+        let missing = host_versions(&other, None, &dir.path().join("missing"));
         assert_eq!(missing, HostVersions::default());
+        // Codex's is what `codex --version` prints; none when it fails.
+        let codex = dir.path().join("codex");
+        fs::write(&codex, "#!/bin/sh\necho 'codex-cli 0.46.0'\n").unwrap();
+        fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let host = host_versions(&other, Some(&codex), &dir.path().join("missing"));
+        assert_eq!(host.codex_version.as_deref(), Some("0.46.0"));
+        let gone = host_versions(&other, Some(&dir.path().join("gone")), dir.path());
+        assert_eq!(gone.codex_version, None);
     }
 }

@@ -4,8 +4,8 @@ type: design
 title: "変更の印（`mark` / `marks`）"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -43,6 +43,7 @@ eventを書かず、`marks`がclaimの順（`run_claimed`のevent IDの順）に
 | --- | --- |
 | `dagq_version` | `run_claimed.dagq_version`（build識別子） |
 | `claude_version` | `run_claimed.claude_version` |
+| `codex_version` | `run_claimed.codex_version`（Codexのworkerを動かすsupervisorのclaimだけが持つ。ADR-t813-2の決定7） |
 | `parallel` | `run_claimed.parallel` |
 | `toolchain` | `run_claimed.rustc_release`と`rustc_host`の組（`1.90.0 aarch64-apple-darwin`）。どちらかがnullのclaimは記録の無いclaimとして飛ばす |
 

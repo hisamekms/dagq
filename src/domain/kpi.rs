@@ -157,10 +157,18 @@ pub enum Axis {
     Toolchain,
     /// Claude Code's version.
     Claude,
+    /// The worker's provider (`claude` / `codex`) at the claim
+    /// (ADR-t813-2 decision 7).
+    Provider,
+    /// The worker's route at the claim: `interactive` or `headless`.
+    Route,
+    /// Codex's version at the claim; `unknown` when the supervisor ran no
+    /// Codex worker.
+    Codex,
 }
 
 impl Axis {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Kind,
         Self::Build,
         Self::Parallel,
@@ -168,6 +176,9 @@ impl Axis {
         Self::Load,
         Self::Toolchain,
         Self::Claude,
+        Self::Provider,
+        Self::Route,
+        Self::Codex,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -179,6 +190,9 @@ impl Axis {
             Self::Load => "load",
             Self::Toolchain => "toolchain",
             Self::Claude => "claude",
+            Self::Provider => "provider",
+            Self::Route => "route",
+            Self::Codex => "codex",
         }
     }
 }

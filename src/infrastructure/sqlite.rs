@@ -1774,7 +1774,14 @@ pub(super) fn claim_task(
         if let (Some(payload), Some(serde_json::Value::Object(attributes))) =
             (payload.as_object_mut(), attributes)
         {
+            // The version of the run's own provider among the host's
+            // (ADR-t813-2 decision 7): `claude_version` or `codex_version`.
+            let version = attributes
+                .get(&format!("{}_version", run.actual_provider().as_str()))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             payload.extend(attributes.clone());
+            payload.insert("provider_version".to_owned(), version);
         }
         if let Some(payload) = payload.as_object_mut() {
             payload.extend(choice.session.fields());

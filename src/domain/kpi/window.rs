@@ -334,6 +334,9 @@ impl<'a> Context<'a> {
                 .to_owned(),
             Axis::Build => text(&measures.dagq_version),
             Axis::Claude => text(&measures.claude_version),
+            Axis::Provider => text(&measures.provider),
+            Axis::Route => text(&measures.route),
+            Axis::Codex => text(&measures.codex_version),
             Axis::Parallel => measures
                 .claim_parallel
                 .map_or_else(|| UNKNOWN.to_owned(), |parallel| parallel.to_string()),

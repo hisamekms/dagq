@@ -645,6 +645,12 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     assert!(claimed["load_avg"].is_f64(), "{claimed}");
     // The stub agent is no versioned install of Claude Code.
     assert!(claimed["claude_version"].is_null(), "{claimed}");
+    // The worker's provider and route; no Codex worker, no Codex version
+    // (ADR-t813-2 decision 7).
+    assert_eq!(claimed["provider"], "claude", "{claimed}");
+    assert_eq!(claimed["worker_mode"], "interactive", "{claimed}");
+    assert!(claimed["provider_version"].is_null(), "{claimed}");
+    assert!(claimed.get("codex_version").is_none(), "{claimed}");
     assert!(
         claimed["rustc_release"]
             .as_str()

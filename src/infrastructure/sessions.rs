@@ -16,11 +16,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
-use super::{sqlite::json_col, transcripts::ClaudeTranscripts};
+use super::{
+    sqlite::{event_row, json_col},
+    transcripts::ClaudeTranscripts,
+};
 use crate::{
     application::{TranscriptSource, Transcripts},
     domain::{
-        EventId, RunId, TaskId,
+        EventId, RunEvent, RunId, TaskId,
         sessions::{
             HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW, RUN_SESSION,
             RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS, Scope, SessionHook,
@@ -29,9 +32,10 @@ use crate::{
         stats::rfc3339_millis,
         tokens,
         transcript::{
-            TRANSCRIPT_NOT_READ_BEFORE, Transcript, Turn, Unreadable, millis_text, span_turns,
-            turns,
+            TRANSCRIPT_NOT_CLAUDE, TRANSCRIPT_NOT_READ_BEFORE, Transcript, Turn, Unreadable,
+            millis_text, span_turns, turns,
         },
+        turn::HeadlessSpan,
         worktime,
     },
 };
@@ -357,6 +361,19 @@ fn close(
     let mut payload = SpanChange::closed_payload(span, reason);
     let mut closed_at = now.to_owned();
     let mut closed = RunSessionClosed::default();
+    if span.headless() {
+        close_headless(
+            conn,
+            now,
+            (task_id, run_id),
+            span,
+            reason,
+            &mut payload,
+            &mut closed,
+        )?;
+        insert_at(conn, task_id, run_id, SESSION_CLOSED, &payload, &closed_at)?;
+        return Ok(Some(closed).filter(|closed| closed.work.is_some() || closed.tokens.is_some()));
+    }
     match (transcript_for_close(conn, span), times(conn, span, now)?) {
         (Ok(transcript), Some((start, now_ms))) => {
             let mut end = now_ms;
@@ -428,6 +445,89 @@ fn close(
         .map(|_| closed))
 }
 
+/// Fill the `session_closed` of a headless worker's `span` at `now`
+/// (ADR-t813-2 decision 7): its active time is its run's turns, each from
+/// its `turn_started` to its `turn_finished` (one still running counts to
+/// the close), recorded as `session_turns` like a transcript's; its tokens
+/// are the `tokens` its turns recorded from the provider's output. A
+/// Claude session's transcript, when it can be read, still gives the model
+/// and effort and the work breakdown; another provider's has none.
+fn close_headless(
+    conn: &Connection,
+    now: &str,
+    (task_id, run_id): (Option<TaskId>, Option<&RunId>),
+    span: &OpenSpan,
+    reason: &str,
+    payload: &mut Value,
+    closed: &mut RunSessionClosed,
+) -> Result<()> {
+    let transcript = transcript_for_close(conn, span);
+    let (Some(run_id), Some((start, now_ms))) = (run_id, times(conn, span, now)?) else {
+        payload["active"] = json!("unavailable");
+        payload["active_unavailable"] = json!("span_time_unparsable");
+        return Ok(());
+    };
+    let headless = HeadlessSpan::of(&turn_events(conn, run_id, span.opened_event_id)?, start);
+    let recorded = recorded_turns(conn, span.opened_event_id)?;
+    // A span closed as inferred (its session gone unseen) does not know
+    // when a turn still running ended.
+    let new = headless.new_turns(&recorded, (reason != INFERRED).then_some(now_ms));
+    if !new.is_empty() {
+        insert_at(
+            conn,
+            task_id,
+            Some(run_id),
+            SESSION_TURNS,
+            &turns_payload(span, &new),
+            now,
+        )?;
+    }
+    let millis: i64 = recorded.iter().chain(&new).map(|turn| turn.millis()).sum();
+    payload["active"] = json!("recorded");
+    payload["active_secs"] = json!(millis / 1000);
+    if let Some(tokens) = &headless.tokens {
+        payload["tokens"] = tokens.payload();
+        closed.tokens = Some(tokens.payload());
+    }
+    match transcript {
+        Ok(transcript) => {
+            tokens::models_payload(
+                &tokens::span_models(&transcript.records, start, now_ms),
+                payload,
+            );
+            let breakdown = work_breakdown(conn, run_id, span, &transcript, start, now_ms)?;
+            closed.work = Some(exited_work(
+                &breakdown,
+                span.kind(),
+                &span.payload["attempt"],
+            ));
+            payload["work"] = breakdown;
+        }
+        Err(unreadable) => debug!(
+            "session span {} ({}): no model or work breakdown, {}: {}",
+            span.opened_event_id,
+            span.kind(),
+            unreadable.code,
+            unreadable.detail
+        ),
+    }
+    Ok(())
+}
+
+/// The `turn_started` and `turn_finished` of `run_id` after the event
+/// `opened`, oldest first.
+fn turn_events(conn: &Connection, run_id: &RunId, opened: EventId) -> Result<Vec<RunEvent>> {
+    Ok(conn
+        .prepare(&format!(
+            "SELECT * FROM run_events WHERE run_id=?1 AND id>?2
+               AND kind IN ('{}','{}') ORDER BY id",
+            event_kind::TURN_STARTED,
+            event_kind::TURN_FINISHED
+        ))?
+        .query_map(params![run_id, opened], event_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// The work breakdown of `span` of `run_id` from `start` to `end` (unix
 /// milliseconds) in `transcript`: the aggregate for the events, and each
 /// command appended to the run directory's `worktime.jsonl`. Failing to
@@ -487,6 +587,18 @@ fn read(conn: &Connection, span: &OpenSpan) -> Result<Transcript, Unreadable> {
             code: TRANSCRIPT_NOT_READ_BEFORE,
             version: None,
             detail: "the transcript was not read before the write transaction began".into(),
+        });
+    }
+    if !span.claude() {
+        return Err(Unreadable {
+            code: TRANSCRIPT_NOT_CLAUDE,
+            version: None,
+            detail: format!(
+                "the session is {}'s, which has no Claude Code transcript",
+                span.payload["provider"]
+                    .as_str()
+                    .unwrap_or("another provider")
+            ),
         });
     }
     #[cfg(test)]
@@ -577,9 +689,12 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
     let open = open_spans(conn, "1=1", "1=1", params![])?;
     let mut recorded = 0;
     for span in open {
-        let transcript = match read(conn, &span) {
-            Ok(transcript) => transcript,
-            Err(unreadable) => {
+        // A headless span's turns are its run's (ADR-t813-2 decision 7).
+        let read = (!span.headless()).then(|| read(conn, &span));
+        let transcript = match read {
+            None => None,
+            Some(Ok(transcript)) => Some(transcript),
+            Some(Err(unreadable)) => {
                 debug!(
                     "session span {} ({}): turns not read now, {}: {}",
                     span.opened_event_id,
@@ -606,19 +721,26 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
         let Some((start, _)) = times(&tx, &span, &now)? else {
             continue;
         };
-        let through = recorded_turns(&tx, span.opened_event_id)?
-            .iter()
-            .map(|turn| turn.end)
-            .max();
-        let new = span_turns(turns(&transcript.records).complete, start, None, through);
-        if new.is_empty() {
-            continue;
-        }
+        let earlier = recorded_turns(&tx, span.opened_event_id)?;
+        let through = earlier.iter().map(|turn| turn.end).max();
         let (task_id, run_id): (Option<TaskId>, Option<RunId>) = tx.query_row(
             "SELECT task_id, run_id FROM run_events WHERE id=?1",
             [span.opened_event_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        let new = match (&transcript, &run_id) {
+            (Some(transcript), _) => {
+                span_turns(turns(&transcript.records).complete, start, None, through)
+            }
+            (None, Some(run_id)) => {
+                HeadlessSpan::of(&turn_events(&tx, run_id, span.opened_event_id)?, start)
+                    .new_turns(&earlier, None)
+            }
+            (None, None) => continue,
+        };
+        if new.is_empty() {
+            continue;
+        }
         insert_at(
             &tx,
             task_id,
@@ -847,12 +969,14 @@ fn open_spans(
 fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
     let run = conn
         .query_row(
-            "SELECT worktree_path, run_dir, workspace_id FROM task_runs WHERE id=?1",
+            "SELECT worktree_path, run_dir, workspace_id, worker_mode, actual_provider
+               FROM task_runs WHERE id=?1",
             [run_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let (worktree, run_dir, workspace_id) = run.unwrap_or((None, None, None));
+    let (worktree, run_dir, workspace_id, route, provider) =
+        run.unwrap_or((None, None, None, None, None));
     let count = |kind: &str| -> Result<i64> {
         Ok(conn.query_row(
             "SELECT count(*) FROM run_events WHERE run_id=?1 AND kind=?2",
@@ -867,6 +991,8 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         resumes: count(event_kind::RESUME_STARTED)?,
         revises: count(event_kind::REVISE_REQUESTED)? - count(event_kind::REVISE_UNSENT)?,
         goal_ids: Vec::new(),
+        route,
+        provider,
     })
 }
 
@@ -1162,6 +1288,80 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    /// A headless Codex worker's span (ADR-t813-2 decision 7) records its
+    /// turns from its run's turn events while open and at its close (one
+    /// still running counts to the close), and its tokens from the turns'
+    /// `tokens`; no Claude Code transcript is read for it.
+    #[test]
+    fn a_headless_span_takes_its_turns_and_tokens_from_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, task_id, run) = run_queue(dir.path());
+        let conn = &queue.conn;
+        conn.execute(
+            "UPDATE task_runs SET worker_mode='headless', requested_provider='codex', actual_provider='codex'",
+            [],
+        )
+        .unwrap();
+        let reads = READS.with(std::cell::Cell::get);
+        let record = |kind: &str, payload: Value| {
+            event(conn, task_id, Some(&run), kind, payload).unwrap();
+            latest(conn)
+        };
+        let at = |id: i64, millis: i64| {
+            conn.execute(
+                "UPDATE run_events SET created_at=?1 WHERE id=?2",
+                params![millis_text(millis), id],
+            )
+            .unwrap();
+        };
+        let now = rfc3339_millis(&now(conn).unwrap()).unwrap();
+        let base = now - 100_000;
+        let tokens =
+            json!({"input": 10, "output": 5, "cache_read": 20, "cache_creation": 0, "messages": 1});
+        at(record("agent_started", json!({"session_id": null})), base);
+        let opened = of_kind(&queue, SESSION_OPENED);
+        assert_eq!(opened[0].payload["route"], "headless");
+        assert_eq!(opened[0].payload["provider"], "codex");
+        at(record("turn_started", json!({"turn": 1})), base + 1_000);
+        at(
+            record(
+                "turn_finished",
+                json!({"turn": 1, "outcome": "succeeded", "tokens": tokens}),
+            ),
+            base + 31_000,
+        );
+        at(record("turn_started", json!({"turn": 2})), base + 40_000);
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
+        at(
+            record(
+                "turn_finished",
+                json!({"turn": 2, "outcome": "succeeded", "tokens": tokens}),
+            ),
+            base + 60_000,
+        );
+        at(record("turn_started", json!({"turn": 3})), base + 70_000);
+        record("session_exited", json!({"exit_code": 0}));
+
+        let turns = of_kind(&queue, SESSION_TURNS);
+        assert_eq!(turns.len(), 2, "{turns:?}");
+        assert_eq!(turns[0].payload["turns"].as_array().unwrap().len(), 1);
+        // The second turn and the third, still running at the close.
+        assert_eq!(turns[1].payload["turns"].as_array().unwrap().len(), 2);
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+        assert_eq!(closed.payload["active"], "recorded");
+        let active = closed.payload["active_secs"].as_i64().unwrap();
+        assert!((80..=90).contains(&active), "{active}");
+        let expected = json!({"input": 20, "output": 10, "cache_read": 40, "cache_creation": 0, "messages": 2});
+        assert_eq!(closed.payload["tokens"], expected);
+        assert!(closed.payload.get("model").is_none());
+        assert_eq!(
+            of_kind(&queue, "session_exited")[0].payload["tokens"],
+            expected
+        );
+        assert_eq!(READS.with(std::cell::Cell::get), reads);
     }
 
     /// The finished turns of an open span are recorded as they come; the

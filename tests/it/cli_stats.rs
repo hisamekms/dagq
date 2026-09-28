@@ -482,7 +482,18 @@ mod stats {
         // Task 576: nothing recorded the worker's model, effort and trial
         // group at the claim.
         let mut first = runs[0].clone();
-        for key in ["worker_model", "worker_effort", "trial_group"] {
+        // Nor its provider, route, versions or headless turns (ADR-t813-2
+        // decision 7).
+        for key in [
+            "worker_model",
+            "worker_effort",
+            "trial_group",
+            "provider",
+            "route",
+            "codex_version",
+            "provider_version",
+            "turns",
+        ] {
             assert_eq!(
                 first.as_object_mut().unwrap().remove(key),
                 Some(Value::Null)

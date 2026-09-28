@@ -16,6 +16,7 @@
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
+use crate::domain::tokens::TokenUsage;
 use crate::domain::turn::{TurnFailure, TurnResult, TurnSignal, shortened};
 
 /// How long a text of the agent's or a message is kept.
@@ -300,10 +301,37 @@ impl TurnReader for CodexTurnReader {
                 .completed
                 .as_ref()
                 .map_or(Value::Null, |event| event["usage"].clone()),
+            tokens: self
+                .completed
+                .as_ref()
+                .and_then(|event| turn_tokens(&event["usage"])),
+            // `turn.completed` carries the thread's total so far, a
+            // resumed thread's earlier turns included.
+            tokens_cumulative: true,
             permission_denials: std::mem::take(&mut self.denials),
             session_missing: stderr.contains("no rollout found"),
         }
     }
+}
+
+/// The tokens of the thread so far from the `usage` of a `turn.completed`
+/// (the thread's running total, not the turn's own), in the kinds of
+/// Claude's: `input_tokens` counts the cached input too, so
+/// `input` is the rest and `cache_read` is `cached_input_tokens`;
+/// `cache_creation` is `cache_write_input_tokens`; `output` is
+/// `output_tokens`, which `reasoning_output_tokens` is a part of. Codex
+/// gives no cost. `None` when the input and output counts are not numbers.
+fn turn_tokens(usage: &Value) -> Option<TokenUsage> {
+    let count = |key: &str| usage[key].as_i64();
+    let cache_read = count("cached_input_tokens").unwrap_or(0);
+    Some(TokenUsage {
+        input: (count("input_tokens")? - cache_read).max(0),
+        output: count("output_tokens")?,
+        cache_read,
+        cache_creation: count("cache_write_input_tokens").unwrap_or(0),
+        messages: 1,
+        cost_usd: None,
+    })
 }
 
 #[cfg(test)]
@@ -364,6 +392,12 @@ mod tests {
         assert_eq!(result.session_id.as_deref(), Some("th-1"));
         assert!(result.session_created);
         assert_eq!(result.usage, usage);
+        assert_eq!(
+            result.tokens.map(|tokens| tokens.payload()),
+            Some(
+                json!({"input": 10, "output": 5, "cache_read": 20, "cache_creation": 0, "messages": 1})
+            )
+        );
         assert!(result.permission_denials.is_empty());
     }
 
@@ -464,6 +498,8 @@ mod tests {
         let result = reader.finish(Some(&exit(2)), "");
         assert!(result.is_error);
         assert_eq!(result.failure, Some(TurnFailure::Other));
+        // A usage without counts has no tokens.
+        assert_eq!(result.tokens, None);
         // An item error that names no limit is only said.
         let mut reader = CodexTurnReader::default();
         assert_eq!(

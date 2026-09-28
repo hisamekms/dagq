@@ -197,6 +197,25 @@ fn a_headless_run_lands_after_its_first_turn() {
     assert_eq!(finished["num_turns"], 2);
     assert_eq!(finished["permission_denials"], 0);
     assert_eq!(finished["session_created"], true);
+    // The runtime's tokens of the turn, with Claude's cost (ADR-t813-2
+    // decision 7), and the claim's provider and route.
+    assert_eq!(finished["provider"], "claude");
+    assert_eq!(
+        finished["tokens"],
+        json!({"input": 7, "output": 3, "cache_read": 0, "cache_creation": 0,
+               "messages": 1, "cost_usd": 0.01})
+    );
+    let claimed = payloads(&detail, "run_claimed")[0];
+    assert_eq!(claimed["provider"], "claude", "{claimed}");
+    assert_eq!(claimed["worker_mode"], "headless", "{claimed}");
+    // The stub is no versioned install of Claude Code.
+    assert_eq!(claimed["provider_version"], Value::Null, "{claimed}");
+    let worker = payloads(&detail, "session_closed")
+        .into_iter()
+        .find(|span| span["kind"] == "worker")
+        .unwrap();
+    assert_eq!(worker["active"], "recorded", "{worker}");
+    assert_eq!(worker["tokens"], finished["tokens"], "{worker}");
     let marker: Value =
         serde_json::from_str(&fs::read_to_string(run.idle_marker_path().unwrap()).unwrap())
             .unwrap();

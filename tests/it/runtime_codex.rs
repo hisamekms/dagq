@@ -263,16 +263,61 @@ esac"#
     // sandbox is one of the turn's denials.
     let turns = payloads(&detail, "turn_finished");
     assert_eq!(turns.len(), 3, "{turns:?}");
-    for turn in &turns {
+    // Codex's usage is the thread's running total: the stub's grows by the
+    // same amount each turn.
+    for (n, turn) in (1..).zip(&turns) {
         assert_eq!(turn["outcome"], "succeeded", "{turn}");
         assert_eq!(turn["failure"], Value::Null);
         assert_eq!(turn["session_id"], "codex-thread-1");
-        assert_eq!(turn["usage"]["input_tokens"], 11);
-        assert_eq!(turn["usage"]["cached_input_tokens"], 4);
-        assert_eq!(turn["usage"]["reasoning_output_tokens"], 2);
+        assert_eq!(turn["usage"]["input_tokens"], 11 * n);
+        assert_eq!(turn["usage"]["cached_input_tokens"], 4 * n);
+        assert_eq!(turn["usage"]["reasoning_output_tokens"], 2 * n);
+        assert_eq!(turn["tokens_total"]["input"], 7 * n, "{turn}");
     }
     assert_eq!(turns[1]["denied_tools"], json!(["sandbox: touch ~/x"]));
     assert_eq!(turns[2]["message"], "fixed");
+    // Each turn's own, in the runtime's kinds of token (ADR-t813-2
+    // decision 7): what it added to the total, the cached input apart, the
+    // reasoning in the output, no cost.
+    for turn in &turns {
+        assert_eq!(turn["provider"], "codex");
+        assert_eq!(
+            turn["tokens"],
+            json!({"input": 7, "output": 5, "cache_read": 4, "cache_creation": 0, "messages": 1})
+        );
+    }
+    // The claim names the provider, the route and Codex's version.
+    let claimed = payloads(&detail, "run_claimed")[0];
+    assert_eq!(claimed["provider"], "codex", "{claimed}");
+    assert_eq!(claimed["worker_mode"], "headless", "{claimed}");
+    assert_eq!(claimed["codex_version"], "0.46.0", "{claimed}");
+    assert_eq!(claimed["provider_version"], "0.46.0", "{claimed}");
+    // The run's spans take their time and tokens from its turns.
+    let spans: Vec<&Value> = payloads(&detail, "session_closed")
+        .into_iter()
+        .filter(|span| span["kind"] != "review")
+        .collect();
+    assert!(!spans.is_empty());
+    let input: i64 = spans
+        .iter()
+        .map(|span| {
+            assert_eq!(span["active"], "recorded", "{span}");
+            span["tokens"]["input"].as_i64().unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(input, 21, "{spans:?}");
+    // `stats` shows them on the run, and per provider and route.
+    let stats = common::cli::ok(&db, &["stats", "--full"]);
+    let row = &stats["runs"][0];
+    assert_eq!(row["provider"], "codex", "{row}");
+    assert_eq!(row["route"], "headless", "{row}");
+    assert_eq!(row["codex_version"], "0.46.0", "{row}");
+    assert_eq!(row["turns"]["count"], 3, "{row}");
+    assert_eq!(row["tokens"]["input"], 21, "{row}");
+    assert_eq!(row["tokens"]["cache_read"], 12, "{row}");
+    assert_eq!(stats["versions"]["provider"][0]["version"], "codex");
+    assert_eq!(stats["versions"]["route"][0]["version"], "headless");
+    assert_eq!(stats["versions"]["codex"][0]["version"], "0.46.0");
 
     // The rules against pkill / killall are kept out of Git.
     let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();

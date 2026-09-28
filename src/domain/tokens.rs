@@ -31,6 +31,34 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    /// The counts of a [`TokenUsage::payload`]; `None` when it is not an
+    /// object with numeric `input` and `output`.
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        let count = |key: &str| payload.get(key).and_then(Value::as_i64);
+        Some(Self {
+            input: count("input")?,
+            output: count("output")?,
+            cache_read: count("cache_read").unwrap_or(0),
+            cache_creation: count("cache_creation").unwrap_or(0),
+            messages: count("messages").unwrap_or(0),
+            cost_usd: payload.get("cost_usd").and_then(Value::as_f64),
+        })
+    }
+
+    /// What was used after `earlier`, when both are running totals of one
+    /// session (Codex's `turn.completed`): each count less the earlier one,
+    /// never below 0, as one turn without a cost.
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            input: (self.input - earlier.input).max(0),
+            output: (self.output - earlier.output).max(0),
+            cache_read: (self.cache_read - earlier.cache_read).max(0),
+            cache_creation: (self.cache_creation - earlier.cache_creation).max(0),
+            messages: 1,
+            cost_usd: None,
+        }
+    }
+
     /// The `tokens` of a `session_closed`: the counts, and `cost_usd` only
     /// when there is one.
     pub fn payload(&self) -> Value {
@@ -203,6 +231,43 @@ pub fn models_payload(uses: &[ModelUse], payload: &mut Value) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A payload reads back to its counts, and a running total less an
+    /// earlier one is one turn's, never below 0 and without a cost.
+    #[test]
+    fn a_running_total_less_an_earlier_one_is_a_turn() {
+        let total = TokenUsage {
+            input: 30,
+            output: 12,
+            cache_read: 8,
+            cache_creation: 1,
+            messages: 1,
+            cost_usd: Some(0.5),
+        };
+        assert_eq!(
+            TokenUsage::from_payload(&total.payload()),
+            Some(total.clone())
+        );
+        assert_eq!(TokenUsage::from_payload(&json!({"input": 1})), None);
+        assert_eq!(TokenUsage::from_payload(&Value::Null), None);
+        let earlier = TokenUsage {
+            input: 10,
+            output: 20,
+            cache_read: 3,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            total.since(&earlier),
+            TokenUsage {
+                input: 20,
+                output: 0,
+                cache_read: 5,
+                cache_creation: 1,
+                messages: 1,
+                cost_usd: None,
+            }
+        );
+    }
     use super::*;
     use crate::domain::transcript::{Transcript, millis_text};
 

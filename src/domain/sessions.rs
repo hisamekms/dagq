@@ -113,6 +113,31 @@ pub struct SpanContext {
     pub revises: i64,
     /// The goals of the proposal's tasks (a plan review's), ascending.
     pub goal_ids: Vec<i64>,
+    /// The run's worker route (`interactive` / `headless`) and provider,
+    /// which its own sessions' spans carry as `route` and `provider`
+    /// (ADR-t813-2 decision 7): a headless span takes its active time and
+    /// tokens from the run's turns rather than a transcript.
+    pub route: Option<String>,
+    pub provider: Option<String>,
+}
+
+/// The `route` of a headless run's session span.
+pub const HEADLESS_ROUTE: &str = "headless";
+
+impl OpenSpan {
+    /// Whether the span is a headless worker's session (ADR-t813-2
+    /// decision 7).
+    pub fn headless(&self) -> bool {
+        self.payload["route"] == HEADLESS_ROUTE
+    }
+
+    /// Whether its transcript is Claude Code's: every span but one of a
+    /// session of another provider.
+    pub fn claude(&self) -> bool {
+        self.payload["provider"]
+            .as_str()
+            .is_none_or(|provider| provider == "claude")
+    }
 }
 
 /// A span to write: `Close` one that is open, or `Open` a new one with the
@@ -174,6 +199,8 @@ pub fn changes(
                 "transcript_path": null,
                 "attempt": attempt,
                 "workspace_id": (span == WORKER).then_some(&context.workspace_id),
+                "route": context.route,
+                "provider": context.provider,
             })));
             changes
         }
@@ -193,6 +220,8 @@ pub fn changes(
                 "transcript_path": null,
                 "attempt": context.revises,
                 "workspace_id": text("workspace_id"),
+                "route": context.route,
+                "provider": context.provider,
             })));
             changes
         }
@@ -216,6 +245,8 @@ pub fn changes(
                 "transcript_path": null,
                 "attempt": attempt,
                 "workspace_id": (span == WORKER).then_some(&context.workspace_id),
+                "route": context.route,
+                "provider": context.provider,
             })));
             changes
         }
@@ -557,6 +588,43 @@ mod tests {
         assert_eq!(closed_payload["opened_event_id"], 10);
         assert_eq!(closed_payload["kind"], WORKER);
         assert_eq!(closed_payload["session_id"], "run-1");
+    }
+
+    /// A run's own spans carry its route and provider (ADR-t813-2 decision
+    /// 7): a headless one takes its time and tokens from its turns, and
+    /// only Claude's has a Claude Code transcript.
+    #[test]
+    fn a_run_span_carries_the_route_and_provider() {
+        let context = SpanContext {
+            worktree: Some("/wt".into()),
+            route: Some(HEADLESS_ROUTE.into()),
+            provider: Some("codex".into()),
+            ..SpanContext::default()
+        };
+        let started = changes("agent_started", &json!({"session_id": null}), &[], &context);
+        let payload = opened(&started[0]);
+        assert_eq!(payload["route"], HEADLESS_ROUTE);
+        assert_eq!(payload["provider"], "codex");
+        let codex = span(3, payload.clone());
+        assert!(codex.headless() && !codex.claude());
+        let revised = changes(
+            "revise_requested",
+            &json!({}),
+            std::slice::from_ref(&codex),
+            &SpanContext {
+                revises: 1,
+                ..context.clone()
+            },
+        );
+        assert_eq!(opened(&revised[1])["route"], HEADLESS_ROUTE);
+        // An interactive span, and one recorded before either was.
+        let interactive = span(
+            4,
+            json!({"kind": WORKER, "route": "interactive", "provider": "claude"}),
+        );
+        assert!(!interactive.headless() && interactive.claude());
+        let older = span(5, json!({"kind": WORKER}));
+        assert!(!older.headless() && older.claude());
     }
 
     /// A revise withdrawn by `revise_unsent` never reached the session: the

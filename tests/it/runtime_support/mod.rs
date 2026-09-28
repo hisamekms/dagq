@@ -1299,7 +1299,7 @@ pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
 MODE=start; THREAD=; PROMPT=; ROOTS=
 ARGS=
 for arg in "$@"; do ARGS="$ARGS $arg|"; done
-[ "$1" = --version ] && {{ echo "codex-cli stub"; exit 0; }}
+[ "$1" = --version ] && {{ echo "codex-cli 0.46.0"; exit 0; }}
 [ "$1" = exec ] || {{ echo "not exec: $*" >&2; exit 2; }}
 shift
 if [ "$1" = resume ]; then MODE=resume; shift; fi
@@ -1328,8 +1328,8 @@ ENDED=
 say() {{ printf '{{"type":"item.completed","item":{{"id":"m%s","type":"agent_message","text":"%s"}}}}
 ' "$TURN" "$1"; }}
 result() {{
-  printf '{{"type":"turn.completed","usage":{{"input_tokens":11,"cached_input_tokens":4,"output_tokens":5,"reasoning_output_tokens":2}}}}
-'
+  printf '{{"type":"turn.completed","usage":{{"input_tokens":%s,"cached_input_tokens":%s,"output_tokens":%s,"reasoning_output_tokens":%s}}}}
+' $((11 * TURN)) $((4 * TURN)) $((5 * TURN)) $((2 * TURN))
   ENDED=1
 }}
 error() {{ printf '{{"type":"error","message":"%s"}}

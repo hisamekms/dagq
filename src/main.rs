@@ -397,7 +397,8 @@ enum Command {
     /// List the change marks oldest first by when they took effect (ADR-0051 decision 12): the
     /// recorded ones (supervisor start, handoff and stop, `[run.env]` changes, `dagq mark` and
     /// its retractions) and the ones derived from the claims (`derived:dagq_version`,
-    /// `derived:claude_version`, `derived:parallel`, `derived:toolchain`). Reads only.
+    /// `derived:claude_version`, `derived:codex_version`, `derived:parallel`,
+    /// `derived:toolchain`). Reads only.
     Marks {
         /// Event id, `@<unix seconds>` or an RFC 3339 time: only marks after it.
         #[arg(long)]
@@ -1002,7 +1003,7 @@ enum Command {
         #[arg(long = "kind", value_parser = parse_kpi_kind)]
         kinds: Vec<String>,
         /// Also split the runs by these attributes of the claim.
-        #[arg(long, value_parser = ["kind", "build", "parallel", "slot", "load", "toolchain", "claude"])]
+        #[arg(long, value_parser = ["kind", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex"])]
         by: Vec<String>,
         /// A mark's event id or a time to compare before and after, or two windows A..B,C..D.
         #[arg(long)]

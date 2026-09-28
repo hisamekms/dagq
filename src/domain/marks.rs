@@ -355,9 +355,11 @@ fn recorded_label(event: &RunEvent) -> String {
 /// The attributes of `run_claimed` a derived mark is read off, and the
 /// key of the same value on `supervisor_started` (a start that already
 /// marks the change).
-const DERIVED: [(&str, Option<&str>); 4] = [
+const DERIVED: [(&str, Option<&str>); 5] = [
     ("dagq_version", Some("dagq_version")),
     ("claude_version", None),
+    // Recorded only by a supervisor that runs Codex (ADR-t813-2 decision 7).
+    ("codex_version", None),
     ("parallel", Some("parallel")),
     ("toolchain", None),
 ];
@@ -701,6 +703,31 @@ mod tests {
         assert_eq!(listed[0].at, "2026-09-26T00:03:00.000Z");
         assert_eq!(listed[0].detail["claim_event"], json!(4));
         assert_eq!(listed[0].detail["task_id"], json!(4));
+    }
+
+    /// Codex's version is marked like Claude Code's when it changes; a
+    /// claim by a supervisor that runs no Codex records none and is
+    /// skipped (ADR-t813-2 decision 7).
+    #[test]
+    fn a_new_codex_version_is_a_derived_mark() {
+        let with_codex = |codex: Option<&str>| {
+            let mut payload = attributes("v1", 3, Some("1.90.0"));
+            if let Some(codex) = codex {
+                payload["codex_version"] = json!(codex);
+            }
+            payload
+        };
+        let events = vec![
+            claim(1, with_codex(Some("0.45.0")), "2026-09-28T00:00:00.000Z"),
+            claim(2, with_codex(None), "2026-09-28T00:01:00.000Z"),
+            claim(3, with_codex(Some("0.45.0")), "2026-09-28T00:02:00.000Z"),
+            claim(4, with_codex(Some("0.46.0")), "2026-09-28T00:03:00.000Z"),
+        ];
+        let listed = marks(&events, None, None);
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].kind, "derived:codex_version");
+        assert_eq!(listed[0].label, "codex_version 0.45.0 → 0.46.0");
+        assert_eq!(listed[0].detail["claim_event"], json!(4));
     }
 
     #[test]

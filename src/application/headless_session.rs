@@ -34,6 +34,7 @@ use super::{
 use crate::domain::{
     ActorContext, TaskRun, event_kind,
     stall::StallConfig,
+    tokens::TokenUsage,
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSignal,
         exit_path, idle_marker, output_path, pending, request_path, taken_path, turns_dir,
@@ -391,6 +392,7 @@ impl Turns<'_> {
             None => (TurnOutcome::Succeeded, None),
         };
         let exit_code = exit.as_ref().and_then(|exit| exit.code);
+        let (tokens, tokens_total) = self.turn_tokens(&result)?;
         self.queue.record_runtime_event(
             run.id(),
             event_kind::TURN_FINISHED,
@@ -407,6 +409,11 @@ impl Turns<'_> {
                 "duration_ms": result.duration_ms,
                 "cost_usd": result.cost_usd,
                 "usage": result.usage,
+                "provider": run.actual_provider(),
+                // The runtime's kinds of token, which the span sums
+                // (ADR-t813-2 decision 7).
+                "tokens": tokens.as_ref().map(TokenUsage::payload),
+                "tokens_total": tokens_total.as_ref().map(TokenUsage::payload),
                 "permission_denials": result.permission_denials.len(),
                 "denied_tools": result.permission_denials,
             }),
@@ -436,6 +443,37 @@ impl Turns<'_> {
             failure,
             result,
         })
+    }
+
+    /// The turn's own tokens, and the session's running total when the
+    /// provider gives that instead (Codex): the total less the one the
+    /// session's last turn recorded as `tokens_total`, the whole total for
+    /// a session's first (ADR-t813-2 decision 7).
+    fn turn_tokens(
+        &mut self,
+        result: &TurnResult,
+    ) -> Result<(Option<TokenUsage>, Option<TokenUsage>)> {
+        let Some(total) = result.tokens.clone().filter(|_| result.tokens_cumulative) else {
+            return Ok((result.tokens.clone(), None));
+        };
+        let events = self.queue.run_events(self.run.id())?;
+        let earlier = events
+            .iter()
+            .rev()
+            .filter(|e| {
+                e.kind == event_kind::TURN_FINISHED
+                    && result.session_id.is_some()
+                    && e.payload["session_id"].as_str() == result.session_id.as_deref()
+            })
+            .find_map(|e| TokenUsage::from_payload(&e.payload["tokens_total"]));
+        let own = earlier.map_or_else(
+            || TokenUsage {
+                messages: 1,
+                ..total.clone()
+            },
+            |earlier| total.since(&earlier),
+        );
+        Ok((Some(own), Some(total)))
     }
 
     /// Record the session `id` the agent said turn `turn` runs in, when it

@@ -9,17 +9,33 @@ use serde::Serialize;
 
 /// The versions of the host a run is claimed on: Claude Code's (from the
 /// versioned file `--claude` resolves to; null when that path names no
-/// version) and the host's `rustc` (`release` and `host` of `rustc -vV`,
-/// run in the main checkout so its toolchain file applies; null when it
-/// cannot be run).
+/// version), Codex's (of `codex --version` of `--codex`, when the
+/// supervisor runs Codex workers; left out otherwise, ADR-t813-2 decision
+/// 7) and the host's `rustc` (`release` and `host` of `rustc -vV`, run in
+/// the main checkout so its toolchain file applies; null when it cannot be
+/// run).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct HostVersions {
     pub claude_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_version: Option<String>,
     pub rustc_release: Option<String>,
     pub rustc_host: Option<String>,
 }
 
 impl HostVersions {
+    /// The version `codex --version` prints (`codex-cli 0.46.0`): the last
+    /// word of its first line that starts with a digit.
+    pub fn with_codex_version(mut self, output: &str) -> Self {
+        self.codex_version = output.lines().find_map(|line| {
+            line.split_whitespace()
+                .last()
+                .filter(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+                .map(str::to_owned)
+        });
+        self
+    }
+
     /// `release` and `host` of the output of `rustc -vV`.
     pub fn with_rustc_verbose(mut self, output: &str) -> Self {
         let field = |name: &str| {
@@ -180,12 +196,33 @@ mod tests {
         assert_eq!(none, HostVersions::default());
     }
 
+    /// Codex's version is the last word of `codex --version`; it goes on
+    /// the claim only when there is one (ADR-t813-2 decision 7).
+    #[test]
+    fn codex_version_is_read_and_left_out_without_one() {
+        let versions = HostVersions::default().with_codex_version("codex-cli 0.46.0\n");
+        assert_eq!(versions.codex_version.as_deref(), Some("0.46.0"));
+        assert_eq!(
+            serde_json::to_value(&versions).unwrap()["codex_version"],
+            "0.46.0"
+        );
+        let none = HostVersions::default().with_codex_version("WARNING: something\n");
+        assert_eq!(none.codex_version, None);
+        assert!(
+            serde_json::to_value(&none)
+                .unwrap()
+                .get("codex_version")
+                .is_none()
+        );
+    }
+
     #[test]
     fn claim_attributes_flatten_the_host_versions() {
         let attributes = ClaimAttributes {
             dagq_version: "0.5.0-dev+abc".to_owned(),
             host: HostVersions {
                 claude_version: None,
+                codex_version: None,
                 rustc_release: Some("1.90.0".to_owned()),
                 rustc_host: Some("aarch64-apple-darwin".to_owned()),
             },

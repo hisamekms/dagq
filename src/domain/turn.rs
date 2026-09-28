@@ -13,7 +13,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::DomainError;
+use super::{
+    DomainError, RunEvent,
+    event_kind::{TURN_FINISHED, TURN_STARTED},
+    stats::timestamp_millis,
+    tokens::TokenUsage,
+    transcript::Turn,
+};
 
 /// The directory of a run's turns, in its run directory.
 pub const TURNS_DIR: &str = "turns";
@@ -216,6 +222,17 @@ pub struct TurnResult {
     pub usage: Value,
     /// The tools refused a permission, one entry per refusal.
     pub permission_denials: Vec<String>,
+    /// The tokens of the turn in the runtime's own kinds (ADR-t813-2
+    /// decision 7), when the provider's usage could be read: what
+    /// `turn_finished` records as `tokens` and the session span sums.
+    #[serde(skip)]
+    pub tokens: Option<TokenUsage>,
+    /// `tokens` is the running total of the session so far rather than the
+    /// turn's own (Codex's `turn.completed` carries the thread's total):
+    /// the wrapper records the turn's own as what it adds to the total the
+    /// session's last turn recorded.
+    #[serde(skip)]
+    pub tokens_cumulative: bool,
     /// The turn resumed a session the agent does not have (Codex's `no
     /// rollout found`): it did nothing, and a new session is started.
     pub session_missing: bool,
@@ -263,6 +280,83 @@ impl TurnMark {
             failure: turn["failure"].as_str().and_then(|f| f.parse().ok()),
             permission_denials: turn["permission_denials"].as_u64().unwrap_or(0) as usize,
         })
+    }
+}
+
+/// The turns of a headless session span and the tokens they used, from
+/// its run's `turn_started` and `turn_finished` events after it opened
+/// (ADR-t813-2 decision 7): the turns that finished, the start of one still
+/// running, and the `tokens` of the finished turns summed (`messages` is
+/// the number of turns that recorded tokens; `cost_usd` only when each of
+/// them had one). `None` for the tokens when no turn recorded them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeadlessSpan {
+    pub finished: Vec<Turn>,
+    pub running: Option<i64>,
+    pub tokens: Option<TokenUsage>,
+}
+
+impl HeadlessSpan {
+    /// `events` in ascending id; other kinds are skipped. A `turn_finished`
+    /// with no `turn_started` before it (the span opened in the middle of
+    /// the turn) is counted from the span's `start`.
+    pub fn of(events: &[RunEvent], start: i64) -> Self {
+        let mut span = Self::default();
+        let mut tokens = TokenUsage::default();
+        let mut costs = Some(0.0);
+        for event in events {
+            let Some(at) = timestamp_millis(&event.created_at) else {
+                continue;
+            };
+            match event.kind.as_str() {
+                TURN_STARTED => span.running = Some(at.max(start)),
+                TURN_FINISHED => {
+                    let begun = span.running.take().unwrap_or(start);
+                    span.finished.push(Turn {
+                        start: begun,
+                        end: at.max(begun),
+                    });
+                    let used = &event.payload["tokens"];
+                    if !used.is_object() {
+                        continue;
+                    }
+                    let count = |key: &str| used[key].as_i64().unwrap_or(0);
+                    tokens.input += count("input");
+                    tokens.output += count("output");
+                    tokens.cache_read += count("cache_read");
+                    tokens.cache_creation += count("cache_creation");
+                    tokens.messages += 1;
+                    costs = costs.zip(used["cost_usd"].as_f64()).map(|(a, b)| a + b);
+                }
+                _ => {}
+            }
+        }
+        if tokens.messages > 0 {
+            tokens.cost_usd = costs;
+            span.tokens = Some(tokens);
+        }
+        span
+    }
+
+    /// The turns not in `recorded` yet: the finished ones, and the one
+    /// running cut at `now` when given (a span closed on a known end; one
+    /// closed as inferred leaves it out, its end unknown). A turn is new
+    /// when it starts at or after the end of the last one recorded (turns
+    /// do not overlap; one may start in the millisecond the last ended).
+    pub fn new_turns(&self, recorded: &[Turn], now: Option<i64>) -> Vec<Turn> {
+        let through = recorded.iter().map(|turn| turn.end).max();
+        let running = self.running.zip(now).map(|(start, now)| Turn {
+            start,
+            end: now.max(start),
+        });
+        self.finished
+            .iter()
+            .copied()
+            .chain(running)
+            .filter(|turn| {
+                !recorded.contains(turn) && through.is_none_or(|through| turn.start >= through)
+            })
+            .collect()
     }
 }
 
@@ -371,6 +465,95 @@ mod tests {
                 limit_secs: 14400
             }
         );
+    }
+
+    /// A headless span's turns run from each `turn_started` to its
+    /// `turn_finished`, one still running to the close unless it was
+    /// inferred, only those not recorded yet are new, and their
+    /// tokens are summed with the cost only when every turn had one.
+    #[test]
+    fn a_headless_span_sums_its_turns_and_tokens() {
+        let event = |id: i64, kind: &str, secs: i64, payload: Value| RunEvent {
+            id: super::super::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: super::super::transcript::millis_text(secs * 1000),
+            actor: None,
+        };
+        let tokens = |input: i64, cost: Option<f64>| {
+            let mut tokens = json!({"input": input, "output": 2, "cache_read": 3, "cache_creation": 4, "messages": 1});
+            if let Some(cost) = cost {
+                tokens["cost_usd"] = json!(cost);
+            }
+            json!({"turn": 1, "tokens": tokens})
+        };
+        let events = [
+            // Finished before a start was seen: counted from the span's.
+            event(1, TURN_FINISHED, 110, tokens(10, Some(0.5))),
+            event(2, "turn_requested", 115, json!({})),
+            event(3, TURN_STARTED, 120, json!({"turn": 2})),
+            event(4, TURN_FINISHED, 150, tokens(20, Some(0.25))),
+            event(5, TURN_STARTED, 160, json!({"turn": 3})),
+            event(6, TURN_FINISHED, 170, json!({"turn": 3, "tokens": null})),
+            event(7, TURN_STARTED, 200, json!({"turn": 4})),
+        ];
+        let span = HeadlessSpan::of(&events, 100 * 1000);
+        assert_eq!(
+            span.new_turns(&[], Some(230 * 1000)),
+            [
+                Turn {
+                    start: 100_000,
+                    end: 110_000
+                },
+                Turn {
+                    start: 120_000,
+                    end: 150_000
+                },
+                Turn {
+                    start: 160_000,
+                    end: 170_000
+                },
+                Turn {
+                    start: 200_000,
+                    end: 230_000
+                },
+            ]
+        );
+        assert_eq!(span.finished.len(), 3);
+        // Closed as inferred: the running turn's end is unknown.
+        assert_eq!(span.new_turns(&[], None).len(), 3);
+        // What was recorded is not again; a turn that starts in the
+        // millisecond the last recorded one ended is new.
+        let recorded = [span.finished[0], span.finished[1]];
+        assert_eq!(span.new_turns(&recorded, None), [span.finished[2]]);
+        let touching = HeadlessSpan {
+            finished: vec![Turn { start: 0, end: 10 }, Turn { start: 10, end: 20 }],
+            ..HeadlessSpan::default()
+        };
+        assert_eq!(
+            touching.new_turns(&[Turn { start: 0, end: 10 }], None),
+            [Turn { start: 10, end: 20 }]
+        );
+        assert_eq!(
+            span.tokens.as_ref().map(TokenUsage::payload),
+            Some(
+                json!({"input": 30, "output": 4, "cache_read": 6, "cache_creation": 8,
+                        "messages": 2, "cost_usd": 0.75})
+            )
+        );
+        // A turn without a cost leaves the sum without one.
+        let span = HeadlessSpan::of(
+            &[
+                event(1, TURN_FINISHED, 110, tokens(10, Some(0.5))),
+                event(2, TURN_FINISHED, 120, tokens(10, None)),
+            ],
+            0,
+        );
+        assert_eq!(span.tokens.unwrap().cost_usd, None);
+        assert_eq!(HeadlessSpan::of(&[], 0), HeadlessSpan::default());
     }
 
     #[test]

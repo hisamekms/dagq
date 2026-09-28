@@ -316,7 +316,7 @@ pub struct Ports<'a> {
     pub free_space: fn(&Path) -> Option<u64>,
     /// The versions of Claude Code (given `--claude`) and of the host's
     /// `rustc` (run in the given checkout) a claim records (task 197).
-    pub host_versions: fn(&Path, &Path) -> HostVersions,
+    pub host_versions: fn(&Path, Option<&Path>, &Path) -> HostVersions,
     /// Writes the daily KPI reports (ADR-0051 decision 20); `None` writes
     /// none.
     pub reports: Option<ReportPort>,
@@ -762,7 +762,7 @@ struct Supervisor<'a> {
     max_load: Option<f64>,
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
-    host_versions: fn(&Path, &Path) -> HostVersions,
+    host_versions: fn(&Path, Option<&Path>, &Path) -> HostVersions,
     /// Writes the daily KPI reports; `None` writes none.
     reports: Option<ReportPort>,
     /// Records the host's load; `None` records none (task 516).
@@ -1196,7 +1196,13 @@ impl Supervisor<'_> {
             let base = self.repository.main_head()?;
             // Read once per pass: `rustc -vV` takes a moment on a loaded host.
             let host = host.get_or_insert_with(|| {
-                (self.host_versions)(&self.layout.claude, &self.layout.repo_root)
+                // Codex's version only when this supervisor runs Codex.
+                let codex = self
+                    .workers
+                    .iter()
+                    .any(|worker| worker.provider == crate::domain::Provider::Codex)
+                    .then_some(self.layout.codex.as_path());
+                (self.host_versions)(&self.layout.claude, codex, &self.layout.repo_root)
             });
             let attributes = self.claim_attributes(parallel, host.clone());
             let run = match self.queue.claim_for_supervisor_in_order(

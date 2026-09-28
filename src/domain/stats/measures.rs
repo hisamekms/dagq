@@ -63,6 +63,19 @@ pub struct RunLoad {
 pub struct RunMeasures {
     pub dagq_version: Option<String>,
     pub claude_version: Option<String>,
+    /// The worker's provider and route (`interactive` / `headless`, the
+    /// claim's `worker_mode`) the run was claimed with, Codex's version
+    /// when the supervisor ran Codex, and the version of the run's own
+    /// provider (ADR-t813-2 decision 7); null when claimed before they were
+    /// recorded.
+    pub provider: Option<String>,
+    pub route: Option<String>,
+    pub codex_version: Option<String>,
+    pub provider_version: Option<String>,
+    /// Its headless turns: how many finished, how many of them failed, and
+    /// their seconds from `turn_started` to `turn_finished`; null for a run
+    /// without one.
+    pub turns: Option<RunTurns>,
     pub rustc_release: Option<String>,
     pub rustc_host: Option<String>,
     pub claim_parallel: Option<i64>,
@@ -80,6 +93,14 @@ pub struct RunMeasures {
     /// with the class of the failure (task 467), in order; those recorded
     /// before the class was are left out.
     pub verify_failures: Vec<RunVerifyFailure>,
+}
+
+/// The headless turns of a run (ADR-t813-2 decision 7).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RunTurns {
+    pub count: i64,
+    pub failed: i64,
+    pub secs: i64,
 }
 
 /// One failed verification command of a run's `integrate`: its attempt,
@@ -128,6 +149,9 @@ pub(super) struct MeasureTrack {
     verify_sum: f64,
     verify_weight: f64,
     verify_max: Option<f64>,
+    /// When the turn running started (unix milliseconds).
+    turn_started: Option<i64>,
+    turn_millis: i64,
 }
 
 impl MeasureTrack {
@@ -140,6 +164,10 @@ impl MeasureTrack {
                 self.claimed = true;
                 measures.dagq_version = text("dagq_version");
                 measures.claude_version = text("claude_version");
+                measures.provider = text("provider");
+                measures.route = text("worker_mode");
+                measures.codex_version = text("codex_version");
+                measures.provider_version = text("provider_version");
                 measures.rustc_release = text("rustc_release");
                 measures.rustc_host = text("rustc_host");
                 measures.claim_parallel = payload.get("parallel").and_then(Value::as_i64);
@@ -148,6 +176,21 @@ impl MeasureTrack {
                 measures.worker_model = text("model");
                 measures.worker_effort = text("effort");
                 measures.trial_group = text("group");
+            }
+            "turn_started" => self.turn_started = super::timestamp_millis(&event.created_at),
+            "turn_finished" => {
+                let turns = measures.turns.get_or_insert_with(RunTurns::default);
+                turns.count += 1;
+                if payload["outcome"] != "succeeded" {
+                    turns.failed += 1;
+                }
+                if let (Some(start), Some(end)) = (
+                    self.turn_started.take(),
+                    super::timestamp_millis(&event.created_at),
+                ) {
+                    self.turn_millis += (end - start).max(0);
+                }
+                turns.secs = self.turn_millis / 1000;
             }
             "receipt_observed" if !self.receipt_seen => {
                 self.receipt_seen = true;
@@ -204,13 +247,19 @@ pub struct VersionStats {
 }
 
 /// The runs grouped by what they were claimed with (task 197): the build
-/// identifier of `dagq`, Claude Code's version, and the host's `rustc`
-/// (`<release> <host>`), each by name with the runs without one last.
+/// identifier of `dagq`, Claude Code's version, the host's `rustc`
+/// (`<release> <host>`), the worker's provider and route and Codex's
+/// version, each by name with the runs without one last.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Versions {
     pub dagq: Vec<VersionStats>,
     pub claude: Vec<VersionStats>,
     pub rustc: Vec<VersionStats>,
+    /// By the worker's provider, its route and Codex's version
+    /// (ADR-t813-2 decision 7).
+    pub provider: Vec<VersionStats>,
+    pub route: Vec<VersionStats>,
+    pub codex: Vec<VersionStats>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -256,6 +305,9 @@ pub(super) fn versions(runs: &[&RunStats]) -> Versions {
                 )),
             }
         }),
+        provider: by(|run| run.measures.provider.clone()),
+        route: by(|run| run.measures.route.clone()),
+        codex: by(|run| run.measures.codex_version.clone()),
     }
 }
 
@@ -679,6 +731,58 @@ mod tests {
             json!([
                 {"class": "flaky", "count": 3, "runs": 2, "retried": 3, "retry_passed": 1, "retry_failed": 1},
             ])
+        );
+    }
+
+    /// The claim's provider, route and versions, and the run's headless
+    /// turns: how many, the failed ones and their seconds (ADR-t813-2
+    /// decision 7).
+    #[test]
+    fn a_headless_run_has_its_provider_route_and_turns() {
+        let at = |id: i64, kind: &str, secs: i64, payload: Value| RunEvent {
+            created_at: crate::domain::transcript::millis_text(secs * 1000),
+            ..event(id, kind, payload)
+        };
+        let mut track = MeasureTrack::default();
+        for event in [
+            at(
+                1,
+                "run_claimed",
+                0,
+                json!({"provider": "codex", "worker_mode": "headless",
+                                           "claude_version": "2.1.0", "codex_version": "0.46.0",
+                                           "provider_version": "0.46.0"}),
+            ),
+            at(2, "turn_started", 10, json!({"turn": 1})),
+            at(
+                3,
+                "turn_finished",
+                40,
+                json!({"turn": 1, "outcome": "succeeded"}),
+            ),
+            at(4, "turn_started", 50, json!({"turn": 2})),
+            at(
+                5,
+                "turn_finished",
+                55,
+                json!({"turn": 2, "outcome": "failed"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert_eq!(measures.provider.as_deref(), Some("codex"));
+        assert_eq!(measures.route.as_deref(), Some("headless"));
+        assert_eq!(measures.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(measures.codex_version.as_deref(), Some("0.46.0"));
+        assert_eq!(measures.provider_version.as_deref(), Some("0.46.0"));
+        assert_eq!(
+            measures.turns,
+            Some(RunTurns {
+                count: 2,
+                failed: 1,
+                secs: 35
+            })
         );
     }
 

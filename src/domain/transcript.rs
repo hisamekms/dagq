@@ -251,6 +251,9 @@ pub const SESSION_UNKNOWN: &str = "session_unknown";
 /// The span closed in a write transaction whose transcript was not read
 /// before it began: it is not read under the write lock (task 543).
 pub const TRANSCRIPT_NOT_READ_BEFORE: &str = "transcript_not_read_before";
+/// The session is another provider's than Claude Code's (a headless Codex
+/// worker, ADR-t813-2): it has no Claude Code transcript to read.
+pub const TRANSCRIPT_NOT_CLAUDE: &str = "transcript_not_claude";
 
 /// The records of a readable transcript, in file order, and the lines
 /// skipped because they were not JSON.

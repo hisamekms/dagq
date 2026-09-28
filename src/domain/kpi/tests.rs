@@ -35,6 +35,8 @@ struct Run {
     slots: i64,
     load: f64,
     build: &'static str,
+    /// The worker's provider; a Codex run is headless, with Codex 0.46.0.
+    provider: &'static str,
     revise: bool,
     failed: bool,
 }
@@ -50,6 +52,7 @@ impl Run {
             slots: 1,
             load: 2.0,
             build: "b1",
+            provider: "claude",
             revise: false,
             failed: false,
         }
@@ -99,7 +102,16 @@ impl Queue {
             task,
             id,
             "run_claimed",
-            json!({"parallel": run.parallel, "slots": run.slots, "load_avg": run.load, "dagq_version": run.build}),
+            {
+                let mut claimed = json!({"parallel": run.parallel, "slots": run.slots, "load_avg": run.load,
+                                         "dagq_version": run.build, "provider": run.provider,
+                                         "worker_mode": "interactive"});
+                if run.provider == "codex" {
+                    claimed["worker_mode"] = json!("headless");
+                    claimed["codex_version"] = json!("0.46.0");
+                }
+                claimed
+            },
             run.claimed,
         );
         self.push(task, id, "agent_started", json!({}), run.claimed + 10);
@@ -222,6 +234,9 @@ fn periods_start_at_local_midnight_and_monday() {
     assert_eq!("week".parse::<Period>(), Ok(Period::Week));
     assert!("month".parse::<Period>().is_err());
     assert_eq!("load".parse::<Axis>(), Ok(Axis::Load));
+    assert_eq!("provider".parse::<Axis>(), Ok(Axis::Provider));
+    assert_eq!("route".parse::<Axis>(), Ok(Axis::Route));
+    assert_eq!("codex".parse::<Axis>(), Ok(Axis::Codex));
     assert!("host".parse::<Axis>().unwrap_err().contains("toolchain"));
 }
 
@@ -286,6 +301,9 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
         run.parallel = 2 + index % 2;
         run.load = 1.0 + 4.0 * index as f64;
         run.revise = index == 1;
+        if index == 3 {
+            run.provider = "codex";
+        }
         runs.push(run);
     }
     for run in &runs {
@@ -309,7 +327,13 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     let query = KpiQuery {
         last: 2,
         at: Some(Cursor::Time(tuesday * 1000)),
-        by: vec![Axis::Parallel, Axis::Load],
+        by: vec![
+            Axis::Parallel,
+            Axis::Load,
+            Axis::Provider,
+            Axis::Route,
+            Axis::Codex,
+        ],
         ..KpiQuery::default()
     };
     let config = KpiConfig::default();
@@ -359,6 +383,32 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     assert_eq!(measure(tuesday, "landings", "load=mid").value, Some(1.0));
     assert_eq!(measure(tuesday, "landings", "load=high").value, Some(2.0));
     assert_eq!(measure(tuesday, "max_load_avg", ALL).value, Some(13.0));
+    // The worker's provider and route, and Codex's version (ADR-t813-2
+    // decision 7): a run claimed without Codex has none.
+    assert_eq!(
+        measure(tuesday, "landings", "provider=claude").value,
+        Some(3.0)
+    );
+    assert_eq!(
+        measure(tuesday, "landings", "provider=codex").value,
+        Some(1.0)
+    );
+    assert_eq!(
+        measure(tuesday, "landings", "route=interactive").value,
+        Some(3.0)
+    );
+    assert_eq!(
+        measure(tuesday, "landings", "route=headless").value,
+        Some(1.0)
+    );
+    assert_eq!(
+        measure(tuesday, "landings", "codex=0.46.0").value,
+        Some(1.0)
+    );
+    assert_eq!(
+        measure(tuesday, "landings", "codex=unknown").value,
+        Some(3.0)
+    );
     assert_eq!(measure(monday, "failed_rate", ALL).value, Some(0.5));
     assert_eq!(measure(monday, "landings", ALL).value, Some(1.0));
     // Tuesday against Monday: a count is judged, a small spread is not.
