@@ -33,7 +33,7 @@ pub mod work;
 pub use asks::{
     AnsweredAsks, AskStats, AskTimes, AskWaits, Choices, OpenedAsks, ReasonAsks, Spread,
 };
-pub use auto_repairs::{AutoRepairStats, DayCounts, LayerRepairs};
+pub use auto_repairs::{AlertJobs, AutoRepairStats, DayCounts, LayerRepairs, RecoveryJobs};
 pub use conflicts::{ConflictConfig, ConflictConfigReport, ConflictHotspots, History};
 pub use landing::{
     CommandSecs, CommandSummary, LandBreakdown, LandClock, LandPhases, PhaseSummary,
