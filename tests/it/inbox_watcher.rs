@@ -43,24 +43,38 @@ fn now() -> i64 {
 
 /// `watch --role inbox` in the background.
 fn spawn_watch(db: &Path, timeout: &str) -> Child {
+    spawn_watch_with(db, &["--timeout", timeout], Stdio::null())
+}
+
+/// `watch --role inbox --interval 1` with `extra` in the background.
+fn spawn_watch_with(db: &Path, extra: &[&str], stdout: Stdio) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     common::WithoutActor::without_actor_env(&mut command);
     command
         .arg("--db")
         .arg(db)
-        .args([
-            "watch",
-            "--role",
-            "inbox",
-            "--timeout",
-            timeout,
-            "--interval",
-            "1",
-        ])
-        .stdout(Stdio::null())
+        .args(["watch", "--role", "inbox", "--interval", "1"])
+        .args(extra)
+        .stdout(stdout)
         .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+/// Opens a blocked ask, an attention for the inbox.
+fn open_ask(db: &Path) {
+    ok(
+        db,
+        &[
+            "ask",
+            "--kind",
+            "blocked",
+            "--because",
+            "scope",
+            "--question",
+            "stuck?",
+        ],
+    );
 }
 
 /// Polls `status --role inbox` until its watcher satisfies `done`.
@@ -99,18 +113,7 @@ fn status_and_doctor_show_the_watcher_alive_while_it_watches_and_absent_after_th
     let doctor = ok(&db, &["doctor"])["inbox_watcher"].clone();
     assert_eq!(doctor["state"], "alive", "{doctor}");
     assert_eq!(doctor["watching"], 1, "{doctor}");
-    ok(
-        &db,
-        &[
-            "ask",
-            "--kind",
-            "blocked",
-            "--because",
-            "scope",
-            "--question",
-            "stuck?",
-        ],
-    );
+    open_ask(&db);
     {
         let _waiting = common::within(common::STEP_LIMIT, "the watch to return on the ask");
         assert!(child.wait().unwrap().success());
@@ -133,6 +136,94 @@ fn status_and_doctor_show_the_watcher_alive_while_it_watches_and_absent_after_th
     let doctor = past.doctor(&db, false, None).unwrap();
     assert_eq!(doctor["inbox_watcher"]["state"], "absent");
     assert_eq!(doctor["inbox_watcher"], *watcher);
+}
+
+#[test]
+fn a_watch_until_attention_outlasts_empty_reads_and_returns_only_on_an_attention() {
+    let (dir, db) = queue();
+    let cursor = ok(&db, &["status", "--role", "inbox"])["cursor"].clone();
+    let after = cursor.as_i64().unwrap().to_string();
+    let mut child = common::KillOnDrop::new(
+        spawn_watch_with(
+            &db,
+            &["--until-attention", "--after", &after],
+            Stdio::piped(),
+        ),
+        "the watch until attention",
+    );
+    let alive = watcher_until(&db, "the watch to be watching", |w| w["watching"] == 1);
+    assert_eq!(alive["state"], "alive", "{alive}");
+    // Its record says it has no timeout.
+    let records = dagq::infrastructure::inbox_watchers::read(&dir.path().join("inbox-watchers"));
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].timeout_secs, None);
+    // Several intervals of nothing: it is still waiting and still watching.
+    thread::sleep(Duration::from_secs(3));
+    assert!(
+        child.child().try_wait().unwrap().is_none(),
+        "returned with nothing"
+    );
+    assert_eq!(
+        ok(&db, &["status", "--role", "inbox"])["inbox_watcher"]["watching"],
+        1
+    );
+
+    open_ask(&db);
+    let output = {
+        let _waiting = common::within(common::STEP_LIMIT, "the watch to return on the ask");
+        child.wait_with_output().unwrap()
+    };
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let events = value["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{value}");
+    assert_eq!(events[0]["kind"], "ask_opened", "{value}");
+    assert_eq!(value["supervisors_changed"], false);
+    assert!(value["supervisors"].is_array(), "{value}");
+    assert!(value["cursor"].as_i64().unwrap() > cursor.as_i64().unwrap());
+    let ended = dagq::infrastructure::inbox_watchers::read(&dir.path().join("inbox-watchers"));
+    assert!(ended[0].ended_at.is_some(), "{ended:?}");
+}
+
+#[test]
+fn a_watch_until_attention_refuses_a_timeout_and_a_queue_it_cannot_open() {
+    let (_dir, db) = queue();
+    let output = invoke(
+        &db,
+        &[
+            "watch",
+            "--until-attention",
+            "--timeout",
+            "5",
+            "--role",
+            "inbox",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // No queue: it ends at once with the error, never waiting for one.
+    let missing = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let output = invoke(
+        &missing.path().join("queue.db"),
+        &[
+            "watch",
+            "--until-attention",
+            "--role",
+            "inbox",
+            "--interval",
+            "1",
+        ],
+    );
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(error["error"].is_string(), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(30));
 }
 
 #[test]

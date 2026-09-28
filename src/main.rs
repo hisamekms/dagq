@@ -943,14 +943,18 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
-    /// Block until an attention event after the cursor arrives or the supervisors' health changes; returns empty on timeout. Reads only, never integrates.
+    /// Block until an attention event after the cursor arrives or the supervisors' health changes; returns empty on timeout, or with --until-attention only when one came. Reads only, never integrates.
     Watch {
         /// Event id to wait past; defaults to the newest event now.
         #[arg(long)]
         after: Option<i64>,
-        /// Seconds to wait before returning with no events.
-        #[arg(long, default_value_t = 600)]
-        timeout: u64,
+        /// Seconds to wait before returning with no events (default 600).
+        #[arg(long, conflicts_with = "until_attention")]
+        timeout: Option<u64>,
+        /// Wait with no timeout: return only when an attention event arrives or the supervisors'
+        /// health changes. An error reading the queue still ends it (non-zero), never retried.
+        #[arg(long)]
+        until_attention: bool,
         /// Seconds between reads of the queue.
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
@@ -1143,6 +1147,8 @@ enum Command {
 
 /// The session roles attention is addressed to.
 const ROLES: [&str; 2] = ["inbox", "planner"];
+/// The seconds `watch` waits without `--timeout` or `--until-attention`.
+const DEFAULT_WATCH_TIMEOUT_SECS: u64 = 600;
 /// The names of the task priorities (ADR-0040 decision 4), highest first.
 const PRIORITIES: [&str; 5] = ["interrupt", "urgent", "high", "normal", "low"];
 
@@ -2523,13 +2529,15 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Watch {
             after,
             timeout,
+            until_attention,
             interval,
             role: r,
         } => dagq::watch::watch(
             &db,
             &dagq::watch::WatchOptions {
                 after: after.map(EventId::new),
-                timeout: Duration::from_secs(timeout),
+                timeout: (!until_attention)
+                    .then(|| Duration::from_secs(timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS))),
                 interval: Duration::from_secs(interval),
                 role: parse_role(r)?,
             },

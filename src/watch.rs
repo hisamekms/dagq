@@ -244,7 +244,9 @@ pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) 
 pub struct WatchOptions {
     /// Cursor to wait past; `None` is the newest event when `watch` starts.
     pub after: Option<EventId>,
-    pub timeout: Duration,
+    /// How long to wait before returning with no events; `None`
+    /// (`--until-attention`) waits until something comes, however long.
+    pub timeout: Option<Duration>,
     pub interval: Duration,
     /// Only the attention addressed to this role (ADR-0022); `None` is all.
     pub role: Option<SessionRole>,
@@ -255,7 +257,9 @@ pub struct WatchOptions {
 /// `stale`) differs from what it was when `watch` started, reading the queue
 /// every `interval`. With a `role`, only the attention events addressed to
 /// it count, the supervisors' health included. A timeout
-/// returns no events and the cursor unchanged. Never writes and never
+/// returns no events and the cursor unchanged; without one
+/// (`--until-attention`) it returns only when something came. An error
+/// reading the queue ends it at once, never retried. Never writes and never
 /// integrates.
 ///
 /// A `watch --role inbox` also leaves the record of itself that says the
@@ -275,7 +279,9 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
                 clock.now(),
                 now.duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64),
-                i64::try_from(options.timeout.as_secs()).unwrap_or(i64::MAX / 4),
+                options
+                    .timeout
+                    .map(|timeout| i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX / 4)),
                 i64::try_from(options.interval.as_secs()).unwrap_or(i64::MAX / 4),
             )
             .inspect_err(|error| {
@@ -300,7 +306,7 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
         full: false,
         filter: EventFilter::default(),
     };
-    let deadline = Instant::now() + options.timeout;
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
     loop {
         let upto = queue.latest_event_id()?;
         let (events, cursor) = read_events(&queue, &query, upto, options.role)?;
@@ -311,8 +317,8 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
         }
         let changed =
             for_role(options.role) && pulses(&registrations, now, &SystemProcesses) != baseline;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if !events.is_empty() || changed || remaining.is_zero() {
+        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        if !events.is_empty() || changed || remaining.is_some_and(|r| r.is_zero()) {
             let cursor = if events.is_empty() && !changed {
                 after
             } else {
@@ -328,6 +334,6 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
                 "cursor": cursor,
             }));
         }
-        thread::sleep(options.interval.min(remaining));
+        thread::sleep(remaining.map_or(options.interval, |r| options.interval.min(r)));
     }
 }

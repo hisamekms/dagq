@@ -257,3 +257,44 @@ fn late_report(open: &HashMap<u64, Open>) -> Option<String> {
     }
     Some(report)
 }
+
+/// A child the test started that would not exit by itself (a `watch
+/// --until-attention`): killed by its handle when the guard drops (the test
+/// passed or panicked) and, through [`on_timeout`], by its pid when a wait
+/// times out and the process exits without the drops.
+pub struct KillOnDrop {
+    child: Option<process::Child>,
+    _cleanup: Cleanup,
+}
+
+impl KillOnDrop {
+    pub fn new(child: process::Child, what: impl Into<String>) -> Self {
+        let pid = child.id().to_string();
+        let cleanup = on_timeout(STEP_LIMIT, what, move || {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+        });
+        Self {
+            child: Some(child),
+            _cleanup: cleanup,
+        }
+    }
+
+    pub fn child(&mut self) -> &mut process::Child {
+        self.child.as_mut().expect("the child is still held")
+    }
+
+    /// Waits for the child and its output; a timeout still kills it.
+    pub fn wait_with_output(mut self) -> std::io::Result<Output> {
+        let child = self.child.take().expect("the child is still held");
+        child.wait_with_output()
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}

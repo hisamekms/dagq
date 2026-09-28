@@ -55,14 +55,15 @@ pub struct WatcherFile {
 
 impl WatcherFile {
     /// Writes the record of a watch started at `now` (unix seconds, with
-    /// `started_ms` naming the file) and deletes the records last seen more
-    /// than [`PRUNE_AFTER_SECS`] before `now`.
+    /// `started_ms` naming the file; `timeout_secs` is `None` for a watch
+    /// without a timeout) and deletes the records last seen more than
+    /// [`PRUNE_AFTER_SECS`] before `now`.
     pub fn start(
         dir: &Path,
         pid: u32,
         now: i64,
         started_ms: i64,
-        timeout_secs: i64,
+        timeout_secs: Option<i64>,
         interval_secs: i64,
     ) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -147,9 +148,9 @@ mod tests {
         assert!(read(&dir).is_empty());
 
         let now = 10 * PRUNE_AFTER_SECS;
-        let mut old = WatcherFile::start(&dir, 7, 1_000, 1_000_000, 600, 2).unwrap();
+        let mut old = WatcherFile::start(&dir, 7, 1_000, 1_000_000, Some(600), 2).unwrap();
         old.end(1_001).unwrap();
-        let mut file = WatcherFile::start(&dir, 7, now, now * 1000, 600, 2).unwrap();
+        let mut file = WatcherFile::start(&dir, 7, now, now * 1000, Some(600), 2).unwrap();
         // The old record is gone; a pid reused later has its own file.
         assert!(!old.path().exists());
         assert_ne!(old.path(), file.path());
@@ -166,15 +167,16 @@ mod tests {
         assert_eq!(record.ended_at, Some(now + 3));
         assert_eq!(record.heartbeat_at, now + 3);
         assert_eq!(record.pid, 7);
-        assert_eq!((record.timeout_secs, record.interval_secs), (600, 2));
+        assert_eq!((record.timeout_secs, record.interval_secs), (Some(600), 2));
     }
 
     #[test]
     fn a_dropped_watch_writes_its_end() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(DIR);
-        drop(WatcherFile::start(&dir, 9, 100, 100_000, 600, 2).unwrap());
+        drop(WatcherFile::start(&dir, 9, 100, 100_000, None, 2).unwrap());
         assert!(read(&dir)[0].ended_at.is_some());
+        assert_eq!(read(&dir)[0].timeout_secs, None);
         assert_eq!(super::dir(Path::new("queue.db")), PathBuf::from(DIR));
     }
 }

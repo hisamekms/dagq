@@ -8,8 +8,9 @@
 # the attention and asks addressed to that role, and the next cursor) on
 # stdout, which Claude Code adds to the context, so the session re-orients
 # itself after a start, a resume, compaction or /clear. The inbox's output
-# starts with one line telling it to start `watch --role inbox --after
-# <cursor>` in the background as its first move (ADR-t906-1), so that no
+# starts with one line telling it to start `watch --role inbox
+# --until-attention --after <cursor>` in the background as its first move
+# (ADR-t906-1), one command with no timeout and no shell loop, so that no
 # ask waits unseen for want of a watch. A planner's startup and resume
 # print nothing: its initial prompt orients it, and a resume keeps its
 # context. The status comes after one line of text
@@ -59,7 +60,7 @@ if output=$("$launcher" status --role "$role" 2>/dev/null); then
     # The top-level `cursor` of the pretty-printed status.
     cursor=$(printf '%s\n' "$output" | sed -n 's/^  "cursor": \([0-9][0-9]*\),\{0,1\}$/\1/p')
     # Without a cursor (a status of another shape) the watch starts from now.
-    printf 'First move, before anything else: start the watch loop of the dagq-inbox skill (reference/watch.md) with run_in_background from cursor %s, which runs "%s" watch --role inbox%s, unless that loop is still running among this session'"'"'s background tasks; keep one running from then on.\n' "${cursor:-now}" "$launcher" "${cursor:+ --after $cursor}"
+    printf 'First move, before anything else: start the watch of the dagq-inbox skill (reference/watch.md) with run_in_background from cursor %s, the one command "%s" watch --role inbox --until-attention%s with no shell loop around it, unless that watch is still running among this session'"'"'s background tasks; keep one running from then on.\n' "${cursor:-now}" "$launcher" "${cursor:+ --after $cursor}"
   fi
   printf 'This session is the dagq %s (DAGQ_ROLE=%s); follow the dagq-%s skill of the dagq plugin. The queue status for this role (dagq status --role %s); when its language.instruction is set, write for people as it says:\n' "$role" "$role" "$role" "$role"
   printf '%s\n' "$output"

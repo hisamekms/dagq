@@ -169,11 +169,20 @@ fn skills_point_at_their_reference_files() {
     }
     with_reference.sort();
     assert_eq!(with_reference, ["dagq", "dagq-inbox", "dagq-recover"]);
-    // The watch loop never lands a run on its own.
+    // The watch never lands a run on its own, and it is one command with no
+    // timeout, never a shell loop around it (task 943).
     let inbox = fs::read_to_string(plugin_root().join("skills/dagq-inbox/SKILL.md")).unwrap();
-    assert!(inbox.contains("\"$DAGQ\" watch --role inbox --after <cursor>"));
+    assert!(inbox.contains("\"$DAGQ\" watch --role inbox --until-attention --after <cursor>"));
     assert!(inbox.contains("run_in_background"));
     assert!(!inbox.contains("\"$DAGQ\" integrate"));
+    let watch =
+        fs::read_to_string(plugin_root().join("skills/dagq-inbox/reference/watch.md")).unwrap();
+    assert!(watch.contains("\"$DAGQ\" watch --role inbox --until-attention --after <cursor>"));
+    assert!(watch.contains("run_in_background"));
+    for loop_part in ["jq", "while :", "sh -c", "empty timeout"] {
+        assert!(!inbox.contains(loop_part), "dagq-inbox has {loop_part}");
+        assert!(!watch.contains(loop_part), "watch.md has {loop_part}");
+    }
     let review =
         fs::read_to_string(plugin_root().join("skills/dagq-recover/reference/review-by-hand.md"))
             .unwrap();
@@ -804,11 +813,13 @@ fn hook_status(output: &Output, role: &str) -> Value {
             .as_i64()
             .unwrap();
         assert!(
-            line.starts_with("First move, before anything else: start the watch loop"),
+            line.starts_with("First move, before anything else: start the watch of"),
             "{line}"
         );
         assert!(
-            line.contains(&format!("watch --role inbox --after {cursor},")),
+            line.contains(&format!(
+                "watch --role inbox --until-attention --after {cursor} with no shell loop"
+            )),
             "{line}"
         );
     }
@@ -1065,10 +1076,13 @@ fn stop_hook_blocks_only_an_inbox_without_a_watch() {
         .unwrap();
     let reason = control["reason"].as_str().unwrap();
     assert!(
-        reason.contains(&format!("\" watch --role inbox --after {cursor}.")),
+        reason.contains(&format!(
+            "\" watch --role inbox --until-attention --after {cursor}."
+        )),
         "{reason}"
     );
     assert!(reason.contains("run_in_background"), "{reason}");
+    assert!(reason.contains("no shell loop"), "{reason}");
 
     // Once blocked, the next stop goes through; so do the other sessions,
     // and a missing or broken binary or queue.
@@ -1123,15 +1137,14 @@ fn stop_hook_blocks_only_an_inbox_without_a_watch() {
     // A watch running: nothing to say.
     let mut watch = Command::new(binary);
     watch.without_actor_env();
-    let mut watch = watch
+    let watch = watch
         .args([
             "--db",
             db,
             "watch",
             "--role",
             "inbox",
-            "--timeout",
-            "60",
+            "--until-attention",
             "--interval",
             "1",
         ])
@@ -1139,6 +1152,8 @@ fn stop_hook_blocks_only_an_inbox_without_a_watch() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    // It never returns by itself: killed by the guard however the test ends.
+    let _watch = common::KillOnDrop::new(watch, "the watch until attention");
     {
         let _waiting = common::within(common::STEP_LIMIT, "the watch to be watching");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -1155,10 +1170,6 @@ fn stop_hook_blocks_only_an_inbox_without_a_watch() {
         }
     }
     silent(&stop(false, &inbox), "a watch running");
-    // The test's own child, by its handle.
-    watch.kill().unwrap();
-    let _waiting = common::within(common::STEP_LIMIT, "the killed watch to exit");
-    watch.wait().unwrap();
 }
 
 /// `XDG_DATA_HOME` is always pointed away from the developer's real queues.

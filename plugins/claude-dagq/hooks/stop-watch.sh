@@ -7,7 +7,7 @@
 # `watch --role inbox` processes watching now by the freshness of their
 # heartbeat (the grace after a watch returned does not count here: the turn
 # must leave one running). With none, it looks once more a second later (a
-# loop started at the end of the turn may not have written its record yet)
+# watch started at the end of the turn may not have written its record yet)
 # and then prints Claude Code's control JSON {"decision": "block", "reason":
 # ...}, which keeps the session going with the reason, the command that
 # starts the watch from the status's cursor. It blocks at most once in a
@@ -54,8 +54,8 @@ watching || exit 0
 [ "$count" -gt 0 ] && exit 0
 
 cursor=$(printf '%s\n' "$status" | sed -n 's/^  "cursor": \([0-9][0-9]*\),\{0,1\}$/\1/p')
-command="\"$launcher\" watch --role inbox${cursor:+ --after $cursor}"
-reason="No dagq inbox watch is running (status --role inbox: inbox_watcher.watching is 0), so asks and attention would not reach the person. If a watch loop of this session has just returned output you have not handled, handle it and start the next loop from its cursor. Otherwise, before ending the turn, start the watch loop of the dagq-inbox skill (reference/watch.md) with run_in_background from cursor ${cursor:-now}; it runs: $command. Keep one loop only: if one is still running among this session's background tasks, check that it has not failed instead of starting another."
+command="\"$launcher\" watch --role inbox --until-attention${cursor:+ --after $cursor}"
+reason="No dagq inbox watch is running (status --role inbox: inbox_watcher.watching is 0), so asks and attention would not reach the person. If a watch of this session has just returned output you have not handled, handle it and start the next watch from its cursor. Otherwise, before ending the turn, start the watch of the dagq-inbox skill (reference/watch.md) with run_in_background from cursor ${cursor:-now}, as this one command with no shell loop around it: $command. Keep one watch only: if one is still running among this session's background tasks, check that it has not failed instead of starting another."
 # A JSON string: backslashes and double quotes escaped.
 escaped=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
 printf '{"decision": "block", "reason": "%s"}\n' "$escaped"

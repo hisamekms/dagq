@@ -16,7 +16,7 @@ fn watch_role(
         db,
         &WatchOptions {
             after: after.map(EventId::new),
-            timeout,
+            timeout: Some(timeout),
             interval: Duration::from_millis(50),
             role: Some(role),
         },
@@ -296,7 +296,7 @@ fn watch_for(db: &Path, after: Option<i64>, timeout: Duration) -> Value {
         db,
         &WatchOptions {
             after: after.map(EventId::new),
-            timeout,
+            timeout: Some(timeout),
             interval: Duration::from_millis(50),
             role: None,
         },

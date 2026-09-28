@@ -33,7 +33,10 @@ pub struct WatcherRecord {
     pub heartbeat_at: i64,
     #[serde(default)]
     pub ended_at: Option<i64>,
-    pub timeout_secs: i64,
+    /// The watch's `--timeout`; `None` (`null`) for a `--until-attention`
+    /// watch, which has none. A record from before the mode holds a number.
+    #[serde(default)]
+    pub timeout_secs: Option<i64>,
     pub interval_secs: i64,
 }
 
@@ -48,16 +51,18 @@ impl WatcherRecord {
 
     /// Whether the watch is watching at `now`: it has not ended, its
     /// heartbeat is fresh, and it has not outlived its own `--timeout` (a
-    /// watch past its deadline is stuck however fresh its heartbeat).
+    /// watch past its deadline is stuck however fresh its heartbeat). A watch
+    /// without a timeout is judged by its heartbeat alone.
     pub fn watching(&self, now: i64) -> bool {
         let stale = self.stale_after_secs();
         self.ended_at.is_none()
             && now - self.heartbeat_at <= stale
-            && now
-                <= self
+            && self.timeout_secs.is_none_or(|timeout| {
+                now <= self
                     .started_at
-                    .saturating_add(self.timeout_secs.max(0))
+                    .saturating_add(timeout.max(0))
                     .saturating_add(stale)
+            })
     }
 
     /// The last time the watch was seen watching: when it ended, else its
@@ -138,9 +143,58 @@ mod tests {
             started_at,
             heartbeat_at,
             ended_at: None,
-            timeout_secs: 600,
+            timeout_secs: Some(600),
             interval_secs: 2,
         }
+    }
+
+    #[test]
+    fn a_watch_without_a_timeout_is_judged_by_its_heartbeat_alone() {
+        let record = WatcherRecord {
+            timeout_secs: None,
+            ..running(1_000, 1_000)
+        };
+        // Long past any timeout, a fresh heartbeat is watching.
+        let later = 1_000 + 30 * 24 * 3600;
+        let fresh = WatcherRecord {
+            heartbeat_at: later - 16,
+            ..record.clone()
+        };
+        assert!(fresh.watching(later));
+        let watcher = judge(std::slice::from_ref(&fresh), later);
+        assert_eq!(watcher.state, WatcherState::Alive);
+        assert_eq!(watcher.watching, 1);
+        // A heartbeat older than the limit is absent, the process or not.
+        let stale = WatcherRecord {
+            heartbeat_at: later - 17,
+            ..record
+        };
+        let watcher = judge(std::slice::from_ref(&stale), later);
+        assert_eq!(watcher.state, WatcherState::Absent);
+        assert_eq!(watcher.absent_secs, Some(17));
+    }
+
+    #[test]
+    fn records_with_a_timeout_a_null_one_or_none_are_read() {
+        let old: WatcherRecord = serde_json::from_str(
+            r#"{"pid":1,"started_at":10,"heartbeat_at":12,"ended_at":null,"timeout_secs":600,"interval_secs":2}"#,
+        )
+        .unwrap();
+        assert_eq!(old.timeout_secs, Some(600));
+        let until: WatcherRecord = serde_json::from_str(
+            r#"{"pid":1,"started_at":10,"heartbeat_at":12,"timeout_secs":null,"interval_secs":2}"#,
+        )
+        .unwrap();
+        assert_eq!(until.timeout_secs, None);
+        let missing: WatcherRecord = serde_json::from_str(
+            r#"{"pid":1,"started_at":10,"heartbeat_at":12,"interval_secs":2}"#,
+        )
+        .unwrap();
+        assert_eq!(missing.timeout_secs, None);
+        assert_eq!(
+            serde_json::to_value(&until).unwrap()["timeout_secs"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
