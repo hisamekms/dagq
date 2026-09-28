@@ -317,16 +317,24 @@ impl Supervisor<'_> {
             } => {
                 let session = workspace.map(|workspace| SessionRef { workspace, resume });
                 let mut watch = ExitWatch::new(session, AfterExit::Rest { close });
-                watch.requested = requested.then(Instant::now);
                 watch.timed_out = timed_out;
                 watch.exit_asked = exit_asked;
                 watch.exit_for_silence = exit_for_silence;
+                let events = self.queue.run_events(run.id())?;
+                let now = Instant::now();
+                // Never a second /exit; its timeout runs from the recorded
+                // request (or a dialog answered by rule since), not the
+                // takeover (task 894). Without a record it restarts now.
+                if requested {
+                    watch.requested = Some(
+                        self.exit_requested_at(&events, |_| true, now)
+                            .unwrap_or(now),
+                    );
+                }
                 // The retries of the `/exit` are read from the events, as
                 // an adopter reads them (ADR-0047 decision 25).
                 if timed_out {
-                    let events = self.queue.run_events(run.id())?;
                     let history = RunHistory::from_events(&events);
-                    let now = Instant::now();
                     watch.retry = ExitRetry::adopt(&history, |event| self.instant_of(event, now));
                 }
                 Phase::Exiting(watch)

@@ -469,7 +469,8 @@ impl Supervisor<'_> {
     /// process started: after a handoff from its `handoff.json`, after an
     /// adoption from the run's events ([`Self::adopt_resume`]). Nothing is
     /// sent or asked twice: the request only when `message_sent_at` is
-    /// unknown, never a second `/exit` (its timeout restarts now), and a
+    /// unknown, never a second `/exit` (its timeout runs from the recorded
+    /// request, task 894), and a
     /// dialog recorded during the resume is not recorded again
     /// ([`SessionWatch::adopt`]).
     pub(super) fn rebuilt_resume(
@@ -502,18 +503,31 @@ impl Supervisor<'_> {
         // The dialog and the recovery jobs the previous process recorded
         // during this resume carry over, as for an adopted revise: the
         // anchor is the `resume_started` of the attempt (task 743).
-        if let Some(anchor) = self
-            .queue
-            .run_events(run.id())?
+        let events = self.queue.run_events(run.id())?;
+        let anchor = events
             .iter()
             .rfind(|e| {
                 e.kind == event_kind::RESUME_STARTED
                     && e.payload["attempt"].as_u64() == Some(attempt as u64)
             })
-            .map(|e| e.id)
-        {
+            .map(|e| e.id);
+        if let Some(anchor) = anchor {
             live.adopt(&*self.queue, run, anchor)?;
         }
+        // Never a second /exit; its timeout runs from the request this
+        // resume recorded (or a dialog answered by rule since), not the
+        // takeover (task 894). Without a record it restarts now.
+        let exit_requested = exit_requested.then(|| {
+            self.exit_requested_at(
+                &events,
+                |e| {
+                    anchor.is_none_or(|anchor| e.id > anchor)
+                        && e.payload["resume_attempt"].as_u64() == Some(attempt as u64)
+                },
+                now,
+            )
+            .unwrap_or(now)
+        });
         Ok(ResumeWatch {
             live,
             stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
@@ -536,8 +550,7 @@ impl Supervisor<'_> {
             // Whether the session took the request is not checked again, as
             // for an adopted revise request.
             start: None,
-            // Never a second /exit; its timeout restarts now.
-            exit_requested: exit_requested.then_some(now),
+            exit_requested,
             // Whether that /exit was typed is not carried over: its
             // "Background work is running" dialog is left to the stuck_exit
             // ask (ADR-0047 decision 29).

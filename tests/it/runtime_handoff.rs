@@ -1,4 +1,5 @@
 //! Runtime tests: The handoff of a supervisor to the next process.
+use crate::runtime_adopt::backdate_event;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
@@ -211,6 +212,116 @@ fn a_handoff_while_a_rejected_run_waits_for_its_exit_sends_no_second_exit() {
     let kinds = event_kinds(&detail);
     assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
     assert!(!kinds.contains(&"run_adopted"), "{kinds:?}");
+}
+
+/// The `/exit` carried over in `handoff.json` keeps the time already
+/// waited (task 894): requested 120 seconds before the takeover with an
+/// exit timeout of 60 seconds, the next process records
+/// `exit_request_timed_out` without waiting the timeout again, and sends
+/// no second `/exit`.
+#[test]
+fn a_handoff_while_a_run_waits_for_its_exit_times_it_from_the_recorded_request() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "commit work; printf 'scratch\\n' > untracked.txt; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"
+        ),
+    );
+    let exit_timeout = Duration::from_secs(60);
+    backend.exit_timeout = exit_timeout;
+    let backend = Arc::new(backend);
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_requested")
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(written["phase"], "exit");
+    assert_eq!(written["requested"], true);
+    backdate_event(&db, &run, "exit_requested", 120);
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_request_timed_out")
+    });
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let at = |kind: &str| {
+        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
+        dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
+    };
+    let waited = Duration::from_millis(
+        u64::try_from(at("exit_request_timed_out") - at("supervisor_handed_off")).unwrap(),
+    );
+    assert!(
+        waited < exit_timeout,
+        "timed out {waited:?} after the handoff"
+    );
+    release_held_session(run.run_dir().unwrap());
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "failed");
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
+    assert!(!kinds.contains(&"run_adopted"), "{kinds:?}");
+}
+
+/// A `stuck_exit` recovery job that answered the dialog holding the `/exit`
+/// back gave it its timeout again: carried over in `handoff.json`, the
+/// timeout runs from that repair, not from the request 120 seconds ago
+/// (task 894), so the next process records no `exit_request_timed_out` at
+/// once.
+#[test]
+fn a_handoff_after_a_recovery_repair_of_the_exit_times_it_from_the_repair() {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "commit work; printf 'scratch\\n' > untracked.txt; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"
+        ),
+    );
+    backend.exit_timeout = Duration::from_secs(60);
+    let backend = Arc::new(backend);
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_requested")
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let snapshot = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    backdate_event(&db, &run, "exit_requested", 120);
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::AutoRepaired,
+            json!({"layer": "recovery", "repair": "answer_known_dialog", "alert": "stuck_exit", "attempt": 1}),
+        )
+        .unwrap();
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    wait_until(&db, Duration::from_secs(30), |_| !snapshot.exists());
+    // Many ticks of the next process.
+    thread::sleep(Duration::from_secs(2));
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(!kinds.contains(&"exit_request_timed_out"), "{kinds:?}");
+    release_held_session(run.run_dir().unwrap());
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "failed");
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
 }
 
 /// A handoff while a resumed session resolves a conflict carries the

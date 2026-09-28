@@ -174,7 +174,7 @@ pub(super) fn answer_send_dialog(
 pub(super) const DIALOG_ANSWERED: &str = "dialog_answered";
 
 /// `auto_repaired`'s `repair` of a dialog a recovery job's verdict answered.
-const RECOVERY_DIALOG_ANSWERED: &str = "answer_known_dialog";
+pub(super) const RECOVERY_DIALOG_ANSWERED: &str = "answer_known_dialog";
 
 /// Whether `dialog` was answered or recorded unanswered since the last
 /// event that began a stage.

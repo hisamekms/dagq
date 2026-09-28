@@ -208,16 +208,7 @@ impl Supervisor<'_> {
                     self.files.is_file(&receipt_path) && history.has(event_kind::RECEIPT_OBSERVED);
                 let now = Instant::now();
                 let since = |event: &RunEvent| self.instant_of(event, now);
-                let exit_requested = history.last(event_kind::EXIT_REQUESTED).map(|requested| {
-                    // A known dialog answered by rule gave the `/exit` its
-                    // timeout again (ADR-0047 decision 29).
-                    let answered = history.events().iter().rev().find(|e| {
-                        e.id > requested.id
-                            && e.kind == event_kind::AUTO_REPAIRED
-                            && e.payload["repair"] == DIALOG_ANSWERED
-                    });
-                    since(answered.unwrap_or(requested))
-                });
+                let exit_requested = self.exit_requested_at(&events, |_| true, now);
                 // Only the latest request's timeout and ask count: a run
                 // resumed and stuck again is asked again (task 240).
                 let exit_timed_out = history.latest_exit_timed_out();
@@ -605,6 +596,33 @@ impl Supervisor<'_> {
             .duration_since(recorded_at(event))
             .unwrap_or_default();
         now.checked_sub(ago).unwrap_or(now)
+    }
+    /// The instant from which the `/exit`'s timeout runs, on the monotonic
+    /// clock whose `now` is `now`: the last `exit_requested` of `events`
+    /// that `of` keeps, or the last restart of its timeout since: a known
+    /// dialog answered by rule (ADR-0047 decision 29), or a `stuck_exit`
+    /// recovery job that answered the dialog or stopped the processes
+    /// holding the `/exit` back. `None` when no such request was recorded.
+    /// A takeover keeps the time already waited (tasks 879 and 894).
+    pub(super) fn exit_requested_at(
+        &self,
+        events: &[RunEvent],
+        of: impl Fn(&RunEvent) -> bool,
+        now: Instant,
+    ) -> Option<Instant> {
+        let requested = events
+            .iter()
+            .rfind(|e| e.kind == event_kind::EXIT_REQUESTED && of(e))?;
+        let restarted = events.iter().rev().find(|e| {
+            e.id > requested.id
+                && e.kind == event_kind::AUTO_REPAIRED
+                && (e.payload["repair"] == DIALOG_ANSWERED
+                    || e.payload["alert"] == RecoveryAlert::StuckExit.as_str()
+                        && [RECOVERY_DIALOG_ANSWERED, "stop_processes"]
+                            .iter()
+                            .any(|repair| e.payload["repair"] == *repair))
+        });
+        Some(self.instant_of(restarted.unwrap_or(requested), now))
     }
 }
 

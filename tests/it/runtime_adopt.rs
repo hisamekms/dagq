@@ -966,7 +966,7 @@ fn adopted_wait_after_the_receipt_runs_from_the_recorded_receipt() {
 
 /// Move the latest `kind` event of `run` `seconds` into the past, as if an
 /// earlier supervisor recorded it then.
-fn backdate_event(db: &Path, run: &TaskRun, kind: &str, seconds: i64) {
+pub(crate) fn backdate_event(db: &Path, run: &TaskRun, kind: &str, seconds: i64) {
     Connection::open(db)
         .unwrap()
         .execute(
