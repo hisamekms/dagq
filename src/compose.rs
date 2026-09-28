@@ -1005,6 +1005,8 @@ impl OneShot {
             }
         };
         report["schema"] = serde_json::to_value(schema)?;
+        // The resource broker's podman and last recorded state (ADR-t827-3).
+        report["broker"] = doctor_broker(db);
         // The host's `[update]`, with what was taken as its default
         // (ADR-t618-1 decision 3).
         report["release_update"] = serde_json::to_value(host_update(db))?;
@@ -2459,4 +2461,220 @@ pub fn marks(
 ) -> Result<Value> {
     let marks = crate::domain::marks::marks(&queue.all_events()?, since, until);
     Ok(json!({ "marks": marks }))
+}
+
+/// What `dagq broker start` is given.
+#[derive(Debug, Clone, Default)]
+pub struct BrokerStartOptions {
+    /// A dagq checkout to build the image from; else the checkout this
+    /// binary was built from, else the working directory's main checkout.
+    pub source: Option<PathBuf>,
+    /// The port on `127.0.0.1`; else the one the queue used last, else a
+    /// free one.
+    pub port: Option<u16>,
+    /// The podman executable; else `podman` on `PATH`.
+    pub podman: Option<PathBuf>,
+    /// The working directory, for the source's fallback.
+    pub cwd: PathBuf,
+}
+
+fn broker_container(
+    location: &QueueLocation,
+    port: u16,
+) -> std::result::Result<
+    crate::application::broker::ContainerSpec,
+    crate::application::broker::BrokerFailure,
+> {
+    use crate::application::broker::{
+        BrokerFailure, ContainerLimits, ContainerSpec, FailureCode, MACHINE, container_name,
+        image_name,
+    };
+    let git_common_dir = location.git_common_dir.clone().ok_or_else(|| {
+        BrokerFailure::new(
+            FailureCode::RepositoryUnknown,
+            "run from inside the repository the queue belongs to: the broker mounts its Git common dir",
+        )
+    })?;
+    Ok(ContainerSpec {
+        machine: MACHINE.to_owned(),
+        name: container_name(&location.hash()),
+        image: image_name(crate::VERSION),
+        host_port: port,
+        queue_dir: location.queue_dir.clone(),
+        runs_dir: location.runs_dir.clone(),
+        git_common_dir,
+        limits: ContainerLimits::default(),
+    })
+}
+
+/// `dagq broker start`: make the queue's broker run in dagq's Podman
+/// machine and answer health on `127.0.0.1` ([`crate::application::broker::start`]).
+/// The queue's lock keeps two starts of one queue apart; the machine has
+/// its own host-wide lock. A failure is recorded in `state.json` and
+/// returned as the [`crate::application::broker::BrokerFailure`].
+pub fn broker_start(location: &QueueLocation, options: &BrokerStartOptions) -> Result<Value> {
+    use crate::application::broker::{
+        self as broker, BrokerFailure, FailureCode, HEALTH_TIMEOUT, HostLock, MachineSpec,
+    };
+    use crate::infrastructure::broker_podman::{
+        BrokerState, CheckoutSource, FileLock, HttpHealth, PodmanCli, free_port, tokens_active,
+    };
+    let podman = PodmanCli::resolve(options.podman.as_deref())?;
+    let queue_dir = &location.queue_dir;
+    let _queue = FileLock::queue(queue_dir).hold()?;
+    let mut state = BrokerState::read(queue_dir);
+    let port = match options.port.or(state.port) {
+        Some(port) => port,
+        None => free_port()?,
+    };
+    let container = broker_container(location, port)?;
+    let source = match &options.source {
+        Some(checkout) => CheckoutSource {
+            checkout: checkout.clone(),
+        },
+        None => CheckoutSource::of_this_build()
+            .or_else(|| {
+                main_checkout_of(&options.cwd)
+                    .ok()
+                    .filter(|checkout| CheckoutSource::is_source(checkout))
+                    .map(|checkout| CheckoutSource { checkout })
+            })
+            .ok_or_else(|| {
+                BrokerFailure::new(
+                    FailureCode::ImageSourceMissing,
+                    "no dagq checkout to build the broker's image from: pass --source",
+                )
+            })?,
+    };
+    // What the container mounts must exist before podman mounts it.
+    crate::infrastructure::broker_token::ensure_key(queue_dir)?;
+    for dir in [
+        location.runs_dir.clone(),
+        container.active(),
+        container.audit(),
+        container.git_common_dir.join("hooks"),
+    ] {
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let machine = MachineSpec::default();
+    let host_lock = FileLock::machine(&data_home()?);
+    let health = HttpHealth::default();
+    let ports = broker::Ports {
+        podman: &podman,
+        host_lock: &host_lock,
+        health: &health,
+    };
+    let scratch = broker::broker_dir(queue_dir).join("build-context");
+    let started = broker::start(
+        &ports,
+        &broker::StartRequest {
+            machine: &machine,
+            container: &container,
+            source: &source,
+            scratch: &scratch,
+            in_use: tokens_active(queue_dir),
+            health_timeout: HEALTH_TIMEOUT,
+            health_interval: Duration::from_millis(500),
+        },
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+    state.port = Some(port);
+    state.container = Some(container.name.clone());
+    // A container kept for the runs that still hold tokens runs the image
+    // recorded before.
+    if !matches!(&started, Ok(report) if report.container_outcome.kept_stale) {
+        state.image = Some(container.image.clone());
+    }
+    state.state = Some(match &started {
+        Ok(_) => "running".to_owned(),
+        Err(failure) => failure.code.as_str().to_owned(),
+    });
+    state.write(queue_dir)?;
+    let report = started?;
+    Ok(json!({
+        "state": "running",
+        "machine": machine,
+        "start": report,
+        "url": format!("http://127.0.0.1:{port}"),
+    }))
+}
+
+/// `dagq broker stop`: stop the queue's container, then dagq's machine when
+/// no container runs on it.
+pub fn broker_stop(location: &QueueLocation, podman: Option<&Path>) -> Result<Value> {
+    use crate::application::broker::{self as broker, HostLock, MACHINE, container_name};
+    use crate::infrastructure::broker_podman::{BrokerState, FileLock, HttpHealth, PodmanCli};
+    let podman = PodmanCli::resolve(podman)?;
+    let queue_dir = &location.queue_dir;
+    let _queue = FileLock::queue(queue_dir).hold()?;
+    let host_lock = FileLock::machine(&data_home()?);
+    let health = HttpHealth::default();
+    let ports = broker::Ports {
+        podman: &podman,
+        host_lock: &host_lock,
+        health: &health,
+    };
+    let container = container_name(&location.hash());
+    let report = broker::stop(&ports, MACHINE, &container)?;
+    let mut state = BrokerState::read(queue_dir);
+    state.container = Some(container);
+    state.state = Some("stopped".to_owned());
+    state.write(queue_dir)?;
+    Ok(json!({"state": "stopped", "stop": report}))
+}
+
+/// `dagq broker status`: the machine, the image, the container and the
+/// health, read without changing anything. No podman is a state
+/// (`podman_missing`), not an error.
+pub fn broker_status(location: &QueueLocation, podman: Option<&Path>) -> Result<Value> {
+    use crate::application::broker;
+    use crate::infrastructure::broker_podman::{BrokerState, FileLock, HttpHealth, PodmanCli};
+    let state = BrokerState::read(&location.queue_dir);
+    let podman = match PodmanCli::resolve(podman) {
+        Ok(podman) => podman,
+        Err(failure) => {
+            return Ok(json!({
+                "state": failure.code.as_str(),
+                "error": failure.to_json(),
+                "recorded": state,
+            }));
+        }
+    };
+    let container = match broker_container(location, state.port.unwrap_or(0)) {
+        Ok(container) => container,
+        Err(failure) => {
+            return Ok(json!({
+                "state": failure.code.as_str(),
+                "error": failure.to_json(),
+                "recorded": state,
+            }));
+        }
+    };
+    let host_lock = FileLock::machine(&data_home()?);
+    let health = HttpHealth::default();
+    let ports = broker::Ports {
+        podman: &podman,
+        host_lock: &host_lock,
+        health: &health,
+    };
+    let report = broker::status(&ports, &container, state.port);
+    let mut value = serde_json::to_value(report)?;
+    value["podman"] = json!(podman.executable);
+    value["recorded"] = serde_json::to_value(state)?;
+    Ok(value)
+}
+
+/// The `broker` of `doctor`: the podman executable (or why there is none)
+/// and what `dagq broker` last recorded. It runs no podman command.
+fn doctor_broker(db: &Path) -> Value {
+    use crate::infrastructure::broker_podman::{BrokerState, PodmanCli};
+    let queue_dir = db.parent().unwrap_or(Path::new("."));
+    let podman = PodmanCli::resolve(None);
+    json!({
+        "mode": "disabled",
+        "podman": podman.as_ref().ok().map(|podman| &podman.executable),
+        "error": podman.as_ref().err().map(|failure| failure.to_json()),
+        "machine": crate::application::broker::MACHINE,
+        "recorded": BrokerState::read(queue_dir),
+    })
 }

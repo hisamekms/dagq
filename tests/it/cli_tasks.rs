@@ -95,6 +95,21 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
                 d2.is_some_and(|value| value.get("tala").is_some()),
                 "doctor reports d2"
             );
+            // Where podman resolves depends on the host's PATH too
+            // (ADR-t827-3); a fresh queue's broker is disabled and has
+            // recorded nothing.
+            let broker = report.as_object_mut().unwrap().remove("broker");
+            let broker = broker.expect("doctor reports the broker");
+            assert_eq!(broker["mode"], "disabled", "{broker}");
+            assert_eq!(broker["machine"], "dagq", "{broker}");
+            assert!(
+                broker["podman"].is_string() || broker["error"]["code"] == "podman_missing",
+                "{broker}"
+            );
+            assert_eq!(
+                broker["recorded"],
+                serde_json::json!({"port": null, "container": null, "image": null, "state": null})
+            );
             // Where `claude` and `codex` resolve depends on the host's PATH
             // too (ADR-t813-2); only which providers and modes are checked.
             let providers = report.as_object_mut().unwrap().remove("providers");

@@ -1060,6 +1060,11 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// The queue's resource broker in dagq's own Podman machine: status, start, stop.
+    Broker {
+        #[command(subcommand)]
+        command: BrokerCommand,
+    },
     /// Bind the queue to the repository containing the working directory (or
     /// --repo) after the repository moved; the one command that changes the
     /// binding. Refused while a supervisor runs. Pass --db for a queue still
@@ -1208,6 +1213,38 @@ enum FindingCommand {
 }
 
 #[derive(Subcommand)]
+enum BrokerCommand {
+    /// Report dagq's Podman machine, the broker's image, the queue's container and its health on
+    /// 127.0.0.1, without changing anything.
+    Status {
+        /// podman executable; defaults to podman on PATH.
+        #[arg(long)]
+        podman: Option<PathBuf>,
+    },
+    /// Make the queue's broker run: init and start dagq's own Podman machine with the fewest
+    /// resources when needed (never another machine), build the image when missing, run the
+    /// container publishing on 127.0.0.1 only, and wait for its health. Idempotent.
+    Start {
+        /// dagq checkout to build the image from; defaults to the checkout this binary was built
+        /// from, else the working directory's main checkout.
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Port on 127.0.0.1; defaults to the queue's last one, else a free one.
+        #[arg(long)]
+        port: Option<u16>,
+        /// podman executable; defaults to podman on PATH.
+        #[arg(long)]
+        podman: Option<PathBuf>,
+    },
+    /// Stop the queue's broker container, then dagq's machine when no container runs on it.
+    Stop {
+        /// podman executable; defaults to podman on PATH.
+        #[arg(long)]
+        podman: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AskCommand {
     /// Mark an answered ask read. An open ask is withdrawn by answering it first.
     Close { id: i64 },
@@ -1343,6 +1380,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Kpi { .. }
         | Command::Forecast { .. }
         | Command::Doctor { .. }
+        | Command::Broker {
+            command: BrokerCommand::Status { .. },
+        }
         | Command::Notes { .. }
         | Command::Marks { .. }
         | Command::Findings { .. }
@@ -1368,6 +1408,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::ReleaseUpdate { .. }
         | Command::Up { .. }
         | Command::Down { .. }
+        | Command::Broker {
+            command: BrokerCommand::Start { .. } | BrokerCommand::Stop { .. },
+        }
         | Command::Plan { .. }
         | Command::Supervise { .. }
         | Command::Observe { history: false, .. }
@@ -1522,6 +1565,9 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::AutoUpdate { .. } | Command::ReleaseUpdate { .. } => Operation::AutoUpdate,
         Command::Up { .. } => Operation::Up,
         Command::Down { .. } => Operation::Down,
+        Command::Broker {
+            command: BrokerCommand::Start { .. } | BrokerCommand::Stop { .. },
+        } => Operation::Broker,
         Command::Plan { .. } => Operation::Plan,
         Command::Supervise { .. } => Operation::Supervise,
         Command::Observe { history: false, .. } => Operation::Observe,
@@ -1645,6 +1691,10 @@ fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
 /// (`denied`: the role, the capability and why), and keeps the message the
 /// observer and the headless jobs always got.
 fn error_json(error: &anyhow::Error) -> Value {
+    // A broker step's failure carries its code (ADR-t827-3).
+    if let Some(failure) = error.downcast_ref::<dagq::application::broker::BrokerFailure>() {
+        return json!({"error": format!("{error:#}"), "broker": failure.to_json()});
+    }
     let Some(denied) = error.downcast_ref::<AuthorizationError>() else {
         return json!({"error": format!("{error:#}")});
     };
@@ -1855,6 +1905,30 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::Doctor { full } = cli.command {
         return one_shot.doctor(&db, full, common_dir.as_deref());
     }
+    // The broker's container needs no queue state, only its paths.
+    if let Command::Broker { command } = cli.command {
+        return match command {
+            BrokerCommand::Status { podman } => {
+                dagq::compose::broker_status(&location, podman.as_deref())
+            }
+            BrokerCommand::Start {
+                source,
+                port,
+                podman,
+            } => dagq::compose::broker_start(
+                &location,
+                &dagq::compose::BrokerStartOptions {
+                    source,
+                    port,
+                    podman,
+                    cwd: cwd.clone(),
+                },
+            ),
+            BrokerCommand::Stop { podman } => {
+                dagq::compose::broker_stop(&location, podman.as_deref())
+            }
+        };
+    }
     // `report` and `graph --out` write files but no queue state.
     let mut queue = if reads_only(&cli.command)
         || matches!(cli.command, Command::Report { .. } | Command::Graph { .. })
@@ -1900,7 +1974,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Rebind { .. }
         | Command::Migrate { .. }
         | Command::Install { .. }
-        | Command::Doctor { .. } => {
+        | Command::Doctor { .. }
+        | Command::Broker { .. } => {
             unreachable!()
         }
         Command::Add {
@@ -3219,6 +3294,8 @@ mod tests {
             ),
             ("up", &[]),
             ("down", &[]),
+            ("broker start", &[]),
+            ("broker stop", &[]),
             ("plan", &[]),
             ("supervise", &[]),
             ("integrate", &["1"]),

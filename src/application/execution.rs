@@ -166,6 +166,8 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("auto-update", &[C::BinaryInstall]),
     ("up", &[C::ServiceLifecycle]),
     ("down", &[C::ServiceLifecycle]),
+    ("broker start", &[C::ServiceLifecycle]),
+    ("broker stop", &[C::ServiceLifecycle]),
     ("plan", &[C::PlannerOpen]),
     ("supervise", &[C::Supervise]),
     ("integrate", &[C::IntegrationRequest]),

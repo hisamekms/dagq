@@ -8,6 +8,7 @@
 
 pub mod actor_executor;
 pub mod ask;
+pub mod broker;
 pub mod commands;
 pub mod diagram;
 pub mod execution;

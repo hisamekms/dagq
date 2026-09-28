@@ -41,6 +41,9 @@ pub enum Operation {
     AutoUpdate,
     Up,
     Down,
+    /// `broker start` and `broker stop`: the resource broker's container
+    /// and dagq's Podman machine, with the service's capability.
+    Broker,
     Plan,
     /// The supervisor's loop, started by `up` (in its workspace or by
     /// launchd), by a person, or by a supervisor handing off to itself.
@@ -68,7 +71,7 @@ impl Operation {
         match self {
             Self::Init | Self::Migrate | Self::Rebind => (C::QueueAdmin, Resource::Queue),
             Self::Install | Self::AutoUpdate => (C::BinaryInstall, Resource::Queue),
-            Self::Up | Self::Down => (C::ServiceLifecycle, Resource::Queue),
+            Self::Up | Self::Down | Self::Broker => (C::ServiceLifecycle, Resource::Queue),
             Self::Plan => (C::PlannerOpen, Resource::Queue),
             Self::Supervise => (C::Supervise, Resource::Queue),
             Self::Observe => (C::ObserveRun, Resource::Queue),
@@ -142,6 +145,7 @@ mod tests {
             Operation::AutoUpdate,
             Operation::Up,
             Operation::Down,
+            Operation::Broker,
             Operation::Plan,
             Operation::Supervise,
             Operation::Observe,
@@ -197,6 +201,7 @@ mod tests {
         for operation in [
             Operation::Up,
             Operation::Down,
+            Operation::Broker,
             Operation::Install,
             Operation::AutoUpdate,
             Operation::Init,

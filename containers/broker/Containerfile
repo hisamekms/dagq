@@ -1,0 +1,31 @@
+# The image of the dagq resource broker (docs/design/broker.md "image",
+# ADR-t827-3 decision 8). dagq stages the build context
+# (src/infrastructure/broker_podman.rs `stage_context`): this file, the
+# sources of dagq-broker-protocol and dagq-broker, Cargo.lock, and a
+# workspace manifest narrowed to those two crates. It builds in dagq's own
+# Podman machine with `--build-arg RUST_VERSION` (from rust-toolchain.toml)
+# and `--build-arg CARGO_BUILD_JOBS=1` (the machine is small).
+
+ARG RUST_VERSION=1.98.1
+
+FROM docker.io/library/rust:${RUST_VERSION}-alpine AS build
+ARG CARGO_BUILD_JOBS=1
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY . .
+# No --locked: Cargo.lock is the whole workspace's, and only the lines of
+# the packages this narrowed workspace does not use go; the versions of the
+# ones it uses stay as locked.
+RUN cargo build --release -p dagq-broker \
+ && install -m 0755 target/release/dagq-broker /dagq-broker
+
+# The run stage: the broker and git only, no language toolchain
+# (ADR-t827-3 decision 9), and a non-root user. `podman run --userns=keep-id`
+# maps the host user's uid over it so the mounted files' owner matches.
+FROM docker.io/library/alpine:3
+RUN apk add --no-cache git \
+ && adduser -D -H -u 10001 broker
+COPY --from=build /dagq-broker /usr/local/bin/dagq-broker
+USER 10001
+EXPOSE 8750
+ENTRYPOINT ["/usr/local/bin/dagq-broker"]

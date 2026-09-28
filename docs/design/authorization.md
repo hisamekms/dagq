@@ -25,7 +25,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 
 | 群 | capability | 対応するCLI |
 | --- | --- | --- |
-| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `lint` `goal list/show` `observe --history` |
+| 読み取り | `queue.read` | `locate` `list` `show` `candidates` `graph`（`--out`なし） `status` `asks` `events` `timeline` `stats` `kpi` `forecast` `doctor` `broker status` `notes` `marks` `findings` `search` `related` `proposal list/show` `planners` `lint` `goal list/show` `observe --history` |
 | | `queue.watch` | `watch` |
 | | `queue.export` | `graph --out` `report`（ファイルを書く） |
 | 計画 | `goal.write` | `goal add` `goal edit` |
@@ -49,7 +49,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | | `planner.open` | `plan` |
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
 | | `run.recover` | `recover` |
-| | `service.lifecycle` | `up` `down` |
+| | `service.lifecycle` | `up` `down` `broker start` `broker stop` |
 | | `service.install` | `install` `auto-update` |
 | | `queue.admin` | `init` `migrate` `rebind` |
 | 着地 | `landing.request` | `integrate`（Integratorへの依頼。[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)） |
@@ -144,7 +144,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | --- | --- | --- |
 | `init` `migrate`（`--check`を含む） `rebind` | `queue.admin` | queue |
 | `install` / `auto-update` | `service.install` | queue |
-| `up` `down` | `service.lifecycle` | queue |
+| `up` `down` `broker start` `broker stop` | `service.lifecycle` | queue |
 | `plan` | `planner.open` | queue |
 | `supervise` | `scheduler.supervise` | queue |
 | `observe`（`--history`を除く） | `observe.run` | queue |
