@@ -388,14 +388,7 @@ impl SqliteQueue {
     }
 
     pub fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-                [id],
-                lease_row,
-            )
-            .optional()?)
+        run_lease_of(&self.conn, id)
     }
 
     /// The slots held and the slots offered when a backend call failed:

@@ -240,17 +240,16 @@ impl SqliteQueue {
         {
             // The supervisor types it into a running worker's terminal, or
             // into a live session it asked to revise (task 238); the answer
-            // of a run that stopped running is the inbox's.
+            // of a run that stopped running is the inbox's. A stale lease
+            // (its supervisor died) delivers nothing, as `status` reads it
+            // (task 584).
             let status: String =
                 tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
                     r.get(0)
                 })?;
             let status: RunStatus = status.parse()?;
-            let leased: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
-                [run_id],
-                |r| r.get(0),
-            )?;
+            let leased = super::runtime_store::run_lease_of(&tx, run_id)?
+                .is_some_and(|lease| !super::runtime_store::lease_is_stale(&lease, now));
             payload["runtime_delivers"] = json!(
                 status == RunStatus::Running
                     || (leased
@@ -1297,5 +1296,110 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "run run-1 is written without its task");
+    }
+
+    /// Answer a `worker_question` on a run of `status` whose lease has
+    /// `pid` and a heartbeat `age` seconds old, after a revise request;
+    /// return whether the answer was recorded as the runtime's and whether
+    /// `status` reports the runtime delivering it.
+    fn answer_leased_question(status: RunStatus, pid: u32, age: i64) -> (bool, bool) {
+        use crate::application::TaskStore;
+        use crate::domain::NewTask;
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let task_id = queue
+            .add(NewTask {
+                title: "t".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                goal_id: None,
+                context: String::new(),
+                kind: None,
+                provider: None,
+                worker_mode: None,
+            })
+            .unwrap()
+            .id();
+        let run = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        let now = queue.generators.clock.now();
+        queue
+            .conn
+            .execute(
+                "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,worktree_path,workspace_id,run_dir)
+                 VALUES (?1,?2,?3,'claude','claude','0000000000000000000000000000000000000000','/wt','W','/run')",
+                params![run, task_id, status.as_str()],
+            )
+            .unwrap();
+        queue
+            .conn
+            .execute(
+                "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'sup',?2,?3)",
+                params![run, pid, now - age],
+            )
+            .unwrap();
+        super::super::sqlite::event(
+            &queue.conn,
+            task_id,
+            Some(&run),
+            EventKind::ReviseRequested,
+            json!({"workspace_id": "W", "sent_at": 0}),
+        )
+        .unwrap();
+        let ask = queue
+            .ask(NewAsk {
+                kind: AskKind::WorkerQuestion,
+                task_id: Some(task_id),
+                run_id: Some(run.clone()),
+                question: "Which line?".into(),
+                options: vec![],
+                asked_by: "worker".into(),
+                reason_category: AskReason::Scope,
+                finding_id: None,
+            })
+            .unwrap()
+            .ask;
+        queue.answer(ask.id, "the second").unwrap();
+        let payload: String = queue
+            .conn
+            .query_row(
+                "SELECT payload FROM run_events WHERE kind='ask_answered'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let recorded = payload["runtime_delivers"].as_bool().unwrap();
+        let registrations = queue.supervisors().unwrap();
+        let attention = health::attention(&queue, &registrations, now, &SystemProcesses).unwrap();
+        let delivering = attention
+            .iter()
+            .find(|a| a.ask_id == Some(ask.id))
+            .is_some_and(|a| matches!(a.next, AttentionNext::DeliveringAnswer { .. }));
+        (recorded, delivering)
+    }
+
+    /// The answer of a question asked during a revise is the runtime's to
+    /// type only while a live supervisor holds the run's lease, as
+    /// `status` judges it (task 584); a running run's answer stays the
+    /// runtime's for the supervisor that adopts it.
+    #[test]
+    fn a_revise_answer_is_the_runtimes_only_with_a_lease_that_is_not_stale() {
+        let live = std::process::id();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let old = crate::domain::HEARTBEAT_TIMEOUT_SECS + 1;
+        let awaiting = RunStatus::AwaitingIntegration;
+        assert_eq!(answer_leased_question(awaiting, live, 0), (true, true));
+        assert_eq!(answer_leased_question(awaiting, dead, 0), (false, false));
+        assert_eq!(answer_leased_question(awaiting, live, old), (false, false));
+        assert!(answer_leased_question(RunStatus::Running, dead, 0).0);
+        assert!(answer_leased_question(RunStatus::Running, live, old).0);
     }
 }

@@ -268,6 +268,17 @@ fn lease_row(r: &Row<'_>) -> rusqlite::Result<RunLease> {
     })
 }
 
+/// The lease of run `id` on `conn`, if any.
+pub(super) fn run_lease_of(conn: &Connection, id: &RunId) -> Result<Option<RunLease>> {
+    Ok(conn
+        .query_row(
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            [id],
+            lease_row,
+        )
+        .optional()?)
+}
+
 /// Every registered supervisor on `conn`, oldest registration first.
 pub(super) fn supervisors_of(conn: &Connection) -> Result<Vec<SupervisorRegistration>> {
     Ok(conn
