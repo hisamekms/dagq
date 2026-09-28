@@ -1,7 +1,8 @@
 //! Runtime tests: the stalled detections of a run taken out of its session
 //! by `recover` or the supervisor's abandon end with it (ADR-0047
 //! decisions 30 and 32): its `stalled` ask closes and each detection not
-//! ended gets one `stall_resolved` of outcome `run_ended`.
+//! ended gets one `stall_resolved`, of the outcome its events tell (task
+//! 799), else `run_ended`.
 use crate::runtime_support;
 
 use dagq::domain::LeaseToken;
@@ -20,8 +21,9 @@ fn dead_run(repo: &Path, db: &Path) -> TaskRun {
 }
 
 /// Record the receipt-less idle the way the supervisor's watch does: a
-/// nudge that went on to a recovery job (its end recorded), the job not
-/// ended, and the `stalled` ask it escalated to.
+/// nudge that went on to a recovery job (its end recorded), the job that
+/// could not start (its end not recorded), and the `stalled` ask it
+/// escalated to.
 fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
     let idle = json!({"phase": "session", "idle_secs": 1250, "threshold_secs": 1200});
     queue
@@ -60,7 +62,7 @@ fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
             run.id(),
             "recovery_finished",
             json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1,
-                   "ask_id": ask.id, "outcome": "escalated"}),
+                   "ask_id": ask.id, "escalated": true, "outcome": "job_failed"}),
         )
         .unwrap();
     ask.id
@@ -81,8 +83,9 @@ fn resolved(db: &Path, run: &TaskRun) -> Vec<(String, String)> {
 
 /// `dagq recover` of a run idle without a receipt whose `stalled` ask is
 /// open, with no workspace left in cmux: the runtime answers and closes the
-/// ask, and the job and the ask not ended get one `run_ended` each (the
-/// nudge ended already). A sweep that follows adds none.
+/// ask, the job that could not start gets one `escalated` (its escalation
+/// is recorded) and the ask one `run_ended` (the nudge ended already). A
+/// sweep that follows adds none.
 #[test]
 fn recover_closes_the_stalled_ask_and_ends_its_detections_once() {
     let (_dir, repo, db) = fixture();
@@ -103,7 +106,7 @@ fn recover_closes_the_stalled_ask_and_ends_its_detections_once() {
         resolved(&db, &run),
         [
             ("nudge".to_owned(), "escalated".to_owned()),
-            ("recovery".to_owned(), "run_ended".to_owned()),
+            ("recovery".to_owned(), "escalated".to_owned()),
             ("ask".to_owned(), "run_ended".to_owned()),
         ]
     );
@@ -124,14 +127,16 @@ fn recover_closes_the_stalled_ask_and_ends_its_detections_once() {
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
     assert_eq!(idle["detections"], 3, "{stats}");
-    assert_eq!(idle["outcomes"]["run_ended"], 2, "{stats}");
+    assert_eq!(idle["outcomes"]["escalated"], 2, "{stats}");
+    assert_eq!(idle["outcomes"]["run_ended"], 1, "{stats}");
 }
 
 /// The supervisor abandons a run (a runtime error) whose nudge is not
-/// ended and whose `stalled` ask a person answered before the supervisor
-/// applied it: the ask closes with the person's answer, and the nudge and
-/// the ask get one `run_ended` each. The watch's end at the session's exit
-/// that follows adds none.
+/// ended (its supervisor died before recording it) and whose `stalled` ask
+/// a person answered before the supervisor applied it: the ask closes with
+/// the person's answer, the nudge gets one `escalated` (the ask followed
+/// it) and the ask one `answered_intervene`, counted so by `stats`. The
+/// watch's end at the session's exit that follows adds none.
 #[test]
 fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
     let (_dir, repo, db) = fixture();
@@ -175,14 +180,23 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
     assert_eq!(
         resolved(&db, &run),
         [
-            ("nudge".to_owned(), "run_ended".to_owned()),
-            ("ask".to_owned(), "run_ended".to_owned()),
+            ("nudge".to_owned(), "escalated".to_owned()),
+            ("ask".to_owned(), "answered_intervene".to_owned()),
         ]
     );
     let ends = events_of(&db, run.id(), "stall_resolved");
     assert_eq!(ends[0]["threshold_secs"], 60);
     assert_eq!(ends[0]["detected_after_secs"], 61);
     assert_eq!(ends[1]["ask_id"], json!(ask.id));
+    let stats = runtime::stats(&db, &Default::default()).unwrap();
+    let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
+    assert_eq!(idle["detections"], 2, "{stats}");
+    assert_eq!(idle["outcomes"]["answered_intervene"], 1, "{stats}");
+    assert_eq!(idle["outcomes"]["escalated"], 1, "{stats}");
+    assert_eq!(
+        idle["by_detection"]["ask"]["outcomes"]["answered_intervene"], 1,
+        "{stats}"
+    );
 
     // An ask left open (its answer never came) is answered by the runtime.
     let other = queue
@@ -209,7 +223,16 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
         .unwrap();
     let other = queue.read_ask(other.id).unwrap();
     assert_eq!(other.answer.as_deref(), Some(STALL_ABANDONED_CLOSED));
-    assert_eq!(resolved(&db, &run).len(), 3);
+    // The runtime's close is no person's answer: it ended with the run.
+    assert_eq!(
+        resolved(&db, &run)[2],
+        ("ask".to_owned(), "run_ended".to_owned())
+    );
+    let answered = events_of(&db, run.id(), "stall_resolved")
+        .iter()
+        .filter(|end| end["outcome"] == "answered_intervene")
+        .count();
+    assert_eq!(answered, 1);
     // Once more, nothing is left to end.
     queue
         .end_stalled_detections(run.id(), "the run ended; closed by the runtime")

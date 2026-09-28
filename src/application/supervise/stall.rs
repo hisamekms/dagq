@@ -62,17 +62,10 @@ pub(super) fn stalled_options(note: Option<&Note>) -> Vec<String> {
 /// The answers the runtime writes into a `stalled` ask it closes.
 pub(super) const STALL_MOVED_CLOSED: &str = "the session moved on; closed by the runtime";
 
-/// Whether a `stalled` ask's answer leaves the session alone: `wait`, or
-/// `propose` (ADR-0044 decision 19), which hands the cause to a planner
-/// of the runtime's instead of a person stepping in.
+/// Whether a `stalled` ask's answer leaves the session alone
+/// ([`crate::domain::stats::thresholds::answer_waits`]).
 fn answered_wait(answer: Option<&str>) -> bool {
-    answer.is_some_and(|answer| {
-        answer.trim() == "wait"
-            || matches!(
-                crate::domain::FindingAnswer::parse(answer),
-                Some(crate::domain::FindingAnswer::Propose(_))
-            )
-    })
+    answer.is_some_and(crate::domain::stats::thresholds::answer_waits)
 }
 
 pub(super) const STALL_EXITED_CLOSED: &str = "the session exited; closed by the runtime";

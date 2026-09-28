@@ -415,19 +415,44 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
     found
 }
 
-/// The `stall_resolved` payloads (outcome `run_ended`) that end the stalled
-/// detections of one run's `events` (ascending id) with no end recorded,
-/// the run being taken out of its session at `now_ms` without the watch
-/// that made them (`recover`, the supervisor's abandon, the sweep; ADR-0047
-/// decisions 30 and 32): each `stall_nudged` with no `stall_resolved` of
-/// its phase's nudge after it, each recovery job of the `stalled` alert
-/// with no end of its attempt (and send), and each `stalled` ask with no
-/// end naming it. A detection that has its end gets none again.
-pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
+/// The `stall_resolved` payloads that end the stalled detections of one
+/// run's `events` (ascending id) with no end recorded, the run being taken
+/// out of its session at `now_ms` without the watch that made them
+/// (`recover`, the supervisor's abandon, the sweep; ADR-0047 decisions 30
+/// and 32): each `stall_nudged` with no `stall_resolved` of its phase's
+/// nudge after it, each recovery job of the `stalled` alert with no end of
+/// its attempt (and send), and each `stalled` ask with no end naming it. A
+/// detection that has its end gets none again.
+///
+/// The outcome is the one the events tell, by the rules the watch records
+/// it with (task 799), else `run_ended`: a nudge followed by an idle's
+/// recovery job or `stalled` ask (a supervisor that died before recording
+/// its end) `escalated`; an idle's recovery job whose escalation, next job
+/// or `stalled` ask followed (a job that could not start) `escalated`; an
+/// ask a person answered (not the runtime) `answered_wait` when the answer
+/// ([`answer_waits`]; `answer_of` gives the answer of an ask id, the
+/// option answered when it gives none) leaves the session alone, else
+/// `answered_intervene`.
+pub fn run_ended_resolutions(
+    events: &[RunEvent],
+    answer_of: &dyn Fn(i64) -> Option<String>,
+    now_ms: i64,
+) -> Vec<Value> {
     let resolved = |later: &[RunEvent], detection: &str, same: &dyn Fn(&RunEvent) -> bool| {
         later.iter().any(|e| {
             e.kind == "stall_resolved" && text(e, "detection") == Some(detection) && same(e)
         })
+    };
+    // The idle's own `stalled` ask (not one of another alert's job).
+    let idle_ask = |e: &RunEvent| {
+        e.kind == "ask_opened"
+            && text(e, "kind") == Some("stalled")
+            && ask_threshold(events, e.payload.get("ask_id")).0 == IDLE
+    };
+    let idle_job = |e: &RunEvent| {
+        e.kind == "recovery_requested"
+            && text(e, "alert") == Some("stalled")
+            && text(e, "reason") != Some("send_unconfirmed")
     };
     let mut ends = Vec::new();
     for (i, event) in events.iter().enumerate() {
@@ -436,27 +461,35 @@ pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
                    detection: &str,
                    threshold: &str,
                    threshold_secs: Option<i64>,
-                   detected_after: Option<i64>| {
+                   detected_after: Option<i64>,
+                   outcome: Option<(&str, &RunEvent)>| {
+            let (outcome, end_ms) =
+                outcome.map_or(("run_ended", Some(now_ms)), |(outcome, e)| (outcome, at(e)));
             serde_json::json!({
                 "phase": phase.cloned().unwrap_or_else(|| Value::from("session")),
                 "detection": detection,
                 "threshold": threshold,
                 "threshold_secs": threshold_secs,
                 "detected_after_secs": detected_after.unwrap_or(0),
-                "outcome": "run_ended",
-                "resolved_after_secs": secs(at(event), Some(now_ms)).unwrap_or(0).max(0),
+                "outcome": outcome,
+                "resolved_after_secs": secs(at(event), end_ms).unwrap_or(0).max(0),
             })
         };
         match event.kind.as_str() {
             "stall_nudged" => {
                 let phase = event.payload.get("phase");
                 if !resolved(later, "nudge", &|e| e.payload.get("phase") == phase) {
+                    let escalated = later.iter().find(|e| {
+                        (idle_job(e) && e.payload.get("phase").is_none_or(|p| Some(p) == phase))
+                            || idle_ask(e)
+                    });
                     ends.push(end(
                         phase,
                         "nudge",
                         IDLE,
                         int(event, "threshold_secs"),
                         int(event, "idle_secs"),
+                        escalated.map(|e| ("escalated", e)),
                     ));
                 }
             }
@@ -473,12 +506,29 @@ pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
                 } else {
                     IDLE
                 };
+                // An idle's job went on to a person or to its next job.
+                let escalated = idle_job(event)
+                    .then(|| {
+                        later.iter().find(|e| {
+                            // An ask open already (`already_asked`) is no
+                            // escalation of the watch's.
+                            (e.kind == "recovery_finished"
+                                && text(e, "alert") == Some("stalled")
+                                && e.payload.get("attempt") == attempt
+                                && e.payload.get("reason") == event.payload.get("reason")
+                                && e.payload.get("escalated") == Some(&Value::Bool(true)))
+                                || idle_job(e)
+                                || idle_ask(e)
+                        })
+                    })
+                    .flatten();
                 let mut payload = end(
                     None,
                     "recovery",
                     threshold,
                     int(event, "threshold_secs"),
                     int(event, "idle_secs").or_else(|| int(event, "waited_secs")),
+                    escalated.map(|e| ("escalated", e)),
                 );
                 payload["attempt"] = attempt.cloned().unwrap_or(Value::Null);
                 if let Some(send) = send {
@@ -492,26 +542,23 @@ pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
                 if resolved(later, "ask", &|e| e.payload.get("ask_id") == id) {
                     continue;
                 }
-                // The recovery job that escalated to it tells the setting,
-                // and its request the value and the idle time.
-                let finished = events
-                    .iter()
-                    .find(|e| e.kind == "recovery_finished" && e.payload.get("ask_id") == id);
-                let threshold = match finished.and_then(|e| text(e, "alert")) {
-                    Some("idle_process") => IDLE_PROCESS,
-                    Some("long_background") => BACKGROUND,
-                    _ if finished.and_then(|e| text(e, "reason")) == Some("send_unconfirmed") => {
-                        SEND
+                let (threshold, requested) = ask_threshold(events, id);
+                // A person answered it while no supervisor applied it.
+                let answered = later.iter().find(|e| {
+                    e.kind == "ask_answered"
+                        && e.payload.get("ask_id") == id
+                        && e.payload.get("runtime_closed") != Some(&Value::Bool(true))
+                });
+                let answered = answered.map(|e| {
+                    let answer = id
+                        .and_then(Value::as_i64)
+                        .and_then(answer_of)
+                        .or_else(|| text(e, "option").map(str::to_owned));
+                    if answer.as_deref().is_some_and(answer_waits) {
+                        ("answered_wait", e)
+                    } else {
+                        ("answered_intervene", e)
                     }
-                    _ => IDLE,
-                };
-                let requested = finished.and_then(|finished| {
-                    events.iter().rev().find(|e| {
-                        e.kind == "recovery_requested"
-                            && e.payload.get("alert") == finished.payload.get("alert")
-                            && e.payload.get("attempt") == finished.payload.get("attempt")
-                            && e.payload.get("reason") == finished.payload.get("reason")
-                    })
                 });
                 let mut payload = end(
                     None,
@@ -519,6 +566,7 @@ pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
                     threshold,
                     requested.and_then(|e| int(e, "threshold_secs")),
                     requested.and_then(|e| int(e, "idle_secs").or_else(|| int(e, "waited_secs"))),
+                    answered,
                 );
                 payload["ask_id"] = id.cloned().unwrap_or(Value::Null);
                 ends.push(payload);
@@ -527,6 +575,44 @@ pub fn run_ended_resolutions(events: &[RunEvent], now_ms: i64) -> Vec<Value> {
         }
     }
     ends
+}
+
+/// Whether a `stalled` ask's answer leaves the session alone: `wait`, or
+/// `propose` (ADR-0044 decision 19), which hands the cause to a planner
+/// of the runtime's instead of a person stepping in.
+pub fn answer_waits(answer: &str) -> bool {
+    answer.trim() == "wait"
+        || matches!(
+            crate::domain::FindingAnswer::parse(answer),
+            Some(crate::domain::FindingAnswer::Propose(_))
+        )
+}
+
+/// The setting of the `stalled` ask `id` among `events`, told by the
+/// recovery job that escalated to it, and that job's request (its value
+/// and idle time).
+fn ask_threshold<'a>(
+    events: &'a [RunEvent],
+    id: Option<&Value>,
+) -> (&'static str, Option<&'a RunEvent>) {
+    let finished = events
+        .iter()
+        .find(|e| e.kind == "recovery_finished" && e.payload.get("ask_id") == id);
+    let threshold = match finished.and_then(|e| text(e, "alert")) {
+        Some("idle_process") => IDLE_PROCESS,
+        Some("long_background") => BACKGROUND,
+        _ if finished.and_then(|e| text(e, "reason")) == Some("send_unconfirmed") => SEND,
+        _ => IDLE,
+    };
+    let requested = finished.and_then(|finished| {
+        events.iter().rev().find(|e| {
+            e.kind == "recovery_requested"
+                && e.payload.get("alert") == finished.payload.get("alert")
+                && e.payload.get("attempt") == finished.payload.get("attempt")
+                && e.payload.get("reason") == finished.payload.get("reason")
+        })
+    });
+    (threshold, requested)
 }
 
 /// Take the value and the idle time an `idle_process` job was started
@@ -780,6 +866,11 @@ mod tests {
         payload
     }
 
+    /// No answer known but the option answered.
+    fn no_answer(_: i64) -> Option<String> {
+        None
+    }
+
     fn nudged() -> Value {
         json!({"phase": "session", "idle_secs": 1250, "threshold_secs": 1200})
     }
@@ -830,7 +921,7 @@ mod tests {
                 T + 50,
             ),
         ]);
-        let ends = run_ended_resolutions(&events, (T + 100) * 1000);
+        let ends = run_ended_resolutions(&events, &no_answer, (T + 100) * 1000);
         assert_eq!(ends.len(), 2, "{ends:?}");
         assert_eq!(ends[0]["detection"], "recovery");
         assert_eq!(ends[0]["threshold"], SEND);
@@ -848,11 +939,176 @@ mod tests {
         for (i, end) in ends.into_iter().enumerate() {
             events.push(event(20 + i as i64, R1, "stall_resolved", end, T + 100));
         }
-        assert!(run_ended_resolutions(&events, (T + 200) * 1000).is_empty());
+        assert!(run_ended_resolutions(&events, &no_answer, (T + 200) * 1000).is_empty());
         let outcomes = outcomes(&events, T + 200);
         assert!(
             outcomes.iter().all(|(_, _, outcome)| outcome != PENDING),
             "{outcomes:?}"
+        );
+    }
+
+    /// Task 799: a detection with no end whose end the events tell gets
+    /// it, by the watch's rules. (a) A nudge a supervisor had seen go on to
+    /// a recovery job or an ask before it died is `escalated`; (b) a
+    /// `stalled` ask a person answered is `answered_intervene` (or
+    /// `answered_wait` for `wait` and `propose`), one the runtime closed is
+    /// not; (c) an idle's job that could not start is `escalated` by its
+    /// `recovery_finished`.
+    #[test]
+    fn a_run_ended_takes_the_end_its_events_tell() {
+        let idle_job = |attempt: i64| {
+            json!({"alert": "stalled", "reason": "idle_without_receipt", "phase": "session",
+                   "attempt": attempt, "idle_secs": 1300, "threshold_secs": 1200})
+        };
+        let failed = json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1,
+                            "escalated": true, "outcome": "job_failed", "ask_id": 9});
+        let answered = |id: i64, option: &str, runtime: bool| {
+            let mut payload = json!({"ask_id": id, "kind": "stalled", "option": option});
+            if runtime {
+                payload["runtime_closed"] = json!(true);
+            }
+            payload
+        };
+        let events = numbered(vec![
+            // (a) and (c): the nudge's end and the job's are not recorded.
+            (R1, "stall_nudged", nudged(), T),
+            (R1, "recovery_requested", idle_job(1), T + 100),
+            (R1, "ask_opened", stalled(9), T + 110),
+            (R1, "recovery_finished", failed, T + 110),
+            // (b): answered by a person.
+            (R1, "ask_answered", answered(9, "intervene", false), T + 200),
+            // A `propose` answer (no option), and an ask the runtime closed.
+            (R1, "ask_opened", stalled(10), T + 300),
+            (R1, "ask_answered", answered(10, "", false), T + 350),
+            (R1, "ask_opened", stalled(11), T + 400),
+            (R1, "ask_answered", answered(11, "", true), T + 450),
+        ]);
+        let answer_of = |id: i64| (id == 10).then(|| "propose: a flaky test".to_owned());
+        let ends = run_ended_resolutions(&events, &answer_of, (T + 1000) * 1000);
+        let got: Vec<_> = ends
+            .iter()
+            .map(|e| {
+                (
+                    e["detection"].as_str().unwrap(),
+                    e["outcome"].as_str().unwrap(),
+                    e["resolved_after_secs"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("nudge", "escalated", 100),
+                ("recovery", "escalated", 10),
+                ("ask", "answered_intervene", 90),
+                ("ask", "answered_wait", 50),
+                ("ask", "run_ended", 600),
+            ]
+        );
+        assert_eq!(ends[1]["attempt"], 1);
+        assert_eq!(ends[2]["ask_id"], 9);
+        assert_eq!(ends[2]["threshold_secs"], 1200);
+        assert_eq!(ends[2]["detected_after_secs"], 1300);
+
+        // With nothing after them to tell their end, they ended with the run.
+        let bare = numbered(vec![
+            (R1, "stall_nudged", nudged(), T),
+            (R1, "recovery_requested", idle_job(1), T + 100),
+            (R1, "ask_opened", stalled(9), T + 110),
+        ]);
+        let ends = run_ended_resolutions(&bare, &no_answer, (T + 1000) * 1000);
+        // The ask tells the nudge and the job went on; nothing tells its own.
+        assert_eq!(
+            ends.iter()
+                .map(|e| e["outcome"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["escalated", "escalated", "run_ended"]
+        );
+        // With no answer known, the option answered tells a `wait`.
+        let waited = numbered(vec![
+            (R1, "ask_opened", stalled(9), T),
+            (R1, "ask_answered", answered(9, "wait", false), T + 10),
+        ]);
+        assert_eq!(
+            run_ended_resolutions(&waited, &no_answer, (T + 100) * 1000)[0]["outcome"],
+            "answered_wait"
+        );
+        let alone = numbered(vec![
+            (R1, "stall_nudged", nudged(), T),
+            (R2, "recovery_requested", idle_job(1), T + 100),
+            // An ask open already is no escalation.
+            (
+                R2,
+                "recovery_finished",
+                json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1,
+                       "escalated": false, "outcome": "already_asked"}),
+                T + 150,
+            ),
+            // Another alert's ask, and a job of a send, escalate neither.
+            (
+                R1,
+                "recovery_requested",
+                json!({"alert": "stalled", "reason": "send_unconfirmed", "attempt": 2,
+                       "send_event": 7}),
+                T + 200,
+            ),
+            (R1, "ask_opened", stalled(12), T + 300),
+            (
+                R1,
+                "recovery_finished",
+                json!({"alert": "long_background", "attempt": 1, "ask_id": 12}),
+                T + 300,
+            ),
+        ]);
+        let r1: Vec<RunEvent> = alone
+            .iter()
+            .filter(|e| e.run_id.as_ref().unwrap().as_str() == R1)
+            .cloned()
+            .collect();
+        let ends = run_ended_resolutions(&r1, &no_answer, (T + 1000) * 1000);
+        assert_eq!(
+            ends.iter()
+                .map(|e| (
+                    e["detection"].as_str().unwrap(),
+                    e["outcome"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("nudge", "run_ended"),
+                ("recovery", "run_ended"),
+                ("ask", "run_ended")
+            ]
+        );
+        let r2: Vec<RunEvent> = alone
+            .iter()
+            .filter(|e| e.run_id.as_ref().unwrap().as_str() == R2)
+            .cloned()
+            .collect();
+        assert_eq!(
+            run_ended_resolutions(&r2, &no_answer, (T + 1000) * 1000)[0]["outcome"],
+            "run_ended"
+        );
+        // The ends read back as the detections' outcomes.
+        let mut events = events;
+        for (i, end) in run_ended_resolutions(&events, &answer_of, (T + 1000) * 1000)
+            .into_iter()
+            .enumerate()
+        {
+            events.push(event(100 + i as i64, R1, "stall_resolved", end, T + 1000));
+        }
+        let outcomes = outcomes(&events, T + 1000);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|(_, d, o)| (*d, o.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("nudge", "escalated"),
+                ("recovery", "escalated"),
+                ("ask", "answered_intervene"),
+                ("ask", "answered_wait"),
+                ("ask", "run_ended"),
+            ]
         );
     }
 

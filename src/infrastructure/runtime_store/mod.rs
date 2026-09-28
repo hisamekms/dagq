@@ -342,8 +342,20 @@ pub(super) fn end_stalled_detections(
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let ends =
-        crate::domain::stats::thresholds::run_ended_resolutions(&run_events_of(tx, id)?, now_ms);
+    // The answers of its `stalled` asks tell a `wait` from a person
+    // stepping in; the events carry only the option answered.
+    let answers: std::collections::HashMap<i64, String> = tx
+        .prepare(
+            "SELECT id, answer FROM asks WHERE run_id=?1 AND kind='stalled'
+             AND answer IS NOT NULL",
+        )?
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let ends = crate::domain::stats::thresholds::run_ended_resolutions(
+        &run_events_of(tx, id)?,
+        &|ask| answers.get(&ask).cloned(),
+        now_ms,
+    );
     let closed = crate::infrastructure::asks::close_asks_in(
         tx,
         id,
