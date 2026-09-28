@@ -1,6 +1,6 @@
 //! `dagq-broker serve` as a host process (no podman) on `127.0.0.1:0`:
-//! health, the refusals of default deny, the fs backend and their audit
-//! lines.
+//! health, the refusals of default deny, the fs and process backends and
+//! their audit lines.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -20,6 +20,9 @@ use serde_json::Value;
 const LIMIT: Duration = Duration::from_secs(20);
 
 const KEY: [u8; 32] = [7; 32];
+
+const HOST_SECRET_NAME: &str = "DAGQ_BROKER_TEST_HOST_SECRET";
+const HOST_SECRET_VALUE: &str = "host-secret-value-832";
 
 struct Broker {
     child: Child,
@@ -60,6 +63,9 @@ impl Broker {
             .arg("--root")
             .arg(root.join("runs"))
             .args(extra)
+            // A secret of the host's env, which no program run by
+            // `process.exec` may see.
+            .env(HOST_SECRET_NAME, HOST_SECRET_VALUE)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -393,7 +399,7 @@ fn default_deny_refuses_unknown_routes_missing_capabilities_and_foreign_fields()
 }
 
 #[test]
-fn paths_are_confined_and_process_and_git_are_not_implemented_yet() {
+fn paths_are_confined_and_git_is_not_implemented_yet() {
     let broker = Broker::start();
     let claims = broker.claims("jti-all", &BrokerCapability::ALL);
     let token = broker.token(&claims, true);
@@ -431,7 +437,8 @@ fn paths_are_confined_and_process_and_git_are_not_implemented_yet() {
         Some(&token),
         r#"{"argv":["/bin/ls","secret-arg"],"env":{"TOKEN":"env-value"}}"#,
     );
-    answer.assert_refused(ErrorCode::BackendError);
+    // The default allowlist is empty.
+    answer.assert_refused(ErrorCode::CapabilityDenied);
     let line = answer.audit_line(&broker);
     assert_eq!(line["backend"], "process");
     assert_eq!(line["program"], "ls");
@@ -674,4 +681,146 @@ fn an_operation_that_cannot_be_audited_is_not_done() {
         "the audit could not be written"
     );
     assert!(!PathBuf::from(broker.workspace()).join("a.txt").exists());
+}
+
+#[test]
+fn process_exec_runs_argv_in_the_workspace_within_the_limits_and_is_audited() {
+    let broker = Broker::start_with(&[
+        "--exec-allow",
+        "sh",
+        "--exec-allow",
+        "env",
+        "--exec-allow",
+        "git",
+        "--exec-env",
+        "ALLOWED",
+        "--exec-max-timeout-secs",
+        "3",
+        "--exec-timeout-secs",
+        "3",
+        "--output-limit-bytes",
+        "4096",
+    ]);
+    let claims = broker.claims("jti-exec", &BrokerCapability::ALL);
+    let token = broker.token(&claims, true);
+    let exec = |body: Value| broker.post("/v1/process/exec", Some(&token), &body.to_string());
+
+    // argv runs in the workspace, with stdin, and the audit has its exit
+    // status and bytes but none of its arguments, env or output.
+    let body = serde_json::json!({
+        "argv": ["sh", "-c", "pwd; cat; echo stderr-text >&2; exit 4", "secret-arg"],
+        "stdin": "stdin-text\n",
+        "env": {"ALLOWED": "allowed-value", "OTHER": "other-value"},
+    });
+    let answer = exec(body.clone());
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let response: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(response["exit_code"], 4);
+    assert_eq!(
+        response["stdout"],
+        format!("{}\nstdin-text\n", broker.workspace())
+    );
+    assert_eq!(response["stderr"], "stderr-text\n");
+    let line = broker.audit().pop().unwrap();
+    assert_eq!(line["result"], "ok");
+    assert_eq!(line["backend"], "process");
+    assert_eq!(line["op"], "process.exec");
+    assert_eq!(line["capability"], "process.exec");
+    assert_eq!(line["run_id"], "run-1");
+    assert_eq!(line["program"], "sh");
+    assert_eq!(line["argc"], 4);
+    assert_eq!(line["exit_code"], 4);
+    assert_eq!(line["bytes_in"], body.to_string().len());
+    assert_eq!(line["bytes_out"], answer.body.len());
+    assert!(line["duration_ms"].is_u64());
+
+    // The host's env does not reach the program; the allowed name does.
+    let answer = exec(serde_json::json!({
+        "argv": ["env"],
+        "env": {"ALLOWED": "allowed-value", HOST_SECRET_NAME: "from-request"},
+    }));
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let response: Value = serde_json::from_str(&answer.body).unwrap();
+    let stdout = response["stdout"].as_str().unwrap();
+    assert!(stdout.contains("ALLOWED=allowed-value"), "{stdout}");
+    assert!(!stdout.contains(HOST_SECRET_NAME), "{stdout}");
+    assert!(!stdout.contains(HOST_SECRET_VALUE), "{stdout}");
+    assert!(
+        stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"),
+        "{stdout}"
+    );
+
+    // The server's maximum timeout wins over the request's, and the
+    // program's group is stopped.
+    let answer = exec(serde_json::json!({
+        "argv": ["sh", "-c", "sleep 60 & echo $! > bg.pid; sleep 60"],
+        "timeout_secs": 3600,
+    }));
+    answer.assert_refused(ErrorCode::Timeout);
+    let line = answer.audit_line(&broker);
+    assert_eq!(line["result"], "timeout");
+    assert_eq!(line["exit_code"], Value::Null);
+    let deadline = std::time::Instant::now() + LIMIT;
+    let pid_file = PathBuf::from(broker.workspace()).join("bg.pid");
+    let pid: i32 = loop {
+        if let Ok(pid) = fs::read_to_string(&pid_file)
+            .unwrap_or_default()
+            .trim()
+            .parse()
+        {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "no pid in bg.pid");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    while Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{pid} is still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Output past the limit.
+    let answer = exec(serde_json::json!({"argv": ["sh", "-c", "while :; do echo out; done"]}));
+    answer.assert_refused(ErrorCode::OutputLimit);
+    assert_eq!(answer.audit_line(&broker)["result"], "output_limit");
+
+    // git and what the allowlist does not hold are refused before running.
+    for argv in [vec!["git", "push"], vec!["cat", "/etc/passwd"]] {
+        let answer = exec(serde_json::json!({ "argv": argv }));
+        answer.assert_refused(ErrorCode::CapabilityDenied);
+        assert_eq!(answer.audit_line(&broker)["program"], argv[0]);
+    }
+
+    // A token without process.exec runs nothing.
+    let fs_only = broker.claims("jti-fs-only", &[BrokerCapability::FsRead]);
+    let fs_token = broker.token(&fs_only, true);
+    let answer = broker.post(
+        "/v1/process/exec",
+        Some(&fs_token),
+        r#"{"argv":["sh","-c","touch ran"]}"#,
+    );
+    answer.assert_refused(ErrorCode::CapabilityDenied);
+    assert!(!PathBuf::from(broker.workspace()).join("ran").exists());
+
+    let text = broker.audit_text();
+    for secret in [
+        token.as_str(),
+        "secret-arg",
+        "stdin-text",
+        "stderr-text",
+        "allowed-value",
+        "other-value",
+        "ALLOWED",
+        HOST_SECRET_VALUE,
+    ] {
+        assert!(!text.contains(secret), "{secret}");
+    }
 }

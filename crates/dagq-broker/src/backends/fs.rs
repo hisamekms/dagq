@@ -51,7 +51,7 @@ impl Backend for FsBackend {
         };
         let target = Target::new(workspace, path)?;
         let limit = call.limits.fs_limit_bytes;
-        let root = self.open_workspace(workspace)?;
+        let root = open_workspace(&self.roots, workspace)?;
         let body = match request {
             BackendRequest::FsRead(request) => read(&root, &target, &request, limit)?,
             BackendRequest::FsList(_) => list(&root, &target, limit)?,
@@ -71,27 +71,25 @@ impl Backend for FsBackend {
     }
 }
 
-impl FsBackend {
-    /// The workspace's directory, opened from the mounted root under it
-    /// without following a symlink below the root.
-    fn open_workspace(&self, workspace: &Path) -> Result<OwnedFd, Failure> {
-        let root = self
-            .roots
-            .iter()
-            .filter(|root| workspace.starts_with(root))
-            .max_by_key(|root| root.as_os_str().len())
-            .ok_or_else(|| violation("the token's workspace is not under a mounted root"))?;
-        let mut dir = open_root(root).map_err(|error| {
-            Failure::new(
-                ErrorCode::BackendError,
-                format!("open the mounted root: {error}"),
-            )
-        })?;
-        for part in normal_parts(workspace.strip_prefix(root).unwrap_or(Path::new("")))? {
-            dir = step(&dir, &part, false, "the workspace")?;
-        }
-        Ok(dir)
+/// The workspace's directory, opened from the mounted root under it
+/// without following a symlink below the root. The process backend runs its
+/// programs in it too.
+pub(crate) fn open_workspace(roots: &[PathBuf], workspace: &Path) -> Result<OwnedFd, Failure> {
+    let root = roots
+        .iter()
+        .filter(|root| workspace.starts_with(root))
+        .max_by_key(|root| root.as_os_str().len())
+        .ok_or_else(|| violation("the token's workspace is not under a mounted root"))?;
+    let mut dir = open_root(root).map_err(|error| {
+        Failure::new(
+            ErrorCode::BackendError,
+            format!("open the mounted root: {error}"),
+        )
+    })?;
+    for part in normal_parts(workspace.strip_prefix(root).unwrap_or(Path::new("")))? {
+        dir = step(&dir, &part, false, "the workspace")?;
     }
+    Ok(dir)
 }
 
 /// The request's path as the names below the workspace.

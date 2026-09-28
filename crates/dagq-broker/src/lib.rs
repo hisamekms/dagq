@@ -3,8 +3,9 @@
 //! token. `serve` listens on loopback, answers health without a token,
 //! refuses everything else without a valid, active token (default deny) and
 //! writes an audit line per request. The fs backend is
-//! [`backends::fs::FsBackend`]; process and git are
-//! [`backend::Unimplemented`] until their tasks land.
+//! [`backends::fs::FsBackend`] and the process backend
+//! [`backends::process::ProcessBackend`]; git is [`backend::Unimplemented`]
+//! until its task lands.
 //!
 //! [Broker]: https://github.com/hisamekms/dagq/blob/main/docs/design/broker.md
 
@@ -22,6 +23,7 @@ use dagq_broker_protocol::HealthResponse;
 
 use crate::backend::Backends;
 use crate::backends::fs::FsBackend;
+use crate::backends::process::ProcessBackend;
 use crate::config::Config;
 use crate::server::Server;
 
@@ -57,6 +59,7 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<(), String> {
             let config = Config::parse(rest).map_err(|error| format!("{NAME} serve: {error}"))?;
             let backends = Backends {
                 fs: Arc::new(FsBackend::new(config.roots.clone())),
+                process: Arc::new(ProcessBackend::new(config.roots.clone())),
                 ..Backends::unimplemented()
             };
             let server = Server::bind(&config, backends)

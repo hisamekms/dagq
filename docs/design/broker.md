@@ -64,6 +64,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 829: protocolに`token`（`sign` / `verify` / `check_active`、`SigningKey`・`BrokerSessionToken`・`TokenError`、`TokenClaims::require` / `confine`）、dagqに`src/infrastructure/broker_token.rs`（`ensure_key`・`issue_run_token`・`broker_grants`）。dagqはprotocolに依存する（`=<同じ版>`と`path`）。claimでの発行・token fileと有効な印の書き込み・失効はhost workerの統合のtaskが足す
 - task 830: serverに`dagq-broker serve`（下の「serve」）。HTTPのserver・loopbackだけのbind・health・tokenの認証・default denyのrouting・構造化のerror・audit。fs・process・gitのbackendは`Backend` traitの後ろの`Unimplemented`（全てのopを`backend_error`の「`<op> is not implemented yet`」で返す）で、各backendのtaskが置き換える
 - task 831: serverにfsのbackend（`crates/dagq-broker/src/backends/fs.rs`の`FsBackend`。下の「mountと閉じ込め」の閉じ込め、`fs.read`・`fs.list`・`fs.write`・`fs.edit`、`--fs-limit-bytes`の上限、tmpとrenameのatomicな書き込み）。serverはbackendに渡す前にauditの日のファイルを追記で開けることを確かめ、開けなければopを走らせずに`backend_error`（`the audit could not be written`）で答える。processとgitはまだ`Unimplemented`
+- task 832: serverにprocessのbackend（`crates/dagq-broker/src/backends/process.rs`の`ProcessBackend`。下の「process.exec」のargvの実行、workspaceのcwd、envの消毒、timeoutと出力とstdinの上限、process groupの停止）。gitはまだ`Unimplemented`
 
 ### protocolの型
 
@@ -277,12 +278,20 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 
 ## process.exec
 
-- `argv`は配列で、shellを通さない。`argv[0]`はallowlist（`dagq.toml`の`[broker] exec_allow`。既定は空で、execは全て拒む）のbasenameと一致するものだけ。`git`は常に拒む
-- cwdはworkspace。envは固定の`PATH=/usr/local/bin:/usr/bin:/bin`・`HOME=<execごとの一時のdir>`（brokerのgitの`HOME`とは別）・`LANG=C.UTF-8`・`TERM=dumb`に、要求の`env`のうち`[broker] exec_env`に名前があるものだけを足す。他の値は捨てる（名前はauditに残さない）
-- timeout: 要求の`timeout_secs`（既定`[broker] exec_timeout_secs` = 60、上限`exec_max_timeout_secs` = 300）。超えたらprocess groupにSIGKILLを送り`timeout`。`setsid`で抜けた子はprocess groupでは止まらず、containerのpidsの上限が最後の歯止めになる
-- 出力: stdoutとstderrの合計が`[broker] output_limit_bytes`（既定1 MiB）を超えたらprocess groupを止めて`output_limit`
+- `argv`は配列で、shellを通さない。`argv[0]`はallowlist（`dagq.toml`の`[broker] exec_allow`、serveの`--exec-allow`。既定は空で、execは全て拒む）にあるプログラムの名前だけで、`/`を含むpath（`/bin/ls`・`./x`）はallowlistの名前と一致しても`capability_denied`。名前はbrokerが固定の`PATH`の順に実行できる通常のファイルを探して解き（要求の`env`の`PATH`は探索に使わない）、見つからなければ`backend_error`。basenameが`git`なら（pathでも）allowlistに関わらず`capability_denied`。`argv`が空・`argv[0]`が空・引数にNULがあれば`invalid_request`
+- cwdはworkspaceで、要求では指定しない（`ExecRequest`にcwdの欄は無く、あれば未知の欄で`invalid_request`）。workspaceはfsと同じく`--root`のfdから`openat(O_NOFOLLOW)`で1つずつ開き（symlinkを通るworkspaceは`workspace_violation`）、子で`fchdir`して入る（確かめたdirでそのまま走る）
+- env: 空から始め、固定の`PATH=/usr/local/bin:/usr/bin:/bin`・`HOME=<execごとの一時のdir>`（`$TMPDIR`の下に`dagq-broker-home-<uuid>`をmode 0700で作り、execの後に消す。brokerのgitの`HOME`とは別）・`LANG=C.UTF-8`・`TERM=dumb`に、要求の`env`のうち`[broker] exec_env`（`--exec-env`）に名前があるものだけを足す（`LANG`・`TERM`は置き換えられるが、`PATH`・`HOME`は名前が許されていても置き換えない）。他の値は読まずに捨てる（名前はauditに残さない）。brokerのプロセス自身のenvは何も継がない。許した名前の値にNULがあれば`invalid_request`
+- stdin: 要求の`stdin`（無ければ空で、すぐに閉じる）。`--output-limit-bytes`を超えれば走らせずに`output_limit`。読まないプログラムに書けなくなったら（EPIPE）残りを捨てる
+- 子はprocess groupの長（`setpgid(0, 0)`）。stdout・stderr・stdinは非blockingにし、1つのthreadで`poll`して読み書きする
+- timeout: 要求の`timeout_secs`（無ければ`[broker] exec_timeout_secs` = 60）と上限`exec_max_timeout_secs` = 300の小さい方。`0`は`invalid_request`。超えたらprocess groupにSIGKILLを送り`timeout`（`exit_code`はnull）。`setsid`で抜けた子はprocess groupでは止まらず、containerのpidsの上限が最後の歯止めになる
+- 出力: stdoutとstderrの合計が`[broker] output_limit_bytes`（既定1 MiB）を超えたらprocess groupを止めて`output_limit`（`exit_code`はnull）。途中までの出力は返さない（ADR-t827-2決定8の「超えればプロセスを止めてerrorにする」に従い、truncatedの応答は持たない）。上限までの出力はそのまま返し、UTF-8でないbyteは置き換える（lossy）
+- 子が自分で終わったときも、刈り取る前（`waitid`の`WNOWAIT`でgroupのIDを保ったまま）にprocess groupへSIGKILLを送り、backgroundに残した子を止める。その後の出力は500 msまで読み、groupを抜けた子がpipeを持ち続けても応答を待たせない
+- 応答は`{exit_code, stdout, stderr, duration_ms}`で、`exit_code`はsignalで終わったとき`null`。auditには`program`・`argc`・`argv_sha256`・`exit_code`・`duration_ms`・`bytes_in`・`bytes_out`を残し、引数・env・stdin・出力は残さない。errorのmessageにも出力・stdin・envの値を入れない
 - 走るのはcontainerの中で、containerのmemory・cpu・pidsの上限に入る。imageにはtoolchainが無く、軽いコマンド（`sh`・`ls`・`cat`・`grep`など、allowlistにあるもの）だけ。使い捨てのrepositoryの代表のtaskもそれで済むものにする（ADR-t827-3決定9）
 - `sh`をallowlistに入れると、shellからimageの中の`git`も走らせられる（containerに資格情報もremoteへの経路の設定も無いので上流へのpushは通らないが、同じrepositoryの他のrefは書き換えうる）。使い捨てのrepositoryの検証のためだけに使い、既定には入れない
+- allowlistが見るのは`argv[0]`だけなので、他のプログラムを走らせるもの（`sh`・`env`・`xargs`・`find`など）を入れると、そこから`git`もworkspaceの外のcwdも走らせられる（誤りを止める仕組みで境界ではない）。`exec_env`に`LD_PRELOAD`・`DYLD_*`のような読み込みを変えるenvの名前を入れない
+- 監視の1巡りで読むのはpipeごとに1回（64 KiB）までで、書く速さが読む速さを上回っても毎巡りで上限と期限を見る。期限の時点で子がもう終わっていれば`timeout`にせず、終わったものとして残りを読む
+- `process.shell`（shellの文字列を受けるop）は作らない。要るならADRが別のcapabilityとして決める
 
 ## containerとPodman machine
 
