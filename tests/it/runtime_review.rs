@@ -2073,8 +2073,14 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
         thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
     };
-    wait_until(&db, Duration::from_secs(30), |queue| {
-        !queue.asks(AskQuery::default()).unwrap().is_empty()
+    // The ask comes after the claim, the review job, the revise, the
+    // /exit's timeout and the recovery job, each with processes of its
+    // own, so when it comes grows with the host's load (about 4s on an
+    // idle host, 20-26s at a load of 120), while none of the runtime's
+    // limits in between is at stake. The wait ends at the ask, or at a
+    // supervisor that returned without one; the test's limit bounds it.
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !queue.asks(AskQuery::default()).unwrap().is_empty() || supervisor.is_finished()
     });
     thread::sleep(HOLD_PERIOD);
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -2094,6 +2100,22 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
     assert!(position(&kinds, "revise_requested") < position(&kinds, "exit_requested"));
     assert!(!kinds.contains(&"revise_finished"), "{kinds:?}");
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
+    // The ask follows the /exit's timeout (1s) and its recovery job, not
+    // the resume timeout: measured from the /exit, not from the start.
+    let at = |kind: &str, ask_kind: Option<&str>| {
+        let event = detail
+            .events
+            .iter()
+            .find(|e| e.kind == kind && ask_kind.is_none_or(|k| e.payload["kind"] == k))
+            .unwrap();
+        timestamp_millis(&event.created_at).unwrap()
+    };
+    let asked = at("ask_opened", Some("stuck_exit")) - at("exit_requested", None);
+    let resume_limit = i64::try_from(backend.resume_timeout.as_millis()).unwrap();
+    assert!(
+        asked < resume_limit,
+        "the stuck_exit ask came {asked}ms after the /exit"
+    );
 
     release_held_session(run.run_dir().unwrap());
     let outcome = joined(supervisor, "the supervisor thread to return");
@@ -2143,10 +2165,20 @@ fn background_work_that_never_ends_is_waited_for_up_to_the_resume_timeout() {
     let limit = i64::try_from(resume_timeout.as_millis()).unwrap();
     let before = at("session_idle_observed") - at("receipt_observed");
     assert!(before >= limit, "went on {before}ms after the receipt");
-    let after = at("exit_requested") - at("session_idle_observed");
+    // The /exit's wait on background work begins once the review is over
+    // (the session stays open through validation and review, ADR-0027
+    // decision 1), so its absence shows from there: validation and the
+    // review take their own time, which load stretches past the limit.
+    let exit = position(&kinds, "exit_requested");
+    let reviewed = detail.events[..exit]
+        .iter()
+        .rev()
+        .find(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
+        .expect("the review's session closed before the /exit");
+    let after = at("exit_requested") - timestamp_millis(&reviewed.created_at).unwrap();
     assert!(
         after < limit,
-        "the /exit waited {after}ms for the work already waited for"
+        "the /exit waited {after}ms after the review for the work already waited for"
     );
 }
 

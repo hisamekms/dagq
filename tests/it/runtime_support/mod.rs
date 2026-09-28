@@ -1599,6 +1599,45 @@ pub fn print_queue_events(db: &Path) {
         ),
     };
     let _ = std::io::stderr().lock().write_all(text.as_bytes());
+    print_stub_processes(db);
+}
+
+/// The processes left in the groups of the stub agents started on `db`,
+/// so that a stub that stopped making progress shows where it is.
+fn print_stub_processes(db: &Path) {
+    use std::io::Write as _;
+    let groups: Vec<String> = stubs()
+        .get(db)
+        .cloned()
+        .flatten()
+        .unwrap_or_default()
+        .iter()
+        .map(u32::to_string)
+        .collect();
+    // `ps` returns at once; the bounded output would wait on the limit
+    // this runs past.
+    let listed = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,stat=,etime=,command="])
+        .output();
+    let text = match listed {
+        Ok(out) => {
+            let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| {
+                    line.split_whitespace()
+                        .nth(2)
+                        .is_some_and(|pgid| groups.iter().any(|g| g == pgid))
+                })
+                .map(|line| format!("  {}", line.chars().take(300).collect::<String>()))
+                .collect();
+            format!(
+                "the processes of the stub groups {groups:?}:\n{}\n",
+                lines.join("\n")
+            )
+        }
+        Err(error) => format!("the stub processes could not be listed: {error}\n"),
+    };
+    let _ = std::io::stderr().lock().write_all(text.as_bytes());
 }
 
 /// The asks other than `approve_landing`: those the supervisor opens for a

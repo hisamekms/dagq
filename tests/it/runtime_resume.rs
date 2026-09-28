@@ -1420,12 +1420,16 @@ fn a_resumed_session_gets_its_request_only_once_its_input_box_is_ready() {
     );
     let outcome = thread::scope(|scope| {
         scope.spawn(|| {
-            let started = Instant::now();
-            // Nothing is typed while the session boots.
-            while started.elapsed() < Duration::from_secs(4) {
+            // Nothing is typed while the session boots. The box gets ready
+            // only once the runtime gave up on it (`input_not_ready`), not
+            // at a time of the test's own: under load the resumed session
+            // may register later than any fixed time after the start.
+            wait_until(&db, Duration::from_secs(60), |queue| {
                 assert!(backend.texts().is_empty());
-                thread::sleep(Duration::from_millis(20));
-            }
+                let detail = queue.show(TaskId::new(2)).unwrap();
+                !payloads(&detail, "input_not_ready").is_empty()
+            });
+            assert!(backend.texts().is_empty());
             *backend.screen.lock().unwrap() = READY_SCREEN.into();
         });
         supervise(&db, &repo, &backend).unwrap()
