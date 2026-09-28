@@ -1,0 +1,136 @@
+name: Stress recent tests
+
+# Repeats the #[test] functions main added or changed since the last
+# successful run (or in the last 24 hours) many times under load, and opens
+# or updates a flaky-test issue per test that fails (ADR-t920-1 decision 2).
+# How it works: docs/design/stress-ci.md.
+on:
+  schedule:
+    # Once a day, 18:00 UTC (03:00 JST).
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Start of the commit range (exclusive). Empty: the last successful run's commit, or the since window"
+        required: false
+        default: ""
+      since:
+        description: "Without base: the window to look back over (git --before)"
+        required: false
+        default: "24 hours ago"
+      count:
+        description: "Stress iterations"
+        required: false
+        default: "20"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # gh run list: the commit of the last successful run starts the range.
+  actions: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stress:
+    name: stress recent tests
+    # The same runner as ci.yml: Apple Silicon, where the runtime runs.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # The whole history: the range is a diff over main's commits.
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Choose the range
+        id: range
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_BASE: ${{ inputs.base }}
+        run: |
+          set -eu
+          base=$INPUT_BASE
+          if [ -z "$base" ]; then
+            # The commit the last successful run stressed, when main still
+            # has it; otherwise the since window decides.
+            last=$(gh run list --workflow stress.yml --branch main \
+              --status success --limit 1 --json headSha --jq '.[0].headSha' \
+              2>/dev/null || true)
+            if [ -n "$last" ] && git merge-base --is-ancestor "$last" HEAD 2>/dev/null; then
+              base=$last
+            fi
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "range base: ${base:-(since window)}"
+
+      - name: Stress
+        id: stress
+        env:
+          STRESS_BASE: ${{ steps.range.outputs.base }}
+          STRESS_SINCE: ${{ inputs.since || '24 hours ago' }}
+          STRESS_COUNT: ${{ inputs.count || '20' }}
+          STRESS_OUT: target/stress
+        run: sh scripts/stress-recent-tests.sh
+
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-logs
+          path: target/stress/
+          if-no-files-found: ignore
+
+      - name: Open or update flaky-test issues
+        if: failure() && steps.stress.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          failed=target/stress/failed-tests.txt
+          if [ ! -s "$failed" ]; then
+            echo "the stress step failed without a failed test (build or setup); see the log"
+            exit 0
+          fi
+          gh label create flaky-test --color d93f0b \
+            --description "A test the scheduled stress run saw fail" 2>/dev/null || true
+          commit=$(git rev-parse HEAD)
+          while read -r binary name; do
+            title="flaky test: $binary $name"
+            body=$(printf '%s\n' \
+              "The scheduled stress run saw \`$name\` (binary \`$binary\`) fail." \
+              "" \
+              "- run: $RUN_URL" \
+              "- commit: $commit" \
+              "- logs: the \`stress-logs\` artifact of the run" \
+              "" \
+              "Reproduce: \`cargo nextest run --locked --workspace --stress-count 20 -E 'binary_id($binary) & test(=$name)'\`")
+            number=$(gh issue list --label flaky-test --state open --limit 200 \
+              --json number,title --jq ".[] | select(.title == \"$title\") | .number" |
+              head -n 1)
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body "$body"
+              echo "commented on #$number: $title"
+            else
+              gh issue create --label flaky-test --title "$title" --body "$body"
+              echo "opened: $title"
+            fi
+          done < "$failed"

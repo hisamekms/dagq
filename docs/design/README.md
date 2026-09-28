@@ -24,3 +24,4 @@ tags:
 - [Provider lifecycle](provider-lifecycle.md)
 - [Plugin integration](plugin-integration.md)
 - [Manual smoke](manual-smoke.md)
+- [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）
