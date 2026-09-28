@@ -4,6 +4,7 @@
 //! event a transition records, and what its payload says, is decided here;
 //! the store only saves them.
 
+use crate::domain::EventKind;
 use serde_json::{Value, json};
 
 use super::{
@@ -19,12 +20,12 @@ use crate::domain::{
 /// A `run_events` row a transition records for its run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewRunEvent {
-    pub kind: &'static str,
+    pub kind: EventKind,
     pub payload: Value,
 }
 
 impl NewRunEvent {
-    pub const fn new(kind: &'static str, payload: Value) -> Self {
+    pub const fn new(kind: EventKind, payload: Value) -> Self {
         Self { kind, payload }
     }
 }
@@ -56,7 +57,7 @@ pub fn end_session(run: TaskRun, exit_code: Option<i32>) -> Result<Recorded, Dom
     };
     Ok((
         run,
-        vec![NewRunEvent::new(event_kind::SUPERVISION_FINISHED, payload)],
+        vec![NewRunEvent::new(EventKind::SupervisionFinished, payload)],
     ))
 }
 
@@ -87,10 +88,10 @@ pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Record
     // A validation is plain data with string keys, so it always serializes.
     let mut payload = serde_json::to_value(validation).expect("a validation serializes");
     payload["status"] = json!(status);
-    let mut events = vec![NewRunEvent::new(event_kind::VALIDATION_FINISHED, payload)];
+    let mut events = vec![NewRunEvent::new(EventKind::ValidationFinished, payload)];
     if status == RunStatus::NeedsSession && !validation.scope_violation.is_empty() {
         events.push(NewRunEvent::new(
-            event_kind::SCOPE_VIOLATION,
+            EventKind::ScopeViolation,
             json!({
                 "code": ReasonCode::ScopeViolation,
                 "paths": validation.scope_violation,
@@ -100,7 +101,7 @@ pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Record
         ));
     } else if status == RunStatus::NeedsSession {
         events.push(NewRunEvent::new(
-            event_kind::EVIDENCE_MISSING,
+            EventKind::EvidenceMissing,
             json!({
                 "code": ReasonCode::EvidenceMissing,
                 "checks": validation.evidence_missing,
@@ -123,7 +124,7 @@ pub fn record_landing_decision(
     let payload = with_status_and_reason(payload, &run, reason);
     Ok((
         run,
-        vec![NewRunEvent::new(event_kind::LANDING_DECIDED, payload)],
+        vec![NewRunEvent::new(EventKind::LandingDecided, payload)],
     ))
 }
 
@@ -138,7 +139,7 @@ pub fn record_live_park(
     let payload = with_status_and_reason(payload, &run, reason);
     Ok((
         run,
-        vec![NewRunEvent::new(event_kind::RECOVERY_PARKED, payload)],
+        vec![NewRunEvent::new(EventKind::RecoveryParked, payload)],
     ))
 }
 
@@ -154,7 +155,7 @@ pub fn record_recheck_park(
     let payload = with_status_and_reason(payload, &run, reason);
     Ok((
         run,
-        vec![NewRunEvent::new(recheck::LANDING_RECHECK_FAILED, payload)],
+        vec![NewRunEvent::new(EventKind::LandingRecheckFailed, payload)],
     ))
 }
 
@@ -164,7 +165,7 @@ pub fn record_recheck_park(
 /// store adds the session's work and tokens it keeps.
 pub fn resume_finished(to: Option<RunStatus>, mut payload: Value) -> NewRunEvent {
     payload["status"] = json!(to.unwrap_or(RunStatus::NeedsSession).as_str());
-    NewRunEvent::new(event_kind::RESUME_FINISHED, payload)
+    NewRunEvent::new(EventKind::ResumeFinished, payload)
 }
 
 /// [`exhaust_resumes`] by the runtime, with the run's `events` and its
@@ -204,7 +205,7 @@ pub fn record_exhausted_resumes(
             payload["attempt"] =
                 json!(recovery::attempts(events, RecoveryAlert::ResumeExhausted) + 1);
             payload["evidence"] = json!(resumed.into_iter().collect::<Vec<_>>());
-            vec![NewRunEvent::new(event_kind::RECOVERY_REQUESTED, payload)]
+            vec![NewRunEvent::new(EventKind::RecoveryRequested, payload)]
         }
         Exhaustion::Inherit { branch, head } => {
             payload["verdict"] = json!(resume::RETRY_INHERIT);
@@ -212,7 +213,7 @@ pub fn record_exhausted_resumes(
             payload["inherit"] = json!({"branch": branch, "head": head});
             vec![
                 NewRunEvent::new(
-                    event_kind::AUTO_REPAIRED,
+                    EventKind::AutoRepaired,
                     json!({
                         "layer": "runtime",
                         "repair": "inherit_retry",
@@ -228,7 +229,7 @@ pub fn record_exhausted_resumes(
                         "detail": "the resumes were used up on conflicts with main; the task is ready again for a run that carries this run's branch over",
                     }),
                 ),
-                NewRunEvent::new(event_kind::TRIAGE_FINISHED, payload),
+                NewRunEvent::new(EventKind::TriageFinished, payload),
             ]
         }
     };
@@ -273,7 +274,7 @@ mod tests {
     }
 
     fn kinds(events: &[NewRunEvent]) -> Vec<&'static str> {
-        events.iter().map(|e| e.kind).collect()
+        events.iter().map(|e| e.kind.as_str()).collect()
     }
 
     fn validation(
@@ -436,7 +437,7 @@ mod tests {
     #[test]
     fn a_finished_resume_reports_the_status_after_it() {
         let event = resume_finished(None, json!({"head": "h"}));
-        assert_eq!(event.kind, event_kind::RESUME_FINISHED);
+        assert_eq!(event.kind, EventKind::ResumeFinished);
         assert_eq!(
             event.payload,
             json!({"head": "h", "status": "needs_session"})

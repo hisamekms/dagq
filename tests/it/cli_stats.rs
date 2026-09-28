@@ -944,10 +944,18 @@ mod stats {
                 panic!("nothing to claim");
             };
             queue
-                .record_runtime_event(run.id(), "receipt_observed", json!({}))
+                .record_runtime_event(
+                    run.id(),
+                    dagq::domain::EventKind::ReceiptObserved,
+                    json!({}),
+                )
                 .unwrap();
             queue
-                .record_runtime_event(run.id(), "validation_finished", json!({"status": "failed"}))
+                .record_runtime_event(
+                    run.id(),
+                    dagq::domain::EventKind::ValidationFinished,
+                    json!({"status": "failed"}),
+                )
                 .unwrap();
             run.id().clone()
         };

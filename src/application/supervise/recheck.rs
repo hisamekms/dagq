@@ -8,6 +8,7 @@
 //! it would land.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::recheck::{self, HELD, LANDING_RECHECK_FAILED, Landed, RecheckFailure};
 
 /// Where the recheck keeps its scratch worktree and its target directory,
@@ -276,7 +277,7 @@ impl Supervisor<'_> {
         );
         self.queue.record_runtime_event(
             &watch.landed.run_id,
-            recheck::LANDING_RECHECK_FINISHED,
+            EventKind::LandingRecheckFinished,
             payload,
         )?;
         Ok(())
@@ -313,8 +314,11 @@ impl Supervisor<'_> {
             Some(lease) if lease.token == self.token => {
                 payload["action"] = json!(HELD);
                 payload["reason"] = json!(reason);
-                self.queue
-                    .record_runtime_event(run.id(), LANDING_RECHECK_FAILED, payload)?;
+                self.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::LandingRecheckFailed,
+                    payload,
+                )?;
                 HELD
             }
             Some(_) => return Ok(None),

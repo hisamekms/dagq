@@ -7,6 +7,7 @@
 //! nothing.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -208,7 +209,7 @@ fn a_markerless_resumed_session_gets_its_answer_once_its_screen_rests() {
     queue
         .record_runtime_event(
             run.id(),
-            "evidence_missing",
+            EventKind::EvidenceMissing,
             json!({"status": "needs_session", "reason": "e2e has no evidence"}),
         )
         .unwrap();

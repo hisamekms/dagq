@@ -19,6 +19,7 @@
 
 use super::*;
 use crate::application::EndedRunWorktree;
+use crate::domain::EventKind;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{disk::Cleaned, sweep::BUILD_OUTPUT_DIRS};
@@ -261,7 +262,7 @@ impl Supervisor<'_> {
                     cleaned.add(&run_id, bytes);
                     self.queue.record_runtime_event(
                         &run_id,
-                        event_kind::BUILD_OUTPUTS_REMOVED,
+                        EventKind::BuildOutputsRemoved,
                         json!({"paths": paths, "bytes": bytes, "by": "supervisor"}),
                     )
                 }
@@ -288,7 +289,7 @@ impl Supervisor<'_> {
                     }
                     cleaned.add(&run_id, bytes);
                     self.queue
-                        .record_runtime_event(&run_id, event_kind::WORKTREE_REMOVED, payload)
+                        .record_runtime_event(&run_id, EventKind::WorktreeRemoved, payload)
                 }
                 Outcome::Failed {
                     run_id,
@@ -304,7 +305,7 @@ impl Supervisor<'_> {
                     warn!(run_id = %run_id, "run {run_id}: {message}");
                     self.queue.record_runtime_event(
                         &run_id,
-                        event_kind::CLEANUP_FAILED,
+                        EventKind::CleanupFailed,
                         reason_of_error(&error, ReasonCode::Other)
                             .on(json!({"path": path, "message": message, "by": "supervisor"})),
                     )

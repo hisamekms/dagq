@@ -1,6 +1,7 @@
 //! Runtime tests: The recovery job of failed runs, dead runs and silent
 //! wrappers.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -768,7 +769,7 @@ fn validated_orphan(db: &Path, run: &TaskRun) -> String {
         .unwrap()
         .record_runtime_event(
             run.id(),
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         )
         .unwrap();
@@ -868,7 +869,7 @@ fn failed_review_asked_before_death(db: &Path, run: &TaskRun) -> AskId {
     queue
         .record_runtime_event(
             run.id(),
-            "review_started",
+            EventKind::ReviewStarted,
             json!({"attempt": 1, "workspace_id": null, "session_live": false, "session_id": "s"}),
         )
         .unwrap();
@@ -966,14 +967,14 @@ fn an_adopted_run_whose_concern_was_asked_waits_for_the_ask() {
         queue
             .record_runtime_event(
                 run.id(),
-                "review_started",
+                EventKind::ReviewStarted,
                 json!({"attempt": 1, "workspace_id": null, "session_live": false, "session_id": "s"}),
             )
             .unwrap();
         queue
             .record_runtime_event(
                 run.id(),
-                "review_finished",
+                EventKind::ReviewFinished,
                 json!({"attempt": 1, "verdict": "concern", "reasons": ["out of scope"], "summary": "scope"}),
             )
             .unwrap();

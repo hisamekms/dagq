@@ -27,18 +27,20 @@ use super::{
 /// A supervisor started, or took over its registration by a handoff
 /// (ADR-0045 decision 10): its build identifier, `parallel`, `mode` and
 /// whether it updates itself.
-pub const SUPERVISOR_STARTED: &str = "supervisor_started";
+pub const SUPERVISOR_STARTED: &str =
+    crate::domain::event_kind::EventKind::SupervisorStarted.as_str();
 /// A supervisor stopped and removed its registration. One that went stale
 /// records none: its interval ends at its last heartbeat or the next start.
-pub const SUPERVISOR_STOPPED: &str = "supervisor_stopped";
+pub const SUPERVISOR_STOPPED: &str =
+    crate::domain::event_kind::EventKind::SupervisorStopped.as_str();
 /// The normalized `[run.env]` of the main checkout's `dagq.toml` hashes
 /// differently from the last one recorded.
-pub const RUN_ENV_CHANGED: &str = "run_env_changed";
+pub const RUN_ENV_CHANGED: &str = crate::domain::event_kind::EventKind::RunEnvChanged.as_str();
 /// A mark a person or a planner recorded with `dagq mark`.
-pub const MARK_RECORDED: &str = "mark_recorded";
+pub const MARK_RECORDED: &str = crate::domain::event_kind::EventKind::MarkRecorded.as_str();
 /// A retraction of a recorded mark (`dagq mark --retract`); the retracted
 /// mark stays, and the KPIs do not split at it.
-pub const MARK_RETRACTED: &str = "mark_retracted";
+pub const MARK_RETRACTED: &str = crate::domain::event_kind::EventKind::MarkRetracted.as_str();
 /// Every kind of recorded mark.
 pub const RECORDED_KINDS: [&str; 5] = [
     SUPERVISOR_STARTED,

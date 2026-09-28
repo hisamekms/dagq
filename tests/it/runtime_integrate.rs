@@ -1,6 +1,7 @@
 //! Runtime tests: `integrate`: landing, rebasing, pushing, the review material, the prompt
 //! of a run and `rebind`.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -137,7 +138,11 @@ fn a_failed_push_keeps_the_landing_and_waits_as_attention() {
     // A later successful push carries this landing too and clears it.
     SqliteQueue::open(&db)
         .unwrap()
-        .record_runtime_event(run.id(), "push_finished", json!({"remote": "origin"}))
+        .record_runtime_event(
+            run.id(),
+            EventKind::PushFinished,
+            json!({"remote": "origin"}),
+        )
         .unwrap();
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");

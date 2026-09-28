@@ -7,12 +7,11 @@
 //! free, before any new work) and its phase goes on where it stopped.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     waiting::{
-        RUN_SLOT_REGAINED, RUN_WAITING_ASK_ADDED, RUN_WAITING_DEFERRED, RUN_WAITING_ENDED,
-        RUN_WAITING_STARTED, WaitCause, WaitCount, WaitPhase, WaitState, consumed_asks,
-        deferred_asks, waits_for,
+        WaitCause, WaitCount, WaitPhase, WaitState, consumed_asks, deferred_asks, waits_for,
     },
 };
 
@@ -235,7 +234,7 @@ impl Supervisor<'_> {
         let run = self.queue.run(slot.run.id())?;
         self.queue.record_runtime_event(
             run.id(),
-            RUN_WAITING_STARTED,
+            EventKind::RunWaitingStarted,
             json!({
                 "ask_id": id,
                 "ask_kind": kind,
@@ -263,7 +262,7 @@ impl Supervisor<'_> {
         let run = self.slots[index].run.clone();
         self.queue.record_runtime_event(
             run.id(),
-            RUN_WAITING_DEFERRED,
+            EventKind::RunWaitingDeferred,
             json!({
                 "ask_id": id,
                 "ask_kind": kind,
@@ -429,7 +428,7 @@ impl Supervisor<'_> {
             waiting.asks.push((ask.id, ask.kind.clone()));
             self.queue.record_runtime_event(
                 slot.run.id(),
-                RUN_WAITING_ASK_ADDED,
+                EventKind::RunWaitingAskAdded,
                 json!({"ask_id": ask.id, "ask_kind": ask.kind}),
             )?;
             info!(run_id = %slot.run.id(), ask_id = %ask.id, "run {}: its {} ask {} joins its wait", slot.run.id(), ask.kind.as_str(), ask.id);
@@ -517,7 +516,7 @@ impl Supervisor<'_> {
         let now = self.generators.clock.now();
         self.queue.record_runtime_event(
             slot.run.id(),
-            RUN_WAITING_ENDED,
+            EventKind::RunWaitingEnded,
             json!({
                 "ask_id": ask.as_ref().map(|(id, _)| id),
                 "ask_kind": ask.as_ref().map(|(_, kind)| kind),
@@ -553,7 +552,7 @@ impl Supervisor<'_> {
         let ended_at = waiting.ended.map_or(now, |(at, _)| at);
         self.queue.record_runtime_event(
             run,
-            RUN_SLOT_REGAINED,
+            EventKind::RunSlotRegained,
             json!({
                 "slot_wait_secs": now - ended_at,
                 "over_parallel": used > self.parallel,
@@ -634,7 +633,7 @@ impl Supervisor<'_> {
         if waiting.ended.is_none() {
             self.queue.record_runtime_event(
                 slot.run.id(),
-                RUN_WAITING_ENDED,
+                EventKind::RunWaitingEnded,
                 json!({
                     "ask_id": null,
                     "ask_kind": null,

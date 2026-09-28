@@ -108,6 +108,7 @@ pub(super) fn event_actor(row: &Row<'_>) -> rusqlite::Result<Option<EventActor>>
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::EventKind;
     use serde_json::json;
 
     use crate::{
@@ -126,7 +127,7 @@ mod tests {
             queue.latest_event_of(kind).unwrap().unwrap().actor.unwrap()
         };
         queue
-            .record_queue_event("observe_started", json!({}))
+            .record_queue_event(EventKind::ObserveStarted, json!({}))
             .unwrap();
         let user = latest(&queue, "observe_started");
         assert_eq!((user.role.as_str(), user.id.as_str()), ("user", "user"));
@@ -138,11 +139,11 @@ mod tests {
         let job = ActorContext::review_job(&crate::domain::RunId::new("r1").unwrap(), 2);
         queue.request_as(Some(&job));
         queue
-            .record_queue_event("observe_finished", json!({}))
+            .record_queue_event(EventKind::ObserveFinished, json!({}))
             .unwrap();
         queue.request_as(None);
         queue
-            .record_queue_event("backend_call_failed", json!({}))
+            .record_queue_event(EventKind::BackendCallFailed, json!({}))
             .unwrap();
         let applied = latest(&queue, "observe_finished");
         assert_eq!(

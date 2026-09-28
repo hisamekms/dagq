@@ -6,6 +6,7 @@
 //! (`triage_started`, `triage_finished`, `triage_failed`).
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
@@ -405,7 +406,7 @@ impl Supervisor<'_> {
         let mut also = Vec::new();
         if !matches!(action, TriageAction::Wait { .. }) {
             also.push((
-                event_kind::AUTO_REPAIRED,
+                EventKind::AutoRepaired,
                 json!({
                     "layer": "recovery",
                     "repair": name,
@@ -416,7 +417,7 @@ impl Supervisor<'_> {
             ));
         }
         also.push((
-            event_kind::RECOVERY_FINISHED,
+            EventKind::RecoveryFinished,
             json!({
                 "alert": alert,
                 "attempt": attempt,
@@ -688,7 +689,7 @@ impl Supervisor<'_> {
             &self.token,
             &TriageAction::Ask { ask_id },
             payload,
-            vec![(event_kind::RECOVERY_FINISHED, finished)],
+            vec![(EventKind::RecoveryFinished, finished)],
         ) {
             Ok(asked) => asked,
             Err(error) => {
@@ -737,7 +738,7 @@ impl Supervisor<'_> {
         warn!(run_id = %run.id(), error = %error, "run {} recovery job {attempt} of {} failed: {error}; the run waits to be recovered by hand", run.id(), alert.as_str());
         for (kind, payload) in [
             (
-                event_kind::TRIAGE_FAILED,
+                EventKind::TriageFailed,
                 json!({
                     "code": ReasonCode::JobFailed,
                     "attempt": round,
@@ -749,7 +750,7 @@ impl Supervisor<'_> {
                 }),
             ),
             (
-                event_kind::RECOVERY_FINISHED,
+                EventKind::RecoveryFinished,
                 json!({
                     "alert": alert,
                     "attempt": attempt,

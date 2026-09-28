@@ -8,7 +8,7 @@
 //! own starts no agent and records a skipped `observe_finished`; the agent
 //! loads no MCP server; `observe --history` reads what each observation
 //! read and wrote.
-use crate::domain::event_kind;
+use crate::domain::EventKind;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -198,7 +198,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     let session_id = uuid::Uuid::new_v4().to_string();
     let launch = observer_launch(checkout.as_deref());
     let event_mark = queue.record_queue_event(
-        event_kind::OBSERVE_STARTED,
+        EventKind::ObserveStarted,
         json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()}),
     )?;
     tracing::info!(
@@ -266,7 +266,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         "wall": wall.map(Wall::as_str),
         "hold_ask_id": hold,
     });
-    queue.record_queue_event(event_kind::OBSERVE_FINISHED, payload.clone())?;
+    queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
     tracing::info!(
         mode = options.mode.as_str(),
         outcome,
@@ -380,7 +380,7 @@ fn skip(queue: &SqliteQueue, mode: ObserveMode, since: Option<EventId>) -> Resul
         "duration_secs": 0,
         "dir": null,
     });
-    queue.record_queue_event(event_kind::OBSERVE_FINISHED, payload.clone())?;
+    queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
     tracing::info!(
         mode = mode.as_str(),
         previous = previous.as_i64(),

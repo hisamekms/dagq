@@ -3,6 +3,7 @@
 //! and findings of a [`SqliteQueue`], with the checkout that names the
 //! repository and the backend that notifies the inbox of a new ask.
 
+use crate::domain::EventKind;
 use std::path::Path;
 
 use anyhow::Result;
@@ -14,7 +15,7 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::{RunLog, TaskStore, WorkspaceBackend};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
-    NewNote, RunEvent, event_kind,
+    NewNote, RunEvent,
 };
 
 /// A queue, with what opening an ask needs besides it.
@@ -26,8 +27,7 @@ pub struct DialogueQueue<'a> {
 
 impl DenialLog for DialogueQueue<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        RunLog::record_queue_event(&*self.queue, event_kind::AUTHORIZATION_DENIED, payload)
-            .map(drop)
+        RunLog::record_queue_event(&*self.queue, EventKind::AuthorizationDenied, payload).map(drop)
     }
 }
 

@@ -1,5 +1,6 @@
 //! Runtime tests: Runs that need a session: conflicts and the resumed sessions.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -445,7 +446,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
     queue
         .record_runtime_event(
             run.id(),
-            "evidence_missing",
+            EventKind::EvidenceMissing,
             json!({"status": "needs_session", "reason": "e2e has no evidence"}),
         )
         .unwrap();
@@ -891,7 +892,7 @@ fn a_run_missing_a_condition_of_the_skip_is_resumed(case: &str, resumed: bool, s
             .unwrap()
             .record_runtime_event(
                 run.id(),
-                "landing_decided",
+                EventKind::LandingDecided,
                 json!({"status": "needs_session", "reason": "findings sent back"}),
             )
             .unwrap();
@@ -1331,12 +1332,16 @@ fn a_used_up_run_is_retried_with_its_branch_by_its_recovery_job() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     for attempt in 1..=3 {
         queue
-            .record_runtime_event(run.id(), "resume_started", json!({"attempt": attempt}))
+            .record_runtime_event(
+                run.id(),
+                EventKind::ResumeStarted,
+                json!({"attempt": attempt}),
+            )
             .unwrap();
         queue
             .record_runtime_event(
                 run.id(),
-                "resume_finished",
+                EventKind::ResumeFinished,
                 json!({"attempt": attempt, "outcome": "unresolved", "status": "needs_session"}),
             )
             .unwrap();

@@ -2,6 +2,7 @@
 //! fixes a `revise` verdict or resolves what parked them (ADR-0071
 //! decisions 1 and 15 to 18).
 use crate::{common, runtime_support};
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -394,16 +395,16 @@ fn an_adopted_revise_keeps_waiting_outside_the_slot() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     for (kind, payload) in [
         (
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         ),
-        ("review_started", json!({"attempt": 1})),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
         (
-            "review_finished",
+            EventKind::ReviewFinished,
             json!({"verdict": "revise", "reasons": ["say which line"], "summary": "one gap", "attempt": 1}),
         ),
         (
-            "revise_requested",
+            EventKind::ReviseRequested,
             json!({"attempt": 1, "reasons": ["say which line"], "sent_at": sent_at}),
         ),
     ] {
@@ -418,7 +419,7 @@ fn an_adopted_revise_keeps_waiting_outside_the_slot() {
     queue
         .record_runtime_event(
             run.id(),
-            "run_waiting_started",
+            EventKind::RunWaitingStarted,
             json!({"ask_id": ask, "ask_kind": "worker_question", "phase": "revise",
                    "status": "awaiting_integration", "waiting": 1, "limit": 4}),
         )

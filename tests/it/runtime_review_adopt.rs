@@ -1,6 +1,7 @@
 //! Runtime tests: a revise the supervisor adopts carries over what the
 //! previous supervisor recorded for its live session (task 581).
 use crate::{common, runtime_support};
+use dagq::domain::EventKind;
 
 use dagq::domain::{AskReason, NewAsk};
 use runtime_support::*;
@@ -121,7 +122,9 @@ fn revise_under_dead_supervisor(
     ])
     .chain(after);
     for (kind, payload) in events {
-        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+        queue
+            .record_runtime_event(run.id(), EventKind::from_name(kind).unwrap(), payload)
+            .unwrap();
     }
     age_lease(&db, &run, 31);
     (dir, repo, db, base, backend, run)
@@ -317,20 +320,20 @@ fn adoptable_unsent_exit(
     let queue = SqliteQueue::open(db).unwrap();
     for (kind, payload) in [
         (
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         ),
-        ("review_started", json!({"attempt": 1})),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
         (
-            "review_finished",
+            EventKind::ReviewFinished,
             json!({"verdict": "pass", "reasons": [], "summary": "meets the acceptance", "attempt": 1}),
         ),
         (
-            "exit_requested",
+            EventKind::ExitRequested,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
         ),
         (
-            "exit_unsent",
+            EventKind::ExitUnsent,
             json!({"code": "backend_timeout", "workspace_id": WORKSPACE_ID, "attempts": 3, "action": "close_and_land"}),
         ),
     ] {

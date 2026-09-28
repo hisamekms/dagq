@@ -58,14 +58,14 @@ impl SqliteQueue {
     pub fn record_runtime_event(
         &self,
         id: &RunId,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
         // The event and the session spans it opens or closes (ADR-0048),
         // in one write transaction taken up front so it waits for other
         // writers rather than failing to upgrade a read. The transcripts of
         // the spans it closes are read before (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[kind]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[kind.as_str()]))?;
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         match run_event(&self.conn, id, kind, payload) {
             Ok(()) => Ok(self.conn.execute_batch("COMMIT")?),
@@ -84,21 +84,25 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<()> {
         match run {
-            Some(id) => run_event(&self.conn, id, event_kind::BACKEND_CALL_FAILED, payload),
+            Some(id) => run_event(&self.conn, id, EventKind::BackendCallFailed, payload),
             None => self
-                .record_queue_event(event_kind::BACKEND_CALL_FAILED, payload)
+                .record_queue_event(EventKind::BackendCallFailed, payload)
                 .map(drop),
         }
     }
 
     /// Record an event of the queue itself, on no task, goal or run (the
     /// observer's `observe_started` / `observe_finished`); returns its id.
-    pub fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId> {
+    pub fn record_queue_event(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<EventId> {
         crate::domain::check_event_target(kind, None, None)?;
         // Immediate like every other write: a deferred one that read first
         // (the schema, to prepare the insert) got SQLITE_BUSY at once, past
         // the busy timeout, when another supervisor wrote at the same time.
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let id = queue_event(&tx, kind, &payload)?;
         tx.commit()?;
@@ -658,7 +662,7 @@ impl RunLog for SqliteQueue {
     fn record_runtime_event(
         &self,
         id: &RunId,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
         SqliteQueue::record_runtime_event(self, id, kind, payload)
@@ -691,7 +695,7 @@ impl RunLog for SqliteQueue {
     ) -> Result<()> {
         SqliteQueue::record_backend_failure(self, run, payload)
     }
-    fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId> {
+    fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
         SqliteQueue::record_queue_event(self, kind, payload)
     }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
@@ -731,11 +735,11 @@ impl RunLog for SqliteQueue {
 
 /// Insert an event of the queue itself in the open transaction `tx`, with
 /// the session span it opens or closes; its id.
-pub(super) fn queue_event(tx: &Connection, kind: &str, payload: &Value) -> Result<EventId> {
+pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> Result<EventId> {
     tx.execute(
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![kind, serde_json::to_string(payload)?],
+        params![kind.as_str(), serde_json::to_string(payload)?],
     )?;
     let id = EventId::new(tx.last_insert_rowid());
     // The observer's session span (ADR-0048).

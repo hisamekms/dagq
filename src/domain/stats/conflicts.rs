@@ -88,7 +88,8 @@ impl Default for ConflictConfigReport {
 /// The queue event a supervisor records when the `[conflicts]` it reads
 /// again from the main checkout's `dagq.toml` differs from the values it
 /// was using (ADR-0080): `from`, `to`, `source` and `supervisor`.
-pub const CONFLICTS_CONFIG_CHANGED: &str = "conflicts_config_changed";
+pub const CONFLICTS_CONFIG_CHANGED: &str =
+    crate::domain::event_kind::EventKind::ConflictsConfigChanged.as_str();
 
 /// The payload of [`CONFLICTS_CONFIG_CHANGED`] for the values read again,
 /// `to`, over `from`, the ones in use; `None` when they are the same, or

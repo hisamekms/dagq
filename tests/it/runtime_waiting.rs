@@ -1,5 +1,6 @@
 //! Runtime tests: runs that wait for a person outside the slots (ADR-0062).
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -519,7 +520,7 @@ fn an_adopted_run_keeps_waiting_outside_the_slot() {
     queue
         .record_runtime_event(
             run.id(),
-            "run_waiting_started",
+            EventKind::RunWaitingStarted,
             json!({"ask_id": ask, "ask_kind": "worker_question", "phase": "session",
                    "status": "running", "waiting": 1, "limit": 4}),
         )

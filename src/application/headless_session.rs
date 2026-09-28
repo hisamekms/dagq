@@ -15,6 +15,7 @@
 //! the supervisor holds the queue for a person as it does for an
 //! interactive session.
 
+use crate::domain::EventKind;
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::{
@@ -183,7 +184,7 @@ impl Turns<'_> {
                 // it ended before it was saved): forget it and start anew.
                 self.queue.record_runtime_event(
                     self.run.id(),
-                    event_kind::TURN_SESSION_IDENTIFIED,
+                    EventKind::TurnSessionIdentified,
                     json!({
                         "turn": turn,
                         "session_id": null,
@@ -353,7 +354,7 @@ impl Turns<'_> {
         let what = request.map_or("the task's prompt", |r| r.what.as_str());
         self.queue.record_runtime_event(
             run.id(),
-            event_kind::TURN_STARTED,
+            EventKind::TurnStarted,
             json!({
                 "turn": turn,
                 "resume": resume.is_some(),
@@ -395,7 +396,7 @@ impl Turns<'_> {
         let (tokens, tokens_total) = self.turn_tokens(&result)?;
         self.queue.record_runtime_event(
             run.id(),
-            event_kind::TURN_FINISHED,
+            EventKind::TurnFinished,
             json!({
                 "turn": turn,
                 "outcome": outcome,
@@ -485,7 +486,7 @@ impl Turns<'_> {
         }
         self.queue.record_runtime_event(
             self.run.id(),
-            event_kind::TURN_SESSION_IDENTIFIED,
+            EventKind::TurnSessionIdentified,
             json!({
                 "turn": turn,
                 "session_id": id,

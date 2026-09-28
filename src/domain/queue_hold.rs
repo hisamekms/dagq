@@ -8,8 +8,9 @@
 //! as an abandon does. The disk's `cost` ask (`subject: disk`, task 377)
 //! is not one: it holds the claims and landings its own way.
 
+use super::EventKind;
 use super::claim_hold::{HoldReason, QueueHold};
-use super::{Ask, AskKind, AskReason, GoalId, ProposalId, RunId, disk::DISK_SUBJECT, event_kind};
+use super::{Ask, AskKind, AskReason, GoalId, ProposalId, RunId, disk::DISK_SUBJECT};
 
 /// The `subject` of the `cost` ask about Claude Code's usage limit.
 pub const USAGE_LIMIT_SUBJECT: &str = "usage_limit";
@@ -85,10 +86,10 @@ impl Wall {
     }
     /// The event recorded on what hit it: `auth_required` or
     /// `usage_limited`.
-    pub fn event_kind(self) -> &'static str {
+    pub fn event_kind(self) -> EventKind {
         match self {
-            Self::Authentication => event_kind::AUTH_REQUIRED,
-            Self::UsageLimit => event_kind::USAGE_LIMITED,
+            Self::Authentication => EventKind::AuthRequired,
+            Self::UsageLimit => EventKind::UsageLimited,
         }
     }
     pub fn question(self) -> &'static str {
@@ -318,11 +319,11 @@ mod tests {
     fn a_wall_names_its_ask_and_its_event() {
         assert_eq!(Wall::Authentication.reason(), AskReason::Authentication);
         assert_eq!(Wall::Authentication.subject(), None);
-        assert_eq!(Wall::Authentication.event_kind(), "auth_required");
+        assert_eq!(Wall::Authentication.event_kind(), EventKind::AuthRequired);
         assert_eq!(Wall::Authentication.question(), AUTH_QUESTION);
         assert_eq!(Wall::UsageLimit.reason(), AskReason::Cost);
         assert_eq!(Wall::UsageLimit.subject(), Some(USAGE_LIMIT_SUBJECT));
-        assert_eq!(Wall::UsageLimit.event_kind(), "usage_limited");
+        assert_eq!(Wall::UsageLimit.event_kind(), EventKind::UsageLimited);
         assert_eq!(Wall::UsageLimit.question(), USAGE_LIMIT_QUESTION);
         assert_eq!(Wall::UsageLimit.as_str(), "usage_limit");
         assert_eq!(Wall::Authentication.as_str(), "authentication");

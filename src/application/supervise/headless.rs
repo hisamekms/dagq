@@ -9,6 +9,7 @@
 //! idle marker ([`TurnMark`]) and the `turn_finished` events.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::recovery::PERMISSION_DENIED;
 use crate::domain::turn::{
     self, LIMITS_FILE, TurnFailure, TurnMark, TurnOutcome, TurnRequest, exit_path, next_seq,
@@ -63,7 +64,7 @@ pub(super) fn request_turn(
     // Written: a record that fails is only noted, as for a typed text.
     if let Err(error) = sv.queue.record_runtime_event(
         run.id(),
-        event_kind::TURN_REQUESTED,
+        EventKind::TurnRequested,
         json!({"seq": seq, "what": what, "workspace_id": workspace}),
     ) {
         warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "turn_requested of {} could not be recorded: {error:#}", run.id());

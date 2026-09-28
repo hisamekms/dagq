@@ -1,6 +1,7 @@
 //! Runtime tests: deferring the claim of a task whose files meet a run in
 //! flight on a conflict hotspot (ADR-0069).
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::{application::DraftPlannerStore, domain::stats::ConflictConfig};
 use runtime_support::*;
@@ -101,7 +102,7 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
         queue
             .record_task_event(
                 old,
-                "integration_deferred",
+                EventKind::IntegrationDeferred,
                 json!({"conflicts": [HOT], "main": main}),
             )
             .unwrap();

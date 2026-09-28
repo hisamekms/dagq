@@ -21,6 +21,7 @@
 
 use super::*;
 use crate::domain::ActorContext;
+use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::idle_process::{
     CpuWatch, IdleProcess, PROGRESS_CPU_PER_MILLE, without_session_helpers,
@@ -348,7 +349,7 @@ impl Escalation {
     ) -> Result<()> {
         let payload = self.finished(alert, attempt, note, ask_id, extra);
         sv.queue
-            .record_runtime_event(run.id(), event_kind::RECOVERY_FINISHED, payload)?;
+            .record_runtime_event(run.id(), EventKind::RecoveryFinished, payload)?;
         Ok(())
     }
 }
@@ -490,7 +491,7 @@ impl RecoveryWatch {
         job.job.stop();
         let recorded = sv.queue.record_runtime_event(
             run.id(),
-            event_kind::RECOVERY_FINISHED,
+            EventKind::RecoveryFinished,
             json!({
                 "alert": job.alert,
                 "reason": job.reason,
@@ -566,7 +567,7 @@ impl RecoveryWatch {
         let mut recorded = payload.clone();
         recorded["launch"] = launch.to_value();
         sv.queue
-            .record_runtime_event(run.id(), event_kind::RECOVERY_REQUESTED, recorded)?;
+            .record_runtime_event(run.id(), EventKind::RecoveryRequested, recorded)?;
         info!(run_id = %run.id(), "run {}: alert {}; recovery job {attempt} starts", run.id(), alert.as_str());
         match spawn_live(sv, run, live, alert, attempt, &payload, &launch) {
             Ok(job) => {
@@ -1186,7 +1187,7 @@ fn apply_live_verdict(
             payload.extend(detail);
         }
         sv.queue
-            .record_runtime_event(run.id(), event_kind::AUTO_REPAIRED, payload)
+            .record_runtime_event(run.id(), EventKind::AutoRepaired, payload)
     };
     for action in &verdict.actions {
         match action {
@@ -1291,7 +1292,7 @@ fn apply_live_verdict(
     }
     sv.queue.record_runtime_event(
         run.id(),
-        event_kind::RECOVERY_FINISHED,
+        EventKind::RecoveryFinished,
         json!({
             "alert": job.alert,
             "reason": job.reason,

@@ -9,6 +9,7 @@
 //! [`submit`].
 
 use super::*;
+use crate::domain::EventKind;
 
 /// What the supervisor types into a session.
 #[derive(Debug, Clone, Copy)]
@@ -246,7 +247,7 @@ pub(super) fn record_submission(
     submission: &Submission,
     retries: usize,
 ) {
-    let note = |sv: &mut Supervisor<'_>, kind: &str, payload: Value| {
+    let note = |sv: &mut Supervisor<'_>, kind: EventKind, payload: Value| {
         if let Err(error) = sv.queue.record_runtime_event(run.id(), kind, payload) {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{kind} of {} could not be recorded: {error:#}", run.id());
         }
@@ -254,7 +255,7 @@ pub(super) fn record_submission(
     if retries > 0 {
         note(
             sv,
-            event_kind::SUBMIT_RETRIED,
+            EventKind::SubmitRetried,
             json!({
                 "workspace_id": workspace,
                 "input": input.name(),
@@ -270,7 +271,7 @@ pub(super) fn record_submission(
         if matches!(submission, Submission::Submitted(Some(_))) {
             note(
                 sv,
-                event_kind::AUTO_REPAIRED,
+                EventKind::AutoRepaired,
                 json!({
                     "layer": "runtime",
                     "repair": "submit_enter_retry",
@@ -284,7 +285,7 @@ pub(super) fn record_submission(
         let excerpt = sv.signals.screen_excerpt(screen);
         note(
             sv,
-            event_kind::SUBMIT_UNCONFIRMED,
+            EventKind::SubmitUnconfirmed,
             json!({
                 "workspace_id": workspace,
                 "input": input.name(),
@@ -527,7 +528,7 @@ impl StartCheck {
             StartSign::Lost if !self.resent => {
                 sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::SUBMIT_RESENT,
+                    EventKind::SubmitResent,
                     json!({
                         "workspace_id": workspace,
                         "what": self.what,
@@ -546,7 +547,7 @@ impl StartCheck {
                 self.done = true;
                 sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::SUBMIT_NOT_STARTED,
+                    EventKind::SubmitNotStarted,
                     json!({
                         "workspace_id": workspace,
                         "what": self.what,
@@ -610,7 +611,7 @@ impl StartCheck {
         self.done = true;
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::SUBMIT_NOT_STARTED,
+            EventKind::SubmitNotStarted,
             json!({
                 "workspace_id": workspace,
                 "what": self.what,

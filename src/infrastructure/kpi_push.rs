@@ -8,10 +8,10 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 
 use super::sqlite::SqliteQueue;
-use crate::domain::EventId;
 use crate::domain::kpi::push::{
     KPI_BREACH_KINDS, KPI_BREACH_STARTED, KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS, breach_key,
 };
+use crate::domain::{EventId, EventKind};
 
 /// Every breach event, oldest first: (id, kind, payload).
 fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, String, Value)>> {
@@ -78,11 +78,11 @@ impl SqliteQueue {
     /// allows one more immediate push that day.
     pub fn record_kpi_breach(
         &self,
-        kind: &str,
+        kind: EventKind,
         mut payload: Value,
         push_day: Option<(i64, usize)>,
     ) -> Result<Option<Value>> {
-        if !KPI_BREACH_KINDS.contains(&kind) {
+        if !KPI_BREACH_KINDS.contains(&kind.as_str()) {
             bail!("{kind} is not a breach event");
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
@@ -90,11 +90,11 @@ impl SqliteQueue {
         let open = open_in(&tx)?
             .iter()
             .any(|(_, open)| breach_key(open) == key);
-        if open == (kind == KPI_BREACH_STARTED) {
+        if open == (kind == EventKind::KpiBreachStarted) {
             tx.commit()?;
             return Ok(None);
         }
-        if kind == KPI_BREACH_STARTED {
+        if kind == EventKind::KpiBreachStarted {
             let pushed = push_day.is_some_and(|(day, limit)| {
                 let today = breach_events(&tx).map_or(0, |events| {
                     events
@@ -114,7 +114,7 @@ impl SqliteQueue {
         tx.execute(
             "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-            params![kind, serde_json::to_string(&payload)?],
+            params![kind.as_str(), serde_json::to_string(&payload)?],
         )?;
         tx.commit()?;
         Ok(Some(payload))
@@ -139,7 +139,10 @@ impl SqliteQueue {
             tx.execute(
                 "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-                params![KPI_PUSH_ABANDONED, serde_json::to_string(&payload)?],
+                params![
+                    EventKind::KpiPushAbandoned.as_str(),
+                    serde_json::to_string(&payload)?
+                ],
             )?;
         }
         tx.commit()?;

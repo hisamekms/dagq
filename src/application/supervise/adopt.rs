@@ -3,6 +3,7 @@
 
 use super::stall_recovery::recorded_at;
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::RunEvent;
 
 impl Supervisor<'_> {
@@ -156,7 +157,7 @@ impl Supervisor<'_> {
         }
         if let Err(error) = self.queue.record_runtime_event(
             run.id(),
-            event_kind::AUTO_REPAIRED,
+            EventKind::AutoRepaired,
             json!({
                 "layer": "runtime",
                 "repair": "resume_adopted",
@@ -526,7 +527,7 @@ impl Supervisor<'_> {
                 );
             self.queue.record_runtime_event(
                 run.id(),
-                event_kind::REVIEW_FAILED,
+                EventKind::ReviewFailed,
                 json!({
                     "code": ReasonCode::JobFailed,
                     "attempt": attempt,

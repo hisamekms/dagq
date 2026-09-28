@@ -2,6 +2,7 @@
 //! validation, landing decisions, integration and clean-up ([`RunTransitions`]).
 
 use super::*;
+use crate::domain::EventKind;
 
 impl SqliteQueue {
     /// Reserve the next dependency-ready task of the interactive Claude
@@ -65,7 +66,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 run.id(),
-                event_kind::LEASE_ACQUIRED,
+                EventKind::LeaseAcquired,
                 json!({"pid": std::process::id()}),
             )?;
         }
@@ -106,7 +107,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::RUNTIME_ERROR,
+            EventKind::RuntimeError,
             reason.on(abandon_payload(message, released == 1, session)),
         )?;
         // Nobody watches its session any more (ADR-0047 decision 30).
@@ -128,12 +129,7 @@ impl SqliteQueue {
             || "run cannot be provisioned twice".to_owned(),
             |run| run::start_provisioning(run, plan),
         )?;
-        run_event(
-            &tx,
-            id,
-            event_kind::RUN_PLANNED,
-            serde_json::to_value(plan)?,
-        )?;
+        run_event(&tx, id, EventKind::RunPlanned, serde_json::to_value(plan)?)?;
         tx.commit()?;
         Ok(())
     }
@@ -159,7 +155,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::WORKSPACE_CREATED,
+            EventKind::WorkspaceCreated,
             json!({"workspace_id": workspace}),
         )?;
         tx.commit()?;
@@ -186,7 +182,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::RUNTIME_ERROR,
+            EventKind::RuntimeError,
             reason.on(json!({"message": message})),
         )?;
         tx.commit()?;
@@ -367,7 +363,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 id,
-                event_kind::LEASE_RELEASED,
+                EventKind::LeaseReleased,
                 json!({"reason": crate::domain::recheck::LANDING_RECHECK_FAILED}),
             )?;
         }
@@ -459,7 +455,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::INTEGRATION_STARTED,
+            EventKind::IntegrationStarted,
             json!({"main": main, "previous_status": previous, "pid": std::process::id()}),
         )?;
         tx.commit()?;
@@ -481,7 +477,7 @@ impl SqliteQueue {
             token,
             |run| run::defer_integration(run, reason.to_owned()),
             reason,
-            event_kind::INTEGRATION_DEFERRED,
+            EventKind::IntegrationDeferred,
             detail,
         )
     }
@@ -502,7 +498,7 @@ impl SqliteQueue {
             token,
             |run| run::hold_integration(run, reason.to_owned()),
             reason,
-            event_kind::INTEGRATION_HELD,
+            EventKind::IntegrationHeld,
             detail,
         )
     }
@@ -522,7 +518,7 @@ impl SqliteQueue {
             token,
             |run| run::fail_integration(run, reason.to_owned()),
             reason,
-            event_kind::INTEGRATION_FAILED,
+            EventKind::IntegrationFailed,
             json!({"code": ReasonCode::WorkerFailed, "receipt": receipt}),
         )
     }
@@ -543,7 +539,7 @@ impl SqliteQueue {
             token,
             |run| run::abort_integration(run, revert_to, message.to_owned()),
             message,
-            event_kind::INTEGRATION_ERROR,
+            EventKind::IntegrationError,
             reason.on(json!({})),
         )
     }
@@ -554,7 +550,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         command: impl FnOnce(TaskRun) -> Result<TaskRun, DomainError>,
         reason: &str,
-        kind: &str,
+        kind: EventKind,
         mut detail: serde_json::Value,
     ) -> Result<TaskRun> {
         let tx = self
@@ -576,7 +572,12 @@ impl SqliteQueue {
         detail["status"] = json!(run.status());
         detail["reason"] = json!(reason);
         run_event(&tx, id, kind, detail)?;
-        run_event(&tx, id, event_kind::LEASE_RELEASED, json!({"reason": kind}))?;
+        run_event(
+            &tx,
+            id,
+            EventKind::LeaseReleased,
+            json!({"reason": kind.as_str()}),
+        )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }
@@ -622,18 +623,18 @@ impl SqliteQueue {
         let mut payload = serde_json::to_value(landing)?;
         payload["result_commit"] = json!(landing.commit);
         payload["git_common_dir"] = json!(common_dir);
-        run_event(&tx, id, event_kind::RUN_INTEGRATED, payload)?;
+        run_event(&tx, id, EventKind::RunIntegrated, payload)?;
         run_event(
             &tx,
             id,
-            event_kind::LEASE_RELEASED,
+            EventKind::LeaseReleased,
             json!({"reason": "integrated"}),
         )?;
         event(
             &tx,
             run.task_id(),
             Some(id),
-            event_kind::TASK_STATUS_CHANGED,
+            EventKind::TaskStatusChanged,
             json!({"from": "in_progress", "to": "completed"}),
         )?;
         let task = read_task(&tx, run.task_id())?;
@@ -663,7 +664,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::CLEANUP_FAILED,
+            EventKind::CleanupFailed,
             reason.on(json!({"message": message})),
         )?;
         tx.commit()?;
@@ -694,7 +695,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::WORKSPACE_CLOSED,
+            EventKind::WorkspaceClosed,
             json!({"workspace_id": result.workspace_id(), "closed_at": result.workspace_closed_at()}),
         )?;
         tx.commit()?;
@@ -726,7 +727,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::CLEANUP_FAILED,
+            EventKind::CleanupFailed,
             reason.on(json!({"workspace_id": result.workspace_id(), "message": message})),
         )?;
         tx.commit()?;
@@ -758,7 +759,7 @@ impl SqliteQueue {
             save_run(&tx, &run, from, None)?;
         }
         payload["workspace_id"] = json!(workspace_id);
-        run_event(&tx, id, event_kind::WORKSPACE_CLOSED, payload)?;
+        run_event(&tx, id, EventKind::WorkspaceClosed, payload)?;
         tx.commit()?;
         Ok(())
     }

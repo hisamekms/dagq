@@ -7,6 +7,7 @@
 //! ask).
 
 use super::*;
+use crate::domain::EventKind;
 use crate::{application::KnownDialog, domain::RunEvent};
 
 /// The events that begin a stage of a run's session: a dialog is answered
@@ -86,7 +87,7 @@ pub(super) fn answer_known_dialog(
                 payload["attempt"] = json!(attempt);
             }
             sv.queue
-                .record_runtime_event(run.id(), event_kind::AUTO_REPAIRED, payload)?;
+                .record_runtime_event(run.id(), EventKind::AutoRepaired, payload)?;
             info!(run_id = %run.id(), "run {} was held by the {dialog} dialog in workspace {workspace}; answered it with {:?}", run.id(), answer.keys);
             Ok(true)
         }
@@ -94,7 +95,7 @@ pub(super) fn answer_known_dialog(
             let error = result.err().map(|error| format!("{error:#}"));
             sv.queue.record_runtime_event(
                 run.id(),
-                event_kind::KNOWN_DIALOG_UNANSWERED,
+                EventKind::KnownDialogUnanswered,
                 json!({
                     "dialog": dialog,
                     "conditions": conditions,

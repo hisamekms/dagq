@@ -2,6 +2,7 @@
 //! back: a silent wrapper and the `stuck_exit` ask.
 
 use super::*;
+use crate::domain::EventKind;
 
 /// Asks the run's session to `/exit` once (unless it ended already) and
 /// waits for its wrapper to exit; then the supervisor closes the workspace
@@ -107,7 +108,7 @@ impl ExitWatch {
                     Ok(screen) => sv.files.write(&run_dir.join(name), screen.as_bytes())?,
                     Err(error) => sv.queue.record_runtime_event(
                         run.id(),
-                        event_kind::SCREEN_CAPTURE_FAILED,
+                        EventKind::ScreenCaptureFailed,
                         reason_of_error(&error, ReasonCode::BackendFailed)
                             .on(json!({"error": format!("{error:#}")})),
                     )?,
@@ -159,7 +160,7 @@ impl ExitWatch {
                 let timeout = sv.cmux.exit_timeout();
                 sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::EXIT_REQUESTED,
+                    EventKind::ExitRequested,
                     json!({"workspace_id": session.workspace, "timeout_secs": timeout.as_secs()}),
                 )?;
                 // Ask once, the way a person would; never kill the session.
@@ -188,7 +189,7 @@ impl ExitWatch {
                 let timeout = sv.cmux.exit_timeout();
                 sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::EXIT_REQUEST_TIMED_OUT,
+                    EventKind::ExitRequestTimedOut,
                     json!({"code": ReasonCode::ExitTimeout, "workspace_id": session.workspace, "timeout_secs": timeout.as_secs()}),
                 )?;
                 warn!(run_id = %run.id(), "session for {} did not exit within {}s of the exit request in workspace {}; keeping the run for its recovery job", run.id(), timeout.as_secs(), session.workspace);
@@ -313,7 +314,7 @@ impl ExitWatch {
                     }
                     Some(attempt) => sv.queue.record_runtime_event(
                         run.id(),
-                        event_kind::WORKSPACE_CLOSED,
+                        EventKind::WorkspaceClosed,
                         json!({"workspace_id": workspace, "resume_attempt": attempt}),
                     )?,
                 }
@@ -375,7 +376,7 @@ impl ExitWatch {
             payload["held"] = json!(why);
         }
         sv.queue
-            .record_runtime_event(run.id(), event_kind::EXIT_UNSENT, payload)?;
+            .record_runtime_event(run.id(), EventKind::ExitUnsent, payload)?;
         let Some(why) = held else {
             self.closed_to_land(
                 sv,
@@ -391,7 +392,7 @@ impl ExitWatch {
         let timeout = sv.cmux.exit_timeout();
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::EXIT_REQUEST_TIMED_OUT,
+            EventKind::ExitRequestTimedOut,
             json!({"code": ReasonCode::ExitTimeout, "workspace_id": workspace, "timeout_secs": timeout.as_secs(), "unsent": true}),
         )?;
         self.timed_out = true;
@@ -437,7 +438,7 @@ impl ExitWatch {
         let timeout = sv.cmux.exit_timeout();
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::EXIT_REQUEST_TIMED_OUT,
+            EventKind::ExitRequestTimedOut,
             json!({"code": ReasonCode::ExitTimeout, "workspace_id": workspace, "timeout_secs": timeout.as_secs(), "unsent": true, "adopted": true, "held": why}),
         )?;
         self.timed_out = true;
@@ -467,7 +468,7 @@ impl ExitWatch {
             }
             Some(attempt) => sv.queue.record_runtime_event(
                 run.id(),
-                event_kind::WORKSPACE_CLOSED,
+                EventKind::WorkspaceClosed,
                 json!({"workspace_id": workspace, "resume_attempt": attempt}),
             )?,
         }
@@ -485,7 +486,7 @@ impl ExitWatch {
         }
         if let Err(error) = sv.queue.record_runtime_event(
             run.id(),
-            event_kind::AUTO_REPAIRED,
+            EventKind::AutoRepaired,
             json!({
                 "layer": "runtime",
                 "repair": "exit_forced_close",
@@ -659,7 +660,7 @@ pub(super) fn wrapper_pulse(
     if !*noted {
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::WRAPPER_HEARTBEAT_EXPIRED,
+            EventKind::WrapperHeartbeatExpired,
             json!({"code": ReasonCode::HeartbeatLost, "pid": wrapper.pid, "heartbeat_age_secs": age, "workspace_id": workspace}),
         )?;
         info!(run_id = %run.id(), "wrapper of {} (pid {}) stopped heartbeating {age}s ago but its process is alive; asking its session in workspace {workspace} to exit", run.id(), wrapper.pid);

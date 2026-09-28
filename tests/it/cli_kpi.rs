@@ -1,6 +1,7 @@
 //! `dagq kpi` (ADR-0051 decisions 1–9 and 14–19) on a real queue: the
 //! periods, the kinds, the host's `[kpi]` settings and targets, and a
 //! comparison across a mark.
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 use std::{path::Path, process::Command};
 
@@ -72,12 +73,12 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
             panic!("nothing to claim");
         };
         for (kind, payload) in [
-            ("receipt_observed", json!({})),
+            (EventKind::ReceiptObserved, json!({})),
             (
-                "validation_finished",
+                EventKind::ValidationFinished,
                 json!({"status": "awaiting_integration"}),
             ),
-            ("run_integrated", json!({"status": "integrated"})),
+            (EventKind::RunIntegrated, json!({"status": "integrated"})),
         ] {
             queue.record_runtime_event(run.id(), kind, payload).unwrap();
         }
@@ -201,7 +202,11 @@ fn kpi_counts_the_drafts_registered_per_landing() {
         panic!("nothing to claim");
     };
     queue
-        .record_runtime_event(run.id(), "run_integrated", json!({"status": "integrated"}))
+        .record_runtime_event(
+            run.id(),
+            EventKind::RunIntegrated,
+            json!({"status": "integrated"}),
+        )
         .unwrap();
 
     let report = kpi_ok(&db, &config, &["--last", "1"]);
@@ -347,12 +352,12 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
             panic!("nothing to claim");
         };
         for (kind, payload) in [
-            ("receipt_observed", json!({})),
+            (EventKind::ReceiptObserved, json!({})),
             (
-                "validation_finished",
+                EventKind::ValidationFinished,
                 json!({"status": "awaiting_integration"}),
             ),
-            ("run_integrated", json!({"status": "integrated"})),
+            (EventKind::RunIntegrated, json!({"status": "integrated"})),
         ] {
             queue.record_runtime_event(run.id(), kind, payload).unwrap();
         }

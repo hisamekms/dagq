@@ -2,8 +2,9 @@
 //! headless job (one unfinished at a time, queue-wide), the goals it may
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
+use crate::domain::EventKind;
+use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
-use crate::domain::{LeaseToken, event_kind};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
@@ -337,7 +338,7 @@ impl GoalReviewStore for SqliteQueue {
         goal_event(
             &tx,
             goal,
-            event_kind::GOAL_REVIEW_STARTED,
+            EventKind::GoalReviewStarted,
             json!({"goal_review_id": id, "attempt": attempt, "dir": dir_text, "tasks": fingerprint, "gaps_in_a_row": gaps}),
         )?;
         tx.commit()?;
@@ -466,7 +467,7 @@ impl GoalReviewStore for SqliteQueue {
         goal_event(
             &tx,
             job.goal_id,
-            event_kind::GOAL_REVIEW_FINISHED,
+            EventKind::GoalReviewFinished,
             json!({
                 "goal_review_id": job.id,
                 "attempt": job.attempt,
@@ -503,7 +504,7 @@ impl GoalReviewStore for SqliteQueue {
         goal_event(
             &tx,
             job.goal_id,
-            event_kind::GOAL_REVIEW_FAILED,
+            EventKind::GoalReviewFailed,
             json!({
                 "code": crate::domain::ReasonCode::JobFailed,
                 "goal_review_id": job.id,
@@ -619,7 +620,7 @@ impl GoalReviewStore for SqliteQueue {
         goal_event(
             &tx,
             goal,
-            event_kind::GOAL_DECIDED,
+            EventKind::GoalDecided,
             json!({
                 "ask_id": ask_id,
                 "goal_review_id": review,
@@ -701,7 +702,7 @@ impl GoalReviewStore for SqliteQueue {
         goal_event(
             &tx,
             goal,
-            event_kind::GOAL_REVIEW_REARMED,
+            EventKind::GoalReviewRearmed,
             json!({"goal_review_id": rearmed}),
         )?;
         let reviewable = candidate(&tx, goal)?.is_some();

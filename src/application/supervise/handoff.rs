@@ -10,12 +10,14 @@
 //! `handoff.json` in the run directory.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use serde::Deserialize;
 
 /// The run event of each run the process that took a registration over
 /// after an exec found leased to it.
-pub const SUPERVISOR_HANDED_OFF: &str = "supervisor_handed_off";
+pub const SUPERVISOR_HANDED_OFF: &str =
+    crate::domain::event_kind::EventKind::SupervisorHandedOff.as_str();
 
 /// What a run directory's `handoff.json` holds for the next process.
 const SNAPSHOT: &str = "handoff.json";
@@ -187,7 +189,7 @@ impl Supervisor<'_> {
             let snapshot = self.take_snapshot(&run);
             self.queue.record_runtime_event(
                 run.id(),
-                SUPERVISOR_HANDED_OFF,
+                EventKind::SupervisorHandedOff,
                 json!({
                     "supervisor": self.token,
                     "pid": self.layout.pid,

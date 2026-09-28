@@ -2,6 +2,7 @@
 //! short of what a run needs, cleaning for room, and telling the inbox once
 //! (task 377).
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{Ask, AskReason, disk::DiskConfig};
 use runtime_support::*;
@@ -414,7 +415,11 @@ fn a_persons_integrate_refuses_to_land_while_the_disk_is_short() {
     // The largest recent build times integrate_factor (1.5).
     SqliteQueue::open(&db)
         .unwrap()
-        .record_runtime_event(run.id(), "build_outputs_removed", json!({"bytes": GIB}))
+        .record_runtime_event(
+            run.id(),
+            EventKind::BuildOutputsRemoved,
+            json!({"bytes": GIB}),
+        )
         .unwrap();
     let error = refused(Some(DiskConfig::default()));
     assert!(error.contains("below the 1.5 GiB"), "{error}");

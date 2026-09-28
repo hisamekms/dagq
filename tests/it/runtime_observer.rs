@@ -1,5 +1,6 @@
 //! Runtime tests: The observer.
 use crate::{common, runtime_support};
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -218,7 +219,7 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     // and records a skipped finish.
     queue
         .record_queue_event(
-            dagq::domain::kpi::CANDIDATES_SAMPLED,
+            EventKind::CandidatesSampled,
             json!({"candidates": 1, "free_slots": 2, "ready": 1}),
         )
         .unwrap();
@@ -234,7 +235,7 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     assert_eq!(read_cursor(&db).unwrap(), Some(EventId::new(cursor)));
     // An event of someone else ends the quiet.
     queue
-        .record_queue_event("stall_config_loaded", json!({}))
+        .record_queue_event(EventKind::StallConfigLoaded, json!({}))
         .unwrap();
 
     // The next observation reads past the saved cursor; a failed one keeps it.
@@ -830,7 +831,7 @@ fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_fi
     let started = SqliteQueue::open(&db)
         .unwrap()
         .record_kpi_breach(
-            "kpi_breach_started",
+            EventKind::KpiBreachStarted,
             json!({"period": "day", "kpi": "forecast.p90_hit_rate", "stratum": "all"}),
             None,
         )

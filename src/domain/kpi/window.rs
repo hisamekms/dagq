@@ -27,7 +27,8 @@ const NONE: &str = "none";
 
 /// A sample of what the supervisor could claim (ADR-0051 decision 3):
 /// `candidates`, `free_slots` and `ready`, recorded when they change.
-pub const CANDIDATES_SAMPLED: &str = "candidates_sampled";
+pub const CANDIDATES_SAMPLED: &str =
+    crate::domain::event_kind::EventKind::CandidatesSampled.as_str();
 
 /// The KPIs no record exists for yet, and why.
 const NOT_RECORDED: &str = "not_recorded";

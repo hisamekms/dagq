@@ -3,6 +3,7 @@
 //! `[worker.trial]` on, alternated between the control and the treatment
 //! for the mechanical tasks of the lower third.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use dagq::domain::{ClaimOutcome, worker_model::WorkerTrial};
@@ -208,17 +209,17 @@ fn stats_compare_the_groups() {
             panic!("nothing to claim");
         };
         let mut events = vec![
-            ("receipt_observed", json!({})),
+            (EventKind::ReceiptObserved, json!({})),
             (
-                "validation_finished",
+                EventKind::ValidationFinished,
                 json!({"status": "awaiting_integration"}),
             ),
         ];
         // The treatment was sent back to revise: task-caused rework.
         if task == 2 {
-            events.push(("revise_requested", json!({"attempt": 1})));
+            events.push((EventKind::ReviseRequested, json!({"attempt": 1})));
         }
-        events.push(("run_integrated", json!({"status": "integrated"})));
+        events.push((EventKind::RunIntegrated, json!({"status": "integrated"})));
         for (kind, payload) in events {
             queue.record_runtime_event(run.id(), kind, payload).unwrap();
         }

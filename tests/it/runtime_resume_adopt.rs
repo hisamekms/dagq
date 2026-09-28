@@ -4,6 +4,7 @@
 use crate::runtime_handoff::hand_off_when;
 use crate::runtime_review_adopt::{DIALOG_SCREEN, screen_hash};
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{AskReason, LeaseToken, NewAsk};
 use runtime_support::*;
@@ -83,7 +84,7 @@ fn resume_taken_over_at_dialog(handoff: bool, max_waiting: usize) {
         .to_owned();
     for (kind, payload) in [
         (
-            "prompt_waiting",
+            EventKind::PromptWaiting,
             json!({
                 "workspace_id": workspace,
                 "excerpt": "Auto mode is available",
@@ -92,11 +93,11 @@ fn resume_taken_over_at_dialog(handoff: bool, max_waiting: usize) {
             }),
         ),
         (
-            "recovery_requested",
+            EventKind::RecoveryRequested,
             json!({"alert": "prompt_waiting", "attempt": 1}),
         ),
         (
-            "recovery_finished",
+            EventKind::RecoveryFinished,
             json!({"alert": "prompt_waiting", "attempt": 1, "outcome": "escalated"}),
         ),
     ] {

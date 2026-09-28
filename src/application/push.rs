@@ -6,6 +6,7 @@
 //! trying it again and recording how it went is the supervisor's
 //! ([`record_attempt`]). Without `[push]` nothing is made nor recorded
 //! but the breaches.
+use crate::domain::EventKind;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -17,10 +18,7 @@ use super::{
 };
 use crate::domain::kpi::{
     KpiQuery, Period,
-    push::{
-        self, KPI_BREACH_RESOLVED, KPI_BREACH_STARTED, KPI_PUSH_FAILED, KPI_PUSH_SENT, PushConfig,
-        PushMessage,
-    },
+    push::{self, PushConfig, PushMessage},
     report::Report,
 };
 
@@ -107,7 +105,7 @@ pub fn check_breaches(
         for target in &kpi.targets {
             if let Some(started) = push::breach_started(period.as_str(), target)
                 && let Some(recorded) =
-                    queue.record_kpi_breach(KPI_BREACH_STARTED, started, push_day)?
+                    queue.record_kpi_breach(EventKind::KpiBreachStarted, started, push_day)?
             {
                 check.started.push(recorded);
             }
@@ -118,7 +116,7 @@ pub fn check_breaches(
         {
             if let Some(resolved) = push::breach_resolved(breach, &kpi.targets)
                 && let Some(recorded) =
-                    queue.record_kpi_breach(KPI_BREACH_RESOLVED, resolved, None)?
+                    queue.record_kpi_breach(EventKind::KpiBreachResolved, resolved, None)?
             {
                 check.resolved.push(recorded);
             }
@@ -218,7 +216,7 @@ pub fn record_attempt(
     let kind = message.kind.as_str();
     if outcome.success {
         queue.record_queue_event(
-            KPI_PUSH_SENT,
+            EventKind::KpiPushSent,
             json!({"push_kind": kind, "period": message.period, "attempt": attempt}),
         )?;
         return Ok(false);
@@ -226,7 +224,7 @@ pub fn record_attempt(
     let again = push::retry_after(attempt).is_some();
     let stderr = push::stderr_tail(&outcome.stderr, &push.command);
     queue.record_queue_event(
-        KPI_PUSH_FAILED,
+        EventKind::KpiPushFailed,
         json!({
             "push_kind": kind,
             "period": message.period,

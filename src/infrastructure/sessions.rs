@@ -8,7 +8,7 @@
 //! lock (task 543): a write that may close spans reads theirs first
 //! ([`read_before`]), and the close takes what was read.
 
-use crate::domain::event_kind;
+use crate::domain::event_kind::{self, EventKind};
 use std::cell::RefCell;
 
 use anyhow::Result;
@@ -170,9 +170,10 @@ pub(super) fn follow(
     event_id: EventId,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
-    kind: &str,
+    kind: EventKind,
     payload: &Value,
 ) -> Result<()> {
+    let kind = kind.as_str();
     let Some(scope) = scope(kind) else {
         return Ok(());
     };
@@ -226,7 +227,7 @@ pub(super) fn follow(
     // was typed (as before task 241) comes later than that.
     let at = payload["sent_at"]
         .as_i64()
-        .filter(|_| kind == event_kind::REVISE_REQUESTED)
+        .filter(|_| kind == EventKind::ReviseRequested)
         .map(|secs| millis_text(secs * 1000))
         .filter(|sent| rfc3339_millis(sent) < rfc3339_millis(&at))
         .unwrap_or(at);
@@ -239,13 +240,20 @@ pub(super) fn follow(
                 }
             }
             SpanChange::Open(payload) => {
-                insert_at(conn, task_id, run_id, SESSION_OPENED, &payload, &at)?;
+                insert_at(
+                    conn,
+                    task_id,
+                    run_id,
+                    EventKind::SessionOpened,
+                    &payload,
+                    &at,
+                )?;
             }
         }
     }
     // The session's exit carries the work (task 514) and the tokens (task
     // 199) of the span it ended.
-    if kind == event_kind::SESSION_EXITED {
+    if kind == EventKind::SessionExited {
         for (key, value) in [("work_breakdown", exited.work), ("tokens", exited.tokens)] {
             if let Some(value) = value {
                 conn.execute(
@@ -371,7 +379,14 @@ fn close(
             &mut payload,
             &mut closed,
         )?;
-        insert_at(conn, task_id, run_id, SESSION_CLOSED, &payload, &closed_at)?;
+        insert_at(
+            conn,
+            task_id,
+            run_id,
+            EventKind::SessionClosed,
+            &payload,
+            &closed_at,
+        )?;
         return Ok(Some(closed).filter(|closed| closed.work.is_some() || closed.tokens.is_some()));
     }
     match (transcript_for_close(conn, span), times(conn, span, now)?) {
@@ -390,7 +405,14 @@ fn close(
             let new = span_turns(turns(&transcript.records).all(), start, Some(end), through);
             if !new.is_empty() {
                 let turns_payload = turns_payload(span, &new);
-                insert_at(conn, task_id, run_id, SESSION_TURNS, &turns_payload, now)?;
+                insert_at(
+                    conn,
+                    task_id,
+                    run_id,
+                    EventKind::SessionTurns,
+                    &turns_payload,
+                    now,
+                )?;
             }
             let millis: i64 = recorded.iter().chain(&new).map(|turn| turn.millis()).sum();
             payload["active"] = json!("recorded");
@@ -438,7 +460,14 @@ fn close(
             payload["active_unavailable"] = json!("span_time_unparsable");
         }
     }
-    insert_at(conn, task_id, run_id, SESSION_CLOSED, &payload, &closed_at)?;
+    insert_at(
+        conn,
+        task_id,
+        run_id,
+        EventKind::SessionClosed,
+        &payload,
+        &closed_at,
+    )?;
     Ok(run_id
         .filter(|_| RUN_SESSION.contains(&span.kind()))
         .filter(|_| closed.work.is_some() || closed.tokens.is_some())
@@ -477,7 +506,7 @@ fn close_headless(
             conn,
             task_id,
             Some(run_id),
-            SESSION_TURNS,
+            EventKind::SessionTurns,
             &turns_payload(span, &new),
             now,
         )?;
@@ -745,7 +774,7 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
             &tx,
             task_id,
             run_id.as_ref(),
-            SESSION_TURNS,
+            EventKind::SessionTurns,
             &turns_payload(&span, &new),
             &now,
         )?;
@@ -859,7 +888,7 @@ pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value
                 closed.push(span.opened_event_id);
             }
             SpanChange::Open(payload) => {
-                insert_at(&tx, task_id, None, SESSION_OPENED, &payload, &now)?;
+                insert_at(&tx, task_id, None, EventKind::SessionOpened, &payload, &now)?;
                 opened = Some(EventId::new(tx.last_insert_rowid()));
             }
         }
@@ -1011,7 +1040,7 @@ fn insert_at(
     conn: &Connection,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
-    kind: &str,
+    kind: EventKind,
     payload: &Value,
     created_at: &str,
 ) -> Result<()> {
@@ -1023,7 +1052,7 @@ fn insert_at(
         params![
             task_id,
             run_id,
-            kind,
+            kind.as_str(),
             serde_json::to_string(payload)?,
             created_at
         ],
@@ -1099,31 +1128,31 @@ mod tests {
             )
             .unwrap();
         let conn = &queue.conn;
-        let record = |kind: &str, payload: Value| {
+        let record = |kind: EventKind, payload: Value| {
             event(conn, task_id, Some(&run), kind, payload).unwrap();
         };
-        record("run_claimed", json!({}));
-        record("agent_started", json!({"session_id": run}));
-        record("revise_requested", json!({"workspace_id": "W"}));
+        record(EventKind::RunClaimed, json!({}));
+        record(EventKind::AgentStarted, json!({"session_id": run}));
+        record(EventKind::ReviseRequested, json!({"workspace_id": "W"}));
         record(
-            "review_started",
+            EventKind::ReviewStarted,
             json!({"attempt": 1, "session_id": "s-review"}),
         );
-        record("review_finished", json!({"verdict": "pass"}));
-        record("session_exited", json!({"exit_code": 0}));
-        record("resume_started", json!({}));
-        record("agent_started", json!({"session_id": run}));
+        record(EventKind::ReviewFinished, json!({"verdict": "pass"}));
+        record(EventKind::SessionExited, json!({"exit_code": 0}));
+        record(EventKind::ResumeStarted, json!({}));
+        record(EventKind::AgentStarted, json!({"session_id": run}));
         // The resume's session was lost: the triage closes it as inferred.
         record(
-            "triage_started",
+            EventKind::TriageStarted,
             json!({"attempt": 1, "session_id": "s-triage"}),
         );
-        record("triage_failed", json!({}));
+        record(EventKind::TriageFailed, json!({}));
         event(
             conn,
             task_id,
             None,
-            "plan_review_started",
+            EventKind::PlanReviewStarted,
             json!({"proposal_id": 1, "plan_review_id": 7, "attempt": 1, "session_id": "s-plan"}),
         )
         .unwrap();
@@ -1133,18 +1162,18 @@ mod tests {
             conn,
             task_id,
             None,
-            "plan_review_failed",
+            EventKind::PlanReviewFailed,
             json!({"proposal_id": 1, "plan_review_id": 7}),
         )
         .unwrap();
         let observed = queue
             .record_queue_event(
-                "observe_started",
+                EventKind::ObserveStarted,
                 json!({"mode": "hourly", "dir": "/obs", "session_id": "s-obs"}),
             )
             .unwrap();
         queue
-            .record_queue_event("observe_finished", json!({"dir": "/obs"}))
+            .record_queue_event(EventKind::ObserveFinished, json!({"dir": "/obs"}))
             .unwrap();
 
         let events = spans(&queue);
@@ -1305,7 +1334,7 @@ mod tests {
         )
         .unwrap();
         let reads = READS.with(std::cell::Cell::get);
-        let record = |kind: &str, payload: Value| {
+        let record = |kind: EventKind, payload: Value| {
             event(conn, task_id, Some(&run), kind, payload).unwrap();
             latest(conn)
         };
@@ -1320,30 +1349,42 @@ mod tests {
         let base = now - 100_000;
         let tokens =
             json!({"input": 10, "output": 5, "cache_read": 20, "cache_creation": 0, "messages": 1});
-        at(record("agent_started", json!({"session_id": null})), base);
+        at(
+            record(EventKind::AgentStarted, json!({"session_id": null})),
+            base,
+        );
         let opened = of_kind(&queue, SESSION_OPENED);
         assert_eq!(opened[0].payload["route"], "headless");
         assert_eq!(opened[0].payload["provider"], "codex");
-        at(record("turn_started", json!({"turn": 1})), base + 1_000);
+        at(
+            record(EventKind::TurnStarted, json!({"turn": 1})),
+            base + 1_000,
+        );
         at(
             record(
-                "turn_finished",
+                EventKind::TurnFinished,
                 json!({"turn": 1, "outcome": "succeeded", "tokens": tokens}),
             ),
             base + 31_000,
         );
-        at(record("turn_started", json!({"turn": 2})), base + 40_000);
+        at(
+            record(EventKind::TurnStarted, json!({"turn": 2})),
+            base + 40_000,
+        );
         assert_eq!(record_open_turns(conn).unwrap(), 1);
         assert_eq!(record_open_turns(conn).unwrap(), 0);
         at(
             record(
-                "turn_finished",
+                EventKind::TurnFinished,
                 json!({"turn": 2, "outcome": "succeeded", "tokens": tokens}),
             ),
             base + 60_000,
         );
-        at(record("turn_started", json!({"turn": 3})), base + 70_000);
-        record("session_exited", json!({"exit_code": 0}));
+        at(
+            record(EventKind::TurnStarted, json!({"turn": 3})),
+            base + 70_000,
+        );
+        record(EventKind::SessionExited, json!({"exit_code": 0}));
 
         let turns = of_kind(&queue, SESSION_TURNS);
         assert_eq!(turns.len(), 2, "{turns:?}");
@@ -1375,7 +1416,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1399,7 +1440,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "session_exited",
+            EventKind::SessionExited,
             json!({"exit_code": 0}),
         )
         .unwrap();
@@ -1427,7 +1468,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1439,7 +1480,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "revise_requested",
+            EventKind::ReviseRequested,
             json!({"attempt": 1, "sent_at": sent}),
         )
         .unwrap();
@@ -1452,7 +1493,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "session_exited",
+            EventKind::SessionExited,
             json!({"exit_code": 0}),
         )
         .unwrap();
@@ -1473,26 +1514,40 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
         let start = retime(conn, 0, 100);
         transcript(dir.path(), start, &[(5, 20)], Some(30));
-        event(conn, task_id, Some(&run), "workspace_closed", json!({})).unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::WorkspaceClosed,
+            json!({}),
+        )
+        .unwrap();
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["reason"], "inferred");
         assert_eq!(closed.payload["active_secs"], 15);
         assert_eq!(closed.created_at, millis_text(start + 30_000));
 
         // The resume's session: its transcript is not JSON.
-        event(conn, task_id, Some(&run), "resume_started", json!({})).unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::ResumeStarted,
+            json!({}),
+        )
+        .unwrap();
         let before = latest(conn);
         event(
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1506,7 +1561,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "session_exited",
+            EventKind::SessionExited,
             json!({"exit_code": 0}),
         )
         .unwrap();
@@ -1523,7 +1578,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1555,7 +1610,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1588,7 +1643,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "session_exited",
+            EventKind::SessionExited,
             json!({"exit_code": 0}),
         )
         .unwrap();
@@ -1624,13 +1679,20 @@ mod tests {
         );
 
         // A resume in the same session, whose transcript is unreadable.
-        event(conn, task_id, Some(&run), "resume_started", json!({})).unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::ResumeStarted,
+            json!({}),
+        )
+        .unwrap();
         let resumed = latest(conn);
         event(
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1639,7 +1701,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "session_exited",
+            EventKind::SessionExited,
             json!({"exit_code": 0}),
         )
         .unwrap();
@@ -1669,7 +1731,7 @@ mod tests {
         // Every span's transcript is readable, so each closes with its work.
         transcript(dir.path(), 0, &[(1, 2)], None);
         let main = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
-        let record = |queue: &SqliteQueue, kind: &str, payload: Value| {
+        let record = |queue: &SqliteQueue, kind: EventKind, payload: Value| {
             event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
         let finished = |queue: &SqliteQueue| {
@@ -1700,7 +1762,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(started, attempt);
-            record(queue, "agent_started", json!({"session_id": RUN}));
+            record(queue, EventKind::AgentStarted, json!({"session_id": RUN}));
         };
         let finish = |queue: &mut SqliteQueue| {
             queue
@@ -1734,7 +1796,7 @@ mod tests {
         assert!(finished(&queue).get("work_breakdown").is_none());
         // Attempt 3 exits before its resume finishes: its own work.
         resume(&mut queue, 3);
-        record(&queue, "session_exited", json!({"exit_code": 0}));
+        record(&queue, EventKind::SessionExited, json!({"exit_code": 0}));
         finish(&mut queue);
         let work = finished(&queue)["work_breakdown"].clone();
         assert_eq!(work["kind"], "resume");
@@ -1775,11 +1837,11 @@ mod tests {
                 "cache_read_input_tokens": 100, "cache_creation_input_tokens": 10}})
         };
         let go = json!({"content": "go"});
-        let record = |queue: &SqliteQueue, kind: &str, payload: Value| {
+        let record = |queue: &SqliteQueue, kind: EventKind, payload: Value| {
             event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
 
-        record(&queue, "agent_started", json!({"session_id": RUN}));
+        record(&queue, EventKind::AgentStarted, json!({"session_id": RUN}));
         let start = retime(&queue.conn, 0, 100);
         write(
             RUN,
@@ -1794,7 +1856,7 @@ mod tests {
         // The review job runs in a session of its own.
         record(
             &queue,
-            "review_started",
+            EventKind::ReviewStarted,
             json!({"attempt": 1, "session_id": "s-review"}),
         );
         // Its span opened 50 s ago; the review_started is now.
@@ -1804,8 +1866,12 @@ mod tests {
             now - 50_000,
             &[("user", 1, go.clone()), ("assistant", 2, reply("r1", 7, 4))],
         );
-        record(&queue, "review_finished", json!({"verdict": "pass"}));
-        record(&queue, "session_exited", json!({"exit_code": 0}));
+        record(
+            &queue,
+            EventKind::ReviewFinished,
+            json!({"verdict": "pass"}),
+        );
+        record(&queue, EventKind::SessionExited, json!({"exit_code": 0}));
 
         let expected = json!({"input": 5, "output": 10, "cache_read": 200,
                               "cache_creation": 20, "messages": 2});
@@ -1851,7 +1917,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let before = latest(&queue.conn);
-        record(&queue, "agent_started", json!({"session_id": RUN}));
+        record(&queue, EventKind::AgentStarted, json!({"session_id": RUN}));
         // Its span opened 20 s ago; begin_resume's events are now.
         let resumed = retime(&queue.conn, before, 20) - 20_000;
         write(
@@ -1868,7 +1934,7 @@ mod tests {
                 ),
             ],
         );
-        record(&queue, "session_exited", json!({"exit_code": 0}));
+        record(&queue, EventKind::SessionExited, json!({"exit_code": 0}));
         queue
             .finish_resume(
                 &run,
@@ -1901,7 +1967,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let before = latest(&queue.conn);
-        record(&queue, "agent_started", json!({"session_id": RUN}));
+        record(&queue, EventKind::AgentStarted, json!({"session_id": RUN}));
         let again = retime(&queue.conn, before, 10) - 10_000;
         write(
             RUN,
@@ -1915,7 +1981,7 @@ mod tests {
                 ),
             ],
         );
-        record(&queue, "session_exited", json!({"exit_code": 0}));
+        record(&queue, EventKind::SessionExited, json!({"exit_code": 0}));
         let closed = of_kind(&queue, SESSION_CLOSED);
         let last = closed.last().unwrap();
         assert_eq!(last.payload["active"], "recorded");
@@ -1939,7 +2005,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -1961,7 +2027,14 @@ mod tests {
             ),
         ];
         std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
-        event(conn, task_id, Some(&run), "workspace_closed", json!({})).unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::WorkspaceClosed,
+            json!({}),
+        )
+        .unwrap();
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["reason"], "inferred");
         assert_eq!(closed.created_at, millis_text(start + 20_000));
@@ -1993,12 +2066,12 @@ mod tests {
             }));
             std::fs::write(project.join(format!("{session}.jsonl")), text.join("\n")).unwrap();
         };
-        let record = |kind: &str, payload: Value| {
+        let record = |kind: EventKind, payload: Value| {
             event(&queue.conn, task_id, Some(&run), kind, payload).unwrap();
         };
         let opus = "claude-opus-5-5";
 
-        record("agent_started", json!({"session_id": RUN}));
+        record(EventKind::AgentStarted, json!({"session_id": RUN}));
         let start = retime(&queue.conn, 0, 100);
         write(
             RUN,
@@ -2010,19 +2083,19 @@ mod tests {
             ],
         );
         record(
-            "review_started",
+            EventKind::ReviewStarted,
             json!({"attempt": 1, "session_id": "s-review"}),
         );
         let now = retime(&queue.conn, latest(&queue.conn) - 1, 50);
         write("s-review", now - 50_000, &[(2, "r1", opus, "medium")]);
-        record("review_finished", json!({"verdict": "pass"}));
+        record(EventKind::ReviewFinished, json!({"verdict": "pass"}));
         // The triage's transcript is missing.
         record(
-            "triage_started",
+            EventKind::TriageStarted,
             json!({"attempt": 1, "session_id": "s-gone"}),
         );
-        record("triage_finished", json!({"decision": "retry"}));
-        record("session_exited", json!({"exit_code": 0}));
+        record(EventKind::TriageFinished, json!({"decision": "retry"}));
+        record(EventKind::SessionExited, json!({"exit_code": 0}));
 
         let closed = of_kind(&queue, SESSION_CLOSED);
         let span = |kind: &str| {
@@ -2088,20 +2161,20 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
         SqliteQueue::record_runtime_event(
             &queue,
             &run,
-            "review_started",
+            EventKind::ReviewStarted,
             json!({"attempt": 1, "session_id": "s-review"}),
         )
         .unwrap();
         queue
             .record_queue_event(
-                "observe_started",
+                EventKind::ObserveStarted,
                 json!({"mode": "hourly", "dir": "/obs", "session_id": "s-obs"}),
             )
             .unwrap();
@@ -2109,7 +2182,7 @@ mod tests {
             conn,
             task_id,
             None,
-            "plan_review_started",
+            EventKind::PlanReviewStarted,
             json!({"proposal_id": 1, "plan_review_id": 7, "attempt": 1,
                    "session_id": "s-plan", "cwd": "/plan"}),
         )
@@ -2121,14 +2194,19 @@ mod tests {
         transcript_in(dir.path(), "/plan", "s-plan", start);
         READS.set(0);
 
-        SqliteQueue::record_runtime_event(&queue, &run, "session_exited", json!({"exit_code": 0}))
-            .unwrap();
+        SqliteQueue::record_runtime_event(
+            &queue,
+            &run,
+            EventKind::SessionExited,
+            json!({"exit_code": 0}),
+        )
+        .unwrap();
         assert_eq!(
             SessionRegistry::close_review_session(&queue, &run).unwrap(),
             1
         );
         queue
-            .record_queue_event("observe_finished", json!({"dir": "/obs"}))
+            .record_queue_event(EventKind::ObserveFinished, json!({"dir": "/obs"}))
             .unwrap();
         {
             let _read = read_before(conn, Closing::PlanReviews(Some(7))).unwrap();
@@ -2168,12 +2246,19 @@ mod tests {
 
         // A span closed in a transaction nothing read before: its
         // transcript is not read, and the event is written.
-        event(conn, task_id, Some(&run), "resume_started", json!({})).unwrap();
         event(
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::ResumeStarted,
+            json!({}),
+        )
+        .unwrap();
+        event(
+            conn,
+            task_id,
+            Some(&run),
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -2182,7 +2267,7 @@ mod tests {
             &tx,
             task_id,
             Some(&run),
-            "session_exited",
+            EventKind::SessionExited,
             json!({"exit_code": 0}),
         )
         .unwrap();
@@ -2203,7 +2288,7 @@ mod tests {
             conn,
             task_id,
             Some(&run),
-            "agent_started",
+            EventKind::AgentStarted,
             json!({"session_id": RUN}),
         )
         .unwrap();
@@ -2458,7 +2543,7 @@ mod tests {
             &queue.conn,
             None,
             Some(&run),
-            "supervisor_stopped",
+            EventKind::SupervisorStopped,
             &json!({}),
             "2026-09-28T00:00:00.000Z",
         )

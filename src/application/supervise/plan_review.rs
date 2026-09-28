@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::domain::ActorContext;
+use crate::domain::EventKind;
 use crate::domain::language::with_instruction;
 use crate::{
     application::{
@@ -769,7 +770,7 @@ impl Supervisor<'_> {
             submit_input(self.cmux, self.signals, &workspace, Input::Exit)?;
             self.planner_exits.push((id, Instant::now()));
             self.queue.record_queue_event(
-                event_kind::PLANNER_RELEASED,
+                EventKind::PlannerReleased,
                 json!({
                     "planner_id": id,
                     "workspace_id": workspace,
@@ -955,7 +956,7 @@ impl Supervisor<'_> {
             payload["hook_error"] = json!(line);
         }
         self.queue
-            .record_queue_event(event_kind::IDLE_INFERRED, payload)?;
+            .record_queue_event(EventKind::IdleInferred, payload)?;
         info!(
             "planner {} has no fresh idle marker ({}); its screen looks idle since {}",
             view.planner.id,

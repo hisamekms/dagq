@@ -15,7 +15,8 @@ pub const LANDING_RECHECK_FAILED: &str = super::event_kind::LANDING_RECHECK_FAIL
 
 /// One recheck ended, recorded on the run whose landing moved main: the
 /// main it checked against and what it found.
-pub const LANDING_RECHECK_FINISHED: &str = "landing_recheck_finished";
+pub const LANDING_RECHECK_FINISHED: &str =
+    crate::domain::event_kind::EventKind::LandingRecheckFinished.as_str();
 
 /// `action` of a failure that parked the run for a resume.
 pub const RESUMED: &str = "resumed";

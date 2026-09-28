@@ -1,5 +1,6 @@
 //! Runtime tests: Idle sessions without a receipt: the nudge and the stalled ask.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -360,14 +361,14 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     queue
         .record_runtime_event(
             run.id(),
-            "stall_nudged",
+            EventKind::StallNudged,
             json!({"phase": "session", "idle_secs": 1200, "threshold_secs": 1200}),
         )
         .unwrap();
     queue
         .record_runtime_event(
             run.id(),
-            "stall_resolved",
+            EventKind::StallResolved,
             json!({"phase": "session", "detection": "nudge", "outcome": "escalated"}),
         )
         .unwrap();

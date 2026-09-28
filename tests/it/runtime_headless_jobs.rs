@@ -4,6 +4,7 @@
 //! process that took the pid later, and a job's timeout stops what the job
 //! started too.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -105,10 +106,10 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     for (kind, payload) in [
         (
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         ),
-        ("review_started", json!({"attempt": 1})),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
     ] {
         queue.record_runtime_event(run.id(), kind, payload).unwrap();
     }

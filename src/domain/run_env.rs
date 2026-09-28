@@ -12,10 +12,12 @@ use serde_json::{Value, json};
 
 /// Recorded on the queue when the supervisor's check turns from found to
 /// missing: an attention (`install tool`) for the inbox.
-pub const RUN_ENV_PROGRAM_MISSING: &str = "run_env_program_missing";
+pub const RUN_ENV_PROGRAM_MISSING: &str =
+    crate::domain::event_kind::EventKind::RunEnvProgramMissing.as_str();
 /// Recorded when every program resolves again after a
 /// [`RUN_ENV_PROGRAM_MISSING`]; the attention ends with it.
-pub const RUN_ENV_PROGRAM_FOUND: &str = "run_env_program_found";
+pub const RUN_ENV_PROGRAM_FOUND: &str =
+    crate::domain::event_kind::EventKind::RunEnvProgramFound.as_str();
 /// The two kinds, for reading the latest of them.
 pub const RUN_ENV_PROGRAM_KINDS: [&str; 2] = [RUN_ENV_PROGRAM_MISSING, RUN_ENV_PROGRAM_FOUND];
 
@@ -74,12 +76,12 @@ install it where this PATH finds it, or register a task that takes the variable 
     /// The event the supervisor records when its check differs from the
     /// latest one on the queue (`last`, a kind of [`RUN_ENV_PROGRAM_KINDS`]):
     /// missing after anything but missing, found after missing, else none.
-    pub fn transition(&self, last: Option<&str>) -> Option<(&'static str, Value)> {
+    pub fn transition(&self, last: Option<&str>) -> Option<(super::EventKind, Value)> {
         let missing = self.missing();
         let programs = serde_json::to_value(&self.programs).unwrap_or(Value::Null);
         match missing.first() {
             Some(first) if last != Some(RUN_ENV_PROGRAM_MISSING) => Some((
-                RUN_ENV_PROGRAM_MISSING,
+                super::EventKind::RunEnvProgramMissing,
                 json!({
                     "variable": first.variable,
                     "value": first.value,
@@ -89,7 +91,7 @@ install it where this PATH finds it, or register a task that takes the variable 
                 }),
             )),
             None if last == Some(RUN_ENV_PROGRAM_MISSING) => Some((
-                RUN_ENV_PROGRAM_FOUND,
+                super::EventKind::RunEnvProgramFound,
                 json!({"path": self.path, "programs": programs}),
             )),
             _ => None,
@@ -100,6 +102,7 @@ install it where this PATH finds it, or register a task that takes the variable 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::EventKind;
 
     fn program(variable: &str, value: &str, resolved: Option<&str>) -> RunEnvProgram {
         RunEnvProgram {
@@ -154,7 +157,7 @@ mod tests {
         )]);
         for last in [None, Some(RUN_ENV_PROGRAM_FOUND)] {
             let (kind, payload) = missing.transition(last).unwrap();
-            assert_eq!(kind, RUN_ENV_PROGRAM_MISSING);
+            assert_eq!(kind, EventKind::RunEnvProgramMissing);
             assert_eq!(payload["variable"], "RUSTC_WRAPPER");
             assert_eq!(payload["value"], "sccache");
             assert_eq!(payload["path"], "/usr/bin:/bin");
@@ -162,7 +165,7 @@ mod tests {
         }
         assert_eq!(missing.transition(Some(RUN_ENV_PROGRAM_MISSING)), None);
         let (kind, payload) = found.transition(Some(RUN_ENV_PROGRAM_MISSING)).unwrap();
-        assert_eq!(kind, RUN_ENV_PROGRAM_FOUND);
+        assert_eq!(kind, EventKind::RunEnvProgramFound);
         assert_eq!(payload["programs"][0]["resolved"], "/bin/sccache");
         assert_eq!(found.transition(None), None);
         assert_eq!(found.transition(Some(RUN_ENV_PROGRAM_FOUND)), None);

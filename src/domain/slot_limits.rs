@@ -14,7 +14,8 @@ pub const DEFAULT_PARALLEL: usize = 4;
 
 /// The queue event recorded when a supervisor starts using values of
 /// `[supervisor]` it read again that differ from those it used.
-pub const SUPERVISOR_CONFIG_CHANGED: &str = "supervisor_config_changed";
+pub const SUPERVISOR_CONFIG_CHANGED: &str =
+    crate::domain::event_kind::EventKind::SupervisorConfigChanged.as_str();
 
 /// Where a value in use comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

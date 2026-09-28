@@ -2,6 +2,7 @@
 //! ([`crate::application::commands::planning`]): the ports of the task
 //! store, and what the authorization reads before them.
 
+use crate::domain::EventKind;
 use anyhow::Result;
 use serde_json::Value;
 
@@ -10,7 +11,7 @@ use crate::application::commands::planning::{Dependency, PlanningStore};
 use crate::application::{GoalReviewStore, RunLog, TaskStore};
 use crate::domain::{
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
-    ProposalId, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus, event_kind,
+    ProposalId, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
 };
 
 impl PlanningStore for SqliteQueue {
@@ -23,7 +24,7 @@ impl PlanningStore for SqliteQueue {
     }
 
     fn record_denial(&self, payload: Value) -> Result<()> {
-        RunLog::record_queue_event(self, event_kind::AUTHORIZATION_DENIED, payload).map(drop)
+        RunLog::record_queue_event(self, EventKind::AuthorizationDenied, payload).map(drop)
     }
 
     fn add(&mut self, task: NewTask) -> Result<Task> {

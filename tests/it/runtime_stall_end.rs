@@ -4,6 +4,7 @@
 //! ended gets one `stall_resolved`, of the outcome its events tell (task
 //! 799), else `run_ended`.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::LeaseToken;
 use dagq::infrastructure::runtime_store::{STALL_ABANDONED_CLOSED, STALL_RECOVERED_CLOSED};
@@ -27,12 +28,12 @@ fn dead_run(repo: &Path, db: &Path) -> TaskRun {
 fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
     let idle = json!({"phase": "session", "idle_secs": 1250, "threshold_secs": 1200});
     queue
-        .record_runtime_event(run.id(), "stall_nudged", idle)
+        .record_runtime_event(run.id(), EventKind::StallNudged, idle)
         .unwrap();
     queue
         .record_runtime_event(
             run.id(),
-            "recovery_requested",
+            EventKind::RecoveryRequested,
             json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1,
                    "idle_secs": 1300, "threshold_secs": 1200}),
         )
@@ -40,7 +41,7 @@ fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
     queue
         .record_runtime_event(
             run.id(),
-            "stall_resolved",
+            EventKind::StallResolved,
             json!({"phase": "session", "detection": "nudge", "outcome": "escalated"}),
         )
         .unwrap();
@@ -60,7 +61,7 @@ fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
     queue
         .record_runtime_event(
             run.id(),
-            "recovery_finished",
+            EventKind::RecoveryFinished,
             json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1,
                    "ask_id": ask.id, "escalated": true, "outcome": "job_failed"}),
         )
@@ -145,7 +146,7 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
     queue
         .record_runtime_event(
             run.id(),
-            "stall_nudged",
+            EventKind::StallNudged,
             json!({"phase": "session", "idle_secs": 61, "threshold_secs": 60}),
         )
         .unwrap();

@@ -2,11 +2,12 @@
 //! checkout's `dagq.toml` each pass (task 698), for the values the flags
 //! did not give.
 
+use crate::domain::EventKind;
 use anyhow::Result;
 use tracing::{info, warn};
 
 use super::Supervisor;
-use crate::domain::slot_limits::{SUPERVISOR_CONFIG_CHANGED, SlotLimits, slot_limits_change};
+use crate::domain::slot_limits::{SlotLimits, slot_limits_change};
 
 impl Supervisor<'_> {
     /// Read `[supervisor]` again. Values that differ from those in use
@@ -59,7 +60,7 @@ impl Supervisor<'_> {
         self.max_waiting = to.max_waiting.value;
         payload["supervisor"] = serde_json::json!(self.token);
         self.queue
-            .record_queue_event(SUPERVISOR_CONFIG_CHANGED, payload)?;
+            .record_queue_event(EventKind::SupervisorConfigChanged, payload)?;
         Ok(())
     }
 }

@@ -3,6 +3,7 @@
 //! nudge, and a text the supervisor typed that the session did not take,
 //! go to the recovery job before any ask.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -530,15 +531,15 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         .as_millis() as i64;
     for (kind, payload) in [
         (
-            "stall_nudged",
+            EventKind::StallNudged,
             json!({"phase": "session", "idle_secs": 1, "threshold_secs": 1}),
         ),
         (
-            "recovery_requested",
+            EventKind::RecoveryRequested,
             json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1, "idle_secs": 1}),
         ),
         (
-            "recovery_finished",
+            EventKind::RecoveryFinished,
             json!({"alert": "stalled", "reason": "idle_without_receipt", "attempt": 1, "verdict": "repair", "confidence": "high", "applied": ["wait"], "escalated": false, "recheck_at_ms": recheck_at_ms}),
         ),
     ] {

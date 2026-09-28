@@ -11,6 +11,7 @@
 //! [`crate::domain::MAX_DRAFT_PLANNERS`] per draft.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::{
     application::{
         DraftPlannerStart, PlannerAnswerRoute,
@@ -84,7 +85,7 @@ impl Supervisor<'_> {
                             warn!(task_id = %task, ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; it is left to the inbox", ask.id, planner.id);
                             self.queue.record_task_event(
                                 task,
-                                event_kind::ASK_DELIVERY_FAILED,
+                                EventKind::AskDeliveryFailed,
                                 json!({
                                     "ask_id": ask.id,
                                     "workspace_id": workspace,

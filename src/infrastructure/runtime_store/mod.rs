@@ -26,7 +26,6 @@ use crate::application::{
     AskStore, Generators, QueueRecords, RunCoordination, RunLog, RunRecovery, RunTransitions,
     SessionRegistry, timestamp, unix_seconds,
 };
-use crate::domain::LeaseToken;
 use crate::domain::slot_limits::{SettingSource, SlotLimits};
 use crate::domain::worker::Worker;
 use crate::domain::worker_model::{WorkerSession, WorkerTrial};
@@ -42,6 +41,7 @@ use crate::domain::{
     run,
     search::{SearchPage, SearchQuery},
 };
+use crate::domain::{EventKind, LeaseToken};
 
 pub use crate::application::{
     EndedRunWorkspace, EndedRunWorktree, Exhaustion, Landing, LeasedRun, ResumeCandidate,
@@ -317,7 +317,12 @@ fn assert_wrapper(conn: &Connection, id: &RunId, pid: u32) -> Result<()> {
     Ok(())
 }
 
-fn run_event(conn: &Connection, id: &RunId, kind: &str, payload: serde_json::Value) -> Result<()> {
+fn run_event(
+    conn: &Connection,
+    id: &RunId,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> Result<()> {
     let task_id: TaskId =
         conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
             r.get(0)
@@ -365,7 +370,7 @@ pub(super) fn end_stalled_detections(
         now,
     )?;
     for end in ends {
-        run_event(tx, id, event_kind::STALL_RESOLVED, end)?;
+        run_event(tx, id, EventKind::StallResolved, end)?;
     }
     Ok(closed)
 }

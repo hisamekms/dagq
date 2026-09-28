@@ -13,6 +13,7 @@
 //! land stays awaiting integration and starts no verification.
 
 use super::{cleanup::DiskRequest, *};
+use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     claim_hold::LANDINGS,
@@ -170,7 +171,7 @@ impl Supervisor<'_> {
             removed.runs.len()
         );
         if let Err(error) = self.queue.record_queue_event(
-            event_kind::AUTO_REPAIRED,
+            EventKind::AutoRepaired,
             json!({
                 "repair": DISK_CLEANUP,
                 "layer": "runtime",

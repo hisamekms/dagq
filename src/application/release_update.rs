@@ -7,6 +7,7 @@
 //! new release (decisions 4 and 5: ask, or install without asking) is
 //! [`next_action`].
 
+use crate::domain::EventKind;
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -15,8 +16,8 @@ use super::update::{
 };
 use super::{InstalledPlugin, Queue};
 use crate::domain::release_update::{
-    RELEASE_CHECK_FAILED, RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig,
-    check_due, is_newer, is_release_build, latest_release,
+    RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, check_due, is_newer,
+    is_release_build, latest_release,
 };
 use crate::domain::{LeaseToken, RunEvent};
 
@@ -90,7 +91,7 @@ pub fn check(
     };
     let (kind, payload) = match found {
         Ok((latest, etag, not_modified)) => (
-            RELEASE_CHECKED,
+            EventKind::ReleaseChecked,
             json!({
                 "latest": latest,
                 "current": current,
@@ -103,7 +104,7 @@ pub fn check(
             }),
         ),
         Err(error) => (
-            RELEASE_CHECK_FAILED,
+            EventKind::ReleaseCheckFailed,
             json!({
                 "error": error,
                 "current": current,
@@ -113,7 +114,7 @@ pub fn check(
         ),
     };
     queue.record_queue_event(kind, payload.clone())?;
-    Ok(Some((kind, payload)))
+    Ok(Some((kind.as_str(), payload)))
 }
 
 /// `status`'s `release_update` of `queue` with the host's `config`:

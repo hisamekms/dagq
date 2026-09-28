@@ -2,6 +2,7 @@
 //! ([`SessionRegistry`]).
 
 use super::*;
+use crate::domain::EventKind;
 
 impl SqliteQueue {
     /// Record the cmux workspace `up` opened for `role`, replacing any
@@ -70,7 +71,7 @@ impl SqliteQueue {
         if seen {
             return Ok(false);
         }
-        super::run_log::queue_event(&tx, event_kind::PLANNER_UNRESPONSIVE, &payload)?;
+        super::run_log::queue_event(&tx, EventKind::PlannerUnresponsive, &payload)?;
         tx.commit()?;
         Ok(true)
     }

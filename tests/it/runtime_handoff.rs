@@ -1,5 +1,6 @@
 //! Runtime tests: The handoff of a supervisor to the next process.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -657,7 +658,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     let queue = SqliteQueue::open(&db).unwrap();
     queue
         .record_queue_event(
-            "update_started",
+            EventKind::UpdateStarted,
             json!({"pid": 999_999_999u32, "commit": source}),
         )
         .unwrap();
@@ -669,7 +670,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     // So is one that died after it put the old binary back.
     queue
         .record_queue_event(
-            "update_restored",
+            EventKind::UpdateRestored,
             json!({"pid": 999_999_999u32, "commit": source}),
         )
         .unwrap();
@@ -680,11 +681,13 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     assert_eq!(of("update_started", &source), 2);
     queue
         .record_queue_event(
-            "update_started",
+            EventKind::UpdateStarted,
             json!({"pid": std::process::id(), "commit": source}),
         )
         .unwrap();
-    queue.record_queue_event("update_retry", json!({})).unwrap();
+    queue
+        .record_queue_event(EventKind::UpdateRetry, json!({}))
+        .unwrap();
     supervise_with(&db, &repo, &backend, &options).unwrap();
     assert_eq!(of("update_started", &source), 3, "{:?}", updates());
     let status = runtime::status(&db).unwrap();

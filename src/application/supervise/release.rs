@@ -18,10 +18,10 @@ use super::*;
 use crate::application::lifecycle;
 use crate::application::release_update::{self, ReleaseAction, ReleaseIndex};
 use crate::application::update::{
-    JOB_STEPS, RELEASE_SOURCE, UPDATE_ANSWERED, UPDATE_ASKER, UPDATE_FAILED, UPDATE_HISTORY,
-    UPDATE_RETRY, UPDATE_STARTED, failed_release, in_progress, job_pid, latest_job_step,
-    latest_job_step_of, record, step_release,
+    JOB_STEPS, RELEASE_SOURCE, UPDATE_ASKER, UPDATE_HISTORY, failed_release, in_progress, job_pid,
+    latest_job_step, latest_job_step_of, record, step_release,
 };
+use crate::domain::EventKind;
 use crate::domain::release_update::{
     RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, is_release_build,
 };
@@ -254,7 +254,13 @@ impl Supervisor<'_> {
             if !APPROVE_RELEASE_OPTIONS.contains(&answer) {
                 continue;
             }
-            self.record_release_answer(UPDATE_ANSWERED, ask.id, answer, &version, current)?;
+            self.record_release_answer(
+                EventKind::UpdateAnswered,
+                ask.id,
+                answer,
+                &version,
+                current,
+            )?;
         }
         let updates = self.queue.update_events(UPDATE_HISTORY)?;
         for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
@@ -263,8 +269,8 @@ impl Supervisor<'_> {
             };
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
             let kind = match answer {
-                "retry" => UPDATE_RETRY,
-                "skip" => UPDATE_ANSWERED,
+                "retry" => EventKind::UpdateRetry,
+                "skip" => EventKind::UpdateAnswered,
                 _ => continue,
             };
             self.record_release_answer(kind, ask.id, answer, version, current)?;
@@ -274,7 +280,7 @@ impl Supervisor<'_> {
 
     fn record_release_answer(
         &mut self,
-        kind: &str,
+        kind: EventKind,
         ask: crate::domain::AskId,
         answer: &str,
         version: &str,
@@ -379,7 +385,7 @@ leave it (the next release asks again).",
         )?;
         record(
             &*self.queue,
-            UPDATE_FAILED,
+            EventKind::UpdateFailed,
             None,
             json!({
                 "stage": if plugin_only { "plugin" } else { "interrupted" },
@@ -470,7 +476,7 @@ leave it (the next release asks again).",
         if plugin_only {
             started["plugin_only"] = json!(true);
         }
-        record(&*self.queue, UPDATE_STARTED, None, started)?;
+        record(&*self.queue, EventKind::UpdateStarted, None, started)?;
         info!(
             "release update: job {} installs release {version}{} (log {})",
             job.id(),

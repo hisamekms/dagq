@@ -4,6 +4,7 @@
 //! work on the turn that input started: its stage does not end, and no
 //! `/exit` is sent, until the idle marker that ends that turn (task 672).
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -64,7 +65,7 @@ fn a_resumed_session_at_work_on_a_notice_after_its_idle_is_not_ended() {
     queue
         .record_runtime_event(
             run.id(),
-            "evidence_missing",
+            EventKind::EvidenceMissing,
             json!({"status": "needs_session", "reason": "e2e has no evidence"}),
         )
         .unwrap();

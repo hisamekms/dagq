@@ -1,4 +1,4 @@
-use crate::domain::event_kind;
+use crate::domain::event_kind::{self, EventKind};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -796,7 +796,7 @@ impl TaskStore for SqliteQueue {
             &tx,
             task_id,
             None,
-            event_kind::DEPENDENCY_REMOVED,
+            EventKind::DependencyRemoved,
             json!({"predecessor_id": predecessor_id}),
         )?;
         tx.commit()?;
@@ -830,7 +830,7 @@ impl TaskStore for SqliteQueue {
             &tx,
             task_id,
             None,
-            event_kind::GOAL_DEPENDENCY_REMOVED,
+            EventKind::GoalDependencyRemoved,
             json!({"goal_id": goal_id}),
         )?;
         tx.commit()?;
@@ -941,7 +941,7 @@ impl TaskStore for SqliteQueue {
             ],
         )?;
         let result = read_goal(&tx, id)?;
-        goal_event(&tx, id, event_kind::GOAL_CREATED, json!({"goal": result}))?;
+        goal_event(&tx, id, EventKind::GoalCreated, json!({"goal": result}))?;
         tx.commit()?;
         Ok(result)
     }
@@ -1021,7 +1021,7 @@ impl TaskStore for SqliteQueue {
         goal_event(
             &tx,
             goal_id,
-            event_kind::GOAL_UPDATED,
+            EventKind::GoalUpdated,
             json!({"old": old_json, "new": new}),
         )?;
         let result = read_goal(&tx, goal_id)?;
@@ -1114,7 +1114,7 @@ impl TaskStore for SqliteQueue {
         goal_event(
             &tx,
             goal_id,
-            event_kind::GOAL_STATUS_CHANGED,
+            EventKind::GoalStatusChanged,
             json!({"from": from, "to": opened.status()}),
         )?;
         let result = read_goal(&tx, goal_id)?;
@@ -1131,7 +1131,7 @@ impl TaskStore for SqliteQueue {
         match &note.target {
             NoteTarget::Task(task_id) => {
                 read_task(&tx, *task_id)?;
-                event(&tx, *task_id, None, OBSERVATION_KIND, payload)?;
+                event(&tx, *task_id, None, EventKind::Observation, payload)?;
             }
             NoteTarget::Run(run_id) => {
                 let task_id: TaskId = tx
@@ -1140,11 +1140,11 @@ impl TaskStore for SqliteQueue {
                     })
                     .optional()?
                     .with_context(|| format!("run {run_id} does not exist"))?;
-                event(&tx, task_id, Some(run_id), OBSERVATION_KIND, payload)?;
+                event(&tx, task_id, Some(run_id), EventKind::Observation, payload)?;
             }
             NoteTarget::Goal(goal_id) => {
                 read_goal(&tx, *goal_id)?;
-                goal_event(&tx, *goal_id, OBSERVATION_KIND, payload)?;
+                goal_event(&tx, *goal_id, EventKind::Observation, payload)?;
             }
         }
         let result = tx.query_row(
@@ -1228,7 +1228,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                event_kind::TASK_GOAL_CHANGED,
+                EventKind::TaskGoalChanged,
                 json!({"from": from, "to": task.goal_id()}),
             )?;
         }
@@ -1259,7 +1259,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                event_kind::TASK_PATHS_CHANGED,
+                EventKind::TaskPathsChanged,
                 json!({"from": from, "to": task.paths()}),
             )?;
         }
@@ -1311,7 +1311,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                event_kind::TASK_EDITED,
+                EventKind::TaskEdited,
                 json!({"from": from, "to": to}),
             )?;
         }
@@ -1340,7 +1340,7 @@ impl TaskStore for SqliteQueue {
                 &tx,
                 task_id,
                 None,
-                event_kind::TASK_PRIORITY_CHANGED,
+                EventKind::TaskPriorityChanged,
                 json!({"from": from, "to": task.priority()}),
             )?;
         }
@@ -1392,7 +1392,7 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
         tx,
         id,
         None,
-        event_kind::TASK_CREATED,
+        EventKind::TaskCreated,
         json!({"goal_id": task.goal_id()}),
     )?;
     // Inserted after the task, which is in its goal already, so the
@@ -1547,7 +1547,7 @@ pub(super) fn close_goal_in(
     if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
         payload.extend(extra.clone());
     }
-    goal_event(conn, goal_id, event_kind::GOAL_CLOSED, payload)?;
+    goal_event(conn, goal_id, EventKind::GoalClosed, payload)?;
     // `abandoned` leaves unstarted tasks as they are; one another goal's
     // task waits on is told to the inbox (task 421).
     if verdict == GoalVerdict::Abandoned {
@@ -1575,13 +1575,13 @@ fn task_counts(conn: &Connection, goal_id: GoalId) -> Result<TaskStatusCounts> {
 pub(super) fn goal_event(
     conn: &Connection,
     goal_id: GoalId,
-    kind: &str,
+    kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO run_events(goal_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![goal_id, kind, serde_json::to_string(&payload)?],
+        params![goal_id, kind.as_str(), serde_json::to_string(&payload)?],
     )?;
     Ok(())
 }
@@ -1769,7 +1769,7 @@ pub(super) fn claim_task(
             run.created_at()
         ],
     )?;
-    event(tx, task.id(), Some(run.id()), event_kind::RUN_CLAIMED, {
+    event(tx, task.id(), Some(run.id()), EventKind::RunClaimed, {
         let mut payload = json!({"from": "ready", "to": task.status(), "provider": run.actual_provider(), "worker_mode": run.worker_mode()});
         if let (Some(payload), Some(serde_json::Value::Object(attributes))) =
             (payload.as_object_mut(), attributes)
@@ -1952,7 +1952,7 @@ fn apply_transition(
         conn,
         task_id,
         None,
-        event_kind::TASK_STATUS_CHANGED,
+        EventKind::TaskStatusChanged,
         match duplicate {
             Some(Duplicate {
                 duplicate_of,
@@ -1973,7 +1973,7 @@ fn apply_transition(
             conn,
             task_id,
             None,
-            event_kind::REVIEW_BYPASSED,
+            EventKind::ReviewBypassed,
             json!({"from": from}),
         )?;
     }
@@ -2020,7 +2020,7 @@ pub(super) fn insert_dependency(
             conn,
             task_id,
             None,
-            event_kind::DEPENDENCY_ADDED,
+            EventKind::DependencyAdded,
             json!({"predecessor_id": predecessor_id}),
         )?;
     }
@@ -2050,7 +2050,7 @@ fn insert_goal_dependency(
             conn,
             task_id,
             None,
-            event_kind::GOAL_DEPENDENCY_ADDED,
+            EventKind::GoalDependencyAdded,
             json!({"goal_id": goal_id}),
         )?;
     }
@@ -2069,13 +2069,18 @@ pub(super) fn event(
     conn: &Connection,
     task_id: TaskId,
     run_id: Option<&RunId>,
-    kind: &str,
+    kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![task_id, run_id, kind, serde_json::to_string(&payload)?],
+        params![
+            task_id,
+            run_id,
+            kind.as_str(),
+            serde_json::to_string(&payload)?
+        ],
     )?;
     // The Claude session spans this event starts or ends (ADR-0048).
     super::sessions::follow(

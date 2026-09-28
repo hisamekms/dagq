@@ -6,6 +6,7 @@
 //! [`IN_FLIGHT_REFRESH_SECS`] or until the next claim. The `[conflicts]`
 //! they are judged by is read again every pass (ADR-0080): a change drops
 //! the cached hotspots.
+use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
@@ -103,7 +104,7 @@ impl Supervisor<'_> {
             );
             payload["supervisor"] = serde_json::json!(self.token);
             self.queue
-                .record_queue_event(CONFLICTS_CONFIG_CHANGED, payload)?;
+                .record_queue_event(EventKind::ConflictsConfigChanged, payload)?;
         }
         Ok(())
     }
@@ -219,7 +220,7 @@ impl Supervisor<'_> {
         self.defer.deferrals = Some(deferrals);
         for (id, (kind, payload)) in events {
             match kind {
-                claim_defer::CLAIM_DEFERRED => warn!(
+                EventKind::ClaimDeferred => warn!(
                     task_id = %id,
                     "claim of task {id} deferred: {}",
                     payload["message"].as_str().unwrap_or_default()

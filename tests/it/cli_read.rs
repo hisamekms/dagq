@@ -1,4 +1,5 @@
 use crate::common;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use common::cli::*;
@@ -9,7 +10,8 @@ use dagq::infrastructure::sqlite::SqliteQueue;
 use serde_json::Value;
 
 /// A claimed run of task 1 (goal 1) with the given events, their
-/// `created_at` set to 2026-09-24 at the given `HH:MM:SS`; the run's ID.
+/// `created_at` set to 2026-09-24 at the given `HH:MM:SS` (a kind this
+/// binary does not know written directly); the run's ID.
 fn run_with_events(db: &Path, events: &[(&str, serde_json::Value, &str)]) -> String {
     use dagq::domain::{ClaimOutcome, CommitSha};
     ok(db, &["init"]);
@@ -34,9 +36,20 @@ fn run_with_events(db: &Path, events: &[(&str, serde_json::Value, &str)]) -> Str
         let before: i64 = conn
             .query_row("SELECT MAX(id) FROM run_events", [], |r| r.get(0))
             .unwrap();
-        queue
-            .record_runtime_event(run.id(), kind, payload.clone())
-            .unwrap();
+        match EventKind::from_name(kind) {
+            Some(kind) => queue
+                .record_runtime_event(run.id(), kind, payload.clone())
+                .unwrap(),
+            // A kind this binary does not know is written as a newer
+            // binary would: the write port takes only the kinds it knows.
+            None => {
+                conn.execute(
+                    "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES (1,?1,?2,?3)",
+                    rusqlite::params![run.id().as_str(), kind, payload.to_string()],
+                )
+                .unwrap();
+            }
+        }
         // The event and the session spans written with it (ADR-0048).
         conn.execute(
             "UPDATE run_events SET created_at=?1 WHERE id>?2",

@@ -11,6 +11,7 @@
 //! `run_ended`, or `unsent` when it could not be typed).
 
 use super::*;
+use crate::domain::EventKind;
 
 /// The phase of the worker's first session.
 pub(super) const SESSION_PHASE: &str = "session";
@@ -124,7 +125,7 @@ pub(super) fn nudge_stale_receipt(
         payload["attempt"] = json!(attempt);
     }
     sv.queue
-        .record_runtime_event(run.id(), event_kind::STALE_RECEIPT_NUDGED, payload)?;
+        .record_runtime_event(run.id(), EventKind::StaleReceiptNudged, payload)?;
     let text = stale_receipt_nudge(run, &stale.receipt_commit, &stale.head)?;
     let sent_at = sv.files.now();
     match submit(
@@ -145,7 +146,7 @@ pub(super) fn nudge_stale_receipt(
             if matches!(submission, Submission::Submitted(_) | Submission::Queued)
                 && let Err(error) = sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::AUTO_REPAIRED,
+                    EventKind::AutoRepaired,
                     json!({
                         "layer": "runtime",
                         "repair": "receipt_rewrite_requested",
@@ -220,7 +221,7 @@ impl StaleNudge {
             payload["attempt"] = json!(attempt);
         }
         sv.queue
-            .record_runtime_event(run.id(), event_kind::STALE_RECEIPT_RESOLVED, payload)?;
+            .record_runtime_event(run.id(), EventKind::StaleReceiptResolved, payload)?;
         info!(run_id = %run.id(), "the request to rewrite the receipt of {} ended: {outcome}", run.id());
         Ok(())
     }

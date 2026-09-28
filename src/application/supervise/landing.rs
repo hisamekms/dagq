@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::domain::ActorContext;
+use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
 
@@ -22,11 +23,10 @@ impl Supervisor<'_> {
     /// Only `stats` reads it, so a failure to record it is only reported:
     /// the step it follows has already changed the run.
     pub(super) fn queue_landing(&mut self, run: &TaskRun, via: &str) {
-        if let Err(error) = self.queue.record_runtime_event(
-            run.id(),
-            event_kind::LANDING_QUEUED,
-            json!({"via": via}),
-        ) {
+        if let Err(error) =
+            self.queue
+                .record_runtime_event(run.id(), EventKind::LandingQueued, json!({"via": via}))
+        {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not record landing_queued: {error:#}", run.id());
         }
     }
@@ -131,7 +131,7 @@ impl Supervisor<'_> {
         }
         self.queue.record_runtime_event(
             run.id(),
-            event_kind::REVIEW_RETRIED,
+            EventKind::ReviewRetried,
             json!({"attempt": attempt, "error": error}),
         )?;
         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} printed no readable verdict: {error}; reviewing it once more", run.id());
@@ -154,7 +154,7 @@ impl Supervisor<'_> {
         let launch = self.actor_launch(ModelRole::Review);
         self.queue.record_runtime_event(
             run.id(),
-            event_kind::REVIEW_STARTED,
+            EventKind::ReviewStarted,
             json!({
                 "attempt": attempt,
                 "workspace_id": session.as_ref().map(|s| s.workspace.clone()),
@@ -321,11 +321,8 @@ impl Supervisor<'_> {
                 if let Some(requested) = requested.as_object_mut() {
                     requested.extend(WorkerSession::of_run(&events).fields());
                 }
-                self.queue.record_runtime_event(
-                    run.id(),
-                    event_kind::REVISE_REQUESTED,
-                    requested,
-                )?;
+                self.queue
+                    .record_runtime_event(run.id(), EventKind::ReviseRequested, requested)?;
                 let submission = match submit(
                     self,
                     run,
@@ -339,7 +336,7 @@ impl Supervisor<'_> {
                         warn!(run_id = %run.id(), "run {}: {why}", run.id());
                         self.queue.record_runtime_event(
                             run.id(),
-                            event_kind::REVISE_UNSENT,
+                            EventKind::ReviseUnsent,
                             json!({"attempt": attempt, "error": why}),
                         )?;
                         return Ok(ask(Some(why), verdict, session));
@@ -449,11 +446,8 @@ impl Supervisor<'_> {
                 // Recorded for the reader and an adopter, which goes on
                 // to land as well.
                 payload["exhausted"] = json!(true);
-                self.queue.record_runtime_event(
-                    run.id(),
-                    event_kind::CONFLICT_PRECHECK,
-                    payload,
-                )?;
+                self.queue
+                    .record_runtime_event(run.id(), EventKind::ConflictPrecheck, payload)?;
                 info!(run_id = %run.id(), "run {}: {why}, after {requested} conflict requests and {} conflict-only resumes (at most {} in all); landing, and a conflicting landing retries the task with the run's branch carried over", run.id(), resumes.conflict_only, self.resume_config.conflict_only_limit);
                 return Ok(land(session));
             }
@@ -476,11 +470,8 @@ impl Supervisor<'_> {
                 };
                 // What an adopter asks, if it takes the run over before the ask.
                 payload["asked"] = json!(why);
-                self.queue.record_runtime_event(
-                    run.id(),
-                    event_kind::CONFLICT_PRECHECK,
-                    payload,
-                )?;
+                self.queue
+                    .record_runtime_event(run.id(), EventKind::ConflictPrecheck, payload)?;
                 info!(run_id = %run.id(), "run {}: {why}; asking a person", run.id());
                 return Ok(Phase::Exiting(ExitWatch::new(
                     session,
@@ -522,11 +513,8 @@ impl Supervisor<'_> {
                 let mut sending = payload.clone();
                 sending["requested"] = json!(true);
                 sending["sent_at"] = json!(unix_seconds(sent_at));
-                self.queue.record_runtime_event(
-                    run.id(),
-                    event_kind::CONFLICT_PRECHECK,
-                    sending,
-                )?;
+                self.queue
+                    .record_runtime_event(run.id(), EventKind::ConflictPrecheck, sending)?;
                 submit(
                     self,
                     run,
@@ -556,7 +544,7 @@ impl Supervisor<'_> {
                 }
             }
             self.queue
-                .record_runtime_event(run.id(), event_kind::CONFLICT_PRECHECK, payload)?;
+                .record_runtime_event(run.id(), EventKind::ConflictPrecheck, payload)?;
             warn!(run_id = %run.id(), error = %error, "run {}: {why}, and {error}; landing, whose rebase parks it for a resume", run.id());
             return Ok(land(session));
         };
@@ -583,7 +571,7 @@ impl Supervisor<'_> {
                 match self.cmux.close(&session.workspace) {
                     Ok(()) => self.queue.record_runtime_event(
                         run.id(),
-                        event_kind::WORKSPACE_CLOSED,
+                        EventKind::WorkspaceClosed,
                         json!({"workspace_id": session.workspace, "resume_attempt": attempt}),
                     )?,
                     Err(error) => {
@@ -753,7 +741,7 @@ impl Supervisor<'_> {
                 {
                     self.queue.record_runtime_event(
                         run.id(),
-                        event_kind::INTEGRATION_APPROVED,
+                        EventKind::IntegrationApproved,
                         json!({"status": run.status().as_str(), "pid": self.layout.pid, "push": true, "ask_id": ask_id}),
                     )?;
                 }

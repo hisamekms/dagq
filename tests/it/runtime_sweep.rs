@@ -1,5 +1,6 @@
 //! Runtime tests: The sweep of workspaces, build outputs and worktrees.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -130,7 +131,7 @@ fn the_sweep_closes_every_workspace_left_open_by_a_landed_run() {
         queue
             .record_runtime_event(
                 run.id(),
-                "workspace_created",
+                EventKind::WorkspaceCreated,
                 json!({"workspace_id": workspace, "resume_attempt": attempt}),
             )
             .unwrap();

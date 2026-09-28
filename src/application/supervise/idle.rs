@@ -17,6 +17,7 @@ use super::*;
 use crate::application::screen_idle::{
     self, Inference, MarkerState, RESUME_DEBUG_LOG, ScreenIdle, ScreenLook, ScreenProbe,
 };
+use crate::domain::EventKind;
 
 pub(super) struct IdleMarker {
     path: PathBuf,
@@ -371,7 +372,7 @@ impl Supervisor<'_> {
         }
         if let Err(error) =
             self.queue
-                .record_runtime_event(run.id(), event_kind::IDLE_INFERRED, payload)
+                .record_runtime_event(run.id(), EventKind::IdleInferred, payload)
         {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: idle_inferred could not be recorded: {error:#}", run.id());
             return inference;

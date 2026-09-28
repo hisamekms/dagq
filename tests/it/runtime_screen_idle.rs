@@ -7,6 +7,7 @@
 //! the marker as before.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -316,7 +317,7 @@ fn a_resumed_session_without_its_marker_ends_its_stage_by_its_screen() {
     queue
         .record_runtime_event(
             run.id(),
-            "evidence_missing",
+            EventKind::EvidenceMissing,
             json!({"status": "needs_session", "reason": "e2e has no evidence"}),
         )
         .unwrap();

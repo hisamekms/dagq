@@ -8,6 +8,7 @@
 //! return; `runtime` and `lifecycle` re-export them under the names the
 //! tests use.
 
+use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -2424,7 +2425,7 @@ pub fn record_mark(
     at: Option<crate::domain::stats::Cursor>,
     by: &str,
 ) -> Result<Value> {
-    use crate::domain::marks::{self, MARK_RECORDED};
+    use crate::domain::marks::{self};
     let events = queue.all_events()?;
     let at = at
         .map(|cursor| {
@@ -2443,7 +2444,7 @@ pub fn record_mark(
         );
     }
     let payload = marks::mark_payload(label, note, at, by).map_err(anyhow::Error::msg)?;
-    let id = queue.record_queue_event(MARK_RECORDED, payload)?;
+    let id = queue.record_queue_event(EventKind::MarkRecorded, payload)?;
     recorded_mark(queue, id)
 }
 
@@ -2454,10 +2455,10 @@ pub fn retract_mark(
     target: crate::domain::EventId,
     by: &str,
 ) -> Result<Value> {
-    use crate::domain::marks::{self, MARK_RETRACTED};
+    use crate::domain::marks::{self};
     let payload =
         marks::retraction_payload(&queue.all_events()?, target, by).map_err(anyhow::Error::msg)?;
-    let id = queue.record_queue_event(MARK_RETRACTED, payload)?;
+    let id = queue.record_queue_event(EventKind::MarkRetracted, payload)?;
     recorded_mark(queue, id)
 }
 

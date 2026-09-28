@@ -2,6 +2,7 @@
 //! ([`RunRecovery`]).
 
 use super::*;
+use crate::domain::EventKind;
 
 impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
@@ -129,7 +130,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::RUN_ADOPTED,
+            EventKind::RunAdopted,
             json!({
                 "previous_token": lease.token,
                 "previous_pid": lease.pid,
@@ -202,7 +203,7 @@ impl SqliteQueue {
         report["status"] = json!(run.status());
         report["lease_deleted"] = json!(leases_deleted == 1);
         Reason::new(ReasonCode::Orphaned).apply_to(&mut report);
-        run_event(&tx, id, event_kind::RUN_RECOVERED, report)?;
+        run_event(&tx, id, EventKind::RunRecovered, report)?;
         // No session of it is stalled any more (ADR-0047 decision 30).
         end_stalled_detections(&tx, id, STALL_RECOVERED_CLOSED, self.generators.clock.now())?;
         // The task stays in_progress; a retry is an explicit `ready` and a new run.
@@ -276,7 +277,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::LEASE_ACQUIRED,
+            EventKind::LeaseAcquired,
             json!({"pid": std::process::id(), "reason": "resume", "previous_token": previous}),
         )?;
         // The resumed session keeps the model and effort of the claim
@@ -285,12 +286,12 @@ impl SqliteQueue {
         if let Some(started) = started.as_object_mut() {
             started.extend(WorkerSession::of_run(&events).fields());
         }
-        run_event(&tx, id, event_kind::RESUME_STARTED, started)?;
+        run_event(&tx, id, EventKind::ResumeStarted, started)?;
         if let Some(basis) = basis {
             run_event(
                 &tx,
                 id,
-                event_kind::AUTO_REPAIRED,
+                EventKind::AutoRepaired,
                 json!({
                     "layer": "runtime",
                     "repair": "conflict_resume_uncounted",
@@ -348,13 +349,13 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::LEASE_ACQUIRED,
+            EventKind::LeaseAcquired,
             json!({"pid": std::process::id(), "reason": "resume_skipped", "previous_token": previous}),
         )?;
         run_event(
             &tx,
             id,
-            event_kind::RESUME_SKIPPED,
+            EventKind::ResumeSkipped,
             json!({"head": head, "main": main, "approved": approved, "status": status.as_str()}),
         )?;
         tx.commit()?;
@@ -427,7 +428,7 @@ impl SqliteQueue {
             run_event(
                 &tx,
                 id,
-                event_kind::LEASE_RELEASED,
+                EventKind::LeaseReleased,
                 json!({"reason": "resume_finished"}),
             )?;
         }
@@ -514,16 +515,16 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::LEASE_ACQUIRED,
+            EventKind::LeaseAcquired,
             json!({"pid": std::process::id(), "reason": "triage", "previous_token": lease.map(|l| l.token)}),
         )?;
         if let Some(request) = request {
-            run_event(&tx, id, event_kind::RECOVERY_REQUESTED, request)?;
+            run_event(&tx, id, EventKind::RecoveryRequested, request)?;
         }
         run_event(
             &tx,
             id,
-            event_kind::TRIAGE_STARTED,
+            EventKind::TriageStarted,
             // The job's Claude session id (ADR-0048 decision 4).
             json!({"attempt": attempt, "status": run.status().as_str(), "session_id": self.generators.ids.uuid(), "launch": launch.to_value()}),
         )?;
@@ -543,11 +544,11 @@ impl SqliteQueue {
         token: &LeaseToken,
         action: &TriageAction,
         mut payload: serde_json::Value,
-        also: Vec<(&'static str, serde_json::Value)>,
+        also: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let kinds: Vec<&str> = std::iter::once(event_kind::TRIAGE_FINISHED)
-            .chain(also.iter().map(|(kind, _)| *kind))
+            .chain(also.iter().map(|(kind, _)| kind.as_str()))
             .collect();
         let _read = read_before(&self.conn, Closing::Run(id, &kinds))?;
         let tx = self
@@ -615,7 +616,7 @@ impl SqliteQueue {
         )?;
         payload["action"] = json!(action.as_str());
         payload["status"] = json!(result.status().as_str());
-        run_event(&tx, id, event_kind::TRIAGE_FINISHED, payload)?;
+        run_event(&tx, id, EventKind::TriageFinished, payload)?;
         for (kind, payload) in also {
             run_event(&tx, id, kind, payload)?;
         }
@@ -834,7 +835,7 @@ impl SqliteQueue {
         if !matches!(answer, "retry" | "resume" | "cancel") {
             payload["action"] = json!(crate::domain::RECOVER_AGAIN);
         }
-        run_event(&tx, id, event_kind::TRIAGE_DECIDED, payload)?;
+        run_event(&tx, id, EventKind::TriageDecided, payload)?;
         tx.commit()?;
         Ok(result)
     }
@@ -904,7 +905,7 @@ impl RunRecovery for SqliteQueue {
         token: &LeaseToken,
         action: &TriageAction,
         payload: serde_json::Value,
-        also: Vec<(&'static str, serde_json::Value)>,
+        also: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<TaskRun> {
         SqliteQueue::finish_triage(self, id, token, action, payload, also)
     }

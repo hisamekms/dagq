@@ -106,7 +106,7 @@ impl SqliteQueue {
     pub fn prune_supervisor(
         &self,
         token: &LeaseToken,
-        kind: &str,
+        kind: EventKind,
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
         crate::domain::check_event_target(kind, None, None)?;
@@ -289,7 +289,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::LEASE_RELEASED,
+            EventKind::LeaseReleased,
             json!({"reason": "finished"}),
         )?;
         tx.commit()?;
@@ -438,7 +438,7 @@ impl SqliteQueue {
             params![id, pid],
         )
         .context("wrapper is already registered; a resume may only launch once")?;
-        run_event(&tx, id, event_kind::WRAPPER_STARTED, json!({"pid": pid}))?;
+        run_event(&tx, id, EventKind::WrapperStarted, json!({"pid": pid}))?;
         tx.commit()?;
         Ok(())
     }
@@ -463,7 +463,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::AGENT_STARTED,
+            EventKind::AgentStarted,
             json!({"pid": agent_pid, "session_id": id}),
         )?;
         tx.commit()?;
@@ -483,7 +483,7 @@ impl SqliteQueue {
             params![id, pid],
         )
         .context("wrapper is already registered; a run may only launch once")?;
-        run_event(&tx, id, event_kind::WRAPPER_STARTED, json!({"pid": pid}))?;
+        run_event(&tx, id, EventKind::WrapperStarted, json!({"pid": pid}))?;
         tx.commit()?;
         Ok(())
     }
@@ -510,7 +510,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::AGENT_STARTED,
+            EventKind::AgentStarted,
             json!({"pid": agent_pid, "session_id": id}),
         )?;
         tx.commit()?;
@@ -542,7 +542,7 @@ impl SqliteQueue {
         run_event(
             &tx,
             id,
-            event_kind::SESSION_EXITED,
+            EventKind::SessionExited,
             json!({"exit_code": exit_code}),
         )?;
         tx.commit()?;
@@ -579,7 +579,7 @@ impl RunCoordination for SqliteQueue {
     fn prune_supervisor(
         &self,
         token: &LeaseToken,
-        kind: &str,
+        kind: EventKind,
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
         SqliteQueue::prune_supervisor(self, token, kind, stopped)
@@ -762,7 +762,11 @@ mod tests {
 
         assert!(
             queue
-                .prune_supervisor(&LeaseToken::new("dead"), STOPPED, &stopped)
+                .prune_supervisor(
+                    &LeaseToken::new("dead"),
+                    EventKind::SupervisorStopped,
+                    &stopped
+                )
                 .unwrap()
         );
 
@@ -780,7 +784,11 @@ mod tests {
 
         assert!(
             !queue
-                .prune_supervisor(&LeaseToken::new("gone"), STOPPED, &stopped)
+                .prune_supervisor(
+                    &LeaseToken::new("gone"),
+                    EventKind::SupervisorStopped,
+                    &stopped
+                )
                 .unwrap()
         );
 
@@ -805,7 +813,11 @@ mod tests {
             .unwrap();
 
         let error = queue
-            .prune_supervisor(&LeaseToken::new("dead"), STOPPED, &stopped)
+            .prune_supervisor(
+                &LeaseToken::new("dead"),
+                EventKind::SupervisorStopped,
+                &stopped,
+            )
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("record failed"), "{error:#}");
@@ -817,7 +829,11 @@ mod tests {
             .unwrap();
         assert!(
             queue
-                .prune_supervisor(&LeaseToken::new("dead"), STOPPED, &stopped)
+                .prune_supervisor(
+                    &LeaseToken::new("dead"),
+                    EventKind::SupervisorStopped,
+                    &stopped
+                )
                 .unwrap()
         );
         assert!(registered(&queue).is_empty());

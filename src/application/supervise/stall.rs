@@ -18,6 +18,7 @@
 //! the `approve_landing` ask), and at the resume timeout otherwise.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::recovery::{
     IDLE_WITHOUT_RECEIPT, PERMISSION_DENIED, SEND_UNCONFIRMED, TURN_WITHOUT_RECEIPT,
 };
@@ -498,7 +499,7 @@ impl StallWatch {
         }
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::STALL_PREEMPTED,
+            EventKind::StallPreempted,
             json!({
                 "phase": PHASE,
                 "threshold": IDLE_THRESHOLD,
@@ -591,7 +592,7 @@ impl StallWatch {
             payload["ask_id"] = json!(id);
         }
         sv.queue
-            .record_runtime_event(run.id(), event_kind::STALL_RESOLVED, payload)?;
+            .record_runtime_event(run.id(), EventKind::StallResolved, payload)?;
         info!(run_id = %run.id(), "stall of {} ({detection}) ended: {outcome}", run.id());
         Ok(())
     }
@@ -1186,7 +1187,7 @@ impl StallWatch {
         let background = idle.background_tasks();
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::STALL_NUDGED,
+            EventKind::StallNudged,
             json!({
                 "phase": PHASE,
                 "idle_secs": idle_secs,

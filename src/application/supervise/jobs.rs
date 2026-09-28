@@ -5,6 +5,7 @@
 //! jobs it left before it starts its own.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::{
     application::{HeadlessJobRecord, NewHeadlessJob},
     domain::headless_job::{Takeover, takeover},
@@ -349,7 +350,7 @@ impl Supervisor<'_> {
                 let recorded = match &job.run_id {
                     Some(run) => self.queue.record_runtime_event(
                         run,
-                        event_kind::HEADLESS_JOB_STOPPED,
+                        EventKind::HeadlessJobStopped,
                         payload.clone(),
                     ),
                     None => Err(anyhow!("no run")),
@@ -357,7 +358,7 @@ impl Supervisor<'_> {
                 if recorded.is_err()
                     && let Err(error) = self
                         .queue
-                        .record_queue_event(event_kind::HEADLESS_JOB_STOPPED, payload)
+                        .record_queue_event(EventKind::HeadlessJobStopped, payload)
                 {
                     warn!(error = %format_args!("{error:#}"), "the stop of headless job {} could not be recorded: {error:#}", job.id);
                 }

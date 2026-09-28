@@ -1,7 +1,7 @@
 //! Asks (ADR-0022): questions for a person kept as queue rows. Registering
 //! and answering one also writes `ask_opened` / `ask_answered` to
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
-use crate::domain::event_kind;
+use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -93,7 +93,7 @@ impl SqliteQueue {
                     &tx,
                     task_id,
                     hold.run_id.as_ref(),
-                    event_kind::ASK_UPDATED,
+                    EventKind::AskUpdated,
                     json!({
                         "ask_id": ask.id,
                         "kind": ask.kind,
@@ -130,7 +130,7 @@ impl SqliteQueue {
                     &tx,
                     None,
                     None,
-                    event_kind::ASK_OPENED,
+                    EventKind::AskOpened,
                     json!({
                         "ask_id": id,
                         "kind": AskKind::QueueHold,
@@ -217,7 +217,7 @@ impl SqliteQueue {
                 &tx,
                 ask.task_id,
                 ask.run_id.as_ref(),
-                event_kind::ASK_ANSWERED,
+                EventKind::AskAnswered,
                 payload,
             )?;
             if ask.kind == AskKind::Blocked {
@@ -227,7 +227,7 @@ impl SqliteQueue {
                     &tx,
                     ask.task_id,
                     ask.run_id.as_ref(),
-                    event_kind::ASK_CLOSED,
+                    EventKind::AskClosed,
                     json!({"ask_id": id, "kind": ask.kind}),
                 )?;
             }
@@ -378,7 +378,7 @@ impl SqliteQueue {
             &tx,
             ask.task_id,
             ask.run_id.as_ref(),
-            event_kind::ASK_ANSWERED,
+            EventKind::AskAnswered,
             payload,
         )?;
         let answered = read_ask(&tx, id)?;
@@ -419,7 +419,7 @@ impl SqliteQueue {
             &tx,
             ask.task_id,
             ask.run_id.as_ref(),
-            event_kind::ASK_CLOSED,
+            EventKind::AskClosed,
             json!({"ask_id": id, "kind": ask.kind}),
         )?;
         let closed = read_ask(&tx, id)?;
@@ -489,7 +489,7 @@ impl SqliteQueue {
                 "UPDATE asks SET closed_at=?2 WHERE id=?1",
                 params![ask.id, now],
             )?;
-            ask_event(&tx, None, None, event_kind::ASK_ANSWERED, payload)?;
+            ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
         }
         tx.execute(
             "INSERT INTO asks(kind,question,options,asked_by,reason_category,subject)
@@ -508,7 +508,7 @@ impl SqliteQueue {
             &tx,
             None,
             None,
-            event_kind::ASK_OPENED,
+            EventKind::AskOpened,
             json!({
                 "ask_id": id,
                 "kind": kind,
@@ -623,7 +623,7 @@ impl SqliteQueue {
             &tx,
             ask.task_id,
             ask.run_id.as_ref(),
-            event_kind::ASK_DELIVERED,
+            EventKind::AskDelivered,
             json!({"ask_id": id, "workspace_id": workspace_id}),
         )?;
         let closed = read_ask(&tx, id)?;
@@ -729,7 +729,7 @@ impl SqliteQueue {
                 &tx,
                 ask.task_id,
                 Some(run_id),
-                event_kind::ASK_UPDATED,
+                EventKind::AskUpdated,
                 json!({"ask_id": ask.id, "kind": ask.kind, "why": why}),
             )?;
             noted.push(read_ask(&tx, ask.id)?);
@@ -765,13 +765,13 @@ impl SqliteQueue {
                 let mut payload =
                     json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
                 write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
-                ask_event(&tx, None, None, event_kind::ASK_ANSWERED, payload)?;
+                ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
             } else {
                 ask_event(
                     &tx,
                     None,
                     None,
-                    event_kind::ASK_CLOSED,
+                    EventKind::AskClosed,
                     json!({"ask_id": ask.id, "kind": ask.kind}),
                 )?;
             }
@@ -845,7 +845,7 @@ pub(super) fn close_asks_in(
                 tx,
                 ask.task_id,
                 ask.run_id.as_ref(),
-                event_kind::ASK_ANSWERED,
+                EventKind::AskAnswered,
                 payload,
             )?;
         } else {
@@ -854,7 +854,7 @@ pub(super) fn close_asks_in(
                 tx,
                 ask.task_id,
                 ask.run_id.as_ref(),
-                event_kind::ASK_CLOSED,
+                EventKind::AskClosed,
                 json!({"ask_id": ask.id, "kind": ask.kind}),
             )?;
         }
@@ -938,7 +938,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
         tx,
         task_id,
         ask.run_id.as_ref(),
-        event_kind::ASK_OPENED,
+        EventKind::AskOpened,
         json!({
             "ask_id": id,
             "kind": ask.kind,
@@ -1004,7 +1004,7 @@ pub(super) fn record_ask_closed(conn: &Connection, ask: &Ask) -> Result<()> {
         conn,
         ask.task_id,
         ask.run_id.as_ref(),
-        event_kind::ASK_CLOSED,
+        EventKind::AskClosed,
         json!({"ask_id": ask.id, "kind": ask.kind}),
     )
 }
@@ -1015,7 +1015,7 @@ fn ask_event(
     conn: &Connection,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
-    kind: &str,
+    kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
     check_event_target(kind, task_id, None)?;
@@ -1023,7 +1023,12 @@ fn ask_event(
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![task_id, run_id, kind, serde_json::to_string(&payload)?],
+        params![
+            task_id,
+            run_id,
+            kind.as_str(),
+            serde_json::to_string(&payload)?
+        ],
     )?;
     Ok(())
 }
@@ -1100,7 +1105,7 @@ mod tests {
         if let Some(source) = source {
             queue
                 .record_queue_event(
-                    crate::domain::UPDATE_FAILED,
+                    EventKind::UpdateFailed,
                     json!({"ask_id": ask.id, "source": source, "release": "0.4.0"}),
                 )
                 .unwrap();
@@ -1283,7 +1288,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let run = RunId::new("run-1").unwrap();
-        let error = ask_event(&queue.conn, None, Some(&run), "ask_opened", json!({})).unwrap_err();
+        let error = ask_event(
+            &queue.conn,
+            None,
+            Some(&run),
+            EventKind::AskOpened,
+            json!({}),
+        )
+        .unwrap_err();
         assert_eq!(error.to_string(), "run run-1 is written without its task");
     }
 }

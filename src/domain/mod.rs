@@ -705,6 +705,7 @@ pub mod claim_hold;
 pub mod disk;
 mod error;
 pub mod event_kind;
+pub use event_kind::EventKind;
 pub mod finding;
 pub mod follow_up;
 pub mod forecast;
@@ -1641,28 +1642,29 @@ pub const ATTENTION_KINDS: &[&str] = &[
 /// decision 17), queue events in `run_events` (task 496): the supervisor
 /// started the job for a commit (`pid`, `base`, `supervisor`, `version`,
 /// the logs).
-pub const UPDATE_STARTED: &str = "update_started";
+pub const UPDATE_STARTED: &str = crate::domain::event_kind::EventKind::UpdateStarted.as_str();
 /// The job built the commit (`pid`, `binary`, `log`).
-pub const UPDATE_BUILT: &str = "update_built";
+pub const UPDATE_BUILT: &str = crate::domain::event_kind::EventKind::UpdateBuilt.as_str();
 /// The supervisor runs the new binary (`version`, `previous_version`,
 /// `migrated`, `supervisors`).
-pub const UPDATE_INSTALLED: &str = "update_installed";
+pub const UPDATE_INSTALLED: &str = crate::domain::event_kind::EventKind::UpdateInstalled.as_str();
 /// The build, its check, the install or the watch failed, or the job died
 /// (`stage`, `error`, `restored`, `supervisor`, `ask_id` of the
 /// `update_failed` ask).
-pub const UPDATE_FAILED: &str = "update_failed";
+pub const UPDATE_FAILED: &str = crate::domain::event_kind::EventKind::UpdateFailed.as_str();
 /// The job put the replaced binary back after a failed watch (`version`,
 /// `restored_version`): the rollback, before its `update_failed`.
-pub const UPDATE_RESTORED: &str = "update_restored";
+pub const UPDATE_RESTORED: &str = crate::domain::event_kind::EventKind::UpdateRestored.as_str();
 /// The build brings a breaking migration and waits for a person
 /// (`version`, `migrations`, `binary`, `command`, `ask_id` of the
 /// `approve_update` ask).
-pub const UPDATE_AWAITING_APPROVAL: &str = "update_awaiting_approval";
+pub const UPDATE_AWAITING_APPROVAL: &str =
+    crate::domain::event_kind::EventKind::UpdateAwaitingApproval.as_str();
 /// The supervisor applied a `skip` answer of an `update_failed` ask
 /// (`ask_id`, `answer`).
-pub const UPDATE_ANSWERED: &str = "update_answered";
+pub const UPDATE_ANSWERED: &str = crate::domain::event_kind::EventKind::UpdateAnswered.as_str();
 /// A `retry` answer: the next check builds main's head again.
-pub const UPDATE_RETRY: &str = "update_retry";
+pub const UPDATE_RETRY: &str = crate::domain::event_kind::EventKind::UpdateRetry.as_str();
 
 /// Every step of the automatic update, each with `commit` (the main commit
 /// it is about) in its payload but for the answers.
@@ -1677,108 +1679,18 @@ pub const UPDATE_EVENT_KINDS: &[&str] = &[
     UPDATE_RETRY,
 ];
 
-/// The event kinds that may belong to no task, goal or run: the queue's
-/// own events. The queue enumerated them in a CHECK until migration 0039;
-/// the write port checks them now (ADR-0073 decision 22).
-pub const QUEUE_EVENT_KINDS: &[&str] = &[
-    "backend_call_failed",
-    // A command the authorizer refused (ADR-t728-1 decision 5).
-    event_kind::AUTHORIZATION_DENIED,
-    "observe_started",
-    "observe_finished",
-    "ask_opened",
-    "ask_answered",
-    "ask_closed",
-    "stall_config_loaded",
-    "finding_recorded",
-    "finding_updated",
-    "finding_status_changed",
-    // A finding's planners and the answers to their questions, for a
-    // finding on the queue (ADR-0044 decision 19).
-    "finding_planner_opened",
-    "finding_planner_exhausted",
-    "ask_delivered",
-    "ask_delivery_failed",
-    "planner_answer_closed",
-    "planner_answer_claimed",
-    "run_env_program_missing",
-    "run_env_program_found",
-    "session_opened",
-    "session_closed",
-    // A planner's screen inferred idle without its idle marker
-    // (ADR-t803-1).
-    event_kind::IDLE_INFERRED,
-    // A planner of the runtime's nothing was seen of within the planner
-    // timeout (task 805); the revise's is on its proposal's task.
-    event_kind::PLANNER_UNRESPONSIVE,
-    // An idle planner of the runtime's asked to exit so that a revise with
-    // no planner, waiting past the planner timeout, gets its place (task
-    // 884).
-    event_kind::PLANNER_RELEASED,
-    "session_turns",
-    "supervisor_started",
-    "supervisor_stopped",
-    "run_env_changed",
-    "mark_recorded",
-    "mark_retracted",
-    // The KPI report the supervisor wrote (ADR-0051 decision 20).
-    kpi::report::REPORT_WRITTEN,
-    // The supervisor's forecast snapshots (ADR-0070 decision 3).
-    forecast::snapshot::FORECAST_RECORDED,
-    // The supervisor's samples of the candidates (ADR-0051 decision 3).
-    kpi::CANDIDATES_SAMPLED,
-    // The breaches of the KPIs' targets and their push (ADR-0051
-    // decisions 18 and 23).
-    kpi::push::KPI_BREACH_STARTED,
-    kpi::push::KPI_BREACH_RESOLVED,
-    kpi::push::KPI_PUSH_SENT,
-    kpi::push::KPI_PUSH_FAILED,
-    kpi::push::KPI_PUSH_ABANDONED,
-    claim_hold::CLAIM_HELD,
-    claim_hold::CLAIM_RESUMED,
-    // The `[conflicts]` a supervisor read again changed (ADR-0080).
-    stats::conflicts::CONFLICTS_CONFIG_CHANGED,
-    // The `[supervisor]` a supervisor read again changed (task 698).
-    slot_limits::SUPERVISOR_CONFIG_CHANGED,
-    claim_hold::LANDING_HELD,
-    claim_hold::LANDING_RESUMED,
-    // The answer of an authentication or usage-limit ask applied (task
-    // 437).
-    queue_hold::QUEUE_HOLD_APPLIED,
-    // A headless job with no run (a plan or goal review, the observer)
-    // that joined a hold ask, and the wall it hit (task 438).
-    event_kind::ASK_UPDATED,
-    event_kind::AUTH_REQUIRED,
-    event_kind::USAGE_LIMITED,
-    // The cleanup for the disk (task 377) is about no run.
-    "auto_repaired",
-    // The stop of a gone supervisor's plan or goal review (task 443).
-    event_kind::HEADLESS_JOB_STOPPED,
-    UPDATE_STARTED,
-    UPDATE_BUILT,
-    UPDATE_INSTALLED,
-    UPDATE_FAILED,
-    UPDATE_RESTORED,
-    UPDATE_AWAITING_APPROVAL,
-    UPDATE_ANSWERED,
-    UPDATE_RETRY,
-    // A supervisor's look for a new release (ADR-t618-1 decision 2).
-    release_update::RELEASE_CHECKED,
-    release_update::RELEASE_CHECK_FAILED,
-];
-
 /// Whether an event of `kind` may be written with its task, goal and run
-/// (ADR-0073 decision 22): one on none of them is a queue event. A reader
-/// does not check it.
+/// (ADR-0073 decision 22): one on none of them is a queue event
+/// ([`EventKind::is_queue`]). A reader does not check it.
 pub fn check_event_target(
-    kind: &str,
+    kind: EventKind,
     task_id: Option<TaskId>,
     goal_id: Option<GoalId>,
 ) -> Result<(), DomainError> {
     require(
-        task_id.is_some() || goal_id.is_some() || QUEUE_EVENT_KINDS.contains(&kind),
+        task_id.is_some() || goal_id.is_some() || kind.is_queue(),
         || DomainError::EventWithoutTarget {
-            kind: kind.to_owned(),
+            kind: kind.as_str().to_owned(),
         },
     )
 }
@@ -2321,15 +2233,39 @@ mod attention_tests {
             );
         }
 
-        assert!(check_event_target("task_created", task, None).is_ok());
-        assert!(check_event_target("goal_closed", None, Some(GoalId::new(1))).is_ok());
-        assert!(check_event_target("mark_recorded", None, None).is_ok());
+        assert!(check_event_target(EventKind::TaskCreated, task, None).is_ok());
+        assert!(check_event_target(EventKind::GoalClosed, None, Some(GoalId::new(1))).is_ok());
+        assert!(check_event_target(EventKind::MarkRecorded, None, None).is_ok());
+        for kind in EventKind::ALL {
+            // The type answers whether a kind is the queue's own.
+            assert_eq!(
+                check_event_target(*kind, None, None).is_ok(),
+                kind.is_queue(),
+                "{kind}"
+            );
+            assert!(check_event_target(*kind, task, None).is_ok(), "{kind}");
+            assert!(
+                check_event_target(*kind, None, Some(GoalId::new(1))).is_ok(),
+                "{kind}"
+            );
+        }
         for kind in UPDATE_EVENT_KINDS {
-            assert!(QUEUE_EVENT_KINDS.contains(kind), "{kind}");
-            assert!(check_event_target(kind, None, None).is_ok());
+            assert!(
+                EventKind::from_name(kind).is_some_and(EventKind::is_queue),
+                "{kind}"
+            );
+        }
+        for kind in [
+            EventKind::TaskCreated,
+            EventKind::RunClaimed,
+            EventKind::ReviewFinished,
+            EventKind::Observation,
+        ] {
+            assert!(!kind.is_queue(), "{kind}");
+            assert!(check_event_target(kind, None, None).is_err(), "{kind}");
         }
         assert_eq!(
-            check_event_target("task_created", None, None)
+            check_event_target(EventKind::TaskCreated, None, None)
                 .unwrap_err()
                 .to_string(),
             "a task_created event needs a task, a goal or a run; it is not an event of the queue itself"

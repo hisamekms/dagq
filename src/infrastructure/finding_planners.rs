@@ -7,7 +7,7 @@
 //! resolves the finding or opens it again. Opening a planner is one write
 //! transaction that re-checks the finding first, so two supervisors never
 //! open one for the same finding.
-use crate::domain::event_kind;
+use crate::domain::event_kind::{self, EventKind};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
@@ -131,7 +131,7 @@ impl SqliteQueue {
             finding_event(
                 &tx,
                 &current,
-                event_kind::FINDING_PLANNER_EXHAUSTED,
+                EventKind::FindingPlannerExhausted,
                 json!({
                     "finding_id": finding,
                     "planners": opened,
@@ -153,7 +153,7 @@ impl SqliteQueue {
         finding_event(
             &tx,
             &current,
-            event_kind::FINDING_PLANNER_OPENED,
+            EventKind::FindingPlannerOpened,
             json!({
                 "finding_id": finding,
                 "planner_id": planner,
@@ -236,7 +236,7 @@ impl SqliteQueue {
             finding_event(
                 &tx,
                 &current,
-                event_kind::FINDING_STATUS_CHANGED,
+                EventKind::FindingStatusChanged,
                 json!({
                     "finding_id": current.id,
                     "from": current.status,
@@ -273,7 +273,7 @@ impl SqliteQueue {
     pub fn record_finding_event(
         &mut self,
         finding: FindingId,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
         let current = read_finding(&self.conn, finding)?;
@@ -494,7 +494,7 @@ pub(super) fn link_findings(
         finding_event(
             conn,
             &current,
-            event_kind::FINDING_STATUS_CHANGED,
+            EventKind::FindingStatusChanged,
             json!({
                 "finding_id": id,
                 "from": current.status,
@@ -565,7 +565,7 @@ pub(super) fn apply_answer(
                     finding_event(
                         conn,
                         &marked,
-                        event_kind::FINDING_STATUS_CHANGED,
+                        EventKind::FindingStatusChanged,
                         json!({
                             "finding_id": id,
                             "from": current.status,
@@ -579,7 +579,7 @@ pub(super) fn apply_answer(
                 finding_event(
                     conn,
                     &marked,
-                    event_kind::FINDING_UPDATED,
+                    EventKind::FindingUpdated,
                     json!({
                         "finding_id": id,
                         "changed": ["propose_reason"],

@@ -1,5 +1,6 @@
 //! Queue tests: what each migration does to the rows of an older queue.
 use crate::common;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use std::sync::Mutex;
@@ -1138,11 +1139,11 @@ fn migration_opening_the_kinds_keeps_rows_and_moves_their_rules_to_the_write_por
 
     // The write port keeps the rules the CHECKs held.
     let error = queue
-        .record_queue_event("task_created", serde_json::json!({}))
+        .record_queue_event(EventKind::TaskCreated, serde_json::json!({}))
         .unwrap_err();
     assert!(error.to_string().contains("needs a task, a goal or a run"));
     queue
-        .record_queue_event("mark_recorded", serde_json::json!({}))
+        .record_queue_event(EventKind::MarkRecorded, serde_json::json!({}))
         .unwrap();
     let ask = |kind: AskKind, task: Option<i64>, run: Option<&str>| NewAsk {
         kind,

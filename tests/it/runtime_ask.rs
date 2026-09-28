@@ -1,5 +1,6 @@
 //! Runtime tests: Asks, attention for the inbox, `watch` and `status`.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -404,12 +405,16 @@ fn attention_events_are_read_past_a_cursor_and_wake_watch() {
     // Consequences), whose `ask_opened` is the attention.
     for attempt in 1..=3 {
         queue
-            .record_runtime_event(run.id(), "resume_started", json!({"attempt": attempt}))
+            .record_runtime_event(
+                run.id(),
+                EventKind::ResumeStarted,
+                json!({"attempt": attempt}),
+            )
             .unwrap();
         queue
             .record_runtime_event(
                 run.id(),
-                "resume_finished",
+                EventKind::ResumeFinished,
                 json!({"attempt": attempt, "outcome": "unresolved", "status": "needs_session", "exhausted": attempt == 3}),
             )
             .unwrap();
@@ -543,7 +548,7 @@ fn status_reports_failed_runs_and_unanswered_exit_requests() {
     queue
         .record_runtime_event(
             orphan.id(),
-            "exit_request_timed_out",
+            EventKind::ExitRequestTimedOut,
             json!({"workspace_id": "ws-1", "timeout_secs": 120}),
         )
         .unwrap();

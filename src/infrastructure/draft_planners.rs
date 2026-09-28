@@ -6,7 +6,7 @@
 //! what such a planner submits without a person. Opening a planner is one
 //! write transaction that re-checks the draft first, so two supervisors
 //! never open one for the same draft.
-use crate::domain::event_kind;
+use crate::domain::event_kind::{self, EventKind};
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, ensure};
@@ -155,7 +155,7 @@ impl SqliteQueue {
                 &tx,
                 draft,
                 None,
-                event_kind::DRAFT_PLANNER_EXHAUSTED,
+                EventKind::DraftPlannerExhausted,
                 json!({
                     "planners": opened,
                     "ask_id": answer,
@@ -182,7 +182,7 @@ impl SqliteQueue {
             &tx,
             draft,
             None,
-            event_kind::DRAFT_PLANNER_OPENED,
+            EventKind::DraftPlannerOpened,
             json!({
                 "planner_id": planner,
                 "attempt": attempt,
@@ -261,13 +261,11 @@ impl SqliteQueue {
                 super::findings::finding_event(
                     &tx,
                     &finding,
-                    event_kind::PLANNER_ANSWER_CLAIMED,
+                    EventKind::PlannerAnswerClaimed,
                     payload,
                 )?;
             }
-            (None, Some(task)) => {
-                event(&tx, task, None, event_kind::PLANNER_ANSWER_CLAIMED, payload)?
-            }
+            (None, Some(task)) => event(&tx, task, None, EventKind::PlannerAnswerClaimed, payload)?,
             (None, None) => return Ok(false),
         }
         tx.commit()?;
@@ -290,14 +288,9 @@ impl SqliteQueue {
         let payload = json!({"ask_id": id, "reason": why});
         if let Some(finding) = ask.finding_id {
             let finding = super::findings::read_finding(&tx, finding)?;
-            super::findings::finding_event(
-                &tx,
-                &finding,
-                event_kind::PLANNER_ANSWER_CLOSED,
-                payload,
-            )?;
+            super::findings::finding_event(&tx, &finding, EventKind::PlannerAnswerClosed, payload)?;
         } else if let Some(task) = ask.task_id {
-            event(&tx, task, None, event_kind::PLANNER_ANSWER_CLOSED, payload)?;
+            event(&tx, task, None, EventKind::PlannerAnswerClosed, payload)?;
         }
         tx.commit()?;
         Ok(())
@@ -375,7 +368,7 @@ impl DraftPlannerStore for SqliteQueue {
     fn close_planner_answer(&mut self, ask: AskId, why: &str) -> Result<()> {
         SqliteQueue::close_planner_answer(self, ask, why)
     }
-    fn record_task_event(&mut self, task: TaskId, kind: &str, payload: Value) -> Result<()> {
+    fn record_task_event(&mut self, task: TaskId, kind: EventKind, payload: Value) -> Result<()> {
         event(&self.conn, task, None, kind, payload)
     }
     fn exhausted_drafts(&self) -> Result<Vec<Task>> {
@@ -426,7 +419,7 @@ impl DraftPlannerStore for SqliteQueue {
     fn record_finding_event(
         &mut self,
         finding: FindingId,
-        kind: &str,
+        kind: EventKind,
         payload: Value,
     ) -> Result<()> {
         SqliteQueue::record_finding_event(self, finding, kind, payload)
@@ -727,12 +720,12 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
             continue;
         };
         let kind = match origin {
-            DraftOrigin::FollowUp => event_kind::FOLLOW_UP_ADOPTED,
-            DraftOrigin::GoalGap | DraftOrigin::Reopened => event_kind::DRAFT_ADOPTED,
+            DraftOrigin::FollowUp => EventKind::FollowUpAdopted,
+            DraftOrigin::GoalGap | DraftOrigin::Reopened => EventKind::DraftAdopted,
         };
         let recorded: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2)",
-            params![adoption.task, kind],
+            params![adoption.task, kind.as_str()],
             |r| r.get(0),
         )?;
         if recorded {
@@ -957,7 +950,7 @@ mod tests {
                 &queue.conn,
                 reopened,
                 None,
-                event_kind::TASK_REOPENED,
+                EventKind::TaskReopened,
                 json!({"proposal_id": into, "reviewed_proposal_id": 9, "reason": reason}),
             )
             .unwrap();

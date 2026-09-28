@@ -14,6 +14,7 @@
 //! payloads, so `status` and `stats` show them in the same shape
 //! ([`LANDINGS`]).
 
+use super::EventKind;
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -24,17 +25,17 @@ use super::{EventId, LeaseToken, RunEvent, TaskId, stats::timestamp_millis};
 /// Recorded when the supervisor starts holding its claims, or holds them
 /// for another reason (`reason`, `value`, `threshold`, `message`,
 /// `supervisor`).
-pub const CLAIM_HELD: &str = "claim_held";
+pub const CLAIM_HELD: &str = crate::domain::event_kind::EventKind::ClaimHeld.as_str();
 /// Recorded when the hold ends and claims resume (`reason` of the hold
 /// that ended, `supervisor`).
-pub const CLAIM_RESUMED: &str = "claim_resumed";
+pub const CLAIM_RESUMED: &str = crate::domain::event_kind::EventKind::ClaimResumed.as_str();
 /// The two kinds, for reading the latest of them.
 pub const CLAIM_HOLD_KINDS: [&str; 2] = [CLAIM_HELD, CLAIM_RESUMED];
 /// Recorded when the supervisor starts holding the landings' verification
 /// (task 377), with the payload of `claim_held`.
-pub const LANDING_HELD: &str = "landing_held";
+pub const LANDING_HELD: &str = crate::domain::event_kind::EventKind::LandingHeld.as_str();
 /// Recorded when landings resume, with the payload of `claim_resumed`.
-pub const LANDING_RESUMED: &str = "landing_resumed";
+pub const LANDING_RESUMED: &str = crate::domain::event_kind::EventKind::LandingResumed.as_str();
 /// The two kinds, for reading the latest of them.
 pub const LANDING_HOLD_KINDS: [&str; 2] = [LANDING_HELD, LANDING_RESUMED];
 
@@ -42,8 +43,8 @@ pub const LANDING_HOLD_KINDS: [&str; 2] = [LANDING_HELD, LANDING_RESUMED];
 /// recorded by its pair of queue events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoldKinds {
-    pub held: &'static str,
-    pub resumed: &'static str,
+    pub held: EventKind,
+    pub resumed: EventKind,
     /// The hold is of the supervisor that recorded it, not of the host:
     /// another live supervisor does not end it (a landing waits in one
     /// supervisor's slot).
@@ -53,20 +54,20 @@ pub struct HoldKinds {
 impl HoldKinds {
     /// Both kinds, for reading the latest of them.
     pub const fn kinds(self) -> [&'static str; 2] {
-        [self.held, self.resumed]
+        [self.held.as_str(), self.resumed.as_str()]
     }
 }
 
 /// The holds on new claims.
 pub const CLAIMS: HoldKinds = HoldKinds {
-    held: CLAIM_HELD,
-    resumed: CLAIM_RESUMED,
+    held: EventKind::ClaimHeld,
+    resumed: EventKind::ClaimResumed,
     own: false,
 };
 /// The holds on the landings' verification.
 pub const LANDINGS: HoldKinds = HoldKinds {
-    held: LANDING_HELD,
-    resumed: LANDING_RESUMED,
+    held: EventKind::LandingHeld,
+    resumed: EventKind::LandingResumed,
     own: true,
 };
 
@@ -261,7 +262,7 @@ pub fn transition(
     last: Option<&RunEvent>,
     token: &LeaseToken,
     live: impl Fn(&str) -> bool,
-) -> Option<(&'static str, Value)> {
+) -> Option<(EventKind, Value)> {
     transition_of(CLAIMS, hold, last, token, live)
 }
 
@@ -273,7 +274,7 @@ pub fn transition_of(
     last: Option<&RunEvent>,
     token: &LeaseToken,
     live: impl Fn(&str) -> bool,
-) -> Option<(&'static str, Value)> {
+) -> Option<(EventKind, Value)> {
     let held = last.filter(|event| event.kind == kinds.held);
     let held_reason = held
         .filter(|event| {
@@ -502,7 +503,7 @@ mod tests {
         assert!(hold.message().contains("no headless job"));
         let (kind, payload) =
             transition(Some(&hold), None, &LeaseToken::new("s"), |_| true).unwrap();
-        assert_eq!(kind, CLAIM_HELD);
+        assert_eq!(kind, EventKind::ClaimHeld);
         assert_eq!(payload["reason"], json!("authentication"));
         assert_eq!(payload["ask_id"], json!(7));
         let limit = ClaimHold::judge(&inputs(HoldReason::UsageLimit)).unwrap();
@@ -552,7 +553,7 @@ mod tests {
         let hold = disk(Some(1), Some(2), None).unwrap();
         let (kind, payload) =
             transition_of(LANDINGS, Some(&hold), None, &LeaseToken::new("s"), |_| true).unwrap();
-        assert_eq!(kind, LANDING_HELD);
+        assert_eq!(kind, EventKind::LandingHeld);
         assert_eq!(payload["reason"], json!("disk_space"));
         assert!(
             payload["message"]
@@ -581,7 +582,7 @@ mod tests {
         );
         let (kind, _) =
             transition_of(LANDINGS, None, Some(&held), &LeaseToken::new("s"), |_| true).unwrap();
-        assert_eq!(kind, LANDING_RESUMED);
+        assert_eq!(kind, EventKind::LandingResumed);
         // Another live supervisor with no landing waiting leaves it; one
         // that stopped does not hold it any more.
         assert_eq!(
@@ -592,7 +593,7 @@ mod tests {
             false
         })
         .unwrap();
-        assert_eq!(kind, LANDING_RESUMED);
+        assert_eq!(kind, EventKind::LandingResumed);
         let events = [claim, held, event(3, LANDING_RESUMED, json!({}), "00:30")];
         let end = timestamp_millis("2026-09-26T01:03:00.000Z").unwrap();
         let landings = holds_of(
@@ -629,7 +630,7 @@ mod tests {
         let hold = load(Some(20.0), Some(16.0)).unwrap();
         let (kind, payload) =
             transition(Some(&hold), None, &LeaseToken::new("s"), |_| true).unwrap();
-        assert_eq!(kind, CLAIM_HELD);
+        assert_eq!(kind, EventKind::ClaimHeld);
         assert_eq!(payload["reason"], json!("load_average"));
         assert_eq!(payload["value"], json!(20.0));
         assert_eq!(payload["threshold"], json!(16.0));
@@ -649,7 +650,7 @@ mod tests {
         );
         let (kind, payload) =
             transition(None, Some(&held), &LeaseToken::new("t"), |_| true).unwrap();
-        assert_eq!(kind, CLAIM_RESUMED);
+        assert_eq!(kind, EventKind::ClaimResumed);
         assert_eq!(payload["supervisor"], json!("t"));
         // A holder that stopped or died holds nothing: the supervisor
         // started after it records the hold anew under its own token, and
@@ -657,7 +658,7 @@ mod tests {
         let stopped = |holder: &str| holder != "s";
         let (kind, payload) =
             transition(Some(&hold), Some(&held), &LeaseToken::new("t"), stopped).unwrap();
-        assert_eq!(kind, CLAIM_HELD);
+        assert_eq!(kind, EventKind::ClaimHeld);
         assert_eq!(payload["supervisor"], json!("t"));
         assert_eq!(
             transition(Some(&hold), Some(&held), &LeaseToken::new("s"), |_| false),
@@ -665,12 +666,12 @@ mod tests {
         );
         let (kind, payload) =
             transition(None, Some(&held), &LeaseToken::new("t"), stopped).unwrap();
-        assert_eq!(kind, CLAIM_RESUMED);
+        assert_eq!(kind, EventKind::ClaimResumed);
         assert_eq!(payload["reason"], json!("load_average"));
         // The load fell: resumed, naming the hold's reason.
         let (kind, payload) =
             transition(None, Some(&held), &LeaseToken::new("s"), |_| true).unwrap();
-        assert_eq!(kind, CLAIM_RESUMED);
+        assert_eq!(kind, EventKind::ClaimResumed);
         assert_eq!(
             payload,
             json!({"reason": "load_average", "supervisor": "s"})
@@ -688,7 +689,7 @@ mod tests {
             transition(Some(&hold), Some(&resumed), &LeaseToken::new("s"), |_| true)
                 .unwrap()
                 .0,
-            CLAIM_HELD
+            EventKind::ClaimHeld
         );
     }
 

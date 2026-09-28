@@ -4,8 +4,8 @@ type: design
 title: "Headless job processes"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -34,7 +34,7 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
 - supervisorはループの各passの先頭で（claim・adopt・triage・plan review・goal reviewがjobを立てる前に）、`orphaned_headless_jobs(token, own)`を読む。自分以外のtokenの未完了の行のうち、そのsupervisorが登録に無いか、heartbeatが`HEARTBEAT_TIMEOUT_SECS`（30秒）より古いものが対象。プロセスの起動の直後（execの後なら`rebuild_own_runs`の前）の1回だけは、自分のtokenの未完了の行も対象にする（execされたプロセスは前のbinaryのjobを知らない。handoffはexecの前にjobを止めるので、普通はもう居ない）。
 - 登録が残っていてheartbeatだけが古く、そのpidが生きているsupervisor（sleepから戻った直後のhostでは全員のheartbeatが古い）の行は、そのpassでは触らない（登録の無い行と、自分と同じpidの登録（in-processのtest）はこの検査をしない）。supervisorのpidが別のプロセスに再利用されていると、その行は閉じられないまま残る。
 - 行ごとに`domain::headless_job::takeover`で決める。pidが生きていなければ`gone`で閉じるだけ。生きていて、今の`start_identity`が記録した`process_start`と同じなら、そのjobのプロセスとして止める。違う（pidが別のプロセスに再利用された）か、どちらかの起動時刻が読めなければ、signalを送らずに`not_the_job`で閉じる。
-- 止める前に行を`taken_over`で閉じる（`end_headless_job`が閉じたときだけ進むので、同時に引き継ぐ2つのsupervisorの片方だけがsignalを送る）。止め方（`stop_tree`）: 子孫とそれぞれの起動時刻を集め、jobと子孫にSIGTERMを送り、5秒（`TAKEOVER_GRACE`）まで消えるのを待ち（自分の子なら`reap`する）、残ったものにSIGKILLを送る。どちらのsignalも、そのpidの起動時刻が集めたときと同じときだけ送る（待つ間にpidが再利用されても触らない）。待ちはループの中で行うので、1行ごとに最大5秒passが止まる。`headless_job_stopped`（`headless_job_id`、`kind`、`label`、`run_id`、`proposal_id`、`goal_id`、`attempt`、`pid`、`process_start`、`descendants`、`killed`、`supervisor`、`started_at`）を、runのjobならそのrunに、plan review / goal reviewならqueueのevent（`QUEUE_EVENT_KINDS`）に記録する（記録の失敗はlogだけ）。
+- 止める前に行を`taken_over`で閉じる（`end_headless_job`が閉じたときだけ進むので、同時に引き継ぐ2つのsupervisorの片方だけがsignalを送る）。止め方（`stop_tree`）: 子孫とそれぞれの起動時刻を集め、jobと子孫にSIGTERMを送り、5秒（`TAKEOVER_GRACE`）まで消えるのを待ち（自分の子なら`reap`する）、残ったものにSIGKILLを送る。どちらのsignalも、そのpidの起動時刻が集めたときと同じときだけ送る（待つ間にpidが再利用されても触らない）。待ちはループの中で行うので、1行ごとに最大5秒passが止まる。`headless_job_stopped`（`headless_job_id`、`kind`、`label`、`run_id`、`proposal_id`、`goal_id`、`attempt`、`pid`、`process_start`、`descendants`、`killed`、`supervisor`、`started_at`）を、runのjobならそのrunに、plan review / goal reviewならqueueのevent（`EventKind::is_queue`）に記録する（記録の失敗はlogだけ）。
 - その後で、adoptしたrunのreviewや復旧job、`begin_plan_review` / `begin_goal_review`が`interrupted`にした行のやり直しが新しいjobを立てるので、同じ入力のjobは1つだけが走る。
 
 ## test

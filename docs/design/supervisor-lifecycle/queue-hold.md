@@ -84,6 +84,6 @@ runのeventかleaseが読めなかったpassは閉じず、次のpassで読み�
 
 ## 記録とtest
 
-- queueイベント: `claim_held` / `claim_resumed`（理由`authentication` / `usage_limit`、`ask_id`）、`queue_hold_applied`、runの無いjobの`ask_updated`・`auth_required`・`usage_limited`（`QUEUE_EVENT_KINDS`）
+- queueイベント: `claim_held` / `claim_resumed`（理由`authentication` / `usage_limit`、`ask_id`）、`queue_hold_applied`、runの無いjobの`ask_updated`・`auth_required`・`usage_limited`（`EventKind::is_queue`）
 - runイベント: `hold_answer_applied`、`hold_continue_sent`、`job_restarted`、`runtime_error`（`hold_canceled`）、`auth_required` / `usage_limited`（画面のものと、`job`を持つjobのもの）
 - test: `tests/it/runtime_queue_hold.rs`（利用上限のaskの控えでclaimとreviewが待ち、`done`で再開する／`cancel_affected`でrunを手放す／`done`で失敗したtriageを起動し直す）、`tests/it/runtime_queue_hold_shared.rs`（2つのsupervisorが1件のaskのrunを1つずつ持ち、`cancel_affected`で両方が手放され、`done`でどちらのsessionにも文面が1回ずつ届く／別の生きているsupervisorがleaseを持つrunを待ってから閉じ、leaseの無いrunを`unwatched`にする）、`tests/it/runtime_stall.rs`の`an_idle_session_at_a_login_that_ran_out_waits_in_the_authentication_ask`（ログインの切れで控え、`done`で続きの文面を送る）、`tests/it/runtime_queue_hold_detect.rs`（利用上限の画面で`cost`のaskに入る／2つのreviewがログインの切れで1件のaskにjobとしてまとまり、`done`でやり直して着地する／runとjobが1件のaskに並ぶ）、`tests/it/plan_review.rs`の`a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_done`、`infrastructure::claude`（`auth_required`・`usage_limited`・`job_wall`）・`domain::queue_hold`・`domain::claim_hold`のunit test

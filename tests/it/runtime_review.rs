@@ -2,6 +2,7 @@
 //! conflicts with a moving main.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::stats::timestamp_millis;
 use runtime_support::*;
@@ -1389,20 +1390,20 @@ fn stuck_exit_after_a_pass(repo: &Path, db: &Path, backend: &TestWorkspace) -> T
     let queue = SqliteQueue::open(db).unwrap();
     for (kind, payload) in [
         (
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         ),
-        ("review_started", json!({"attempt": 1})),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
         (
-            "review_finished",
+            EventKind::ReviewFinished,
             json!({"verdict": "pass", "reasons": [], "summary": "ok", "attempt": 1}),
         ),
         (
-            "exit_requested",
+            EventKind::ExitRequested,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
         ),
         (
-            "exit_request_timed_out",
+            EventKind::ExitRequestTimedOut,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
         ),
     ] {
@@ -1722,20 +1723,20 @@ fn adopted_run_waiting_for_its_exit_after_a_pass_asks_once_and_lands() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     for (kind, payload) in [
         (
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         ),
-        ("review_started", json!({"attempt": 1})),
+        (EventKind::ReviewStarted, json!({"attempt": 1})),
         (
-            "review_finished",
+            EventKind::ReviewFinished,
             json!({"verdict": "pass", "reasons": [], "summary": "ok", "attempt": 1}),
         ),
         (
-            "exit_requested",
+            EventKind::ExitRequested,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
         ),
         (
-            "exit_request_timed_out",
+            EventKind::ExitRequestTimedOut,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
         ),
     ] {
@@ -2375,7 +2376,9 @@ fn adopt_pending_request(
         _ => None,
     });
     for (kind, payload) in events {
-        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+        queue
+            .record_runtime_event(run.id(), EventKind::from_name(kind).unwrap(), payload)
+            .unwrap();
     }
     let run_dir = Path::new(run.run_dir().unwrap());
     let message = message();

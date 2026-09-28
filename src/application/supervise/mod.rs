@@ -24,6 +24,7 @@
 //! and the landing), `revise`, `resume`, `triage`, `adopt` and `idle` (the
 //! idle marker). The prompts and requests are in [`super::prompt`].
 
+use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::language::with_instruction;
 use crate::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
@@ -83,14 +84,14 @@ use crate::domain::{
     after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
     decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
-    kpi::{CANDIDATES_SAMPLED, CandidatesSample},
-    marks::{RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED, run_env_digest},
+    kpi::CandidatesSample,
+    marks::{RUN_ENV_CHANGED, run_env_digest},
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
     queue_hold::{HoldJob, Wall},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
     resume::{ResumeConfig, ResumeCount, inherits_on_exhaustion, is_inherit_retry},
     run_env::RUN_ENV_PROGRAM_KINDS,
-    stall::{BackgroundTask, STALL_CONFIG_LOADED, StallConfig},
+    stall::{BackgroundTask, StallConfig},
     triage_state,
     worker::Worker,
     worker_model::{WorkerSession, WorkerTrial},
@@ -501,7 +502,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     queue.set_supervisor_providers(&token, &layout.providers)?;
     let mut config = serde_json::to_value(settings.stall)?;
     config["supervisor"] = json!(token);
-    queue.record_queue_event(STALL_CONFIG_LOADED, config)?;
+    queue.record_queue_event(EventKind::StallConfigLoaded, config)?;
     // The mark of this start or handoff (ADR-0051 decision 10): the mode
     // `up` passed, else the registration's (a handoff keeps it).
     let registration = queue
@@ -509,7 +510,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         .into_iter()
         .find(|registration| registration.token == token);
     queue.record_queue_event(
-        SUPERVISOR_STARTED,
+        EventKind::SupervisorStarted,
         json!({
             "supervisor": token,
             "dagq_version": layout.version,
@@ -947,7 +948,10 @@ impl Supervisor<'_> {
                 "dagq_version": self.layout.version,
                 "outcome": if result.is_ok() { "stopped" } else { "failed" },
             });
-            if let Err(error) = self.queue.record_queue_event(SUPERVISOR_STOPPED, stopped) {
+            if let Err(error) = self
+                .queue
+                .record_queue_event(EventKind::SupervisorStopped, stopped)
+            {
                 warn!(error = %format_args!("{error:#}"), "the supervisor's stop could not be recorded: {error:#}");
             }
             if let Err(error) = self.queue.deregister_supervisor(&self.token) {
@@ -1265,7 +1269,8 @@ impl Supervisor<'_> {
         let result = sample.and_then(|sample| {
             if let Some(mut payload) = sample.transition(self.candidates.as_ref()) {
                 payload["supervisor"] = json!(self.token);
-                self.queue.record_queue_event(CANDIDATES_SAMPLED, payload)?;
+                self.queue
+                    .record_queue_event(EventKind::CandidatesSampled, payload)?;
                 self.candidates = Some(sample);
             }
             Ok(())
@@ -1378,7 +1383,8 @@ impl Supervisor<'_> {
                 payload["changed"]
             );
             payload["supervisor"] = json!(self.token);
-            self.queue.record_queue_event(RUN_ENV_CHANGED, payload)?;
+            self.queue
+                .record_queue_event(EventKind::RunEnvChanged, payload)?;
         }
         Ok(())
     }
@@ -2122,7 +2128,7 @@ impl Supervisor<'_> {
                         self.for_job(&job, |sv| {
                             sv.queue.record_runtime_event(
                                 run.id(),
-                                event_kind::REVIEW_FINISHED,
+                                EventKind::ReviewFinished,
                                 json!({
                                     "verdict": verdict.verdict,
                                     "reasons": verdict.reasons,
@@ -2164,8 +2170,8 @@ impl Supervisor<'_> {
                 match outcome {
                     ReviseOutcome::Rewritten(head) => {
                         let kind = match watch.fix {
-                            Fix::Revise(_) => event_kind::REVISE_FINISHED,
-                            Fix::Conflict(_) => event_kind::CONFLICT_RESOLVED,
+                            Fix::Revise(_) => EventKind::ReviseFinished,
+                            Fix::Conflict(_) => EventKind::ConflictResolved,
                         };
                         self.queue.record_runtime_event(
                             slot.run.id(),
@@ -2204,8 +2210,8 @@ impl Supervisor<'_> {
                                     ),
                                 );
                                 let kind = match watch.fix {
-                                    Fix::Revise(_) => event_kind::REVISE_RECEIPT_REJECTED,
-                                    Fix::Conflict(_) => event_kind::CONFLICT_RECEIPT_REJECTED,
+                                    Fix::Revise(_) => EventKind::ReviseReceiptRejected,
+                                    Fix::Conflict(_) => EventKind::ConflictReceiptRejected,
                                 };
                                 self.queue.record_runtime_event(
                                     slot.run.id(),
@@ -2306,7 +2312,7 @@ impl Supervisor<'_> {
                         }
                         self.queue.record_runtime_event(
                             run.id(),
-                            event_kind::REVIEW_FAILED,
+                            EventKind::ReviewFailed,
                             payload,
                         )?;
                         self.queue.release_lease(run.id(), &self.token)?;
@@ -2531,16 +2537,16 @@ mod tests {
         }
         let result: Result<()> = requested_by_job(&mut queue, log, &outer, |queue| {
             let inner_result: Result<()> = requested_by_job(queue, log, &inner, |queue| {
-                queue.record_queue_event("observe_started", json!({}))?;
+                queue.record_queue_event(EventKind::ObserveStarted, json!({}))?;
                 anyhow::bail!("the inner apply failed")
             });
             assert!(inner_result.is_err());
-            queue.record_queue_event("observe_finished", json!({}))?;
+            queue.record_queue_event(EventKind::ObserveFinished, json!({}))?;
             Ok(())
         });
         result.unwrap();
         queue
-            .record_queue_event("backend_call_failed", json!({}))
+            .record_queue_event(EventKind::BackendCallFailed, json!({}))
             .unwrap();
         let requested_by = |kind: &str| {
             queue

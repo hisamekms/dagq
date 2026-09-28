@@ -11,6 +11,7 @@
 //! once it has lasted `[conflicts] defer_max_secs`: the task is claimed
 //! then even if the files still meet.
 
+use super::EventKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
@@ -20,13 +21,14 @@ use super::{EventId, LeaseToken, RunEvent, TaskId, scope::glob_matches, stats::t
 
 /// Recorded on the task when its claim is first deferred (`reason`,
 /// `files`, `runs`, `max_secs`, `message`, `supervisor`).
-pub const CLAIM_DEFERRED: &str = "claim_deferred";
+pub const CLAIM_DEFERRED: &str = crate::domain::event_kind::EventKind::ClaimDeferred.as_str();
 /// Recorded on the task when its deferral ends (`reason`, `why`,
 /// `deferred_secs`, `supervisor`): `cleared` (the files no longer meet or
 /// the task became an interrupt), `expired` (it lasted the limit) or
 /// `not_candidate` (it left the candidates: claimed elsewhere, canceled,
 /// blocked again).
-pub const CLAIM_DEFERRAL_ENDED: &str = "claim_deferral_ended";
+pub const CLAIM_DEFERRAL_ENDED: &str =
+    crate::domain::event_kind::EventKind::ClaimDeferralEnded.as_str();
 /// The kinds that say where a task's deferral stands; a claim of the task
 /// ends whatever came before it.
 pub const DEFERRAL_KINDS: [&str; 3] = [CLAIM_DEFERRED, CLAIM_DEFERRAL_ENDED, "run_claimed"];
@@ -164,13 +166,9 @@ pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, Deferral> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     /// Claim it (or pass it on to the claim); `event` ends a deferral.
-    Claim {
-        event: Option<(&'static str, Value)>,
-    },
+    Claim { event: Option<(EventKind, Value)> },
     /// Pass over it; `event` starts the deferral.
-    Defer {
-        event: Option<(&'static str, Value)>,
-    },
+    Defer { event: Option<(EventKind, Value)> },
 }
 
 /// Judge one candidate: `interrupt` for a task of interrupt priority,
@@ -186,7 +184,7 @@ pub fn decide(
 ) -> Decision {
     let ended = |why: &str, since: i64| {
         Some((
-            CLAIM_DEFERRAL_ENDED,
+            EventKind::ClaimDeferralEnded,
             json!({
                 "reason": HOT_FILES,
                 "why": why,
@@ -217,7 +215,7 @@ pub fn decide(
             let message = message(&overlap, max_secs);
             Decision::Defer {
                 event: Some((
-                    CLAIM_DEFERRED,
+                    EventKind::ClaimDeferred,
                     json!({
                         "reason": HOT_FILES,
                         "files": overlap.files,
@@ -244,10 +242,10 @@ pub fn decide(
 
 /// The event that ends `deferral` of a task that left the candidates, if
 /// it was still open.
-pub fn left(deferral: Deferral, now: i64, token: &LeaseToken) -> Option<(&'static str, Value)> {
+pub fn left(deferral: Deferral, now: i64, token: &LeaseToken) -> Option<(EventKind, Value)> {
     (!deferral.expired).then(|| {
         (
-            CLAIM_DEFERRAL_ENDED,
+            EventKind::ClaimDeferralEnded,
             json!({
                 "reason": HOT_FILES,
                 "why": "not_candidate",
@@ -284,14 +282,14 @@ pub fn worker_deferred(
     reason: &str,
     worker: super::worker::Worker,
     token: &LeaseToken,
-) -> (&'static str, Value) {
+) -> (EventKind, Value) {
     let message = format!(
         "this supervisor cannot run a {} {} worker ({reason}): not claimed until one can",
         worker.provider.as_str(),
         worker.mode.as_str()
     );
     (
-        CLAIM_DEFERRED,
+        EventKind::ClaimDeferred,
         json!({
             "reason": reason,
             "provider": worker.provider,
@@ -310,9 +308,9 @@ pub fn worker_deferral_ended(
     since: i64,
     now: i64,
     token: &LeaseToken,
-) -> (&'static str, Value) {
+) -> (EventKind, Value) {
     (
-        CLAIM_DEFERRAL_ENDED,
+        EventKind::ClaimDeferralEnded,
         json!({
             "reason": reason,
             "why": why,
@@ -542,7 +540,7 @@ mod tests {
         else {
             panic!("deferred with its event")
         };
-        assert_eq!(kind, CLAIM_DEFERRED);
+        assert_eq!(kind, EventKind::ClaimDeferred);
         assert_eq!(payload["reason"], "hot_files");
         assert_eq!(payload["files"], json!(["x.md"]));
         assert_eq!(payload["runs"][0]["run_id"], "r1");
@@ -567,7 +565,7 @@ mod tests {
         else {
             panic!("claimed with the end")
         };
-        assert_eq!(kind, CLAIM_DEFERRAL_ENDED);
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
         assert_eq!(payload["why"], "cleared");
         assert_eq!(payload["deferred_secs"], 50);
         assert_eq!(deferral, None);
@@ -609,7 +607,7 @@ mod tests {
         else {
             panic!("expired")
         };
-        assert_eq!(kind, CLAIM_DEFERRAL_ENDED);
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
         assert_eq!(payload["why"], "expired");
         assert_eq!(payload["deferred_secs"], 60);
         assert!(deferral.unwrap().expired);
@@ -646,7 +644,7 @@ mod tests {
             expired: false,
         };
         let (kind, payload) = left(open, 130, &LeaseToken::new("s")).unwrap();
-        assert_eq!(kind, CLAIM_DEFERRAL_ENDED);
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
         assert_eq!(payload["why"], "not_candidate");
         assert_eq!(payload["deferred_secs"], 30);
         assert_eq!(
@@ -748,7 +746,7 @@ mod tests {
         let token = LeaseToken::new("s");
         let worker = super::super::worker::Worker::ALL[2];
         let (kind, payload) = worker_deferred("provider_unavailable", worker, &token);
-        assert_eq!(kind, CLAIM_DEFERRED);
+        assert_eq!(kind, EventKind::ClaimDeferred);
         assert_eq!(payload["provider"], "codex");
         assert_eq!(payload["worker_mode"], "headless");
         assert!(
@@ -773,7 +771,7 @@ mod tests {
         let since = workers[&TaskId::new(1)].1;
         let (kind, ended) =
             worker_deferral_ended("provider_unavailable", "cleared", since, since + 5, &token);
-        assert_eq!(kind, CLAIM_DEFERRAL_ENDED);
+        assert_eq!(kind, EventKind::ClaimDeferralEnded);
         assert_eq!(ended["why"], "cleared");
         assert_eq!(ended["deferred_secs"], 5);
         // Ended, it is no longer in place.

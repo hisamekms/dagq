@@ -25,11 +25,11 @@ use super::{
     install::{self, Binaries, InstallOptions, Source, previous_path},
     lifecycle,
 };
-use crate::domain::LeaseToken;
 use crate::domain::{
     APPROVE_UPDATE_OPTIONS, AskKind, EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent,
     SupervisorRegistration, UPDATE_FAILED_OPTIONS,
 };
+use crate::domain::{EventKind, LeaseToken};
 pub use crate::domain::{
     UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_FAILED, UPDATE_INSTALLED,
     UPDATE_RESTORED, UPDATE_RETRY, UPDATE_STARTED,
@@ -118,7 +118,7 @@ impl UpdatePaths {
 /// `commit` (the main commit it is about) in its payload.
 pub fn record(
     queue: &dyn Queue,
-    kind: &str,
+    kind: EventKind,
     commit: Option<&str>,
     mut payload: Value,
 ) -> Result<EventId> {
@@ -514,7 +514,7 @@ fn plugin_only(queue: &mut dyn Queue, job: &Job, version: &str, step: PluginStep
         payload["message"] = json!(message);
     }
     job.subject
-        .record(&*queue, UPDATE_INSTALLED, payload.clone())?;
+        .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;
     let mut value = payload;
     value["outcome"] = json!("installed");
     job.subject.tag(&mut value);
@@ -531,7 +531,7 @@ enum Subject<'a> {
 
 impl Subject<'_> {
     /// Record the step `kind` with what it is about in its payload.
-    fn record(self, queue: &dyn Queue, kind: &str, mut payload: Value) -> Result<EventId> {
+    fn record(self, queue: &dyn Queue, kind: EventKind, mut payload: Value) -> Result<EventId> {
         match self {
             Self::Commit(commit) => record(queue, kind, Some(commit), payload),
             Self::Release(version) => {
@@ -601,7 +601,7 @@ fn put_in_place(
     let pid = job.pid;
     job.subject.record(
         &*queue,
-        UPDATE_BUILT,
+        EventKind::UpdateBuilt,
         json!({"pid": pid, "binary": binary, "log": job.log}),
     )?;
     let schema = match ports.binaries.schema(binary, db) {
@@ -758,7 +758,7 @@ fn put_in_place(
             // being brought back or the ask from opening.
             let _ = job.subject.record(
                 &*queue,
-                UPDATE_RESTORED,
+                EventKind::UpdateRestored,
                 json!({
                     "pid": pid,
                     "version": version,
@@ -804,7 +804,7 @@ fn put_in_place(
         payload["message"] = json!(message);
     }
     job.subject
-        .record(&*queue, UPDATE_INSTALLED, payload.clone())?;
+        .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;
     // The new binary works with the plugin it had, so it stays (decision
     // 2): the failure only asks.
     if let Some(error) = plugin_error {
@@ -1186,7 +1186,7 @@ now, `up` starts one.",
         object.extend(details);
     }
     job.subject
-        .record(&*queue, UPDATE_FAILED, payload.clone())?;
+        .record(&*queue, EventKind::UpdateFailed, payload.clone())?;
     payload["outcome"] = json!("failed");
     job.subject.tag(&mut payload);
     Ok(payload)
@@ -1247,7 +1247,7 @@ migrate and start it again with the new binary; or `skip` to leave it. The build
         "ask_id": ask,
     });
     job.subject
-        .record(&*queue, UPDATE_AWAITING_APPROVAL, payload.clone())?;
+        .record(&*queue, EventKind::UpdateAwaitingApproval, payload.clone())?;
     let mut value = payload;
     value["outcome"] = json!("awaiting_approval");
     job.subject.tag(&mut value);

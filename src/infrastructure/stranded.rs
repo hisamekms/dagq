@@ -4,6 +4,7 @@
 //! record `dependency_stranded` on it for the inbox, and `status` shows
 //! every one from the queue as it is now. Nothing here holds or cancels the
 //! waiting tasks: that is the plan's call.
+use crate::domain::EventKind;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -127,7 +128,7 @@ pub(super) fn record(conn: &Connection, task: TaskId, cause: &str, extra: Value)
     if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
         payload.extend(extra.clone());
     }
-    event(conn, task, None, event_kind::DEPENDENCY_STRANDED, payload)
+    event(conn, task, None, EventKind::DependencyStranded, payload)
 }
 
 /// [`record`] for every unfinished task of the goal just closed as

@@ -10,16 +10,19 @@ use std::collections::BTreeMap;
 use super::{AskId, AskKind, EventId, RunEvent, TaskId, stats::timestamp_millis};
 
 /// The run entered a wait (decision 5).
-pub const RUN_WAITING_STARTED: &str = "run_waiting_started";
+pub const RUN_WAITING_STARTED: &str =
+    crate::domain::event_kind::EventKind::RunWaitingStarted.as_str();
 /// An ask of the table opened during the wait joined it.
-pub const RUN_WAITING_ASK_ADDED: &str = "run_waiting_ask_added";
+pub const RUN_WAITING_ASK_ADDED: &str =
+    crate::domain::event_kind::EventKind::RunWaitingAskAdded.as_str();
 /// The wait ended; `cause` says how.
-pub const RUN_WAITING_ENDED: &str = "run_waiting_ended";
+pub const RUN_WAITING_ENDED: &str = crate::domain::event_kind::EventKind::RunWaitingEnded.as_str();
 /// The run whose wait ended is back in a slot.
-pub const RUN_SLOT_REGAINED: &str = "run_slot_regained";
+pub const RUN_SLOT_REGAINED: &str = crate::domain::event_kind::EventKind::RunSlotRegained.as_str();
 /// The run met the conditions of a wait while the waits were at their
 /// limit, and stayed counted in its slot (decision 7).
-pub const RUN_WAITING_DEFERRED: &str = "run_waiting_deferred";
+pub const RUN_WAITING_DEFERRED: &str =
+    crate::domain::event_kind::EventKind::RunWaitingDeferred.as_str();
 
 /// The default of `--max-waiting` (decision 7).
 pub const DEFAULT_MAX_WAITING: usize = 4;

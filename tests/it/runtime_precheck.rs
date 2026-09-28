@@ -3,6 +3,7 @@
 //! attempts after a passed review (ADR-0047 decision 24, task 511).
 use crate::runtime_review::{moving_main_then_pass, rebasing_agent};
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{AskKind, resume::CONFLICT_ONLY_RESUME_LIMIT};
 use runtime_support::*;
@@ -146,7 +147,7 @@ fn a_precheck_conflict_after_the_counted_resumes_asks_a_person() {
         queue
             .record_runtime_event(
                 run.id(),
-                "resume_started",
+                EventKind::ResumeStarted,
                 json!({"attempt": attempt, "counted": true}),
             )
             .unwrap();
@@ -156,14 +157,14 @@ fn a_precheck_conflict_after_the_counted_resumes_asks_a_person() {
     queue
         .record_runtime_event(
             run.id(),
-            "resume_finished",
+            EventKind::ResumeFinished,
             json!({"attempt": 3, "status": "validating", "workspace_id": WORKSPACE_ID}),
         )
         .unwrap();
     queue
         .record_runtime_event(
             run.id(),
-            "review_finished",
+            EventKind::ReviewFinished,
             json!({"attempt": 1, "verdict": "pass", "reasons": [], "summary": "meets the acceptance"}),
         )
         .unwrap();

@@ -47,7 +47,10 @@ impl SqliteQueue {
             tx.execute(
                 "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-                params![REPORT_WRITTEN, serde_json::to_string(&payload)?],
+                params![
+                    EventKind::ReportWritten.as_str(),
+                    serde_json::to_string(&payload)?
+                ],
             )?;
         }
         tx.commit()?;
@@ -76,7 +79,10 @@ impl SqliteQueue {
         tx.execute(
             "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-            params![FORECAST_RECORDED, serde_json::to_string(&payload)?],
+            params![
+                EventKind::ForecastRecorded.as_str(),
+                serde_json::to_string(&payload)?
+            ],
         )?;
         let id = EventId::new(tx.last_insert_rowid());
         tx.commit()?;
@@ -135,7 +141,7 @@ impl QueueRecords for SqliteQueue {
     }
     fn record_kpi_breach(
         &self,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
         push_day: Option<(i64, usize)>,
     ) -> Result<Option<serde_json::Value>> {

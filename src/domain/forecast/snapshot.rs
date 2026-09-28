@@ -16,7 +16,7 @@ use crate::domain::{
 
 /// The event of one snapshot. A KPI bookkeeping event (ADR-0051 decision
 /// 24): it never wakes the observer.
-pub const FORECAST_RECORDED: &str = "forecast_recorded";
+pub const FORECAST_RECORDED: &str = crate::domain::event_kind::EventKind::ForecastRecorded.as_str();
 /// A landing is recorded when a task's or goal's p50 moved by at least
 /// this share of the remaining time the previous snapshot gave it ...
 pub const MOVE_RATIO: f64 = 0.2;

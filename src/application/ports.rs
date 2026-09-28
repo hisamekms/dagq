@@ -16,7 +16,7 @@ use std::{
 use super::{GraphInput, TaskPage, TaskQuery, timestamp, unix_seconds};
 use crate::domain::{
     Ask, AskId, AskKind, AskOutcome, ClaimOutcome, CommitSha, DraftOrigin, DraftTarget, EventId,
-    Finding, FindingId, FindingStatus, FindingView, Goal, GoalDetail, GoalEdit, GoalId,
+    EventKind, Finding, FindingId, FindingStatus, FindingView, Goal, GoalDetail, GoalEdit, GoalId,
     GoalPredecessor, GoalSummary, GoalVerdict, LeaseToken, LintInput, NewAsk, NewGoal, NewNote,
     NewTask, NotePage, NoteQuery, PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict,
     PlannerId, PlannerOrigin, PlannerSession, Predecessor, Priority, Proposal, ProposalId, Reason,
@@ -1425,7 +1425,7 @@ pub trait RunRecovery {
         token: &LeaseToken,
         action: &TriageAction,
         payload: serde_json::Value,
-        also: Vec<(&'static str, serde_json::Value)>,
+        also: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<TaskRun>;
     /// Apply a person's answer to the triage's `decide` ask.
     fn decide_triage(
@@ -1496,7 +1496,7 @@ pub trait RunCoordination {
     fn prune_supervisor(
         &self,
         token: &LeaseToken,
-        kind: &str,
+        kind: EventKind,
         stopped: &dyn Fn(&SupervisorRegistration) -> serde_json::Value,
     ) -> Result<bool>;
     /// Every registered supervisor, oldest first, alive or not.
@@ -1654,7 +1654,7 @@ pub trait RunLog {
     fn record_runtime_event(
         &self,
         id: &RunId,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()>;
     /// The workspaces of the ended runs the triage does not take, for the
@@ -1678,7 +1678,7 @@ pub trait RunLog {
     fn record_backend_failure(&self, run: Option<&RunId>, payload: serde_json::Value)
     -> Result<()>;
     /// Record an event of the queue itself, on no task, goal or run.
-    fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId>;
+    fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId>;
     /// The newest event of `kind`, on whatever task, goal or run.
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>>;
     /// The newest `limit` events of `kind`, on whatever task, goal or run,
@@ -1758,7 +1758,7 @@ pub trait QueueRecords {
     /// day's limit) allows. Returns the payload recorded.
     fn record_kpi_breach(
         &self,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
         push_day: Option<(i64, usize)>,
     ) -> Result<Option<serde_json::Value>>;
@@ -1986,7 +1986,7 @@ pub trait DraftPlannerStore {
     fn record_task_event(
         &mut self,
         task: TaskId,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()>;
     /// Drafts still `draft` whose planners were used up
@@ -2028,7 +2028,7 @@ pub trait DraftPlannerStore {
     fn record_finding_event(
         &mut self,
         finding: FindingId,
-        kind: &str,
+        kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()>;
     /// Whether the answer of `ask` was typed into `workspace`.

@@ -15,23 +15,26 @@ use super::{ALL, Measure, PeriodKpis, TargetReport, report::Report};
 /// `period` (`day` / `week`), `kpi`, `stratum`, `stat`, `min`, `max`,
 /// `source`, `since`, `streak`, the latest judged `label` and `value`, and
 /// whether it was pushed at once (`pushed`, on the host's local `day`).
-pub const KPI_BREACH_STARTED: &str = "kpi_breach_started";
+pub const KPI_BREACH_STARTED: &str =
+    crate::domain::event_kind::EventKind::KpiBreachStarted.as_str();
 /// A breach ended: its `period`, `kpi` and `stratum`, the `label` of the
 /// period that met the target and the `reason` (`met`, or
 /// `target_removed` when the target is no longer set).
-pub const KPI_BREACH_RESOLVED: &str = "kpi_breach_resolved";
+pub const KPI_BREACH_RESOLVED: &str =
+    crate::domain::event_kind::EventKind::KpiBreachResolved.as_str();
 /// The breaches' start and end, the latest of a target telling its state.
 pub const KPI_BREACH_KINDS: [&str; 2] = [KPI_BREACH_STARTED, KPI_BREACH_RESOLVED];
 /// The push command took a message (`push_kind`, `period`, `attempt`).
-pub const KPI_PUSH_SENT: &str = "kpi_push_sent";
+pub const KPI_PUSH_SENT: &str = crate::domain::event_kind::EventKind::KpiPushSent.as_str();
 /// The push command failed on a message: `push_kind`, `period`,
 /// `attempt`, `exit_code`, `signal`, `timed_out`, `error`, the tail of its
 /// stderr and whether the message was given up (`gave_up`).
-pub const KPI_PUSH_FAILED: &str = "kpi_push_failed";
+pub const KPI_PUSH_FAILED: &str = crate::domain::event_kind::EventKind::KpiPushFailed.as_str();
 /// A message was given up after its last attempt, and no push succeeded
 /// since the last one given up: the inbox's attention (`fix the push
 /// command`), which ends with the next [`KPI_PUSH_SENT`].
-pub const KPI_PUSH_ABANDONED: &str = "kpi_push_abandoned";
+pub const KPI_PUSH_ABANDONED: &str =
+    crate::domain::event_kind::EventKind::KpiPushAbandoned.as_str();
 /// The events whose latest tells whether the push's attention is open.
 pub const KPI_PUSH_ATTENTION_KINDS: [&str; 2] = [KPI_PUSH_SENT, KPI_PUSH_ABANDONED];
 

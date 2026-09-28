@@ -2,6 +2,7 @@
 //! resume, the resolution request and the [`ResumeWatch`] of the session.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::language::with_instruction;
 use crate::domain::{
     ParkCause, RunEvent, required_of,
@@ -415,7 +416,7 @@ impl Supervisor<'_> {
         // 806).
         if let Err(error) = self.queue.record_runtime_event(
             run.id(),
-            event_kind::WORKSPACE_CREATED,
+            EventKind::WorkspaceCreated,
             json!({"workspace_id": workspace, "resume_attempt": attempt}),
         ) {
             return Err(match self.cmux.close(&workspace) {
@@ -876,7 +877,8 @@ pub(super) fn resume_in_progress(events: &[RunEvent]) -> Option<(EventId, usize,
 /// The run event recording that the resolution request of a resume was
 /// typed (`resume_attempt`, `workspace_id`, `sent_at` on the files' wall clock):
 /// a supervisor that adopts the resume does not send it again.
-pub const RESUME_REQUEST_SENT: &str = "resume_request_sent";
+pub const RESUME_REQUEST_SENT: &str =
+    crate::domain::event_kind::EventKind::ResumeRequestSent.as_str();
 
 /// What a [`ResumeWatch`] taken over from another process starts from.
 pub(super) struct ResumeState {
@@ -932,7 +934,7 @@ impl ResumeWatch {
     fn request_exit(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun, typed: bool) -> Result<()> {
         sv.queue.record_runtime_event(
             run.id(),
-            event_kind::EXIT_REQUESTED,
+            EventKind::ExitRequested,
             json!({
                 "workspace_id": self.workspace,
                 "timeout_secs": sv.cmux.exit_timeout().as_secs(),
@@ -1091,7 +1093,7 @@ impl ResumeWatch {
                 let prompt = sv.signals.detect_prompt(&screen);
                 sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::INPUT_NOT_READY,
+                    EventKind::InputNotReady,
                     json!({
                         "workspace_id": self.workspace,
                         "waited_secs": timeout.as_secs(),
@@ -1143,7 +1145,7 @@ impl ResumeWatch {
         // record that fails is only noted.
         if let Err(error) = sv.queue.record_runtime_event(
             run.id(),
-            RESUME_REQUEST_SENT,
+            EventKind::ResumeRequestSent,
             json!({
                 "resume_attempt": self.attempt,
                 "workspace_id": self.workspace,
@@ -1199,7 +1201,7 @@ impl ResumeWatch {
                 )?,
                 Err(error) => sv.queue.record_runtime_event(
                     run.id(),
-                    event_kind::SCREEN_CAPTURE_FAILED,
+                    EventKind::ScreenCaptureFailed,
                     reason_of_error(&error, ReasonCode::BackendFailed)
                         .on(json!({"error": format!("{error:#}")})),
                 )?,

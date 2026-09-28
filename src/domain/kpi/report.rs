@@ -32,7 +32,7 @@ pub const DEFAULT_KEEP_DAILY_DAYS: usize = 90;
 pub const DEFAULT_KEEP_WEEKLY_WEEKS: usize = 104;
 /// The event of a report the supervisor wrote: `period`, `label`, the
 /// files, the build and the supervisor.
-pub const REPORT_WRITTEN: &str = "report_written";
+pub const REPORT_WRITTEN: &str = crate::domain::event_kind::EventKind::ReportWritten.as_str();
 /// The file the reports are listed in, newest first.
 pub const INDEX_FILE: &str = "index.html";
 /// The marker of a report of a period not over yet in its file names.

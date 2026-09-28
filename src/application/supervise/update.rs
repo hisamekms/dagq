@@ -10,10 +10,11 @@
 
 use super::*;
 use crate::application::update::{
-    JOB_STEPS, UPDATE_ANSWERED, UPDATE_ASKER, UPDATE_FAILED, UPDATE_HISTORY, UPDATE_RETRY,
-    UPDATE_STARTED, base_commit, changes_runtime, failed_release, in_progress, job_pid,
-    latest_job_step, latest_job_step_of, record, retry_requested, step_commit,
+    JOB_STEPS, UPDATE_ASKER, UPDATE_HISTORY, base_commit, changes_runtime, failed_release,
+    in_progress, job_pid, latest_job_step, latest_job_step_of, record, retry_requested,
+    step_commit,
 };
+use crate::domain::EventKind;
 use crate::domain::{AskKind, RunEvent, UPDATE_FAILED_OPTIONS};
 
 /// How often the supervisor looks at main for an update by default.
@@ -194,7 +195,7 @@ to wait for the next landing that changes the runtime.",
         )?;
         record(
             &*self.queue,
-            UPDATE_FAILED,
+            EventKind::UpdateFailed,
             step_commit(step),
             json!({"stage": "interrupted", "after": step.kind, "ask_id": ask.id, "supervisor": self.token}),
         )?;
@@ -217,8 +218,8 @@ to wait for the next landing that changes the runtime.",
             }
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
             let kind = match answer {
-                "retry" => UPDATE_RETRY,
-                "skip" => UPDATE_ANSWERED,
+                "retry" => EventKind::UpdateRetry,
+                "skip" => EventKind::UpdateAnswered,
                 _ => continue,
             };
             record(
@@ -294,7 +295,7 @@ to wait for the next landing that changes the runtime.",
         )?;
         record(
             &*self.queue,
-            UPDATE_STARTED,
+            EventKind::UpdateStarted,
             Some(head),
             json!({
                 "pid": job.id(),

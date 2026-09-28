@@ -4,6 +4,7 @@
 //! and the verdicts and `approve_plan` answers the supervisor applies, each
 //! in one transaction. Events go to the first task of the proposal, since
 //! an event needs a task or a goal.
+use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::write_rules::check_at_least;
 use crate::domain::{LeaseToken, event_kind};
@@ -253,7 +254,7 @@ fn set_priority(
         conn,
         task_id,
         None,
-        event_kind::TASK_PRIORITY_CHANGED,
+        EventKind::TaskPriorityChanged,
         json!({"from": from, "to": to, "by": "plan_review"}),
     )
 }
@@ -330,7 +331,7 @@ fn reopen(
         conn,
         task_id,
         None,
-        event_kind::TASK_REOPENED,
+        EventKind::TaskReopened,
         json!({"proposal_id": id, "reviewed_proposal_id": reviewed, "reason": reason}),
     )?;
     Ok(Ok(ReopenedTask {
@@ -531,7 +532,7 @@ impl PlanReviewStore for SqliteQueue {
             &tx,
             anchor,
             None,
-            event_kind::PLAN_REVIEW_STARTED,
+            EventKind::PlanReviewStarted,
             json!({"proposal_id": proposal_id, "plan_review_id": id, "attempt": attempt, "dir": dir_text, "session_id": session_id, "cwd": cwd, "features": features, "launch": launch.to_value()}),
         )?;
         tx.commit()?;
@@ -600,7 +601,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 job.anchor,
                 None,
-                event_kind::PLAN_REVIEW_DISCARDED,
+                EventKind::PlanReviewDiscarded,
                 json!({
                     "proposal_id": job.proposal_id,
                     "plan_review_id": job.id,
@@ -706,7 +707,7 @@ impl PlanReviewStore for SqliteQueue {
             &tx,
             job.anchor,
             None,
-            event_kind::PLAN_REVIEW_FINISHED,
+            EventKind::PlanReviewFinished,
             json!({
                 "proposal_id": job.proposal_id,
                 "plan_review_id": job.id,
@@ -781,7 +782,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 job.anchor,
                 None,
-                event_kind::PLAN_REVIEW_DISCARDED,
+                EventKind::PlanReviewDiscarded,
                 json!({
                     "proposal_id": job.proposal_id,
                     "plan_review_id": job.id,
@@ -807,7 +808,7 @@ impl PlanReviewStore for SqliteQueue {
             &tx,
             job.anchor,
             None,
-            event_kind::PLAN_REVIEW_FAILED,
+            EventKind::PlanReviewFailed,
             json!({
                 "code": crate::domain::ReasonCode::JobFailed,
                 "proposal_id": job.proposal_id,
@@ -887,7 +888,7 @@ impl PlanReviewStore for SqliteQueue {
             &tx,
             anchor(&tx, proposal_id)?,
             None,
-            event_kind::PLAN_REVISE_SENT,
+            EventKind::PlanReviseSent,
             json!({
                 "proposal_id": proposal_id,
                 "planner_id": planner,
@@ -923,7 +924,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 anchor(&tx, proposal_id)?,
                 None,
-                event_kind::PLAN_REVISE_LOST,
+                EventKind::PlanReviseLost,
                 json!({"proposal_id": proposal_id, "planner_id": planner, "reason": why}),
             )?;
         }
@@ -989,7 +990,7 @@ impl PlanReviewStore for SqliteQueue {
                 &tx,
                 anchor(&tx, proposal_id)?,
                 None,
-                event_kind::PLANNER_UNRESPONSIVE,
+                EventKind::PlannerUnresponsive,
                 payload,
             )?;
         }
@@ -1033,7 +1034,7 @@ impl PlanReviewStore for SqliteQueue {
                     &tx,
                     anchor,
                     None,
-                    event_kind::PROPOSAL_SETTLED,
+                    EventKind::ProposalSettled,
                     json!({"proposal_id": id, "status": ended.status(), "reason": "none of its tasks waits for plan review any more"}),
                 )?;
             }
@@ -1121,7 +1122,7 @@ impl PlanReviewStore for SqliteQueue {
             &tx,
             anchor(&tx, proposal_id)?,
             None,
-            event_kind::PLAN_DECIDED,
+            EventKind::PlanDecided,
             json!({"proposal_id": proposal_id, "ask_id": ask_id, "answer": text.trim(), "status": decided.status()}),
         )?;
         tx.commit()?;
@@ -1223,7 +1224,7 @@ fn record_predictions(
             conn,
             predicted.task_id,
             None,
-            event_kind::TASK_WEIGHT_PREDICTED,
+            EventKind::TaskWeightPredicted,
             json!({
                 "proposal_id": job.proposal_id,
                 "plan_review_id": job.id,

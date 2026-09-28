@@ -13,6 +13,7 @@
 //! proposal resolves the finding, or opens it again.
 
 use super::*;
+use crate::domain::EventKind;
 use crate::{
     application::{
         FindingPlannerStart, PlannerAnswerRoute,
@@ -108,7 +109,7 @@ impl Supervisor<'_> {
                         warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "answer of ask {} could not be sent to planner {} in workspace {workspace}: {error:#}; it is left to the inbox", ask.id, planner.id);
                         self.queue.record_finding_event(
                             finding,
-                            event_kind::ASK_DELIVERY_FAILED,
+                            EventKind::AskDeliveryFailed,
                             json!({
                                 "ask_id": ask.id,
                                 "workspace_id": workspace,

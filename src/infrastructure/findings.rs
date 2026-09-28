@@ -2,7 +2,7 @@
 //! every change to it, also writes a run event (`finding_recorded`,
 //! `finding_updated`, `finding_status_changed`) on the finding's target, or
 //! on nothing for a finding on the queue.
-use crate::domain::event_kind;
+use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -168,7 +168,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
             finding_event(
                 tx,
                 &created,
-                event_kind::FINDING_RECORDED,
+                EventKind::FindingRecorded,
                 json!({
                 "finding_id": created.id,
                 "kind": created.kind,
@@ -218,7 +218,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
                     finding_event(
                         tx,
                         f,
-                        event_kind::FINDING_STATUS_CHANGED,
+                        EventKind::FindingStatusChanged,
                         json!({
                             "finding_id": f.id,
                             "from": existing.status,
@@ -231,7 +231,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
                 finding_event(
                     tx,
                     f,
-                    event_kind::FINDING_UPDATED,
+                    EventKind::FindingUpdated,
                     json!({
                         "finding_id": f.id,
                         "changed": update.changed,
@@ -272,7 +272,7 @@ pub(super) fn set_status_in(
     finding_event(
         tx,
         &changed,
-        event_kind::FINDING_STATUS_CHANGED,
+        EventKind::FindingStatusChanged,
         json!({
             "finding_id": id,
             "from": current.status,
@@ -317,7 +317,7 @@ fn resolve_target(
 pub(super) fn finding_event(
     conn: &Connection,
     finding: &Finding,
-    kind: &str,
+    kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
     crate::domain::check_event_target(kind, finding.task_id, finding.goal_id)?;
@@ -329,7 +329,7 @@ pub(super) fn finding_event(
             finding.task_id,
             finding.run_id,
             finding.goal_id,
-            kind,
+            kind.as_str(),
             serde_json::to_string(&payload)?
         ],
     )?;

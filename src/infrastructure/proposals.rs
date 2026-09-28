@@ -4,6 +4,7 @@
 //! plan-review path ([`approve`]) is what makes them `ready`, a send back
 //! returns them to `draft` for the planner, and a [`withdraw`] releases
 //! them as drafts.
+use crate::domain::EventKind;
 use crate::domain::event_kind;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -48,7 +49,7 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
                     conn,
                     task_id,
                     None,
-                    event_kind::PROPOSAL_RESUBMITTED,
+                    EventKind::ProposalResubmitted,
                     json!({"proposal_id": retried.id()}),
                 )?;
             }
@@ -139,7 +140,7 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
             conn,
             task_id,
             None,
-            event_kind::TASK_SUBMITTED,
+            EventKind::TaskSubmitted,
             json!({"proposal_id": id}),
         )?;
     }
@@ -153,7 +154,7 @@ pub(super) fn submit(conn: &Connection, submission: Submission, now: &str) -> Re
             goal_event(
                 conn,
                 goal_id,
-                event_kind::GOAL_SUBMITTED,
+                EventKind::GoalSubmitted,
                 json!({"proposal_id": id}),
             )?;
         }
@@ -185,7 +186,7 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
                     conn,
                     task_id,
                     None,
-                    event_kind::APPROVE_WITHHELD,
+                    EventKind::ApproveWithheld,
                     json!({"proposal_id": id, "goal_id": goal_id, "verdict": verdict}),
                 )?;
                 withheld.push(task_id);
@@ -223,7 +224,7 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
             goal_event(
                 conn,
                 goal_id,
-                event_kind::GOAL_STATUS_CHANGED,
+                EventKind::GoalStatusChanged,
                 json!({"from": GoalStatus::Draft, "to": opened.status()}),
             )?;
         }
@@ -293,7 +294,7 @@ pub(super) fn withdraw(
             conn,
             task_id,
             None,
-            event_kind::PROPOSAL_WITHDRAWN,
+            EventKind::ProposalWithdrawn,
             payload.clone(),
         )?;
         close_plan_asks(conn, task_id, now_secs)?;
@@ -304,12 +305,7 @@ pub(super) fn withdraw(
         }
     }
     for &goal_id in withdrawn.goal_ids() {
-        goal_event(
-            conn,
-            goal_id,
-            event_kind::PROPOSAL_WITHDRAWN,
-            payload.clone(),
-        )?;
+        goal_event(conn, goal_id, EventKind::ProposalWithdrawn, payload.clone())?;
     }
     read(conn, id)
 }
@@ -355,7 +351,7 @@ fn close_plan_asks(conn: &Connection, task_id: TaskId, now: i64) -> Result<()> {
                 now,
                 &mut payload,
             )?;
-            event(conn, task_id, None, event_kind::ASK_ANSWERED, payload)?;
+            event(conn, task_id, None, EventKind::AskAnswered, payload)?;
         } else {
             // An answer given before is closed unapplied: `ask_closed` ends
             // its wait (task 568).

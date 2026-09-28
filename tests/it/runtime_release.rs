@@ -3,6 +3,7 @@
 //! decisions 1 to 3), through a stub `curl`, asks about it, and starts the
 //! job that installs it on the answer or without asking (decisions 4, 5),
 //! through a stub `cargo` that fails, so nothing is ever replaced.
+use dagq::domain::EventKind;
 use std::os::unix::fs::PermissionsExt;
 
 use crate::{common, runtime_support};
@@ -154,7 +155,7 @@ impl Setup {
         calls
     }
 
-    fn record(&self, kind: &str, payload: Value) {
+    fn record(&self, kind: EventKind, payload: Value) {
         SqliteQueue::open(&self.db)
             .unwrap()
             .record_queue_event(kind, payload)
@@ -289,7 +290,7 @@ fn a_development_build_and_release_off_do_not_look() {
 fn a_look_by_another_supervisor_within_the_interval_is_not_repeated() {
     let s = setup("[update]\ncheck_interval_secs = 3600\n", "0.3.0", false);
     s.record(
-        "release_checked",
+        EventKind::ReleaseChecked,
         json!({"latest": "0.4.0", "current": "0.3.0", "checked_at": now_secs() - 60, "etag": "\"e1\"", "supervisor": "another"}),
     );
     s.supervise();
@@ -299,7 +300,7 @@ fn a_look_by_another_supervisor_within_the_interval_is_not_repeated() {
     // A failed look counts as a look too.
     let failed = setup("", "0.3.0", false);
     failed.record(
-        "release_check_failed",
+        EventKind::ReleaseCheckFailed,
         json!({"error": "timeout", "current": "0.3.0", "checked_at": now_secs() - 60}),
     );
     failed.supervise();
@@ -310,7 +311,7 @@ fn a_look_by_another_supervisor_within_the_interval_is_not_repeated() {
 fn past_the_interval_the_etag_is_sent_and_a_304_keeps_the_last_result() {
     let s = setup("[update]\ncheck_interval_secs = 60\n", "0.3.0", false);
     s.record(
-        "release_checked",
+        EventKind::ReleaseChecked,
         json!({"latest": "0.4.0", "current": "0.3.0", "checked_at": now_secs() - 120, "etag": "\"e1\"", "supervisor": "another"}),
     );
     s.supervise();
@@ -377,7 +378,7 @@ fn doctor_warns_of_a_wrong_update_value_taken_as_its_default() {
 
 fn record_latest(s: &Setup, latest: &str) {
     s.record(
-        "release_checked",
+        EventKind::ReleaseChecked,
         json!({"latest": latest, "current": "0.3.0", "checked_at": now_secs(), "etag": "\"e2\"", "supervisor": "another"}),
     );
 }
@@ -562,11 +563,11 @@ fn an_interrupted_release_job_is_reported_not_retried() {
     let s = setup("", "0.3.0", false);
     record_latest(&s, "0.4.0");
     s.record(
-        "update_started",
+        EventKind::UpdateStarted,
         json!({"pid": 999_999_999u32, "source": "release", "release": "0.4.0"}),
     );
     s.record(
-        "update_failed",
+        EventKind::UpdateFailed,
         json!({"stage": "build", "commit": "abc", "ask_id": 0}),
     );
     s.supervise();

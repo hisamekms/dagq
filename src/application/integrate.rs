@@ -12,6 +12,7 @@
 //! writing the landing's events as itself at the requester's request. Only
 //! it holds the [`PushGrant`] [`MainRemote::push_main`] takes.
 
+use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -447,7 +448,7 @@ fn begin(
     if !queue.has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)? {
         queue.record_runtime_event(
             run.id(),
-            event_kind::INTEGRATION_APPROVED,
+            EventKind::IntegrationApproved,
             json!({"status": run.status().as_str(), "pid": ctx.pid, "push": ctx.remote.is_some()}),
         )?;
     }
@@ -742,15 +743,15 @@ fn push_main(
     };
     let (kind, payload) = match report.outcome {
         PushResult::Pushed => (
-            event_kind::PUSH_FINISHED,
+            EventKind::PushFinished,
             json!({"remote": report.remote, "branch": report.branch, "commit": commit}),
         ),
         PushResult::Skipped => (
-            event_kind::PUSH_SKIPPED,
+            EventKind::PushSkipped,
             json!({"remote": report.remote, "branch": report.branch, "commit": commit, "reason": report.reason}),
         ),
         PushResult::Failed => (
-            event_kind::PUSH_FAILED,
+            EventKind::PushFailed,
             json!({"code": ReasonCode::PushFailed, "remote": report.remote, "branch": report.branch, "commit": commit, "error": report.error}),
         ),
     };
@@ -767,7 +768,7 @@ fn push_main(
             op = "push",
             run_id = %run_id,
             remote,
-            outcome = kind,
+            outcome = %kind,
             "run {run_id}: {kind} ({remote})"
         ),
     }
@@ -883,7 +884,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 "follow_up": entry,
             });
             if let Err(error) =
-                queue.record_runtime_event(run_id, event_kind::FOLLOW_UP_REGISTERED, payload)
+                queue.record_runtime_event(run_id, EventKind::FollowUpRegistered, payload)
             {
                 warn!(
                     op = "follow_up",
@@ -961,7 +962,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
             payload["goal_closed"] = json!(true);
         }
         if let Err(error) =
-            queue.record_runtime_event(run_id, event_kind::FOLLOW_UP_REGISTERED, payload)
+            queue.record_runtime_event(run_id, EventKind::FollowUpRegistered, payload)
         {
             warn!(
                 op = "follow_up",
@@ -1041,7 +1042,7 @@ fn land(
         repository.rebase_abort(worktree)?;
         queue.record_runtime_event(
             run.id(),
-            event_kind::INTEGRATION_REBASE_ABORTED,
+            EventKind::IntegrationRebaseAborted,
             json!({"code": ReasonCode::RebaseInProgress, "reason": "a rebase was left in progress"}),
         )?;
     }
@@ -1113,7 +1114,7 @@ fn land(
     // DB otherwise keeps only the receipt seen at validation time.
     queue.record_runtime_event(
         run.id(),
-        event_kind::INTEGRATION_RECEIPT,
+        EventKind::IntegrationReceipt,
         json!({
             "main": main,
             "commit": receipt.commit(),
@@ -1166,7 +1167,7 @@ fn land(
     let rebased = repository.head(worktree)?;
     queue.record_runtime_event(
         run.id(),
-        event_kind::INTEGRATION_REBASED,
+        EventKind::IntegrationRebased,
         json!({"main": main, "head_before": head, "head_after": rebased}),
     )?;
     if rebased == *main {
@@ -1325,7 +1326,7 @@ fn land(
                 warn!(op = "integrate", reason = %reason, "run {}: {reason}", run.id());
                 queue.record_runtime_event(
                     run.id(),
-                    event_kind::INTEGRATION_RETRIED,
+                    EventKind::IntegrationRetried,
                     Reason::new(ReasonCode::VerificationFlaky)
                         .with("index", index)
                         .on(json!({
@@ -1519,7 +1520,7 @@ impl VerifyStep<'_> {
                 "log_path": path_text(&first.log)?,
             });
         }
-        queue.record_runtime_event(self.run.id(), event_kind::VERIFICATION_COMMAND, payload)?;
+        queue.record_runtime_event(self.run.id(), EventKind::VerificationCommand, payload)?;
         Ok(checked)
     }
 }
@@ -1725,7 +1726,7 @@ fn renumber_migration(
     };
     queue.record_runtime_event(
         run.id(),
-        event_kind::MIGRATION_RENUMBERED,
+        EventKind::MigrationRenumbered,
         json!({
             "main": main,
             "from": old,
@@ -1930,7 +1931,7 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
     let recorded = match repository.remove_worktree_and_branch(Path::new(worktree), branch) {
         Ok(()) => queue.record_runtime_event(
             run.id(),
-            event_kind::WORKTREE_REMOVED,
+            EventKind::WorktreeRemoved,
             json!({"path": worktree, "branch": branch}),
         ),
         Err(error) => {
@@ -2362,7 +2363,7 @@ mod tests {
         fn record_runtime_event(
             &self,
             id: &RunId,
-            kind: &str,
+            kind: EventKind,
             payload: serde_json::Value,
         ) -> Result<()> {
             unreachable!("resumes_left reads only the run's events")
@@ -2395,7 +2396,11 @@ mod tests {
         ) -> Result<()> {
             unreachable!("resumes_left reads only the run's events")
         }
-        fn record_queue_event(&self, kind: &str, payload: serde_json::Value) -> Result<EventId> {
+        fn record_queue_event(
+            &self,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<EventId> {
             unreachable!("resumes_left reads only the run's events")
         }
         fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {

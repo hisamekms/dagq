@@ -20,13 +20,11 @@
 //! [`HoldReason::UsageLimit`]: crate::domain::claim_hold::HoldReason::UsageLimit
 
 use super::*;
+use crate::domain::EventKind;
 use crate::domain::{
     Ask, GoalId, PlannerOrigin, ProposalId, RunEvent,
     proposal::{PlannerOwner, Submission as Resubmission},
-    queue_hold::{
-        self, CANCEL_AFFECTED, DONE, HOLD_ANSWER_APPLIED, HOLD_CONTINUE_SENT, JOB_RESTARTED,
-        QUEUE_HOLD_APPLIED,
-    },
+    queue_hold::{self, CANCEL_AFFECTED, DONE, HOLD_ANSWER_APPLIED},
     stats::timestamp_millis,
 };
 
@@ -118,7 +116,7 @@ impl Supervisor<'_> {
             let outcome = hold_outcome(&self.slots[index].phase, answer);
             self.queue.record_runtime_event(
                 &id,
-                HOLD_ANSWER_APPLIED,
+                EventKind::HoldAnswerApplied,
                 json!({
                     "ask_id": ask.id,
                     "answer": answer,
@@ -223,7 +221,7 @@ impl Supervisor<'_> {
                 .collect()
         };
         self.queue.record_queue_event(
-            QUEUE_HOLD_APPLIED,
+            EventKind::QueueHoldApplied,
             json!({
                 "ask_id": ask.id,
                 "answer": answer,
@@ -357,7 +355,7 @@ impl Supervisor<'_> {
         }
         self.queue.record_runtime_event(
             run_id,
-            JOB_RESTARTED,
+            EventKind::JobRestarted,
             json!({"job": "triage", "ask_id": ask.id, "event_id": event.id}),
         )?;
         info!(run_id = %run_id, "the recovery job of {run_id} failed while ask {} held the queue: it is started again", ask.id);
@@ -438,7 +436,7 @@ impl SessionWatch {
                 self.answer_start = Some(StartCheck::new("continue", &text, sent_at, &submission));
                 sv.queue.record_runtime_event(
                     run.id(),
-                    HOLD_CONTINUE_SENT,
+                    EventKind::HoldContinueSent,
                     json!({
                         "ask_id": ask_id,
                         "workspace_id": workspace,

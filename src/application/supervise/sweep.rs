@@ -5,6 +5,7 @@
 //! worktree and branch once its task is over (task 376).
 
 use super::*;
+use crate::domain::EventKind;
 use crate::{
     application::{EndedRunWorkspace, planner},
     domain::run::{RunWorkspace, run_workspaces},
@@ -290,7 +291,7 @@ impl Supervisor<'_> {
         warn!(run_id = %run_id, "run {run_id}: {message}");
         self.queue.record_runtime_event(
             run_id,
-            event_kind::CLEANUP_FAILED,
+            EventKind::CleanupFailed,
             reason_of_error(error, ReasonCode::Other)
                 .on(json!({"workspace_id": workspace, "message": message, "by": closer.by()})),
         )

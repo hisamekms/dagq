@@ -1,6 +1,7 @@
 //! Runtime tests: Concurrent runs and the adoption of runs from a dead supervisor.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -723,17 +724,17 @@ fn adopter_does_not_repeat_an_exit_request_the_previous_supervisor_sent() {
     queue
         .record_runtime_event(
             run.id(),
-            "receipt_observed",
+            EventKind::ReceiptObserved,
             json!({"path": run.receipt_path(), "validated": false}),
         )
         .unwrap();
     queue
-        .record_runtime_event(run.id(), "session_idle_observed", json!({}))
+        .record_runtime_event(run.id(), EventKind::SessionIdleObserved, json!({}))
         .unwrap();
     queue
         .record_runtime_event(
             run.id(),
-            "exit_requested",
+            EventKind::ExitRequested,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 120}),
         )
         .unwrap();
@@ -811,7 +812,7 @@ fn adopt_receipt_after_dialog(waited: bool) {
     queue
         .record_runtime_event(
             run.id(),
-            "prompt_waiting",
+            EventKind::PromptWaiting,
             json!({
                 "workspace_id": WORKSPACE_ID,
                 "excerpt": "Do you want to proceed?",
@@ -837,7 +838,7 @@ fn adopt_receipt_after_dialog(waited: bool) {
         queue
             .record_runtime_event(
                 run.id(),
-                "run_waiting_started",
+                EventKind::RunWaitingStarted,
                 json!({
                     "ask_id": ask.id,
                     "ask_kind": "answer_prompt",
@@ -852,7 +853,7 @@ fn adopt_receipt_after_dialog(waited: bool) {
     queue
         .record_runtime_event(
             run.id(),
-            "receipt_observed",
+            EventKind::ReceiptObserved,
             json!({"path": run.receipt_path(), "validated": false}),
         )
         .unwrap();
@@ -929,7 +930,7 @@ fn adopted_wait_after_the_receipt_runs_from_the_recorded_receipt() {
     queue
         .record_runtime_event(
             run.id(),
-            "receipt_observed",
+            EventKind::ReceiptObserved,
             json!({"path": run.receipt_path(), "validated": false}),
         )
         .unwrap();
@@ -1003,7 +1004,7 @@ fn adopted_exit_request_times_out_from_its_recorded_request() {
     queue
         .record_runtime_event(
             run.id(),
-            "exit_requested",
+            EventKind::ExitRequested,
             json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 60}),
         )
         .unwrap();
@@ -1058,7 +1059,7 @@ fn adopted_run_does_not_record_an_exit_timeout_twice() {
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
-    for kind in ["exit_requested", "exit_request_timed_out"] {
+    for kind in [EventKind::ExitRequested, EventKind::ExitRequestTimedOut] {
         queue
             .record_runtime_event(
                 run.id(),
@@ -1134,7 +1135,7 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
-    for kind in ["exit_requested", "exit_request_timed_out"] {
+    for kind in [EventKind::ExitRequested, EventKind::ExitRequestTimedOut] {
         queue
             .record_runtime_event(
                 run.id(),
@@ -1206,7 +1207,7 @@ fn adopted_run_asks_about_an_exit_that_timed_out_again() {
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let timed_out = |queue: &mut SqliteQueue| {
-        for kind in ["exit_requested", "exit_request_timed_out"] {
+        for kind in [EventKind::ExitRequested, EventKind::ExitRequestTimedOut] {
             queue
                 .record_runtime_event(
                     run.id(),

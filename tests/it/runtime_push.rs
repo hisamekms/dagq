@@ -1,5 +1,6 @@
 //! Runtime tests: the push of the KPIs to the host's command (ADR-0051
 //! decisions 18, 22 and 23) after the supervisor's daily reports.
+use dagq::domain::EventKind;
 use std::os::unix::fs::PermissionsExt;
 
 use crate::runtime_support;
@@ -302,7 +303,7 @@ fn a_breach_is_recorded_once_per_start() {
     let queue = SqliteQueue::open(&db).unwrap();
     let breach = json!({"period": "day", "kpi": "landings", "stratum": "all"});
     let started = queue
-        .record_kpi_breach("kpi_breach_started", breach.clone(), Some((10, 1)))
+        .record_kpi_breach(EventKind::KpiBreachStarted, breach.clone(), Some((10, 1)))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -311,7 +312,7 @@ fn a_breach_is_recorded_once_per_start() {
     );
     assert!(
         queue
-            .record_kpi_breach("kpi_breach_started", breach.clone(), Some((10, 1)))
+            .record_kpi_breach(EventKind::KpiBreachStarted, breach.clone(), Some((10, 1)))
             .unwrap()
             .is_none()
     );
@@ -319,31 +320,31 @@ fn a_breach_is_recorded_once_per_start() {
     // The day's limit: another breach that day is not pushed.
     let other = json!({"period": "day", "kpi": "auto_repairs", "stratum": "all"});
     let second = queue
-        .record_kpi_breach("kpi_breach_started", other, Some((10, 1)))
+        .record_kpi_breach(EventKind::KpiBreachStarted, other, Some((10, 1)))
         .unwrap()
         .unwrap();
     assert_eq!(second["pushed"], false);
     assert!(
         queue
-            .record_kpi_breach("kpi_breach_resolved", breach.clone(), None)
+            .record_kpi_breach(EventKind::KpiBreachResolved, breach.clone(), None)
             .unwrap()
             .is_some()
     );
     assert!(
         queue
-            .record_kpi_breach("kpi_breach_resolved", breach.clone(), None)
+            .record_kpi_breach(EventKind::KpiBreachResolved, breach.clone(), None)
             .unwrap()
             .is_none()
     );
     assert_eq!(queue.kpi_breaches_open().unwrap().len(), 1);
     let again = queue
-        .record_kpi_breach("kpi_breach_started", breach, Some((11, 1)))
+        .record_kpi_breach(EventKind::KpiBreachStarted, breach, Some((11, 1)))
         .unwrap()
         .unwrap();
     assert_eq!(again["pushed"], true);
     assert!(
         queue
-            .record_kpi_breach("kpi_push_sent", json!({}), None)
+            .record_kpi_breach(EventKind::KpiPushSent, json!({}), None)
             .is_err()
     );
     assert!(queue.record_kpi_push_abandoned(json!({"n": 1})).unwrap());

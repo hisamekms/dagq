@@ -1,6 +1,7 @@
 //! `dagq forecast` (ADR-0070 decisions 1 and 2) on a real queue: the open
 //! tasks and goals with their p50 and p90, what it assumed, the narrowing
 //! by task and goal, and that it records nothing.
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 use std::{path::Path, process::Command};
 
@@ -71,12 +72,12 @@ fn forecast_prints_the_open_tasks_and_goals_with_what_it_assumed() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let landed = claim(&mut queue);
     for (kind, payload) in [
-        ("receipt_observed", json!({})),
+        (EventKind::ReceiptObserved, json!({})),
         (
-            "validation_finished",
+            EventKind::ValidationFinished,
             json!({"status": "awaiting_integration"}),
         ),
-        ("run_integrated", json!({"status": "integrated"})),
+        (EventKind::RunIntegrated, json!({"status": "integrated"})),
     ] {
         queue
             .record_runtime_event(landed.id(), kind, payload)

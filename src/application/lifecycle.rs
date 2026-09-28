@@ -41,14 +41,14 @@ use super::{
     prompt::inbox_prompt,
     recording::RecordingBackend,
 };
+use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::language::{Language, with_instruction};
 use crate::{
     VERSION,
     domain::{
         ActorContext, ActorRole, HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode,
-        SupervisorRegistration, marks::SUPERVISOR_STOPPED, recovery::ProcessInfo,
-        run_env::RunEnvCheck,
+        SupervisorRegistration, recovery::ProcessInfo, run_env::RunEnvCheck,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -1692,14 +1692,18 @@ pub fn auto_update_refused(checkout: &Path) -> String {
 /// heartbeat is read from the row as it is removed, as `registration` may
 /// be from before a drain.
 fn prune_supervisor(queue: &dyn Queue, registration: &SupervisorRegistration) -> Result<()> {
-    queue.prune_supervisor(&registration.token, SUPERVISOR_STOPPED, &|removed| {
-        json!({
-            "supervisor": removed.token,
-            "dagq_version": removed.binary_version,
-            "outcome": "pruned",
-            "last_heartbeat_at": removed.heartbeat_at,
-        })
-    })?;
+    queue.prune_supervisor(
+        &registration.token,
+        EventKind::SupervisorStopped,
+        &|removed| {
+            json!({
+                "supervisor": removed.token,
+                "dagq_version": removed.binary_version,
+                "outcome": "pruned",
+                "last_heartbeat_at": removed.heartbeat_at,
+            })
+        },
+    )?;
     Ok(())
 }
 
