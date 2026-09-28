@@ -180,10 +180,16 @@ pub(super) struct StallRecovery<'a, 'b> {
     pub(super) live: &'a Live<'b>,
 }
 
-/// Seconds from `from` to `to`, zero when `to` is earlier.
+/// Seconds from `from` to `to`, zero when `to` is earlier: what events
+/// record. The checks compare [`elapsed`] with their threshold, which a
+/// test may set below a second (task 1045).
 fn secs_between(from: SystemTime, to: SystemTime) -> i64 {
-    to.duration_since(from)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    i64::try_from(elapsed(from, to).as_secs()).unwrap_or(i64::MAX)
+}
+
+/// The time from `from` to `to`, zero when `to` is earlier.
+pub(super) fn elapsed(from: SystemTime, to: SystemTime) -> Duration {
+    to.duration_since(from).unwrap_or_default()
 }
 
 /// The run's `stalled` ask `id`, or its latest one, closed or not.
@@ -210,14 +216,14 @@ const SENDS_KEPT: usize = 16;
 
 /// Slack past two [`confirm_wait`]s (the send, and the text sent again)
 /// within which an input is taken to be the supervisor's send.
-const SEND_SLACK_SECS: i64 = 10;
+const SEND_SLACK: Duration = Duration::from_secs(10);
 
 /// Whether a send of the supervisor's at `sent` explains an input taken at
 /// `at`: taken no earlier than a second before it, and within two
-/// `confirm_secs` (the text may be sent again once) and a slack after it.
-fn send_explains(sent: SystemTime, at: SystemTime, confirm_secs: i64) -> bool {
+/// `confirm` waits (the text may be sent again once) and a slack after it.
+fn send_explains(sent: SystemTime, at: SystemTime, confirm: Duration) -> bool {
     at + Duration::from_secs(1) >= sent
-        && secs_between(sent, at) <= confirm_secs.saturating_mul(2) + SEND_SLACK_SECS
+        && elapsed(sent, at) < confirm.saturating_mul(2) + SEND_SLACK + Duration::from_secs(1)
 }
 
 fn at_unix(secs: i64) -> SystemTime {
@@ -423,9 +429,9 @@ impl StallWatch {
     /// typed no later than a second after it (an answer the session took
     /// only after its turn), or any text typed within the window of
     /// [`send_explains`] before it.
-    fn sent_by_supervisor(&self, input: &InputMarker, confirm_secs: i64) -> bool {
+    fn sent_by_supervisor(&self, input: &InputMarker, confirm: Duration) -> bool {
         self.sends.iter().any(|(sent, text)| {
-            send_explains(*sent, input.modified, confirm_secs)
+            send_explains(*sent, input.modified, confirm)
                 || (text.is_some()
                     && *text == input.text
                     && input.modified + Duration::from_secs(1) >= *sent)
@@ -452,7 +458,7 @@ impl StallWatch {
     /// for a stall. Returns the idle seconds to record as
     /// `stall_preempted` when the input is new, typed, explained by no
     /// send of the supervisor's, and taken while the session was idle
-    /// (its idle marker older than it) short of `threshold_secs`, with no
+    /// (its idle marker older than it) short of `threshold`, with no
     /// `stalled` ask open and no person stepped in since its last turn
     /// (ADR-0043 decision 3). A notice of the agent's, or an input the
     /// marker does not say the source of, is never counted.
@@ -460,8 +466,8 @@ impl StallWatch {
         &mut self,
         input: InputMarker,
         idle: Option<SystemTime>,
-        threshold_secs: i64,
-        confirm_secs: i64,
+        threshold: Duration,
+        confirm: Duration,
     ) -> Option<i64> {
         let before = self.seen_idle;
         if idle.is_some() {
@@ -484,12 +490,11 @@ impl StallWatch {
             .flatten()
             .filter(|idle| *idle < input.modified)
             .max()?;
-        if self.held.is_some_and(|at| idle <= at) || self.sent_by_supervisor(&input, confirm_secs) {
+        if self.held.is_some_and(|at| idle <= at) || self.sent_by_supervisor(&input, confirm) {
             return None;
         }
         let from = self.wait_from.map_or(idle, |at| at.max(idle));
-        let idle_secs = secs_between(from, input.modified);
-        (idle_secs < threshold_secs).then_some(idle_secs)
+        (elapsed(from, input.modified) < threshold).then(|| secs_between(from, input.modified))
     }
 
     /// Record the input a person typed before the idle detection as
@@ -892,8 +897,8 @@ impl StallWatch {
                 if let Some(idle_secs) = self.input_taken(
                     input,
                     marker,
-                    sv.stall.idle_without_receipt_secs,
-                    sv.stall.send_confirm_secs,
+                    sv.stall.idle_without_receipt(),
+                    sv.stall.send_confirm(),
                 ) {
                     Self::preempted(sv, run, idle_secs, dialog)?;
                 }
@@ -939,11 +944,11 @@ impl StallWatch {
         // A headless turn that ended is done for good: nothing to wait out
         // (ADR-t813-1 decision 9).
         let threshold = if headless(run) {
-            0
+            Duration::ZERO
         } else {
-            sv.stall.idle_without_receipt_secs
+            sv.stall.idle_without_receipt()
         };
-        if secs_between(from, now) < threshold {
+        if elapsed(from, now) < threshold {
             return Ok(None);
         }
         // A dialog or an ask the session waits at is not a stall.
@@ -1545,8 +1550,8 @@ impl StallWatch {
 mod tests {
     use super::*;
 
-    const THRESHOLD: i64 = 1200;
-    const CONFIRM: i64 = 60;
+    const THRESHOLD: Duration = Duration::from_secs(1200);
+    const CONFIRM: Duration = Duration::from_secs(60);
 
     fn at(secs: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_000_000 + secs)

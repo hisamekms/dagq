@@ -72,7 +72,19 @@ fn supervise_backend(
     (reviewer, supervisor)
 }
 
-/// A receipt-less idle threshold of one second.
+/// The receipt-less idle threshold of these tests, in milliseconds.
+const IDLE_MS: u64 = 200;
+
+/// Well past the threshold: one and a half of it.
+const WELL_PAST_IDLE: Duration = Duration::from_millis(IDLE_MS * 3 / 2);
+
+/// A receipt-less idle threshold of [`IDLE_MS`].
+fn idle_short() -> dagq::domain::stall::StallConfig {
+    dagq::domain::stall::StallConfig::default().with_millis("idle_without_receipt_secs", IDLE_MS)
+}
+
+/// A receipt-less idle threshold of one second, for a session that takes
+/// an input some time after its idle: it must come short of the threshold.
 fn idle_second() -> dagq::domain::stall::StallConfig {
     dagq::domain::stall::StallConfig {
         idle_without_receipt_secs: 1,
@@ -129,7 +141,7 @@ fn an_idle_after_the_nudge_is_repaired_by_the_recovery_job_without_an_ask() {
         &db,
         &repo,
         STALLED_AGENT,
-        idle_second(),
+        idle_short(),
         &[repair(
             json!({"action": "send_instruction", "instruction": "stop waiting for the tests and write the receipt"}),
             "the session waits for tests that finished",
@@ -200,7 +212,7 @@ fn a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_
         &db,
         &repo,
         STALLED_AGENT,
-        idle_second(),
+        idle_short(),
         &[recovery(json!({
             "verdict": "repair",
             "confidence": "low",
@@ -229,7 +241,7 @@ fn a_recovery_job_of_low_confidence_raises_one_stalled_ask_that_closes_when_the_
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
     // Asked once, with no other job.
-    thread::sleep(Duration::from_millis(1500));
+    thread::sleep(WELL_PAST_IDLE);
     assert_eq!(stalled_asks(&queue).len(), 1);
     release(&db, &backend, supervisor);
     let closed = queue.read_ask(ask.id).unwrap();
@@ -265,7 +277,7 @@ fn a_stall_past_its_three_recovery_jobs_is_asked_without_a_fourth() {
         &db,
         &repo,
         STALLED_AGENT,
-        idle_second(),
+        idle_short(),
         &[wait.clone(), wait.clone(), wait],
     );
     wait_until(&db, Duration::from_secs(60), |queue| {
@@ -311,7 +323,7 @@ fn a_failed_stalled_job_raises_the_stalled_ask() {
         &db,
         &repo,
         STALLED_AGENT,
-        idle_second(),
+        idle_short(),
         &["printf 'no verdict here\\n'".to_owned()],
     );
     wait_until(&db, Duration::from_secs(30), |queue| {
@@ -328,7 +340,7 @@ fn a_failed_stalled_job_raises_the_stalled_ask() {
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
-    thread::sleep(Duration::from_millis(1500));
+    thread::sleep(WELL_PAST_IDLE);
     assert_eq!(stalled_asks(&queue).len(), 1);
     assert_eq!(reviewer.triage_prompts().len(), 1);
     release(&db, &backend, supervisor);
@@ -359,7 +371,7 @@ fn an_escalated_recovery_job_raises_the_stalled_ask_with_its_category() {
         &db,
         &repo,
         STALLED_AGENT,
-        idle_second(),
+        idle_short(),
         &[recovery(json!({
             "verdict": "escalate",
             "confidence": "high",
@@ -401,7 +413,7 @@ fn a_repair_whose_precondition_fails_raises_the_stalled_ask() {
         &db,
         &repo,
         STALLED_AGENT,
-        idle_second(),
+        idle_short(),
         &[repair(
             json!({"action": "stop_processes", "pids": [1]}),
             "init holds the session",
@@ -453,10 +465,7 @@ fn a_send_the_session_did_not_take_is_repaired_by_the_recovery_job() {
         &db,
         &repo,
         ASKING_AGENT,
-        dagq::domain::stall::StallConfig {
-            send_confirm_secs: 1,
-            ..Default::default()
-        },
+        dagq::domain::stall::StallConfig::default().with_millis("send_confirm_secs", IDLE_MS),
         &["printf '%s\\n' \"{\\\"verdict\\\": \\\"repair\\\", \\\"confidence\\\": \\\"high\\\", \\\"diagnosis\\\": \\\"an orphan holds the session\\\", \\\"actions\\\": [{\\\"action\\\": \\\"stop_processes\\\", \\\"pids\\\": [$(cat bg.pid)]}]}\"".to_owned()],
     );
     backend.dropped_texts.store(2, Ordering::SeqCst);
@@ -523,7 +532,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let marker = run.idle_marker_path().unwrap();
     wait_until(&db, Duration::from_secs(30), |_| marker.exists());
-    thread::sleep(Duration::from_millis(1100));
+    thread::sleep(Duration::from_millis(IDLE_MS * 11 / 10));
     let mut queue = SqliteQueue::open(&db).unwrap();
     let recheck_at_ms = (SystemTime::now() + Duration::from_secs(3600))
         .duration_since(UNIX_EPOCH)
@@ -547,7 +556,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     }
     age_lease(&db, &run, 31);
     let options = SuperviseOptions {
-        stall: Some(idle_second()),
+        stall: Some(idle_short()),
         ..supervise_options(4, true)
     };
     let supervisor = {
@@ -557,7 +566,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    thread::sleep(Duration::from_millis(2500));
+    thread::sleep(Duration::from_millis(IDLE_MS * 5 / 2));
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(stalled_asks(&queue).is_empty());
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -589,10 +598,7 @@ idle
 while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
-        dagq::domain::stall::StallConfig {
-            send_confirm_secs: 1,
-            ..Default::default()
-        },
+        dagq::domain::stall::StallConfig::default().with_millis("send_confirm_secs", IDLE_MS),
         &[],
     );
     backend.dropped_texts.store(2, Ordering::SeqCst);
@@ -679,7 +685,7 @@ await_exit
         &db,
         &repo,
         backend.clone(),
-        idle_second(),
+        idle_short(),
         &[repair(
             json!({"action": "resume", "instruction": "restart the hung tests in a fresh session"}),
             "the session hangs on its tests",

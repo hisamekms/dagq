@@ -5,7 +5,8 @@
 //! capture shows its input box ready ([`AgentSignals::input_ready`]), no
 //! work ([`AgentSignals::working`]) and no dialog
 //! ([`AgentSignals::detect_prompt`]), with the same transcript, on two
-//! captures or more spaced over `[stall].screen_idle_secs`. A screen cmux
+//! captures or more spaced over `[stall].screen_idle_secs` (compared in
+//! milliseconds, so a test may set it below a second). A screen cmux
 //! cannot read infers nothing. Each capture also reads whether the screen
 //! shows background work the agent keeps running
 //! ([`AgentSignals::screen_background`]): a span keeps one reading, and the
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     io,
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use super::{AgentSignals, RunFiles, WorkspaceBackend, unix_seconds};
@@ -135,14 +136,16 @@ impl MarkerState {
 }
 
 /// The span of idle-looking captures [`SCREEN_IDLE_FILE`] keeps. Times are
-/// Unix seconds.
+/// Unix milliseconds (task 1045; a file of an older supervisor, in
+/// seconds, is not read and its span starts over).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
     /// The first capture of the span.
-    pub first_seen: i64,
+    pub first_seen_ms: i64,
     /// The latest capture of the span.
-    pub last_seen: i64,
-    /// The captures of the span, each at a later second than the one before.
+    pub last_seen_ms: i64,
+    /// The captures of the span, each at a later millisecond than the one
+    /// before.
     pub captures: u32,
     /// The fingerprint of the transcript every capture of the span showed.
     pub transcript: u64,
@@ -162,10 +165,17 @@ pub struct Inference {
     pub source: &'static str,
     /// Why the marker did not tell.
     pub marker: MarkerState,
-    /// The first capture of the span: when the session went idle.
+    /// The first capture of the span: when the session went idle, in Unix
+    /// seconds.
     pub since: i64,
+    /// [`Self::since`] in Unix milliseconds.
+    #[serde(skip)]
+    pub since_ms: i64,
     /// The seconds the span covers.
     pub observed_secs: i64,
+    /// [`Self::observed_secs`] in milliseconds.
+    #[serde(skip)]
+    pub observed_ms: i64,
     pub captures: u32,
     /// Background work the screen showed running over the span; `None`
     /// from a provider whose screen does not tell.
@@ -214,7 +224,8 @@ fn fingerprint(text: &str) -> u64 {
     hasher.finish()
 }
 
-/// The span after a capture at `now` that showed `look`, from `previous`:
+/// The span after a capture at `now` (Unix milliseconds, as `last_input`)
+/// that showed `look`, from `previous`:
 /// an idle look extends a span that began after `last_input` with the same
 /// transcript and the same background work and begins a new one otherwise
 /// (background work that ends starts the idle over); a working or busy
@@ -233,13 +244,13 @@ pub fn observe(
             background,
         } => Some(match previous {
             Some(span)
-                if span.first_seen > last_input
+                if span.first_seen_ms > last_input
                     && span.transcript == transcript
                     && span.background == background =>
             {
-                if now > span.last_seen {
+                if now > span.last_seen_ms {
                     Observation {
-                        last_seen: now,
+                        last_seen_ms: now,
                         captures: span.captures.saturating_add(1),
                         ..span
                     }
@@ -248,8 +259,8 @@ pub fn observe(
                 }
             }
             _ => Observation {
-                first_seen: now,
-                last_seen: now,
+                first_seen_ms: now,
+                last_seen_ms: now,
                 captures: 1,
                 transcript,
                 background,
@@ -261,9 +272,11 @@ pub fn observe(
 
 impl Observation {
     /// Whether the span shows the session idle: two captures or more,
-    /// `threshold` seconds apart or more.
-    pub fn idle(&self, threshold: i64) -> bool {
-        self.captures >= 2 && self.last_seen - self.first_seen >= threshold
+    /// `threshold` apart or more.
+    pub fn idle(&self, threshold: Duration) -> bool {
+        self.captures >= 2
+            && self.last_seen_ms - self.first_seen_ms
+                >= i64::try_from(threshold.as_millis()).unwrap_or(i64::MAX)
     }
 }
 
@@ -315,15 +328,16 @@ pub struct ScreenProbe<'a> {
     pub files: &'a dyn RunFiles,
     pub mode: ScreenIdle<'a>,
     /// `[stall].screen_idle_secs`.
-    pub threshold: i64,
+    pub threshold: Duration,
 }
 
 impl ScreenProbe<'_> {
     /// Capture `workspace` for the session whose idle marker is
     /// `idle_marker` and that `marker` could not judge, whose last input
-    /// was at `last_input`; its idle inferred from the span the capture
-    /// extends, if it is. With [`ScreenIdle::Record`] the span is kept
-    /// (a file that cannot be written only loses it).
+    /// was at `last_input`, at `now` (both Unix milliseconds); its idle inferred
+    /// from the span the capture extends, if it is. With
+    /// [`ScreenIdle::Record`] the span is kept (a file that cannot be
+    /// written only loses it).
     pub fn infer(
         &self,
         workspace: &str,
@@ -370,8 +384,10 @@ impl ScreenProbe<'_> {
             .map(|span| Inference {
                 source: "screen",
                 marker,
-                since: span.first_seen,
-                observed_secs: span.last_seen - span.first_seen,
+                since: span.first_seen_ms.div_euclid(1000),
+                since_ms: span.first_seen_ms,
+                observed_secs: (span.last_seen_ms - span.first_seen_ms) / 1000,
+                observed_ms: span.last_seen_ms - span.first_seen_ms,
                 captures: span.captures,
                 background_running: span.background,
                 unrecorded: !span.recorded,
@@ -467,17 +483,23 @@ mod tests {
 
     #[test]
     fn a_span_grows_over_spaced_captures_of_the_same_transcript() {
+        let ms = Duration::from_millis;
         let first = observe(None, 100, idle("a"), 50).unwrap();
-        assert_eq!((first.first_seen, first.captures), (100, 1));
-        assert!(!first.idle(0));
-        // A capture in the same second is not another one.
+        assert_eq!((first.first_seen_ms, first.captures), (100, 1));
+        assert!(!first.idle(Duration::ZERO));
+        // A capture in the same millisecond is not another one.
         assert_eq!(observe(Some(first), 100, idle("a"), 50), Some(first));
         let second = observe(Some(first), 130, idle("a"), 50).unwrap();
         assert_eq!(
-            (second.first_seen, second.last_seen, second.captures),
+            (second.first_seen_ms, second.last_seen_ms, second.captures),
             (100, 130, 2)
         );
-        assert!(second.idle(30) && !second.idle(31));
+        // Compared in milliseconds, not rounded to a second (task 1045).
+        assert!(second.idle(ms(30)) && !second.idle(ms(31)));
+        let long = observe(Some(second), 120_099, idle("a"), 50).unwrap();
+        assert!(!long.idle(Duration::from_secs(120)));
+        let long = observe(Some(long), 120_100, idle("a"), 50).unwrap();
+        assert!(long.idle(Duration::from_secs(120)));
         // Unreadable keeps it, busy ends it.
         assert_eq!(
             observe(Some(second), 140, ScreenLook::Unreadable, 50),
@@ -487,9 +509,12 @@ mod tests {
         assert_eq!(observe(Some(second), 140, ScreenLook::Working, 50), None);
         // Another transcript, or an input after the span began, starts over.
         let other = observe(Some(second), 140, idle("b"), 50).unwrap();
-        assert_eq!((other.first_seen, other.captures), (140, 1));
+        assert_eq!((other.first_seen_ms, other.captures), (140, 1));
         let typed = observe(Some(second), 140, idle("a"), 110).unwrap();
-        assert_eq!((typed.first_seen, typed.captures), (140, 1));
+        assert_eq!((typed.first_seen_ms, typed.captures), (140, 1));
+        // An input in the millisecond before the span began does not.
+        let after = observe(Some(second), 140, idle("a"), 99).unwrap();
+        assert_eq!((after.first_seen_ms, after.captures), (100, 3));
         assert!(!typed.recorded);
     }
 
@@ -506,7 +531,7 @@ mod tests {
         let first = observe(None, 100, shells, 50).unwrap();
         let running = observe(Some(first), 130, shells, 50).unwrap();
         assert_eq!(running.background, Some(true));
-        assert!(running.idle(30));
+        assert!(running.idle(Duration::from_millis(30)));
         // The same transcript without the background work is a new span.
         let same = ScreenLook::Idle {
             transcript: fingerprint("ready a shells"),
@@ -514,14 +539,23 @@ mod tests {
         };
         let done = observe(Some(running), 140, same, 50).unwrap();
         assert_eq!(
-            (done.first_seen, done.captures, done.background),
+            (done.first_seen_ms, done.captures, done.background),
             (140, 1, Some(false))
         );
         // A span written before the screen told keeps none.
-        let old: Observation =
-            serde_json::from_str(r#"{"first_seen":1,"last_seen":2,"captures":2,"transcript":3}"#)
-                .unwrap();
+        let old: Observation = serde_json::from_str(
+            r#"{"first_seen_ms":1,"last_seen_ms":2,"captures":2,"transcript":3}"#,
+        )
+        .unwrap();
         assert_eq!(old.background, None);
+        // One an older supervisor wrote in seconds is not read: its span
+        // starts over.
+        assert!(
+            serde_json::from_str::<Observation>(
+                r#"{"first_seen":1,"last_seen":2,"captures":2,"transcript":3}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

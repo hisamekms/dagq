@@ -161,8 +161,7 @@ fn at_millis(ms: i64) -> SystemTime {
 }
 
 fn secs_between(from: SystemTime, to: SystemTime) -> i64 {
-    to.duration_since(from)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    i64::try_from(super::stall::elapsed(from, to).as_secs()).unwrap_or(i64::MAX)
 }
 
 /// When the longest running of the marker's `tasks` was first listed in
@@ -722,7 +721,7 @@ impl RecoveryWatch {
             return Ok(LiveStep::Pending);
         }
         let threshold = sv.stall.idle_process_secs;
-        let interval = sample_interval(threshold);
+        let interval = sample_interval(sv.stall.idle_process());
         if self.idle_watched.get_or_insert_with(Instant::now).elapsed() < interval {
             return Ok(LiveStep::Pending);
         }
@@ -745,7 +744,7 @@ impl RecoveryWatch {
         let own = without_session_helpers(own, agent.as_ref());
         let at_ms = millis(at);
         self.cpu.observe(&own, at_ms);
-        let idle = self.cpu.idle(&own, at_ms, threshold);
+        let idle = self.cpu.idle(&own, at_ms, sv.stall.idle_process());
         if idle.is_empty() {
             return Ok(LiveStep::Pending);
         }
@@ -786,9 +785,11 @@ impl RecoveryWatch {
 }
 
 /// How often the processes are sampled for the `idle_process` alert: a
-/// tenth of its threshold, between one second and a minute.
-fn sample_interval(threshold_secs: i64) -> Duration {
-    Duration::from_secs(u64::try_from(threshold_secs / 10).unwrap_or(0).clamp(1, 60))
+/// tenth of its threshold in whole seconds, between one second and a
+/// minute, and no longer than the threshold (one a test set below a
+/// second, task 1045).
+fn sample_interval(threshold: Duration) -> Duration {
+    Duration::from_secs((threshold.as_secs() / 10).clamp(1, 60)).min(threshold)
 }
 
 /// The user's processes as the supervisor listed them at most `interval`
@@ -1368,7 +1369,7 @@ impl SessionWatch {
         // does (task 331), so turns the session keeps taking do not reset it.
         let since = background_since(sv, &self.idle_marker, marker, idle.background_tasks());
         let idle_secs = secs_between(since, now);
-        if idle_secs <= sv.stall.background_alert_secs
+        if super::stall::elapsed(since, now) <= sv.stall.background_alert()
             || self.recovery.recheck.is_some_and(|at| now < at)
             || (self.recovery.recheck.is_none()
                 && self.recovery.seen.is_some_and(|seen| marker <= seen))
@@ -1859,4 +1860,25 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
         stopped.push(json!({"pid": pid, "gone": true}));
     }
     Ok(stopped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The processes are sampled every tenth of the threshold in whole
+    /// seconds, between a second and a minute, and no less often than a
+    /// threshold a test set below a second (task 1045).
+    #[test]
+    fn the_sample_interval_follows_the_threshold() {
+        let secs = Duration::from_secs;
+        assert_eq!(sample_interval(secs(30 * 60)), secs(60));
+        assert_eq!(sample_interval(secs(100)), secs(10));
+        assert_eq!(sample_interval(secs(2)), secs(1));
+        assert_eq!(sample_interval(secs(1)), secs(1));
+        assert_eq!(
+            sample_interval(Duration::from_millis(300)),
+            Duration::from_millis(300)
+        );
+    }
 }

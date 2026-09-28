@@ -896,7 +896,7 @@ impl Supervisor<'_> {
             signals: self.signals,
             clock: &*self.generators.clock,
             planners_dir: &self.layout.planners_dir,
-            screen_idle_secs: self.stall.screen_idle_secs,
+            screen_idle_threshold: self.stall.screen_idle(),
             screen_idle: ScreenIdle::Record(&self.screen_spans),
         };
         let views = self
@@ -945,7 +945,9 @@ impl Supervisor<'_> {
             "source": inference.source,
             "marker": inference.marker.as_str(),
             "since": inference.since,
+            "since_ms": inference.since_ms,
             "observed_secs": inference.observed_secs,
+            "observed_ms": inference.observed_ms,
             "captures": inference.captures,
             "background_running": inference.background_running,
         });

@@ -387,7 +387,14 @@ pub(super) fn start_sign(
 /// supervisor reads the screen for it: `[stall].send_confirm_secs`
 /// (ADR-0043 decision 2).
 pub(super) fn confirm_wait(stall: &StallConfig) -> Duration {
-    Duration::from_secs(u64::try_from(stall.send_confirm_secs).unwrap_or(0))
+    stall.send_confirm()
+}
+
+/// `wait` in whole seconds, rounded up, as events record it: a wait a test
+/// set below a second (task 1045) is one second, as its setting's seconds
+/// are.
+fn whole_secs(wait: Duration) -> u64 {
+    wait.as_secs() + u64::from(wait.subsec_nanos() > 0)
 }
 
 /// The files whose writing after a send shows the session took it: its
@@ -533,10 +540,10 @@ impl StartCheck {
                     json!({
                         "workspace_id": workspace,
                         "what": self.what,
-                        "waited_secs": wait.as_secs(),
+                        "waited_secs": whole_secs(wait),
                     }),
                 )?;
-                info!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s and its input box is empty; sending it again", run.id(), self.what, wait.as_secs());
+                info!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s and its input box is empty; sending it again", run.id(), self.what, whole_secs(wait));
                 let sent_at = sv.files.now();
                 let text = self.text.clone();
                 let what = self.what.clone();
@@ -552,12 +559,12 @@ impl StartCheck {
                     json!({
                         "workspace_id": workspace,
                         "what": self.what,
-                        "waited_secs": wait.as_secs(),
+                        "waited_secs": whole_secs(wait),
                         "resent": self.resent,
                         "excerpt": excerpt,
                     }),
                 )?;
-                warn!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s; its recovery job looks at it", run.id(), self.what, wait.as_secs());
+                warn!(run_id = %run.id(), "session of {} showed no sign of the {} within {}s; its recovery job looks at it", run.id(), self.what, whole_secs(wait));
             }
         }
         Ok(())
@@ -616,7 +623,7 @@ impl StartCheck {
             json!({
                 "workspace_id": workspace,
                 "what": self.what,
-                "waited_secs": confirm_wait(&sv.stall).as_secs(),
+                "waited_secs": whole_secs(confirm_wait(&sv.stall)),
                 "resent": self.resent,
                 "dialog": kind,
                 "excerpt": excerpt,
@@ -1020,6 +1027,14 @@ mod tests {
         stall.set("send_confirm_secs", 5).unwrap();
         let wait = confirm_wait(&stall);
         assert_eq!(wait, Duration::from_secs(5));
+        // A test may set it below a second (task 1045).
+        assert_eq!(
+            confirm_wait(&stall.with_millis("send_confirm_secs", 200)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(whole_secs(Duration::from_millis(200)), 1);
+        assert_eq!(whole_secs(wait), 5);
+        assert_eq!(whole_secs(Duration::ZERO), 0);
         let files = crate::application::memory_files::MemoryFiles::default();
         let mut check = StartCheck::new("request", TEXT, files.now(), &Submission::Submitted(None));
         // Within the wait the screen is not read.

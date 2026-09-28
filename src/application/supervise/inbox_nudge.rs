@@ -270,15 +270,21 @@ impl Supervisor<'_> {
             signals: self.signals,
             files: &*self.files,
             mode: ScreenIdle::Record(&self.screen_spans),
-            threshold: self.stall.screen_idle_secs,
+            threshold: self.stall.screen_idle(),
         };
-        let last_input = unix_seconds(screen_idle::last_input(
+        let last_input = unix_millis(screen_idle::last_input(
             &*self.files,
             marker,
             SystemTime::UNIX_EPOCH,
         ));
         if probe
-            .infer(workspace, marker, MarkerState::Missing, now, last_input)
+            .infer(
+                workspace,
+                marker,
+                MarkerState::Missing,
+                now.saturating_mul(1000),
+                last_input,
+            )
             .is_none()
         {
             return Ok(false);

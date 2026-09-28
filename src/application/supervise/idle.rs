@@ -54,7 +54,8 @@ impl IdleMarker {
     fn inferred(path: &Path, inference: Inference) -> Self {
         Self {
             path: path.to_owned(),
-            modified: UNIX_EPOCH + Duration::from_secs(u64::try_from(inference.since).unwrap_or(0)),
+            modified: UNIX_EPOCH
+                + Duration::from_millis(u64::try_from(inference.since_ms).unwrap_or(0)),
             hook: IdleHook {
                 background_running: inference.background_running == Some(true),
                 background_tasks: Vec::new(),
@@ -162,11 +163,12 @@ impl IdleMarker {
 
 /// How long a worker session's screen is not captured again for the
 /// inference ([`Supervisor::session_idle`]): half of
-/// `[stall].screen_idle_secs`, and a minute at most, so a span reaches the
-/// threshold within one more capture and a session that works is not
-/// captured on every tick.
-pub(super) fn probe_interval(screen_idle_secs: i64) -> Duration {
-    Duration::from_secs(u64::try_from((screen_idle_secs / 2).clamp(0, 60)).unwrap_or(0))
+/// `[stall].screen_idle_secs` in whole seconds, and a minute at most, so a
+/// span reaches the threshold within one more capture and a session that
+/// works is not captured on every tick. A threshold of a second or less
+/// (one a test sets) is captured on every tick.
+pub(super) fn probe_interval(screen_idle: Duration) -> Duration {
+    Duration::from_secs((screen_idle.as_secs() / 2).min(60))
 }
 
 /// How many [`probe_interval`]s the wait between captures grows to while
@@ -176,8 +178,8 @@ const PROBE_BACKOFF_LIMIT: u32 = 4;
 /// The longest wait between two captures of a session whose screen keeps
 /// showing it at work: [`PROBE_BACKOFF_LIMIT`] [`probe_interval`]s, four
 /// minutes at most. A session that comes to rest is captured within it.
-pub(super) fn max_probe_interval(screen_idle_secs: i64) -> Duration {
-    probe_interval(screen_idle_secs) * PROBE_BACKOFF_LIMIT
+pub(super) fn max_probe_interval(screen_idle: Duration) -> Duration {
+    probe_interval(screen_idle) * PROBE_BACKOFF_LIMIT
 }
 
 /// The last capture of a session judged by its screen.
@@ -186,7 +188,7 @@ struct Probe {
     at: SystemTime,
     /// What it inferred.
     inference: Option<Inference>,
-    /// The session's last input then, in Unix seconds.
+    /// The session's last input then, in Unix milliseconds.
     floor: i64,
     /// Whether the screen showed the session at work.
     working: bool,
@@ -229,7 +231,11 @@ impl ScreenProbes {
         } else {
             probe.wait
         };
-        (now < probe.at + wait).then(|| probe.inference.filter(|inference| inference.since > floor))
+        (now < probe.at + wait).then(|| {
+            probe
+                .inference
+                .filter(|inference| inference.since_ms > floor)
+        })
     }
 
     /// Keep a capture at `now` that showed `look` and inferred `inference`,
@@ -298,8 +304,8 @@ impl Supervisor<'_> {
             Some(_) => return Ok(marker),
         };
         let now = self.files.now();
-        let floor = unix_seconds(last_input);
-        let base = probe_interval(self.stall.screen_idle_secs);
+        let floor = unix_millis(last_input);
+        let base = probe_interval(self.stall.screen_idle());
         let inference = match self.screen_probes.kept(idle_marker, now, floor, base) {
             Some(inference) => inference,
             None => {
@@ -308,9 +314,9 @@ impl Supervisor<'_> {
                     signals: self.signals,
                     files: &*self.files,
                     mode: ScreenIdle::Record(&self.screen_spans),
-                    threshold: self.stall.screen_idle_secs,
+                    threshold: self.stall.screen_idle(),
                 }
-                .probe(workspace, idle_marker, state, unix_seconds(now), floor);
+                .probe(workspace, idle_marker, state, unix_millis(now), floor);
                 let inference = inference.map(|inference| {
                     self.record_idle_inferred(run, workspace, idle_marker, phase, inference)
                 });
@@ -321,7 +327,7 @@ impl Supervisor<'_> {
                     look,
                     inference,
                     base,
-                    max_probe_interval(self.stall.screen_idle_secs),
+                    max_probe_interval(self.stall.screen_idle()),
                 );
                 inference
             }
@@ -353,7 +359,9 @@ impl Supervisor<'_> {
             "source": inference.source,
             "marker": inference.marker.as_str(),
             "since": inference.since,
+            "since_ms": inference.since_ms,
             "observed_secs": inference.observed_secs,
+            "observed_ms": inference.observed_ms,
             "captures": inference.captures,
             "background_running": inference.background_running,
         });
@@ -574,7 +582,9 @@ mod tests {
                     source: "screen",
                     marker: MarkerState::Missing,
                     since,
+                    since_ms: since * 1000,
                     observed_secs: 60,
+                    observed_ms: 60_000,
                     captures: 2,
                     background_running: read,
                     unrecorded: false,
@@ -608,13 +618,16 @@ mod tests {
                 source: "screen",
                 marker: MarkerState::Stale,
                 since,
+                since_ms: since * 1000 + 250,
                 observed_secs: 130,
+                observed_ms: 130_400,
                 captures: 3,
                 background_running: None,
                 unrecorded: false,
             },
         );
         assert_eq!(unix_seconds(idle.modified()), since);
+        assert_eq!(unix_millis(idle.modified()), since * 1000 + 250);
         assert!(!idle.background_running());
         assert_eq!(idle.background_running_evidence(), Value::Null);
         let evidence = idle.idle_after_receipt(&files, receipt).unwrap().unwrap();
@@ -628,10 +641,14 @@ mod tests {
 
     #[test]
     fn the_screen_is_captured_again_after_half_the_threshold_and_a_minute_at_most() {
-        assert_eq!(probe_interval(120), Duration::from_secs(60));
-        assert_eq!(probe_interval(600), Duration::from_secs(60));
-        assert_eq!(probe_interval(10), Duration::from_secs(5));
-        assert_eq!(probe_interval(1), Duration::ZERO);
+        let secs = Duration::from_secs;
+        assert_eq!(probe_interval(secs(120)), secs(60));
+        assert_eq!(probe_interval(secs(600)), secs(60));
+        assert_eq!(probe_interval(secs(10)), secs(5));
+        assert_eq!(probe_interval(secs(3)), secs(1));
+        assert_eq!(probe_interval(secs(1)), Duration::ZERO);
+        // As is a threshold below a second (task 1045).
+        assert_eq!(probe_interval(Duration::from_millis(200)), Duration::ZERO);
     }
 
     const IDLE_LOOK: ScreenLook = ScreenLook::Idle {
@@ -648,10 +665,10 @@ mod tests {
     /// input, or any other look, brings it back.
     #[test]
     fn the_wait_between_captures_grows_while_the_screen_shows_work() {
-        let base = probe_interval(120);
-        let limit = max_probe_interval(120);
+        let base = probe_interval(Duration::from_secs(120));
+        let limit = max_probe_interval(Duration::from_secs(120));
         assert_eq!(limit, Duration::from_secs(240));
-        assert_eq!(max_probe_interval(1), Duration::ZERO);
+        assert_eq!(max_probe_interval(Duration::ZERO), Duration::ZERO);
         let marker = Path::new("/run/idle.json");
         let probes = ScreenProbes::default();
         let capture = |now: u64, floor: i64, look: ScreenLook| {
@@ -686,7 +703,8 @@ mod tests {
     /// captured within the longest wait and then every probe interval.
     #[test]
     fn a_session_at_work_is_captured_less_and_its_rest_within_the_limit() {
-        let (base, limit) = (probe_interval(120), max_probe_interval(120));
+        let threshold = Duration::from_secs(120);
+        let (base, limit) = (probe_interval(threshold), max_probe_interval(threshold));
         let marker = Path::new("/run/idle.json");
         let probes = ScreenProbes::default();
         let rest = 3600;

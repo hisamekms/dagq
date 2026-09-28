@@ -487,7 +487,7 @@ pub struct PlannerProbes<'a> {
     pub signals: &'a dyn AgentSignals,
     pub clock: &'a dyn Clock,
     pub planners_dir: &'a Path,
-    pub screen_idle_secs: i64,
+    pub screen_idle_threshold: Duration,
     pub screen_idle: ScreenIdle<'a>,
 }
 
@@ -546,14 +546,14 @@ pub fn planner_view(probes: &PlannerProbes<'_>, planner: PlannerSession) -> Resu
                         signals: probes.signals,
                         files: probes.files,
                         mode: probes.screen_idle,
-                        threshold: probes.screen_idle_secs,
+                        threshold: probes.screen_idle_threshold,
                     }
                     .infer(
                         workspace,
                         &marker_path,
                         state,
-                        now,
-                        super::unix_seconds(last_input),
+                        super::unix_millis(probes.clock.system_time()),
+                        super::unix_millis(last_input),
                     );
                     probe.screen_idle = inferred.map(|inference| IdleProbe {
                         since: inference.since,

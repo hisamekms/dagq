@@ -11,8 +11,13 @@ use dagq::domain::EventKind;
 
 use runtime_support::*;
 
-/// How long a screen must look idle in these tests.
-const SCREEN_IDLE_SECS: i64 = 1;
+/// How long a screen must look idle in these tests, in milliseconds.
+const SCREEN_IDLE_MS: u64 = 200;
+
+/// The thresholds of these tests: a screen at rest for [`SCREEN_IDLE_MS`].
+fn stall() -> dagq::domain::stall::StallConfig {
+    dagq::domain::stall::StallConfig::default().with_millis("screen_idle_secs", SCREEN_IDLE_MS)
+}
 
 /// The agent's `Stop` hook failed to write the marker (task 475: the disk
 /// was full), as Claude Code's debug log says.
@@ -26,10 +31,7 @@ fn markerless_agent() -> String {
 
 fn options() -> SuperviseOptions {
     SuperviseOptions {
-        stall: Some(dagq::domain::stall::StallConfig {
-            screen_idle_secs: SCREEN_IDLE_SECS,
-            ..Default::default()
-        }),
+        stall: Some(stall()),
         ..supervise_options(4, true)
     }
 }
@@ -94,7 +96,11 @@ fn a_first_session_whose_hook_could_not_write_its_marker_is_validated_by_its_scr
     assert_eq!(last["marker"], "missing");
     assert_eq!(last["workspace_id"], WORKSPACE_ID);
     assert_eq!(last["background_running"], false);
-    assert!(last["observed_secs"].as_i64().unwrap() >= SCREEN_IDLE_SECS);
+    assert!(last["observed_ms"].as_i64().unwrap() >= SCREEN_IDLE_MS as i64);
+    assert_eq!(
+        last["observed_secs"].as_i64().unwrap(),
+        last["observed_ms"].as_i64().unwrap() / 1000
+    );
     assert!(
         last["hook_error"]
             .as_str()
@@ -147,11 +153,7 @@ receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
         ),
     );
     let options = SuperviseOptions {
-        stall: Some(dagq::domain::stall::StallConfig {
-            idle_without_receipt_secs: 1,
-            screen_idle_secs: SCREEN_IDLE_SECS,
-            ..Default::default()
-        }),
+        stall: Some(stall().with_millis("idle_without_receipt_secs", SCREEN_IDLE_MS)),
         ..supervise_options(4, true)
     };
     let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
@@ -200,9 +202,7 @@ fn a_markerless_session_is_held_by(screen: Option<&str>) {
     });
     // Well past the threshold, with captures on the way.
     let captured = backend.captures.load(Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(
-        u64::try_from(SCREEN_IDLE_SECS).unwrap() * 2500,
-    ));
+    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
     assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -272,9 +272,7 @@ fn a_markerless_session_that_shows_background_work_is_not_idle() {
     assert_eq!(inferred(&detail)[0]["background_running"], true);
     // Well past the threshold, with captures on the way.
     let captured = backend.captures.load(Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(
-        u64::try_from(SCREEN_IDLE_SECS).unwrap() * 2500,
-    ));
+    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
     assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
@@ -400,8 +398,8 @@ receipt \"$(git rev-parse HEAD)\"; await_exit",
     assert_eq!(payloads(&detail, "revise_finished").len(), 1);
     // One event per span. The revise watch counts the rewritten receipt as
     // an input and the prompt watch of the same session does not, so a
-    // span the prompt watch saw begin before the receipt's second can be
-    // started over by the revise watch and recorded again.
+    // span the prompt watch saw begin before the receipt can be started
+    // over by the revise watch and recorded again.
     let events = inferred(&detail);
     assert!((1..=2).contains(&events.len()), "{events:?}");
     for event in &events {
@@ -410,7 +408,7 @@ receipt \"$(git rev-parse HEAD)\"; await_exit",
     }
     let since: Vec<i64> = events
         .iter()
-        .map(|e| e["since"].as_i64().unwrap())
+        .map(|e| e["since_ms"].as_i64().unwrap())
         .collect();
     assert!(since.windows(2).all(|pair| pair[0] < pair[1]), "{events:?}");
 }

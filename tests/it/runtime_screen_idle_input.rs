@@ -11,8 +11,8 @@ use dagq::domain::EventKind;
 
 use runtime_support::*;
 
-/// How long a screen must look idle in these tests.
-const SCREEN_IDLE_SECS: i64 = 1;
+/// How long a screen must look idle in these tests, in milliseconds.
+const SCREEN_IDLE_MS: u64 = 200;
 
 /// The agent's `Stop` hook failed to write the marker (task 475: the disk
 /// was full), as Claude Code's debug log says.
@@ -34,12 +34,23 @@ receipt "$(git rev-parse HEAD)"; await_exit
     )
 }
 
-fn stall(idle_without_receipt_secs: i64) -> dagq::domain::stall::StallConfig {
-    dagq::domain::stall::StallConfig {
-        screen_idle_secs: SCREEN_IDLE_SECS,
-        idle_without_receipt_secs,
-        ..Default::default()
-    }
+/// The thresholds of these tests: a screen at rest for [`SCREEN_IDLE_MS`],
+/// and a receipt-less idle of `idle_without_receipt_ms`.
+fn stall(idle_without_receipt_ms: u64) -> dagq::domain::stall::StallConfig {
+    dagq::domain::stall::StallConfig::default()
+        .with_millis("screen_idle_secs", SCREEN_IDLE_MS)
+        .with_millis("idle_without_receipt_secs", idle_without_receipt_ms)
+}
+
+/// When the ask `ask` was opened, in Unix milliseconds (its `created_at`
+/// keeps only the second).
+fn opened_ms(detail: &dagq::domain::TaskDetail, ask: &dagq::domain::Ask) -> i64 {
+    detail
+        .events
+        .iter()
+        .find(|e| e.kind == "ask_opened" && e.payload["ask_id"] == json!(ask.id))
+        .and_then(|e| dagq::domain::stats::timestamp_millis(&e.created_at))
+        .unwrap()
 }
 
 /// Supervise with `backend` on a thread, with `reviewer` when given.
@@ -118,7 +129,7 @@ fn a_markerless_question_is_answered_once_the_screen_rests(screen: Option<&str>)
     let backend = TestWorkspace::new(&db, false, &markerless_asking_agent());
     *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
     let ask = question_of(&db, 1);
     match screen {
         Some(screen) => *backend.screen.lock().unwrap() = screen.into(),
@@ -128,9 +139,7 @@ fn a_markerless_question_is_answered_once_the_screen_rests(screen: Option<&str>)
     queue.answer(ask.id, "use blue").unwrap();
     // Well past the threshold, with captures on the way.
     let captured = backend.captures.load(Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(
-        u64::try_from(SCREEN_IDLE_SECS).unwrap() * 2500,
-    ));
+    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
     assert!(backend.captures.load(Ordering::SeqCst) >= captured + 2);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert!(!delivered(&db, 1));
@@ -168,7 +177,7 @@ fn a_markerless_question_is_answered_once_the_screen_rests(screen: Option<&str>)
     assert!(!inferred.is_empty());
     assert_eq!(inferred[0]["phase"], "session");
     assert_eq!(inferred[0]["marker"], "missing");
-    assert!(inferred[0]["since"].as_i64().unwrap() > ask.created_at);
+    assert!(inferred[0]["since_ms"].as_i64().unwrap() > opened_ms(&detail, &ask));
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "idle_inferred") < position(&kinds, "ask_delivered"));
 }
@@ -224,14 +233,12 @@ while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; await_exit"#,
     );
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
     // The request put the screen at work, and keeps it there while the
     // question is asked and answered.
     let ask = question_of(&db, 2);
     queue.answer(ask.id, "theirs").unwrap();
-    thread::sleep(Duration::from_millis(
-        u64::try_from(SCREEN_IDLE_SECS).unwrap() * 2500,
-    ));
+    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
     assert!(!delivered(&db, 2));
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
     wait_until(&db, Duration::from_secs(30), |_| delivered(&db, 2));
@@ -258,7 +265,7 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
         "{inferred:?}"
     );
     assert_eq!(inferred[0]["marker"], "stale");
-    assert!(inferred[0]["since"].as_i64().unwrap() > ask.created_at);
+    assert!(inferred[0]["since_ms"].as_i64().unwrap() > opened_ms(&detail, &ask));
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "idle_inferred") < position(&kinds, "ask_delivered"));
 }
@@ -287,13 +294,11 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = supervise_in_thread(&db, &repo, &backend, Some(&reviewer), stall(600));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, Some(&reviewer), stall(600_000));
     let ask = question_of(&db, 1);
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "the last").unwrap();
-    thread::sleep(Duration::from_millis(
-        u64::try_from(SCREEN_IDLE_SECS).unwrap() * 2500,
-    ));
+    thread::sleep(Duration::from_millis(SCREEN_IDLE_MS * 5 / 2));
     assert!(!delivered(&db, 1));
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
     wait_until(&db, Duration::from_secs(30), |_| delivered(&db, 1));
@@ -312,7 +317,7 @@ receipt "$(git rev-parse HEAD)"; await_exit"#,
         "{inferred:?}"
     );
     assert_eq!(inferred[0]["marker"], "stale");
-    assert!(inferred[0]["since"].as_i64().unwrap() > ask.created_at);
+    assert!(inferred[0]["since_ms"].as_i64().unwrap() > opened_ms(&detail, &ask));
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "idle_inferred") < position(&kinds, "ask_delivered"));
 }
@@ -358,7 +363,8 @@ fn markerless_stall(
     let reviewer = Arc::new(
         TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[instruction_job(gate)]),
     );
-    let supervisor = supervise_in_thread(db, repo, &backend, Some(&reviewer), stall(1));
+    let supervisor =
+        supervise_in_thread(db, repo, &backend, Some(&reviewer), stall(SCREEN_IDLE_MS));
     // The nudge put the screen at work; the session stopped again.
     typed(&backend, 1);
     *backend.screen.lock().unwrap() = READY_SCREEN.into();
@@ -468,7 +474,7 @@ receipt "$(git rev-parse HEAD)"; await_exit"#
     backend.prompt_wait = Duration::from_millis(300);
     *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, None, stall(600_000));
     let count = |queue: &mut SqliteQueue, kind: &str| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap())
             .iter()

@@ -791,6 +791,13 @@ pub fn unix_seconds(time: SystemTime) -> i64 {
         .unwrap_or_default()
 }
 
+/// Milliseconds since the Unix epoch; zero before it.
+pub fn unix_millis(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
 /// `time` as `YYYY-MM-DDTHH:MM:SS.mmmZ` in UTC; the epoch for a time before it.
 pub fn timestamp(time: SystemTime) -> String {
     let elapsed = time.duration_since(UNIX_EPOCH).unwrap_or_default();

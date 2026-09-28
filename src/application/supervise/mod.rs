@@ -71,7 +71,7 @@ use super::{
     recording::{
         RecordingBackend, exit_unsent, reason_of_error, text_on_screen, timed_out_maybe_sent,
     },
-    tail, unix_seconds,
+    tail, unix_millis, unix_seconds,
 };
 use crate::domain::{
     ABANDON_EXIT_FAILED, ABANDON_EXIT_REQUESTED_BEFORE, ABANDON_EXIT_SENT, ActorContext,

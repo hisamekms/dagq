@@ -108,7 +108,7 @@ fn situation(send: &RunEvent) -> String {
 /// open long enough to take the session for idle at its prompt (task 672):
 /// no idle marker (`marker`) ended it, it was taken after the last text
 /// the supervisor typed (`after_sends`) and the last input of the stage
-/// (`input_at`), and `threshold_secs` passed since it by `now`. The screen
+/// (`input_at`), and `threshold` passed since it by `now`. The screen
 /// is read only past this.
 fn turn_left_open(
     input: SystemTime,
@@ -116,15 +116,13 @@ fn turn_left_open(
     after_sends: bool,
     input_at: Option<SystemTime>,
     now: SystemTime,
-    threshold_secs: i64,
+    threshold: Duration,
 ) -> bool {
-    let waited = now
-        .duration_since(input)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let waited = super::stall::elapsed(input, now);
     marker.is_none_or(|marker| marker <= input)
         && after_sends
         && input_at.is_none_or(|at| input >= at)
-        && waited >= threshold_secs
+        && waited >= threshold
 }
 
 impl SessionWatch {
@@ -189,7 +187,7 @@ impl SessionWatch {
             self.stall.taken_after_sends(input.modified),
             self.input_at,
             sv.files.now(),
-            sv.stall.idle_without_receipt_secs,
+            sv.stall.idle_without_receipt(),
         ) {
             return false;
         }
@@ -682,7 +680,14 @@ mod tests {
     fn a_turn_left_open_counts_as_at_the_prompt_only_past_the_threshold() {
         let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
         let open = |marker, after_sends, input_at, now| {
-            turn_left_open(at(100), marker, after_sends, input_at, at(now), 60)
+            turn_left_open(
+                at(100),
+                marker,
+                after_sends,
+                input_at,
+                at(now),
+                Duration::from_secs(60),
+            )
         };
         assert!(
             !open(Some(at(50)), true, None, 159),
@@ -697,6 +702,18 @@ mod tests {
             "before the stage"
         );
         // An input stamped after now waited nothing.
-        assert!(!turn_left_open(at(100), None, true, None, at(90), 1));
+        assert!(!turn_left_open(
+            at(100),
+            None,
+            true,
+            None,
+            at(90),
+            Duration::from_secs(1)
+        ));
+        // A threshold below a second (task 1045) is not rounded to one.
+        let ms = |ms: u64| UNIX_EPOCH + Duration::from_millis(100_000 + ms);
+        let short = Duration::from_millis(200);
+        assert!(!turn_left_open(at(100), None, true, None, ms(199), short));
+        assert!(turn_left_open(at(100), None, true, None, ms(200), short));
     }
 }

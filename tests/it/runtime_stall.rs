@@ -4,13 +4,16 @@ use dagq::domain::EventKind;
 
 use runtime_support::*;
 
-/// Supervisor options whose receipt-less idle threshold is one second.
+/// The receipt-less idle threshold of these tests, in milliseconds.
+const IDLE_MS: u64 = 200;
+
+/// Supervisor options whose receipt-less idle threshold is [`IDLE_MS`].
 fn stall_options() -> SuperviseOptions {
     SuperviseOptions {
-        stall: Some(dagq::domain::stall::StallConfig {
-            idle_without_receipt_secs: 1,
-            ..Default::default()
-        }),
+        stall: Some(
+            dagq::domain::stall::StallConfig::default()
+                .with_millis("idle_without_receipt_secs", IDLE_MS),
+        ),
         ..supervise_options(4, true)
     }
 }
@@ -26,6 +29,12 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .map(|event| event.payload)
         .collect()
 }
+
+/// Past the threshold: two and a half of it.
+const PAST_IDLE: Duration = Duration::from_millis(IDLE_MS * 5 / 2);
+
+/// Well past the threshold: one and a half of it.
+const WELL_PAST_IDLE: Duration = Duration::from_millis(IDLE_MS * 3 / 2);
 
 /// The payloads of the task-less `stall_config_loaded` events.
 fn stall_configs(db: &Path) -> Vec<Value> {
@@ -53,7 +62,7 @@ fn a_receiptless_idle_is_nudged_once_and_the_receipt_resolves_it() {
         r#"
 commit work; idle_bg
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-cp "$MESSAGE" "$MESSAGE.seen"
+cp "$MESSAGE" "$MESSAGE.seen"; cp -p "$IDLE" "$MESSAGE.idle"
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#,
     );
@@ -77,7 +86,24 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     assert_eq!(nudged[0]["threshold_secs"], 1);
     assert_eq!(nudged[0]["background_running"], true);
     assert_eq!(nudged[0]["background_tasks"][0]["command"], "cargo test");
-    assert!(nudged[0]["idle_secs"].as_i64().unwrap() >= 1);
+    assert!(nudged[0]["idle_secs"].as_i64().is_some(), "{nudged:?}");
+    // Nudged past the threshold from the idle marker (kept by the session
+    // with its time), both times in whole milliseconds.
+    let idle_at = fs::metadata(resume_message_path(run.run_dir().unwrap()).with_extension("idle"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let nudged_at = detail
+        .events
+        .iter()
+        .find(|e| e.kind == "stall_nudged")
+        .and_then(|e| dagq::domain::stats::timestamp_millis(&e.created_at))
+        .unwrap();
+    let idle_ms = i64::try_from(idle_at.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    assert!(
+        nudged_at - idle_ms >= IDLE_MS as i64 - 1,
+        "{nudged_at} {idle_ms}"
+    );
     let resolved = payloads(&detail, "stall_resolved");
     assert_eq!(resolved.len(), 1, "{resolved:?}");
     assert_eq!(resolved[0]["detection"], "nudge");
@@ -123,7 +149,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     // Well past the threshold, still no nudge and no stalled ask.
-    thread::sleep(Duration::from_millis(1500));
+    thread::sleep(WELL_PAST_IDLE);
     assert!(backend.texts().is_empty());
     assert!(stalled_asks(&queue).is_empty());
     let hold = queue
@@ -230,7 +256,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     }
     assert_eq!(backend.notifications.lock().unwrap().len(), 1);
     // Not asked twice, nor nudged again.
-    thread::sleep(Duration::from_millis(1500));
+    thread::sleep(WELL_PAST_IDLE);
     assert_eq!(stalled_asks(&queue).len(), 1);
     assert_eq!(backend.texts().len(), 1);
 
@@ -247,7 +273,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     wait_until(&db, Duration::from_secs(30), |queue| {
         payloads(&queue.show(TaskId::new(1)).unwrap(), "stall_resolved").len() == 3
     });
-    thread::sleep(Duration::from_millis(1500));
+    thread::sleep(WELL_PAST_IDLE);
     assert_eq!(stalled_asks(&queue).len(), 2);
     assert!(queue.read_ask(second.id).unwrap().closed_at.is_none());
     assert_eq!(
@@ -325,7 +351,7 @@ commit work; receipt "$(git rev-parse HEAD)"; idle; await_exit
         !queue.asks(Default::default()).unwrap().is_empty()
     });
     let ask = queue.asks(Default::default()).unwrap().remove(0);
-    thread::sleep(Duration::from_millis(2500));
+    thread::sleep(PAST_IDLE);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     queue.answer(ask.id, "blue").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
@@ -356,7 +382,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let marker = run.idle_marker_path().unwrap();
     wait_until(&db, Duration::from_secs(30), |_| marker.exists());
-    thread::sleep(Duration::from_millis(1100));
+    thread::sleep(Duration::from_millis(IDLE_MS * 11 / 10));
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
         .record_runtime_event(
@@ -394,7 +420,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    thread::sleep(Duration::from_millis(2500));
+    thread::sleep(PAST_IDLE);
     assert!(backend.texts().is_empty(), "{:?}", backend.texts());
     assert_eq!(stalled_asks(&queue).len(), 1);
     assert!(queue.read_ask(asked.id).unwrap().is_open());
@@ -507,11 +533,11 @@ fn an_input_the_supervisor_did_not_send_holds_the_nudge_and_is_preempted() {
             &format!(
                 r#"
 commit work; idle
-sleep 0.3
+sleep 0.1
 INPUT="$(dirname "$IDLE")/prompt-submit.json"
 printf '{{"hook_event_name":"UserPromptSubmit","prompt":"{prompt}"}}' > "$INPUT.tmp"
 mv "$INPUT.tmp" "$INPUT"
-sleep 5
+sleep 2
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#
             ),
@@ -520,7 +546,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
         let options = SuperviseOptions {
             stall: Some(dagq::domain::stall::StallConfig {
-                idle_without_receipt_secs: 3,
+                idle_without_receipt_secs: 1,
                 ..Default::default()
             }),
             ..supervise_options(4, true)
@@ -538,8 +564,8 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         assert_eq!(found.len(), preempted, "{prompt}: {found:?}");
         if preempted == 1 {
             assert_eq!(found[0]["threshold"], "idle_without_receipt_secs");
-            assert_eq!(found[0]["threshold_secs"], 3);
-            assert!(found[0]["idle_secs"].as_i64().unwrap() < 3, "{found:?}");
+            assert_eq!(found[0]["threshold_secs"], 1);
+            assert!(found[0]["idle_secs"].as_i64().unwrap() < 1, "{found:?}");
         }
         let stats = runtime::stats(&db, &Default::default()).unwrap();
         let idle = &stats["stall_thresholds"]["idle_without_receipt_secs"];
@@ -561,7 +587,7 @@ fn an_input_whose_turn_never_ended_is_nudged_past_the_threshold() {
         false,
         r#"
 commit work; idle
-sleep 0.3
+sleep 0.1
 INPUT="$(dirname "$IDLE")/prompt-submit.json"
 printf '{"hook_event_name":"UserPromptSubmit","prompt":"wait"}' > "$INPUT.tmp"
 mv "$INPUT.tmp" "$INPUT"
@@ -571,7 +597,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     );
     let options = SuperviseOptions {
         stall: Some(dagq::domain::stall::StallConfig {
-            idle_without_receipt_secs: 2,
+            idle_without_receipt_secs: 1,
             ..Default::default()
         }),
         ..supervise_options(4, true)
@@ -584,7 +610,7 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     let detail = queue.show(TaskId::new(1)).unwrap();
     let nudged = payloads(&detail, "stall_nudged");
     assert_eq!(nudged.len(), 1, "{:?}", event_kinds(&detail));
-    assert!(nudged[0]["idle_secs"].as_i64().unwrap() >= 2, "{nudged:?}");
+    assert!(nudged[0]["idle_secs"].as_i64().unwrap() >= 1, "{nudged:?}");
     // The input itself came short of the threshold.
     assert_eq!(payloads(&detail, "stall_preempted").len(), 1);
     let resolved = payloads(&detail, "stall_resolved");

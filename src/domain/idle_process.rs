@@ -204,7 +204,7 @@ impl CpuWatch {
     }
 
     /// The processes of `processes` (the sample last observed) that, with
-    /// all their descendants, have made no progress for `threshold_secs`
+    /// all their descendants, have made no progress for `threshold`
     /// at `now_ms`: only the top of each idle subtree, and not one handed
     /// to a job since its last progress ([`Self::hand`]). A process whose
     /// CPU time could not be read counts as making progress, and so does
@@ -213,7 +213,7 @@ impl CpuWatch {
         &self,
         processes: &[ProcessInfo],
         now_ms: i64,
-        threshold_secs: i64,
+        threshold: std::time::Duration,
     ) -> Vec<IdleProcess> {
         let pids: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
         let children = |pid: u32| {
@@ -250,7 +250,8 @@ impl CpuWatch {
         };
         let is_idle = |pid: u32| {
             let (active, _) = progress(pid);
-            now_ms.saturating_sub(active) >= threshold_secs.saturating_mul(1000)
+            now_ms.saturating_sub(active)
+                >= i64::try_from(threshold.as_millis()).unwrap_or(i64::MAX)
         };
         processes
             .iter()
@@ -317,6 +318,7 @@ mod tests {
     }
 
     const MIN: i64 = 60_000;
+    const THIRTY_MIN: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
     #[test]
     fn a_process_without_progress_for_the_threshold_is_idle() {
@@ -325,10 +327,10 @@ mod tests {
         // 0.3% of the wall time is no progress.
         let sample = [process(10, 1, Some(500 + 540))];
         watch.observe(&sample, 3 * MIN);
-        assert!(watch.idle(&sample, 3 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 3 * MIN, THIRTY_MIN).is_empty());
         let sample = [process(10, 1, Some(500 + 5400))];
         watch.observe(&sample, 30 * MIN);
-        let idle = watch.idle(&sample, 30 * MIN, 30 * 60);
+        let idle = watch.idle(&sample, 30 * MIN, THIRTY_MIN);
         assert_eq!(idle.len(), 1, "{idle:?}");
         assert_eq!(idle[0].pid, 10);
         assert_eq!(idle[0].idle_secs, 30 * 60);
@@ -337,20 +339,34 @@ mod tests {
         assert!(idle[0].descendants.is_empty());
     }
 
+    /// A threshold a test set below a second (task 1045) is compared in
+    /// milliseconds, not rounded to a second.
+    #[test]
+    fn a_threshold_below_a_second_is_not_rounded() {
+        let short = std::time::Duration::from_millis(200);
+        let mut watch = CpuWatch::default();
+        let sample = [process(10, 1, Some(500))];
+        watch.observe(&sample, 0);
+        watch.observe(&sample, 199);
+        assert!(watch.idle(&sample, 199, short).is_empty());
+        watch.observe(&sample, 200);
+        assert_eq!(watch.idle(&sample, 200, short).len(), 1);
+    }
+
     #[test]
     fn a_long_process_that_uses_cpu_is_not_idle() {
         let mut watch = CpuWatch::default();
         for minute in 0..=40 {
             let sample = [process(10, 1, Some(minute as u64 * 30_000))];
             watch.observe(&sample, minute * MIN);
-            assert!(watch.idle(&sample, minute * MIN, 30 * 60).is_empty());
+            assert!(watch.idle(&sample, minute * MIN, THIRTY_MIN).is_empty());
         }
         // Progress restarts the idle time: a burst, then quiet.
         let sample = [process(10, 1, Some(40 * 30_000))];
         watch.observe(&sample, 69 * MIN);
-        assert!(watch.idle(&sample, 69 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 69 * MIN, THIRTY_MIN).is_empty());
         watch.observe(&sample, 70 * MIN);
-        assert_eq!(watch.idle(&sample, 70 * MIN, 30 * 60).len(), 1);
+        assert_eq!(watch.idle(&sample, 70 * MIN, THIRTY_MIN).len(), 1);
     }
 
     #[test]
@@ -366,11 +382,11 @@ mod tests {
         watch.observe(&at(0), 0);
         let sample = at(31 * 30_000);
         watch.observe(&sample, 31 * MIN);
-        assert!(watch.idle(&sample, 31 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 31 * MIN, THIRTY_MIN).is_empty());
         // Once the child stops too, only the top of the subtree is idle.
         let sample = at(31 * 30_000);
         watch.observe(&sample, 62 * MIN);
-        let idle = watch.idle(&sample, 62 * MIN, 30 * 60);
+        let idle = watch.idle(&sample, 62 * MIN, THIRTY_MIN);
         assert_eq!(idle.len(), 1, "{idle:?}");
         assert_eq!(idle[0].pid, 10);
         assert_eq!(idle[0].descendants, [11, 12]);
@@ -384,17 +400,21 @@ mod tests {
         let mut reused = process(10, 1, Some(100));
         reused.command = "other".to_owned();
         watch.observe(&[reused.clone()], 31 * MIN);
-        assert!(watch.idle(&[reused.clone()], 31 * MIN, 30 * 60).is_empty());
+        assert!(
+            watch
+                .idle(&[reused.clone()], 31 * MIN, THIRTY_MIN)
+                .is_empty()
+        );
         // CPU time that went down is another process under the same pid.
         let mut restarted = reused.clone();
         restarted.cpu_ms = Some(5);
         watch.observe(&[restarted.clone()], 62 * MIN);
-        assert!(watch.idle(&[restarted], 62 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&[restarted], 62 * MIN, THIRTY_MIN).is_empty());
         // A child whose CPU time is unknown keeps its parent busy.
         let sample = [process(20, 1, Some(0)), process(21, 20, None)];
         watch.observe(&sample, 0);
         watch.observe(&sample, 31 * MIN);
-        assert!(watch.idle(&sample, 31 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 31 * MIN, THIRTY_MIN).is_empty());
     }
 
     #[test]
@@ -403,24 +423,24 @@ mod tests {
         let quiet = [process(10, 1, Some(0))];
         watch.observe(&quiet, 0);
         watch.observe(&quiet, 31 * MIN);
-        let idle = watch.idle(&quiet, 31 * MIN, 30 * 60);
+        let idle = watch.idle(&quiet, 31 * MIN, THIRTY_MIN);
         watch.hand(&idle);
         watch.observe(&quiet, 90 * MIN);
-        assert!(watch.idle(&quiet, 90 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&quiet, 90 * MIN, THIRTY_MIN).is_empty());
         assert_eq!(
             watch
                 .clone()
                 .released()
-                .idle(&quiet, 90 * MIN, 30 * 60)
+                .idle(&quiet, 90 * MIN, THIRTY_MIN)
                 .len(),
             1
         );
         let busy = [process(10, 1, Some(60_000))];
         watch.observe(&busy, 91 * MIN);
         watch.observe(&busy, 122 * MIN);
-        assert_eq!(watch.idle(&busy, 122 * MIN, 30 * 60).len(), 1);
+        assert_eq!(watch.idle(&busy, 122 * MIN, THIRTY_MIN).len(), 1);
         // A process that went away is forgotten, handed or not.
-        watch.hand(&watch.idle(&busy, 122 * MIN, 30 * 60));
+        watch.hand(&watch.idle(&busy, 122 * MIN, THIRTY_MIN));
         watch.observe(&[], 123 * MIN);
         assert!(watch.handed.is_empty() && watch.tracks.is_empty());
     }
@@ -436,12 +456,12 @@ mod tests {
         );
         let both = [process(10, 1, Some(0)), process(11, 10, Some(1000))];
         watch.observe(&both, 35 * MIN);
-        let idle = watch.idle(&both, 35 * MIN, 30 * 60);
+        let idle = watch.idle(&both, 35 * MIN, THIRTY_MIN);
         assert_eq!(idle[0].active_ms, 5 * MIN);
         watch.hand(&idle);
         let parent = [process(10, 1, Some(0))];
         watch.observe(&parent, 36 * MIN);
-        assert!(watch.idle(&parent, 36 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&parent, 36 * MIN, THIRTY_MIN).is_empty());
     }
 
     fn child(pid: u32, ppid: u32, cpu_ms: u64, elapsed_secs: u64) -> ProcessInfo {
@@ -466,10 +486,10 @@ mod tests {
             ];
             watch.observe(&last, minute * MIN);
             if minute < 30 {
-                assert!(watch.idle(&last, minute * MIN, 30 * 60).is_empty());
+                assert!(watch.idle(&last, minute * MIN, THIRTY_MIN).is_empty());
             }
         }
-        let idle = watch.idle(&last, 31 * MIN, 30 * 60);
+        let idle = watch.idle(&last, 31 * MIN, THIRTY_MIN);
         assert_eq!(idle.len(), 1, "{idle:?}");
         assert_eq!(idle[0].pid, 10);
         assert_eq!(idle[0].descendants, [11, 131]);
@@ -483,13 +503,13 @@ mod tests {
             child(200, 11, 0, 0),
         ];
         watch.observe(&deeper, 32 * MIN);
-        let idle = watch.idle(&deeper, 32 * MIN, 30 * 60);
+        let idle = watch.idle(&deeper, 32 * MIN, THIRTY_MIN);
         assert_eq!(idle.len(), 1, "{idle:?}");
         assert_eq!(idle[0].active_ms, 0);
         // A quiet new root starts over.
         let root = [child(300, 1, 0, 0)];
         watch.observe(&root, 33 * MIN);
-        assert!(watch.idle(&root, 33 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&root, 33 * MIN, THIRTY_MIN).is_empty());
     }
 
     #[test]
@@ -508,7 +528,7 @@ mod tests {
         let sample = build(20_000, 30);
         watch.observe(&sample, 29 * MIN + 30_000);
         watch.observe(&sample, 31 * MIN);
-        assert!(watch.idle(&sample, 31 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 31 * MIN, THIRTY_MIN).is_empty());
         // Started just before a sample, quiet when first seen, then busy: its
         // progress is measured from when it was seen, not from the parent's
         // old progress, so 2% of a minute counts.
@@ -521,7 +541,7 @@ mod tests {
         watch.observe(&sample, 30 * MIN);
         assert_eq!(watch.tracks[&50].active_ms, 30 * MIN);
         watch.observe(&sample, 31 * MIN);
-        assert!(watch.idle(&sample, 31 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 31 * MIN, THIRTY_MIN).is_empty());
         // A reused pid is new too: busy, it is progress.
         let mut reused = child(50, 10, 60_000, 60);
         reused.command = "cargo test".to_owned();
@@ -543,7 +563,7 @@ mod tests {
         }
         let sample = [cargo.clone(), child(12, 10, 0, 0)];
         watch.observe(&sample, 41 * MIN);
-        assert!(watch.idle(&sample, 41 * MIN, 30 * 60).is_empty());
+        assert!(watch.idle(&sample, 41 * MIN, THIRTY_MIN).is_empty());
         assert_eq!(watch.tracks[&12].active_ms, 40 * MIN);
     }
 

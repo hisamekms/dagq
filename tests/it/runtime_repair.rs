@@ -17,9 +17,14 @@ while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; idle; await_exit
 "#;
 
+/// Thresholds with the `long_background` alert after a fifth of a second.
+fn background_alert() -> dagq::domain::stall::StallConfig {
+    dagq::domain::stall::StallConfig::default().with_millis("background_alert_secs", 200)
+}
+
 /// Supervise the fixture's task with [`ORPHAN_AGENT`], a background alert
-/// after one second, and `recovery` as the recovery job's script, on a
-/// thread.
+/// after a fifth of a second, and `recovery` as the recovery job's script,
+/// on a thread.
 fn supervise_long_background(
     db: &Path,
     repo: &Path,
@@ -29,16 +34,7 @@ fn supervise_long_background(
     Arc<TestReviewer>,
     thread::JoinHandle<Result<Value>>,
 ) {
-    supervise_repair(
-        db,
-        repo,
-        ORPHAN_AGENT,
-        dagq::domain::stall::StallConfig {
-            background_alert_secs: 1,
-            ..Default::default()
-        },
-        &[recovery],
-    )
+    supervise_repair(db, repo, ORPHAN_AGENT, background_alert(), &[recovery])
 }
 
 /// Supervise the fixture's task with `agent`, the thresholds `stall`, and
@@ -179,10 +175,7 @@ fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_rec
         &db,
         &repo,
         LEFTOVER_LOOP_AGENT,
-        dagq::domain::stall::StallConfig {
-            background_alert_secs: 1,
-            ..Default::default()
-        },
+        background_alert(),
         &[&recovery_verdict(&json!({
             "verdict": "repair",
             "confidence": "high",
@@ -413,12 +406,13 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
     )
 }
 
-/// Thresholds with the `idle_process` alert after two seconds.
+/// How long a process makes no progress before the `idle_process` alert in
+/// these tests, in milliseconds.
+const IDLE_PROCESS_MS: u64 = 200;
+
+/// Thresholds with the `idle_process` alert after [`IDLE_PROCESS_MS`].
 fn idle_process_stall() -> dagq::domain::stall::StallConfig {
-    dagq::domain::stall::StallConfig {
-        idle_process_secs: 2,
-        ..Default::default()
-    }
+    dagq::domain::stall::StallConfig::default().with_millis("idle_process_secs", IDLE_PROCESS_MS)
 }
 
 /// Task 469: an orphan of the worktree that stays alive without using CPU
@@ -459,13 +453,23 @@ fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job(
     let requested = requested[0];
     assert_eq!(requested["alert"], "idle_process");
     assert_eq!(requested["threshold"], "idle_process_secs");
-    assert_eq!(requested["threshold_secs"], 2);
+    assert_eq!(requested["threshold_secs"], 1);
     assert_eq!(requested["phase"], "session");
     let idle = requested["idle_processes"].as_array().unwrap();
     assert_eq!(idle.len(), 1, "{idle:?}");
     assert_eq!(idle[0]["pid"], pid);
     assert!(idle[0]["command"].as_str().unwrap().contains("sleep 300"));
-    assert!(idle[0]["idle_secs"].as_i64().unwrap() >= 2, "{idle:?}");
+    // Quiet for the threshold when the job was requested.
+    let requested_ms = detail
+        .events
+        .iter()
+        .find(|e| e.kind == "recovery_requested")
+        .and_then(|e| dagq::domain::stats::timestamp_millis(&e.created_at))
+        .unwrap();
+    assert!(
+        requested_ms - idle[0]["active_ms"].as_i64().unwrap() >= IDLE_PROCESS_MS as i64,
+        "{idle:?}"
+    );
     let prompts = reviewer.triage_prompts();
     assert_eq!(prompts.len(), 1);
     for part in ["idle_process", &format!("- pid {pid} (parent "), ", cpu 0."] {
@@ -493,7 +497,7 @@ fn a_long_process_that_uses_cpu_time_is_not_an_idle_process_alert() {
         &repo,
         &idle_agent(
             "yes",
-            r#"i=0; while [ $i -lt 120 ]; do sleep 0.05; i=$((i + 1)); done; kill "$pid""#,
+            r#"i=0; while [ $i -lt 20 ]; do sleep 0.05; i=$((i + 1)); done; kill "$pid""#,
         ),
         idle_process_stall(),
         &[],

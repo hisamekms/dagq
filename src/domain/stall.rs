@@ -1,7 +1,9 @@
 //! The thresholds of the stalled-session checks (ADR-0043 decision 4): the
 //! `[stall]` table of the repository's `dagq.toml`, each a positive number
-//! of seconds, with the defaults a person chose (2026-09-25).
-use std::collections::HashMap;
+//! of seconds, with the defaults a person chose (2026-09-25). A test may
+//! set a threshold below a second ([`StallConfig::with_millis`]); the
+//! checks compare each as a [`Duration`] ([`StallConfig::threshold`]).
+use std::{collections::HashMap, time::Duration};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -48,7 +50,17 @@ pub struct StallConfig {
     pub screen_idle_secs: i64,
     pub turn_silence_secs: i64,
     pub turn_limit_secs: i64,
+    /// The thresholds a test set below a second (task 1045), which the
+    /// checks use in place of the seconds; `[stall]` never sets them.
+    #[serde(skip)]
+    pub millis: StallMillis,
 }
+
+/// The thresholds of a [`StallConfig`] set in milliseconds, by the
+/// position of their key in [`StallConfig::KEYS`]: none unless a test
+/// sets one ([`StallConfig::with_millis`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StallMillis([Option<u64>; 7]);
 
 impl Default for StallConfig {
     fn default() -> Self {
@@ -60,6 +72,7 @@ impl Default for StallConfig {
             screen_idle_secs: DEFAULT_SCREEN_IDLE_SECS,
             turn_silence_secs: DEFAULT_TURN_SILENCE_SECS,
             turn_limit_secs: DEFAULT_TURN_LIMIT_SECS,
+            millis: StallMillis::default(),
         }
     }
 }
@@ -76,9 +89,56 @@ impl StallConfig {
         "turn_limit_secs",
     ];
 
-    /// The setting `key` set to `secs`; `None` for a key the table does not have.
+    /// The setting `key` set to `secs` (and no longer in milliseconds);
+    /// `None` for a key the table does not have.
     pub fn set(&mut self, key: &str, secs: i64) -> Option<()> {
-        let field = match key {
+        *self.field(key)? = secs;
+        self.millis.0[Self::index(key)?] = None;
+        Some(())
+    }
+
+    /// The setting `key` set to `millis` milliseconds, for a test that
+    /// waits less than a second: the checks wait `millis`
+    /// ([`Self::threshold`]), and its seconds, which events record, are
+    /// `millis` rounded up to a whole second. `None` for a key the table
+    /// does not have.
+    pub fn set_millis(&mut self, key: &str, millis: u64) -> Option<()> {
+        *self.field(key)? = i64::try_from(millis.div_ceil(1000).max(1)).unwrap_or(i64::MAX);
+        self.millis.0[Self::index(key)?] = Some(millis);
+        Some(())
+    }
+
+    /// [`Self::set_millis`] of `key`, which must be one of [`Self::KEYS`].
+    #[must_use]
+    pub fn with_millis(mut self, key: &str, millis: u64) -> Self {
+        self.set_millis(key, millis)
+            .unwrap_or_else(|| panic!("{key} is not a [stall] setting"));
+        self
+    }
+
+    /// How long the setting `key` is: its milliseconds when a test set
+    /// them, else its seconds (a value that is not positive is zero).
+    /// `None` for a key the table does not have.
+    pub fn threshold(&self, key: &str) -> Option<Duration> {
+        let mut copy = *self;
+        let secs = *copy.field(key)?;
+        Some(match self.millis_of(key) {
+            Some(millis) => Duration::from_millis(millis),
+            None => Duration::from_secs(u64::try_from(secs).unwrap_or(0)),
+        })
+    }
+
+    /// The milliseconds a test set `key` to, if it did.
+    fn millis_of(&self, key: &str) -> Option<u64> {
+        self.millis.0[Self::index(key)?]
+    }
+
+    fn index(key: &str) -> Option<usize> {
+        Self::KEYS.iter().position(|k| *k == key)
+    }
+
+    fn field(&mut self, key: &str) -> Option<&mut i64> {
+        Some(match key {
             "idle_without_receipt_secs" => &mut self.idle_without_receipt_secs,
             "send_confirm_secs" => &mut self.send_confirm_secs,
             "background_alert_secs" => &mut self.background_alert_secs,
@@ -87,9 +147,36 @@ impl StallConfig {
             "turn_silence_secs" => &mut self.turn_silence_secs,
             "turn_limit_secs" => &mut self.turn_limit_secs,
             _ => return None,
-        };
-        *field = secs;
-        Some(())
+        })
+    }
+
+    fn known(&self, key: &str) -> Duration {
+        self.threshold(key).unwrap_or_default()
+    }
+
+    /// `idle_without_receipt_secs` as a [`Duration`].
+    pub fn idle_without_receipt(&self) -> Duration {
+        self.known("idle_without_receipt_secs")
+    }
+
+    /// `send_confirm_secs` as a [`Duration`].
+    pub fn send_confirm(&self) -> Duration {
+        self.known("send_confirm_secs")
+    }
+
+    /// `background_alert_secs` as a [`Duration`].
+    pub fn background_alert(&self) -> Duration {
+        self.known("background_alert_secs")
+    }
+
+    /// `idle_process_secs` as a [`Duration`].
+    pub fn idle_process(&self) -> Duration {
+        self.known("idle_process_secs")
+    }
+
+    /// `screen_idle_secs` as a [`Duration`].
+    pub fn screen_idle(&self) -> Duration {
+        self.known("screen_idle_secs")
     }
 
     /// The limits a headless worker's turns are held to.
@@ -97,6 +184,8 @@ impl StallConfig {
         super::turn::TurnLimits {
             silence_secs: self.turn_silence_secs,
             limit_secs: self.turn_limit_secs,
+            silence_ms: self.millis_of("turn_silence_secs"),
+            limit_ms: self.millis_of("turn_limit_secs"),
         }
     }
 
@@ -192,6 +281,66 @@ mod tests {
             })
         );
         assert_eq!(StallConfig::default().set("other", 1), None);
+    }
+
+    /// Task 1045: a test sets a threshold in milliseconds; the checks wait
+    /// that long, events keep whole seconds (rounded up), and setting the
+    /// seconds again drops the milliseconds. `[stall]`'s seconds are
+    /// thresholds of whole seconds.
+    #[test]
+    fn a_threshold_set_in_milliseconds_stands_in_for_its_seconds() {
+        let config = StallConfig::default();
+        assert_eq!(config.idle_without_receipt(), Duration::from_secs(20 * 60));
+        assert_eq!(config.send_confirm(), Duration::from_secs(60));
+        assert_eq!(config.background_alert(), Duration::from_secs(30 * 60));
+        assert_eq!(config.idle_process(), Duration::from_secs(30 * 60));
+        assert_eq!(config.screen_idle(), Duration::from_secs(2 * 60));
+        let short = StallConfig::KEYS
+            .iter()
+            .fold(config, |config, key| config.with_millis(key, 200));
+        for key in StallConfig::KEYS {
+            assert_eq!(
+                short.threshold(key),
+                Some(Duration::from_millis(200)),
+                "{key}"
+            );
+        }
+        assert_eq!(short.idle_without_receipt_secs, 1);
+        assert_eq!(short.turn_limits().silence(), Duration::from_millis(200));
+        assert_eq!(short.turn_limits().limit(), Duration::from_millis(200));
+        let json = serde_json::to_value(short).unwrap();
+        assert_eq!(json["send_confirm_secs"], 1);
+        assert!(json.get("millis").is_none(), "{json}");
+        let long = config.with_millis("send_confirm_secs", 2500);
+        assert_eq!(long.send_confirm_secs, 3);
+        assert_eq!(long.send_confirm(), Duration::from_millis(2500));
+        let mut again = long;
+        again.set("send_confirm_secs", 2).unwrap();
+        assert_eq!(again.send_confirm(), Duration::from_secs(2));
+        assert_eq!(
+            again,
+            StallConfig {
+                send_confirm_secs: 2,
+                ..config
+            }
+        );
+        let mut config = config;
+        assert_eq!(config.set_millis("other", 1), None);
+        assert_eq!(config.threshold("other"), None);
+        assert_eq!(
+            StallConfig {
+                screen_idle_secs: -1,
+                ..config
+            }
+            .screen_idle(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "other is not a [stall] setting")]
+    fn with_millis_takes_only_a_setting_of_the_table() {
+        let _ = StallConfig::default().with_millis("other", 1);
     }
 
     fn task(id: &str) -> BackgroundTask {

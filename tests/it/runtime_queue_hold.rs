@@ -205,10 +205,10 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
     let stop = Arc::new(AtomicBool::new(false));
     let options = SuperviseOptions {
         stop: stop.clone(),
-        stall: Some(dagq::domain::stall::StallConfig {
-            idle_without_receipt_secs: 1,
-            ..Default::default()
-        }),
+        stall: Some(
+            dagq::domain::stall::StallConfig::default()
+                .with_millis("idle_without_receipt_secs", 200),
+        ),
         ..supervise_options(2, false)
     };
     let supervisor = {

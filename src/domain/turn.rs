@@ -8,7 +8,10 @@
 //! next turn (a resume of the same session), and writes the run's idle
 //! marker when the turn's process ended ([`idle_marker`]).
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -88,31 +91,71 @@ impl TurnOutcome {
 
 /// The limits the wrapper holds a turn to: stopped after `silence_secs`
 /// without a line of output (for an agent whose output has a heartbeat),
-/// and after `limit_secs` in all.
+/// and after `limit_secs` in all. A test may set either in milliseconds
+/// (`silence_ms`, `limit_ms`; [`super::stall::StallConfig::with_millis`]),
+/// which then stand in for the seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnLimits {
     pub silence_secs: i64,
     pub limit_secs: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silence_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_ms: Option<u64>,
 }
 
 impl TurnLimits {
     /// The limits in `text` (the [`LIMITS_FILE`]), else `fallback`; a
-    /// value that is not positive keeps the fallback's.
+    /// value that is not positive keeps the fallback's, and a limit read
+    /// in seconds is in milliseconds only when `text` says so too.
     pub fn parse_or(text: Option<&str>, fallback: Self) -> Self {
         let Some(value) = text.and_then(|text| serde_json::from_str::<Value>(text).ok()) else {
             return fallback;
         };
-        let secs = |name: &str, default: i64| {
-            value[name]
-                .as_i64()
-                .filter(|&secs| secs > 0)
-                .unwrap_or(default)
+        let limit = |name: &str, ms_name: &str, default: i64, default_ms: Option<u64>| match value
+            [name]
+            .as_i64()
+            .filter(|&secs| secs > 0)
+        {
+            Some(secs) => (secs, value[ms_name].as_u64().filter(|&ms| ms > 0)),
+            None => (default, default_ms),
         };
+        let (silence_secs, silence_ms) = limit(
+            "silence_secs",
+            "silence_ms",
+            fallback.silence_secs,
+            fallback.silence_ms,
+        );
+        let (limit_secs, limit_ms) = limit(
+            "limit_secs",
+            "limit_ms",
+            fallback.limit_secs,
+            fallback.limit_ms,
+        );
         Self {
-            silence_secs: secs("silence_secs", fallback.silence_secs),
-            limit_secs: secs("limit_secs", fallback.limit_secs),
+            silence_secs,
+            limit_secs,
+            silence_ms,
+            limit_ms,
         }
     }
+
+    /// How long a turn may go without a line of output.
+    pub fn silence(&self) -> Duration {
+        duration(self.silence_secs, self.silence_ms)
+    }
+
+    /// How long a turn may run in all.
+    pub fn limit(&self) -> Duration {
+        duration(self.limit_secs, self.limit_ms)
+    }
+}
+
+fn duration(secs: i64, ms: Option<u64>) -> Duration {
+    ms.map_or_else(
+        || Duration::from_secs(u64::try_from(secs).unwrap_or(0)),
+        Duration::from_millis,
+    )
 }
 
 /// What the supervisor asks the session for next: the prompt of the next
@@ -522,6 +565,8 @@ mod tests {
         let fallback = TurnLimits {
             silence_secs: 900,
             limit_secs: 14400,
+            silence_ms: None,
+            limit_ms: Some(300),
         };
         assert_eq!(TurnLimits::parse_or(None, fallback), fallback);
         assert_eq!(TurnLimits::parse_or(Some("oops"), fallback), fallback);
@@ -529,8 +574,31 @@ mod tests {
             TurnLimits::parse_or(Some(r#"{"silence_secs": 2, "limit_secs": 0}"#), fallback),
             TurnLimits {
                 silence_secs: 2,
-                limit_secs: 14400
+                limit_secs: 14400,
+                silence_ms: None,
+                limit_ms: Some(300),
             }
+        );
+    }
+
+    /// A limit set in milliseconds (task 1045) reaches the wrapper through
+    /// the limits file and stands in for its seconds.
+    #[test]
+    fn limits_in_milliseconds_round_trip_and_stand_in_for_seconds() {
+        let limits = crate::domain::stall::StallConfig::default()
+            .with_millis("turn_silence_secs", 200)
+            .turn_limits();
+        assert_eq!(limits.silence_secs, 1);
+        assert_eq!(limits.silence(), Duration::from_millis(200));
+        assert_eq!(limits.limit(), Duration::from_secs(4 * 60 * 60));
+        let text = serde_json::to_string(&limits).unwrap();
+        assert!(!text.contains("limit_ms"), "{text}");
+        let fallback = crate::domain::stall::StallConfig::default().turn_limits();
+        assert_eq!(TurnLimits::parse_or(Some(&text), fallback), limits);
+        assert_eq!(
+            TurnLimits::parse_or(Some(r#"{"silence_secs": 1, "silence_ms": 0}"#), fallback)
+                .silence(),
+            Duration::from_secs(1)
         );
     }
 

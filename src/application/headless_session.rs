@@ -26,7 +26,7 @@ use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use super::{
@@ -698,8 +698,8 @@ impl<'a> Turns<'a> {
         let started = Instant::now();
         let mut last_output = Instant::now();
         let mut tail = Tail::default();
-        let silence = Duration::from_secs(u64::try_from(limits.silence_secs).unwrap_or(0));
-        let limit = Duration::from_secs(u64::try_from(limits.limit_secs).unwrap_or(0));
+        let silence = limits.silence();
+        let limit = limits.limit();
         let mut stop: Option<Stop> = None;
         loop {
             let lines = tail.read(self.files, stdout, false);

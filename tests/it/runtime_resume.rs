@@ -1652,10 +1652,9 @@ fn a_request_lost_twice_is_asked_to_the_inbox() {
         "until [ -f \"$EXIT\" ] || \"$DAGQ\" --db \"$DB\" asks --open | grep -q stalled; do sleep 0.05; done",
     );
     let options = SuperviseOptions {
-        stall: Some(dagq::domain::stall::StallConfig {
-            send_confirm_secs: 1,
-            ..Default::default()
-        }),
+        stall: Some(
+            dagq::domain::stall::StallConfig::default().with_millis("send_confirm_secs", 200),
+        ),
         ..supervise_options(4, true)
     };
     let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();

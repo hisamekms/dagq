@@ -140,7 +140,7 @@ fn views(
             },
             clock,
             planners_dir: &planners,
-            screen_idle_secs: SCREEN_IDLE_SECS,
+            screen_idle_threshold: Duration::from_secs(SCREEN_IDLE_SECS as u64),
             screen_idle: mode,
         },
         false,
