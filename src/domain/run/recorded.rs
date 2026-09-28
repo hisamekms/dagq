@@ -196,6 +196,7 @@ pub fn record_exhausted_resumes(
         "resumes": resumes.total(),
         "counted_resumes": resumes.counted,
         "conflict_only_resumes": resumes.conflict_only,
+        "kill_only_resumes": resumes.kill_only,
         "conflict_requests": resumes.conflict_requests,
         "previous_status": previous.as_str(),
         "status": run.status().as_str(),
@@ -500,6 +501,7 @@ mod tests {
         let resumes = ResumeCount {
             counted: 0,
             conflict_only: 5,
+            kill_only: 0,
             conflict_requests: 0,
             parked_for_conflict: true,
         };

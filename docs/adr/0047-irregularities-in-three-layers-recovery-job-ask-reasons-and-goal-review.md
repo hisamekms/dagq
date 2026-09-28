@@ -20,6 +20,7 @@ amended_by:
   - adr-t813-2
   - adr-t963-1
   - adr-t996-1
+  - adr-t946-1
 owners:
   - hisamekms
 tags:

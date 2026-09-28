@@ -89,7 +89,9 @@ use crate::domain::{
     measure::{ClaimAttributes, HostVersions, LoadSummary, LoadWindow},
     queue_hold::{HoldJob, Wall},
     recovery::{RecoveryAlert, RecoveryDecision, RecoveryVerdict, STUCK_EXIT_ACTIONS},
-    resume::{ResumeConfig, ResumeCount, inherits_on_exhaustion, is_inherit_retry},
+    resume::{
+        KILL_ONLY_RESUME_LIMIT, ResumeConfig, ResumeCount, inherits_on_exhaustion, is_inherit_retry,
+    },
     run_env::RUN_ENV_PROGRAM_KINDS,
     stall::{BackgroundTask, StallConfig},
     triage_state,

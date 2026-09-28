@@ -767,24 +767,39 @@ impl Supervisor<'_> {
 /// How often the run was resumed, for its used-up reason and ask: the
 /// counted resumes against [`MAX_RESUME_ATTEMPTS`], and the conflict-only
 /// ones against `config`'s limit (ADR-0047 decision 24) when there were any, with the conflict
-/// precheck's requests that shared their limit.
+/// precheck's requests that shared their limit, and the kill-only ones
+/// against [`KILL_ONLY_RESUME_LIMIT`] (ADR-t946-1).
 fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
     let limit = config.conflict_only_limit;
-    if resumes.conflict_attempts() == 0 {
+    let killed = if resumes.kill_only == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {} of at most {KILL_ONLY_RESUME_LIMIT} after a signal from outside killed its session",
+            resumes.kill_only
+        )
+    };
+    if resumes.conflict_attempts() == 0 && resumes.kill_only == 0 {
         format!(
             "resumed {} times (at most {MAX_RESUME_ATTEMPTS})",
             resumes.counted
         )
+    } else if resumes.conflict_attempts() == 0 {
+        format!(
+            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted{killed})",
+            resumes.total(),
+            resumes.counted,
+        )
     } else if resumes.conflict_requests == 0 {
         format!(
-            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted, and {} of at most {limit} for conflicts only after its review passed)",
+            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted{killed}, and {} of at most {limit} for conflicts only after its review passed)",
             resumes.total(),
             resumes.counted,
             resumes.conflict_only
         )
     } else {
         format!(
-            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted) and asked {} times by the conflict precheck ({} of at most {limit} attempts for conflicts only after its review passed)",
+            "resumed {} times ({} of at most {MAX_RESUME_ATTEMPTS} counted{killed}) and asked {} times by the conflict precheck ({} of at most {limit} attempts for conflicts only after its review passed)",
             resumes.total(),
             resumes.counted,
             resumes.conflict_requests,

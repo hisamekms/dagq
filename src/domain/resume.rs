@@ -1,9 +1,12 @@
 //! How the resumes of a `needs_session` run are counted, and when a run
 //! whose resumes are used up is retried with its branch carried over
-//! (ADR-0047 decision 24). Both are read from the run's events alone.
+//! (ADR-0047 decision 24, amended by ADR-t946-1). Both are read from the
+//! run's events alone.
 
 use super::{
-    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, event_kind, recheck,
+    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, event_kind,
+    reason::{event_code, explains_last_error},
+    recheck,
 };
 
 /// How many conflict-only attempts of one run the supervisor makes: the
@@ -16,9 +19,17 @@ use super::{
 /// sets.
 pub const CONFLICT_ONLY_RESUME_LIMIT: usize = 5;
 
+/// How many kill-only resumes of one run the supervisor makes: the resumes
+/// a recovery job's (or a person's) `resume` started after a signal from
+/// outside ended the session (`session_killed`), which the run did not
+/// cause. They are not [`MAX_RESUME_ATTEMPTS`], but a session that is
+/// killed again and again stops here (ADR-t946-1).
+pub const KILL_ONLY_RESUME_LIMIT: usize = 3;
+
 /// `[resume]` of `dagq.toml` (ADR-0047 decision 24): the limit of the
 /// conflict-only attempts of one run. The counted resumes'
-/// [`MAX_RESUME_ATTEMPTS`] is not configurable.
+/// [`MAX_RESUME_ATTEMPTS`] and the kill-only ones'
+/// [`KILL_ONLY_RESUME_LIMIT`] are not configurable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResumeConfig {
     /// The conflict-only attempts one run makes at most.
@@ -58,13 +69,18 @@ const PARKING: [&str; 7] = [
 /// approved (`integration_approved`, an `integrate` call or a person's
 /// `land`), whether its latest review passed, whether the latest parking
 /// event is a landing deferred for a rebase conflict or a landing recheck
-/// that found one, and whether it is that recheck (ADR-0068 decision 5).
+/// that found one, and whether it is that recheck (ADR-0068 decision 5);
+/// whether the latest parking event is a `resume` decided for a session a
+/// signal killed (ADR-t946-1), and the code of the run's `last_error` so
+/// far.
 #[derive(Debug, Clone, Copy, Default)]
 struct History {
     approved: bool,
     passed: bool,
     conflict: bool,
     rechecked: bool,
+    killed: bool,
+    error: Option<ReasonCode>,
 }
 
 impl History {
@@ -80,9 +96,28 @@ impl History {
                     "integration_deferred" | recheck::LANDING_RECHECK_FAILED
                 ) && event.payload["code"] == ReasonCode::RebaseConflict.as_str();
                 self.rechecked = kind == recheck::LANDING_RECHECK_FAILED;
+                // The recovery job's or a person's `resume` carries
+                // `triage_resume`; the error it replaces is what ended the
+                // run.
+                self.killed = matches!(kind, "triage_finished" | "triage_decided")
+                    && event_code(event) == Some(ReasonCode::TriageResume)
+                    && self.error == Some(ReasonCode::SessionKilled);
             }
+            // Only the resume right after the kill's `resume` is kill-only:
+            // a later one, with no kill in between, is judged as usual.
+            event_kind::RESUME_STARTED => self.killed = false,
             _ => {}
         }
+        if explains_last_error(event) {
+            self.error = event_code(event);
+        }
+    }
+
+    /// The run waits for a session only because a signal from outside
+    /// ended its session and the recovery job (or a person) resumed it
+    /// (ADR-t946-1): not a failure the run caused.
+    const fn kill_only(self) -> bool {
+        self.killed
     }
 
     /// The run waits for a session only because it conflicts with main,
@@ -151,6 +186,14 @@ pub fn parked_by_recheck(events: &[RunEvent]) -> bool {
     history(events).rechecked
 }
 
+/// Whether the run, as its events stand, waits for a session only because
+/// a signal from outside killed its session (ADR-t946-1): its next resume
+/// is not counted toward [`MAX_RESUME_ATTEMPTS`] but toward
+/// [`KILL_ONLY_RESUME_LIMIT`].
+pub fn parked_for_kill_only(events: &[RunEvent]) -> bool {
+    history(events).kill_only()
+}
+
 /// The resumes of one run (`resume_started` events), split by whether
 /// each counts toward [`MAX_RESUME_ATTEMPTS`], and the conflict precheck's
 /// requests to its live session, which share the conflict-only limit.
@@ -161,6 +204,9 @@ pub struct ResumeCount {
     /// Resumes of a run parked only by a rebase conflict after its review
     /// passed, fenced by [`ResumeConfig::conflict_only_limit`].
     pub conflict_only: usize,
+    /// Resumes of a run parked only because a signal from outside killed
+    /// its session (ADR-t946-1), fenced by [`KILL_ONLY_RESUME_LIMIT`].
+    pub kill_only: usize,
     /// The conflict precheck's resolution requests sent to the live
     /// session of a passed run (`conflict_precheck` with `requested: true`,
     /// but those a later one with `unsent: true` withdrew): conflicts only
@@ -182,6 +228,8 @@ impl ResumeCount {
             if event.kind == "resume_started" {
                 if history.conflict_only() {
                     count.conflict_only += 1;
+                } else if history.kill_only() {
+                    count.kill_only += 1;
                 } else {
                     count.counted += 1;
                 }
@@ -208,7 +256,7 @@ impl ResumeCount {
 
     /// Every resume started, counted or not: the number of the last one.
     pub const fn total(self) -> usize {
-        self.counted + self.conflict_only
+        self.counted + self.conflict_only + self.kill_only
     }
 
     /// How many counted resumes are left.
@@ -217,7 +265,8 @@ impl ResumeCount {
     }
 
     /// No further resume starts: the counted ones reached
-    /// [`MAX_RESUME_ATTEMPTS`], the conflict-only resumes
+    /// [`MAX_RESUME_ATTEMPTS`], the kill-only ones
+    /// [`KILL_ONLY_RESUME_LIMIT`], the conflict-only resumes
     /// `config`'s [`ResumeConfig::conflict_only_limit`], or, while the run is parked only by a
     /// conflict, the conflict-only attempts with the precheck's requests
     /// ([`Self::conflict_attempts`]) reached it. A run the requests brought
@@ -226,6 +275,7 @@ impl ResumeCount {
     pub const fn exhausted(self, config: ResumeConfig) -> bool {
         let limit = config.conflict_only_limit;
         self.counted >= MAX_RESUME_ATTEMPTS
+            || self.kill_only >= KILL_ONLY_RESUME_LIMIT
             || self.conflict_only >= limit
             || (self.parked_for_conflict && self.conflict_attempts() >= limit)
     }
@@ -316,6 +366,7 @@ mod tests {
             ResumeCount {
                 counted: 0,
                 conflict_only: 2,
+                kill_only: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
             }
@@ -394,6 +445,7 @@ mod tests {
             ResumeCount {
                 counted: 1,
                 conflict_only: 1,
+                kill_only: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
             }
@@ -448,6 +500,7 @@ mod tests {
         // conflict; the counted resumes' limit stays.
         let requests = ResumeCount {
             conflict_only: 1,
+            kill_only: 0,
             conflict_requests: 1,
             parked_for_conflict: true,
             ..Default::default()
@@ -485,6 +538,7 @@ mod tests {
             ResumeCount {
                 counted: 0,
                 conflict_only: 1,
+                kill_only: 0,
                 conflict_requests: 1,
                 parked_for_conflict: true,
             }
@@ -537,6 +591,137 @@ mod tests {
         assert!(!retried_with_inheritance(&run));
     }
 
+    fn killed() -> RunEvent {
+        event(
+            "supervision_finished",
+            json!({"status": "failed", "exit_code": 143, "code": "session_killed", "signal": 15}),
+        )
+    }
+
+    fn triage_resume() -> RunEvent {
+        event(
+            "triage_finished",
+            json!({"action": "resume", "code": "triage_resume"}),
+        )
+    }
+
+    #[test]
+    fn a_resume_after_a_kill_from_outside_is_not_counted() {
+        let events = [killed(), triage_resume(), resume()];
+        let count = ResumeCount::of(&events);
+        assert_eq!(
+            count,
+            ResumeCount {
+                counted: 0,
+                conflict_only: 0,
+                kill_only: 1,
+                conflict_requests: 0,
+                parked_for_conflict: false,
+            }
+        );
+        assert_eq!(count.total(), 1);
+        assert_eq!(count.left(), MAX_RESUME_ATTEMPTS);
+        assert!(!count.exhausted(ResumeConfig::default()));
+        assert!(parked_for_kill_only(&events[..2]));
+        assert!(!parked_for_kill_only(&events[..1]));
+        // A person's `resume` after the kill is not counted either.
+        let decided = [
+            killed(),
+            event(
+                "triage_decided",
+                json!({"answer": "resume", "code": "triage_resume"}),
+            ),
+            resume(),
+        ];
+        assert_eq!(ResumeCount::of(&decided).kill_only, 1);
+    }
+
+    #[test]
+    fn only_the_resume_right_after_a_kill_is_not_counted() {
+        // A resumed session that ends unresolved is resumed again, counted.
+        let events = [killed(), triage_resume(), resume(), resume(), resume()];
+        let count = ResumeCount::of(&events);
+        assert_eq!((count.kill_only, count.counted), (1, 2));
+        assert!(!parked_for_kill_only(&events[..3]));
+        // Another kill later is another kill-only resume.
+        let again = [
+            killed(),
+            triage_resume(),
+            resume(),
+            killed(),
+            triage_resume(),
+            resume(),
+        ];
+        assert_eq!(ResumeCount::of(&again).kill_only, 2);
+    }
+
+    #[test]
+    fn a_resume_after_another_failure_is_counted() {
+        let failed = event(
+            "supervision_finished",
+            json!({"status": "failed", "exit_code": 1, "code": "session_exit_code"}),
+        );
+        let events = [failed, triage_resume(), resume()];
+        assert_eq!(ResumeCount::of(&events).counted, 1);
+        assert!(!parked_for_kill_only(&events[..2]));
+        // A resume the recovery job decided without a kill before it, such
+        // as one after a later error, is counted.
+        let later = [
+            killed(),
+            event(
+                "runtime_error",
+                json!({"code": "backend_failed", "message": "x"}),
+            ),
+            triage_resume(),
+            resume(),
+        ];
+        assert_eq!(ResumeCount::of(&later).counted, 1);
+    }
+
+    #[test]
+    fn a_park_after_the_kills_resume_is_judged_by_its_own_reason() {
+        let events = [
+            killed(),
+            triage_resume(),
+            resume(),
+            event(
+                "integration_deferred",
+                json!({"code": "verification_failed"}),
+            ),
+            resume(),
+        ];
+        let count = ResumeCount::of(&events);
+        assert_eq!((count.counted, count.kill_only), (1, 1));
+        let conflicts = [
+            killed(),
+            triage_resume(),
+            resume(),
+            pass(),
+            conflict(),
+            resume(),
+        ];
+        let count = ResumeCount::of(&conflicts);
+        assert_eq!(
+            (count.counted, count.kill_only, count.conflict_only),
+            (0, 1, 1)
+        );
+    }
+
+    #[test]
+    fn kill_only_resumes_are_used_up_at_their_own_limit() {
+        let mut events = Vec::new();
+        for _ in 0..KILL_ONLY_RESUME_LIMIT {
+            events.extend([killed(), triage_resume(), resume()]);
+        }
+        let count = ResumeCount::of(&events);
+        assert_eq!(count.kill_only, KILL_ONLY_RESUME_LIMIT);
+        assert_eq!(count.counted, 0);
+        assert_eq!(count.left(), MAX_RESUME_ATTEMPTS);
+        assert!(count.exhausted(ResumeConfig::default()));
+        let fewer = ResumeCount::of(&events[..events.len() - 1]);
+        assert!(!fewer.exhausted(ResumeConfig::default()));
+    }
+
     fn recheck(code: &str, action: &str) -> RunEvent {
         event(
             recheck::LANDING_RECHECK_FAILED,
@@ -557,6 +742,7 @@ mod tests {
             ResumeCount {
                 counted: 0,
                 conflict_only: 1,
+                kill_only: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
             }

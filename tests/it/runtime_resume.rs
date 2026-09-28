@@ -2134,3 +2134,69 @@ fn stats_ties_a_deferred_landing_to_the_landing_that_broke_it() {
         [json!(run.id().as_str())]
     );
 }
+
+/// A signal from outside killed the session (`session_killed`) and the
+/// recovery job resumed the run (ADR-t946-1): the resume is not one of the
+/// three counted attempts but a kill-only one, recorded as a repair, and
+/// the kill-only resumes stop at their own limit.
+#[test]
+fn resumes_after_kills_from_outside_are_not_counted_and_stop_at_their_own_limit() {
+    use dagq::domain::resume::{KILL_ONLY_RESUME_LIMIT, ResumeCount};
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let kill_and_resume = |queue: &mut SqliteQueue| {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::SupervisionFinished,
+                json!({"status": "failed", "exit_code": 143, "code": "session_killed", "signal": 15}),
+            )
+            .unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::TriageFinished,
+                json!({"status": "needs_session", "action": "resume", "reason": "killed", "code": "triage_resume"}),
+            )
+            .unwrap();
+        queue.begin_resume(
+            run.id(),
+            &LeaseToken::new("t"),
+            &sha(&first_landed),
+            None,
+            Default::default(),
+        )
+    };
+    for attempt in 1..=KILL_ONLY_RESUME_LIMIT {
+        let (_, started) = kill_and_resume(&mut queue).unwrap().unwrap();
+        assert_eq!(started, attempt);
+        // The session of the resume is gone: its lease with it.
+        Connection::open(&db)
+            .unwrap()
+            .execute("DELETE FROM run_leases", [])
+            .unwrap();
+    }
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let started = payloads(&detail, "resume_started");
+    assert_eq!(started.len(), KILL_ONLY_RESUME_LIMIT);
+    for payload in &started {
+        assert_eq!(payload["counted"], false, "{payload}");
+    }
+    let uncounted: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "kill_resume_uncounted")
+        .collect();
+    assert_eq!(uncounted.len(), KILL_ONLY_RESUME_LIMIT);
+    assert_eq!(uncounted[0]["conditions"]["parked"], "session_killed");
+    assert_eq!(uncounted[0]["conditions"]["counted_resumes"], 0);
+    assert_eq!(uncounted[2]["conditions"]["kill_only_resumes"], 3);
+    let count = ResumeCount::of(&queue.run_events(run.id()).unwrap());
+    assert_eq!(
+        (count.counted, count.kill_only),
+        (0, KILL_ONLY_RESUME_LIMIT)
+    );
+    // The next kill finds the kill-only resumes used up.
+    assert!(kill_and_resume(&mut queue).unwrap().is_none());
+}

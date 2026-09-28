@@ -197,7 +197,7 @@ pub fn event_code(event: &RunEvent) -> Option<ReasonCode> {
 
 /// Whether `event` is one that set its run's `last_error` or interrupted
 /// it: the events whose code explains the run's current error.
-fn explains_last_error(event: &RunEvent) -> bool {
+pub(crate) fn explains_last_error(event: &RunEvent) -> bool {
     let status = event.payload.get("status").and_then(Value::as_str);
     match event.kind.as_str() {
         "supervision_finished"

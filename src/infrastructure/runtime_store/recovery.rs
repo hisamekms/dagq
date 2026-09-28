@@ -269,7 +269,10 @@ impl SqliteQueue {
         // A resume of a run parked only by a conflict after its review
         // passed is not one of the counted attempts.
         let basis = resume::conflict_only_basis(&events);
-        let counted = basis.is_none();
+        // Nor is one the recovery job (or a person) decided after a signal
+        // from outside killed the session (ADR-t946-1).
+        let killed = basis.is_none() && resume::parked_for_kill_only(&events);
+        let counted = basis.is_none() && !killed;
         let Some(previous) = lease_parked_run(&tx, id, token, now, true)? else {
             return Ok(None);
         };
@@ -304,6 +307,23 @@ impl SqliteQueue {
                         "parked": ReasonCode::RebaseConflict,
                         "counted_resumes": resumes.counted,
                         "conflict_only_resumes": resumes.conflict_only + 1,
+                    },
+                    "detail": {"attempt": attempt, "main": main},
+                }),
+            )?;
+        }
+        if killed {
+            run_event(
+                &tx,
+                id,
+                EventKind::AutoRepaired,
+                json!({
+                    "layer": "runtime",
+                    "repair": "kill_resume_uncounted",
+                    "conditions": {
+                        "parked": ReasonCode::SessionKilled,
+                        "counted_resumes": resumes.counted,
+                        "kill_only_resumes": resumes.kill_only + 1,
                     },
                     "detail": {"attempt": attempt, "main": main},
                 }),
