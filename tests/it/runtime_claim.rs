@@ -1005,6 +1005,36 @@ fn no_ready_task_ends_a_once_pass_without_creating_a_run_or_lease() {
     assert!(queue.supervisors().unwrap().is_empty());
 }
 
+/// Wait until the heartbeat of the one registration, `registered`, is
+/// fresh again after a test set it to 0. Nothing in `supervise` removes or
+/// replaces its own row while it runs (the heartbeat only updates it; `up`
+/// and `down` prune), so an empty list is the gap between the supervisor
+/// deregistering and its thread ending, waited through. A supervisor that
+/// ended (a heartbeat failure keeps its row) fails with its own result
+/// instead of an index panic or a wait for nothing (task 722), and a row
+/// of another token or pid fails too.
+#[track_caller]
+fn wait_for_heartbeat(
+    db: &Path,
+    registered: &LeaseToken,
+    supervisor: &mut Option<thread::JoinHandle<Result<Value>>>,
+) {
+    let mut ended = false;
+    wait_until(db, Duration::from_secs(10), |queue| {
+        let fresh = queue.supervisors().unwrap().first().is_some_and(|row| {
+            assert_eq!(&row.token, registered, "another registration");
+            assert_eq!(row.pid, std::process::id(), "another process");
+            row.heartbeat_at > 0
+        });
+        ended = supervisor.as_ref().is_some_and(|s| s.is_finished());
+        fresh || ended
+    });
+    if ended {
+        let outcome = joined(supervisor.take().unwrap(), "the ended supervisor thread");
+        panic!("the supervisor ended while it was expected to heartbeat: {outcome:?}");
+    }
+}
+
 /// A resident supervisor that holds no run is still listed by `status` and
 /// `doctor` through its registration, which its heartbeat refreshes and a
 /// graceful stop removes.
@@ -1016,11 +1046,11 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
     assert_eq!(runtime::status(&db).unwrap()["supervisors"], json!([]));
     let backend = Arc::new(TestWorkspace::new(&db, true, VALID_AGENT));
     let options = supervise_options(3, false);
-    let supervisor = {
+    let mut supervisor = Some({
         let (db, repo, backend, options) =
             (db.clone(), repo.clone(), backend.clone(), options.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
+    });
     wait_until(&db, Duration::from_secs(10), |queue| {
         queue.supervisors().unwrap().len() == 1
     });
@@ -1048,13 +1078,11 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
         .unwrap()
         .execute("UPDATE supervisors SET heartbeat_at=0", [])
         .unwrap();
-    wait_until(&db, Duration::from_secs(10), |queue| {
-        queue.supervisors().unwrap()[0].heartbeat_at > 0
-    });
+    wait_for_heartbeat(&db, &registered.token, &mut supervisor);
     assert!(queue.run_leases().unwrap().is_empty());
 
     options.stop.store(true, Ordering::SeqCst);
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    let outcome = joined(supervisor.unwrap(), "the supervisor thread to return").unwrap();
     assert_eq!(outcome["outcome"], "stopped");
     assert_eq!(outcome["runs"], json!([]));
     assert!(queue.supervisors().unwrap().is_empty());
@@ -1069,14 +1097,15 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
     // out of the loop itself (here: main names no commit) ends the process
     // with nothing active, so it deregisters too.
     let options = supervise_options(1, false);
-    let supervisor = {
+    let mut supervisor = Some({
         let (db, repo, backend, options) =
             (db.clone(), repo.clone(), backend.clone(), options.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
-    };
+    });
     wait_until(&db, Duration::from_secs(10), |queue| {
         queue.supervisors().unwrap().len() == 1
     });
+    let registered = queue.supervisors().unwrap().remove(0).token;
     git(&repo, &["update-ref", "-d", "refs/heads/main"]);
     queue
         .transition(TaskId::new(1), TaskAction::BypassReview)
@@ -1087,9 +1116,7 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
             .unwrap()
             .execute("UPDATE supervisors SET heartbeat_at=0", [])
             .unwrap();
-        wait_until(&db, Duration::from_secs(10), |queue| {
-            queue.supervisors().unwrap()[0].heartbeat_at > 0
-        });
+        wait_for_heartbeat(&db, &registered, &mut supervisor);
     }
     assert!(queue.show(TaskId::new(1)).unwrap().runs.is_empty());
     let blob = Command::new("git")
@@ -1109,7 +1136,7 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
     .unwrap();
     let error = format!(
         "{:#}",
-        joined(supervisor, "the supervisor thread to return").unwrap_err()
+        joined(supervisor.unwrap(), "the supervisor thread to return").unwrap_err()
     );
     assert!(error.contains("Needed a single revision"), "{error}");
     assert!(queue.supervisors().unwrap().is_empty());
