@@ -1,7 +1,7 @@
 //! Runtime tests: the limit of the conflict precheck's requests to the live
 //! session of a passed run (ADR-0027 decision 4), which are conflict-only
 //! attempts after a passed review (ADR-0047 decision 24, task 511).
-use crate::runtime_review::{moving_main_then_pass, rebasing_agent};
+use crate::runtime_review_conflict::{moving_main_then_pass, rebasing_agent};
 use crate::runtime_support;
 use dagq::domain::EventKind;
 
