@@ -1697,9 +1697,20 @@ pub trait RunLog {
     ) -> Result<Vec<RunEvent>>;
     /// Record `requester`, a headless job whose verdict the caller
     /// applies, as `requested_by` on the events written until it is
-    /// cleared with `None` (ADR-t728-1 decision 1, task 730). A store that
-    /// records no actors ignores it.
-    fn request_as(&self, _requester: Option<&crate::domain::actor::ActorContext>) {}
+    /// replaced (ADR-t728-1 decision 1, task 730), and return
+    /// the `requested_by` it replaces, for the caller to put back with
+    /// [`RunLog::restore_request`] so a nested request does not clear the
+    /// outer one (task 783). A store that records no actors ignores it and
+    /// returns `None`.
+    fn request_as(
+        &self,
+        _requester: Option<&crate::domain::actor::ActorContext>,
+    ) -> Option<String> {
+        None
+    }
+    /// Put back the `requested_by` [`RunLog::request_as`] returned. A store
+    /// that records no actors ignores it.
+    fn restore_request(&self, _previous: Option<String>) {}
     /// Record `actor` as the actor of the events written from now on and
     /// return the one it replaces, for the [`super::integrate::Integrator`]
     /// to write the landing as itself (ADR-t728-2). A store that records no

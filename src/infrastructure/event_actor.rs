@@ -76,10 +76,11 @@ impl EventActors {
         lock(&self.0).actor.clone()
     }
 
-    /// Record `requester` (a headless job whose verdict is being applied)
-    /// on the events written until it is cleared with `None`.
-    pub(super) fn request(&self, requester: Option<&ActorContext>) {
-        lock(&self.0).requested_by = requester.map(|actor| actor.actor_id().to_owned());
+    /// Record `requested_by` (the id of a headless job whose verdict is
+    /// being applied) on the events written until it is replaced; the one
+    /// it replaces, to be put back when the request ends (task 783).
+    pub(super) fn request(&self, requested_by: Option<String>) -> Option<String> {
+        std::mem::replace(&mut lock(&self.0).requested_by, requested_by)
     }
 }
 

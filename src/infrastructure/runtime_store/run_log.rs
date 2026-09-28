@@ -712,8 +712,12 @@ impl RunLog for SqliteQueue {
     ) -> Result<Vec<RunEvent>> {
         SqliteQueue::events_of_between(self, kinds, after, upto, limit)
     }
-    fn request_as(&self, requester: Option<&crate::domain::actor::ActorContext>) {
-        self.actors.request(requester);
+    fn request_as(&self, requester: Option<&crate::domain::actor::ActorContext>) -> Option<String> {
+        self.actors
+            .request(requester.map(|actor| actor.actor_id().to_owned()))
+    }
+    fn restore_request(&self, previous: Option<String>) {
+        self.actors.request(previous);
     }
     fn act_as(
         &self,

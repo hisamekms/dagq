@@ -47,8 +47,8 @@ use tracing::{error, info, warn};
 use super::{
     AgentProvider, AgentSignals, AskQuery, CommandSpec, Exhaustion, Generators, IdleHook,
     InputSource, LeasedRun, MainRemote, ProcessControl, Queue, QueueOpener, Repository,
-    ResumeCandidate, RunFiles, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction, Validation,
-    Verifier, WorkerAdapters, WorkspaceBackend,
+    ResumeCandidate, RunFiles, RunLog, Spawned, Spawner, Streams, TRIAGE_ASKER, TriageAction,
+    Validation, Verifier, WorkerAdapters, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
         WorkspaceAccess,
@@ -1607,16 +1607,15 @@ impl Supervisor<'_> {
     }
     /// Apply what the headless job `job` returned: the events written
     /// meanwhile record the supervisor as their actor and the job as
-    /// `requested_by` (ADR-t728-1 decision 1, task 730).
+    /// `requested_by` (ADR-t728-1 decision 1, task 730). On the way out,
+    /// whether `apply` failed or not, `requested_by` goes back to what it
+    /// was, so a nested `for_job` leaves the outer job's (task 783).
     pub(super) fn for_job<T>(
         &mut self,
         job: &ActorContext,
         apply: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        self.queue.request_as(Some(job));
-        let result = apply(self);
-        self.queue.request_as(None);
-        result
+        requested_by_job(self, |sv| &*sv.queue, job, apply)
     }
     /// Close the review span of `run` when its job ended without a verdict
     /// or could not start: `review_failed` waits for the session's `/exit`,
@@ -2489,5 +2488,75 @@ fn close_workspace(
                 &reason_of_error(&error, ReasonCode::BackendFailed),
             )
         }
+    }
+}
+
+/// Run `apply` on `state` with `job` as the `requested_by` of the events
+/// its queue (`log`) writes, and put back the `requested_by` it replaced
+/// afterwards, whatever `apply` returned (task 783).
+fn requested_by_job<S: ?Sized, T>(
+    state: &mut S,
+    log: impl Fn(&S) -> &dyn RunLog,
+    job: &ActorContext,
+    apply: impl FnOnce(&mut S) -> Result<T>,
+) -> Result<T> {
+    let previous = log(state).request_as(Some(job));
+    let result = apply(state);
+    log(state).restore_request(previous);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        domain::actor::{ActorContext, ActorRole},
+        infrastructure::sqlite::SqliteQueue,
+    };
+
+    #[test]
+    fn a_nested_job_request_gives_the_outer_one_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db"))
+            .unwrap()
+            .with_actor(ActorContext::instance(ActorRole::Supervisor, 42));
+        let outer = ActorContext::review_job(&RunId::new("r1").unwrap(), 1);
+        let inner = ActorContext::review_job(&RunId::new("r2").unwrap(), 3);
+        fn log(queue: &SqliteQueue) -> &dyn RunLog {
+            queue
+        }
+        let result: Result<()> = requested_by_job(&mut queue, log, &outer, |queue| {
+            let inner_result: Result<()> = requested_by_job(queue, log, &inner, |queue| {
+                queue.record_queue_event("observe_started", json!({}))?;
+                anyhow::bail!("the inner apply failed")
+            });
+            assert!(inner_result.is_err());
+            queue.record_queue_event("observe_finished", json!({}))?;
+            Ok(())
+        });
+        result.unwrap();
+        queue
+            .record_queue_event("backend_call_failed", json!({}))
+            .unwrap();
+        let requested_by = |kind: &str| {
+            queue
+                .latest_event_of(kind)
+                .unwrap()
+                .unwrap()
+                .actor
+                .unwrap()
+                .requested_by
+        };
+        assert_eq!(
+            requested_by("observe_started").as_deref(),
+            Some("review-job:r2:3")
+        );
+        assert_eq!(
+            requested_by("observe_finished").as_deref(),
+            Some("review-job:r1:1")
+        );
+        assert_eq!(requested_by("backend_call_failed"), None);
     }
 }

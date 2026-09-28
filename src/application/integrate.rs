@@ -279,11 +279,11 @@ impl Integrator {
     ) -> Result<IntegrationOutcome> {
         let grant = self.push_grant()?;
         let previous = ctx.queue.act_as(self.actor.clone());
-        ctx.queue.request_as(Some(&request.requester));
+        let requested_by = ctx.queue.request_as(Some(&request.requester));
         let landed = self
             .check(&mut *ctx.queue, request)
             .and_then(|()| land_integrating(ctx, &grant, request));
-        ctx.queue.request_as(None);
+        ctx.queue.restore_request(requested_by);
         if let Some(previous) = previous {
             ctx.queue.act_as(previous);
         }
