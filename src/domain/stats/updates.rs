@@ -1,6 +1,7 @@
 //! The automatic update of the fixed binary (ADR-0073 decision 17, task
 //! 496): its `update_*` queue events of the window by kind, the failures by
-//! the stage they failed at, and the builds installed, so how often the
+//! the stage they failed at, the builds installed and apart from them the
+//! releases a plugin-only job brought the plugin to, so how often the
 //! binary was replaced and how often it failed can be read next to the
 //! runs. Derived from `run_events` like the rest of `stats`.
 use std::collections::BTreeMap;
@@ -19,13 +20,32 @@ use super::{
 pub struct UpdateStats {
     /// Every `update_*` event.
     pub count: i64,
-    /// Those by kind (`update_started`, `update_installed`, ...).
+    /// Those by kind (`update_started`, `update_installed`, ...); a
+    /// plugin-only job's `update_installed` (`plugin_only: true`) counts
+    /// under [`PLUGIN_ONLY_INSTALLED`] instead, as it replaced no binary.
     pub by_kind: BTreeMap<String, i64>,
     /// The `update_failed` events by `stage` (`build`, `check`, `install`,
-    /// `watch`, `interrupted`).
+    /// `handoff`, `watch`, `plugin`, `interrupted`).
     pub failed_by_stage: BTreeMap<String, i64>,
     /// The build identifiers `update_installed` put in place, oldest first.
+    /// A plugin-only job's install is not among them.
     pub installed: Vec<String>,
+    /// The releases a plugin-only job brought the installed plugin to
+    /// (`update_installed` with `plugin_only: true`), oldest first.
+    pub plugin_installed: Vec<String>,
+}
+
+/// The `by_kind` key of a plugin-only job's `update_installed`, which
+/// brought the plugin to a release without replacing the binary.
+pub const PLUGIN_ONLY_INSTALLED: &str = "update_installed_plugin_only";
+
+/// Whether `event` is a plugin-only job's step (`plugin_only: true`).
+pub fn plugin_only(event: &RunEvent) -> bool {
+    event
+        .payload
+        .get("plugin_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Count the `update_*` events with `after < id <= upto`. They belong to no
@@ -44,7 +64,13 @@ pub fn updates(
             && counts(event.task_id)
     }) {
         stats.count += 1;
-        *stats.by_kind.entry(event.kind.clone()).or_default() += 1;
+        let plugin_only = event.kind == UPDATE_INSTALLED && plugin_only(event);
+        let kind = if plugin_only {
+            PLUGIN_ONLY_INSTALLED
+        } else {
+            event.kind.as_str()
+        };
+        *stats.by_kind.entry(kind.to_owned()).or_default() += 1;
         let text = |key: &str| event.payload.get(key).and_then(Value::as_str);
         match event.kind.as_str() {
             UPDATE_FAILED => {
@@ -53,6 +79,9 @@ pub fn updates(
                     .entry(text("stage").unwrap_or(UNKNOWN).to_owned())
                     .or_default() += 1;
             }
+            UPDATE_INSTALLED if plugin_only => stats
+                .plugin_installed
+                .push(text("version").unwrap_or(UNKNOWN).to_owned()),
             UPDATE_INSTALLED => stats
                 .installed
                 .push(text("version").unwrap_or(UNKNOWN).to_owned()),
@@ -113,5 +142,33 @@ mod tests {
             task.is_some()
         });
         assert_eq!(goal, UpdateStats::default());
+    }
+
+    /// A plugin-only job's `update_installed` counts apart from the binary
+    /// installs: under its own `by_kind` key and in `plugin_installed`.
+    #[test]
+    fn a_plugin_only_install_counts_apart_from_the_binary_installs() {
+        let events = [
+            event(1, "update_installed", json!({"version": "0.5.0"})),
+            event(
+                2,
+                "update_installed",
+                json!({"version": "0.5.0", "plugin_only": true, "plugin": "0.5.0"}),
+            ),
+            event(
+                3,
+                "update_installed",
+                json!({"version": "0.5.1", "plugin_only": false}),
+            ),
+        ];
+        let stats = updates(&events, EventId::new(0), EventId::new(3), |_| true);
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.by_kind["update_installed"], 2);
+        assert_eq!(stats.by_kind[PLUGIN_ONLY_INSTALLED], 1);
+        assert_eq!(
+            stats.installed,
+            vec!["0.5.0".to_owned(), "0.5.1".to_owned()]
+        );
+        assert_eq!(stats.plugin_installed, vec!["0.5.0".to_owned()]);
     }
 }

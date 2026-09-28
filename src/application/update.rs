@@ -188,9 +188,11 @@ pub fn job_pid(update: &RunEvent) -> Option<u32> {
 
 /// The automatic update as `status` shows it: whether a live supervisor has
 /// it on, and where the latest update stands (`state`: `building`,
-/// `installing`, `interrupted` when its job died, `installed`, `failed`,
-/// `awaiting_approval`, `retry_requested`, `skipped`; `idle` when none
-/// ran), with its commit, time and details. `updates` is newest first.
+/// `installing`, `interrupted` when its job died, `installed`,
+/// `plugin_installed` when a plugin-only job brought the plugin to a
+/// release without replacing the binary, `failed`, `awaiting_approval`,
+/// `retry_requested`, `skipped`; `idle` when none ran), with its commit,
+/// time and details. `updates` is newest first.
 pub fn status(
     registrations: &[SupervisorRegistration],
     updates: &[RunEvent],
@@ -214,6 +216,9 @@ pub fn status(
         UPDATE_BUILT if in_progress(latest, processes) => "installing",
         UPDATE_RESTORED if in_progress(latest, processes) => "restoring",
         UPDATE_STARTED | UPDATE_BUILT | UPDATE_RESTORED => "interrupted",
+        UPDATE_INSTALLED if crate::domain::stats::updates::plugin_only(latest) => {
+            "plugin_installed"
+        }
         UPDATE_INSTALLED => "installed",
         UPDATE_FAILED => "failed",
         UPDATE_AWAITING_APPROVAL => "awaiting_approval",
@@ -1279,5 +1284,59 @@ mod tests {
         assert_eq!(build_commit("0.4.0-dev+abc123.dirty"), Some("abc123"));
         assert_eq!(build_commit("0.4.0-dev+unknown"), None);
         assert_eq!(build_commit("0.4.0"), None);
+    }
+
+    /// No process is alive.
+    struct NoneAlive;
+
+    impl ProcessControl for NoneAlive {
+        fn alive(&self, _: u32) -> bool {
+            false
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn update(id: i64, kind: &str, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: "2026-09-28T01:00:00.000Z".to_owned(),
+            actor: None,
+        }
+    }
+
+    /// The latest `update_installed` of a plugin-only job shows as
+    /// `plugin_installed`; one that replaced the binary as `installed`.
+    #[test]
+    fn status_tells_a_plugin_only_install_from_a_binary_install() {
+        let state = |updates: &[RunEvent]| status(&[], updates, &NoneAlive, 0)["state"].clone();
+        let binary = update(
+            1,
+            UPDATE_INSTALLED,
+            json!({"pid": 7, "source": "release", "release": "0.5.0", "version": "0.5.0"}),
+        );
+        let plugin = update(
+            2,
+            UPDATE_INSTALLED,
+            json!({"pid": 8, "source": "release", "release": "0.5.0", "version": "0.5.0",
+                   "plugin_only": true, "plugin": "0.5.0"}),
+        );
+        assert_eq!(state(std::slice::from_ref(&binary)), "installed");
+        assert_eq!(state(&[plugin.clone(), binary.clone()]), "plugin_installed");
+        let status = status(&[], &[plugin], &NoneAlive, 0);
+        assert_eq!(status["last"]["plugin_only"], true);
+        assert_eq!(status["enabled"], false);
     }
 }
