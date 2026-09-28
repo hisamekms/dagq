@@ -51,7 +51,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 "$DAGQ" add "TITLE" --goal 1 \
   --description "..." --acceptance "..." --context "..." \
   --verify "cargo fmt --all --check" --verify "cargo test --locked" \
-  --evidence e2e --change feature --depends-on 3
+  --change feature --depends-on 3
 "$DAGQ" lint ID...               # the fixed rules; each violation {code, task_id, reason}
 "$DAGQ" submit ID...             # or --goal GOAL; prints the proposal
 "$DAGQ" candidates

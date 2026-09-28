@@ -18,7 +18,7 @@ Split the goal into tasks, each one session in one worktree. Collect per task:
 - verification commands (run by `integrate` after its rebase; repeat `--verify`)
 - dependencies (tasks that must be `completed` first, repeat `--depends-on`; to wait for another goal, `--depends-on-goal ID`: claimed only once that goal is closed `achieved`, `reference/inspect.md`)
 - `--context` (why it exists, what to read first)
-- `--evidence` (receipt checks to report `passed` with evidence: `tests`, `e2e`, `subagent_review`). A missing one parks the run (`evidence_missing`).
+- `--evidence` (receipt checks to report `passed` with evidence: `tests`, `e2e`, `subagent_review`). A missing one parks the run (`evidence_missing`). When `dagq.toml` has `[e2e] paths`, validating also requires `e2e` of a run whose diff touches them, so a task needs `--evidence e2e` only when the real cmux must check it whatever its diff (`reference/scope.md`).
 - `--paths GLOB` (repeatable) limits what a task may change: a run changing more parks (`scope_violation`).
 - `--change CHANGE`: the kind of change the task makes (a lowercase label, ADR-t980-1). When the repository's `dagq.toml` lists `[tasks] changes`, give one of them: `add` / `edit` refuse another value, and `lint` (`missing_change`) and `submit` refuse a task without one. Without the list it is optional.
 

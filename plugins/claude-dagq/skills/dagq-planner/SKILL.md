@@ -13,7 +13,7 @@ Which planner you are is in your initial prompt: opened by a person (they are at
 
 ## 1. Plan with the person and submit
 
-Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--change` per AGENTS.md; no `--kind`, which is going away). Before each `add`, `"$DAGQ" search`; after it, `"$DAGQ" related ID`; cancel a duplicate or done work with `cancel ID --duplicate-of X`. Files to name, goal dependencies, `set-paths`: `skills/dagq/reference/register.md`, "For a planner". Check the order with `"$DAGQ" graph --goal ID`, then lint and submit once the person agrees:
+Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) unless it is a one-shot task, and tasks with `add --goal` (acceptance, verification, dependencies, context, `--paths`, `--evidence`, `--change` per AGENTS.md; `e2e` comes from the diff and `dagq.toml`'s `[e2e] paths`, not a blanket `--evidence e2e`; no `--kind`, which is going away). Before each `add`, `"$DAGQ" search`; after it, `"$DAGQ" related ID`; cancel a duplicate or done work with `cancel ID --duplicate-of X`. Files to name, goal dependencies, `set-paths`: `skills/dagq/reference/register.md`, "For a planner". Check the order with `"$DAGQ" graph --goal ID`, then lint and submit once the person agrees:
 
 ```sh
 "$DAGQ" lint TASK...            # or --proposal ID; fix every violation first
