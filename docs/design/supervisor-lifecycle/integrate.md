@@ -4,8 +4,8 @@ type: design
 title: "`integrate`"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-28
+last_verified: 2026-09-28
 scope: runtime
 related:
   - adr-t728-2
@@ -51,6 +51,8 @@ related:
 - 分類の集合（`disk_full`・`killed`・`timeout`）は人の判断なしに広げない（ADR-t639-1）
 
 **不安定なtestの着地のやり直し**（task 768、[ADR-t768-1](../../adr/2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md)）: `.config/nextest.toml`の`[profile.default]`は`retries = 1`と`flaky-result = "fail"`を持ち、nextestは落ちたtestを1回だけ流し直す。流し直して通ったtestは`TRY 2 PASS`と、終わりの一覧に`FLKY-FL 2/2`と出るが、runは失敗（exit 100）のままで、関門は通らない。nextestの設定に置くので`integrate`の`cargo llvm-cov nextest`だけでなく、CI・人の手元・workerのstress（`cargo nextest run --stress-count`）にも同じく効く（`[run.env]`や`integrate`の引数に置かないのは、不安定なtestをどこでも同じ印で見えるようにするため。`NEXTEST_RETRIES`・`NEXTEST_FLAKY_RESULT`で上書きできる）。`cargo test`（nextestでないもの）の検証には効かず、`flaky`にもならない。
+
+`[profile.default]`は`fail-fast = false`も持ち（task 777）、nextestは最初の失敗で新しいtestの開始を止めず（`Cancelling due to test failure`にならず）、全部のtestを流しきる。`flaky-result = "fail"`の下ではFLAKYのtestも失敗と数えるので、既定のfail-fastではFLAKYが1件出た時点で残りのtestが始まらず、同じ回の本当の失敗（流し直しても落ちるtest）がlogに出ないまま、落ちたtestが全てFLAKYとして`flaky`に分類されうる。流しきるので、`flaky`の判定（落ちたtestが全て`flaky_tests`にある）はその回の全部のtestの結果に対して行われ、本当の失敗を見落として着地のやり直しに回すことはない（やり直しで初めて見つかってresumeが1往復遅れることもない）。本当の失敗が複数あれば、resumeされたsessionは1回の検証のlogで全部を見られる。費用は失敗する検証だけにかかり、fail-fastなら止まっていた時点からtest段の終わりまでの分で、1回の失敗した検証あたり最大でtest段1回分（`NEXTEST_TEST_THREADS = "8"`で中央値約160秒。[nextestの測定](../../plans/nextest-measurement.md)）。流し直すのは落ちたtestだけなので、加わるのはその分だけ。通る検証と、buildが落ちてtestを流さない検証の時間は変わらない。`NEXTEST_FAIL_FAST`か`--fail-fast` / `--no-fail-fast`で上書きできる。
 
 - 検証コマンドの失敗の`class`が`flaky`（落ちたtestの名前が全て`flaky_tests`にあり、20件を超えて切れていない）で、このrunにまだ`integration_retried`が無ければ、`needs_session`にせず`integration_retried`（code `verification_flaky`、`index`、`main`、`head`、`attempt`（落ちた試行）、`command`、`exit_code`、`failure`、`failed_tests`、`flaky_tests`、`log_path`、`reason`）を記録し、同じ着地の中で検証をもう1回やり直す。receiptの照合とrebaseはやり直さない（rebaseがrun branchをreceiptの`commit`の先へ動かしているので、照合し直すと`commit_mismatch`になる）。runは`integrating`のまま、同じslotとleaseで、rebase後の同じhead（`head`）に対して続けるので、supervisorの着地でも人の`integrate`でも同じに動き、resumeの回数（`resume_started`）もsessionも使わない。main headは着地の開始時のまま（slotを持つ間はmainは動かない）
 - やり直しは新しい試行（`attempt`が1つ進み、logは`integrate-<attempt+1>-verify-N.log`）で、検証コマンドを最初から全部流す（`land`の検証のloop）

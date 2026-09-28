@@ -10,6 +10,14 @@
 [profile.default]
 retries = 1
 flaky-result = "fail"
+# 最初の失敗で新しい test の開始を止めず、全部の test を流しきる（task 777）。
+# flaky-result = "fail" の下では FLAKY の test も失敗と数えるので、既定の fail-fast
+# だと FLAKY が 1 件出た時点で残りが Cancelling になり、同じ回の本当の失敗が
+# 見えないまま「落ちた test が全て FLAKY」と判定されて着地がやり直され、やり直しで
+# 初めて見つかる（resume が 1 往復遅れる）。本当の失敗が複数あっても、resume された
+# worker は 1 回の log で全部を見られる。費用は失敗した検証が test 段を最後まで流す分
+# （最大で test 段 1 回分、中央値は約 160 秒）で、通る検証の時間は変わらない。
+fail-fast = false
 # 60 秒を超えた test を SLOW と出すだけで、打ち切らない（決定 6）。test の上限は
 # tests/common/mod.rs の within（TEST_LIMIT 600 秒・STEP_LIMIT 300 秒）が持つので、
 # terminate-after は置かず、その上限より先に nextest が test を止めることはない。
