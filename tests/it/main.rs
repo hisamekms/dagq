@@ -84,6 +84,7 @@ mod runtime_release;
 mod runtime_repair;
 mod runtime_report;
 mod runtime_resume;
+mod runtime_resume_adopt;
 mod runtime_review;
 mod runtime_review_adopt;
 mod runtime_review_questions;

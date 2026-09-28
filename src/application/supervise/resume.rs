@@ -465,7 +465,9 @@ impl Supervisor<'_> {
     /// process started: after a handoff from its `handoff.json`, after an
     /// adoption from the run's events ([`Self::adopt_resume`]). Nothing is
     /// sent or asked twice: the request only when `message_sent_at` is
-    /// unknown, never a second `/exit` (its timeout restarts now).
+    /// unknown, never a second `/exit` (its timeout restarts now), and a
+    /// dialog recorded during the resume is not recorded again
+    /// ([`SessionWatch::adopt`]).
     pub(super) fn rebuilt_resume(
         &mut self,
         run: &TaskRun,
@@ -487,12 +489,27 @@ impl Supervisor<'_> {
         // Answers and dialogs are followed from the request on; an answer
         // typed since closed its ask, which moves the last input on
         // (ADR-0071 decision 17).
-        let live = Box::new(SessionWatch::fixing(
+        let mut live = Box::new(SessionWatch::fixing(
             run,
             &workspace,
             message_sent_at.unwrap_or(started_at),
             Stage::Resume,
         )?);
+        // The dialog and the recovery jobs the previous process recorded
+        // during this resume carry over, as for an adopted revise: the
+        // anchor is the `resume_started` of the attempt (task 743).
+        if let Some(anchor) = self
+            .queue
+            .run_events(run.id())?
+            .iter()
+            .rfind(|e| {
+                e.kind == event_kind::RESUME_STARTED
+                    && e.payload["attempt"].as_u64() == Some(attempt as u64)
+            })
+            .map(|e| e.id)
+        {
+            live.adopt(&*self.queue, run, anchor)?;
+        }
         Ok(ResumeWatch {
             live,
             stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,

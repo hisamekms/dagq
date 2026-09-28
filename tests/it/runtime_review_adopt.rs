@@ -7,7 +7,7 @@ use runtime_support::*;
 use sha2::Digest;
 
 /// A dialog screen as Claude Code draws it.
-const DIALOG_SCREEN: &str = "\
+pub(crate) const DIALOG_SCREEN: &str = "\
  Auto mode is available
 
  ❯ 1. Yes, turn on auto mode
@@ -18,7 +18,7 @@ const DIALOG_SCREEN: &str = "\
 
 /// The `screen_hash` the supervisor records for `screen`: the digest of its
 /// excerpt, the last non-empty lines right-trimmed.
-fn screen_hash(screen: &str) -> String {
+pub(crate) fn screen_hash(screen: &str) -> String {
     let excerpt = screen
         .lines()
         .map(str::trim_end)

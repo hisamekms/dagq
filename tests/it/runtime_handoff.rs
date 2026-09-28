@@ -13,7 +13,7 @@ fn only_registration(db: &Path) -> dagq::domain::SupervisorRegistration {
 
 /// Supervise until `condition` holds on the queue, then ask the supervisor
 /// to hand off (ADR-0045 decision 10) and return its outcome and token.
-fn hand_off_when(
+pub(crate) fn hand_off_when(
     db: &Path,
     repo: &Path,
     backend: &Arc<TestWorkspace>,
