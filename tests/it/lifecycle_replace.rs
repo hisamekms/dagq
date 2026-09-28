@@ -1053,6 +1053,8 @@ fn gone_registration() -> dagq::domain::SupervisorRegistration {
         max_waiting: None,
         parallel_source: None,
         max_waiting_source: None,
+        runtime_planners: None,
+        runtime_planners_source: None,
         providers: None,
     }
 }
@@ -1129,6 +1131,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE tasks DROP COLUMN worker_mode;
              ALTER TABLE task_runs DROP COLUMN worker_mode;
              ALTER TABLE supervisors DROP COLUMN providers;
+             ALTER TABLE supervisors DROP COLUMN runtime_planners;
+             ALTER TABLE supervisors DROP COLUMN runtime_planners_source;
              PRAGMA user_version = 30;",
         )
         .unwrap();
@@ -1205,6 +1209,8 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              ALTER TABLE tasks DROP COLUMN worker_mode;
              ALTER TABLE task_runs DROP COLUMN worker_mode;
              ALTER TABLE supervisors DROP COLUMN providers;
+             ALTER TABLE supervisors DROP COLUMN runtime_planners;
+             ALTER TABLE supervisors DROP COLUMN runtime_planners_source;
              PRAGMA user_version = {};",
             auto_update - 1
         ))

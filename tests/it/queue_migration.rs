@@ -1451,22 +1451,20 @@ fn migration_dropping_every_check_keeps_rows_ids_indexes_triggers_and_keys() {
         assert!(!table_rows.is_empty(), "{table}");
     }
 
-    SqliteQueue::migrate(&path, None, 0).unwrap();
+    // This migration alone, as `migrate` applies each (foreign keys off
+    // around one transaction), so a later migration that adds a column
+    // does not change what is compared.
+    raw.pragma_update(None, "foreign_keys", false).unwrap();
+    raw.execute_batch(&format!(
+        "BEGIN IMMEDIATE; {} PRAGMA user_version = {}; COMMIT;",
+        MIGRATIONS[open],
+        open + 1
+    ))
+    .unwrap();
+    raw.pragma_update(None, "foreign_keys", true).unwrap();
     assert_eq!(checked(&raw), 0);
-    // Rows, ids, rowids and the AUTOINCREMENT sequences are kept; only the
-    // floor rises (breaking).
-    let floor_row = |rows: &[(String, Vec<String>)]| {
-        rows.iter()
-            .filter(|(name, _)| name != "schema_floor")
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    let after = all_rows(&raw);
-    assert_eq!(floor_row(&after), floor_row(&rows));
-    let floor: i64 = raw
-        .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
-        .unwrap();
-    assert!(floor > open as i64, "breaking: the floor rises to {floor}");
+    // Rows, ids, rowids and the AUTOINCREMENT sequences are kept.
+    assert_eq!(all_rows(&raw), rows);
     // Columns, NOT NULL, DEFAULT, keys, indexes and triggers are the same.
     assert_eq!(structure(&raw), before);
     let violations: i64 = raw
@@ -1475,6 +1473,12 @@ fn migration_dropping_every_check_keeps_rows_ids_indexes_triggers_and_keys() {
         })
         .unwrap();
     assert_eq!(violations, 0);
+    // The rest through `migrate`: the floor rises past it (breaking).
+    SqliteQueue::migrate(&path, None, 0).unwrap();
+    let floor: i64 = raw
+        .query_row("SELECT floor FROM schema_floor", [], |r| r.get(0))
+        .unwrap();
+    assert!(floor > open as i64, "breaking: the floor rises to {floor}");
 
     // The triggers still index, and the next id follows the deleted ask.
     let mut queue = SqliteQueue::open(&path).unwrap();

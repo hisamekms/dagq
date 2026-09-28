@@ -306,6 +306,8 @@ fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
         max_waiting: r.get("max_waiting")?,
         parallel_source: source(r, "parallel_source")?,
         max_waiting_source: source(r, "max_waiting_source")?,
+        runtime_planners: r.get("runtime_planners")?,
+        runtime_planners_source: source(r, "runtime_planners_source")?,
         // Unreadable JSON (another binary's shape) reads as none.
         providers: r
             .get::<_, Option<String>>("providers")?

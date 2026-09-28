@@ -1254,6 +1254,8 @@ fn killed_supervisor_registration_is_reported_stale_and_never_deleted() {
             "providers",
             "registered",
             "run_ids",
+            "runtime_planners",
+            "runtime_planners_source",
             "stale",
             "workspace_id"
         ]

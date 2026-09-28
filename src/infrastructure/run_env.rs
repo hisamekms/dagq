@@ -13,8 +13,8 @@
 //! back and the wait after each (ADR-0047 decision 25). `[worker.trial]` turns on the limited trial of the worker's model
 //! (ADR-0079 decision 4). `[roles.<role>]` holds the model and effort of a
 //! session other than the worker's (ADR-0079 decision 7). `[supervisor]`
-//! holds `parallel` and `max_waiting` of a supervisor started without the
-//! flags (task 698). The file is parsed by
+//! holds `parallel`, `max_waiting` and `runtime_planners` of a supervisor
+//! started without the flags (task 698, task 941). The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
 use anyhow::{Context, Result, bail, ensure};
@@ -74,7 +74,8 @@ const ROLES_TABLE: &str = "roles";
 /// [`super::language`] reads and checks it, so a mistake in it never stops
 /// a claim or a landing.
 const LANGUAGE_TABLE: &str = "language";
-/// `[supervisor]`: `parallel` and `max_waiting` (task 698).
+/// `[supervisor]`: `parallel` and `max_waiting` (task 698), and
+/// `runtime_planners` (task 941).
 const SUPERVISOR_TABLE: &str = "supervisor";
 const TABLES: [&str; 11] = [
     RUN_ENV_TABLE,
@@ -361,6 +362,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     let parallel = parse_positive(rest.trim(), "number").with_context(with)?;
                     config.supervisor.parallel =
                         Some(u16::try_from(parallel).with_context(with)?.into());
+                } else if key == "runtime_planners" {
+                    let planners = parse_positive(rest.trim(), "number").with_context(with)?;
+                    config.supervisor.runtime_planners =
+                        Some(u16::try_from(planners).with_context(with)?.into());
                 } else {
                     let limit = parse_whole(rest.trim()).with_context(with)?;
                     config.supervisor.max_waiting =
@@ -1420,13 +1425,14 @@ LITERAL = 'no \n escapes # here'
     #[test]
     fn parses_and_loads_the_supervisor_table() {
         let config =
-            parse_config("[supervisor] # slots\nparallel = 3 # build is heavy\nmax_waiting = 0\n")
+            parse_config("[supervisor] # slots\nparallel = 3 # build is heavy\nmax_waiting = 0\nruntime_planners = 2\n")
                 .unwrap();
         assert_eq!(
             config.supervisor,
             SupervisorConfig {
                 parallel: Some(3),
                 max_waiting: Some(0),
+                runtime_planners: Some(2),
             }
         );
         assert_eq!(
@@ -1436,6 +1442,7 @@ LITERAL = 'no \n escapes # here'
             SupervisorConfig {
                 parallel: None,
                 max_waiting: Some(2),
+                runtime_planners: None,
             }
         );
         assert_eq!(
@@ -1453,12 +1460,36 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[supervisor]\nmax_waiting =\n", "missing value"),
             (
+                "[supervisor]\nruntime_planners = 0\n",
+                "dagq.toml:2: value of runtime_planners",
+            ),
+            (
+                "[supervisor]\nruntime_planners = 0\n",
+                "must be a positive number",
+            ),
+            (
+                "[supervisor]\nruntime_planners = two\n",
+                "dagq.toml:2: value of runtime_planners",
+            ),
+            (
+                "[supervisor]\nruntime_planners = 1.5\n",
+                "value of runtime_planners",
+            ),
+            (
+                "[supervisor]\nruntime_planners = 70000\n",
+                "value of runtime_planners",
+            ),
+            (
+                "[supervisor]\nruntime_planners = 2\nruntime_planners = 3\n",
+                "dagq.toml:3: runtime_planners is defined twice",
+            ),
+            (
                 "[supervisor]\nparallel = 2\nparallel = 3\n",
                 "parallel is defined twice",
             ),
             (
                 "[supervisor]\nslots = 2\n",
-                "unknown key slots in [supervisor]; the keys are parallel, max_waiting",
+                "unknown key slots in [supervisor]; the keys are parallel, max_waiting, runtime_planners",
             ),
             (
                 "[supervisor]\n[supervisor]\n",
@@ -1480,6 +1511,7 @@ LITERAL = 'no \n escapes # here'
             Some(SupervisorConfig {
                 parallel: Some(2),
                 max_waiting: None,
+                runtime_planners: None,
             })
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();

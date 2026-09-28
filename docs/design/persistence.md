@@ -63,6 +63,7 @@ supervisors          -- 0007: 常駐superviseプロセスの登録（token主キ
                      -- 0009: mode（'launchd' | 'in_cmux' | null）とworkspace_id
                      -- 0045: parallel_sourceとmax_waiting_source（'flag' | 'dagq.toml' | 'default' | null。task 698）
                      -- 0048: providers（JSON。providerごとの実行ファイルの解決先・見つかったか・経路。null = 古いbinaryの登録。ADR-t813-2）
+                     -- 0051: runtime_plannersとruntime_planners_source（runtimeのplannerの上限と出どころ。null = 古いbinaryの登録。task 941）
 goals                -- 0008: 複数taskが解く課題（title、description、acceptance、constraints、doc、closed_at、verdict）
                      -- 0013: status（'draft' | 'open'、既定'open'）
                      -- 0021: proposal_id（所属するproposal、null可）

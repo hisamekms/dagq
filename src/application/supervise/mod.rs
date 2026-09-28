@@ -180,10 +180,12 @@ impl ObserveMode {
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
 #[derive(Debug, Clone)]
 pub struct LoopSettings {
-    /// Upper bound on runs executing at once (`parallel`), and on the runs
+    /// Upper bound on runs executing at once (`parallel`), on the runs
     /// waiting for a person outside the slots (`max_waiting`, ADR-0062
-    /// decision 7; zero keeps every run in its slot), with where each
-    /// comes from (task 698).
+    /// decision 7; zero keeps every run in its slot), and on the planners
+    /// the runtime has open at once (`runtime_planners`, ADR-0041 decision
+    /// 12; apart from the run slots, and planners a person opened do not
+    /// count), with where each comes from (task 698, task 941).
     pub limits: SlotLimits,
     /// The flags `limits` was resolved from: a value not given is read
     /// again from `[supervisor]` each pass.
@@ -211,10 +213,6 @@ pub struct LoopSettings {
     /// The thresholds of the `conflict_hotspot` alert, for the files the
     /// plan review is told conflict often.
     pub conflicts: crate::domain::stats::ConflictConfigReport,
-    /// Upper bound on the planners the runtime has open at once (ADR-0041
-    /// decision 12), apart from the run slots; planners a person opened
-    /// do not count.
-    pub runtime_planners: usize,
     /// How long a planner a revise went to may take to submit its proposal
     /// again before the inbox is told (ADR-0041 decision 13).
     pub planner_timeout: Duration,
@@ -668,8 +666,8 @@ struct Supervisor<'a> {
     parallel: usize,
     /// `--max-waiting` (ADR-0062 decision 7).
     max_waiting: usize,
-    /// `parallel` and `max_waiting` with where each comes from, as last
-    /// resolved (task 698).
+    /// `parallel`, `max_waiting` and `runtime_planners` with where each
+    /// comes from, as last resolved (task 698, task 941).
     limits: SlotLimits,
     /// The flags given; a value not given follows `[supervisor]`.
     slot_flags: SlotFlags,
@@ -1009,8 +1007,9 @@ impl Supervisor<'_> {
             // Every pass, before any claim: a change of `[conflicts]` takes
             // effect without a restart (ADR-0080).
             self.reread_conflicts()?;
-            // And `[supervisor]`: a change of `parallel` or `max_waiting`
-            // takes effect without a restart (task 698).
+            // And `[supervisor]`: a change of `parallel`, `max_waiting` or
+            // `runtime_planners` takes effect without a restart (task 698,
+            // task 941).
             self.reread_slot_limits()?;
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).

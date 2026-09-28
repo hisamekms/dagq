@@ -3,7 +3,7 @@
 //! submission) through a headless job, applies its verdict, applies a
 //! person's answer to its `approve_plan` ask, delivers a revise to the
 //! proposal's planner (or opens a planner of the runtime's for it, within
-//! [`LoopSettings::runtime_planners`]), tells the inbox of a planner that
+//! `runtime_planners` of [`LoopSettings::limits`]), tells the inbox of a planner that
 //! does not answer, and ends the runtime's planners that are done. None of
 //! this takes a run slot; a failure is logged and tried again on a later
 //! pass.
@@ -635,7 +635,7 @@ impl Supervisor<'_> {
                 // Not listed, yet its session runs: it is not given up on
                 // that evidence; the timeout tells the inbox.
                 Some(view) if !self.planner_gone(view) => {}
-                _ if runtime_open < options.runtime_planners => {
+                _ if runtime_open < self.limits.runtime_planners.value => {
                     if !self.queue.claim_revise(proposal.id())? {
                         continue;
                     }
@@ -676,13 +676,13 @@ impl Supervisor<'_> {
         }
         // Then the drafts the runtime or a job registered (ADR-0041
         // decision 16), within the same limit.
-        self.deliver_planner_answers(options, &views, &mut runtime_open)?;
-        self.open_draft_planners(options, &mut runtime_open)?;
+        self.deliver_planner_answers(&views, &mut runtime_open)?;
+        self.open_draft_planners(&mut runtime_open)?;
         // Then the findings marked for a proposal (ADR-0044 decision 19),
         // within the same limit, once those whose proposal ended are
         // settled.
         self.settle_findings()?;
-        self.open_finding_planners(options, &mut runtime_open)?;
+        self.open_finding_planners(&mut runtime_open)?;
         self.tell_of_silent_planners(timeout, &views)?;
         self.end_runtime_planners(&views)?;
         if let Some(proposal) = starved {

@@ -2,7 +2,7 @@
 //! by ADR-0047): a finding marked for a proposal — by the observer's
 //! `finding record --propose`, or by a person's `propose` answer to an ask
 //! — gets a planner of the runtime's, within
-//! [`LoopSettings::runtime_planners`] (shared with the planners for
+//! `runtime_planners` of [`LoopSettings::limits`] (shared with the planners for
 //! revises and drafts), the oldest mark first. The planner submits a
 //! proposal that remedies it (linking the finding, which becomes
 //! `proposed`), dismisses it, or asks the inbox a `planner_question`,
@@ -62,7 +62,6 @@ impl Supervisor<'_> {
     /// closed when the finding moved on.
     pub(super) fn deliver_finding_answer(
         &mut self,
-        options: &LoopSettings,
         views: &[PlannerView],
         runtime_open: &mut usize,
         ask: &Ask,
@@ -121,7 +120,9 @@ impl Supervisor<'_> {
                     }
                 }
             }
-            PlannerAnswerRoute::NewPlanner if *runtime_open < options.runtime_planners => {
+            PlannerAnswerRoute::NewPlanner
+                if *runtime_open < self.limits.runtime_planners.value =>
+            {
                 if let Some(workspace) = self.start_finding_planner(finding, Some(ask), 0)? {
                     *runtime_open += 1;
                     self.queue.ask_delivered(ask.id, &workspace)?;
@@ -144,18 +145,14 @@ impl Supervisor<'_> {
     /// Open a planner for each finding waiting for one, the oldest mark
     /// first, while the runtime's planners are below the limit and the
     /// improvements running below theirs (ADR-0051 decision 25).
-    pub(super) fn open_finding_planners(
-        &mut self,
-        options: &LoopSettings,
-        runtime_open: &mut usize,
-    ) -> Result<()> {
+    pub(super) fn open_finding_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
         let findings = self.queue.planner_findings()?;
         if findings.is_empty() {
             return Ok(());
         }
         let limit = self.max_improvement_proposals();
         for finding in findings {
-            if *runtime_open >= options.runtime_planners {
+            if *runtime_open >= self.limits.runtime_planners.value {
                 break;
             }
             match self.start_finding_planner(finding.id, None, limit) {

@@ -299,8 +299,9 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         ]
     );
 
-    // A drained supervisor with the automatic update and a wait limit gets
-    // both back from the `up`, once each even when the restart names them.
+    // A drained supervisor with the automatic update, a wait limit and a
+    // limit of the runtime's planners gets them back from the `up`, once
+    // each even when the restart names them (task 941).
     queue
         .set_auto_update(&LeaseToken::new("live"), true)
         .unwrap();
@@ -312,7 +313,13 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         .unwrap();
     let binaries = FakeBinaries::new(&[(28, false)], false);
     install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
-    options.restart = vec!["--auto-update".into(), "--max-waiting".into(), "6".into()];
+    options.restart = vec![
+        "--auto-update".into(),
+        "--max-waiting".into(),
+        "6".into(),
+        "--runtime-planners".into(),
+        "2".into(),
+    ];
     install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
     assert_eq!(
         *binaries.up.lock().unwrap(),
@@ -327,6 +334,8 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
                 "--auto-update",
                 "--max-waiting",
                 "2",
+                "--runtime-planners",
+                "3",
                 "--cmux",
                 "/opt/cmux"
             ],
@@ -339,7 +348,9 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
                 "--in-cmux",
                 "--auto-update",
                 "--max-waiting",
-                "6"
+                "6",
+                "--runtime-planners",
+                "2"
             ]
         ]
     );
@@ -383,7 +394,8 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     assert!(dagq::application::install::parse_version("").is_err());
 }
 
-/// `parallel` 4 and `max_waiting` `max_waiting`, both from `source`.
+/// `parallel` 4, `max_waiting` `max_waiting` and `runtime_planners` 3, all
+/// from `source`.
 fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
     SlotLimits {
         parallel: Setting { value: 4, source },
@@ -391,6 +403,7 @@ fn slot_limits(source: SettingSource, max_waiting: usize) -> SlotLimits {
             value: max_waiting,
             source,
         },
+        runtime_planners: Setting { value: 3, source },
     }
 }
 

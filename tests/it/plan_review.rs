@@ -388,7 +388,7 @@ pub(crate) fn options(runtime_planners: usize, planner_timeout: Duration) -> Sup
         tick: Duration::from_millis(20),
         idle_poll: Duration::from_millis(20),
         generators: clock::system(),
-        runtime_planners,
+        runtime_planners: Some(runtime_planners),
         planner_timeout,
         ..SuperviseOptions::new(2, true)
     }

@@ -1,7 +1,7 @@
 //! Planners the runtime opens for drafts (ADR-0041 decision 16, which
 //! replaced the follow-up triage job of ADR-0037): every draft the runtime
 //! or a job registered (a follow_up of a landed receipt, a goal's gap) gets
-//! a planner of the runtime's, within [`LoopSettings::runtime_planners`]
+//! a planner of the runtime's, within `runtime_planners` of [`LoopSettings::limits`]
 //! (shared with the planners opened for revises), oldest draft first. The
 //! planner adopts the draft (completes and submits it, so plan review
 //! checks it), drops it (cancels it with a note) or asks the inbox a
@@ -31,13 +31,12 @@ impl Supervisor<'_> {
     /// `ask_delivery_failed` and leaves the answer to the inbox.
     pub(super) fn deliver_planner_answers(
         &mut self,
-        options: &LoopSettings,
         views: &[PlannerView],
         runtime_open: &mut usize,
     ) -> Result<()> {
         for ask in self.queue.planner_answers()? {
             if let Some(finding) = ask.finding_id {
-                self.deliver_finding_answer(options, views, runtime_open, &ask, finding)?;
+                self.deliver_finding_answer(views, runtime_open, &ask, finding)?;
                 continue;
             }
             let Some(task) = ask.task_id else {
@@ -96,7 +95,9 @@ impl Supervisor<'_> {
                         }
                     }
                 }
-                PlannerAnswerRoute::NewPlanner if *runtime_open < options.runtime_planners => {
+                PlannerAnswerRoute::NewPlanner
+                    if *runtime_open < self.limits.runtime_planners.value =>
+                {
                     if let Some(workspace) = self.start_draft_planner(task, Some(&ask))? {
                         *runtime_open += 1;
                         self.queue.ask_delivered(ask.id, &workspace)?;
@@ -126,13 +127,9 @@ impl Supervisor<'_> {
 
     /// Open a planner for each draft waiting for one, oldest first, while
     /// the runtime's planners are below the limit.
-    pub(super) fn open_draft_planners(
-        &mut self,
-        options: &LoopSettings,
-        runtime_open: &mut usize,
-    ) -> Result<()> {
+    pub(super) fn open_draft_planners(&mut self, runtime_open: &mut usize) -> Result<()> {
         for target in self.queue.planner_drafts()? {
-            if *runtime_open >= options.runtime_planners {
+            if *runtime_open >= self.limits.runtime_planners.value {
                 break;
             }
             if self.start_draft_planner(target.task.id(), None)?.is_some() {

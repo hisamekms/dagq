@@ -109,6 +109,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
         options: UpOptions {
             parallel: Some(2),
             max_waiting: None,
+            runtime_planners: None,
             max_load: None,
             in_cmux: false,
             no_wait: false,

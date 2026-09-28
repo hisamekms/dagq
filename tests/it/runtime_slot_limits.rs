@@ -1,7 +1,8 @@
 //! Runtime tests: a supervisor's `parallel` and `max_waiting` from its
 //! flags, else `[supervisor]` of the main checkout's `dagq.toml`, else 4
-//! (task 698), read again each pass, and shown with where each comes from
-//! in `status` and `doctor`.
+//! (task 698), and its `runtime_planners` likewise, else 1 (task 941),
+//! read again each pass, and shown with where each comes from in `status`
+//! and `doctor`.
 use crate::runtime_support;
 
 use dagq::domain::slot_limits::SettingSource;
@@ -174,5 +175,68 @@ fn a_flag_wins_over_the_table_and_the_default_is_four() {
     fs::remove_file(repo.join("dagq.toml")).unwrap();
     let (stop, backend, supervisor) = start(&db, &repo, None, None);
     assert_eq!(registered(&db), (4, "default", Some(4), "default"));
+    finish(&stop, &backend, supervisor);
+}
+
+/// The one registration's `(runtime_planners, its source)`.
+fn registered_planners(db: &Path) -> (Option<u32>, &'static str) {
+    let registration = SqliteQueue::open(db)
+        .unwrap()
+        .supervisors()
+        .unwrap()
+        .remove(0);
+    (
+        registration.runtime_planners,
+        registration
+            .runtime_planners_source
+            .map_or("none", SettingSource::as_str),
+    )
+}
+
+/// Without the flag, `[supervisor] runtime_planners` sets the limit on
+/// the runtime's planners, shown in `status` and `doctor` with its source;
+/// a change takes effect without a restart and is recorded; an invalid
+/// value keeps the one in use; a table taken out goes back to 1 (task
+/// 941).
+#[test]
+fn the_supervisor_table_sets_runtime_planners_and_is_read_again() {
+    let (_dir, repo, db) = fixture();
+    write_config(&repo, "[supervisor]\nruntime_planners = 2\n");
+    let (stop, backend, supervisor) = start(&db, &repo, Some(1), Some(0));
+    assert_eq!(registered_planners(&db), (Some(2), "dagq.toml"));
+    for report in [
+        runtime::status(&db).unwrap(),
+        runtime::doctor(&db, false).unwrap(),
+    ] {
+        let entry = &report["supervisors"][0];
+        assert_eq!(entry["runtime_planners"], 2, "{entry}");
+        assert_eq!(entry["runtime_planners_source"], "dagq.toml", "{entry}");
+    }
+
+    write_config(&repo, "[supervisor]\nruntime_planners = 3\n");
+    wait_until(&db, Duration::from_secs(30), |_| {
+        events(&db, "supervisor_config_changed").len() == 1
+    });
+    assert_eq!(registered_planners(&db), (Some(3), "dagq.toml"));
+    let changed = &events(&db, "supervisor_config_changed")[0];
+    assert_eq!(changed["from"]["runtime_planners"], 2, "{changed}");
+    assert_eq!(changed["to"]["runtime_planners"], 3, "{changed}");
+    assert_eq!(
+        changed["to"]["runtime_planners_source"], "dagq.toml",
+        "{changed}"
+    );
+    // The flags are not read again for.
+    assert_eq!(registered(&db), (1, "flag", Some(0), "flag"));
+
+    write_config(&repo, "[supervisor]\nruntime_planners = 0\n");
+    thread::sleep(TEST_TICK * 10);
+    assert_eq!(registered_planners(&db), (Some(3), "dagq.toml"));
+    assert_eq!(events(&db, "supervisor_config_changed").len(), 1);
+
+    write_config(&repo, "[stall]\n");
+    wait_until(&db, Duration::from_secs(30), |_| {
+        events(&db, "supervisor_config_changed").len() == 2
+    });
+    assert_eq!(registered_planners(&db), (Some(1), "default"));
     finish(&stop, &backend, supervisor);
 }

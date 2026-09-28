@@ -184,6 +184,10 @@ pub struct SupervisorHealth {
     /// comes from, `None` as for `parallel_source`.
     pub max_waiting: Option<u32>,
     pub max_waiting_source: Option<SettingSource>,
+    /// The registration's `runtime_planners` (ADR-0041 decision 12) and
+    /// where it comes from (task 941), `None` as for `parallel_source`.
+    pub runtime_planners: Option<u32>,
+    pub runtime_planners_source: Option<SettingSource>,
     /// It updates its own binary on every landing that changes the runtime
     /// (ADR-0045 decision 17).
     pub auto_update: bool,
@@ -214,6 +218,8 @@ impl SupervisorHealth {
             "parallel_source": self.parallel_source,
             "max_waiting": self.max_waiting,
             "max_waiting_source": self.max_waiting_source,
+            "runtime_planners": self.runtime_planners,
+            "runtime_planners_source": self.runtime_planners_source,
             "auto_update": self.auto_update,
             "providers": self.providers,
             "heartbeat_age_secs": self.heartbeat_age_secs,
@@ -612,6 +618,8 @@ pub fn supervisors(
             parallel_source: registration.and_then(|r| r.parallel_source),
             max_waiting: registration.and_then(|r| r.max_waiting),
             max_waiting_source: registration.and_then(|r| r.max_waiting_source),
+            runtime_planners: registration.and_then(|r| r.runtime_planners),
+            runtime_planners_source: registration.and_then(|r| r.runtime_planners_source),
             providers: registration.and_then(|r| r.providers.clone()),
             auto_update: registration.is_some_and(|r| r.auto_update),
             started_at: registration.map(|r| r.started_at),
@@ -1270,6 +1278,8 @@ mod tests {
             max_waiting: None,
             parallel_source: None,
             max_waiting_source: None,
+            runtime_planners: None,
+            runtime_planners_source: None,
             providers: None,
             binary_version: Some("1.0.0".into()),
         }

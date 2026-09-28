@@ -1412,3 +1412,43 @@ fn up_passes_parallel_and_max_waiting_only_when_given() {
     assert!(command.contains("'--parallel' '3'"), "{command}");
     assert!(command.contains("'--max-waiting' '4'"), "{command}");
 }
+
+/// `up --runtime-planners` reaches the supervisor it starts only when given
+/// (task 941), in both modes, as `--parallel` does.
+#[test]
+fn up_passes_runtime_planners_only_when_given() {
+    let launchd_arguments = |runtime_planners: Option<u16>| {
+        let mut fixture = fixture();
+        fixture.options.runtime_planners = runtime_planners;
+        let cmux = FakeCmux::default();
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        let installs = launchd.installs.lock().unwrap();
+        installs[0].2.clone()
+    };
+    let contents = launchd_arguments(None);
+    assert!(!contents.contains("--runtime-planners"), "{contents}");
+    let contents = launchd_arguments(Some(2));
+    assert!(
+        contents.contains("\t\t<string>--runtime-planners</string>\n\t\t<string>2</string>\n"),
+        "{contents}"
+    );
+
+    let in_cmux_command = |runtime_planners: Option<u16>| {
+        let mut fixture = fixture();
+        fixture.options.in_cmux = true;
+        fixture.options.runtime_planners = runtime_planners;
+        let cmux = FakeCmux {
+            registers_supervisor_in: Some(fixture.location.db.clone()),
+            ..FakeCmux::default()
+        };
+        let launchd = FakeLaunchd::new(&fixture.location.db);
+        up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+        let workspaces = cmux.workspaces.lock().unwrap();
+        workspaces[0].3.clone()
+    };
+    let command = in_cmux_command(None);
+    assert!(!command.contains("--runtime-planners"), "{command}");
+    let command = in_cmux_command(Some(3));
+    assert!(command.contains("'--runtime-planners' '3'"), "{command}");
+}

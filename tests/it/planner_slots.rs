@@ -3,10 +3,12 @@
 //! is ended even when the ask closed after it stopped; a revise with no
 //! planner that waits at the limit tells the inbox which planners hold
 //! it and why, and past the planner timeout frees a place held by an idle
-//! planner nobody waits on.
+//! planner nobody waits on. Without the flag, `[supervisor]
+//! runtime_planners` of `dagq.toml` sets the limit (task 941).
 
 use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, fixture, open_goal, options, runtime_draft, submit,
+    supervise_with,
 };
 use dagq::{
     application::{Clock, Generators, TaskStore, planner_idle_marker},
@@ -340,4 +342,48 @@ fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
     assert!(backend.exits.lock().unwrap().is_empty());
     assert!(events(&queue, "planner_released").is_empty());
     assert_eq!(backend.opened().len(), 1);
+}
+
+/// Without `--runtime-planners`, `[supervisor] runtime_planners` of the
+/// main checkout's `dagq.toml` is the limit on the runtime's planners; the
+/// flag wins over it (task 941).
+#[test]
+fn the_supervisor_table_sets_the_limit_of_the_runtimes_planners() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    for title in ["one", "two", "three"] {
+        runtime_draft(
+            &mut queue,
+            title,
+            Some(goal),
+            DraftOrigin::GoalGap,
+            json!({"findings": [format!("{title} is not checked")]}),
+        );
+    }
+    fs::write(
+        fx.repo.join("dagq.toml"),
+        "[supervisor]\nruntime_planners = 2\n",
+    )
+    .unwrap();
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    let from_file = SuperviseOptions {
+        runtime_planners: None,
+        ..options(1, Duration::from_secs(3600))
+    };
+    supervise_with(&fx, &backend, &reviewer, &from_file);
+    assert_eq!(queue.planners(false).unwrap().len(), 2);
+    // The limit holds while both are at work.
+    supervise_with(&fx, &backend, &reviewer, &from_file);
+    assert_eq!(queue.planners(false).unwrap().len(), 2);
+
+    // The flag wins over the table.
+    supervise_with(
+        &fx,
+        &backend,
+        &reviewer,
+        &options(3, Duration::from_secs(3600)),
+    );
+    assert_eq!(queue.planners(false).unwrap().len(), 3);
 }

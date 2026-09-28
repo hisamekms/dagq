@@ -239,8 +239,10 @@ pub struct SuperviseOptions {
     /// `dagq.toml`.
     pub conflicts: Option<crate::domain::stats::ConflictConfig>,
     /// Upper bound on the planners the runtime has open at once (ADR-0041
-    /// decision 12); a person's planners do not count.
-    pub runtime_planners: usize,
+    /// decision 12); a person's planners do not count. `None` follows
+    /// `[supervisor] runtime_planners` as `parallel` does, else 1 (task
+    /// 941).
+    pub runtime_planners: Option<usize>,
     /// How long a planner may take to submit a proposal sent back to it
     /// before the inbox is told (ADR-0041 decision 13).
     pub planner_timeout: Duration,
@@ -374,7 +376,7 @@ impl SuperviseOptions {
             generators: clock::system(),
             stall: None,
             conflicts: None,
-            runtime_planners: 1,
+            runtime_planners: None,
             planner_timeout: PLANNER_TIMEOUT,
             plugin_dir: None,
             handoff_token: None,
@@ -403,11 +405,13 @@ impl SuperviseOptions {
         }
     }
 
-    /// The flags `parallel` and `max_waiting` stand for.
+    /// The flags `parallel`, `max_waiting` and `runtime_planners` stand
+    /// for.
     fn slot_flags(&self) -> SlotFlags {
         SlotFlags {
             parallel: self.parallel,
             max_waiting: self.max_waiting,
+            runtime_planners: self.runtime_planners,
         }
     }
 
@@ -432,7 +436,6 @@ impl SuperviseOptions {
             sweep_interval: self.sweep_interval,
             stall,
             conflicts,
-            runtime_planners: self.runtime_planners,
             planner_timeout: self.planner_timeout,
             handoff_token: self.handoff_token.clone(),
             mode: self.mode,
@@ -530,7 +533,8 @@ pub fn supervise_with_reviewer(
             })
             .unwrap_or_default()
     });
-    // `parallel` and `max_waiting` the flags did not give (task 698): a
+    // `parallel`, `max_waiting` and `runtime_planners` the flags did not
+    // give (task 698, task 941): a
     // `[supervisor]` that cannot be read at the start leaves the defaults,
     // as `[disk]` does; later reads keep the values in use.
     let slot_flags = options.slot_flags();

@@ -533,8 +533,9 @@ replaced, and `up` starts the old binary again"
             {
                 arguments.push("--in-cmux".to_owned());
             }
-            // The drained supervisor's automatic update and wait limit carry
-            // over, so no second `up` is needed to put them back.
+            // The drained supervisor's automatic update, wait limit and
+            // limit of the runtime's planners carry over, so no second `up`
+            // is needed to put them back.
             let restarts = |flag: &str| options.restart.iter().any(|argument| argument == flag);
             if live.iter().any(|registration| registration.auto_update)
                 && !restarts("--auto-update")
@@ -548,6 +549,17 @@ replaced, and `up` starts the old binary again"
                 && !restarts("--max-waiting")
             {
                 arguments.extend(["--max-waiting".to_owned(), max_waiting.to_string()]);
+            }
+            if let Some(runtime_planners) = live
+                .iter()
+                .filter(|registration| flagged(registration.runtime_planners_source))
+                .find_map(|registration| registration.runtime_planners)
+                && !restarts("--runtime-planners")
+            {
+                arguments.extend([
+                    "--runtime-planners".to_owned(),
+                    runtime_planners.to_string(),
+                ]);
             }
             arguments.extend(options.restart.iter().cloned());
             binaries.run(&options.target, &arguments).with_context(|| {

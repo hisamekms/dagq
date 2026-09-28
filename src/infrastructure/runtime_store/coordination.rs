@@ -237,21 +237,27 @@ impl SqliteQueue {
         Ok(())
     }
 
-    /// Record the supervisor `token`'s `parallel` and `max_waiting` in use
-    /// (ADR-0062 decision 7) and where each comes from (task 698).
+    /// Record the supervisor `token`'s `parallel`, `max_waiting` and
+    /// `runtime_planners` in use (ADR-0062 decision 7, task 941) and where
+    /// each comes from (task 698).
     pub fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         let parallel = u32::try_from(limits.parallel.value)?;
         ensure!(parallel >= 1, "parallel must be at least 1");
         let max_waiting = u32::try_from(limits.max_waiting.value)?;
+        // Not held to 1 or more here: the flag and `[supervisor]` refuse 0,
+        // and a caller of the library may open no planner of the runtime's.
+        let runtime_planners = u32::try_from(limits.runtime_planners.value)?;
         ensure!(
             self.conn.execute(
-                "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5 WHERE token=?1",
+                "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5, runtime_planners=?6, runtime_planners_source=?7 WHERE token=?1",
                 params![
                     token,
                     parallel,
                     limits.parallel.source.as_str(),
                     max_waiting,
-                    limits.max_waiting.source.as_str()
+                    limits.max_waiting.source.as_str(),
+                    runtime_planners,
+                    limits.runtime_planners.source.as_str()
                 ],
             )? == 1,
             "supervisor {token} is no longer registered"
@@ -731,6 +737,7 @@ mod tests {
                 SlotLimits {
                     parallel: setting(0),
                     max_waiting: setting(2),
+                    runtime_planners: setting(1),
                 },
             )
             .unwrap_err();

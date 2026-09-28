@@ -576,10 +576,12 @@ enum Command {
         /// none.
         #[arg(long, default_value_t = dagq::domain::host_metrics::DEFAULT_RETENTION_DAYS)]
         host_metrics_retention_days: u32,
-        /// Maximum number of planners the runtime opens at once for proposals plan review sent
-        /// back (apart from --parallel; planners a person opened do not count).
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
-        runtime_planners: u16,
+        /// Maximum number of planners the runtime opens at once for drafts, findings and
+        /// proposals plan review sent back (apart from --parallel; planners a person opened do
+        /// not count). Without it, `runtime_planners` of `[supervisor]` in the main checkout's
+        /// dagq.toml (read again each pass), else 1.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        runtime_planners: Option<u16>,
         /// Seconds a planner may take to submit a proposal sent back to it before the inbox is
         /// told.
         #[arg(long, default_value_t = 3600)]
@@ -728,6 +730,12 @@ enum Command {
         /// `max_waiting` of `[supervisor]` in dagq.toml, else 4.
         #[arg(long)]
         max_waiting: Option<u16>,
+        /// Maximum number of planners the supervisor's runtime opens at
+        /// once (drafts, findings and revised proposals). Passed only when
+        /// given; without it, `runtime_planners` of `[supervisor]` in
+        /// dagq.toml, else 1.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        runtime_planners: Option<u16>,
         /// The supervisor claims no new run while the host's 1-minute load
         /// average is above this; the runs in flight go on. 0 disables the
         /// hold. Passed only when given; without it, the supervisor holds
@@ -2567,7 +2575,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 report_daily,
                 forecast_snapshots,
                 generators,
-                runtime_planners: usize::from(runtime_planners),
+                runtime_planners: runtime_planners.map(usize::from),
                 planner_timeout: Duration::from_secs(planner_timeout),
                 plugin_dir,
                 handoff_token: handoff_token.map(LeaseToken::new),
@@ -2607,6 +2615,7 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Up {
             parallel,
             max_waiting,
+            runtime_planners,
             max_load,
             in_cmux,
             no_wait,
@@ -2642,6 +2651,7 @@ fn execute(cli: Cli) -> Result<Value> {
             let options = UpOptions {
                 parallel,
                 max_waiting,
+                runtime_planners,
                 max_load,
                 in_cmux,
                 no_wait,

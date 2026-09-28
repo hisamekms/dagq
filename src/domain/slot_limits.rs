@@ -1,7 +1,9 @@
-//! How many runs a supervisor executes at once (`parallel`) and keeps
+//! How many runs a supervisor executes at once (`parallel`), keeps
 //! waiting for a person outside its slots (`max_waiting`, ADR-0062
-//! decision 7), and where each value comes from (task 698): the flag
-//! (`supervise --parallel` / `--max-waiting`), else `[supervisor]` of the
+//! decision 7) and how many planners its runtime opens at once
+//! (`runtime_planners`, ADR-0041 decision 12, task 941), and where each
+//! value comes from (task 698): the flag (`supervise --parallel` /
+//! `--max-waiting` / `--runtime-planners`), else `[supervisor]` of the
 //! main checkout's `dagq.toml`, else the default.
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,9 @@ use super::waiting::DEFAULT_MAX_WAITING;
 
 /// The default of `parallel`.
 pub const DEFAULT_PARALLEL: usize = 4;
+
+/// The default of `runtime_planners`.
+pub const DEFAULT_RUNTIME_PLANNERS: usize = 1;
 
 /// The queue event recorded when a supervisor starts using values of
 /// `[supervisor]` it read again that differ from those it used.
@@ -55,11 +60,13 @@ pub struct SupervisorConfig {
     pub parallel: Option<usize>,
     /// 0 keeps every run in its slot.
     pub max_waiting: Option<usize>,
+    /// At least 1.
+    pub runtime_planners: Option<usize>,
 }
 
 impl SupervisorConfig {
     /// The keys `[supervisor]` may set.
-    pub const KEYS: [&'static str; 2] = ["parallel", "max_waiting"];
+    pub const KEYS: [&'static str; 3] = ["parallel", "max_waiting", "runtime_planners"];
 }
 
 /// The flags given to `supervise`; `None` is not given.
@@ -67,12 +74,13 @@ impl SupervisorConfig {
 pub struct SlotFlags {
     pub parallel: Option<usize>,
     pub max_waiting: Option<usize>,
+    pub runtime_planners: Option<usize>,
 }
 
 impl SlotFlags {
-    /// Both given: the file is never read for them.
+    /// All given: the file is never read for them.
     pub const fn complete(self) -> bool {
-        self.parallel.is_some() && self.max_waiting.is_some()
+        self.parallel.is_some() && self.max_waiting.is_some() && self.runtime_planners.is_some()
     }
 }
 
@@ -103,11 +111,12 @@ impl Setting {
     }
 }
 
-/// `parallel` and `max_waiting` in use.
+/// `parallel`, `max_waiting` and `runtime_planners` in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SlotLimits {
     pub parallel: Setting,
     pub max_waiting: Setting,
+    pub runtime_planners: Setting,
 }
 
 impl SlotLimits {
@@ -117,6 +126,11 @@ impl SlotLimits {
         Self {
             parallel: Setting::resolve(flags.parallel, file.parallel, DEFAULT_PARALLEL),
             max_waiting: Setting::resolve(flags.max_waiting, file.max_waiting, DEFAULT_MAX_WAITING),
+            runtime_planners: Setting::resolve(
+                flags.runtime_planners,
+                file.runtime_planners,
+                DEFAULT_RUNTIME_PLANNERS,
+            ),
         }
     }
 
@@ -126,6 +140,8 @@ impl SlotLimits {
             "parallel_source": self.parallel.source,
             "max_waiting": self.max_waiting.value,
             "max_waiting_source": self.max_waiting.source,
+            "runtime_planners": self.runtime_planners.value,
+            "runtime_planners_source": self.runtime_planners.source,
         })
     }
 }
@@ -145,16 +161,32 @@ mod tests {
         let file = SupervisorConfig {
             parallel: Some(3),
             max_waiting: Some(0),
+            runtime_planners: Some(2),
         };
-        let both = SlotFlags {
+        let all = SlotFlags {
             parallel: Some(2),
             max_waiting: Some(1),
+            runtime_planners: Some(3),
         };
-        let limits = SlotLimits::resolve(both, file);
+        let limits = SlotLimits::resolve(all, file);
         assert_eq!(limits.parallel.value, 2);
         assert_eq!(limits.parallel.source, SettingSource::Flag);
         assert_eq!(limits.max_waiting.value, 1);
-        assert!(both.complete());
+        assert_eq!(
+            (
+                limits.runtime_planners.value,
+                limits.runtime_planners.source
+            ),
+            (3, SettingSource::Flag)
+        );
+        assert!(all.complete());
+        assert!(
+            !SlotFlags {
+                runtime_planners: None,
+                ..all
+            }
+            .complete()
+        );
 
         let limits = SlotLimits::resolve(SlotFlags::default(), file);
         assert_eq!(
@@ -165,6 +197,13 @@ mod tests {
             (limits.max_waiting.value, limits.max_waiting.source),
             (0, SettingSource::File)
         );
+        assert_eq!(
+            (
+                limits.runtime_planners.value,
+                limits.runtime_planners.source
+            ),
+            (2, SettingSource::File)
+        );
 
         let limits = SlotLimits::resolve(SlotFlags::default(), SupervisorConfig::default());
         assert_eq!(
@@ -174,6 +213,13 @@ mod tests {
         assert_eq!(
             (limits.max_waiting.value, limits.max_waiting.source),
             (DEFAULT_MAX_WAITING, SettingSource::Default)
+        );
+        assert_eq!(
+            (
+                limits.runtime_planners.value,
+                limits.runtime_planners.source
+            ),
+            (DEFAULT_RUNTIME_PLANNERS, SettingSource::Default)
         );
         assert!(!SlotFlags::default().complete());
     }
@@ -199,6 +245,7 @@ mod tests {
             SupervisorConfig {
                 parallel: Some(2),
                 max_waiting: None,
+                runtime_planners: Some(2),
             },
         );
         let payload = slot_limits_change(from, to).unwrap();
@@ -206,6 +253,9 @@ mod tests {
         assert_eq!(payload["to"]["parallel"], json!(2));
         assert_eq!(payload["to"]["parallel_source"], json!("dagq.toml"));
         assert_eq!(payload["to"]["max_waiting_source"], json!("default"));
+        assert_eq!(payload["from"]["runtime_planners"], json!(1));
+        assert_eq!(payload["to"]["runtime_planners"], json!(2));
+        assert_eq!(payload["to"]["runtime_planners_source"], json!("dagq.toml"));
     }
 }
 
@@ -232,6 +282,8 @@ mod registration_tests {
                 max_waiting,
                 parallel_source,
                 max_waiting_source,
+                runtime_planners: None,
+                runtime_planners_source: None,
                 providers: None,
             };
         assert_eq!(
@@ -260,6 +312,29 @@ mod registration_tests {
             )
             .flag_arguments()
             .is_empty()
+        );
+        let with_planners = |runtime_planners_source| SupervisorRegistration {
+            runtime_planners: Some(2),
+            runtime_planners_source,
+            ..registration(
+                Some(SettingSource::File),
+                Some(4),
+                Some(SettingSource::Default),
+            )
+        };
+        assert_eq!(
+            with_planners(Some(SettingSource::Flag)).flag_arguments(),
+            ["--runtime-planners", "2"]
+        );
+        assert!(
+            with_planners(Some(SettingSource::File))
+                .flag_arguments()
+                .is_empty()
+        );
+        assert!(
+            with_planners(Some(SettingSource::Default))
+                .flag_arguments()
+                .is_empty()
         );
     }
 }

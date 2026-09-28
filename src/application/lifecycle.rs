@@ -306,6 +306,9 @@ pub struct UpOptions {
     /// The supervisor's `--max-waiting` (ADR-0062 decision 7), passed only
     /// when given, as `parallel` is.
     pub max_waiting: Option<u16>,
+    /// The supervisor's `--runtime-planners` (ADR-0041 decision 12),
+    /// passed only when given, as `parallel` is (task 941).
+    pub runtime_planners: Option<u16>,
     /// The supervisor's `--max-load` (task 327): no new run is claimed
     /// while the 1-minute load average is above it; 0 or below disables
     /// the hold. Passed only when given: without it the supervisor holds
@@ -1657,6 +1660,10 @@ fn supervise_arguments(
     if let Some(max_waiting) = options.max_waiting {
         arguments.push("--max-waiting".into());
         arguments.push(max_waiting.to_string());
+    }
+    if let Some(runtime_planners) = options.runtime_planners {
+        arguments.push("--runtime-planners".into());
+        arguments.push(runtime_planners.to_string());
     }
     // 0 or below disables the hold; it is passed as 0, since a negative
     // value would read as a flag.

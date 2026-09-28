@@ -3078,6 +3078,8 @@ mod attention_tests {
             max_waiting: None,
             parallel_source: None,
             max_waiting_source: None,
+            runtime_planners: None,
+            runtime_planners_source: None,
             providers: None,
             binary_version: None,
         };

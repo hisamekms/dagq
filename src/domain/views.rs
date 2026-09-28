@@ -214,6 +214,14 @@ pub struct SupervisorRegistration {
     /// Where `max_waiting` comes from; `None` as for `parallel_source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_waiting_source: Option<super::slot_limits::SettingSource>,
+    /// The limit on the planners its runtime opens at once (ADR-0041
+    /// decision 12, task 941); `None` for a supervisor of an older binary,
+    /// whose value is not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_planners: Option<u32>,
+    /// Where `runtime_planners` comes from; `None` as for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_planners_source: Option<super::slot_limits::SettingSource>,
     /// Each provider's executable as the supervisor resolved it at its
     /// start (ADR-t813-2), and the worker modes it runs it in; `None` for
     /// a supervisor of an older binary.
@@ -222,11 +230,11 @@ pub struct SupervisorRegistration {
 }
 
 impl SupervisorRegistration {
-    /// `--parallel N` and `--max-waiting N` for an `up` that starts this
-    /// supervisor again: each value it took from a flag, or that a
-    /// registration of an older binary recorded without a source; one it
-    /// took from `dagq.toml` or the default is left for the started one to
-    /// resolve again (task 698).
+    /// `--parallel N`, `--max-waiting N` and `--runtime-planners N` for an
+    /// `up` that starts this supervisor again: each value it took from a
+    /// flag, or that a registration of an older binary recorded without a
+    /// source; one it took from `dagq.toml` or the default is left for the
+    /// started one to resolve again (task 698, task 941).
     pub fn flag_arguments(&self) -> Vec<String> {
         use super::slot_limits::SettingSource;
         let flagged = |source: Option<SettingSource>| {
@@ -241,6 +249,15 @@ impl SupervisorRegistration {
             .filter(|_| flagged(self.max_waiting_source))
         {
             arguments.extend(["--max-waiting".to_owned(), max_waiting.to_string()]);
+        }
+        if let Some(runtime_planners) = self
+            .runtime_planners
+            .filter(|_| flagged(self.runtime_planners_source))
+        {
+            arguments.extend([
+                "--runtime-planners".to_owned(),
+                runtime_planners.to_string(),
+            ]);
         }
         arguments
     }
