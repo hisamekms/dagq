@@ -614,7 +614,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     supervisor.tend_headless_jobs();
     if settings.handoff_token.is_some() {
         // A review rebuilt under an open hold ask waits for it (task 437).
-        supervisor.check_queue_hold()?;
+        // An answer waits for the rebuilt slots (task 754).
+        supervisor.check_queue_hold(false)?;
         supervisor.rebuild_own_runs(previous_version.as_deref())?;
     }
     let result = supervisor.run_loop(settings);
@@ -994,7 +995,7 @@ impl Supervisor<'_> {
             // Every pass too: the answer of an authentication or usage-limit
             // ask is applied and the hold read before any work starts (task
             // 437).
-            self.check_queue_hold()?;
+            self.check_queue_hold(true)?;
             self.draining = stopping || !self.claiming || self.handoff.is_some();
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).

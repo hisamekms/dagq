@@ -10,7 +10,10 @@
 //! watches (checked like every typed text, ADR-0047 decision 31) and
 //! starts again the jobs that failed around the hold; `cancel_affected`
 //! gives the held runs this supervisor watches up as an abandon does.
-//! Either closes the ask and records `queue_hold_applied`. The disk's
+//! Every supervisor applies an answer to the held runs in its own slots,
+//! once each (`hold_answer_applied`, task 754), and the ask closes, with
+//! `queue_hold_applied`, once no run in it waits for a live supervisor to
+//! apply it. The disk's
 //! `cost` ask (task 377) is applied by [`super::disk`].
 //!
 //! [`HoldReason::Authentication`]: crate::domain::claim_hold::HoldReason::Authentication
@@ -21,7 +24,8 @@ use crate::domain::{
     Ask, GoalId, PlannerOrigin, ProposalId, RunEvent,
     proposal::{PlannerOwner, Submission as Resubmission},
     queue_hold::{
-        self, CANCEL_AFFECTED, DONE, HOLD_CONTINUE_SENT, JOB_RESTARTED, QUEUE_HOLD_APPLIED,
+        self, CANCEL_AFFECTED, DONE, HOLD_ANSWER_APPLIED, HOLD_CONTINUE_SENT, JOB_RESTARTED,
+        QUEUE_HOLD_APPLIED,
     },
     stats::timestamp_millis,
 };
@@ -32,11 +36,28 @@ use crate::domain::{
 const FAILED_BEFORE_ASK_SECS: i64 = 600;
 /// How many of the latest failures of each job kind are looked at.
 const FAILURES_READ: usize = 50;
+/// How long an answered ask waits for the other live supervisors to apply
+/// the answer to the runs they watch before it closes without them.
+const APPLY_WAIT_SECS: i64 = 300;
+
+/// What became of a run the answer of a hold ask was applied to, or was
+/// not (the `outcome` of `hold_answer_applied` and of `queue_hold_applied`'s
+/// `runs`).
+const CONTINUED: &str = "continued";
+const RELEASED: &str = "released";
+const MOVED_ON: &str = "moved_on";
+/// Another live supervisor leased it and did not apply the answer within
+/// [`APPLY_WAIT_SECS`].
+const ELSEWHERE: &str = "elsewhere";
+/// No live supervisor watched it: no lease, or a stale one.
+const UNWATCHED: &str = "unwatched";
 
 impl Supervisor<'_> {
-    /// Apply the answered authentication and usage-limit asks, then read
-    /// the one that holds the queue's work now (see the module).
-    pub(super) fn check_queue_hold(&mut self) -> Result<()> {
+    /// Apply the answered authentication and usage-limit asks (unless
+    /// `apply` is false: the pass of a handoff, before this supervisor
+    /// rebuilt the slots of its runs), then read the one that holds the
+    /// queue's work now (see the module).
+    pub(super) fn check_queue_hold(&mut self, apply: bool) -> Result<()> {
         let unclosed: Vec<Ask> = self
             .queue
             .asks(AskQuery::default())?
@@ -46,13 +67,11 @@ impl Supervisor<'_> {
         for ask in unclosed.iter().filter(|ask| ask.answered_at.is_some()) {
             let answer = ask.answer.as_deref().unwrap_or_default().trim();
             // Another answer is a person's to read and act on.
-            if !queue_hold::applies(&ask.options, answer) {
+            if !apply || !queue_hold::applies(&ask.options, answer) {
                 continue;
             }
-            match answer {
-                DONE => self.hold_done(ask)?,
-                CANCEL_AFFECTED => self.hold_canceled(ask)?,
-                _ => {}
+            if matches!(answer, DONE | CANCEL_AFFECTED) {
+                self.apply_hold_answer(ask, answer)?;
             }
         }
         let hold = unclosed.iter().find_map(queue_hold::hold_of);
@@ -76,103 +95,152 @@ impl Supervisor<'_> {
         self.queue_hold = hold;
         Ok(())
     }
-    /// `done`: the held sessions this supervisor watches (a worker's, a
-    /// revise's or a resume's) get the text to go on (from their watch,
-    /// [`SessionWatch::continue_after_hold`]),
-    /// the failed jobs start again, and the ask closes. A held run another
-    /// supervisor watches is that one's: its stall nudge tells it to go on.
-    fn hold_done(&mut self, ask: &Ask) -> Result<()> {
-        let mut continued = Vec::new();
-        let mut moved_on = Vec::new();
-        let mut elsewhere = Vec::new();
-        for run in queue_hold::affected_runs(ask) {
-            match self.slots.iter().find(|slot| slot.run.id().as_str() == run) {
-                Some(slot) if slot.phase.holds_live_session() => {
-                    self.hold_continue.insert(slot.run.id().clone(), ask.id);
-                    continued.push(run.clone());
-                }
-                // Past its session (a receipt, a review, an exit): nothing
-                // to tell it.
-                Some(_) => moved_on.push(run.clone()),
-                None => elsewhere.push(run.clone()),
-            }
-        }
-        let restarted = self.restart_failed_jobs(ask);
-        self.queue.close_ask(ask.id)?;
-        self.queue.record_queue_event(
-            QUEUE_HOLD_APPLIED,
-            json!({
-                "ask_id": ask.id,
-                "answer": DONE,
-                "reason_category": ask.reason_category,
-                "subject": ask.subject,
-                "continued": continued,
-                "released": [],
-                "moved_on": moved_on,
-                "restarted": restarted,
-                "elsewhere": elsewhere,
-                "jobs": jobs_of(ask),
-                "supervisor": self.token,
-            }),
-        )?;
-        info!(ask_id = %ask.id, "applied `done` to ask {}: {} held session(s) are told to go on, {} failed job(s) start again", ask.id, continued.len(), restarted.len());
-        Ok(())
-    }
-    /// `cancel_affected`: each held run this supervisor watches is given
-    /// up as an abandon does (its lease released, its session and worktree
-    /// kept; `recover run` for the inbox), and the ask closes. Throwing the
-    /// work away is the answer's, a person's decision.
-    fn hold_canceled(&mut self, ask: &Ask) -> Result<()> {
-        let mut released = Vec::new();
-        let mut moved_on = Vec::new();
-        let mut elsewhere = Vec::new();
+    /// Apply `answer` to the held runs of `ask` this supervisor watches,
+    /// each once (`hold_answer_applied`: another pass, or another
+    /// supervisor, sees it applied), then close the ask once every run in
+    /// it was applied or no live supervisor watches it (task 754).
+    fn apply_hold_answer(&mut self, ask: &Ask, answer: &str) -> Result<()> {
         for run in queue_hold::affected_runs(ask) {
             let Some(index) = self
                 .slots
                 .iter()
                 .position(|slot| slot.run.id().as_str() == run)
             else {
-                elsewhere.push(run.clone());
                 continue;
             };
-            // A run that went on by itself past its session (validating,
-            // reviewing, landing) is no longer held: it is left alone.
-            let phase = &self.slots[index].phase;
-            if !(phase.holds_live_session() || matches!(phase, Phase::ReviewHeld(_))) {
-                moved_on.push(run.clone());
+            let id = self.slots[index].run.id().clone();
+            if applied_to(&self.queue.run_events(&id)?, ask.id).is_some() {
                 continue;
             }
-            let mut slot = self.slots.remove(index);
-            stop_job(&mut slot);
-            self.hold_continue.remove(slot.run.id());
-            self.loads.remove(slot.run.id());
-            let message = format!(
-                "a person answered `{CANCEL_AFFECTED}` to the {} ask {} that held the run: the supervisor gave it up",
-                ask.reason_category.as_str(),
-                ask.id
-            );
-            warn!(run_id = %slot.run.id(), "run {}: {message}", slot.run.id());
-            self.abandon(&slot.run, message, &ReasonCode::HoldCanceled.into());
-            released.push(run.clone());
+            // Recorded before the answer acts: a run given up has no lease,
+            // and another supervisor closing the ask must not read it as
+            // one nobody watched.
+            let outcome = hold_outcome(&self.slots[index].phase, answer);
+            self.queue.record_runtime_event(
+                &id,
+                HOLD_ANSWER_APPLIED,
+                json!({
+                    "ask_id": ask.id,
+                    "answer": answer,
+                    "outcome": outcome,
+                    "supervisor": self.token,
+                }),
+            )?;
+            match outcome {
+                CONTINUED => {
+                    self.hold_continue.insert(id, ask.id);
+                }
+                RELEASED => self.hold_canceled(ask, index),
+                _ => {}
+            }
         }
-        self.queue.close_ask(ask.id)?;
+        self.close_hold(ask, answer)
+    }
+    /// `cancel_affected` to the held run in slot `index`: given up as an
+    /// abandon does (its lease released, its session and worktree kept;
+    /// `recover run` for the inbox). Throwing the work away is the
+    /// answer's, a person's decision.
+    fn hold_canceled(&mut self, ask: &Ask, index: usize) {
+        let mut slot = self.slots.remove(index);
+        stop_job(&mut slot);
+        self.hold_continue.remove(slot.run.id());
+        self.loads.remove(slot.run.id());
+        let message = format!(
+            "a person answered `{CANCEL_AFFECTED}` to the {} ask {} that held the run: the supervisor gave it up",
+            ask.reason_category.as_str(),
+            ask.id
+        );
+        warn!(run_id = %slot.run.id(), "run {}: {message}", slot.run.id());
+        self.abandon(&slot.run, message, &ReasonCode::HoldCanceled.into());
+    }
+    /// Close the answered `ask` once no run in it waits for a live
+    /// supervisor to apply the answer: each run is applied
+    /// (`hold_answer_applied`), has no lease (`unwatched`: nothing runs it
+    /// to apply the answer to), or [`APPLY_WAIT_SECS`] passed since the
+    /// answer (a run another supervisor still leases is then `elsewhere`,
+    /// one whose lease is stale `unwatched`). A run whose lease went stale
+    /// is waited for until then, as a supervisor may adopt it and apply
+    /// the answer. The supervisor that closes the ask starts the failed
+    /// jobs again (`done`) and records `queue_hold_applied`; one that
+    /// finds it closed by another does neither.
+    fn close_hold(&mut self, ask: &Ask, answer: &str) -> Result<()> {
+        let now = self.generators.clock.now();
+        let due = ask
+            .answered_at
+            .is_some_and(|at| now - at >= APPLY_WAIT_SECS);
+        let mut runs = Vec::new();
+        for run in queue_hold::affected_runs(ask) {
+            // A run the queue does not know has nothing to apply.
+            let Ok(id) = RunId::new(run.clone()) else {
+                runs.push(json!({"run_id": run, "outcome": UNWATCHED, "supervisor": null}));
+                continue;
+            };
+            // What cannot be read now is read again on the next pass.
+            let Ok(events) = self.queue.run_events(&id) else {
+                return Ok(());
+            };
+            let applied = applied_to(&events, ask.id).cloned();
+            if let Some(payload) = applied {
+                runs.push(json!({
+                    "run_id": run,
+                    "outcome": payload["outcome"],
+                    "supervisor": payload["supervisor"],
+                }));
+                continue;
+            }
+            let Ok(lease) = self.queue.run_lease(&id) else {
+                return Ok(());
+            };
+            let (outcome, supervisor) = match lease {
+                None => (UNWATCHED, None),
+                // Its supervisor applies it on its next pass.
+                Some(_) if !due => return Ok(()),
+                // Leased by this supervisor but in none of its slots, or
+                // by a gone one: nobody watches it to apply the answer.
+                Some(lease) if lease.token == self.token || self.lease_stale(&lease, now) => {
+                    (UNWATCHED, Some(lease.token))
+                }
+                Some(lease) => (ELSEWHERE, Some(lease.token)),
+            };
+            runs.push(json!({"run_id": run, "outcome": outcome, "supervisor": supervisor}));
+        }
+        if let Err(error) = self.queue.close_ask(ask.id) {
+            // Another supervisor closed it first and recorded the rest.
+            if self.queue.read_ask(ask.id)?.closed_at.is_some() {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        let restarted = if answer == DONE {
+            self.restart_failed_jobs(ask)
+        } else {
+            Vec::new()
+        };
+        let of = |outcome: &str| -> Vec<Value> {
+            runs.iter()
+                .filter(|r| r["outcome"] == outcome)
+                .map(|r| r["run_id"].clone())
+                .collect()
+        };
         self.queue.record_queue_event(
             QUEUE_HOLD_APPLIED,
             json!({
                 "ask_id": ask.id,
-                "answer": CANCEL_AFFECTED,
+                "answer": answer,
                 "reason_category": ask.reason_category,
                 "subject": ask.subject,
-                "continued": [],
-                "released": released,
-                "moved_on": moved_on,
-                "restarted": [],
-                "elsewhere": elsewhere,
+                "continued": of(CONTINUED),
+                "released": of(RELEASED),
+                "moved_on": of(MOVED_ON),
+                "restarted": restarted,
+                "elsewhere": of(ELSEWHERE),
+                "unwatched": of(UNWATCHED),
+                "runs": runs,
                 "jobs": jobs_of(ask),
                 "supervisor": self.token,
             }),
         )?;
-        info!(ask_id = %ask.id, "applied `{CANCEL_AFFECTED}` to ask {}: gave up {} held run(s)", ask.id, released.len());
+        info!(ask_id = %ask.id, "applied `{answer}` to ask {}: {} run(s) told to go on, {} given up, {} failed job(s) start again", ask.id, of(CONTINUED).len(), of(RELEASED).len(), restarted.len());
         Ok(())
     }
     /// Start again the headless jobs that failed from
@@ -295,6 +363,30 @@ impl Supervisor<'_> {
         info!(run_id = %run_id, "the recovery job of {run_id} failed while ask {} held the queue: it is started again", ask.id);
         Ok(true)
     }
+}
+
+/// What `answer` does to a held run in `phase`. `done`: a session a hold
+/// can stop (a worker's, a revise's or a resume's) gets the text to go on
+/// from its watch ([`SessionWatch::continue_after_hold`]). `cancel_affected`:
+/// such a session, or a review waiting for the hold, is given up. A run
+/// that went on by itself past its session (a receipt, validating, a
+/// review, an exit, landing) is no longer held: it is left alone.
+fn hold_outcome(phase: &Phase, answer: &str) -> &'static str {
+    match answer {
+        DONE if phase.holds_live_session() => CONTINUED,
+        CANCEL_AFFECTED if phase.holds_live_session() || matches!(phase, Phase::ReviewHeld(_)) => {
+            RELEASED
+        }
+        _ => MOVED_ON,
+    }
+}
+
+/// The `hold_answer_applied` of the ask `ask_id` among a run's `events`.
+fn applied_to(events: &[RunEvent], ask_id: AskId) -> Option<&Value> {
+    events
+        .iter()
+        .find(|e| e.kind == HOLD_ANSWER_APPLIED && e.payload["ask_id"] == json!(ask_id))
+        .map(|e| &e.payload)
 }
 
 /// The headless jobs `ask` lists next to its runs (task 438): a review

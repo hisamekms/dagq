@@ -59,6 +59,7 @@ pub const GOAL_STATUS_CHANGED: &str = "goal_status_changed";
 pub const GOAL_SUBMITTED: &str = "goal_submitted";
 pub const GOAL_UPDATED: &str = "goal_updated";
 pub const HEADLESS_JOB_STOPPED: &str = "headless_job_stopped";
+pub const HOLD_ANSWER_APPLIED: &str = "hold_answer_applied";
 pub const HOLD_CONTINUE_SENT: &str = "hold_continue_sent";
 /// A session without a fresh idle marker whose screen was inferred idle
 /// (ADR-t803-1), once per span.

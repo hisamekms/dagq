@@ -21,8 +21,15 @@ pub const CANCEL_AFFECTED: &str = "cancel_affected";
 
 /// Recorded on the queue when the supervisor applied the answer of a
 /// `queue_hold` ask (`ask_id`, `answer`, `reason_category`, `subject`,
-/// `continued`, `released`, `moved_on`, `restarted`, `elsewhere`, `supervisor`).
+/// `continued`, `released`, `moved_on`, `restarted`, `elsewhere`,
+/// `unwatched`, `runs`, `jobs`, `supervisor`).
 pub const QUEUE_HOLD_APPLIED: &str = super::event_kind::QUEUE_HOLD_APPLIED;
+/// Recorded on a held run by the supervisor whose slot has it when that
+/// supervisor applied the answer of a `queue_hold` ask to it (task 754):
+/// `ask_id`, `answer`, `outcome` (`continued`, `released` or `moved_on`)
+/// and `supervisor`. Every supervisor applies an answer to the runs it
+/// watches, once each, and the ask closes when every run in it was.
+pub const HOLD_ANSWER_APPLIED: &str = super::event_kind::HOLD_ANSWER_APPLIED;
 /// Recorded on a held run when the fixed text to go on was typed into its
 /// session after `done` (`ask_id`, `workspace_id`, `submitted`).
 pub const HOLD_CONTINUE_SENT: &str = super::event_kind::HOLD_CONTINUE_SENT;
