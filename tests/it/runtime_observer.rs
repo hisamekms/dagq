@@ -671,6 +671,7 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: None,
             run_id: None,

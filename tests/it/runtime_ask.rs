@@ -51,6 +51,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
     queue.close_ask(dagq::domain::AskId::new(1)).unwrap();
 
     let new_ask = |question: &str| NewAsk {
+        topics: Vec::new(),
         kind: AskKind::ApproveLanding,
         task_id: None,
         run_id: Some(RunId::new(run_id.clone()).unwrap()),
@@ -90,6 +91,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
         &db,
         &other,
         NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Decide,
             task_id: Some(TaskId::new(1)),
             run_id: None,
@@ -117,6 +119,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
         &db,
         &other,
         NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: None,
             run_id: None,
@@ -158,6 +161,7 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
     // A `decide` ask: the supervisor applies an `approve_landing` answer
     // itself (see a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it).
     let new_ask = |question: &str| NewAsk {
+        topics: Vec::new(),
         kind: AskKind::Decide,
         task_id: None,
         run_id: Some(run.id().clone()),
@@ -555,6 +559,7 @@ fn status_reports_failed_runs_and_unanswered_exit_requests() {
     // The timeout alone is no attention: the supervisor's stuck_exit ask is.
     queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::StuckExit,
             task_id: None,
             run_id: Some(orphan.id().clone()),
@@ -726,6 +731,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
     // answer goes to a new planner (none works on the draft).
     let asked = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(draft),
             run_id: None,

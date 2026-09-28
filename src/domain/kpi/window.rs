@@ -276,6 +276,7 @@ impl<'a> Context<'a> {
             goal_id,
             live: LiveSnapshot {
                 draft_origins: input.draft_origins.clone(),
+                utc_offset_secs: input.utc_offset_secs,
                 ..LiveSnapshot::default()
             },
             now: input.now,
@@ -910,6 +911,27 @@ impl<'a> Context<'a> {
         );
         put("plan.follow_up_draft_secs", ALL, Measure::secs(all_secs));
         details.insert("follow_up_categories", json(categories));
+        // A person's answers to the workers' questions per primary topic
+        // (ADR-t947-2 decision 4), and by when the asks were opened.
+        let questions = &stats.worker_question_topics;
+        let (mut night, mut day) = (Vec::new(), Vec::new());
+        for (topic, asks) in &questions.by_topic {
+            put(
+                "ask.worker_question_wait",
+                &format!("topic={topic}"),
+                Measure::secs(asks.night_values.iter().chain(&asks.day_values).copied()),
+            );
+            night.extend(asks.night_values.iter().copied());
+            day.extend(asks.day_values.iter().copied());
+        }
+        put(
+            "ask.worker_question_wait",
+            ALL,
+            Measure::secs(night.iter().chain(&day).copied()),
+        );
+        put("ask.worker_question_wait", "at=night", Measure::secs(night));
+        put("ask.worker_question_wait", "at=day", Measure::secs(day));
+        details.insert("worker_question_topics", json(questions));
 
         details.insert("forecast", self.forecast_kpis(start, end, &mut put));
 

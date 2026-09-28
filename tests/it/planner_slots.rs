@@ -136,6 +136,7 @@ fn answered_draft_planner(
     heartbeat_ahead(&fx.db);
     let asked = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(draft),
             run_id: None,
@@ -308,6 +309,7 @@ fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
     heartbeat_ahead(&fx.db);
     queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(draft),
             run_id: None,

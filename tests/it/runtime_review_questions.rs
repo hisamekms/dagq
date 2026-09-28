@@ -29,6 +29,7 @@ fn ask_during_review(db: &std::path::Path) -> AskId {
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     let ask = queue
         .ask(NewAsk {
+            topics: vec!["task_overlap".into()],
             kind: AskKind::WorkerQuestion,
             task_id: Some(run.task_id()),
             run_id: Some(run.id().clone()),
@@ -197,7 +198,7 @@ fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
 const ASKS_AFTER_REVISE: &str = r#"
 commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
 "#;
 
 /// The `worker_question` a worker asked during its revise, still open.

@@ -26,7 +26,7 @@ Take `workspace_id`, `worktree_path` and the run `id` from `"$DAGQ" show ID` (`-
 
 1. **Read the screen**: `cmux read-screen --workspace <workspace_id> --lines 60`. See what the session last said: waiting on a background task, a question it wrote to the terminal instead of asking, a failure it gave up on, or a dialog (an `answer_prompt` case, `reference/session.md`; under a `send_unconfirmed` ask answer it under this ask, as `reference/session.md` says).
 2. **Check the background work** the question listed: `"$DAGQ" doctor --full` shows the run's processes (read only). A test or build still making progress may only need time: tell the person and, on their word, `ask close <id>`; no new `stalled` ask opens until the session ends a turn after the close, and the idle is counted again from that turn. One that hangs is stopped by the session itself: type an instruction naming the task (below), never `kill` / `pkill` by name.
-3. **Type an instruction** the person gave or approved, for example "stop the background task <id>, then commit and write the receipt" or "ask your question with `dagq ask --run <run-id> --kind worker_question`":
+3. **Type an instruction** the person gave or approved, for example "stop the background task <id>, then commit and write the receipt" or "ask your question with `dagq ask --run <run-id> --kind worker_question --because scope --topic <code>`":
 
    ```sh
    cmux send --workspace <workspace_id> "<instruction>"

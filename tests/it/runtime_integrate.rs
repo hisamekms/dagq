@@ -1044,6 +1044,13 @@ fn prompt_describes_the_goal_and_the_context_and_keeps_one_shape_without_them() 
             "{prompt}"
         );
         assert!(prompt.contains("flaky_test ("), "{prompt}");
+        // A worker_question carries a topic from the runtime's list (ADR-t947-2).
+        assert!(
+            prompt.contains(&runtime::worker_question_topics_line()),
+            "{prompt}"
+        );
+        assert!(prompt.contains("--topic <code>"), "{prompt}");
+        assert!(prompt.contains("task_overlap ("), "{prompt}");
         // The worker reads only what its run needs, never the queue.
         assert!(prompt.contains(runtime::WORKER_READING), "{prompt}");
         assert!(

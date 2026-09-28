@@ -452,6 +452,7 @@ impl Supervisor<'_> {
             options: PLAN_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
             asked_by: PLAN_REVIEW_ASKER.to_owned(),
             reason_category: AskReason::Scope,
+            topics: Vec::new(),
             finding_id: None,
         });
         let applied = self.queue.finish_plan_review(

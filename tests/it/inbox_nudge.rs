@@ -91,6 +91,7 @@ impl Inbox {
         if ask {
             queue
                 .ask(NewAsk {
+                    topics: Vec::new(),
                     kind: AskKind::Blocked,
                     task_id: Some(TaskId::new(1)),
                     run_id: None,

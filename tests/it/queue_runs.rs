@@ -351,6 +351,7 @@ fn a_login_that_stops_several_runs_is_one_ask_that_lists_them() {
     );
     let error = queue
         .ask(NewAsk {
+            topics: vec!["task_overlap".into()],
             kind: AskKind::WorkerQuestion,
             task_id: None,
             run_id: Some(runs[0].clone()),

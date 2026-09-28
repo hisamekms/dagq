@@ -229,6 +229,7 @@ mod tests {
                 return Err(anyhow!("ask {id} does not exist"));
             }
             Ok(Ask {
+                topics: Vec::new(),
                 id,
                 kind: AskKind::Decide,
                 task_id: Some(TaskId::new(1)),
@@ -291,6 +292,11 @@ mod tests {
 
     fn new_ask(kind: AskKind, run: Option<&str>, task: Option<i64>) -> NewAsk {
         NewAsk {
+            topics: if kind == AskKind::WorkerQuestion {
+                vec!["task_overlap".into()]
+            } else {
+                Vec::new()
+            },
             kind,
             task_id: task.map(TaskId::new),
             run_id: run.map(|id| RunId::new(id).unwrap()),

@@ -1123,6 +1123,7 @@ mod tests {
     fn question(queue: &mut SqliteQueue, task: TaskId, kind: AskKind) -> Ask {
         queue
             .ask(NewAsk {
+                topics: Vec::new(),
                 kind,
                 task_id: Some(task),
                 run_id: None,

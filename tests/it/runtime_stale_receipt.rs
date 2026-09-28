@@ -212,7 +212,7 @@ if [ -f "$mark" ]; then receipt "$(git rev-parse HEAD)"; idle; await_exit; exit 
 : > "$mark"; resolve; idle
 {AWAIT_NUDGE}
 rm "$MESSAGE"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Rewrite it?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Rewrite it?' --cmux /usr/bin/true > /dev/null || exit 70
 {during_wait}; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 idle; await_exit"#

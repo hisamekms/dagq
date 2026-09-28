@@ -1088,7 +1088,7 @@ mod tests {
         // A question quoting a command runs dagq only (manual-smoke, task 547).
         assert_eq!(
             classify(
-                "dagq ask --run R --kind worker_question --because scope --question \
+                "dagq ask --run R --kind worker_question --because scope --topic acceptance_conflict --question \
                  'Step 5 requires `sleep 40 && cargo build --release`; ok?'"
             ),
             DAGQ

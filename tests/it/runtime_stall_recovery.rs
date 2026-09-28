@@ -435,7 +435,7 @@ const ASKING_AGENT: &str = r#"
 commit work
 bg="$(dirname "$RECEIPT")/bg.pid"
 ( sleep 300 >/dev/null 2>&1 & echo $! > "$bg.tmp"; mv "$bg.tmp" "$bg" )
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 pid=$(cat "$bg")
 while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
@@ -584,7 +584,7 @@ fn a_send_the_job_cannot_repair_becomes_the_stalled_ask_in_the_first_session() {
         &repo,
         r#"
 commit work
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; idle; await_exit

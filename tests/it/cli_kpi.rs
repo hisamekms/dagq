@@ -544,3 +544,56 @@ fn kpi_summarizes_the_host_load_of_each_span() {
         "{summary}"
     );
 }
+
+/// A worker_question's topics reach `stats` and `kpi` (ADR-t947-2
+/// decision 4): per primary topic the asks and the time to the answer,
+/// the secondary topic in `codes`, and the answer's wait as
+/// `ask.worker_question_wait` by `topic=`.
+#[test]
+fn the_worker_question_topics_reach_stats_and_kpi() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    ok(&db, &["add", "first"]);
+    let asked = ok(
+        &db,
+        &[
+            "ask",
+            "--kind",
+            "worker_question",
+            "--because",
+            "scope",
+            "--topic",
+            "adr_conflict",
+            "--topic",
+            "out_of_scope_change",
+            "--question",
+            "Which way?",
+            "--task",
+            "1",
+        ],
+    );
+    ok(&db, &["answer", &asked["id"].to_string(), "--text", "A"]);
+
+    let topics = &ok(&db, &["stats", "--full"])["worker_question_topics"];
+    assert_eq!(topics["asks"], 1, "{topics}");
+    assert_eq!(topics["codes"]["out_of_scope_change"], 1, "{topics}");
+    let primary = &topics["by_topic"]["adr_conflict"];
+    assert_eq!(primary["asks"], 1, "{topics}");
+    assert_eq!(primary["by_reason_category"]["scope"], 1, "{topics}");
+    assert_eq!(primary["to_answer"]["count"], 1, "{topics}");
+    assert_eq!(
+        primary["night"]["count"].as_i64().unwrap() + primary["day"]["count"].as_i64().unwrap(),
+        1,
+        "{topics}"
+    );
+
+    let report = kpi_ok(&db, &config, &["--last", "1"]);
+    let today = &report["periods"][0];
+    let waits = &today["kpis"]["ask.worker_question_wait"];
+    assert_eq!(waits["all"]["n"], 1, "{waits}");
+    assert_eq!(waits["topic=adr_conflict"]["n"], 1, "{waits}");
+    assert_eq!(
+        today["details"]["worker_question_topics"]["asks"], 1,
+        "{today}"
+    );
+}

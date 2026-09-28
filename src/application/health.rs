@@ -296,7 +296,7 @@ pub fn status(
         })?
         .into_iter()
         .map(|ask| {
-            json!({
+            let mut entry = json!({
                 "id": ask.id,
                 "kind": ask.kind,
                 "question": truncate(&ask.question, ASK_QUESTION_CHARS)
@@ -307,7 +307,13 @@ pub fn status(
                 "reason_category": ask.reason_category,
                 "affected": ask.affected,
                 "age_secs": now - ask.created_at,
-            })
+            });
+            // What a worker_question left undecided (ADR-t947-2), primary
+            // first; absent for the kinds and the asks without topics.
+            if !ask.topics.is_empty() {
+                entry["topics"] = json!(ask.topics);
+            }
+            entry
         })
         .collect::<Vec<_>>();
     let (supervisors, waiting) = slots_and_waits(

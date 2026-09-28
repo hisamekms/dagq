@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{AskId, AskKind, EventId, RunEvent, TaskId, stats::timestamp_millis};
 
@@ -304,6 +304,10 @@ pub struct WaitingStats {
     /// `waited_secs` of the waits that ended, by the kind of the ask that
     /// started them: the slot time the waits would have held.
     pub waited: BTreeMap<String, Durations>,
+    /// `waited` of the waits a `worker_question` started, by its primary
+    /// topic (ADR-t947-2), `unlabeled` for one asked before topics were
+    /// kept.
+    pub waited_by_topic: BTreeMap<String, Durations>,
     /// `slot_wait_secs` of the runs back in a slot.
     pub slot_wait: Durations,
     /// Runs that went back past `--parallel` (decision 10).
@@ -324,24 +328,48 @@ pub fn waiting_stats(
     // The kind of the ask that started each run's latest wait.
     let mut started_by: BTreeMap<&str, String> = BTreeMap::new();
     let mut waited: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut waited_by_topic: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    // Each worker_question's primary topic, by its ask's id, and the
+    // topic of the question that started each run's latest wait.
+    let mut topics: HashMap<String, String> = HashMap::new();
+    let mut started_topic: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    let ask_id = |payload: &Value| {
+        payload
+            .get("ask_id")
+            .map(|id| id.as_str().map_or_else(|| id.to_string(), str::to_owned))
+    };
     let mut slot_wait = Vec::new();
     for event in events {
         let run = event.run_id.as_ref().map_or("", |id| id.as_str());
         let inside = event.id > after && event.id <= upto && counts(event.task_id);
         match event.kind.as_str() {
+            "ask_opened" if event.payload["kind"].as_str() == Some("worker_question") => {
+                if let Some(id) = ask_id(&event.payload) {
+                    let primary = super::stats::worker_question_topics::topics_of(&event.payload)
+                        .swap_remove(0);
+                    topics.insert(id, primary);
+                }
+            }
             RUN_WAITING_STARTED => {
                 let kind = text(&event.payload, "ask_kind");
                 if inside {
                     *stats.started.entry(kind.clone()).or_default() += 1;
                 }
+                let topic = (kind == "worker_question").then(|| {
+                    ask_id(&event.payload)
+                        .and_then(|id| topics.get(&id).cloned())
+                        .unwrap_or_else(|| super::UNLABELED_TOPIC.to_owned())
+                });
+                started_topic.insert(run, topic);
                 started_by.insert(run, kind);
             }
             RUN_WAITING_ENDED if inside => {
                 let kind = started_by.get(run).cloned().unwrap_or_default();
-                waited
-                    .entry(kind)
-                    .or_default()
-                    .push(event.payload["waited_secs"].as_i64().unwrap_or(0));
+                let secs = event.payload["waited_secs"].as_i64().unwrap_or(0);
+                if let Some(Some(topic)) = started_topic.get(run) {
+                    waited_by_topic.entry(topic.clone()).or_default().push(secs);
+                }
+                waited.entry(kind).or_default().push(secs);
             }
             RUN_SLOT_REGAINED if inside => {
                 slot_wait.push(event.payload["slot_wait_secs"].as_i64().unwrap_or(0));
@@ -356,6 +384,10 @@ pub fn waiting_stats(
     stats.waited = waited
         .into_iter()
         .map(|(kind, secs)| (kind, Durations::of(secs)))
+        .collect();
+    stats.waited_by_topic = waited_by_topic
+        .into_iter()
+        .map(|(topic, secs)| (topic, Durations::of(secs)))
         .collect();
     stats.slot_wait = Durations::of(slot_wait);
     stats
@@ -388,6 +420,44 @@ mod tests {
             json!({"ask_id": ask, "ask_kind": kind, "phase": "exit", "status": "awaiting_integration"}),
             "2026-09-26T04:10:00.000Z",
         )
+    }
+
+    /// The waits a worker_question started, by its primary topic
+    /// (ADR-t947-2); one asked before topics were kept is `unlabeled`.
+    #[test]
+    fn the_waits_of_worker_questions_are_split_by_topic() {
+        let opened = |id, ask, payload: Value| {
+            let mut payload = payload;
+            payload["ask_id"] = json!(ask);
+            payload["kind"] = json!("worker_question");
+            event(id, "r1", "ask_opened", payload, "2026-09-26T04:00:00.000Z")
+        };
+        let ended = |id, secs| {
+            event(
+                id,
+                "r1",
+                RUN_WAITING_ENDED,
+                json!({"waited_secs": secs}),
+                "2026-09-26T04:20:00.000Z",
+            )
+        };
+        let events = [
+            opened(1, 7, json!({"topics": ["adr_conflict", "task_overlap"]})),
+            started(2, 7, "worker_question"),
+            ended(3, 60),
+            opened(4, 8, json!({})),
+            started(5, 8, "worker_question"),
+            ended(6, 30),
+            started(7, 9, "stuck_exit"),
+            ended(8, 10),
+        ];
+        let stats = waiting_stats(&events, EventId::new(0), EventId::new(8), |_| true);
+        assert_eq!(
+            stats.waited_by_topic.keys().collect::<Vec<_>>(),
+            ["adr_conflict", "unlabeled"]
+        );
+        assert_eq!(stats.waited_by_topic["adr_conflict"].total_secs, 60);
+        assert_eq!(stats.waited["worker_question"].count, 2);
     }
 
     #[test]

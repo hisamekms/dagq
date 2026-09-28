@@ -185,6 +185,9 @@ fn the_records_keep_the_writer_they_had() {
         let question = format!("asked by {writer}");
         let mut args = ask_args(&question);
         args[2] = kind;
+        if kind == "worker_question" {
+            args.extend(["--topic", "task_overlap"]);
+        }
         let asked = run(&args);
         assert_eq!(asked["asked_by"], writer, "{env:?}");
         let id = asked["id"].to_string();
@@ -225,6 +228,7 @@ fn every_event_records_its_actor() {
     ];
     let mut question = ask_args("which way?");
     question[2] = "worker_question";
+    question.extend(["--topic", "task_overlap"]);
     run(&worker, &question);
     let observer = [("DAGQ_ROLE", "observer"), ("DAGQ_ACTOR_ID", "observer:s1")];
     run(

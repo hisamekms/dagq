@@ -415,7 +415,7 @@ impl AgentProvider for TestProvider {
         assert!(prompt.contains("Sibling tasks in progress"));
         // A question goes to the queue as an ask, not to the terminal.
         assert!(prompt.contains(&format!(
-            "`dagq ask --run {} --kind worker_question --because scope --question '...'`",
+            "`dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'`",
             run.id()
         )));
         // Background work is stopped before the receipt, or /exit stalls.
@@ -1310,7 +1310,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --question "$1" >/dev/null; }}
+ask() {{ "$DAGQ" --db "$DB" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
 printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 . {turns}
 [ -n "$RESULTED" ] || result
@@ -1398,7 +1398,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --question "$1" >/dev/null; }}
+ask() {{ "$DAGQ" --db "$DB" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
 echo "Reading additional input from stdin..." >&2
 printf '{{"type":"thread.started","thread_id":"%s"}}
 {{"type":"turn.started"}}

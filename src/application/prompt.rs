@@ -237,7 +237,7 @@ pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns 
 pub const HEADLESS_STOP: &str = "Before you end the turn, stop every process you started that still runs (a detached `nohup ... &` outlives the turn). Stop only what you started, by its pid; never signal by name or pattern (pkill, killall, kill $(pgrep ...)), which also hits other runs' sessions and checks on this host.";
 
 /// The last step of a request to a headless session: the turn is its reply.
-const HEADLESS_DONE: &str = "Do not merge or push. Follow the repository's instructions for a worker (AGENTS.md or CLAUDE.md) as before. Do all of this in this turn. If you need a decision, run `dagq ask --run <run> --kind worker_question --because <scope|discard> --question '...'` and end the turn: the answer comes as the prompt of your next turn. When done, report briefly and end the turn.";
+const HEADLESS_DONE: &str = "Do not merge or push. Follow the repository's instructions for a worker (AGENTS.md or CLAUDE.md) as before. Do all of this in this turn. If you need a decision, run `dagq ask --run <run> --kind worker_question --because <scope|discard> --topic <code> --question '...'` and end the turn: the answer comes as the prompt of your next turn. When done, report briefly and end the turn.";
 
 /// The last step of a request to an interactive session.
 const INTERACTIVE_DONE: &str =
@@ -546,7 +546,7 @@ pub fn prompt(
          follow_ups is optional: an array of work you found outside this task, each with a title, a description and a category, for the planner to decide on; omit it when there is none. {categories}\n\
          You may write this receipt outside the worktree. Keep the worktree clean after committing.\n\
          The supervisor rejects the run unless the commit is the clean head of your branch on top of the base commit, and integrate runs the verification commands itself after rebasing onto main.\n\
-         When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {answer_arrives}\n\
+         When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --topic <code> --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {topics} {answer_arrives}\n\
          {stop_background}\n\
          {after_submitting}\n\
          {headless}",
@@ -561,6 +561,7 @@ pub fn prompt(
         verification = serde_json::to_string_pretty(&task.verification_commands())?,
         local_checks = local_checks("above"),
         categories = follow_up_categories_line(),
+        topics = worker_question_topics_line(),
     ))
 }
 
@@ -589,6 +590,19 @@ fn e2e_expectation(required: &[EvidenceCheck], paths: &[String], e2e_paths: &[St
     format!(
         "E2E evidence is decided by your diff: validation requires `e2e` (passed with evidence in the receipt, or the run waits for a session to add it) when the change from the base commit touches any of these paths from the repository's dagq.toml [e2e] paths: {}. {expected}; when it touches none, report `e2e` as not_applicable with that reason.\n",
         e2e_paths.join(", ")
+    )
+}
+
+/// What the worker's prompt says of a worker_question's `--topic`
+/// (ADR-t947-2): the codes, and how to choose the primary one.
+pub fn worker_question_topics_line() -> String {
+    let list: Vec<String> = crate::domain::WORKER_QUESTION_TOPICS
+        .iter()
+        .map(|(code, meaning)| format!("{code} ({meaning})"))
+        .collect();
+    format!(
+        "`--topic` says what is left undecided: give the primary code first (what stopped you first; the earlier in this list when two came at once), then with more `--topic` any code that must be decided with it, from: {}.",
+        list.join("; ")
     )
 }
 
@@ -1379,7 +1393,7 @@ pub(crate) fn stall_nudge(
             "1. If the work is done, commit it and write the receipt at {receipt} (a temporary file in the same directory, then rename). If it is not, go on with it now and end the turn with the receipt."
         ));
         lines.push(format!(
-            "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --question '...'` (or `--because discard` for whether to throw work away) and end the turn.",
+            "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'` (or `--because discard` for whether to throw work away) and end the turn.",
             run.id()
         ));
         lines.push(
@@ -1411,7 +1425,7 @@ pub(crate) fn stall_nudge(
         "1. If the work is done, commit it and write the receipt at {receipt} (a temporary file in the same directory, then rename)."
     ));
     lines.push(format!(
-        "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --question '...'` (or `--because discard` for whether to throw work away) and stop.",
+        "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'` (or `--because discard` for whether to throw work away) and stop.",
         run.id()
     ));
     lines.push(

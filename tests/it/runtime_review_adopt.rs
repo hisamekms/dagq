@@ -206,6 +206,7 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::AnswerPrompt,
             task_id: Some(run.task_id()),
             run_id: Some(run.id().clone()),

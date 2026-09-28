@@ -203,6 +203,7 @@ mod tests {
 
     fn ask(reason: AskReason, subject: Option<&str>) -> Ask {
         Ask {
+            topics: Vec::new(),
             id: AskId::new(4),
             kind: AskKind::QueueHold,
             task_id: None,

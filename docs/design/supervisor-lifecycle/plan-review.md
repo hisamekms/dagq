@@ -45,7 +45,7 @@ related:
 [ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定（task 948で実装）。一覧と定義は`domain::review_reason::PLAN_REVIEW_CODES`が持ち、plan reviewのpromptがそのまま載せる。一覧はtask 945の分析（[review-sendback-reasons](../../plans/review-sendback-reasons.md#plan-review-のラベル)）を元にした。
 
 - **verdictの形と記録**: runの[Review](review.md#差し戻しの分類コード)と同じく、`reasons`の各項目は`{"text", "codes"}`（先頭が主。文字列だけの項目も読み、`codes`の形はrunの[Review](review.md#差し戻しの分類コード)と同じくverdictを読めなくしない）で、`PlanReviewVerdict`は文を`reasons`に、項目ごとのコードを`reason_codes`に持つ。`plan_review_finished`は`reason_codes`（欠けた項目は`["unlabeled"]`）と`primary_code`（適用した`decision`がpassなら`null`、それ以外は最初の項目の主のコード）を持ち、`plan_reviews`の行の`verdict`のJSONも`reason_codes`を持つ（文を読む所は`reasons`だけを読む）。一覧に無い値はそのまま記録し、コードはverdictの判定と適用（`actions`・`reopen`など）に使わない。コードより前の記録は書き換えない。
-- **runのreviewと共通のコード**: `adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`・`acceptance_ambiguous`は定義の文を揃えて[Review](review.md#差し戻しの分類コード)と同じ定義で使う（plan reviewで止められなかったものが後でreviewのconcernやworkerの問いになった割合を追うため）。`task_overlap`はworkerの問い（[ask](ask.md#worker_questionの分類コード未実装)）と同じ定義。
+- **runのreviewと共通のコード**: `adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`・`acceptance_ambiguous`は定義の文を揃えて[Review](review.md#差し戻しの分類コード)と同じ定義で使う（plan reviewで止められなかったものが後でreviewのconcernやworkerの問いになった割合を追うため）。`task_overlap`はworkerの問い（[ask](ask.md#worker_questionの分類コード)）と同じ定義。
 - **主の選び方**: 重い順に`adr_conflict` > `acceptance_conflict` > `acceptance_infeasible` > `operational_hazard` > `wrong_premise` > `task_overlap` > `missing_dependency` > `stale_adr_reference` > `acceptance_ambiguous` > `incomplete_spec` > `paths_insufficient` > `verification_rule` > `lint_violation` > `other`。
 
 | コード | 定義 | task 945の例・対応 |

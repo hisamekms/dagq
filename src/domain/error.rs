@@ -206,6 +206,13 @@ pub enum DomainError {
     AskFindingNotBlocked {
         kind: AskKind,
     },
+    /// A `worker_question` without a topic code (ADR-t947-2 decision 1).
+    AskWithoutTopic,
+    /// A topic code on an ask that is not a `worker_question` (ADR-t947-2
+    /// decision 6).
+    AskTopicNotWorkerQuestion {
+        kind: AskKind,
+    },
     /// An ask of `kind` names neither a task nor a run; only `blocked` may.
     AskWithoutTarget {
         kind: AskKind,
@@ -511,6 +518,16 @@ impl fmt::Display for DomainError {
                 "finding {finding_id} is {}; it cannot become {}",
                 status.as_str(),
                 to.as_str()
+            ),
+            Self::AskWithoutTopic => write!(
+                f,
+                "a worker_question needs --topic: the primary code of what is left undecided first ({}), then any secondary ones",
+                super::worker_question::topic_codes()
+            ),
+            Self::AskTopicNotWorkerQuestion { kind } => write!(
+                f,
+                "only a worker_question carries --topic, not {}",
+                kind.as_str()
             ),
             Self::AskFindingNotBlocked { kind } => write!(
                 f,

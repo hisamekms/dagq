@@ -899,6 +899,19 @@ enum Command {
         /// A question that fits none of them is no ask: decide it yourself, or leave it as a note (`dagq note`).
         #[arg(long = "because", required = true, value_parser = ["scope", "discard", "recovery_failed", "authentication", "cost"])]
         because: Option<String>,
+        /// What a worker_question left undecided (ADR-t947-2); repeat for several, the first the
+        /// primary one (what stopped you first), the rest what must be decided with it. Required
+        /// for a worker_question and refused on any other kind. One of: discard_work (throw away
+        /// or redo the work), adr_conflict (the task contradicts an accepted ADR, a design or a
+        /// person's decision), acceptance_conflict (two criteria cannot both hold),
+        /// acceptance_infeasible (a fact keeps a criterion from being met), out_of_scope_change
+        /// (a change outside the task's paths or description is needed), task_overlap (another
+        /// task or a landed change overlaps), precondition_missing (what the work starts from is
+        /// not there yet), host_environment (the host's tools or settings block it),
+        /// design_choice (an implementation choice, yours to decide) or other; the heavier first
+        /// when two came at once. A code outside the list is kept as given.
+        #[arg(long = "topic")]
+        topics: Vec<String>,
         /// Task the ask is about. Only a blocked ask, or a planner_question about a finding, may
         /// name neither a task nor a run.
         #[arg(long = "task", conflicts_with = "run")]
@@ -2565,6 +2578,7 @@ fn execute(cli: Cli) -> Result<Value> {
             question,
             options,
             because,
+            topics,
             task_id,
             run,
             finding,
@@ -2584,6 +2598,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 // The session's role; a person at a plain terminal has none.
                 asked_by: actor.written_by().to_owned(),
                 reason_category: because.unwrap_or_default().parse::<AskReason>()?,
+                topics,
                 finding_id: finding.map(FindingId::new),
             })?
         }
@@ -3490,6 +3505,8 @@ mod tests {
                     "q",
                     "--because",
                     "scope",
+                    "--topic",
+                    "task_overlap",
                 ],
             ),
             (

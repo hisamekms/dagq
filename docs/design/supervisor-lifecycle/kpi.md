@@ -163,11 +163,18 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 
 ## 分類コードごとの系列（未実装）
 
-ADR-t947-1の分は上の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)、ADR-t947-3の分は下の[follow_upの種類ごとの系列](#follow_upの種類ごとの系列)。[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。[Stats](stats.md#分類コードごとの集計未実装)の集計を期間ごとの窓で読み、コードを層として次の系列を出す予定。良い向きはどれも低い方（採用率だけは持たない）で、目標は今までどおり`dagq.toml`とhost.tomlの`targets`が決める。
+ADR-t947-1の分は上の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)、ADR-t947-2の分は下の[worker_questionの分類コードごとの系列](#worker_questionの分類コードごとの系列)、ADR-t947-3の分は下の[follow_upの種類ごとの系列](#follow_upの種類ごとの系列)。[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。[Stats](stats.md#分類コードごとの集計未実装)の集計を期間ごとの窓で読み、コードを層として次の系列を出す予定。良い向きはどれも低い方（採用率だけは持たない）で、目標は今までどおり`dagq.toml`とhost.tomlの`targets`が決める。
 
-- `ask.worker_question_wait`（`topic=<主のコード>`）: worker_questionの答えまでの秒
+- `ask.worker_question_wait`（`topic=<主のコード>`）: 実装済み。下の[worker_questionの分類コードごとの系列](#worker_questionの分類コードごとの系列)
 - `plan.follow_up_adoption_rate`（`category=<コード>`）: 実装済み。下の[follow_upの種類ごとの系列](#follow_upの種類ごとの系列)
 - `plan.cancel_waste`（`reason=<コード>`）: `ready`・`submitted`に進んでから、またはruntimeのplannerを経てcancelされたtaskの数
+
+## worker_questionの分類コードごとの系列
+
+[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定4（task 953で実装）。期間の窓の`stats`の`worker_question_topics`（[worker_questionの分類コードごとの集計](stats.md#worker_questionの分類コードごとの集計)）を読み、夜と昼はKPIの期間と同じhostの時刻で分ける。
+
+- `ask.worker_question_wait`: 期間に開いた`worker_question`の、人が答えるまでの秒の分布（runtimeが自分で閉じた答えは除く）。層は`all`、主のコードの`topic=<コード>`（無ければ`unlabeled`）、開いた時刻の`at=night`（22時から7時）と`at=day`。良い向きは低い方（`direction`の既定）。
+- `details.worker_question_topics`: 期間の窓の`worker_question_topics`をそのまま置く。件数・率・`reason_category`との組み合わせ・答えの後の経過・副を含めたコードの集合はここで読む。test は`src/domain/kpi/tests.rs`の`the_worker_question_waits_are_split_by_topic_and_night`。
 
 ## follow_upの種類ごとの系列
 

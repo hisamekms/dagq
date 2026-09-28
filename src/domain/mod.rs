@@ -809,6 +809,7 @@ mod views;
 pub mod waiting;
 pub mod worker;
 pub mod worker_model;
+pub mod worker_question;
 pub mod worktime;
 pub mod write_rules;
 
@@ -851,6 +852,7 @@ pub use views::{
     RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess, SupervisorRegistration,
     TaskDetail, TaskOrigin, TaskStatusCounts,
 };
+pub use worker_question::{UNLABELED_TOPIC, WORKER_QUESTION_TOPICS};
 
 /// A question for a person (ADR-0022): about a task, or one of its runs when
 /// `run_id` is set; a `blocked` ask of the observer may be about neither
@@ -870,6 +872,11 @@ pub struct Ask {
     pub asked_by: String,
     /// Why a person is needed (ADR-0047 decision 41).
     pub reason_category: AskReason,
+    /// What a `worker_question` left undecided (ADR-t947-2): the primary
+    /// topic code first, then the secondary ones. Empty for every other
+    /// kind and for an ask opened before topics were kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
     /// What a `queue_hold` ask is about within its reason (the usage limit
     /// or the disk for `cost`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1005,6 +1012,9 @@ pub struct NewAsk {
     /// Why a person is needed (ADR-0047 decision 41): `scope`, `discard`
     /// or `recovery_failed`. Authentication and cost are [`NewHold`]s.
     pub reason_category: AskReason,
+    /// What a `worker_question` left undecided (ADR-t947-2), primary
+    /// first: one at least for that kind, none for any other.
+    pub topics: Vec<String>,
     /// The finding a `blocked` ask raises; the one-open-ask rule then holds
     /// per finding (ADR-0044 decision 23). A `planner_question` names the
     /// finding its planner of the runtime's was opened for (ADR-0044
@@ -1032,6 +1042,16 @@ impl NewAsk {
                 reason: self.reason_category,
             },
         )?;
+        let topics = worker_question::normalize_topics(&self.topics);
+        if self.kind == AskKind::WorkerQuestion {
+            require(!topics.is_empty(), || DomainError::AskWithoutTopic)?;
+        } else {
+            require(topics.is_empty(), || {
+                DomainError::AskTopicNotWorkerQuestion {
+                    kind: self.kind.clone(),
+                }
+            })?;
+        }
         require(
             self.finding_id.is_none()
                 || matches!(self.kind, AskKind::Blocked | AskKind::PlannerQuestion),
@@ -2109,6 +2129,7 @@ mod attention_tests {
 
     fn ask_of(kind: AskKind, options: &[&str]) -> Ask {
         Ask {
+            topics: Vec::new(),
             id: AskId::new(1),
             kind,
             task_id: Some(TaskId::new(1)),
@@ -2188,6 +2209,7 @@ mod attention_tests {
     #[test]
     fn asks_wait_for_the_inbox_until_closed() {
         let mut ask = Ask {
+            topics: Vec::new(),
             id: AskId::new(1),
             kind: AskKind::Decide,
             task_id: Some(TaskId::new(1)),
@@ -2346,6 +2368,7 @@ mod attention_tests {
     #[test]
     fn new_ask_rejects_blank_texts_and_bad_ids() {
         let valid = NewAsk {
+            topics: vec!["task_overlap".into()],
             kind: AskKind::WorkerQuestion,
             task_id: Some(TaskId::new(1)),
             run_id: None,
@@ -2377,6 +2400,16 @@ mod attention_tests {
                 task_id: None,
                 ..valid.clone()
             },
+            // A worker_question names what it left undecided (ADR-t947-2).
+            NewAsk {
+                topics: vec![" ".into()],
+                ..valid.clone()
+            },
+            // Only a worker_question carries topics (decision 6).
+            NewAsk {
+                kind: AskKind::Decide,
+                ..valid.clone()
+            },
         ] {
             assert!(broken.validate().is_err(), "{broken:?}");
         }
@@ -2384,6 +2417,7 @@ mod attention_tests {
         let blocked = NewAsk {
             kind: AskKind::Blocked,
             task_id: None,
+            topics: Vec::new(),
             ..valid.clone()
         };
         assert!(blocked.validate().is_ok());

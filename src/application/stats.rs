@@ -51,6 +51,9 @@ pub struct StatsSources<'a> {
     /// The `[areas]` of `dagq.toml` and the landed commits' changes, for
     /// the runs' areas (ADR-t980-1).
     pub areas: &'a super::areas::AreaReader,
+    /// The host's offset from UTC in seconds, east positive: when an ask
+    /// counts as opened at night.
+    pub utc_offset_secs: i64,
 }
 
 /// Main's history since the earliest event of `events` (a second before
@@ -207,6 +210,7 @@ pub fn stats(
         history: conflict_history(&events, sources.history),
         conflicts: conflict_config((sources.conflicts_file)()?),
         draft_origins: queue.draft_origins()?,
+        utc_offset_secs: sources.utc_offset_secs,
     };
     let mut stats = aggregate(&events, &goals, now, snapshot, query, &live);
     let titles = queue.task_titles()?;

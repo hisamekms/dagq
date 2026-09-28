@@ -805,6 +805,7 @@ pub(super) fn ask_stuck_exit(
             options,
             asked_by: SessionRole::Supervisor.as_str().into(),
             reason_category: note.map_or(AskReason::RecoveryFailed, |note| note.category),
+            topics: Vec::new(),
             finding_id: None,
         },
         sv.cmux,

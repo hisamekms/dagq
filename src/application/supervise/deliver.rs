@@ -327,6 +327,7 @@ pub(super) fn ask_unsubmitted(
             options: Vec::new(),
             asked_by: SessionRole::Supervisor.as_str().into(),
             reason_category: AskReason::RecoveryFailed,
+            topics: Vec::new(),
             finding_id: None,
         },
         sv.cmux,

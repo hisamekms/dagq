@@ -37,7 +37,7 @@ related:
 
 ## 差し戻しの分類コード
 
-[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定（task 948で実装）。一覧と定義は`domain::review_reason::REVIEW_CODES`が持ち、reviewのpromptがそのまま載せる（`application::prompt`の`reason_codes_section`）。一覧はtask 945の分析（[review-sendback-reasons](../../plans/review-sendback-reasons.md#ラベルの定義案)）を元に、workerの問い（[ask](ask.md#worker_questionの分類コード未実装)）とfollow_up（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)）の集合と同じ種類の問題の名前を揃えた。
+[ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定（task 948で実装）。一覧と定義は`domain::review_reason::REVIEW_CODES`が持ち、reviewのpromptがそのまま載せる（`application::prompt`の`reason_codes_section`）。一覧はtask 945の分析（[review-sendback-reasons](../../plans/review-sendback-reasons.md#ラベルの定義案)）を元に、workerの問い（[ask](ask.md#worker_questionの分類コード)）とfollow_up（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)）の集合と同じ種類の問題の名前を揃えた。
 
 - **verdictの形**: `reasons`の各項目は`{"text": string, "codes": [code, ...]}`（`codes`は1つ以上、先頭が主）。文字列だけの項目（コードより前の形）も読み、`codes`の無い項目として扱う。コードは集計のためのlabelなので、その形でverdictを読めなくはしない（ADR-t947-1決定3）: `codes`は文字列1つか配列（文字列でない要素は捨てる）で、それ以外の形は`codes`の無い項目、項目の他の欄は無視する。`text`の無い項目とverdictの未知の欄は今までどおり読めないverdictにする。`ReviewVerdict`は`reasons`に文だけを、`reason_codes`に項目ごとのコード（無ければ空）を持つので、`revise_requested`・askの問い・`send_back`の理由など文を使う所は変わらない。verdictの主のコードは最初の項目の主のコードで、promptはverdictを決めた項目を先頭に置かせる（止めない注意の項目は先頭にしない）。
 - **記録**: `review_finished`の`reason_codes`（項目ごとのコードの配列）と`primary_code`（passは`null`。revise・concernで項目もコードも無ければ`unlabeled`）。`codes`の欠けた項目は`["unlabeled"]`、一覧に無い値はその値のまま記録し（拒否も`other`への読み替えもしない）、空白だけのコードは捨てる。コードはverdictの判定と適用に使わない。コードより前の`review_finished`は書き換えず、読む側（[Stats](stats.md#差し戻しの分類コードごとの集計)）が各理由を`unlabeled`として数える。

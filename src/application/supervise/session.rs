@@ -1073,6 +1073,7 @@ pub(super) fn ask_answer_prompt(
             options: note.map(|note| note.options.clone()).unwrap_or_default(),
             asked_by: SessionRole::Supervisor.as_str().into(),
             reason_category: note.map_or(AskReason::RecoveryFailed, |note| note.category),
+            topics: Vec::new(),
             finding_id: None,
         },
         sv.cmux,

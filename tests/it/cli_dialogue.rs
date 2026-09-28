@@ -55,6 +55,9 @@ fn ask(kind: &str, target: &[&str]) -> Vec<String> {
     ]
     .map(str::to_owned)
     .to_vec();
+    if kind == "worker_question" {
+        args.extend(["--topic".to_owned(), "task_overlap".to_owned()]);
+    }
     args.extend(target.iter().map(|arg| (*arg).to_owned()));
     args
 }
@@ -263,4 +266,73 @@ fn the_observer_still_records_findings_and_raises_blocked_asks() {
     );
     assert_eq!(answered["answer_approval"], true);
     assert_eq!(answered["answer_authority"], "user");
+}
+
+/// A worker_question carries what it left undecided (ADR-t947-2): the
+/// primary topic first, kept in the row, `ask_opened` and `status`' asks;
+/// one is required, other kinds carry none, and a code outside the list is
+/// kept as given.
+#[test]
+fn a_worker_question_records_its_topics_primary_first() {
+    let (_dir, db) = queue();
+    ok(&db, &["add", "first"]);
+    let mut args = ask("decide", &["--task", "1"]);
+    args[2] = "worker_question".to_owned();
+    let missing = denied_as(&WORKER, &db, &strs(&args));
+    assert!(
+        missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("a worker_question needs --topic"),
+        "{missing}"
+    );
+    let mut on_decide = ask("decide", &["--task", "1"]);
+    on_decide.extend(["--topic".to_owned(), "task_overlap".to_owned()]);
+    let refused = invoke(&db, &strs(&on_decide));
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("only a worker_question carries --topic, not decide"),
+    );
+
+    args.extend(
+        [
+            "--topic",
+            " adr_conflict ",
+            "--topic",
+            "new_code",
+            "--topic",
+            "adr_conflict",
+        ]
+        .map(str::to_owned),
+    );
+    let asked = allowed_as(&WORKER, &db, &strs(&args));
+    assert_eq!(asked["topics"], json!(["adr_conflict", "new_code"]));
+    let decided = ok(&db, &strs(&ask("decide", &["--task", "1"])));
+    assert!(decided.get("topics").is_none(), "{decided}");
+
+    let opened = events(&db, "ask_opened");
+    assert_eq!(
+        opened[0]["payload"]["topics"],
+        json!(["adr_conflict", "new_code"])
+    );
+    assert_eq!(opened[0]["payload"]["reason_category"], "scope");
+    assert!(
+        opened[1]["payload"].get("topics").is_none(),
+        "{}",
+        opened[1]
+    );
+    let status = ok(&db, &["status"]);
+    let asks = status["asks"].as_array().unwrap();
+    assert_eq!(
+        asks[0]["topics"],
+        json!(["adr_conflict", "new_code"]),
+        "{status}"
+    );
+    assert!(asks[1].get("topics").is_none(), "{status}");
+    let all = ok(&db, &["asks", "--all"]);
+    assert_eq!(
+        all["asks"][0]["topics"],
+        json!(["adr_conflict", "new_code"])
+    );
 }

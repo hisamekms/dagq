@@ -918,9 +918,15 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
                 created: false,
             });
         }
+    // A worker_question's topic codes (ADR-t947-2), primary first; NULL
+    // for the kinds that carry none.
+    let topics = crate::domain::worker_question::normalize_topics(&ask.topics);
+    let topics_column = (!topics.is_empty())
+        .then(|| serde_json::to_string(&topics))
+        .transpose()?;
     tx.execute(
-        "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         params![
             ask.kind.as_str(),
             task_id,
@@ -929,21 +935,26 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
             serde_json::to_string(&options)?,
             ask.asked_by,
             ask.reason_category.as_str(),
-            ask.finding_id
+            ask.finding_id,
+            topics_column
         ],
     )?;
     let id = AskId::new(tx.last_insert_rowid());
+    let mut payload = json!({
+        "ask_id": id,
+        "kind": ask.kind,
+        "asked_by": ask.asked_by,
+        "reason_category": ask.reason_category,
+    });
+    if !topics.is_empty() {
+        payload["topics"] = json!(topics);
+    }
     ask_event(
         tx,
         task_id,
         ask.run_id.as_ref(),
         EventKind::AskOpened,
-        json!({
-            "ask_id": id,
-            "kind": ask.kind,
-            "asked_by": ask.asked_by,
-            "reason_category": ask.reason_category,
-        }),
+        payload,
     )?;
     let created = read_ask(tx, id)?;
     Ok(AskOutcome {
@@ -1049,6 +1060,12 @@ pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
         answer: row.get("answer")?,
         asked_by: row.get("asked_by")?,
         reason_category: enum_col(row, "reason_category")?,
+        // NULL for the kinds without topics and the asks before them; a
+        // value that is no array of texts reads as none.
+        topics: row
+            .get::<_, Option<String>>("topics")?
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default(),
         subject: row.get("subject")?,
         affected: json_col(row, "affected")?,
         created_at: row.get("created_at")?,
@@ -1354,6 +1371,7 @@ mod tests {
         .unwrap();
         let ask = queue
             .ask(NewAsk {
+                topics: vec!["task_overlap".into()],
                 kind: AskKind::WorkerQuestion,
                 task_id: Some(task_id),
                 run_id: Some(run.clone()),

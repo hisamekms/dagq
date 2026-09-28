@@ -36,6 +36,9 @@ pub struct AskStats {
 pub struct AskTimes {
     pub by_kind: BTreeMap<String, AskWaits>,
     pub by_asked_by: BTreeMap<String, AskWaits>,
+    /// The `worker_question`s by their primary topic (ADR-t947-2),
+    /// `unlabeled` for one opened before topics were kept.
+    pub by_topic: BTreeMap<String, AskWaits>,
 }
 
 /// The waits of one group of asks.
@@ -127,6 +130,8 @@ struct AskTrack {
     reason: String,
     kind: String,
     asked_by: String,
+    /// A worker_question's primary topic.
+    topic: Option<String>,
     task_id: Option<TaskId>,
     opened_ms: Option<i64>,
     /// The first `ask_answered`: its id and time.
@@ -320,6 +325,12 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
                         reason: text(&event.payload, "reason_category"),
                         kind: text(&event.payload, "kind"),
                         asked_by: text(&event.payload, "asked_by"),
+                        topic: (event.payload["kind"].as_str() == Some("worker_question")).then(
+                            || {
+                                super::worker_question_topics::topics_of(&event.payload)
+                                    .swap_remove(0)
+                            },
+                        ),
                         task_id: event.task_id,
                         opened_ms: timestamp_millis(&event.created_at),
                         answered: None,
@@ -419,6 +430,7 @@ fn times(
 ) -> AskTimes {
     let mut by_kind: BTreeMap<String, WaitSecs> = BTreeMap::new();
     let mut by_asked_by: BTreeMap<String, WaitSecs> = BTreeMap::new();
+    let mut by_topic: BTreeMap<String, WaitSecs> = BTreeMap::new();
     let secs = |from: Option<i64>, to: Option<i64>| Some((to? - from?) / 1000);
     for track in tracks.values().filter(|track| counts(track.task_id)) {
         let mut own = WaitSecs::default();
@@ -445,6 +457,9 @@ fn times(
             .entry(track.asked_by.clone())
             .or_default()
             .add(&own);
+        if let Some(topic) = &track.topic {
+            by_topic.entry(topic.clone()).or_default().add(&own);
+        }
     }
     let summary = |groups: BTreeMap<String, WaitSecs>| {
         groups
@@ -455,6 +470,7 @@ fn times(
     AskTimes {
         by_kind: summary(by_kind),
         by_asked_by: summary(by_asked_by),
+        by_topic: summary(by_topic),
     }
 }
 
@@ -696,6 +712,43 @@ mod tests {
                 ("scope".to_owned(), reason(1, 1, 0)),
             ])
         );
+    }
+
+    /// The worker_questions' waits per primary topic (ADR-t947-2), one
+    /// opened before topics were kept `unlabeled`; other kinds have none.
+    #[test]
+    fn times_the_worker_questions_by_their_primary_topic() {
+        let events = [
+            at(
+                1,
+                "ask_opened",
+                json!({"ask_id": 1, "kind": "worker_question", "asked_by": "worker",
+                    "topics": ["task_overlap", "adr_conflict"]}),
+                0,
+            ),
+            at(2, "ask_answered", json!({"ask_id": 1}), 30),
+            at(
+                3,
+                "ask_opened",
+                json!({"ask_id": 2, "kind": "worker_question", "asked_by": "worker"}),
+                40,
+            ),
+            at(
+                4,
+                "ask_opened",
+                json!({"ask_id": 3, "kind": "decide", "asked_by": "triage"}),
+                40,
+            ),
+        ];
+        let end = timestamp_millis("2026-09-26T00:01:40.000Z").unwrap();
+        let stats = asks(&events, EventId::new(0), EventId::new(4), end, |_| true);
+        let by_topic = &stats.times.by_topic;
+        assert_eq!(
+            by_topic.keys().collect::<Vec<_>>(),
+            ["task_overlap", "unlabeled"]
+        );
+        assert_eq!(by_topic["task_overlap"].to_answer.max, Some(30));
+        assert_eq!(by_topic["unlabeled"].open.max, Some(60));
     }
 
     /// An event `secs` after midnight of 2026-09-26.

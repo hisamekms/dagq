@@ -940,7 +940,7 @@ fn sessions_stopped_at_the_same_login_share_one_authentication_ask() {
 /// `$EXIT.idle` exists and then waits for the answer in `$MESSAGE` (the
 /// test backend's terminal); it commits the answer it got.
 const ASKING_AGENT: &str = r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
@@ -1070,7 +1070,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
         &db,
         false,
         &format!(
-            "\"$DAGQ\" --db \"$DB\" ask --run \"$RUN_ID\" --kind worker_question --because scope --question 'Which?' --cmux /usr/bin/true >/dev/null; idle; {HOLD}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
+            "\"$DAGQ\" --db \"$DB\" ask --run \"$RUN_ID\" --kind worker_question --because scope --topic acceptance_conflict --question 'Which?' --cmux /usr/bin/true >/dev/null; idle; {HOLD}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit"
         ),
     );
     backend.text_fails = true;
@@ -1146,6 +1146,7 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
     let cursor = queue.latest_event_id().unwrap().as_i64();
     let late = queue
         .ask(dagq::domain::NewAsk {
+            topics: vec!["task_overlap".into()],
             kind: "worker_question".parse().unwrap(),
             task_id: None,
             run_id: Some(run.id().clone()),
@@ -1346,7 +1347,7 @@ fn a_settings_panel_is_closed_with_escape() {
 
 /// [`ASKING_AGENT`] that holds after taking its answer until `$EXIT.go`.
 const HOLDING_ASKING_AGENT: &str = r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
@@ -1543,7 +1544,7 @@ fn an_unknown_dialog_over_a_typed_answer_gets_no_key() {
 /// [`HOLDING_ASKING_AGENT`] that goes idle again once it took its answer,
 /// and marks that with `$EXIT.took`.
 const IDLE_AFTER_ANSWER_AGENT: &str = r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done

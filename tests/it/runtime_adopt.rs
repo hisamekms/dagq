@@ -823,6 +823,7 @@ fn adopt_receipt_after_dialog(waited: bool) {
         .unwrap();
     let ask = queue
         .ask(dagq::domain::NewAsk {
+            topics: Vec::new(),
             kind: AskKind::AnswerPrompt,
             task_id: Some(run.task_id()),
             run_id: Some(run.id().clone()),
@@ -1146,6 +1147,7 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
     }
     let asked = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::StuckExit,
             task_id: None,
             run_id: Some(run.id().clone()),
@@ -1220,6 +1222,7 @@ fn adopted_run_asks_about_an_exit_that_timed_out_again() {
     timed_out(&mut queue);
     let earlier = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::StuckExit,
             task_id: None,
             run_id: Some(run.id().clone()),

@@ -34,6 +34,7 @@ pub mod tokens;
 pub mod trial;
 pub mod updates;
 pub mod work;
+pub mod worker_question_topics;
 
 pub use asks::{
     AnsweredAsks, AskStats, AskTimes, AskWaits, Choices, OpenedAsks, ReasonAsks, Spread,
@@ -564,6 +565,11 @@ pub struct Stats {
     /// how they left `draft`, what the runtime's planners decided, the
     /// landings and how long they stayed drafts.
     pub follow_up_categories: BTreeMap<String, follow_up_categories::CategoryFlow>,
+    /// The workers' worker_question asks opened in the same window as
+    /// `asks`, by their primary topic (ADR-t947-2 decision 4): how many,
+    /// their rate over the runs claimed, the answer times at night and by
+    /// day, and what followed the answers; `unlabeled` without topics.
+    pub worker_question_topics: worker_question_topics::WorkerQuestionTopics,
     /// The use of the single integration slot over the window of `host`
     /// in time (goal 72): the share the `integrate` attempts held it,
     /// landed or not, its busiest hour, each attempt's time and the runs
@@ -713,6 +719,9 @@ pub struct LiveSnapshot {
     /// Where each draft the runtime or a job registered came from
     /// (`draft_origins`), for `draft_flow`.
     pub draft_origins: HashMap<TaskId, crate::domain::DraftOrigin>,
+    /// The host's offset from UTC in seconds, east positive: which asks
+    /// `worker_question_topics` counts as opened at night.
+    pub utc_offset_secs: i64,
 }
 
 impl Default for LiveSnapshot {
@@ -731,6 +740,7 @@ impl Default for LiveSnapshot {
             history: History::default(),
             conflicts: ConflictConfigReport::default(),
             draft_origins: HashMap::new(),
+            utc_offset_secs: 0,
         }
     }
 }
@@ -1036,6 +1046,13 @@ pub fn stats(
         window_end,
         counts,
     );
+    let worker_question_topics = worker_question_topics::worker_question_topics(
+        events,
+        window_start,
+        next_cursor,
+        live.utc_offset_secs,
+        counts,
+    );
     let claim_holds =
         super::claim_hold::claim_holds(events, window_start, next_cursor, window_end, counts);
     let landing_holds = super::claim_hold::holds_of(
@@ -1182,6 +1199,7 @@ pub fn stats(
         updates,
         draft_flow,
         follow_up_categories,
+        worker_question_topics,
         landing_utilization,
         host: None,
         next_cursor,

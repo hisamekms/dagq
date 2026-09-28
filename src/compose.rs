@@ -1160,6 +1160,7 @@ impl OneShot {
             history: &history,
             host_metrics: Some(&host_metrics),
             areas: &area_reader(checkout.as_deref())?,
+            utc_offset_secs: clock::local_utc_offset(now),
         };
         Ok(serde_json::to_value(statistics::stats(
             queue,

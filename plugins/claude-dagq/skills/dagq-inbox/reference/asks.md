@@ -6,7 +6,7 @@ Read this when an open ask's kind, options or effect is unclear (the `dagq-inbox
 - `approve_plan`: plan review's concern: `ready` / `send_back: <reason>` / `cancel`.
 - `decide`: a failed, interrupted or resume-exhausted run the recovery job could not fix: `retry` / `resume` / `cancel`, no `resume` once resumes are used up, plus the job's options, which send the run back to the job.
 - `stalled`: a session idle without a receipt after one nudge (`reason: idle_without_receipt`), a typed text the session did not take (`reason: send_unconfirmed`), or a job's escalation; the question lists background work and screen: `wait` (the supervisor closes it, counts again), `intervene` (a person steps in), `propose`. It closes itself once the session moves on (`reference/status.md` of this skill).
-- `worker_question`: typed into the worker's terminal.
+- `worker_question`: typed into the worker's terminal. Its `topics` (in `status`' `asks` and the ask; the first is the primary) say what the worker left undecided, next to `reason_category`: show them with the question.
 - `planner_question`: `adopt` / `cancel` / `keep_draft`.
 - `answer_prompt`: a dialog the runtime and the job could not answer, or a resumed session's input box not ready (`input_not_ready`). No options: the answer is what to send, e.g. `enter`; the question ends with its screen.
 - `stuck_exit`: a `/exit` neither could see through: `exit` / `wait`.

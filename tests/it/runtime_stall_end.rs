@@ -47,6 +47,7 @@ fn stall(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
         .unwrap();
     let ask = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Stalled,
             task_id: None,
             run_id: Some(run.id().clone()),
@@ -152,6 +153,7 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
         .unwrap();
     let ask = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Stalled,
             task_id: None,
             run_id: Some(run.id().clone()),
@@ -202,6 +204,7 @@ fn an_abandoned_run_closes_its_answered_stalled_ask_and_ends_its_nudge() {
     // An ask left open (its answer never came) is answered by the runtime.
     let other = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Stalled,
             task_id: None,
             run_id: Some(run.id().clone()),

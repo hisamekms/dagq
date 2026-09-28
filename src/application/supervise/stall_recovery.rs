@@ -581,6 +581,7 @@ impl SessionWatch {
                     options: stalled_options(Some(&note)),
                     asked_by: SessionRole::Supervisor.as_str().into(),
                     reason_category: note.category,
+                    topics: Vec::new(),
                     finding_id: None,
                 },
                 sv.cmux,

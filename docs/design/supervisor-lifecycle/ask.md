@@ -5,7 +5,7 @@ title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
 updated: 2026-09-29
-last_verified: 2026-09-28
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -27,12 +27,13 @@ related:
 - `dagq ask close ASK_ID`は回答済みのaskに`closed_at`を書き、`ask_closed`（`ask_id`、`kind`）を記録する。inboxが回答を読んで従った印（supervisorが答えを適用して閉じるときも同じ`close_ask`）で、`stats`の`asks.times`は回答の適用として読む（task 468）。runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`）も同じ`ask_closed`をcloseと同じトランザクションで書く（task 568）。attentionではない。未回答のaskはcloseできず（error）、取り下げは`answer`で取り下げた旨を書いてからcloseする。run_eventsでaskを終えるのは`ask_answered`だけで（`worker_question`の送信の`ask_delivered` / `ask_delivery_failed`は後から足したkindで、`stats`の対には使わない）、`stats`はこの2つを`ask_id`で対にして未回答のaskを数えるため、closeだけで閉じたaskが`stats`に残り続けないようにする。回答した時点で同じ（task、run、kind）の新しいaskを登録できる。
 - `dagq asks [--open] [--role <role>] [--all]`はaskを古い順に`{asks}`で返す。既定はcloseされていないもの、`--all`はcloseされたものも、`--open`は未回答のものだけ、`--role`はそのroleが今動かすもの（`Ask::waits_for`: 未回答も回答済みでcloseされていないものもinbox、plannerは無し）。
 
-## worker_questionの分類コード（未実装）
+## worker_questionの分類コード
 
-[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、`ask`はこの欄を持たない。一覧はtask 950の分析（[worker-question-topics](../../plans/worker-question-topics.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
+[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定（task 953で実装）。一覧と定義は`domain::worker_question::WORKER_QUESTION_TOPICS`（重い順）が持ち、workerのprompt（`application::prompt`の`worker_question_topics_line`）とCLIの`ask --topic`のhelpがそのまま載せる。一覧はtask 950の分析（[worker-question-topics](../../plans/worker-question-topics.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
 
-- **CLI**: `dagq ask --kind worker_question --because <scope|discard> --topic <code> [--topic <code>]...`。`--topic`は1つ以上必須で、先頭が主、残りが副。一覧に無い値は拒まずにそのまま記録する。`worker_question`以外のkindに`--topic`を付けたら拒む（ADR-t947-2決定6）。
-- **記録**: `ask_opened`のpayloadと`asks`の出力に`topics`（配列、先頭が主）を載せる。`reason_category`（上の「人が要る理由」）とは別の欄で、一方から他方を推さず、食い違っても拒まない。`topics`の無い過去のaskは`unlabeled`として数える。
+- **CLI**: `dagq ask --kind worker_question --because <scope|discard> --topic <code> [--topic <code>]...`。`--topic`は1つ以上必須で、先頭が主、残りが副。前後の空白を除き、空の値は捨て、同じコードは最初の1つだけ残す。一覧に無い値は拒まずにそのまま記録する。`--topic`の無い`worker_question`（`a worker_question needs --topic`とコードの一覧）と、`worker_question`以外のkindに付けた`--topic`（ADR-t947-2決定6）は`NewAsk::validate`が拒む。runtimeは`worker_question`を作らない。
+- **記録**: askの行の`topics`（JSONの配列、先頭が主。schema v54、`0054_ask_topics.sql`。他のkindと、それより前のaskはnull）に書き、`ask_opened`のpayload・`ask`と`asks`の出力（`Ask`の`topics`）・`status`の`asks`の各項目に`topics`を載せる（無いaskは欄ごと省く）。`reason_category`（上の「人が要る理由」）とは別の欄で、一方から他方を推さず、食い違っても拒まない。`topics`の無い過去のaskは書き換えず、集計では`unlabeled`として数える（`domain::UNLABELED_TOPIC`）。
+- **集計**: [`stats`](stats.md#worker_questionの分類コードごとの集計)の`worker_question_topics`・`asks.times.by_topic`・`waiting.waited_by_topic`と、[`kpi`](kpi.md#worker_questionの分類コードごとの系列)の`ask.worker_question_wait`。
 - **主の選び方**: 主はworkerが止まったきっかけ（最初に満たせなくなったもの）、副はそれを解くのに一緒に決める必要があるもの。きっかけが2つ同時で決められないときだけ、重い方を主にする。重い順: `discard_work` > `adr_conflict` > `acceptance_conflict` > `acceptance_infeasible` > `out_of_scope_change` > `task_overlap` > `precondition_missing` > `host_environment` > `design_choice` > `other`。
 
 | コード | 定義 | task 950の例 | `reason_category`の目安 |

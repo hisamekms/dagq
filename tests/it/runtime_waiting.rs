@@ -8,7 +8,7 @@ use runtime_support::*;
 /// A worker that asks a `worker_question`, goes idle, and waits for the
 /// answer in its terminal (`$MESSAGE`); it commits the answer it got.
 const ASKING_AGENT: &str = r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt
@@ -625,7 +625,7 @@ fn a_wrapper_that_goes_silent_during_a_wait_sends_the_run_back_for_its_exit() {
         &db,
         false,
         r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 await_exit
 "#,
@@ -699,11 +699,11 @@ fn a_wrapper_heartbeat_that_comes_back_lets_the_run_wait_again() {
         &db,
         false,
         r#"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 rm "$MESSAGE"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which colour?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which colour?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 await_exit
 "#,

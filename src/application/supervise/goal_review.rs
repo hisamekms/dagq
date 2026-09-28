@@ -276,6 +276,7 @@ impl Supervisor<'_> {
                 Some(AskReason::Discard) => AskReason::Discard,
                 _ => AskReason::Scope,
             },
+            topics: Vec::new(),
             finding_id: None,
         });
         let applied = self.queue.finish_goal_review(

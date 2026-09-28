@@ -390,6 +390,7 @@ fn a_question_about_any_draft_of_the_bundle_goes_to_its_planner() {
     let planner = planner_of(&queue, a[0]).unwrap();
     let asked = queue
         .ask(dagq::domain::NewAsk {
+            topics: Vec::new(),
             kind: dagq::domain::AskKind::PlannerQuestion,
             task_id: Some(a[1]),
             run_id: None,

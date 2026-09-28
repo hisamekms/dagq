@@ -2548,3 +2548,60 @@ fn splits_the_runs_by_their_change() {
     assert_eq!(asked.change_summary.keys().collect::<Vec<_>>(), ["fix"]);
     assert_eq!("change".parse::<Axis>(), Ok(Axis::Change));
 }
+
+/// A person's answers to the workers' questions per primary topic
+/// (ADR-t947-2): `ask.worker_question_wait` by `topic=`, by when the ask
+/// was opened (`at=night` from 22:00 to 07:00 of the host's day,
+/// `at=day`), and `stats`' `worker_question_topics` in the details.
+#[test]
+fn the_worker_question_waits_are_split_by_topic_and_night() {
+    let mut queue = Queue::default();
+    let tuesday = MONDAY + DAY;
+    for (ask, topics, opened, waited) in [
+        (
+            1,
+            json!(["adr_conflict", "task_overlap"]),
+            tuesday + 23 * HOUR,
+            600,
+        ),
+        (2, json!(["adr_conflict"]), tuesday + 12 * HOUR, 120),
+        (3, Value::Null, tuesday + 13 * HOUR, 60),
+    ] {
+        let mut payload = json!({"ask_id": ask, "kind": "worker_question",
+            "reason_category": "scope"});
+        if !topics.is_null() {
+            payload["topics"] = topics;
+        }
+        queue.push(Some(1), Some("r1"), "ask_opened", payload, opened);
+        queue.push(
+            Some(1),
+            Some("r1"),
+            "ask_answered",
+            json!({"ask_id": ask, "kind": "worker_question", "answered_by": "inbox"}),
+            opened + waited,
+        );
+    }
+    let query = KpiQuery {
+        last: 3,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY + HOUR, &KpiConfig::default(), &query);
+    let second = &result.periods[1];
+    let wait = |stratum: &str| {
+        let measure = measure(second, "ask.worker_question_wait", stratum);
+        (measure.n, measure.max)
+    };
+    assert_eq!(wait(ALL), (3, Some(600.0)));
+    assert_eq!(wait("topic=adr_conflict"), (2, Some(600.0)));
+    assert_eq!(wait("topic=unlabeled"), (1, Some(60.0)));
+    assert_eq!(wait("at=night"), (1, Some(600.0)));
+    assert_eq!(wait("at=day"), (2, Some(120.0)));
+    let details = &second.window.details["worker_question_topics"];
+    assert_eq!(details["asks"], 3);
+    assert_eq!(details["codes"]["task_overlap"], 1);
+    assert_eq!(details["by_topic"]["adr_conflict"]["night"]["total"], 600);
+    assert_eq!(
+        measure(&result.periods[0], "ask.worker_question_wait", ALL).n,
+        0
+    );
+}

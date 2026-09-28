@@ -657,6 +657,7 @@ impl Supervisor<'_> {
                 options,
                 asked_by: TRIAGE_ASKER.to_owned(),
                 reason_category: note.category,
+                topics: Vec::new(),
                 finding_id: None,
             },
             self.cmux,

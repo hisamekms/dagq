@@ -379,6 +379,7 @@ fn the_rows_the_ports_write_keep_the_check_rules() {
         .unwrap();
     let ask = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: Some(task.id()),
             run_id: None,

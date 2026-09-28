@@ -941,6 +941,7 @@ fn integrate_closes_the_blocked_asks_of_the_run_and_its_task() {
     let mut blocked = |task_id: Option<TaskId>, run_id: Option<RunId>| {
         queue
             .ask(NewAsk {
+                topics: Vec::new(),
                 kind: AskKind::Blocked,
                 task_id,
                 run_id,
@@ -2867,7 +2868,7 @@ fn an_adopted_run_with_a_withdrawn_revise_asks_a_person_without_sending_it() {
 const REVISE_ASKING_AGENT: &str = r#"
 commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt; rm "$MESSAGE"

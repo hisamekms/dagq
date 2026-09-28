@@ -371,6 +371,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     let found = record(&mut queue, FindingTarget::Task(task), "src/a.rs", None);
     let asked = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: None,
             run_id: None,
@@ -405,6 +406,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     let other = record(&mut queue, FindingTarget::Queue, "docs", None);
     let dismiss = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: None,
             run_id: None,
@@ -428,6 +430,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     // for gets its answer through the inbox, not a runtime planner.
     let mine = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: None,
             run_id: None,
@@ -450,6 +453,7 @@ fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     // of its own, marked, and leaves the ask to the stall watch.
     let stalled = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::Stalled,
             task_id: Some(task),
             run_id: None,
@@ -522,6 +526,7 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
     // It cannot decide and asks about the finding, on no task.
     let asked = queue
         .ask(NewAsk {
+            topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: None,
             run_id: None,

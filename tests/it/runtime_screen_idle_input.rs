@@ -26,7 +26,7 @@ const DIALOG_SCREEN: &str = " Auto mode is available\n\n ❯ 1. Yes, turn on aut
 fn markerless_asking_agent() -> String {
     format!(
         r#"{HOOK_FAILED}
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which word?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt; git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; await_exit
@@ -219,7 +219,7 @@ fn a_markerless_resumed_session_gets_its_answer_once_its_screen_rests() {
     backend.resume_script_for(
         2,
         r#"await_message; rm "$MESSAGE"; sleep 1.1
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which side?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which side?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 receipt "$(git rev-parse HEAD)"; await_exit"#,
     );
@@ -274,7 +274,7 @@ fn a_markerless_revised_session_gets_its_answer_once_its_screen_rests() {
         false,
         r#"commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"; sleep 1.1
-"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
+"$DAGQ" --db "$DB" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Which line?' --cmux /usr/bin/true > /dev/null || exit 70
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
 cp "$MESSAGE" answer.txt; git add answer.txt; git commit -q -m answer
 receipt "$(git rev-parse HEAD)"; await_exit"#,
