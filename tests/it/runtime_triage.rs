@@ -865,20 +865,45 @@ fn a_revise_for_an_adopted_run_whose_wrapper_died_asks_a_person() {
 /// 1 started, its session closed, the ask open and no `review_failed`.
 /// Returns the ask's ID.
 fn failed_review_asked_before_death(db: &Path, run: &TaskRun) -> AskId {
+    failed_review_asked_before_death_at(db, run, 1, false)
+}
+
+/// As `failed_review_asked_before_death`, with the failed review being
+/// review `attempt` (each earlier one retried for an unreadable verdict,
+/// `review_retried`) and, when `recorded`, its `review_failed` with the ask
+/// already recorded, as by a supervisor that died before giving the lease
+/// back.
+fn failed_review_asked_before_death_at(
+    db: &Path,
+    run: &TaskRun,
+    attempt: u64,
+    recorded: bool,
+) -> AskId {
     let mut queue = SqliteQueue::open(db).unwrap();
-    queue
-        .record_runtime_event(
-            run.id(),
-            EventKind::ReviewStarted,
-            json!({"attempt": 1, "workspace_id": null, "session_live": false, "session_id": "s"}),
-        )
-        .unwrap();
-    queue
+    for n in 1..=attempt {
+        if n > 1 {
+            queue
+                .record_runtime_event(
+                    run.id(),
+                    EventKind::ReviewRetried,
+                    json!({"attempt": n - 1, "error": "expected `,` or `}`"}),
+                )
+                .unwrap();
+        }
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ReviewStarted,
+                json!({"attempt": n, "workspace_id": null, "session_live": false, "session_id": "s"}),
+            )
+            .unwrap();
+    }
+    let ask = queue
         .ask(NewAsk {
             kind: AskKind::ApproveLanding,
             task_id: None,
             run_id: Some(run.id().clone()),
-            question: "The supervisor's headless review of run r (task 1) failed and gave no verdict (review 1): exit status 3\nReview material: r/review.md".into(),
+            question: format!("The supervisor's headless review of run r (task 1) failed and gave no verdict (review {attempt}): exit status 3\nReview material: r/review.md"),
             options: vec!["land".into(), "send_back".into(), "cancel".into()],
             asked_by: "supervisor".into(),
             reason_category: dagq::domain::AskReason::Scope,
@@ -886,7 +911,17 @@ fn failed_review_asked_before_death(db: &Path, run: &TaskRun) -> AskId {
         })
         .unwrap()
         .ask
-        .id
+        .id;
+    if recorded {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ReviewFailed,
+                json!({"code": "job_failed", "attempt": attempt, "error": "exit status 3", "status": "awaiting_integration", "ask_id": ask}),
+            )
+            .unwrap();
+    }
+    ask
 }
 
 /// A supervisor that died between the `approve_landing` ask of a failed
@@ -950,6 +985,96 @@ fn an_adopted_run_whose_failed_review_ask_was_answered_has_the_answer_applied() 
     assert_eq!(detail.task.status(), TaskStatus::Canceled);
     assert_eq!(payloads(&detail, "review_failed")[0]["ask_id"], json!(ask));
     assert!(queue.read_ask(ask).unwrap().closed_at.is_some());
+    assert!(queue.run_leases().unwrap().is_empty());
+}
+
+/// The failed review asked about is the second (task 592): review 1
+/// printed an unreadable verdict and was retried, and review 2 failed and
+/// was asked about. The adoption takes the ask after the last
+/// `review_started`, records its `review_failed` as review 2 and does not
+/// review the run again.
+#[test]
+fn an_adopted_run_whose_retried_review_was_asked_records_the_second_attempt() {
+    let (_dir, repo, db) = fixture();
+    let run = orphan_run(&repo, &db, "dead-supervisor", dead_pid(), dead_pid());
+    validated_orphan(&db, &run);
+    let ask = failed_review_asked_before_death_at(&db, &run, 2, false);
+    kill_supervisor_and_wrapper(&db, &run);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.prompts().is_empty());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "review_started").len(), 2);
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["ask_id"], json!(ask));
+    assert_eq!(failed[0]["attempt"], 2);
+    assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
+    assert!(queue.run_leases().unwrap().is_empty());
+}
+
+/// An ask closed before the adoption (its answer applied) is not waited
+/// for (task 592): the run
+/// is adopted as any whose review started and gave no verdict, and is
+/// reviewed again.
+#[test]
+fn an_adopted_run_whose_failed_review_ask_was_closed_is_reviewed_again() {
+    let (_dir, repo, db) = fixture();
+    let run = orphan_run(&repo, &db, "dead-supervisor", dead_pid(), dead_pid());
+    validated_orphan(&db, &run);
+    let ask = failed_review_asked_before_death(&db, &run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask, "land").unwrap();
+    queue.close_ask(ask).unwrap();
+    drop(queue);
+    kill_supervisor_and_wrapper(&db, &run);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(!reviewer.prompts().is_empty());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "review_started").len(), 2);
+    assert!(
+        payloads(&detail, "review_failed")
+            .iter()
+            .all(|failed| failed["ask_id"] != json!(ask)),
+        "{:?}",
+        payloads(&detail, "review_failed")
+    );
+}
+
+/// A supervisor that died after recording the failed review's
+/// `review_failed` (with its ask) and before giving the lease back (task
+/// 592): the adoption records no second `review_failed`, does not review
+/// the run again, and gives the lease back.
+#[test]
+fn an_adopted_run_whose_failed_review_was_recorded_is_not_recorded_again() {
+    let (_dir, repo, db) = fixture();
+    let run = orphan_run(&repo, &db, "dead-supervisor", dead_pid(), dead_pid());
+    validated_orphan(&db, &run);
+    let ask = failed_review_asked_before_death_at(&db, &run, 1, true);
+    kill_supervisor_and_wrapper(&db, &run);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.prompts().is_empty());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["ask_id"], json!(ask));
+    assert!(failed[0].get("adopted").is_none(), "{failed:?}");
+    assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
     assert!(queue.run_leases().unwrap().is_empty());
 }
 
