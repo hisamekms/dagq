@@ -59,6 +59,20 @@ impl BrokerSessionToken {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// The claims as written in the token, read without a key: the
+    /// signature, the version and the expiry are not checked. For a
+    /// person's inspection only (`dagq-broker-client token inspect`),
+    /// never for a decision; that is [`verify`]'s.
+    pub fn unverified_claims(&self) -> Result<TokenClaims, TokenError> {
+        let rest = self
+            .0
+            .strip_prefix(TOKEN_PREFIX)
+            .ok_or(TokenError::Malformed)?;
+        let (claims_part, _) = rest.split_once('.').ok_or(TokenError::Malformed)?;
+        let json = base64url_decode(claims_part).ok_or(TokenError::Malformed)?;
+        decode(&json).map_err(|_| TokenError::BadClaims)
+    }
 }
 
 impl fmt::Debug for BrokerSessionToken {
@@ -337,6 +351,25 @@ mod tests {
         assert_eq!(verify(&key(), &token, 150).unwrap(), claims());
         // The same claims are the same token.
         assert_eq!(sign(&key(), &claims()).unwrap(), token);
+    }
+
+    #[test]
+    fn unverified_claims_read_without_a_key_and_refuse_other_text() {
+        let token = sign(&key(), &claims()).unwrap();
+        assert_eq!(token.unverified_claims().unwrap(), claims());
+        // Another key's signature does not matter to inspection.
+        let (claims_part, _) = parts(&token);
+        let resigned = BrokerSessionToken::new(format!("{TOKEN_PREFIX}{claims_part}.AAAA"));
+        assert_eq!(resigned.unverified_claims().unwrap(), claims());
+        for text in ["", "dagq1.", "dagq2.a.b", "dagq1.!!.x", "dagq1.e30.x"] {
+            let error = BrokerSessionToken::new(text)
+                .unverified_claims()
+                .unwrap_err();
+            assert!(
+                matches!(error, TokenError::Malformed | TokenError::BadClaims),
+                "{text}: {error:?}"
+            );
+        }
     }
 
     #[test]

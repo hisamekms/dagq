@@ -12,4 +12,13 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 dagq-broker-protocol = { version = "=0.4.0-dev", path = "../dagq-broker-protocol" }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# The broker's server, in process, for the client's tests only: the client
+# itself depends on the protocol alone (and never on dagq). Path only, with
+# no version, so `cargo publish` drops it: the server is published after the
+# client (ADR-t827-1 decision 8).
+[dev-dependencies]
+dagq-broker = { path = "../dagq-broker" }
+tempfile = "3.25"

@@ -4,8 +4,8 @@ type: design
 title: Resource broker
 status: draft
 created: 2026-09-28
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 tags:
   - security
@@ -55,7 +55,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 | --- | --- | --- | --- | --- |
 | `dagq-broker-protocol`（`crates/dagq-broker-protocol`） | lib | 要求と応答のDTO、`BrokerCapability`、`ErrorCode`、`TokenClaims`、`sign` / `verify`（HMAC-SHA256）、pathの定数、protocolの版（`PROTOCOL_VERSION = 1`） | `serde`・`serde_json`・`sha2`（HMACとbase64urlは自前の小さな関数。`hmac` crateは足さない） | publishする（最初） |
 | `dagq-broker`（`crates/dagq-broker`） | lib + bin `dagq-broker`（`main`は薄い） | HTTPのserver（`std::net`の上の自前の小さな同期のserver。task 830）、fs・process・gitのbackend、tokenの検証、audit | protocol・`uuid`・`sha2`（HTTPのcrateは足さない） | publishする（最後。releaseのimageの材料） |
-| `dagq-broker-client`（`crates/dagq-broker-client`） | lib + bin `dagq-broker-client` | HTTPのclient（例: `ureq`、TLSなし）、subcommand `mcp`（stdioのMCP server。JSON-RPCは`serde_json`で自前）、診断のCLI | protocol・HTTPのclient | publishする（dagqの後） |
+| `dagq-broker-client`（`crates/dagq-broker-client`） | lib + bin `dagq-broker-client` | HTTPのclient（`std::net`の上の自前の小さなclient、TLSなし。task 834）、subcommand `mcp`（stdioのMCP server。JSON-RPCは`serde_json`で自前）、診断のCLI | protocol・`serde`（HTTPのcrateは足さない。testだけがserverの`dagq-broker`にdev-dependencyで依存する） | publishする（dagqの後） |
 
 - `dagq`は`dagq-broker-protocol`だけに依存し（`version = "=<同じ版>"`と`path`）、HTTPの依存を持たない。brokerのhealthは`dagq-broker-client health --json`を子プロセスで呼んで見る（ADR-t827-1決定2）
 - 版は全crateで1つ。rootの`[package] version`は継承にせず文字どおりに書き（`scripts/check-plugin-version.sh`が`[package]`のversionを読むため）、`crates/`の各crateも同じ値を書く。一致は`check-plugin-version.sh`に検査を足して守る
@@ -67,6 +67,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 831: serverにfsのbackend（`crates/dagq-broker/src/backends/fs.rs`の`FsBackend`。下の「mountと閉じ込め」の閉じ込め、`fs.read`・`fs.list`・`fs.write`・`fs.edit`、`--fs-limit-bytes`の上限、tmpとrenameのatomicな書き込み）。serverはbackendに渡す前にauditの日のファイルを追記で開けることを確かめ、開けなければopを走らせずに`backend_error`（`the audit could not be written`）で答える。processとgitはまだ`Unimplemented`
 - task 832: serverにprocessのbackend（`crates/dagq-broker/src/backends/process.rs`の`ProcessBackend`。下の「process.exec」のargvの実行、workspaceのcwd、envの消毒、timeoutと出力とstdinの上限、process groupの停止）
 - task 833: serverにgitのbackend（`crates/dagq-broker/src/backends/git.rs`の`GitBackend`。下の「git」）。`git.status`・`git.diff`・`git.log`・`git.show`・`git.add`・`git.commit`・`git.restore`をtokenのworktreeだけで行う（show・restoreはtask 833の受け入れ条件が求め、2026-09-28に人がreviewの差し戻しで決めた。ADR-t827-2決定7の「status・diff・add・commit・logの類」に入るrun branchの読み書きとして足す）
+- task 834: clientに`BrokerClient`（`crates/dagq-broker-client/src/client.rs`。fs・process・gitのopごとのtypedな呼び出しで、brokerの拒否は`ClientError::Broker { status, error }`にbrokerの`BrokerError`をそのまま入れて返す）と診断のCLI（`src/cli.rs`。下の「workerの道具（MCP）」の人の診断のCLI）。HTTPは`src/http.rs`の1接続1要求（`Connection: close`、`Content-Length`で読む、応答は64 MiBまで、接続と送信は10秒・応答の待ちは既定330秒）。clientはdagqにもserverにも依存しない（`crates/dagq-broker-client/tests/client.rs`が`cargo tree`で確かめる）。protocolに`BrokerSessionToken::unverified_claims`（鍵なしでclaimsを読む。`token inspect`のためだけで、判定には使わない）を足した。`mcp`は後のtask
 
 ### protocolの型
 
@@ -397,7 +398,11 @@ task 836で測った（2026-09-28、podman 6.1.2、applehv）: 起点の値（CP
 - 道具（`mcp__dagq-broker__<name>`）: `read_file`（`path`・`offset`・`limit`）、`list_dir`（`path`）、`write_file`（`path`・`content`）、`edit_file`（`path`・`old_string`・`new_string`・`replace_all`。組み込みのEditと同じ）、`exec`（`argv`・`env`・`stdin`・`timeout_secs`）、`git_status`、`git_diff`（`staged`・`paths`）、`git_log`（`limit`）、`git_show`（`commit`・`paths`）、`git_add`（`paths`）、`git_commit`（`message`）、`git_restore`（`staged`・`paths`）。errorはMCPの`isError`とerror codeを返す
 - workerのsettingsの`permissions.allow`にserver単位の`mcp__dagq-broker`を足す。`preferred`では組み込みの道具を拒まない
 - workerのpromptに、brokerの道具があるときだけ「ファイルの読み書き・置換、許されたコマンド、run branchのgitはbrokerの道具を優先する」段落を足す
-- 人の診断のCLI: `dagq-broker-client health`、`fs read|list|write|edit`、`exec`、`git status|diff|log|show|add|commit|restore`、`token inspect`（token fileのclaimsだけを出し、tokenと署名は出さない）。`--url`と`--token-file`（無ければenv）
+- 人の診断のCLI（task 834）: `dagq-broker-client [--url URL] [--token-file FILE] <command>`。`--url`と`--token-file`が無ければ`DAGQ_BROKER_URL`と`DAGQ_BROKER_TOKEN_FILE`を読む。tokenの値は引数にもenvにも取らず、出力にも出さない。token fileは要求ごとに読み直す
+  - URLは`http://<loopbackのaddress>:<port>`だけ（`localhost`は`127.0.0.1`、末尾の`/`は許す）。https・path・user・loopbackでないaddress・port 0は設定の誤りとして送らない（tokenをhostの外へ送らない）
+  - command: `health [--json]`（tokenを要らない。既定は`ok build <build> protocol 1`の1行）、`token inspect`（token fileのclaimsのJSONだけ。署名は確かめず、tokenと署名は出さない）、`fs read PATH [--offset N] [--limit N]`、`fs list PATH`、`fs write PATH [--content TEXT] [--create-dirs]`（`--content`が無ければstdin）、`fs edit PATH --old TEXT --new TEXT [--replace-all]`、`exec [--env NAME=VALUE]... [--stdin TEXT] [--timeout-secs N] -- PROGRAM [ARG]...`、`git status`、`git diff [--staged] [PATH]...`、`git log [--limit N]`、`git show [--commit REV] [PATH]...`、`git add PATH...`、`git commit --message TEXT`、`git restore [--staged] PATH...`（addとrestoreはpathが1つ以上）。token fileの中身が空白か制御文字を含めば送らない。push・fetch・remoteのcommandは無い
+  - 出力と終了: 成功はopの応答のJSONをstdoutに1行で出してexit 0（`exec`は子のexit codeに関わらず0で、`exit_code`は応答の欄）。要求の本体が8 MiB（`MAX_REQUEST_BYTES`）を超えれば送らずにclient側の失敗にする。brokerの拒否・失敗はbrokerの`{"error":{"code","message","request_id"}}`をstderrに1行で出してexit 1。command lineの誤りはexit 2。client側の失敗（設定・接続・応答のprotocolの版の違いや形の違い）はstderrに理由を出してexit 3
+  - 応答の`X-Dagq-Broker-Protocol`が`1`でないか無いときは、本体を解釈せずにprotocolの誤りにする（fail closed）
 
 ## audit
 

@@ -196,8 +196,11 @@ dependencies = [
 name = "dagq-broker-client"
 version = "0.4.0-dev"
 dependencies = [
+ "dagq-broker",
  "dagq-broker-protocol",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
