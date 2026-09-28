@@ -8,7 +8,8 @@ pub use crate::application::{
     integrate::{IntegrateTarget, integrate_verify_log, register_follow_ups},
     prompt::{
         GoalPredecessorSummary, HEADLESS_WORKER, PredecessorSummary, STOP_BACKGROUND, TRIAGE_TOOLS,
-        WORKER_READING, inbox_prompt, planner_prompt, prompt, review_prompt, siblings_in_progress,
+        WORKER_READING, follow_up_categories_line, inbox_prompt, planner_prompt, prompt,
+        review_prompt, siblings_in_progress,
     },
     rebind::REBIND_LOG,
     recording::{BACKEND_ERROR_CHARS, RecordingBackend, backend_failure_payload},

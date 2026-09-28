@@ -55,6 +55,67 @@ pub const MAX_DRAFT_PLANNERS: usize = 3;
 /// ADR-0041 decision 16; raised from 2 to 3 by ADR-t808-1).
 pub const FOLLOW_UP_ASK_DEPTH: i64 = 3;
 
+/// The categories a worker gives each entry of its receipt's `follow_ups`
+/// (`category`, ADR-t947-3), with what each means; the design's list
+/// (receipt-and-session-exit) is the one of record. The runtime records a
+/// value it does not know as it is, and never rejects a receipt for one.
+pub const FOLLOW_UP_CATEGORIES: &[(&str, &str)] = &[
+    (
+        "defect",
+        "the runtime (or a script) does not do what is decided",
+    ),
+    (
+        "flaky_test",
+        "an existing test fails or times out now and then (name it as <module>::<name>)",
+    ),
+    (
+        "test_gap",
+        "a path has no test or a weak one, not failing now (name the test)",
+    ),
+    (
+        "docs_drift",
+        "a document (design, the ADR index, a skill, AGENTS.md) disagrees with the code or an accepted ADR",
+    ),
+    (
+        "remaining_scope",
+        "what an accepted ADR or the goal decided that this task did not do",
+    ),
+    (
+        "improvement",
+        "not a defect but better: observation, stats, refactoring, speed, ease of use",
+    ),
+    (
+        "measurement",
+        "count and check something after a landing or a period",
+    ),
+    (
+        "decision",
+        "a question a person or a planner has to decide; the work is not settled",
+    ),
+    (
+        "ops",
+        "work a person or the inbox does on the host, the queue or a service, not a change to the repository",
+    ),
+    ("other", "none of these; say what it is in the description"),
+];
+
+/// The category of a follow_up entry that names none (or a blank or
+/// non-text one), and of a draft registered before categories were kept.
+pub const UNLABELED_CATEGORY: &str = "unlabeled";
+
+/// The category of a receipt's follow_up `entry` as the runtime records
+/// it: its trimmed `category`, one of [`FOLLOW_UP_CATEGORIES`] or not, or
+/// [`UNLABELED_CATEGORY`] without a non-blank text one.
+pub fn follow_up_category(entry: &serde_json::Value) -> String {
+    entry
+        .get("category")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|category| !category.is_empty())
+        .unwrap_or(UNLABELED_CATEGORY)
+        .to_owned()
+}
+
 /// Where a follow_up draft stands when a planner of the runtime's submits
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +238,25 @@ string_enum!(DraftOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A known category, an unknown one kept as it is, and entries without
+    /// a text one (ADR-t947-3 decision 3).
+    #[test]
+    fn a_follow_up_category_is_kept_as_written_or_unlabeled() {
+        use serde_json::json;
+        let category = |entry| follow_up_category(&entry);
+        assert_eq!(category(json!({"category": " defect "})), "defect");
+        assert_eq!(category(json!({"category": "typo_fix"})), "typo_fix");
+        assert_eq!(category(json!({"title": "t"})), UNLABELED_CATEGORY);
+        assert_eq!(category(json!({"category": " "})), UNLABELED_CATEGORY);
+        assert_eq!(category(json!({"category": 3})), UNLABELED_CATEGORY);
+        assert_eq!(category(json!("text")), UNLABELED_CATEGORY);
+        assert!(
+            FOLLOW_UP_CATEGORIES
+                .iter()
+                .any(|(code, _)| *code == "other")
+        );
+    }
 
     #[test]
     fn a_follow_up_needs_a_person_for_a_closed_goal_or_depth_three() {

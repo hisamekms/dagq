@@ -853,6 +853,41 @@ impl<'a> Context<'a> {
                 usize::try_from(follow_ups.adopted + follow_ups.canceled).unwrap_or(0),
             ),
         );
+        // The same by the category the worker gave each follow_up
+        // (ADR-t947-3), with the share canceled as duplicates and how long
+        // they stayed drafts, as `stats`' `follow_up_categories` counts them.
+        let categories = &stats.follow_up_categories;
+        let (mut duplicates, mut left, mut all_secs) = (0, 0, Vec::new());
+        for (category, flow) in categories {
+            let stratum = format!("category={category}");
+            let settled = flow.adopted + flow.canceled + flow.duplicate;
+            let settled_n = usize::try_from(settled).unwrap_or(0);
+            put(
+                "plan.follow_up_adoption_rate",
+                &stratum,
+                Measure::ratio(float(flow.adopted), settled_n),
+            );
+            put(
+                "plan.follow_up_duplicate_rate",
+                &stratum,
+                Measure::ratio(float(flow.duplicate), settled_n),
+            );
+            put(
+                "plan.follow_up_draft_secs",
+                &stratum,
+                Measure::secs(flow.draft_secs_values.iter().copied()),
+            );
+            duplicates += flow.duplicate;
+            left += settled;
+            all_secs.extend(flow.draft_secs_values.iter().copied());
+        }
+        put(
+            "plan.follow_up_duplicate_rate",
+            ALL,
+            Measure::ratio(float(duplicates), usize::try_from(left).unwrap_or(0)),
+        );
+        put("plan.follow_up_draft_secs", ALL, Measure::secs(all_secs));
+        details.insert("follow_up_categories", json(categories));
 
         details.insert("forecast", self.forecast_kpis(start, end, &mut put));
 

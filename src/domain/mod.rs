@@ -821,8 +821,8 @@ pub use finding::{
     NewFinding, PROPOSE_OPTION, improvement_running,
 };
 pub use follow_up::{
-    BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftTarget, MAX_DRAFT_PLANNERS,
-    PLANNER_QUESTION_OPTIONS,
+    BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftTarget, FOLLOW_UP_CATEGORIES,
+    MAX_DRAFT_PLANNERS, PLANNER_QUESTION_OPTIONS, UNLABELED_CATEGORY, follow_up_category,
 };
 pub use goal::{Goal, StrandedDependency};
 pub use ids::{

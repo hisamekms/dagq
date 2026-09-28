@@ -104,7 +104,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `draft_backlog` | 「改善」群（task 611）。期間の終わりの時点で`draft`のままの、runtimeやjobが登録したdraftの数（`value`。数えるKPI）と、そのうち最も古いものの`task_created`からの経過秒（`max`。`candidates`と同じく`median` / `p90` / `min`はnull）。良い向きは小さい。期間の`registered` / `adopted` / `canceled` / `kept_draft`・`inflow_per_outflow`・最も古いdraftのtaskと、出どころごとの同じ数は`details.drafts` | `all` |
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
 | `forecast.p50_error` / `forecast.p50_abs_error` / `forecast.p50_error_ratio` / `forecast.p90_hit_rate` / `forecast.late_rate` / `forecast.early_rate` | 完了見込みの答え合わせ（下の[完了見込みの答え合わせ](#完了見込みの答え合わせ)） | 答え合わせの層 |
-| `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` | 計画の品質（下の[計画の品質](#計画の品質)）。`plan.revise_rate`は`code=`の層も持つ（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | 計画の層と`code=` |
+| `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` / `plan.follow_up_duplicate_rate` / `plan.follow_up_draft_secs` | 計画の品質（下の[計画の品質](#計画の品質)）。`plan.revise_rate`は`code=`の層も持つ（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | 計画の層と`code=` |
 | `review.sendback_rate` | reviewにかかったrunのうちreviseかconcernを受けたものの割合（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | `all`・`code=`・`kind=` |
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
@@ -135,7 +135,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
   - `plan.duplicate_cancels_after_ready`: そのtaskのうち`ready`になった後に重複としてcancelされたもの（`duplicate_of`のある`task_status_changed`か`task_canceled_as_duplicate`。`stats`の`duplicate_cancels`と同じ記録）の数。`n`はproposalの数
   - `plan.follow_up_canceled_after_adoption`: そのtaskのうちfollow-up（`follow_up_registered`が指すtask）で、draftから採用された（task 470と同じく、draftから`canceled`以外へ出た）後にcancelされたものの数。`n`は採用されたfollow-upの数
   - `plan.task_rework_rate`: そのtaskのうちrunのあるもので、taskに由来する手戻り（ADR-0079の決定1: `integration_deferred`の`verification_failed`、`review_finished`の`concern`、`revise_requested`。衝突とkillは数えない）があったものの割合
-- `plan.follow_up_adoption_rate`: `stats`の`draft_flow.by_origin.follow_up`（task 470）の`adopted` ÷ (`adopted` + `canceled`)。採らなかったdraftはproposalに入らず判断したsessionが無いので、`all`だけ。良い向きは持たない
+- `plan.follow_up_adoption_rate`: `stats`の`draft_flow.by_origin.follow_up`（task 470）の`adopted` ÷ (`adopted` + `canceled`)。採らなかったdraftはproposalに入らず判断したsessionが無いので、計画の層は持たず、`all`とworkerが付けた種類の`category=`の層（下の[follow_upの種類ごとの系列](#follow_upの種類ごとの系列)）だけ。良い向きは持たない
 
 ## 目標（`targets`）
 
@@ -162,8 +162,14 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 
 ## 分類コードごとの系列（未実装）
 
-ADR-t947-1の分は上の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)。[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。[Stats](stats.md#分類コードごとの集計未実装)の集計を期間ごとの窓で読み、コードを層として次の系列を出す予定。良い向きはどれも低い方（採用率だけは持たない）で、目標は今までどおり`dagq.toml`とhost.tomlの`targets`が決める。
+ADR-t947-1の分は上の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)、ADR-t947-3の分は下の[follow_upの種類ごとの系列](#follow_upの種類ごとの系列)。[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。[Stats](stats.md#分類コードごとの集計未実装)の集計を期間ごとの窓で読み、コードを層として次の系列を出す予定。良い向きはどれも低い方（採用率だけは持たない）で、目標は今までどおり`dagq.toml`とhost.tomlの`targets`が決める。
 
 - `ask.worker_question_wait`（`topic=<主のコード>`）: worker_questionの答えまでの秒
-- `plan.follow_up_adoption_rate`（`category=<コード>`）: follow_upのdraftの採用率
+- `plan.follow_up_adoption_rate`（`category=<コード>`）: 実装済み。下の[follow_upの種類ごとの系列](#follow_upの種類ごとの系列)
 - `plan.cancel_waste`（`reason=<コード>`）: `ready`・`submitted`に進んでから、またはruntimeのplannerを経てcancelされたtaskの数
+
+## follow_upの種類ごとの系列
+
+[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定4（task 954で実装）。期間の窓の`stats`の`follow_up_categories`（[follow_upの種類ごとの集計](stats.md#follow_upの種類ごとの集計)）を読み、workerが付けた種類を`category=<コード>`の層にする（無ければ`unlabeled`）。
+
+- `plan.follow_up_adoption_rate`の`category=<コード>`: `stats`の`follow_up_categories`の`adopted` ÷ (`adopted` + `canceled` + `duplicate`)。あわせて`plan.follow_up_duplicate_rate`（`duplicate`の割合。`all`と`category=`、良い向きは低い方）と`plan.follow_up_draft_secs`（draftから出るまでの秒の分布。`all`と`category=`、良い向きは低い方）を出し、windowの`details.follow_up_categories`に`stats`の`follow_up_categories`をそのまま載せる。`all`の`plan.follow_up_adoption_rate`は今までどおり`draft_flow`から求める（test は`src/domain/kpi/tests.rs`の`the_follow_up_rates_are_split_by_category`）

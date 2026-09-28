@@ -297,11 +297,17 @@ KPIの集計（[`kpi`](kpi.md)）は、この値を「改善」群のKPIの`draf
 
 ## 分類コードごとの集計（未実装）
 
-ADR-t947-1の分は上の[差し戻しの分類コードごとの集計](#差し戻しの分類コードごとの集計)。[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。コードの一覧と記録の欄は各文書が持ち、ここは`stats`の出力の予定の形を書く。どれも窓の中のeventだけから数え、コードの無い過去の記録は書き換えずに`unlabeled`（cancelは`unrecorded`）として数える。一覧に無い値はその値の行として出す。
+ADR-t947-1の分は上の[差し戻しの分類コードごとの集計](#差し戻しの分類コードごとの集計)、ADR-t947-3の分は下の[follow_upの種類ごとの集計](#follow_upの種類ごとの集計)。[ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)〜[ADR-t947-4](../../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。**まだ実装していない**（goal 64の後続のtask）。コードの一覧と記録の欄は各文書が持ち、ここは`stats`の出力の予定の形を書く。どれも窓の中のeventだけから数え、コードの無い過去の記録は書き換えずに`unlabeled`（cancelは`unrecorded`）として数える。一覧に無い値はその値の行として出す。
 
 - `worker_question_topics`（ADR-t947-2、[ask](ask.md#worker_questionの分類コード未実装)）: 主のコードごとに件数、runに対する率、答えまでの秒（中央値と合計、夜と昼）、答えの後の経過（着地・`failed`・reviewのconcern）と、副を含めた件数。`reason_category`との組み合わせの件数も出す。
-- `follow_up_categories`（ADR-t947-3、[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード未実装)）: コードごとにdraftの件数、runtimeのplannerの判断（[Draft planners](draft-planners.md#follow_upの種類と判断の集計未実装)の結末: 採用・不採用・重複・draftのまま・未決、`planner_question`の件数と答え）、着地の件数、draftのままの秒。
+- `follow_up_categories`（ADR-t947-3）: 実装済み。下の[follow_upの種類ごとの集計](#follow_upの種類ごとの集計)。
 - `cancel_reasons`（ADR-t947-4、[Domain model](../domain-model.md#cancelの理由の分類コード未実装)）: 理由ごとに件数、actor、登録からcancelまでの秒、`ready`以降のcancelの件数、cancelまでに使ったrun・plan review・runtimeのplannerの数、follow_upのdraftなら`category`ごとの内訳。
+
+## follow_upの種類ごとの集計
+
+[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定4（task 954で実装。`domain::stats::follow_up_categories`）。コードの一覧と記録の欄は[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)、runtimeのplannerの判断との突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計)。`draft_flow`と同じwindowと`--goal`の絞り込みで、新しい表もeventも持たない。
+
+- `follow_up_categories`: `follow_up_registered`の`category`ごと（無ければ`unlabeled`）のmapで、窓の中に何も起きなかった種類は出さない。欄は`registered`（窓の中の`task_created`）、draftから初めて出たものの`adopted`（`canceled`以外へ）・`canceled`（`duplicate_of`なし）・`duplicate`（`duplicate_of`あり）と、その合計に対する`adoption_rate`・`duplicate_rate`（小数2桁、出たものが無ければnull）、runtimeのplannerの判断（[Draft planners](draft-planners.md#follow_upの種類と判断の集計)）の`planner_outcomes`（draftごとの窓の中の最後の`draft_planner_settled`の`outcome`の件数）・`exhausted`（`draft_planner_exhausted`）・`planner_questions`（`planner_question`の`ask_opened`）・`answers`（その`ask_answered`の`option`ごと、選ばない答えは`free`、runtimeが自分で閉じた（`runtime_closed`）ものは数えない）、`landed`（draftのrunの`run_integrated`）、`draft_secs`（窓の中でdraftから出たものの`task_created`からの秒の`{count, total, median}`）、`backlog`と`oldest_backlog_secs`（窓の終わりにまだdraftのもの）。`src/domain/stats/follow_up_categories.rs`のunit test（`counts_the_follow_up_drafts_by_category`）が種類ごとの件数・率・判断・時間と窓・`--goal`の絞り込みを確かめる。
 
 ## KPIからの読み口
 

@@ -20,6 +20,7 @@ pub mod conflicts;
 pub mod drafts;
 pub mod escalations;
 pub mod failed_tests;
+pub mod follow_up_categories;
 pub mod landing;
 pub mod landing_utilization;
 pub mod measures;
@@ -524,6 +525,11 @@ pub struct Stats {
     /// runtime and its jobs registered (task 470): by origin, how they were
     /// settled, the backlog at the window's end and the drafts per landing.
     pub draft_flow: drafts::DraftFlow,
+    /// The follow_up drafts of the same window by the category their
+    /// worker gave them (ADR-t947-3), `unlabeled` without one: registered,
+    /// how they left `draft`, what the runtime's planners decided, the
+    /// landings and how long they stayed drafts.
+    pub follow_up_categories: BTreeMap<String, follow_up_categories::CategoryFlow>,
     /// The use of the single integration slot over the window of `host`
     /// in time (goal 72): the share the `integrate` attempts held it,
     /// landed or not, its busiest hour, each attempt's time and the runs
@@ -988,6 +994,13 @@ pub fn stats(
         window_end,
         counts,
     );
+    let follow_up_categories = follow_up_categories::follow_up_categories(
+        events,
+        window_start,
+        next_cursor,
+        window_end,
+        counts,
+    );
     let claim_holds =
         super::claim_hold::claim_holds(events, window_start, next_cursor, window_end, counts);
     let landing_holds = super::claim_hold::holds_of(
@@ -1131,6 +1144,7 @@ pub fn stats(
         provider_switches,
         updates,
         draft_flow,
+        follow_up_categories,
         landing_utilization,
         host: None,
         next_cursor,

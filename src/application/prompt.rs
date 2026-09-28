@@ -538,9 +538,9 @@ pub fn prompt(
          {evidence}{paths}{goal}{context}{predecessors}{siblings}{inherited}\
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
-         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\"}}]}}\n\
+         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded or failed\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}}]}}\n\
          Each of tests, e2e and subagent_review needs evidence when passed and a reason when not_applicable.\n\
-         follow_ups is optional: an array of work you found outside this task, each with a title and a description, for the planner to decide on; omit it when there is none.\n\
+         follow_ups is optional: an array of work you found outside this task, each with a title, a description and a category, for the planner to decide on; omit it when there is none. {categories}\n\
          You may write this receipt outside the worktree. Keep the worktree clean after committing.\n\
          The supervisor rejects the run unless the commit is the clean head of your branch on top of the base commit, and integrate runs the verification commands itself after rebasing onto main.\n\
          When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {answer_arrives}\n\
@@ -557,7 +557,21 @@ pub fn prompt(
         acceptance = task.acceptance(),
         verification = serde_json::to_string_pretty(&task.verification_commands())?,
         local_checks = local_checks("above"),
+        categories = follow_up_categories_line(),
     ))
+}
+
+/// What the worker's prompt says of a follow_up's `category` (ADR-t947-3):
+/// the list, and how to choose.
+pub fn follow_up_categories_line() -> String {
+    let list: Vec<String> = crate::domain::FOLLOW_UP_CATEGORIES
+        .iter()
+        .map(|(code, meaning)| format!("{code} ({meaning})"))
+        .collect();
+    format!(
+        "Give each one category, one of: {}. When unsure, choose by what finishing it changes; whether it duplicates another task is not a category.",
+        list.join("; ")
+    )
 }
 
 /// The initial prompt of the inbox session that `up` opens in the
@@ -686,6 +700,32 @@ pub struct DraftPlannerMaterial<'a> {
     pub answer: Option<&'a Ask>,
 }
 
+/// The line of a follow_up draft's section that shows the category its
+/// worker gave it (ADR-t947-3), with what the category means when it is
+/// one of the list; empty for a draft of another origin.
+fn follow_up_category_line(target: &DraftTarget) -> String {
+    if target.origin != DraftOrigin::FollowUp {
+        return String::new();
+    }
+    let category = crate::domain::follow_up_category(&target.material);
+    let meaning = crate::domain::FOLLOW_UP_CATEGORIES
+        .iter()
+        .find(|(code, _)| *code == category)
+        .map_or_else(
+            || {
+                if category == crate::domain::UNLABELED_CATEGORY {
+                    " (the worker gave none)".to_owned()
+                } else {
+                    " (not one of the runtime's categories)".to_owned()
+                }
+            },
+            |(_, meaning)| format!(": {meaning}"),
+        );
+    format!(
+        "\nCategory (the worker's; keep it as it is, and judge the draft on its merits): {category}{meaning}\n"
+    )
+}
+
 /// The initial prompt of a planner the runtime opens for a bundle of drafts
 /// the runtime or a job registered (ADR-0041 decision 16, ADR-t807-1): the
 /// material, and the three things it may do with each draft — submit it
@@ -745,9 +785,10 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
             format!("## Draft {} (planner {attempt} for it)", task.id())
         };
         out.push_str(&format!(
-            "\n{heading}\n\nTask {id}: {title}\n\n### Description\n\n{description}\n\n### Context\n\n{context}\n",
+            "\n{heading}\n\nTask {id}: {title}\n{category}\n### Description\n\n{description}\n\n### Context\n\n{context}\n",
             id = task.id(),
             title = task.title(),
+            category = follow_up_category_line(target),
             description = or_none(task.description()),
             context = or_none(task.context()),
         ));

@@ -1555,7 +1555,8 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
         "follow",
         Some(goal),
         DraftOrigin::FollowUp,
-        json!({"source_task_id": source.as_i64(), "source_run_id": null, "index": 0}),
+        json!({"source_task_id": source.as_i64(), "source_run_id": null, "index": 0,
+               "category": "flaky_test"}),
     );
     let gap = runtime_draft(
         &mut queue,
@@ -1584,6 +1585,8 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     for expected in [
         format!("draft task {follow_up}"),
         "## Where it came from: follow_up".to_owned(),
+        // The worker's category (ADR-t947-3), with what it means.
+        "Category (the worker's; keep it as it is, and judge the draft on its merits): flaky_test: an existing test fails".to_owned(),
         "`dagq events --full --task ID`".to_owned(),
         "`dagq timeline RUN`".to_owned(),
         "### Source task".to_owned(),
@@ -1625,7 +1628,8 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
     let prompt = planner_prompt(&fx.db, planners[1].id);
     assert!(
         prompt.contains("## Where it came from: goal_gap")
-            && prompt.contains("the acceptance names a check nobody runs"),
+            && prompt.contains("the acceptance names a check nobody runs")
+            && !prompt.contains("Category (the worker's"),
         "{prompt}"
     );
     for draft in [TaskId::new(1), mine] {

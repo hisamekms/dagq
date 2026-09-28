@@ -1024,7 +1024,7 @@ fn prompt_describes_the_goal_and_the_context_and_keeps_one_shape_without_them() 
     for prompt in [&alone, &grouped] {
         assert!(
             prompt.contains(
-                "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\"}]}\n"
+                "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\"}]}\n"
             ),
             "{prompt}"
         );
@@ -1036,6 +1036,12 @@ fn prompt_describes_the_goal_and_the_context_and_keeps_one_shape_without_them() 
             "{prompt}"
         );
         assert!(prompt.contains("follow_ups is optional"), "{prompt}");
+        // Each follow_up carries a category from the runtime's list (ADR-t947-3).
+        assert!(
+            prompt.contains(&runtime::follow_up_categories_line()),
+            "{prompt}"
+        );
+        assert!(prompt.contains("flaky_test ("), "{prompt}");
         // The worker reads only what its run needs, never the queue.
         assert!(prompt.contains(runtime::WORKER_READING), "{prompt}");
         assert!(
@@ -1763,8 +1769,8 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     let head = run.result_commit().cloned().unwrap();
     let follow_ups = json!([
-        {"title": "later work", "description": "outside the task"},
-        {"title": "  ", "description": "no title, not a task"},
+        {"title": "later work", "description": "outside the task", "category": "defect"},
+        {"title": "  ", "description": "no title, not a task", "category": "ops"},
         {"title": "more work", "description": ""},
         {"title": "no description"}
     ]);
@@ -1814,20 +1820,23 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(
         events_of(&db, run.id(), "follow_up_registered"),
         vec![
-            json!({"task_id": 2, "title": "later work", "index": 0}),
+            json!({"task_id": 2, "title": "later work", "index": 0, "category": "defect"}),
             json!({
-                "task_id": null, "title": "  ", "index": 1,
+                "task_id": null, "title": "  ", "index": 1, "category": "ops",
                 "skipped": "title is not a non-blank string",
-                "follow_up": {"title": "  ", "description": "no title, not a task"},
+                "follow_up": {"title": "  ", "description": "no title, not a task", "category": "ops"},
             }),
-            json!({"task_id": 3, "title": "more work", "index": 2}),
+            json!({"task_id": 3, "title": "more work", "index": 2, "category": "unlabeled"}),
             json!({
-                "task_id": null, "title": "no description", "index": 3,
+                "task_id": null, "title": "no description", "index": 3, "category": "unlabeled",
                 "skipped": "description is not a string",
                 "follow_up": {"title": "no description"},
             }),
         ]
     );
+    // The draft's origin keeps the worker's category (ADR-t947-3).
+    let origin = &crate::common::cli::ok(&db, &["show", "2"])["origin"];
+    assert_eq!(origin["material"]["category"], "defect", "{origin}");
     // Drafts are not picked up by the supervisor.
     assert!(queue.candidates().unwrap().is_empty());
 
@@ -1853,6 +1862,15 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(follow_up["backlog"], 1, "{flow}");
     assert_eq!(follow_up["oldest_backlog_task_id"], 2, "{flow}");
     assert!(follow_up["oldest_backlog_secs"].as_i64().unwrap() >= 0);
+    // The same drafts by category (ADR-t947-3).
+    let categories = &crate::common::cli::ok(&db, &["stats", "--full"])["follow_up_categories"];
+    assert_eq!(categories["defect"]["registered"], 1, "{categories}");
+    assert_eq!(categories["defect"]["backlog"], 1, "{categories}");
+    assert_eq!(categories["unlabeled"]["canceled"], 1, "{categories}");
+    assert_eq!(
+        categories["unlabeled"]["adoption_rate"], 0.0,
+        "{categories}"
+    );
 
     // A closed goal takes no task: a new follow-up is registered without it.
     queue
@@ -1867,7 +1885,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(detail.task.goal_id(), None);
     assert_eq!(
         events_of(&db, run.id(), "follow_up_registered")[4],
-        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "goal_closed": true})
+        json!({"task_id": added[0].task_id, "title": "after the goal", "index": 4, "category": "unlabeled", "goal_closed": true})
     );
     // Nothing to register without follow_ups.
     assert!(runtime::register_follow_ups(&mut queue, &task, run.id(), None).is_empty());

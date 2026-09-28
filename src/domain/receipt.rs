@@ -25,10 +25,14 @@ pub struct Receipt {
     e2e: ReceiptCheck,
     subagent_review: ReceiptCheck,
     summary: String,
-    /// Follow-up tasks the agent proposes, as `{"title", "description"}`
-    /// objects. Only its shape (an array) is checked here; `integrate`
+    /// Follow-up tasks the agent proposes, as `{"title", "description",
+    /// "category"}` objects (`category`: the worker's code for the kind of
+    /// work, ADR-t947-3; a missing or unknown one never rejects the
+    /// receipt). Only its shape (an array) is checked here; `integrate`
     /// registers each entry with a title as a draft task once the run lands,
-    /// and a person decides whether it becomes ready.
+    /// with its category, and a planner the runtime opens for the drafts
+    /// (ADR-0044 decision 16) submits it for plan review, cancels it or asks
+    /// a person.
     #[serde(skip_serializing_if = "Option::is_none")]
     follow_ups: Option<Value>,
 }

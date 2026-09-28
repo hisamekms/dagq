@@ -578,7 +578,8 @@ fn extend(payload: &mut Value, more: serde_json::Map<String, Value>) {
 /// so `events --task` and `events --run` lead from the origin to the end:
 /// its `bundle_key` and the fields of its material that name the source
 /// (`source_task_id`, `source_run_id`, `index`, `goal_review_id`,
-/// `reviewed_proposal_id`). Empty for a task without an origin.
+/// `reviewed_proposal_id`), and a follow_up's `category` (ADR-t947-3).
+/// Empty for a task without an origin.
 pub(super) fn origin_fields(
     conn: &Connection,
     task: TaskId,
@@ -605,6 +606,7 @@ fn material_fields(
         "source_task_id",
         "source_run_id",
         "index",
+        "category",
         "goal_review_id",
         "reviewed_proposal_id",
     ] {

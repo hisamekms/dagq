@@ -795,7 +795,9 @@ fn push_main(
 /// is not a non-blank string or whose `description` is not a string is not
 /// registered: its `follow_up_registered` has `task_id: null`, the `skipped`
 /// reason and the entry itself as `follow_up`. Every event carries the
-/// entry's `index`, and an entry already recorded is not looked at again, so
+/// entry's `index` and its `category` (ADR-t947-3: as the worker wrote it,
+/// `unlabeled` without one), which the draft's origin material keeps too,
+/// and an entry already recorded is not looked at again, so
 /// a second call for the same run adds nothing (the task and its event are
 /// written one after the other, so only a failure to record between them
 /// could let a later call register it twice). A registration that fails is
@@ -862,6 +864,9 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
         }
         let title = entry["title"].as_str().map(str::trim).unwrap_or_default();
         let description = entry["description"].as_str();
+        // The worker's category of it (ADR-t947-3), `unlabeled` without
+        // one; an unknown one is kept as it is.
+        let category = crate::domain::follow_up_category(entry);
         let skipped = if title.is_empty() {
             Some("title is not a non-blank string")
         } else if description.is_none() {
@@ -881,6 +886,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 "title": entry["title"],
                 "index": index,
                 "skipped": reason,
+                "category": category,
                 "follow_up": entry,
             });
             if let Err(error) =
@@ -943,6 +949,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
             "source_task_id": task.id(),
             "source_run_id": run_id,
             "index": index,
+            "category": category,
         });
         if let Err(error) =
             queue.record_draft_origin(created.id(), DraftOrigin::FollowUp, &material)
@@ -956,8 +963,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 created.id()
             );
         }
-        let mut payload =
-            json!({"task_id": created.id(), "title": created.title(), "index": index});
+        let mut payload = json!({"task_id": created.id(), "title": created.title(), "index": index, "category": category});
         if goal_closed {
             payload["goal_closed"] = json!(true);
         }

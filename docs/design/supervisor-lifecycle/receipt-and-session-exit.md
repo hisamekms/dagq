@@ -5,7 +5,7 @@ title: "Receipt and session exit"
 status: current
 created: 2026-09-26
 updated: 2026-09-29
-last_verified: 2026-09-28
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -64,12 +64,14 @@ ADR-0047の決定25、task 555（`ExitRetry`、`application::supervise::exit_ret
   - 対象外: `long_background`の検知は今も印だけで判定する（画面の推定のbackgroundの表示は`long_background`にかけない）。
 - **test**: `src/application/screen_idle.rs`のunit testが見え方・区間・最後の入力・区間の保存・debug logの読み取りを、`src/infrastructure/claude.rs`の`a_failed_stop_hook_is_found_in_the_debug_log`がClaude Codeのdebug logの行を、`background_on_screen_reads_the_count_under_the_input_box`が実際の画面の抜粋（`3 shells`のstatus line）からbackgroundの表示を、`src/application/supervise/idle.rs`の`an_idle_the_screen_showed_with_background_work_waits_as_the_markers_would`が推定のidleのbackgroundの扱いを、`the_wait_between_captures_grows_while_the_screen_shows_work`が作業中のcaptureの間隔の延び・上限・新しい入力と作業中でない画面（入力待ち・ダイアログ・captureの失敗）での戻りを、`a_session_at_work_is_captured_less_and_its_rest_within_the_limit`が1時間の作業のcaptureの回数と、入力待ちになったsessionが上限以内に読まれ直すことを（task 845）、`tests/it/planner_screen_idle.rs`がfakeのcmuxの画面でplannerの推定・`idle_inferred`・runtimeのplannerの`/exit`と行の片付け・人のplannerに`/exit`を送らないこと・作業中とダイアログとcaptureの失敗で推定しないこと・古い印を確かめ、`a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit`がbackgroundの表示のあるruntimeのplannerに`/exit`を送らず、表示が消えると送ることを確かめる。`tests/it/runtime_screen_idle.rs`が、印の書けないworker（task 475の型。debug logに`Hook Stop`のerror）のreceiptの後のvalidating、receiptの無いidleの促し、resumeとreviseの段の終わり、作業中・ダイアログ・captureの失敗で進めないこと、backgroundの表示があるうちはreceiptの後もvalidatingへ進まず`/exit`も送らないこと（`a_markerless_session_that_shows_background_work_is_not_idle`）、印のあるsessionで推定しないことを確かめる。`tests/it/runtime_screen_idle_input.rs`（task 844）が、印の書けないworkerの`worker_question`の回答が画面の推定で打たれて`ask_delivered`と`idle_inferred`が残ること（最初のsession・resume・revise）、作業中・ダイアログ・captureの失敗では打たないこと、復旧jobの`send_instruction`が推定のidleで適用されること、画面が作業中に戻ればjobの検知が終わって（`alert_cleared`）指示を打たないこと、ダイアログ待ちが印なしで`prompt_cleared`になることを確かめる。
 
-## follow_upsの分類コード（未実装）
+## follow_upsの分類コード
 
-[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定。**まだ実装していない**（goal 64の後続のtask）。着地するまで、receiptの`follow_ups`の要素は`{"title", "description"}`のままで、この節は予定の形を書く。一覧はtask 951の分析（[follow-up-kinds](../../plans/follow-up-kinds.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
+[ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定（task 954で実装）。一覧はtask 951の分析（[follow-up-kinds](../../plans/follow-up-kinds.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
 
 - **receiptの形**: `follow_ups`の各要素に`category`（コード1つ）を足す: `{"title", "description", "category"}`。taskの`--kind`（repositoryが名付けるlabel）と混ざらないよう、欄名は`kind`にしない。`category`の無い要素と一覧に無い値もreceiptの受理を変えない（validationは拒まない）。
-- **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md)の10）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けは`unlabeled`、一覧に無い値はそのまま）。runtimeのplannerとの突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計未実装)。
+- **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md)の10）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けは`unlabeled`、一覧に無い値はそのまま）。欠けの判定は`src/domain/follow_up.rs`の`follow_up_category`（`category`が空でない文字列でなければ`unlabeled`、前後の空白は落とす）。draftから出る`draft_planner_opened`・`draft_planner_settled`などの出どころの欄（`origin_fields`）にも`category`が載る。runtimeのplannerとの突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計)。
+- **workerへの見せ方**: workerのprompt（[prompt](prompt.md)）のreceiptの例は`follow_ups`の要素に`category`を持ち、`follow_up_categories_line`（`src/application/prompt.rs`）が`FOLLOW_UP_CATEGORIES`（`src/domain/follow_up.rs`。下の表と同じ一覧と短い定義）から一覧と付け方を1行で出す。一覧を変えるときは表と`FOLLOW_UP_CATEGORIES`を一緒に変える。
+- **test**: `src/domain/follow_up.rs`の`a_follow_up_category_is_kept_as_written_or_unlabeled`が欠け・空白・文字列でない値・一覧に無い値の扱いを、`tests/it/runtime_integrate.rs`の`integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once`が`follow_up_registered`（登録したものと飛ばしたもの）と`show`の`origin.material`の`category`、`stats`の`follow_up_categories`を、同じファイルのworkerのpromptのtestがreceiptの例と一覧の行を、`tests/it/plan_review.rs`の`drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none`がruntimeのplannerのpromptの種類の行（goal_gapのdraftには出ないこと）を確かめる。集計のtestは[Stats](stats.md#follow_upの種類ごとの集計)と[KPI](kpi.md#follow_upの種類ごとの系列)。
 - **付け方**: 迷ったら、follow_upを片付けたときに何が変わるかで選ぶ（runtimeの挙動が直る → `defect`、testが安定する → `flaky_test`、文書が実装に追いつく → `docs_drift`）。`flaky_test`と`test_gap`はdescriptionにtestの名前（`<module>::<name>`）を書く。重複や採否はコードにしない（ADR-t947-3決定2）。
 
 | コード | 定義 | task 951の例 |

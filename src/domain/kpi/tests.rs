@@ -1649,6 +1649,92 @@ fn the_drafts_per_landing_and_the_backlog_are_stats_draft_flow() {
     assert_eq!(state("drafts_per_landing"), ("ok", 0));
 }
 
+/// The follow_up drafts by the category their worker gave them
+/// (ADR-t947-3): the adoption and duplicate rates and the time they stayed
+/// drafts per `category=` stratum, next to `all`, and `stats`'
+/// `follow_up_categories` in the details.
+#[test]
+fn the_follow_up_rates_are_split_by_category() {
+    let mut queue = Queue::default();
+    let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, 300));
+    for (task, category) in [(10, Some("defect")), (11, Some("defect")), (12, None)] {
+        queue.push(Some(task), None, "task_created", json!({}), landed + task);
+        let mut payload = json!({"task_id": task, "index": task - 10});
+        if let Some(category) = category {
+            payload["category"] = json!(category);
+        }
+        queue.push(
+            Some(1),
+            None,
+            "follow_up_registered",
+            payload,
+            landed + task,
+        );
+    }
+    let next = MONDAY + DAY + 2 * HOUR;
+    for (task, to, duplicate_of, at) in [
+        (10, "submitted", None, next),
+        (11, "canceled", Some(3), next + 100),
+        (12, "canceled", None, next + 200),
+    ] {
+        queue.push(
+            Some(task),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": to, "duplicate_of": duplicate_of}),
+            at,
+        );
+    }
+    let now = MONDAY + 2 * DAY + HOUR;
+    let query = KpiQuery {
+        last: 3,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(now, &KpiConfig::default(), &query);
+    let second = &result.periods[1];
+    let value = |kpi: &str, stratum: &str| {
+        let measure = measure(second, kpi, stratum);
+        (measure.n, measure.value)
+    };
+    assert_eq!(
+        value("plan.follow_up_adoption_rate", "category=defect"),
+        (2, Some(0.5))
+    );
+    assert_eq!(
+        value("plan.follow_up_duplicate_rate", "category=defect"),
+        (2, Some(0.5))
+    );
+    assert_eq!(
+        value("plan.follow_up_adoption_rate", "category=unlabeled"),
+        (1, Some(0.0))
+    );
+    assert_eq!(
+        value("plan.follow_up_duplicate_rate", ALL),
+        (3, Some(0.333))
+    );
+    let secs = measure(second, "plan.follow_up_draft_secs", "category=defect");
+    assert_eq!(secs.n, 2);
+    assert!(secs.max > secs.min, "{secs:?}");
+    assert_eq!(measure(second, "plan.follow_up_draft_secs", ALL).n, 3);
+    let details = &second.window.details["follow_up_categories"];
+    assert_eq!(details["defect"]["duplicate"], 1);
+    assert_eq!(details["unlabeled"]["canceled"], 1);
+    // The day they were registered: none left draft yet.
+    let first = &result.periods[0];
+    assert_eq!(
+        first.window.details["follow_up_categories"]["defect"]["registered"],
+        2
+    );
+    assert_eq!(
+        measure(first, "plan.follow_up_adoption_rate", "category=defect").value,
+        None
+    );
+    assert_eq!(
+        direction("plan.follow_up_duplicate_rate"),
+        Some(Direction::Lower)
+    );
+}
+
 /// The forecast's errors (ADR-0070 decision 4): every snapshot of a target
 /// that finished in the period is a sample in the period it finished,
 /// split by target, kind, band, method and whether a change mark came
