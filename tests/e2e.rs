@@ -21,7 +21,7 @@ use cleanup::{
     GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_retrying, listed_group,
     listed_workspace, sweep_abandoned_fixtures, wait_until_not_listed, workspace_listed,
 };
-use common::{Bounded, Cleanup, Waiting};
+use common::{Bounded, Cleanup, Waiting, WithoutActor};
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -383,14 +383,11 @@ fn dagq_opening(
 fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::process::Output {
     let mut command = Command::new(BIN);
     // A person's commands, not the actor's of the session running the tests.
+    command.without_actor_env();
     command
         .current_dir(&env.repo)
         .env("XDG_DATA_HOME", &env.data_home)
         .env_remove("CLAUDE_CONFIG_DIR")
-        .env_remove("DAGQ_ROLE")
-        .env_remove("DAGQ_ACTOR_ID")
-        .env_remove("DAGQ_RUN_ID")
-        .env_remove("DAGQ_TASK_ID")
         .args(args);
     for (key, value) in extra {
         command.env(key, value);
@@ -651,13 +648,10 @@ fn supervise_once(
     let started = Instant::now();
     let mut child = ChildGuard::new(
         Command::new(BIN)
+            // A person's supervisor, not the session's running the tests.
+            .without_actor_env()
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
-            // A person's supervisor, not the session's running the tests.
-            .env_remove("DAGQ_ROLE")
-            .env_remove("DAGQ_ACTOR_ID")
-            .env_remove("DAGQ_RUN_ID")
-            .env_remove("DAGQ_TASK_ID")
             .arg("supervise")
             .arg("--once")
             .args(NO_LOAD_HOLD)
@@ -1360,13 +1354,10 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     // A resident supervisor starts the run; it is killed once the worker runs.
     let mut victim = ChildGuard::new(
         Command::new(BIN)
+            // A person's supervisor, not the session's running the tests.
+            .without_actor_env()
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
-            // A person's supervisor, not the session's running the tests.
-            .env_remove("DAGQ_ROLE")
-            .env_remove("DAGQ_ACTOR_ID")
-            .env_remove("DAGQ_RUN_ID")
-            .env_remove("DAGQ_TASK_ID")
             .args(["supervise", "--parallel", "1"])
             .args(NO_LOAD_HOLD)
             .arg("--cmux")
@@ -2303,13 +2294,10 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let fixed_text = fixed.to_str().unwrap();
     let mut supervisor = ChildGuard::new(
         Command::new(&fixed)
+            // A person's supervisor, not the session's running the tests.
+            .without_actor_env()
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
-            // A person's supervisor, not the session's running the tests.
-            .env_remove("DAGQ_ROLE")
-            .env_remove("DAGQ_ACTOR_ID")
-            .env_remove("DAGQ_RUN_ID")
-            .env_remove("DAGQ_TASK_ID")
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
             .args(NO_LOAD_HOLD)
             .arg("--cmux")
@@ -2495,13 +2483,10 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     );
     let mut supervisor = ChildGuard::new(
         Command::new(&fixed)
+            // A person's supervisor, not the session's running the tests.
+            .without_actor_env()
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
-            // A person's supervisor, not the session's running the tests.
-            .env_remove("DAGQ_ROLE")
-            .env_remove("DAGQ_ACTOR_ID")
-            .env_remove("DAGQ_RUN_ID")
-            .env_remove("DAGQ_TASK_ID")
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
             .args(NO_LOAD_HOLD)
             .arg("--cmux")

@@ -321,8 +321,9 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
     // `observe --history` lists them newest first with what each read and
     // wrote; the observer may read it too.
     let output = {
-        use crate::common::Bounded;
+        use crate::common::{Bounded, WithoutActor};
         std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
             .args(["--db", db.to_str().unwrap(), "observe", "--history"])
             .env("DAGQ_ROLE", "observer")
             .bounded_output()
@@ -375,8 +376,9 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
         first_entry["started_at"].as_str().unwrap() <= first_entry["finished_at"].as_str().unwrap()
     );
     let limited = {
-        use crate::common::Bounded;
+        use crate::common::{Bounded, WithoutActor};
         std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
             .args([
                 "--db",
                 db.to_str().unwrap(),
@@ -953,8 +955,9 @@ env -u DAGQ_ROLE dagq --db "$DAGQ_QUEUE" finding dismiss {dismissed} --reason 'n
     );
 
     let output = {
-        use crate::common::Bounded;
+        use crate::common::{Bounded, WithoutActor};
         std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
             .args(["--db", db.to_str().unwrap(), "observe", "--history"])
             .bounded_output()
             .unwrap()

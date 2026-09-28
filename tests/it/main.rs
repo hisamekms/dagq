@@ -102,4 +102,5 @@ mod runtime_verify_retry;
 mod runtime_waiting;
 mod runtime_waiting_stages;
 mod source_repository;
+mod test_actor_env;
 mod worker_model;

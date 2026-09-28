@@ -10,16 +10,14 @@ use dagq::{
 };
 use serde_json::{Value, json};
 
-use crate::common::{Bounded, cli::*};
+use crate::common::{Bounded, WithoutActor, cli::*};
 
 /// `dagq kpi` in UTC, with the host-wide `host.toml` read from `config`
 /// rather than the home of the person running the tests.
 fn kpi(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command
-        .env("TZ", "UTC")
-        .env("XDG_CONFIG_HOME", config)
-        .env_remove("DAGQ_ROLE");
+    command.without_actor_env();
+    command.env("TZ", "UTC").env("XDG_CONFIG_HOME", config);
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }
@@ -229,10 +227,8 @@ fn kpi_counts_the_drafts_registered_per_landing() {
 /// `dagq report` in UTC with the host-wide `host.toml` under `config`.
 fn report(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command
-        .env("TZ", "UTC")
-        .env("XDG_CONFIG_HOME", config)
-        .env_remove("DAGQ_ROLE");
+    command.without_actor_env();
+    command.env("TZ", "UTC").env("XDG_CONFIG_HOME", config);
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }

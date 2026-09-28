@@ -224,10 +224,10 @@ fn stats_compare_the_groups() {
         }
     }
     let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .arg("--db")
         .arg(&db)
         .args(["stats", "--full"])
-        .env_remove("DAGQ_ROLE")
         .bounded_output()
         .unwrap();
     assert!(

@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::Bounded;
+use common::{Bounded, WithoutActor};
 
 use std::{
     fs,
@@ -933,13 +933,10 @@ fn session_start_hook_prints_status_only_in_the_sessions_up_opens() {
 fn launcher(env: &[(&str, &str)], data_home: &Path, cwd: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(plugin_root().join("bin/dagq"));
     // As the user, not as the actor of the session running the tests.
+    command.without_actor_env();
     command
         .env_remove("DAGQ_BIN")
         .env_remove("DAGQ_DB")
-        .env_remove("DAGQ_ROLE")
-        .env_remove("DAGQ_ACTOR_ID")
-        .env_remove("DAGQ_RUN_ID")
-        .env_remove("DAGQ_TASK_ID")
         .env("XDG_DATA_HOME", data_home)
         .env("PATH", "/usr/bin:/bin")
         .current_dir(cwd)

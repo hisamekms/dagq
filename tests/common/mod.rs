@@ -15,9 +15,12 @@
 //! those hooks, each within its own limit, before it exits (task 440).
 #![allow(dead_code)]
 
+pub mod actor;
 pub mod cli;
 pub mod lifecycle;
 pub mod queue;
+
+pub use actor::WithoutActor;
 
 use std::{
     collections::HashMap,

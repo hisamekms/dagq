@@ -3,7 +3,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::common;
-pub use crate::common::Bounded;
+pub use crate::common::{Bounded, WithoutActor};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
 pub use dagq::{
@@ -133,6 +133,8 @@ impl Spawner for StubSpawner {
             bail!("the test's fixture is gone");
         };
         let mut command = process::command(spec);
+        // The spec's own actor (a worker's, a job's), not the tests' one.
+        command.without_actor_env();
         command.stdin(Stdio::null());
         match streams {
             // The agent's terminal.

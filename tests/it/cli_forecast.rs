@@ -10,15 +10,14 @@ use dagq::{
 };
 use serde_json::{Value, json};
 
-use crate::common::{Bounded, cli::*};
+use crate::common::{Bounded, WithoutActor, cli::*};
 
 /// `dagq forecast` as `role`, with the host-wide `host.toml` read from
 /// `config` rather than the home of the person running the tests.
 fn forecast(role: Option<&str>, db: &Path, config: &Path, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command
-        .env("XDG_CONFIG_HOME", config)
-        .env_remove("DAGQ_ROLE");
+    command.without_actor_env();
+    command.env("XDG_CONFIG_HOME", config);
     if let Some(role) = role {
         command.env("DAGQ_ROLE", role);
     }

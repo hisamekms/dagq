@@ -3,6 +3,7 @@
 //! which prints a scripted verdict. The goal's tasks are completed in the
 //! queue directly; no run is claimed.
 
+use crate::common::WithoutActor;
 use crate::plan_review::{
     Fixture, PlanWorkspace, StubReviewer, add, fixture, job_actors, options, supervise_with,
 };
@@ -350,6 +351,7 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
 
     // The inbox shows it as a goal review to do by hand.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .args(["--db", fx.db.to_str().unwrap(), "status", "--role", "inbox"])
         .current_dir(&fx.repo)
         .output()
@@ -361,8 +363,7 @@ fn a_failed_goal_review_waits_for_a_person_until_rearmed() {
     // `goal review ID` rearms it; the next review closes it. A person
     // does, not the actor of the session running the tests.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .env_remove("DAGQ_ROLE")
-        .env_remove("DAGQ_ACTOR_ID")
+        .without_actor_env()
         .args([
             "--db",
             fx.db.to_str().unwrap(),

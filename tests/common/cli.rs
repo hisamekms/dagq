@@ -9,7 +9,7 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::Bounded;
+use super::{Bounded, WithoutActor};
 
 /// A fresh queue, `queue.db` in a new temporary directory, after `init`.
 /// The directory lives as long as the returned guard.
@@ -59,15 +59,8 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     )
     .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command
-        .env("PATH", path)
-        .env_remove("DAGQ_ROLE")
-        .env_remove("DAGQ_ACTOR_ID")
-        .env_remove("DAGQ_RUN_ID")
-        .env_remove("DAGQ_TASK_ID")
-        .env_remove("DAGQ_SESSION_KIND")
-        .env_remove("DAGQ_PLANNER_ID")
-        .env_remove("DAGQ_PLANNER_ORIGIN");
+    command.without_actor_env();
+    command.env("PATH", path);
     command.envs(env.iter().copied());
     command
         .arg("--db")
@@ -119,10 +112,8 @@ pub fn submit_from(
     args: &[&str],
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
-    command
-        .env_remove("DAGQ_ROLE")
-        .env_remove("CMUX_WORKSPACE_ID")
-        .env_remove("DAGQ_PLANNER_ORIGIN");
+    command.without_actor_env();
+    command.env_remove("CMUX_WORKSPACE_ID");
     if let Some(workspace) = workspace {
         command.env("CMUX_WORKSPACE_ID", workspace);
     }

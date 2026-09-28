@@ -4,6 +4,7 @@
 //! The supervisor records `idle_inferred` once per span and asks a planner
 //! of the runtime's to exit; a person's planner only shows `idle`.
 
+use crate::common::WithoutActor;
 use crate::plan_review::{
     Fixture, PlanWorkspace, StubReviewer, fixture, open_goal, options, runtime_draft,
 };
@@ -243,6 +244,7 @@ fn a_runtime_planner_without_its_marker_is_ended_by_its_screen() {
 
     // `dagq events` reads it.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .arg("--db")
         .arg(&fx.db)
         .args(["events", "--kind", "idle_inferred", "--full"])

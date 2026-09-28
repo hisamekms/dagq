@@ -156,8 +156,8 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .env("XDG_CONFIG_HOME", &config)
-        .env_remove("DAGQ_ROLE")
         .arg("--db")
         .arg(&db)
         .args(["kpi", "--last", "1"])

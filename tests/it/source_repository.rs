@@ -8,7 +8,7 @@
 use crate::common;
 
 use common::{
-    Bounded,
+    Bounded, WithoutActor,
     lifecycle::{FakeCmux, FakeLaunchd, FakeProcesses, fixture, git, try_up},
 };
 use dagq::infrastructure::sqlite::SqliteQueue;
@@ -26,10 +26,10 @@ fn manifest(repo: &Path, package: &str) {
 /// its stderr and whether it succeeded.
 fn install(repo: &Path, home: &Path) -> (bool, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .current_dir(repo)
         .env("XDG_DATA_HOME", home.join("data"))
         .env("HOME", home)
-        .env_remove("DAGQ_ROLE")
         .args(["install", "--to"])
         .arg(home.join("bin").join("dagq"))
         .bounded_output()

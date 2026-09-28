@@ -4,7 +4,7 @@
 use crate::common;
 use dagq::domain::LeaseToken;
 
-use common::Bounded;
+use common::{Bounded, WithoutActor};
 
 use std::{
     fs,
@@ -45,13 +45,10 @@ fn repository(dir: &Path, name: &str) -> PathBuf {
 /// It runs as the user, not as the actor of the session running the tests.
 fn invoke(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env();
     command
         .env_remove("XDG_DATA_HOME")
         .env_remove("HOME")
-        .env_remove("DAGQ_ROLE")
-        .env_remove("DAGQ_ACTOR_ID")
-        .env_remove("DAGQ_RUN_ID")
-        .env_remove("DAGQ_TASK_ID")
         .current_dir(cwd)
         .args(args);
     for (key, value) in env {

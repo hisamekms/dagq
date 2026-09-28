@@ -1,7 +1,7 @@
 use crate::common;
 
-use common::Bounded;
 use common::cli::*;
+use common::{Bounded, WithoutActor};
 
 use std::{
     path::Path,
@@ -15,6 +15,7 @@ use serde_json::Value;
 fn version_works_outside_a_repository_and_without_a_queue() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .arg("--version")
         .current_dir(dir.path())
         .bounded_output()
@@ -55,7 +56,7 @@ fn version_is_the_build_identifier() {
 /// `runs/<id>/runner`) against `db`.
 fn run_copy(binary: &Path, db: &Path, args: &[&str]) -> Output {
     Command::new(binary)
-        .env_remove("DAGQ_ROLE")
+        .without_actor_env()
         .arg("--db")
         .arg(db)
         .args(args)
@@ -416,6 +417,7 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
     );
 
     let mut supervisor = Command::new(&fixed)
+        .without_actor_env()
         .arg("--db")
         .arg(&db)
         .args(["supervise", "--observe-interval", "0", "--repo"])
@@ -424,7 +426,6 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
         .arg(&cmux)
         .arg("--claude")
         .arg(&claude)
-        .env_remove("DAGQ_ROLE")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -550,6 +551,7 @@ exec '{bin}' \"$@\"\n"
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     std::fs::copy(bin, &fixed).unwrap();
     let mut supervisor = Command::new(&fixed)
+        .without_actor_env()
         .arg("--db")
         .arg(&db)
         .args(["supervise", "--observe-interval", "0", "--repo"])
@@ -561,7 +563,6 @@ exec '{bin}' \"$@\"\n"
         .args(["--auto-update", "--update-interval", "1"])
         .arg("--update-build-command")
         .arg(&build)
-        .env_remove("DAGQ_ROLE")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

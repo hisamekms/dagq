@@ -3,7 +3,10 @@
 //! repository's `dagq.toml` is over it. The worker's and the review's
 //! prompts carry the instruction, and `doctor` and `status --role inbox`
 //! show the language and where it came from.
-use crate::{common::Bounded, runtime_support};
+use crate::{
+    common::{Bounded, WithoutActor},
+    runtime_support,
+};
 
 use runtime_support::*;
 
@@ -43,8 +46,8 @@ fn prompts(db: &Path, repo: &Path, user_config: &Path) -> (String, String) {
 fn reported(db: &Path, config_home: &Path) -> (Value, Value) {
     let run = |args: &[&str]| -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
             .env("XDG_CONFIG_HOME", config_home)
-            .env_remove("DAGQ_ROLE")
             .arg("--db")
             .arg(db)
             .args(args)

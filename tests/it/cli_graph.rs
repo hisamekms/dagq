@@ -7,7 +7,7 @@ use std::{
     process::{Command, Output},
 };
 
-use crate::common::{self, Bounded};
+use crate::common::{self, Bounded, WithoutActor};
 
 use common::cli::*;
 
@@ -16,8 +16,8 @@ use common::cli::*;
 fn invoke_with_bin(db: &Path, bin: &Path, args: &[&str]) -> Output {
     let path = std::env::join_paths([bin, Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
     Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
         .env("PATH", path)
-        .env_remove("DAGQ_ROLE")
         .arg("--db")
         .arg(db)
         .args(args)
@@ -195,10 +195,10 @@ fn report_carries_the_near_term_diagram_or_why_not() {
         std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
     let report = |args: &[&str]| -> serde_json::Value {
         let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+            .without_actor_env()
             .env("PATH", &path)
             .env("TZ", "UTC")
             .env("XDG_CONFIG_HOME", &config)
-            .env_remove("DAGQ_ROLE")
             .arg("--db")
             .arg(&db)
             .arg("report")
