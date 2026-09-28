@@ -95,6 +95,11 @@ pub struct AutoUpdateJob {
     /// Where the build's output is appended.
     pub log: PathBuf,
     pub build_command: Option<String>,
+    /// A shell command in place of the e2e the build passes before it is
+    /// put in place (ADR-t963-1 decision 1; tests).
+    pub e2e_command: Option<String>,
+    /// How long that e2e may run.
+    pub e2e_timeout: Duration,
     /// What an in-cmux supervisor started again uses.
     pub cmux: PathBuf,
     pub claude: PathBuf,
@@ -103,6 +108,17 @@ pub struct AutoUpdateJob {
     pub plugin_dir: Option<PathBuf>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
+}
+
+/// The log of the automatic update's e2e next to its build's:
+/// `update-<time>-<commit>.e2e.log` for `update-<time>-<commit>.build.log`.
+fn e2e_log(build_log: &Path) -> PathBuf {
+    let name = build_log
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".build.log").unwrap_or(&name);
+    build_log.with_file_name(format!("{stem}.e2e.log"))
 }
 
 /// The arguments of the `up` that starts an in-cmux supervisor again after
@@ -1507,6 +1523,18 @@ same in one step",
             job.plugin_dir.as_deref(),
         )?;
         let restart = restarter(&db, &job.cmux, &job.target, &restart_arguments);
+        let paths = update::UpdatePaths::under(&location.queue_dir);
+        let e2e = installation::E2eSettings {
+            command: job.e2e_command.clone(),
+            timeout: job.e2e_timeout,
+            cmux: Some(job.cmux.clone()),
+            // The runtime reads `[run.env]` from the main checkout's
+            // `dagq.toml`, as for a run.
+            run_env_root: Some(job.repository.clone()),
+            queue_dir: Some(location.queue_dir.clone()),
+            scratch: paths.e2e.clone(),
+            log: e2e_log(&job.log),
+        };
         update::run(
             &update::JobPorts {
                 binaries: &LocalBinaries,
@@ -1522,9 +1550,10 @@ same in one step",
                 token: job.token.clone(),
                 target: job.target.clone(),
                 repository: job.repository.clone(),
-                paths: update::UpdatePaths::under(&location.queue_dir),
+                paths,
                 log: job.log.clone(),
                 build_command: job.build_command.clone(),
+                e2e,
                 restart: restart_arguments.clone(),
                 handoff_timeout: job.handoff_timeout,
                 watch_timeout: job.watch_timeout,

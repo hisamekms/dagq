@@ -99,6 +99,18 @@ enum Command {
         /// Plugin directory of the restarted `up` after a drain.
         #[arg(long)]
         plugin_dir: Option<PathBuf>,
+        /// Install a checkout of dagq's source without first running its e2e (`cargo test --locked
+        /// --test e2e -- --ignored`, ADR-t963-1 decision 1), which otherwise must pass before
+        /// anything is replaced. For a person in a hurry; a built binary, `--rollback` and
+        /// `--release` have no e2e.
+        #[arg(long)]
+        skip_e2e: bool,
+        /// A shell command in place of the e2e (tests).
+        #[arg(long, hide = true)]
+        e2e_command: Option<String>,
+        /// Seconds the e2e may run before it counts as failed.
+        #[arg(long, hide = true, default_value_t = 1800)]
+        e2e_timeout: u64,
     },
     /// Show which queue this directory resolves to, without opening it.
     Locate,
@@ -608,6 +620,13 @@ enum Command {
         /// (tests); it must leave the binary at $CARGO_TARGET_DIR/release/dagq.
         #[arg(long, hide = true)]
         update_build_command: Option<String>,
+        /// A shell command the automatic update runs in place of its e2e gate (`cargo test --locked
+        /// --test e2e -- --ignored`, ADR-t963-1 decision 1; tests).
+        #[arg(long, hide = true)]
+        update_e2e_command: Option<String>,
+        /// Seconds the automatic update's e2e gate may run before it counts as failed.
+        #[arg(long, hide = true)]
+        update_e2e_timeout: Option<u64>,
         /// The cargo the release update's job installs a release with (tests give a stub).
         #[arg(long, hide = true)]
         update_cargo: Option<PathBuf>,
@@ -634,6 +653,13 @@ enum Command {
         log: PathBuf,
         #[arg(long)]
         build_command: Option<String>,
+        /// A shell command in place of the e2e the build passes before it is put in place (`cargo
+        /// test --locked --test e2e -- --ignored`, ADR-t963-1 decision 1).
+        #[arg(long)]
+        e2e_command: Option<String>,
+        /// Seconds the e2e may run before it counts as failed.
+        #[arg(long, default_value_t = 1800)]
+        e2e_timeout: u64,
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
         #[arg(long, default_value = "claude")]
@@ -1857,9 +1883,12 @@ fn execute(cli: Cli) -> Result<Value> {
         claude,
         codex,
         plugin_dir,
+        skip_e2e,
+        e2e_command,
+        e2e_timeout,
     } = cli.command
     {
-        use dagq::application::install::{InstallOptions, Source};
+        use dagq::application::install::{E2eGate, E2eSettings, InstallOptions, Source};
         use dagq::infrastructure::{
             adapters::{Cmux, executable},
             launchd::Launchctl,
@@ -1892,6 +1921,27 @@ fn execute(cli: Cli) -> Result<Value> {
         if let Some(plugin_dir) = plugin_dir {
             restart.extend(["--plugin-dir".to_owned(), path_text(&plugin_dir)?]);
         }
+        // A checkout of dagq's source passes its e2e before it is put in
+        // place, unless a person skips it (ADR-t963-1 decision 1).
+        let e2e = match &source {
+            Source::Checkout(checkout)
+                if !skip_e2e && dagq::infrastructure::adapters::is_dagq_source(checkout) =>
+            {
+                E2eGate::Run(E2eSettings {
+                    command: e2e_command,
+                    timeout: Duration::from_secs(e2e_timeout),
+                    cmux: Some(cmux.clone()),
+                    run_env_root: Some(checkout.clone()),
+                    queue_dir: Some(location.queue_dir.clone()),
+                    scratch: dagq::application::update::UpdatePaths::under(&location.queue_dir).e2e,
+                    log: location
+                        .log_dir
+                        .join(format!("install-{}.e2e.log", generators.clock.now())),
+                })
+            }
+            Source::Checkout(_) if skip_e2e => E2eGate::Skip,
+            _ => E2eGate::NotApplicable,
+        };
         let options = InstallOptions {
             source,
             target: match to {
@@ -1902,6 +1952,7 @@ fn execute(cli: Cli) -> Result<Value> {
             restart,
             handoff_timeout: Duration::from_secs(handoff_timeout),
             poll: Duration::from_millis(500),
+            e2e,
         };
         if let Some(release) = release {
             return one_shot.install_release(
@@ -2580,6 +2631,8 @@ fn execute(cli: Cli) -> Result<Value> {
             auto_update,
             update_interval,
             update_build_command,
+            update_e2e_command,
+            update_e2e_timeout,
             update_cargo,
         } => {
             use dagq::compose::SuperviseOptions;
@@ -2606,6 +2659,8 @@ fn execute(cli: Cli) -> Result<Value> {
                     register: auto_update,
                     interval: Duration::from_secs(update_interval),
                     build_command: update_build_command,
+                    e2e_command: update_e2e_command,
+                    e2e_timeout: update_e2e_timeout.map(Duration::from_secs),
                     cmux: Some(cmux.clone()),
                     cargo: update_cargo,
                 },
@@ -2705,6 +2760,8 @@ fn execute(cli: Cli) -> Result<Value> {
             repo,
             log,
             build_command,
+            e2e_command,
+            e2e_timeout,
             cmux,
             claude,
             codex,
@@ -2723,6 +2780,8 @@ fn execute(cli: Cli) -> Result<Value> {
                     repository: repo,
                     log,
                     build_command,
+                    e2e_command,
+                    e2e_timeout: Duration::from_secs(e2e_timeout),
                     cmux: executable(&cmux).unwrap_or(cmux),
                     claude: executable(&claude).unwrap_or(claude),
                     codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),

@@ -679,6 +679,8 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
             register: true,
             interval: Duration::ZERO,
             build_command: Some("echo no build here >&2; exit 1".into()),
+            e2e_command: None,
+            e2e_timeout: None,
             cmux: None,
             cargo: None,
         },

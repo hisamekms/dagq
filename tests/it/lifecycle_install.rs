@@ -9,6 +9,7 @@ use dagq::domain::LeaseToken;
 use common::lifecycle::*;
 
 use anyhow::{Result, bail};
+use dagq::application::install::{E2eGate, E2eOutcome};
 use dagq::{
     VERSION,
     domain::{
@@ -32,6 +33,8 @@ struct FakeBinaries {
     schema: dagq::application::install::SchemaCheck,
     calls: Mutex<Vec<String>>,
     up: Mutex<Vec<Vec<String>>>,
+    /// How the e2e of a checkout goes: passes unless set.
+    e2e: Mutex<Option<E2eOutcome>>,
 }
 
 impl FakeBinaries {
@@ -51,6 +54,7 @@ impl FakeBinaries {
             },
             calls: Mutex::default(),
             up: Mutex::default(),
+            e2e: Mutex::default(),
         }
     }
     fn calls(&self) -> Vec<String> {
@@ -58,6 +62,29 @@ impl FakeBinaries {
     }
     fn note(&self, call: String) {
         self.calls.lock().unwrap().push(call);
+    }
+}
+
+/// An e2e that passed in `secs`.
+fn e2e_passed(secs: u64) -> E2eOutcome {
+    E2eOutcome {
+        passed: true,
+        secs,
+        cleanup: json!({"removed": true}),
+        ..Default::default()
+    }
+}
+
+/// The e2e gate's settings of the tests: nothing runs them.
+fn e2e_settings(dir: &Path) -> dagq::application::install::E2eSettings {
+    dagq::application::install::E2eSettings {
+        command: None,
+        timeout: Duration::from_secs(1800),
+        cmux: Some("/opt/cmux".into()),
+        run_env_root: None,
+        queue_dir: None,
+        scratch: dir.join("e2e"),
+        log: dir.join("e2e.log"),
     }
 }
 
@@ -100,6 +127,16 @@ impl dagq::application::install::Binaries for FakeBinaries {
         self.up.lock().unwrap().push(arguments.to_vec());
         Ok(json!({"supervisor": {"outcome": "started"}}))
     }
+    fn e2e(
+        &self,
+        checkout: &Path,
+        target: Option<&Path>,
+        _: &dagq::application::install::E2eSettings,
+    ) -> Result<E2eOutcome> {
+        assert_eq!(target, None, "install's e2e uses the build's own target");
+        self.note(format!("e2e {}", checkout.display()));
+        Ok(self.e2e.lock().unwrap().clone().unwrap_or(e2e_passed(3)))
+    }
 }
 
 fn install_with(
@@ -140,6 +177,7 @@ fn install_options(
         restart: vec!["--cmux".into(), "/opt/cmux".into()],
         handoff_timeout: Duration::from_secs(5),
         poll: Duration::from_millis(20),
+        e2e: E2eGate::Run(e2e_settings(Path::new("/queue"))),
     }
 }
 
@@ -185,10 +223,13 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
     assert_eq!(report["supervisors"][0]["token"], "new");
     assert_eq!(report["not_handed_off"][0]["token"], "older");
     assert_eq!(report["previous"], "/opt/bin/dagq.previous");
+    assert_eq!(report["e2e"]["status"], "passed", "{report}");
+    assert_eq!(report["e2e"]["secs"], 3, "{report}");
     assert_eq!(
         binaries.calls(),
         [
             "build /src/dagq",
+            "e2e /src/dagq",
             "probe /src/dagq/target/release/dagq",
             "migrate /src/dagq/target/release/dagq",
             "replace /src/dagq/target/release/dagq /opt/bin/dagq",
@@ -235,6 +276,69 @@ fn install_migrates_replaces_and_hands_over_and_restores_on_a_failed_handoff() {
         ]
     );
     drop(queue);
+}
+
+/// `install` of a checkout runs its e2e first (ADR-t963-1 decision 1): one
+/// that fails or runs past its timeout replaces nothing and names its
+/// failed tests and log; `--skip-e2e` installs without it, and a built
+/// binary has none.
+#[test]
+fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
+    use dagq::application::install::Source;
+    let fixture = fixture();
+    let processes = FakeProcesses::default();
+    let no_down = || -> Result<Value> { panic!("no drain") };
+    let checkout = || install_options(Source::Checkout("/src/dagq".into()));
+
+    let failing = FakeBinaries::new(&[], true);
+    *failing.e2e.lock().unwrap() = Some(E2eOutcome {
+        failed_tests: vec!["e2e::lands".into()],
+        secs: 40,
+        ..Default::default()
+    });
+    let error = format!(
+        "{:#}",
+        install_with(&fixture, &failing, &processes, &no_down, &checkout()).unwrap_err()
+    );
+    assert!(
+        error.contains("the e2e failed: e2e::lands; see /queue/e2e.log")
+            && error.contains("nothing was replaced")
+            && error.contains("--skip-e2e"),
+        "{error}"
+    );
+    assert_eq!(failing.calls(), ["build /src/dagq", "e2e /src/dagq"]);
+
+    let stopped = FakeBinaries::new(&[], true);
+    *stopped.e2e.lock().unwrap() = Some(E2eOutcome {
+        timed_out: true,
+        secs: 1800,
+        ..Default::default()
+    });
+    let error = format!(
+        "{:#}",
+        install_with(&fixture, &stopped, &processes, &no_down, &checkout()).unwrap_err()
+    );
+    assert!(error.contains("did not finish within 1800s"), "{error}");
+    assert!(stopped.calls().iter().all(|c| !c.starts_with("replace")));
+
+    let skipped = FakeBinaries::new(&[], true);
+    let mut options = checkout();
+    options.e2e = E2eGate::Skip;
+    let report = install_with(&fixture, &skipped, &processes, &no_down, &options).unwrap();
+    assert_eq!(report["e2e"]["status"], "skipped", "{report}");
+    assert!(skipped.calls().iter().all(|c| !c.starts_with("e2e")));
+
+    let binary = FakeBinaries::new(&[], true);
+    let report = install_with(
+        &fixture,
+        &binary,
+        &processes,
+        &no_down,
+        &install_options(Source::Binary("/built/dagq".into())),
+    )
+    .unwrap();
+    assert_eq!(report["e2e"]["status"], "not_applicable", "{report}");
+    assert!(binary.calls().iter().all(|c| !c.starts_with("e2e")));
 }
 
 /// A build with a breaking migration is refused without `--allow-breaking`
@@ -417,6 +521,9 @@ struct UpdateBinaries {
     replace_fails: std::sync::atomic::AtomicBool,
     pending: Vec<(i64, bool)>,
     calls: Mutex<Vec<String>>,
+    /// How the build's e2e goes: passes unless set; an `Err` could not
+    /// start.
+    e2e: Mutex<Option<Result<E2eOutcome, String>>>,
 }
 
 impl UpdateBinaries {
@@ -431,7 +538,12 @@ impl UpdateBinaries {
             replace_fails: Default::default(),
             pending: pending.to_vec(),
             calls: Mutex::default(),
+            e2e: Mutex::default(),
         }
+    }
+    fn with_e2e(self, e2e: Result<E2eOutcome, String>) -> Self {
+        *self.e2e.lock().unwrap() = Some(e2e);
+        self
     }
     fn note(&self, call: String) {
         self.calls.lock().unwrap().push(call);
@@ -502,6 +614,23 @@ impl dagq::application::install::Binaries for UpdateBinaries {
         }
         Ok(self.built.clone())
     }
+    fn e2e(
+        &self,
+        checkout: &Path,
+        target: Option<&Path>,
+        _: &dagq::application::install::E2eSettings,
+    ) -> Result<E2eOutcome> {
+        self.note(format!(
+            "e2e {} {}",
+            checkout.display(),
+            target.unwrap().display()
+        ));
+        match self.e2e.lock().unwrap().clone() {
+            None => Ok(e2e_passed(170)),
+            Some(Ok(outcome)) => Ok(outcome),
+            Some(Err(error)) => bail!("{error}"),
+        }
+    }
 }
 
 /// The supervisor the job updates: registered under a pid of its own, which
@@ -548,6 +677,7 @@ fn run_update_job(
             paths: update::UpdatePaths::under(&dir.join("queue-dir")),
             log: dir.join("build.log"),
             build_command: None,
+            e2e: e2e_settings(&dir.join("queue-dir")),
             restart: vec!["--cmux".into(), "/opt/cmux".into()],
             handoff_timeout: Duration::from_secs(5),
             watch_timeout: Duration::from_secs(5),
@@ -630,6 +760,11 @@ fn the_update_job_installs_watches_restores_and_asks() {
                 "c0ffee".repeat(6) + "c0ff"
             ),
             format!("build {}", dir.join("queue-dir/update/target").display()),
+            format!(
+                "e2e {} {}",
+                dir.join("queue-dir/update/checkout").display(),
+                dir.join("queue-dir/update/target").display()
+            ),
             "migrate".to_owned(),
             format!("replace {}", target.display()),
         ]
@@ -642,7 +777,10 @@ fn the_update_job_installs_watches_restores_and_asks() {
             .map(|u| u.kind)
             .collect::<Vec<_>>()
     };
-    assert_eq!(kinds(&queue), ["update_installed", "update_built"]);
+    assert_eq!(
+        kinds(&queue),
+        ["update_installed", "update_e2e_passed", "update_built"]
+    );
 
     // The new binary dies after it took the handoff: back to the old one,
     // and the gone in-cmux supervisor is started again.
@@ -667,8 +805,13 @@ fn the_update_job_installs_watches_restores_and_asks() {
     let first_ask = report["ask_id"].as_i64().unwrap();
     // The rollback is a step of its own, before the failure it explains.
     assert_eq!(
-        kinds(&queue)[..3],
-        ["update_failed", "update_restored", "update_built"]
+        kinds(&queue)[..4],
+        [
+            "update_failed",
+            "update_restored",
+            "update_e2e_passed",
+            "update_built"
+        ]
     );
 
     // A failed build replaces nothing, and its ask replaces the older one.
@@ -726,6 +869,142 @@ fn the_update_job_installs_watches_restores_and_asks() {
         status["auto_update"]["state"], "awaiting_approval",
         "{status}"
     );
+}
+
+/// The e2e gate of the job (ADR-t963-1 decision 1): a build whose e2e
+/// fails, runs past its timeout or cannot start replaces nothing (a
+/// breaking one is not staged either) and opens the `update_failed` ask at
+/// the `e2e` stage with its failed tests and log; one whose e2e passes is
+/// installed after `update_e2e_passed`; `stats` counts both.
+#[test]
+fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
+    let fixture = fixture();
+    let queue = auto_supervisor(&fixture);
+    let processes = FakeProcesses::default();
+    let restarted = Mutex::new(Vec::new());
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    let e2e_log = dir.join("queue-dir").join("e2e.log");
+    let open_ask = |queue: &SqliteQueue| {
+        let asks = queue.asks(dagq::application::AskQuery::default()).unwrap();
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        asks.into_iter().next().unwrap()
+    };
+    let replaced_nothing = |binaries: &UpdateBinaries| {
+        assert!(
+            binaries
+                .calls()
+                .iter()
+                .all(|c| !c.starts_with("replace") && c != "migrate"),
+            "{:?}",
+            binaries.calls()
+        );
+    };
+
+    // Failed tests.
+    let binaries = UpdateBinaries::new(dir, false, &[(40, true)]).with_e2e(Ok(E2eOutcome {
+        failed_tests: vec!["e2e::lands".into(), "e2e::hands_over".into()],
+        secs: 200,
+        cleanup: json!({"removed": true, "groups": ["G-1"]}),
+        ..Default::default()
+    }));
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "e2e", "{report}");
+    assert_eq!(
+        report["failed_tests"],
+        json!(["e2e::lands", "e2e::hands_over"])
+    );
+    assert_eq!(report["timed_out"], false);
+    assert_eq!(report["e2e_log"], json!(e2e_log));
+    assert_eq!(report["cleanup"]["groups"], json!(["G-1"]));
+    replaced_nothing(&binaries);
+    let ask = open_ask(&queue);
+    assert_eq!(ask.kind, dagq::domain::AskKind::UpdateFailed);
+    assert_eq!(ask.options, ["retry", "skip"]);
+    assert!(
+        ask.question.contains("failed at its e2e")
+            && ask.question.contains("e2e::lands, e2e::hands_over")
+            && ask.question.contains(&e2e_log.display().to_string())
+            && ask.question.contains("nothing was replaced"),
+        "{}",
+        ask.question
+    );
+    let status = dagq::compose::status(&fixture.location.db).unwrap();
+    assert_eq!(status["auto_update"]["state"], "failed", "{status}");
+    assert_eq!(status["auto_update"]["last"]["stage"], "e2e", "{status}");
+
+    // Past its timeout.
+    let binaries = UpdateBinaries::new(dir, false, &[]).with_e2e(Ok(E2eOutcome {
+        timed_out: true,
+        secs: 1800,
+        ..Default::default()
+    }));
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["stage"], "e2e", "{report}");
+    assert_eq!(report["timed_out"], true, "{report}");
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("did not finish within 1800s"),
+        "{report}"
+    );
+    replaced_nothing(&binaries);
+    assert!(open_ask(&queue).question.contains("did not finish"));
+
+    // It could not start (no cmux).
+    let binaries =
+        UpdateBinaries::new(dir, false, &[]).with_e2e(Err("the e2e needs a running cmux".into()));
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["stage"], "e2e", "{report}");
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("the e2e could not start: the e2e needs a running cmux"),
+        "{report}"
+    );
+    replaced_nothing(&binaries);
+
+    // A breaking build that fails its e2e waits for no person.
+    let binaries = UpdateBinaries::new(dir, false, &[(41, false)]).with_e2e(Ok(E2eOutcome {
+        failed_tests: vec!["e2e::lands".into()],
+        ..Default::default()
+    }));
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["stage"], "e2e", "{report}");
+    assert!(!dir.join("queue-dir/update/staged/dagq").exists());
+    assert_eq!(open_ask(&queue).kind, dagq::domain::AskKind::UpdateFailed);
+
+    // It passes: installed as before.
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    let report = thread::scope(|scope| {
+        scope.spawn(|| take_and_heartbeat(&fixture, &processes, true));
+        run_update_job(&fixture, &binaries, &processes, &restarted)
+    });
+    assert_eq!(report["outcome"], "installed", "{report}");
+    let passed = queue
+        .update_events(10)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.kind == "update_e2e_passed")
+        .unwrap();
+    assert_eq!(passed.payload["secs"], 170);
+    assert_eq!(passed.payload["log"], json!(e2e_log));
+
+    let stats = common::cli::ok(&fixture.location.db, &["stats", "--full"]);
+    let e2e = &stats["updates"]["e2e"];
+    assert_eq!(
+        (e2e["passed"].as_i64(), e2e["failed"].as_i64()),
+        (Some(1), Some(4)),
+        "{stats}"
+    );
+    assert_eq!(e2e["timed_out"], 1, "{stats}");
+    assert_eq!(stats["updates"]["failed_by_stage"]["e2e"], 4, "{stats}");
+    assert!(restarted.lock().unwrap().is_empty());
 }
 
 /// The second supervisor of the queue in the watch tests.

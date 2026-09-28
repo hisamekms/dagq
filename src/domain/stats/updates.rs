@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    super::{UPDATE_EVENT_KINDS, UPDATE_FAILED, UPDATE_INSTALLED},
+    super::{UPDATE_E2E_PASSED, UPDATE_EVENT_KINDS, UPDATE_FAILED, UPDATE_INSTALLED},
     EventId, RunEvent, TaskId,
     asks::UNKNOWN,
 };
@@ -33,7 +33,36 @@ pub struct UpdateStats {
     /// The releases a plugin-only job brought the installed plugin to
     /// (`update_installed` with `plugin_only: true`), oldest first.
     pub plugin_installed: Vec<String>,
+    /// The e2e gate a build of main passes before it is put in place
+    /// (ADR-t963-1 decision 1).
+    pub e2e: E2eGateStats,
 }
+
+/// How the e2e gate of the automatic update went in a window: the
+/// `update_e2e_passed` and the `update_failed` at the `e2e` stage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct E2eGateStats {
+    pub passed: i64,
+    /// Failed ones, those that ran past their timeout and those that could
+    /// not start included.
+    pub failed: i64,
+    pub timed_out: i64,
+    /// The seconds of the e2e that ran (`secs`), summed and the longest.
+    pub secs_total: i64,
+    pub secs_max: i64,
+}
+
+impl E2eGateStats {
+    fn add_secs(&mut self, event: &RunEvent) {
+        if let Some(secs) = event.payload.get("secs").and_then(Value::as_i64) {
+            self.secs_total += secs;
+            self.secs_max = self.secs_max.max(secs);
+        }
+    }
+}
+
+/// The `stage` of an `update_failed` whose build failed its e2e gate.
+pub const E2E_STAGE: &str = "e2e";
 
 /// The `by_kind` key of a plugin-only job's `update_installed`, which
 /// brought the plugin to a release without replacing the binary.
@@ -74,10 +103,19 @@ pub fn updates(
         let text = |key: &str| event.payload.get(key).and_then(Value::as_str);
         match event.kind.as_str() {
             UPDATE_FAILED => {
-                *stats
-                    .failed_by_stage
-                    .entry(text("stage").unwrap_or(UNKNOWN).to_owned())
-                    .or_default() += 1;
+                let stage = text("stage").unwrap_or(UNKNOWN);
+                *stats.failed_by_stage.entry(stage.to_owned()).or_default() += 1;
+                if stage == E2E_STAGE {
+                    stats.e2e.failed += 1;
+                    if event.payload.get("timed_out").and_then(Value::as_bool) == Some(true) {
+                        stats.e2e.timed_out += 1;
+                    }
+                    stats.e2e.add_secs(event);
+                }
+            }
+            UPDATE_E2E_PASSED => {
+                stats.e2e.passed += 1;
+                stats.e2e.add_secs(event);
             }
             UPDATE_INSTALLED if plugin_only => stats
                 .plugin_installed
@@ -142,6 +180,36 @@ mod tests {
             task.is_some()
         });
         assert_eq!(goal, UpdateStats::default());
+    }
+
+    /// The e2e gate counts its passes, failures and timeouts, with their
+    /// time.
+    #[test]
+    fn counts_the_e2e_gate_by_outcome_with_its_time() {
+        let events = [
+            event(1, "update_e2e_passed", json!({"secs": 170})),
+            event(2, "update_failed", json!({"stage": "e2e", "secs": 200})),
+            event(
+                3,
+                "update_failed",
+                json!({"stage": "e2e", "secs": 1800, "timed_out": true}),
+            ),
+            event(4, "update_failed", json!({"stage": "e2e"})),
+            event(5, "update_failed", json!({"stage": "build"})),
+        ];
+        let stats = updates(&events, EventId::new(0), EventId::new(5), |_| true);
+        assert_eq!(
+            stats.e2e,
+            E2eGateStats {
+                passed: 1,
+                failed: 3,
+                timed_out: 1,
+                secs_total: 2170,
+                secs_max: 1800,
+            }
+        );
+        assert_eq!(stats.failed_by_stage["e2e"], 3);
+        assert_eq!(stats.by_kind["update_e2e_passed"], 1);
     }
 
     /// A plugin-only job's `update_installed` counts apart from the binary

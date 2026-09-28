@@ -1707,6 +1707,10 @@ pub const ATTENTION_KINDS: &[&str] = &[
 pub const UPDATE_STARTED: &str = crate::domain::event_kind::EventKind::UpdateStarted.as_str();
 /// The job built the commit (`pid`, `binary`, `log`).
 pub const UPDATE_BUILT: &str = crate::domain::event_kind::EventKind::UpdateBuilt.as_str();
+/// The e2e of the build passed before it was put in place (ADR-t963-1
+/// decision 1: `pid`, `secs`, `log`); a failed one is `update_failed` at
+/// the `e2e` stage.
+pub const UPDATE_E2E_PASSED: &str = crate::domain::event_kind::EventKind::UpdateE2ePassed.as_str();
 /// The supervisor runs the new binary (`version`, `previous_version`,
 /// `migrated`, `supervisors`).
 pub const UPDATE_INSTALLED: &str = crate::domain::event_kind::EventKind::UpdateInstalled.as_str();
@@ -1733,6 +1737,7 @@ pub const UPDATE_RETRY: &str = crate::domain::event_kind::EventKind::UpdateRetry
 pub const UPDATE_EVENT_KINDS: &[&str] = &[
     UPDATE_STARTED,
     UPDATE_BUILT,
+    UPDATE_E2E_PASSED,
     UPDATE_INSTALLED,
     UPDATE_FAILED,
     UPDATE_RESTORED,

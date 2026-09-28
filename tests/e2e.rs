@@ -2532,6 +2532,9 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
             .args(["--auto-update", "--update-interval", "1"])
             .arg("--update-build-command")
             .arg(&build)
+            // The e2e gate (ADR-t963-1) passes without running the e2e
+            // again inside this one.
+            .args(["--update-e2e-command", "true"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

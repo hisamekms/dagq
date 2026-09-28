@@ -32,6 +32,11 @@ pub struct UpdateSettings {
     /// A shell command the job runs in place of `cargo build --release
     /// --locked` (tests).
     pub build_command: Option<String>,
+    /// A shell command the job runs in place of the e2e (`cargo test
+    /// --locked --test e2e -- --ignored`, ADR-t963-1 decision 1; tests).
+    pub e2e_command: Option<String>,
+    /// How long the job's e2e may run; `None` is the job's default.
+    pub e2e_timeout: Option<Duration>,
     /// The cmux the job's `up` uses when it starts an in-cmux supervisor
     /// again.
     pub cmux: Option<PathBuf>,
@@ -46,6 +51,8 @@ impl Default for UpdateSettings {
             register: false,
             interval: UPDATE_INTERVAL,
             build_command: None,
+            e2e_command: None,
+            e2e_timeout: None,
             cmux: None,
             cargo: None,
         }
@@ -285,6 +292,14 @@ to wait for the next landing that changes the runtime.",
         }
         if let Some(build) = &options.update.build_command {
             command.arg("--build-command").arg(build);
+        }
+        if let Some(e2e) = &options.update.e2e_command {
+            command.arg("--e2e-command").arg(e2e);
+        }
+        if let Some(timeout) = options.update.e2e_timeout {
+            command
+                .arg("--e2e-timeout")
+                .arg(timeout.as_secs().to_string());
         }
         let job = self.spawner.spawn(
             &command,

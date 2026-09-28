@@ -191,7 +191,8 @@ pub fn prune_logs(log_dir: &Path, now: SystemTime, retention: Duration) -> Vec<P
 /// the pid of the process writing it, if the name has one:
 /// `<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, an older binary's
 /// `supervisor-<unix time>-<pid>.log`, or an update job's
-/// `update-<unix time>-<commit>.{log,build.log,json}` (no pid).
+/// `update-<unix time>-<commit>.{log,build.log,e2e.log,json}` (no pid), or
+/// the e2e gate's log of an `install`, `install-<unix time>.e2e.log`.
 fn log_file_owner(name: &str) -> Option<Option<u32>> {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
     if let Some(stem) = name.strip_suffix(".jsonl") {
@@ -211,8 +212,14 @@ fn log_file_owner(name: &str) -> Option<Option<u32>> {
         let (started_at, pid) = stem.rsplit_once('-')?;
         return (digits(started_at) && digits(pid)).then(|| pid.parse().ok());
     }
+    if let Some(at) = name
+        .strip_prefix("install-")
+        .and_then(|rest| rest.strip_suffix(".e2e.log"))
+    {
+        return digits(at).then_some(None);
+    }
     let stem = name.strip_prefix("update-")?;
-    let stem = [".build.log", ".log", ".json"]
+    let stem = [".build.log", ".e2e.log", ".log", ".json"]
         .iter()
         .find_map(|suffix| stem.strip_suffix(suffix))?;
     let (at, commit) = stem.split_once('-')?;
@@ -609,7 +616,11 @@ mod tests {
             Some(None)
         );
         assert_eq!(owner("update-1756684800-0123456789ab.json"), Some(None));
+        assert_eq!(owner("update-1756684800-0123456789ab.e2e.log"), Some(None));
+        assert_eq!(owner("install-1756684800.e2e.log"), Some(None));
         for name in [
+            "install-release-0.5.0.log",
+            "install-x.e2e.log",
             "launchd.log",
             "rebind.jsonl",
             "other-1-2.log",

@@ -563,6 +563,8 @@ exec '{bin}' \"$@\"\n"
         .args(["--auto-update", "--update-interval", "1"])
         .arg("--update-build-command")
         .arg(&build)
+        // The e2e gate (ADR-t963-1) passes without running the e2e.
+        .args(["--update-e2e-command", "echo 'test e2e::stub ... ok'"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -745,6 +747,12 @@ exec '{bin}' \"$@\"\n"
     assert_eq!(updates_stats["by_kind"]["update_installed"], 3, "{stats}");
     assert_eq!(updates_stats["failed_by_stage"]["install"], 1, "{stats}");
     assert!(updates_stats["by_kind"]["update_started"].as_i64() >= Some(4));
+    // Every build passed the e2e gate before it was put in place (ADR-t963-1).
+    assert!(
+        updates_stats["e2e"]["passed"].as_i64() >= Some(4),
+        "{stats}"
+    );
+    assert_eq!(updates_stats["e2e"]["failed"], 0, "{stats}");
     let rows: i64 = rusqlite::Connection::open(&db)
         .unwrap()
         .query_row("SELECT count(*) FROM binary_updates", [], |r| r.get(0))

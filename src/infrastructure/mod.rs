@@ -12,6 +12,7 @@ pub mod d2;
 pub mod denials;
 pub mod dialogue;
 pub mod draft_planners;
+pub mod e2e_gate;
 pub mod event_actor;
 mod finding_planners;
 mod findings;

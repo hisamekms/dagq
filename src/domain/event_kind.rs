@@ -229,6 +229,7 @@ event_kinds! {
     UpdateAnswered => "update_answered",
     UpdateAwaitingApproval => "update_awaiting_approval",
     UpdateBuilt => "update_built",
+    UpdateE2ePassed => "update_e2e_passed",
     UpdateFailed => "update_failed",
     UpdateInstalled => "update_installed",
     UpdateRestored => "update_restored",
@@ -345,6 +346,7 @@ impl EventKind {
                 // The steps of the automatic update (ADR-0073 decision 17).
                 | UpdateStarted
                 | UpdateBuilt
+                | UpdateE2ePassed
                 | UpdateInstalled
                 | UpdateFailed
                 | UpdateRestored
@@ -837,6 +839,7 @@ mod tests {
                 "update_awaiting_approval",
             ),
             (EventKind::UpdateBuilt, "update_built"),
+            (EventKind::UpdateE2ePassed, "update_e2e_passed"),
             (EventKind::UpdateFailed, "update_failed"),
             (EventKind::UpdateInstalled, "update_installed"),
             (EventKind::UpdateRestored, "update_restored"),

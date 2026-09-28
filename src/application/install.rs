@@ -89,6 +89,94 @@ pub trait Binaries {
         let _ = (checkout, target_dir, command, log);
         bail!("these binaries cannot build a checkout")
     }
+    /// Run the e2e of `checkout` (ADR-t963-1 decision 1) with
+    /// `CARGO_TARGET_DIR` set to `target_dir` when given, and clean up what
+    /// it left in cmux and on disk; how it went. An error is an e2e that
+    /// could not start (no cmux, an unreadable `[run.env]`).
+    fn e2e(
+        &self,
+        checkout: &Path,
+        target_dir: Option<&Path>,
+        settings: &E2eSettings,
+    ) -> Result<E2eOutcome> {
+        let _ = (checkout, target_dir, settings);
+        bail!("these binaries cannot run the e2e")
+    }
+}
+
+/// How long the gate's e2e may run by default before it counts as failed
+/// (ADR-t963-1 decision 1).
+pub const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// The e2e a build of dagq's source passes before it is put in place
+/// (ADR-t963-1 decision 1): `cargo test --locked --test e2e -- --ignored`
+/// in the checkout.
+#[derive(Debug, Clone)]
+pub struct E2eSettings {
+    /// A shell command in place of `cargo test --locked --test e2e --
+    /// --ignored` (tests).
+    pub command: Option<String>,
+    /// How long it may run; past it the e2e is stopped and failed.
+    pub timeout: Duration,
+    /// The cmux the e2e drives (`DAGQ_E2E_CMUX`): pinged before it starts,
+    /// and the groups the e2e left in it are deleted after.
+    pub cmux: Option<PathBuf>,
+    /// The directory whose `dagq.toml` `[run.env]` the e2e runs with,
+    /// expanded with `queue_dir`; `None` passes none.
+    pub run_env_root: Option<PathBuf>,
+    /// `${DAGQ_QUEUE_DIR}` of the `[run.env]`.
+    pub queue_dir: Option<PathBuf>,
+    /// The directory the e2e's fixtures are made in (its `TMPDIR`, one
+    /// directory per e2e under it), removed with what they left.
+    pub scratch: PathBuf,
+    /// Where the e2e's output is appended.
+    pub log: PathBuf,
+}
+
+/// How the gate's e2e went.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct E2eOutcome {
+    pub passed: bool,
+    /// It ran past its timeout and was stopped.
+    pub timed_out: bool,
+    /// The tests its output names as failed.
+    pub failed_tests: Vec<String>,
+    pub secs: u64,
+    /// What was cleaned up after it (groups, processes, the directory).
+    pub cleanup: Value,
+}
+
+impl E2eOutcome {
+    /// Why it did not pass, for an error and a question.
+    pub fn failure(&self, settings: &E2eSettings) -> String {
+        let what = if self.timed_out {
+            format!(
+                "the e2e did not finish within {}s and was stopped",
+                settings.timeout.as_secs()
+            )
+        } else if self.failed_tests.is_empty() {
+            "the e2e failed".to_owned()
+        } else {
+            format!("the e2e failed: {}", self.failed_tests.join(", "))
+        };
+        format!("{what}; see {}", settings.log.display())
+    }
+
+    /// The `e2e` of a report: `passed` with its time.
+    pub fn report(&self, settings: &E2eSettings) -> Value {
+        json!({"status": "passed", "secs": self.secs, "log": settings.log})
+    }
+}
+
+/// Whether `install` runs the e2e of a checkout it builds (ADR-t963-1
+/// decision 1). A binary, a rollback and a release have no gate.
+#[derive(Debug, Clone)]
+pub enum E2eGate {
+    /// The source has none (not dagq's source, or a built binary).
+    NotApplicable,
+    /// A person skipped it (`--skip-e2e`).
+    Skip,
+    Run(E2eSettings),
 }
 
 /// Installs a dagq release from crates.io (ADR-t618-1 decision 5): `cargo
@@ -162,6 +250,8 @@ pub struct InstallOptions {
     pub restart: Vec<String>,
     pub handoff_timeout: Duration,
     pub poll: Duration,
+    /// The e2e of a checkout's build before it is put in place.
+    pub e2e: E2eGate,
 }
 
 pub struct Ports<'a> {
@@ -192,10 +282,34 @@ pub fn install(ports: &Ports, db: Option<&Path>, options: &InstallOptions) -> Re
     } = *ports;
     let target = &options.target;
     let previous = previous_path(target);
+    let mut e2e = json!({"status": "not_applicable"});
     let source = match &options.source {
-        Source::Checkout(checkout) => binaries
-            .build(checkout)
-            .with_context(|| format!("build {}", checkout.display()))?,
+        Source::Checkout(checkout) => {
+            let built = binaries
+                .build(checkout)
+                .with_context(|| format!("build {}", checkout.display()))?;
+            e2e = match &options.e2e {
+                E2eGate::NotApplicable => json!({"status": "not_applicable"}),
+                E2eGate::Skip => json!({"status": "skipped"}),
+                E2eGate::Run(settings) => {
+                    let outcome = binaries.e2e(checkout, None, settings).with_context(|| {
+                        format!(
+                            "the e2e of {} could not start, so nothing was replaced (a person \
+may pass --skip-e2e to install without it)",
+                            checkout.display()
+                        )
+                    })?;
+                    ensure!(
+                        outcome.passed,
+                        "{}: nothing was replaced (a person may pass --skip-e2e to install \
+without it)",
+                        outcome.failure(settings)
+                    );
+                    outcome.report(settings)
+                }
+            };
+            built
+        }
         Source::Binary(binary) => binary.clone(),
         Source::Rollback => {
             ensure!(
@@ -234,6 +348,7 @@ pub fn install(ports: &Ports, db: Option<&Path>, options: &InstallOptions) -> Re
             "previous_version": replaced_version,
             "migrated": Value::Null,
             "supervisors": [],
+            "e2e": e2e,
         }));
     };
     let schema = binaries.schema(&source, db)?;
@@ -251,7 +366,12 @@ wrappers could not open the queue after: nothing was replaced. `install --allow-
 the supervisor (waits for its runs), migrates with a backup and starts it again",
             breaking.join(", ")
         );
-        return install_breaking(ports, db, &source, &version, replaced_version, options);
+        return install_breaking(ports, db, &source, &version, replaced_version, options).map(
+            |mut report| {
+                report["e2e"] = e2e;
+                report
+            },
+        );
     }
     ensure!(
         schema.opens || !schema.pending.is_empty(),
@@ -328,6 +448,7 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
         "previous_version": replaced_version,
         "migrated": migrated,
         "kept": failure.is_some(),
+        "e2e": e2e,
         "supervisors": handed.iter().map(Handed::report).collect::<Vec<_>>(),
         // A supervisor of a binary before ADR-0045 takes no handoff;
         // `up` drains and replaces it.

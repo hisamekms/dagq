@@ -14,7 +14,8 @@ use std::{
 };
 
 use crate::application::install::{
-    Binaries, PendingMigration, ReleaseInstaller, SchemaCheck, parse_version, previous_path,
+    Binaries, E2eOutcome, E2eSettings, PendingMigration, ReleaseInstaller, SchemaCheck,
+    parse_version, previous_path,
 };
 
 pub struct LocalBinaries;
@@ -272,6 +273,15 @@ impl Binaries for LocalBinaries {
             binary.display()
         );
         Ok(binary)
+    }
+
+    fn e2e(
+        &self,
+        checkout: &Path,
+        target_dir: Option<&Path>,
+        settings: &E2eSettings,
+    ) -> Result<E2eOutcome> {
+        super::e2e_gate::run(checkout, target_dir, settings)
     }
 }
 

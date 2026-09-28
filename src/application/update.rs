@@ -5,7 +5,9 @@
 //! the runtime ([`RUNTIME_PATHS`]), it starts the update job ([`run`], the
 //! hidden `auto-update` command) in a session of its own and goes on
 //! supervising. The job builds that commit in the queue's own checkout
-//! and target (`<queue dir>/update/`, never a person's checkout), then does
+//! and target (`<queue dir>/update/`, never a person's checkout), runs the
+//! e2e there and replaces nothing when it fails (ADR-t963-1 decision 1),
+//! then does
 //! what `install` does ([`super::install::install`]: the check, the
 //! compatible migrations, the swap that keeps `.previous`, the handoff), and
 //! watches the supervisors that exec'd the new binary heartbeat on. A build
@@ -22,7 +24,7 @@
 
 use super::{
     Clock, InstalledPlugin, ProcessControl, Queue, QueueOpener, RunCoordination, RunFiles,
-    install::{self, Binaries, InstallOptions, Source, previous_path},
+    install::{self, Binaries, E2eGate, E2eSettings, InstallOptions, Source, previous_path},
     lifecycle,
 };
 use crate::domain::{
@@ -31,8 +33,8 @@ use crate::domain::{
 };
 use crate::domain::{EventKind, LeaseToken};
 pub use crate::domain::{
-    UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_FAILED, UPDATE_INSTALLED,
-    UPDATE_RESTORED, UPDATE_RETRY, UPDATE_STARTED,
+    UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_E2E_PASSED, UPDATE_FAILED,
+    UPDATE_INSTALLED, UPDATE_RESTORED, UPDATE_RETRY, UPDATE_STARTED,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -100,6 +102,9 @@ pub struct UpdatePaths {
     /// `<queue dir>/update/release`: the `--root` of the release update's
     /// `cargo install` (ADR-t618-1 decision 5).
     pub release: PathBuf,
+    /// `<queue dir>/update/e2e`: where the gate's e2e makes its fixtures
+    /// (ADR-t963-1 decision 1).
+    pub e2e: PathBuf,
 }
 
 impl UpdatePaths {
@@ -110,6 +115,7 @@ impl UpdatePaths {
             target: root.join("target"),
             staged: root.join("staged").join("dagq"),
             release: root.join("release"),
+            e2e: root.join("e2e"),
         }
     }
 }
@@ -135,7 +141,12 @@ pub fn step_commit(update: &RunEvent) -> Option<&str> {
 
 /// The steps a job writes before the one that ends it: a job whose latest
 /// step is one of these and whose process is gone was interrupted.
-pub const JOB_STEPS: &[&str] = &[UPDATE_STARTED, UPDATE_BUILT, UPDATE_RESTORED];
+pub const JOB_STEPS: &[&str] = &[
+    UPDATE_STARTED,
+    UPDATE_BUILT,
+    UPDATE_E2E_PASSED,
+    UPDATE_RESTORED,
+];
 
 /// Whether `update` is a step of a job still working: one of
 /// [`JOB_STEPS`] and the job's process lives.
@@ -188,7 +199,8 @@ pub fn job_pid(update: &RunEvent) -> Option<u32> {
 
 /// The automatic update as `status` shows it: whether a live supervisor has
 /// it on, and where the latest update stands (`state`: `building`,
-/// `installing`, `interrupted` when its job died, `installed`,
+/// `testing` while a build of main runs its e2e, `installing`,
+/// `interrupted` when its job died, `installed`,
 /// `plugin_installed` when a plugin-only job brought the plugin to a
 /// release without replacing the binary, `failed`, `awaiting_approval`,
 /// `retry_requested`, `skipped`; `idle` when none ran), with its commit,
@@ -213,9 +225,14 @@ pub fn status(
     };
     let state = match latest.kind.as_str() {
         UPDATE_STARTED if in_progress(latest, processes) => "building",
-        UPDATE_BUILT if in_progress(latest, processes) => "installing",
+        // A build of main runs its e2e after it is built (ADR-t963-1); a
+        // release goes on to its install.
+        UPDATE_BUILT if in_progress(latest, processes) && step_release(latest).is_none() => {
+            "testing"
+        }
+        UPDATE_BUILT | UPDATE_E2E_PASSED if in_progress(latest, processes) => "installing",
         UPDATE_RESTORED if in_progress(latest, processes) => "restoring",
-        UPDATE_STARTED | UPDATE_BUILT | UPDATE_RESTORED => "interrupted",
+        UPDATE_STARTED | UPDATE_BUILT | UPDATE_E2E_PASSED | UPDATE_RESTORED => "interrupted",
         UPDATE_INSTALLED if crate::domain::stats::updates::plugin_only(latest) => {
             "plugin_installed"
         }
@@ -292,6 +309,9 @@ pub struct JobOptions {
     /// A shell command in place of `cargo build --release --locked -p dagq`
     /// (tests), run in the checkout with `CARGO_TARGET_DIR` set.
     pub build_command: Option<String>,
+    /// The e2e the build passes before it is put in place (ADR-t963-1
+    /// decision 1), run in the checkout with `CARGO_TARGET_DIR` set.
+    pub e2e: E2eSettings,
     /// The `up` arguments the question of a breaking build hands a person,
     /// beside `--db`: `--cmux`, `--claude`, `--plugin-dir`.
     pub restart: Vec<String>,
@@ -354,7 +374,74 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         Ok(binary) => binary,
         Err(error) => return failed(queue, &job, "build", &error, json!({})),
     };
+    record_built(queue, &job, &binary)?;
+    if let Some(failure) = e2e_gate(ports, queue, &job, options)? {
+        return Ok(failure);
+    }
     put_in_place(ports, queue, db, &job, &binary, PluginStep::Untouched)
+}
+
+/// Record `update_built` for `binary`.
+fn record_built(queue: &dyn Queue, job: &Job, binary: &Path) -> Result<EventId> {
+    job.subject.record(
+        queue,
+        EventKind::UpdateBuilt,
+        json!({"pid": job.pid, "binary": binary, "log": job.log}),
+    )
+}
+
+/// Run the e2e of the build in the update's checkout (ADR-t963-1 decision
+/// 1): `update_e2e_passed` when it passes, else `update_failed` at the
+/// `e2e` stage with its failed tests and log, and the `update_failed` ask,
+/// whose value is returned. Nothing is replaced then, a breaking build
+/// included.
+fn e2e_gate(
+    ports: &JobPorts,
+    queue: &mut dyn Queue,
+    job: &Job,
+    options: &JobOptions,
+) -> Result<Option<Value>> {
+    let settings = &options.e2e;
+    let log = &settings.log;
+    let outcome = match ports.binaries.e2e(
+        &options.paths.checkout,
+        Some(&options.paths.target),
+        settings,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let error = error.context("the e2e could not start");
+            return failed(queue, job, "e2e", &error, json!({"e2e_log": log})).map(Some);
+        }
+    };
+    if !outcome.passed {
+        let error = anyhow::anyhow!("{}", outcome.failure(settings));
+        return failed(
+            queue,
+            job,
+            "e2e",
+            &error,
+            json!({
+                "e2e_log": log,
+                "failed_tests": outcome.failed_tests,
+                "timed_out": outcome.timed_out,
+                "secs": outcome.secs,
+                "cleanup": outcome.cleanup,
+            }),
+        )
+        .map(Some);
+    }
+    job.subject.record(
+        &*queue,
+        EventKind::UpdateE2ePassed,
+        json!({
+            "pid": job.pid,
+            "secs": outcome.secs,
+            "log": log,
+            "cleanup": outcome.cleanup,
+        }),
+    )?;
+    Ok(None)
 }
 
 /// The release update's job (ADR-t618-1 decision 5): the settings of one
@@ -430,6 +517,7 @@ pub fn run_release(
         Ok(binary) => binary,
         Err(error) => return failed(queue, &job, "build", &error, json!({})),
     };
+    record_built(queue, &job, &binary)?;
     put_in_place(ports, queue, db, &job, &binary, step)
 }
 
@@ -586,10 +674,10 @@ struct Job<'a> {
     pid: u32,
 }
 
-/// Check `binary`, leave it to a person when it brings a breaking
-/// migration, else install it as `install` does, watch the supervisors
-/// take it and put the old binary back when none does; once it is in place
-/// and taken, do the `plugin` step.
+/// Check `binary` (its `update_built` recorded), leave it to a person when
+/// it brings a breaking migration, else install it as `install` does, watch
+/// the supervisors take it and put the old binary back when none does; once
+/// it is in place and taken, do the `plugin` step.
 fn put_in_place(
     ports: &JobPorts,
     queue: &mut dyn Queue,
@@ -599,11 +687,6 @@ fn put_in_place(
     plugin: PluginStep,
 ) -> Result<Value> {
     let pid = job.pid;
-    job.subject.record(
-        &*queue,
-        EventKind::UpdateBuilt,
-        json!({"pid": pid, "binary": binary, "log": job.log}),
-    )?;
     let schema = match ports.binaries.schema(binary, db) {
         Ok(schema) => schema,
         Err(error) => return failed(queue, job, "check", &error, json!({})),
@@ -646,6 +729,8 @@ fn put_in_place(
             restart: Vec::new(),
             handoff_timeout: job.handoff_timeout,
             poll: job.poll,
+            // A built binary: the job ran its e2e before.
+            e2e: E2eGate::NotApplicable,
         },
     );
     // An install that handed some of the supervisors over but not all kept
@@ -1113,6 +1198,11 @@ fn failed(
     let error = format!("{error:#}");
     let mut situation = match stage {
         "build" => "Nothing was replaced.".to_owned(),
+        "e2e" => format!(
+            "The build did not pass its e2e, so nothing was replaced (a build with a breaking \
+migration is not kept for a person either). The e2e's log is {}.",
+            details["e2e_log"].as_str().unwrap_or("(none)")
+        ),
         "check" => "The build did not pass its check, so nothing was replaced.".to_owned(),
         _ if details["kept"] == true => format!(
             "The new binary stays at {}: other supervisors run it. The ones that failed are \
@@ -1302,6 +1392,44 @@ mod tests {
         fn kill(&self, _: u32) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// Every process is alive.
+    struct AllAlive;
+
+    impl ProcessControl for AllAlive {
+        fn alive(&self, _: u32) -> bool {
+            true
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A build of main runs its e2e after `update_built` (`testing`) and
+    /// installs after `update_e2e_passed`; a release installs after
+    /// `update_built`; a job gone at either step was interrupted.
+    #[test]
+    fn status_shows_the_e2e_of_a_build_of_main_as_testing() {
+        let state = |kind: &str, payload: Value, processes: &dyn ProcessControl| {
+            status(&[], &[update(1, kind, payload)], processes, 0)["state"].clone()
+        };
+        let main = json!({"pid": 7, "commit": "abc"});
+        let release = json!({"pid": 7, "source": "release", "release": "0.5.0"});
+        assert_eq!(state(UPDATE_BUILT, main.clone(), &AllAlive), "testing");
+        assert_eq!(
+            state(UPDATE_E2E_PASSED, main.clone(), &AllAlive),
+            "installing"
+        );
+        assert_eq!(state(UPDATE_BUILT, release, &AllAlive), "installing");
+        assert_eq!(state(UPDATE_BUILT, main.clone(), &NoneAlive), "interrupted");
+        assert_eq!(state(UPDATE_E2E_PASSED, main, &NoneAlive), "interrupted");
     }
 
     fn update(id: i64, kind: &str, payload: Value) -> RunEvent {
