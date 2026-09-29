@@ -489,6 +489,7 @@ mod stats {
             "worker_effort",
             "trial_group",
             "provider",
+            "actual_provider",
             "route",
             "codex_version",
             "provider_version",
@@ -499,6 +500,11 @@ mod stats {
                 Some(Value::Null)
             );
         }
+        // Task 898: it never moved to the other provider.
+        assert_eq!(
+            first.as_object_mut().unwrap().remove("provider_switches"),
+            Some(json!(0))
+        );
         // ADR-t947-1: its only review passed.
         assert_eq!(
             first.as_object_mut().unwrap().remove("review_reasons"),

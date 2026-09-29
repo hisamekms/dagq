@@ -382,7 +382,7 @@ impl<'a> Context<'a> {
             Axis::Area => unreachable!("an area is one of a run's values (axis_values)"),
             Axis::Build => text(&measures.dagq_version),
             Axis::Claude => text(&measures.claude_version),
-            Axis::Provider => text(&measures.provider),
+            Axis::Provider => text(&measures.actual_provider),
             Axis::Route => text(&measures.route),
             Axis::Codex => text(&measures.codex_version),
             // A claim that recorded the worker's session always wrote its

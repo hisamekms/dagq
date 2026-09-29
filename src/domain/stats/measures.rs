@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Intervals, RunStats, intervals, median_f64};
+use super::{Intervals, RunStats, intervals, median_f64, tokens::TokenTotals};
 use crate::domain::{
     EventId, RunEvent, TaskId,
     measure::{load_band, load_band_order},
@@ -63,12 +63,19 @@ pub struct RunLoad {
 pub struct RunMeasures {
     pub dagq_version: Option<String>,
     pub claude_version: Option<String>,
-    /// The worker's provider and route (`interactive` / `headless`, the
-    /// claim's `worker_mode`) the run was claimed with, Codex's version
-    /// when the supervisor ran Codex, and the version of the run's own
-    /// provider (ADR-t813-2 decision 7); null when claimed before they were
-    /// recorded.
+    /// The worker's provider the task requested (the claim's
+    /// `requested_provider`, else its `provider`) and route (`interactive` /
+    /// `headless`, the claim's `worker_mode`) the run was claimed with,
+    /// Codex's version when the supervisor ran Codex, and the version of the
+    /// provider the claim started on (ADR-t813-2 decision 7); null when
+    /// claimed before they were recorded.
     pub provider: Option<String>,
+    /// The provider that did the run's work in the end: the `to` of its
+    /// last `provider_switched`, else the claim's `provider` (the same as
+    /// `provider` for a run that never moved); and how many times it moved
+    /// (`provider_switched`, a move at the claim included).
+    pub actual_provider: Option<String>,
+    pub provider_switches: i64,
     pub route: Option<String>,
     pub codex_version: Option<String>,
     pub provider_version: Option<String>,
@@ -95,12 +102,25 @@ pub struct RunMeasures {
     pub verify_failures: Vec<RunVerifyFailure>,
 }
 
-/// The headless turns of a run (ADR-t813-2 decision 7).
+/// The headless turns of a run (ADR-t813-2 decision 7), and the same per
+/// provider that ran each turn (its `turn_finished`'s `provider`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RunTurns {
     pub count: i64,
     pub failed: i64,
     pub secs: i64,
+    pub by_provider: BTreeMap<String, ProviderTurns>,
+}
+
+/// The headless turns one provider ran in a run, with the tokens their
+/// `turn_finished` recorded (`sessions` counts the turns that had them;
+/// null when none did).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProviderTurns {
+    pub count: i64,
+    pub failed: i64,
+    pub secs: i64,
+    pub tokens: Option<TokenTotals>,
 }
 
 /// One failed verification command of a run's `integrate`: its attempt,
@@ -152,6 +172,12 @@ pub(super) struct MeasureTrack {
     /// When the turn running started (unix milliseconds).
     turn_started: Option<i64>,
     turn_millis: i64,
+    turn_millis_by_provider: BTreeMap<String, i64>,
+    /// The claim's `provider`, and the `to` of the last `provider_switched`
+    /// (which may come before the claim: a move at the claim is recorded
+    /// first).
+    claim_provider: Option<String>,
+    switched_to: Option<String>,
 }
 
 impl MeasureTrack {
@@ -164,7 +190,8 @@ impl MeasureTrack {
                 self.claimed = true;
                 measures.dagq_version = text("dagq_version");
                 measures.claude_version = text("claude_version");
-                measures.provider = text("provider");
+                self.claim_provider = text("provider");
+                measures.provider = text("requested_provider").or_else(|| text("provider"));
                 measures.route = text("worker_mode");
                 measures.codex_version = text("codex_version");
                 measures.provider_version = text("provider_version");
@@ -177,20 +204,45 @@ impl MeasureTrack {
                 measures.worker_effort = text("effort");
                 measures.trial_group = text("group");
             }
+            "provider_switched" => {
+                measures.provider_switches += 1;
+                self.switched_to = text("to");
+            }
             "turn_started" => self.turn_started = super::timestamp_millis(&event.created_at),
             "turn_finished" => {
-                let turns = measures.turns.get_or_insert_with(RunTurns::default);
-                turns.count += 1;
-                if payload["outcome"] != "succeeded" {
-                    turns.failed += 1;
-                }
-                if let (Some(start), Some(end)) = (
+                // A turn recorded without its provider ran on the one the
+                // run was on then.
+                let provider = text("provider")
+                    .or_else(|| self.switched_to.clone())
+                    .or_else(|| self.claim_provider.clone())
+                    .unwrap_or_else(|| super::asks::UNKNOWN.to_owned());
+                let failed = payload["outcome"] != "succeeded";
+                let millis = match (
                     self.turn_started.take(),
                     super::timestamp_millis(&event.created_at),
                 ) {
-                    self.turn_millis += (end - start).max(0);
-                }
+                    (Some(start), Some(end)) => (end - start).max(0),
+                    _ => 0,
+                };
+                self.turn_millis += millis;
+                let by_provider = self
+                    .turn_millis_by_provider
+                    .entry(provider.clone())
+                    .or_default();
+                *by_provider += millis;
+                let turns = measures.turns.get_or_insert_with(RunTurns::default);
+                turns.count += 1;
+                turns.failed += i64::from(failed);
                 turns.secs = self.turn_millis / 1000;
+                let one = turns.by_provider.entry(provider).or_default();
+                one.count += 1;
+                one.failed += i64::from(failed);
+                one.secs = *by_provider / 1000;
+                if payload["tokens"].is_object() {
+                    one.tokens
+                        .get_or_insert_with(TokenTotals::default)
+                        .add(&payload["tokens"]);
+                }
             }
             "receipt_observed" if !self.receipt_seen => {
                 self.receipt_seen = true;
@@ -224,6 +276,7 @@ impl MeasureTrack {
     }
 
     pub(super) fn finish(mut self) -> RunMeasures {
+        self.measures.actual_provider = self.switched_to.take().or(self.claim_provider.take());
         let mean = (self.verify_weight > 0.0)
             .then(|| (self.verify_sum / self.verify_weight * 100.0).round() / 100.0);
         self.measures.load.verify = IntervalLoad::new(mean, self.verify_max);
@@ -255,8 +308,9 @@ pub struct Versions {
     pub dagq: Vec<VersionStats>,
     pub claude: Vec<VersionStats>,
     pub rustc: Vec<VersionStats>,
-    /// By the worker's provider, its route and Codex's version
-    /// (ADR-t813-2 decision 7).
+    /// By the provider that did the run's work in the end
+    /// (`actual_provider`), the route it was claimed with and Codex's
+    /// version (ADR-t813-2 decision 7).
     pub provider: Vec<VersionStats>,
     pub route: Vec<VersionStats>,
     pub codex: Vec<VersionStats>,
@@ -305,7 +359,7 @@ pub(super) fn versions(runs: &[&RunStats]) -> Versions {
                 )),
             }
         }),
-        provider: by(|run| run.measures.provider.clone()),
+        provider: by(|run| run.measures.actual_provider.clone()),
         route: by(|run| run.measures.route.clone()),
         codex: by(|run| run.measures.codex_version.clone()),
     }
@@ -781,9 +835,120 @@ mod tests {
             Some(RunTurns {
                 count: 2,
                 failed: 1,
-                secs: 35
+                secs: 35,
+                by_provider: BTreeMap::from([(
+                    "codex".to_owned(),
+                    ProviderTurns {
+                        count: 2,
+                        failed: 1,
+                        secs: 35,
+                        tokens: None,
+                    }
+                )]),
             })
         );
+        // A run that never moved: its actual provider is the claim's.
+        assert_eq!(measures.actual_provider.as_deref(), Some("codex"));
+        assert_eq!(measures.provider_switches, 0);
+    }
+
+    /// A run that moved from Codex to Claude in the middle (and one moved
+    /// at its claim): the requested provider stays, the actual one is the
+    /// last it moved to, and the turns and their tokens are split by the
+    /// provider that ran them (ADR-t813-2 decision 7).
+    #[test]
+    fn a_run_that_moved_has_its_requested_and_actual_provider_and_turns_per_provider() {
+        let at = |id: i64, kind: &str, secs: i64, payload: Value| RunEvent {
+            created_at: crate::domain::transcript::millis_text(secs * 1000),
+            ..event(id, kind, payload)
+        };
+        let mut track = MeasureTrack::default();
+        for event in [
+            at(
+                1,
+                "run_claimed",
+                0,
+                json!({"provider": "codex", "requested_provider": "codex", "worker_mode": "headless"}),
+            ),
+            at(
+                2,
+                "turn_started",
+                10,
+                json!({"turn": 1, "provider": "codex"}),
+            ),
+            at(
+                3,
+                "turn_finished",
+                40,
+                json!({"turn": 1, "outcome": "failed", "provider": "codex",
+                       "tokens": {"input": 10, "output": 5, "cache_read": 0, "cache_creation": 0, "messages": 1}}),
+            ),
+            at(
+                4,
+                "provider_switched",
+                41,
+                json!({"from": "codex", "to": "claude", "reason": "usage_limit", "phase": "start"}),
+            ),
+            at(
+                5,
+                "turn_started",
+                50,
+                json!({"turn": 2, "provider": "claude"}),
+            ),
+            at(
+                6,
+                "turn_finished",
+                70,
+                json!({"turn": 2, "outcome": "succeeded", "provider": "claude",
+                       "tokens": {"input": 100, "output": 20, "cache_read": 3, "cache_creation": 2, "messages": 1, "cost_usd": 0.5}}),
+            ),
+            // A turn recorded without its provider ran on the run's then.
+            at(7, "turn_started", 80, json!({"turn": 3})),
+            at(
+                8,
+                "turn_finished",
+                85,
+                json!({"turn": 3, "outcome": "succeeded"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert_eq!(measures.provider.as_deref(), Some("codex"));
+        assert_eq!(measures.actual_provider.as_deref(), Some("claude"));
+        assert_eq!(measures.provider_switches, 1);
+        let turns = measures.turns.unwrap();
+        assert_eq!((turns.count, turns.failed, turns.secs), (3, 1, 55));
+        let codex = &turns.by_provider["codex"];
+        assert_eq!((codex.count, codex.failed, codex.secs), (1, 1, 30));
+        assert_eq!(codex.tokens.as_ref().unwrap().total, 15);
+        let claude = &turns.by_provider["claude"];
+        assert_eq!((claude.count, claude.failed, claude.secs), (2, 0, 25));
+        let tokens = claude.tokens.as_ref().unwrap();
+        assert_eq!((tokens.sessions, tokens.total), (1, 125));
+        assert_eq!(json!(tokens.cost_usd), json!(0.5));
+
+        // Moved at its claim: the switch comes before `run_claimed`, which
+        // carries the provider it moved to and the requested one.
+        let mut track = MeasureTrack::default();
+        for event in [
+            event(
+                1,
+                "provider_switched",
+                json!({"from": "claude", "to": "codex", "reason": "executable_missing", "phase": "start"}),
+            ),
+            event(
+                2,
+                "run_claimed",
+                json!({"provider": "codex", "requested_provider": "claude", "worker_mode": "headless"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert_eq!(measures.provider.as_deref(), Some("claude"));
+        assert_eq!(measures.actual_provider.as_deref(), Some("codex"));
+        assert_eq!(measures.provider_switches, 1);
     }
 
     #[test]

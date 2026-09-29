@@ -165,8 +165,9 @@ pub enum Axis {
     Toolchain,
     /// Claude Code's version.
     Claude,
-    /// The worker's provider (`claude` / `codex`) at the claim
-    /// (ADR-t813-2 decision 7).
+    /// The provider (`claude` / `codex`) that did the run's work in the
+    /// end: the last one it moved to, else the claim's (ADR-t813-2
+    /// decision 7).
     Provider,
     /// The worker's route at the claim: `interactive` or `headless`.
     Route,

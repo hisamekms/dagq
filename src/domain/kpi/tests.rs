@@ -42,6 +42,8 @@ struct Run {
     build: &'static str,
     /// The worker's provider; a Codex run is headless, with Codex 0.46.0.
     provider: &'static str,
+    /// The provider it moved to in the middle (`provider_switched`), if any.
+    switched_to: Option<&'static str>,
     /// The worker session the claim recorded (model, effort, trial group);
     /// none for a claim before ADR-0079.
     session: Option<(&'static str, &'static str, Option<&'static str>)>,
@@ -64,6 +66,7 @@ impl Run {
             load: 2.0,
             build: "b1",
             provider: "claude",
+            switched_to: None,
             session: None,
             nature: None,
             revise: false,
@@ -151,6 +154,15 @@ impl Queue {
             json!({}),
             run.claimed + 60,
         );
+        if let Some(to) = run.switched_to {
+            self.push(
+                task,
+                id,
+                "provider_switched",
+                json!({"from": run.provider, "to": to, "reason": "usage_limit", "phase": "nudge"}),
+                run.claimed + 70,
+            );
+        }
         let receipt = run.claimed + run.work;
         if run.failed {
             self.push(task, id, "run_failed", json!({"status": "failed"}), receipt);
@@ -348,6 +360,10 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
         if index == 3 {
             run.provider = "codex";
         }
+        if index == 2 {
+            // Claimed interactive on Claude, moved to Codex in the middle.
+            run.switched_to = Some("codex");
+        }
         runs.push(run);
     }
     for run in &runs {
@@ -428,14 +444,16 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     assert_eq!(measure(tuesday, "landings", "load=high").value, Some(2.0));
     assert_eq!(measure(tuesday, "max_load_avg", ALL).value, Some(13.0));
     // The worker's provider and route, and Codex's version (ADR-t813-2
-    // decision 7): a run claimed without Codex has none.
+    // decision 7): a run claimed without Codex has none. The provider is
+    // the one that did the work in the end, so the run moved from Claude to
+    // Codex counts for Codex; its route is still the claim's.
     assert_eq!(
         measure(tuesday, "landings", "provider=claude").value,
-        Some(3.0)
+        Some(2.0)
     );
     assert_eq!(
         measure(tuesday, "landings", "provider=codex").value,
-        Some(1.0)
+        Some(2.0)
     );
     assert_eq!(
         measure(tuesday, "landings", "route=interactive").value,
