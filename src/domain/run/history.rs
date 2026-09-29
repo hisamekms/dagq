@@ -21,9 +21,9 @@ pub struct RunHistory<'a> {
 }
 
 /// The events that park a run for a session with a reason of their own
-/// (the landing or validation, or a person's `send_back`), and the
-/// triage's resume.
-const PARKING: [&str; 8] = [
+/// (the landing or validation, or a person's `send_back`), the triage's
+/// resume, and an adopter's park of a run whose workspace was gone.
+const PARKING: [&str; 9] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -32,6 +32,7 @@ const PARKING: [&str; 8] = [
     event_kind::TRIAGE_FINISHED,
     event_kind::TRIAGE_DECIDED,
     event_kind::RECOVERY_PARKED,
+    event_kind::SESSION_GONE_PARKED,
 ];
 
 /// The first five of [`PARKING`] and any landing recheck failure: what
@@ -68,6 +69,9 @@ pub enum ParkCause {
     /// The landing recheck found that the waiting run no longer lands
     /// (ADR-0068 decision 3).
     Recheck,
+    /// An adopter found the workspace of its session gone while it could
+    /// not land without that session (task 960).
+    SessionGone,
 }
 
 /// Why a run waits for a session, from its latest parking event.
@@ -447,6 +451,8 @@ impl<'a> RunHistory<'a> {
             ParkCause::Triage
         } else if event.kind == event_kind::LANDING_RECHECK_FAILED {
             ParkCause::Recheck
+        } else if event.kind == event_kind::SESSION_GONE_PARKED {
+            ParkCause::SessionGone
         } else {
             ParkCause::Landing
         };
@@ -1355,6 +1361,14 @@ mod tests {
             Some((ParkCause::Recheck, Some("moved".into())))
         );
         assert_eq!(park(vec![recheck(1, recheck::HELD)]), None);
+        assert_eq!(
+            park(vec![event(
+                1,
+                "session_gone_parked",
+                json!({"code": "session_gone", "reason": "gone"})
+            )]),
+            Some((ParkCause::SessionGone, Some("gone".into())))
+        );
     }
 
     #[test]

@@ -836,6 +836,7 @@ pub(super) fn resume_reason(
         Some(ParkCause::SentBack) => ResumeKind::SentBack,
         Some(ParkCause::Triage) => ResumeKind::Triage,
         Some(ParkCause::Recheck) => ResumeKind::Recheck,
+        Some(ParkCause::SessionGone) => ResumeKind::SessionGone,
         Some(ParkCause::Landing) | None => ResumeKind::Landing,
     };
     Ok((reason, kind))

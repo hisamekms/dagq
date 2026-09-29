@@ -21,7 +21,7 @@ pub const BREAKING_CODES: [&str; 3] = ["rebase_conflict", "verification_failed",
 
 /// The events that park a run for a resume, whose code is the resume's
 /// reason (as the supervisor's `resume_reason` picks them).
-const PARKING: [&str; 7] = [
+const PARKING: [&str; 8] = [
     "integration_deferred",
     "integration_error",
     "evidence_missing",
@@ -29,6 +29,7 @@ const PARKING: [&str; 7] = [
     "landing_decided",
     "triage_finished",
     "triage_decided",
+    "session_gone_parked",
 ];
 
 /// The reason of a deferral or resume whose event carries no code.

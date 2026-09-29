@@ -22,7 +22,8 @@ pub use history::{
 };
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_exhausted_resumes,
-    record_landing_decision, record_live_park, record_recheck_park, resume_finished,
+    record_gone_session_park, record_landing_decision, record_live_park, record_recheck_park,
+    resume_finished,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no
@@ -398,6 +399,20 @@ pub fn park_after_recheck(mut run: TaskRun, reason: String) -> Result<TaskRun, D
         &run,
         &[RunStatus::AwaitingIntegration],
         "park after a landing recheck",
+    )?;
+    run.status = RunStatus::NeedsSession;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
+/// `awaiting_integration` → `needs_session`: an adopter found the workspace
+/// of the run's session gone while the run could not land without that
+/// session's exit (task 960), with `reason` as `last_error`.
+pub fn park_gone_session(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[RunStatus::AwaitingIntegration],
+        "park after its session's workspace is gone",
     )?;
     run.status = RunStatus::NeedsSession;
     run.last_error = Some(reason);
@@ -923,6 +938,13 @@ mod tests {
         let parked = park_live(run(RunStatus::Running), "live".into()).unwrap();
         assert_eq!(parked.status(), RunStatus::NeedsSession);
         assert_eq!(parked.last_error(), Some("live"));
+        refused(
+            park_gone_session(run(RunStatus::Running), "r".into()),
+            RunStatus::Running,
+        );
+        let parked = park_gone_session(run(RunStatus::AwaitingIntegration), "gone".into()).unwrap();
+        assert_eq!(parked.status(), RunStatus::NeedsSession);
+        assert_eq!(parked.last_error(), Some("gone"));
         refused(
             decide_landing(
                 run(RunStatus::AwaitingIntegration),

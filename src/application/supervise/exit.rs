@@ -470,8 +470,13 @@ impl ExitWatch {
     /// not land or integrate checks again what held it
     /// ([`rechecked_on_landing`]), the session is taken as ended, as one
     /// whose wrapper died (`exit_unsent` with `action: session_gone`), and
-    /// the run goes on to `then` (task 757).
-    /// Otherwise, or when the close fails, the run takes the path of an
+    /// the run goes on to `then` (task 757). A run that lands, held by what
+    /// integrate does not check, has its session taken as ended the same
+    /// way but does not land: it is parked for a resume
+    /// (`session_gone_parked`, `exit_unsent` with `resume: true`), and its
+    /// lease goes back as the watch ends (task 960).
+    /// Otherwise (the workspace is listed, or whether it is cannot be
+    /// read), or when the close fails, the run takes the path of an
     /// `exit_unsent` that could not land: `exit_request_timed_out` (with
     /// `unsent` and `adopted`), the retries of the `/exit` and then the
     /// `stuck_exit` recovery job and ask, which the watch's first poll
@@ -487,11 +492,15 @@ impl ExitWatch {
             AfterExit::Land => landable_without_exit(sv, run),
             _ => Some("the run does not land after its exit".to_owned()),
         };
+        // Only the close stands between the run and its landing.
+        let landable = held.is_none();
         if held.is_none()
             && let Err(error) = close_unless_gone(sv.cmux, workspace)
         {
             held = Some(format!("its workspace could not be closed: {error:#}"));
         }
+        // A close that failed while the workspace went away closed it.
+        let held = held.filter(|_| !(landable && matches!(sv.cmux.exists(workspace), Ok(false))));
         let Some(why) = held else {
             self.closed_to_land(sv, run, workspace, CAUSE_BACKEND_TIMEOUT, attempts, true)?;
             info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent and before its workspace {workspace} was recorded closed; its receipt still holds against its clean worktree, so the workspace is closed and it goes on to land", run.id());
@@ -501,26 +510,45 @@ impl ExitWatch {
         // close succeeded, so the workspace is usually gone: its session
         // ended as one whose wrapper died, and no `/exit`, recovery job or
         // ask is aimed at a workspace that does not exist (task 757). The
-        // run goes on to `then`. A landing goes on only when integrate
-        // checks again what held it (its receipt); a reviewed commit that
+        // run goes on to `then` when it does not land, or when integrate
+        // checks again what held it (its receipt). A reviewed commit that
         // is no longer the head, an open worker_question or a rebase in
-        // progress is not checked there, and stays with the person.
-        let rechecked = !matches!(self.then, AfterExit::Land) || rechecked_on_landing(&why);
-        if rechecked && matches!(sv.cmux.exists(workspace), Ok(false)) {
-            sv.queue.record_runtime_event(
-                run.id(),
-                EventKind::ExitUnsent,
-                json!({
-                    "code": ReasonCode::BackendTimeout,
-                    "workspace_id": workspace,
-                    "attempts": attempts,
-                    "action": "session_gone",
-                    "adopted": true,
-                    "workspace_gone": true,
-                    "held": why,
-                    "then": if matches!(self.then, AfterExit::Land) { "land" } else { "rest" },
-                }),
-            )?;
+        // progress integrate does not check: that run does not land but is
+        // parked for a resume (task 960), whose session settles it and
+        // rewrites the receipt, which validation and review check again.
+        let lands = matches!(self.then, AfterExit::Land);
+        let rechecked = !lands || rechecked_on_landing(&why);
+        if matches!(sv.cmux.exists(workspace), Ok(false)) {
+            let mut payload = json!({
+                "code": ReasonCode::BackendTimeout,
+                "workspace_id": workspace,
+                "attempts": attempts,
+                "action": "session_gone",
+                "adopted": true,
+                "workspace_gone": true,
+                "held": why,
+                "then": if lands { "land" } else { "rest" },
+            });
+            if !rechecked {
+                payload["resume"] = json!(true);
+            }
+            sv.queue
+                .record_runtime_event(run.id(), EventKind::ExitUnsent, payload)?;
+            // Parked before the workspace is recorded closed: an adopter
+            // that died in between left a run that waits for its resume,
+            // never one that lands without a session to rejudge (task 960).
+            if !rechecked {
+                let reason = format!(
+                    "its session's workspace {workspace} was gone after its /exit could not be sent, and it cannot land as it stands: {why}"
+                );
+                sv.queue.park_gone_session(
+                    run.id(),
+                    &sv.token,
+                    &reason,
+                    json!({"workspace_id": workspace, "held": why}),
+                )?;
+                self.then = AfterExit::Rest { close: true };
+            }
             self.forget_session(sv, run, workspace)?;
             for ask in sv
                 .queue
@@ -528,7 +556,11 @@ impl ExitWatch {
             {
                 info!(run_id = %run.id(), ask_id = %ask.id, "workspace of {} is gone; closed its stuck_exit ask {}", run.id(), ask.id);
             }
-            info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent; it cannot land without its exit ({why}), but its workspace {workspace} is gone, so its session is taken as ended", run.id());
+            if rechecked {
+                info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent; it cannot land without its exit ({why}), but its workspace {workspace} is gone, so its session is taken as ended", run.id());
+            } else {
+                info!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent; its workspace {workspace} is gone and it cannot land as it stands ({why}), so it is parked for a resume instead of landing", run.id());
+            }
             return Ok(());
         }
         warn!(run_id = %run.id(), "run {} was adopted after its /exit could not be sent, and it cannot land without its exit ({why}); its recovery job looks at it", run.id());

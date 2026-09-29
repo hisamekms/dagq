@@ -4,8 +4,8 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: domain
 related:
   - adr-t946-1
@@ -241,6 +241,7 @@ storeの保存は「`stored_run`で読む → domainのコマンド → `save_ru
 | `finish_validation(run, &Validation)` | 受理は`accept`、拒否は`reject`（`Validation::resumable()`なら`needs_session`） | `validation_finished`（`Validation`とstatus）。`needs_session`なら続けて`scope_violation`（宣言外のpathがあれば優先）か`evidence_missing`（statusは持たない） |
 | `record_landing_decision(run, to, reason, payload)` | `decide_landing` | `landing_decided`（payloadにstatusとreason） |
 | `record_live_park(run, reason, payload)` | `park_live` | `recovery_parked`（payloadにstatusとreason） |
+| `record_gone_session_park(run, reason, payload)` | `park_gone_session` | `session_gone_parked`（payloadにcode `session_gone`、statusとreason。task 960） |
 | `record_recheck_park(run, reason, payload)` | `park_after_recheck` | `landing_recheck_failed`（payloadに`action: resumed`とstatusとreason） |
 | `record_exhausted_resumes(run, reason, &Exhaustion, resumes, &events)` | `exhaust_resumes` | `Exhaustion::Recover`は`recovery_requested`（`alert: resume_exhausted`、次のattempt、最後の`resume_finished`をevidence）、`Exhaustion::Inherit`は`auto_repaired`（`repair: inherit_retry`）と`triage_finished`（`action: retry_inherit`） |
 
@@ -406,6 +407,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `cancelled` | 人が着地をcancelした | |
 | `triage_resume` | triage（かその`decide`のaskへの人の回答）がrunをsessionに戻した | |
 | `resume_exhausted` | 最後のresumeの後もsessionが要る | |
+| `session_gone` | 引き継いだsupervisorが、`/exit`が届かなかったrunのworkspaceがもう無いのを見つけたが、runがそのsessionなしでは着地できなかった（HEADがreviewしたcommitでない・`worker_question`が開いている・rebaseの途中）ので、着地せずにresumeを待つ（task 960） | |
 | `orphaned` | runの登録processが死んでいて`recover`された | |
 | `push_failed` | 着地したmainのpushが失敗した | |
 | `git_failed` | runtimeのGitコマンドが失敗した（着地したworktreeの削除） | |
@@ -437,6 +439,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `recovery_requested` | resumeを使い切り、復旧jobに渡した（`alert: resume_exhausted`、`by: runtime`） | `resume_exhausted` |
 | `triage_decided` | 復旧jobの`decide`のaskに`resume`と答えた | `triage_resume`。`retry` / `cancel`は持たない |
 | `landing_decided` | `approve_landing`のaskの`send_back` / `cancel` | `sent_back` / `cancelled` |
+| `session_gone_parked` | 引き継いだsupervisorが、workspaceの無い`/exit`の届かなかったrunを着地させずに`needs_session`にした（task 960。[Receipt and session exit](supervisor-lifecycle/receipt-and-session-exit.md)） | `session_gone` |
 | `cleanup_failed` | workspaceのclose（受理後、resume workspace、triage）の失敗 | `backend_*`（triageは、なければ`other`。triageのものは`by: triage`を持ち`last_error`を変えない） |
 | `cleanup_failed` | 着地したworktreeとbranchの削除の失敗 | `git_failed` |
 | `exit_request_timed_out` | `/exit`の応答なし | `exit_timeout` |

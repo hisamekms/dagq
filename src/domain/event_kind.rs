@@ -203,6 +203,7 @@ event_kinds! {
     ScreenCaptureFailed => "screen_capture_failed",
     SessionClosed => "session_closed",
     SessionExited => "session_exited",
+    SessionGoneParked => "session_gone_parked",
     SessionIdleObserved => "session_idle_observed",
     SessionOpened => "session_opened",
     SessionTurns => "session_turns",
@@ -601,6 +602,11 @@ pub const SCRATCHPAD_REMOVED: &str = EventKind::ScratchpadRemoved.as_str();
 pub const SCREEN_CAPTURE_FAILED: &str = EventKind::ScreenCaptureFailed.as_str();
 pub const SESSION_CLOSED: &str = EventKind::SessionClosed.as_str();
 pub const SESSION_EXITED: &str = EventKind::SessionExited.as_str();
+/// An adopter parked a run for a resume, whose `/exit` never reached its
+/// session, whose workspace was gone, and which could not land without that
+/// session (task 960): `code: session_gone`, `workspace_id`, `held`, the
+/// status and the reason.
+pub const SESSION_GONE_PARKED: &str = EventKind::SessionGoneParked.as_str();
 pub const SESSION_IDLE_OBSERVED: &str = EventKind::SessionIdleObserved.as_str();
 pub const SESSION_OPENED: &str = EventKind::SessionOpened.as_str();
 pub const SESSION_TURNS: &str = EventKind::SessionTurns.as_str();
@@ -857,6 +863,7 @@ mod tests {
             (EventKind::ScreenCaptureFailed, "screen_capture_failed"),
             (EventKind::SessionClosed, "session_closed"),
             (EventKind::SessionExited, "session_exited"),
+            (EventKind::SessionGoneParked, "session_gone_parked"),
             (EventKind::SessionIdleObserved, "session_idle_observed"),
             (EventKind::SessionOpened, "session_opened"),
             (EventKind::SessionTurns, "session_turns"),

@@ -1190,6 +1190,11 @@ pub(crate) enum ResumeKind {
     /// another landing moved main (ADR-0068 decision 3): rebase, like
     /// `Landing`, and run the failed recheck command again.
     Recheck,
+    /// A passed run whose `/exit` never reached its session, and whose
+    /// workspace an adopter found gone while the run could not land as it
+    /// stood (task 960): do what the reason says holds it, and rewrite the
+    /// receipt, which validation and review check again.
+    SessionGone,
 }
 
 /// The fixed resolution request the supervisor types into a resumed
@@ -1243,6 +1248,11 @@ pub(crate) fn resume_request(
             task.id(),
             request.branch
         ),
+        ResumeKind::SessionGone => format!(
+            "dagq: run {} (task {}) passed its review, but its session's workspace was gone before the run could land, and the run cannot land as it stands, so the run is needs_session and is validated and reviewed again after this session.",
+            run.id(),
+            task.id()
+        ),
     });
     lines.push(format!("Reason: {}", request.reason));
     let branch = &request.branch;
@@ -1285,6 +1295,12 @@ pub(crate) fn resume_request(
     } else if request.kind == ResumeKind::Triage {
         lines.push(format!(
             "1. Do what the reason asks in this worktree and commit; if {branch} moved, git rebase {} first.",
+            request.main
+        ));
+        lines.push(format!("2. {checks}"));
+    } else if request.kind == ResumeKind::SessionGone {
+        lines.push(format!(
+            "1. Settle what the reason says holds the run in this worktree (finish or abort a rebase in progress, wait for the answer to an open worker_question, or commit the work the head holds) and commit; if {branch} moved, git rebase {} first.",
             request.main
         ));
         lines.push(format!("2. {checks}"));
@@ -2552,6 +2568,7 @@ mod tests {
             ResumeKind::ScopeViolation,
             ResumeKind::Precheck,
             ResumeKind::Triage,
+            ResumeKind::SessionGone,
         ] {
             let request = ResumeRequest {
                 main: CommitSha::try_from(SHA).unwrap(),
@@ -2871,6 +2888,7 @@ mod tests {
             ResumeKind::Precheck,
             ResumeKind::Triage,
             ResumeKind::Recheck,
+            ResumeKind::SessionGone,
         ] {
             let request = ResumeRequest {
                 main: CommitSha::try_from(SHA).unwrap(),
@@ -2943,7 +2961,7 @@ mod tests {
                     "{provider:?}: {text}"
                 );
             }
-            for request in &texts[1..11] {
+            for request in &texts[1..12] {
                 assert!(request.starts_with(HEADLESS_NEXT_TURN), "{request}");
                 assert!(request.contains(HEADLESS_STOP), "{request}");
                 assert!(request.contains("pkill"), "{request}");
@@ -2954,13 +2972,13 @@ mod tests {
                 );
                 assert!(request.contains("and end the turn"), "{request}");
             }
-            assert!(texts[14].ends_with(HEADLESS_GO_ON));
-            assert!(texts[11].starts_with(HEADLESS_NEXT_TURN));
-            assert!(texts[11].contains("dagq: the previous turn of run"));
-            assert!(texts[12].starts_with("answer to ask 3: blue\n\n"));
-            assert!(texts[12].ends_with(HEADLESS_GO_ON));
-            assert!(texts[13].starts_with("dagq: the supervisor's recovery job for run"));
+            assert!(texts[15].ends_with(HEADLESS_GO_ON));
+            assert!(texts[12].starts_with(HEADLESS_NEXT_TURN));
+            assert!(texts[12].contains("dagq: the previous turn of run"));
+            assert!(texts[13].starts_with("answer to ask 3: blue\n\n"));
             assert!(texts[13].ends_with(HEADLESS_GO_ON));
+            assert!(texts[14].starts_with("dagq: the supervisor's recovery job for run"));
+            assert!(texts[14].ends_with(HEADLESS_GO_ON));
         }
         // Codex reviews its own diff and does not owe subagent_review.
         let codex = session_texts(&task, &run_on(Provider::Codex, WorkerMode::Headless));
@@ -2992,7 +3010,7 @@ mod tests {
         ));
         assert!(first.contains("Perform applicable unit tests, E2E, and subagent review."));
         assert!(!first.contains(HEADLESS_WORKER));
-        for request in &texts[1..11] {
+        for request in &texts[1..12] {
             assert!(request.starts_with("dagq: "), "{request}");
             assert!(request.contains(STOP_BACKGROUND), "{request}");
             assert!(
@@ -3001,12 +3019,12 @@ mod tests {
                 "{request}"
             );
         }
-        assert!(texts[11].starts_with(
+        assert!(texts[12].starts_with(
             "dagq: run 00000000-0000-4000-8000-000000000001 has been idle for 10 minutes"
         ));
-        assert_eq!(texts[12], "answer to ask 3: blue");
+        assert_eq!(texts[13], "answer to ask 3: blue");
         assert_eq!(
-            texts[13],
+            texts[14],
             format!(
                 "dagq: the supervisor's recovery job for run {RUN} (alert stalled) asks: write the receipt"
             )

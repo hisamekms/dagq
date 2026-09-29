@@ -1470,6 +1470,18 @@ pub trait RunTransitions {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
+    /// Park a run awaiting integration leased to `token` whose session's
+    /// workspace an adopter found gone while it could not land without that
+    /// session (task 960): it becomes `needs_session` with `reason`,
+    /// recorded as `session_gone_parked` with `payload`; the lease stays
+    /// until the supervisor gives it back.
+    fn park_gone_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// Park a run awaiting integration that the landing recheck found no
     /// longer landing on main (ADR-0068 decision 3), leased to `token` or
     /// to nobody; `None` when it is not so any more.

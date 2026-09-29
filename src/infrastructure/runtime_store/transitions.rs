@@ -314,6 +314,35 @@ impl SqliteQueue {
         Ok(run.relocated(&self.runs_dir))
     }
 
+    /// Park a run awaiting integration leased to `token` whose session's
+    /// workspace an adopter found gone while it could not land without that
+    /// session (task 960): it becomes `needs_session` with `reason` as
+    /// `last_error`, recorded as `session_gone_parked` with `payload`, the
+    /// code, the status and the reason. The lease stays: the supervisor
+    /// gives it back as the run leaves its slot.
+    pub fn park_gone_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, self.generators.clock.now())?;
+        let run = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            Some(token),
+            || "run is not awaiting integration under this supervisor".to_owned(),
+            |run| run::record_gone_session_park(run, reason, payload),
+        )?;
+        tx.commit()?;
+        Ok(run.relocated(&self.runs_dir))
+    }
+
     /// Move `id`'s worker to `worker` (ADR-t813-2 decision 4) under this
     /// supervisor's lease: its `actual_provider` and `worker_mode` change,
     /// recorded as `provider_switched` with `payload`.
@@ -955,6 +984,15 @@ impl RunTransitions for SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
         SqliteQueue::park_live(self, id, token, reason, payload)
+    }
+    fn park_gone_session(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun> {
+        SqliteQueue::park_gone_session(self, id, token, reason, payload)
     }
     fn park_rechecked(
         &mut self,
