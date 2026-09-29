@@ -4,8 +4,8 @@ type: design
 title: "空き容量を確かめる（claimと着地の検証の前）"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - adr-t639-1
@@ -28,12 +28,12 @@ related:
 
 `domain::disk::DiskConfig::needs`が、直近のrunのビルドの大きさから決める。
 
-- 直近のrunのビルドの大きさ: `build_outputs_removed`（終わったrunのworktreeから`target/`などを消したときの記録。[Run worktrees](run-worktrees.md)）の新しい順に`sample_runs`件（既定20）の`bytes`の最大値
-- claimの前: その最大値 × `claim_factor`（既定2）
-- 着地の検証の前: その最大値 × `integrate_factor`（既定1.5）
+- 直近のrunの大きさ: `build_outputs_removed`（終わったrunのworktreeから`target/`などを消したときの記録）の新しい順に`sample_runs`件（既定20）の`bytes`の最大値と、`scratchpad_removed`（taskの終わったrunのClaude Codeのscratchpadを消したときの記録。[Run worktrees](run-worktrees.md)、task 1100）の新しい順に`sample_runs`件の`bytes`の最大値の和（`domain::disk::run_size`、`application::recent_run_sizes`）。runの作業はworktreeのビルドとscratchpadの両方を同時にdiskに置くので、片方だけでは見積もりが小さく出る。runごとには足さない: `build_outputs_removed`はtaskが続くrunだけに、`scratchpad_removed`はtaskが終わった後にだけ記録され（着地したrunのビルドはworktreeごと`worktree_removed`で消える）、同じrunに両方がそろうことはまれなので、それぞれの最大値を足す。片方だけ記録があればその最大値。`$CLAUDE_CODE_TMPDIR`が別のファイルシステムでも区別しない
+- claimの前: その和 × `claim_factor`（既定2）
+- 着地の検証の前: その和 × `integrate_factor`（既定1.5）
 - どちらも`min_free_bytes`（既定なし）を下限にする。記録がまだ無く`min_free_bytes`も無ければ確かめない
 
-値は`dagq.toml`の`[disk]`（`sample_runs`・`min_free_bytes`は正の整数、`claim_factor`・`integrate_factor`は正の数。書式は[Run environment](run-environment.md)）で変える。読むのはmain checkoutの作業ファイルで、supervisorの起動時に読む（読めなければwarnを出して既定値）。libraryの`SuperviseOptions::disk`で上書きできる（testが使う）。直近のビルドの大きさは60秒ごとに読み直す。
+値は`dagq.toml`の`[disk]`（`sample_runs`・`min_free_bytes`は正の整数、`claim_factor`・`integrate_factor`は正の数。書式は[Run environment](run-environment.md)）で変える。読むのはmain checkoutの作業ファイルで、supervisorの起動時に読む（読めなければwarnを出して既定値）。libraryの`SuperviseOptions::disk`で上書きできる（testが使う）。直近のrunの大きさは60秒ごとに読み直す。
 
 空きは`statvfs(3)`の`f_bavail × f_frsize`（一般のprocessが使える量。`infrastructure::adapters::free_disk_bytes`）で、supervisorのpassごとに読む。読めなければ控えない。
 
@@ -41,7 +41,7 @@ related:
 
 supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhandoffの途中も）に`Supervisor::check_disk`で確かめる。
 
-1. 空きがclaimかlandingの閾値の大きい方を下回れば、掃除を自動で走らせる（60秒に1回まで）: 終わったrunのビルド成果物の消し残しと、`completed` / `canceled`のtaskのworktreeの消し残し（[Run worktrees](run-worktrees.md)の`clean_ended_worktrees`と同じ）、`git worktree prune`。掃除はloopの外のjobが行い（[Run worktrees](run-worktrees.md#loopの外で掃除する)、task 405）、そのjobが終わるまでclaimと着地は控えるが、控えのeventもaskも記録しない。jobが終われば、何か消えればqueueイベント`auto_repaired`（`repair: disk_cleanup`、`layer: runtime`、`bytes`、`conditions: {free_bytes, needed_bytes, free_bytes_after}`、`detail: {bytes, runs}`、`supervisor`）を記録する。その後の周回で読み直した空きで判定する
+1. 空きがclaimかlandingの閾値の大きい方を下回れば、掃除を自動で走らせる（60秒に1回まで）: 終わったrunのビルド成果物の消し残しと、`completed` / `canceled`のtaskのworktreeとClaude Codeのscratchpadの消し残し（[Run worktrees](run-worktrees.md)の`clean_ended_worktrees`と同じ）、`git worktree prune`。掃除はloopの外のjobが行い（[Run worktrees](run-worktrees.md#loopの外で掃除する)、task 405）、そのjobが終わるまでclaimと着地は控えるが、控えのeventもaskも記録しない。jobが終われば、何か消えればqueueイベント`auto_repaired`（`repair: disk_cleanup`、`layer: runtime`、`bytes`、`conditions: {free_bytes, needed_bytes, free_bytes_after}`、`detail: {bytes, runs}`、`supervisor`）を記録する。`bytes`は消したworktree・ビルド成果物・scratchpadの`bytes`の合計で、`runs`は何か消えたrunを1回ずつ並べる。その後の周回で読み直した空きで判定する
 2. claim: `fill_slots`の`hold_claims`が、空きとclaimの閾値を`ClaimHold::judge`に渡す。足りなければ理由`disk_space`で控え（load averageより先に判定する）、`claim_held`（`value`は空きbytes、`threshold`は要るbytes）を記録する。空きが戻れば`claim_resumed`
 3. 着地: 着地slotを待つrun（`Phase::AwaitingSlot`）は、空きが着地の閾値を下回る間`begin_integration`をしない。runは`awaiting_integration`のままleaseを持ち、rebaseも検証も始めない。`approve_landing`の`land`のanswerは足りない間もその場で適用してaskを閉じ、runを着地の列に並べる。列のrunの着地の開始（`start_approved_landings`）だけが、空きが戻るまで待つ（task 949、[Review](review.md#review-supervisor)の6）。着地を待つrunがあり足りない間はqueueイベント`landing_held`（payloadは`claim_held`と同じ。`message`は着地の文）を、空きが戻るか待つrunが無くなれば`landing_resumed`を記録する（`domain::claim_hold::LANDINGS`、`transition_of`）。着地の控えはhostのものではなく記録したsupervisorのslotのものなので、別の生きているsupervisorは`landing_resumed`で終えない（そのsupervisorが止まれば終えてよい）。drainやhandoffのsupervisorは待たず、leaseを返してrunを`awaiting_integration`のまま人に残す（`[run.env]`のprogramが無いときと同じ）
 
@@ -51,9 +51,9 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 
 人が打つ`dagq integrate`（`dagq-recover`の手順で打つものも）は、supervisorの着地と同じ着地の閾値で空きを確かめる（task 638）。`application::integrate::begin`が、runを選び、leaseを確かめた後、`integration_approved`を記録してintegrationのslotを取る前に確かめる。
 
-- 閾値: supervisorと同じ`DiskConfig::needs`の着地の側。`[disk]`はmain checkoutの`dagq.toml`をcommandのたびに読み（読めなければwarnを出して既定値）、直近のビルドの大きさはqueueの`build_outputs_removed`から読む。libraryの`OneShot::disk`で上書きできる（testが使う）
+- 閾値: supervisorと同じ`DiskConfig::needs`の着地の側。`[disk]`はmain checkoutの`dagq.toml`をcommandのたびに読み（読めなければwarnを出して既定値）、直近のrunの大きさはqueueの`build_outputs_removed`と`scratchpad_removed`から上と同じく読む。libraryの`OneShot::disk`で上書きできる（testが使う）
 - 空き: queueの`runs/`（無ければDBのあるdirectory）のファイルシステムの空き（`free_disk_bytes`。`OneShot::free_space`でtestが差し替える）
-- 足りなければ、人が目の前にいるので控えて待つのではなく断る: `integration_approved`を記録せず、runの状態もleaseも変えず、空き・必要量・直近のビルドの最大値と、掃除の手がかり（`dagq doctor`でrunとworktreeを見る、見なくなったrunのworktreeや他のファイルを消す）を含むエラーで非0終了する。eventもaskも記録しない
+- 足りなければ、人が目の前にいるので控えて待つのではなく断る: `integration_approved`を記録せず、runの状態もleaseも変えず、空き・必要量・直近のrunの大きさ（ビルド成果物の最大値とscratchpadの最大値の和。`largest_build_bytes`。名前は前のまま）と、掃除の手がかり（`dagq doctor`でrunとworktreeを見る、見なくなったrunのworktreeや他のファイルを消す）を含むエラーで非0終了する。eventもaskも記録しない
 - 閾値が決まらない（記録も`min_free_bytes`も無い）・空きが読めないときは確かめない（supervisorと同じ）
 
 supervisorの着地（`land_integrating`）は上の「判定と掃除」の控えを使い、この確かめはしない。
@@ -63,12 +63,12 @@ supervisorの着地（`land_integrating`）は上の「判定と掃除」の控�
 事前の確かめをすり抜けて着地の検証コマンドが`disk_full`で落ちたら（supervisorの着地も人の`integrate`も）、integrateはやり直す前に空きを着地の閾値で確かめる（task 639。[`integrate`](integrate.md#integrate)の5の「hostの失敗のやり直し」）。閾値と空きの読み方は上と同じで、supervisorは起動時の`[disk]`と`free_space`、人の`integrate`は`OneShot`の`disk`と`free_space`を、そのときに読む（`Integration::retry_disk`）。
 
 - 足りれば同じ試行で1回やり直す
-- 足りなければやり直さず、runを`awaiting_integration`に戻して`integration_held`（`retried: false`、`disk`に`{free_bytes, needed_bytes, largest_build_bytes}`）を記録し、inboxの`review and integrate`になる。resumeはしない。supervisorの次のpassの`check_disk`は、上の「判定と掃除」のとおり掃除し、足りなければ`cost`のaskを開く。空けた後に人が`dagq integrate <task>`を打てば、上の「人が打つ`integrate`」の確かめを通って検証からやり直す
+- 足りなければやり直さず、runを`awaiting_integration`に戻して`integration_held`（`retried: false`、`disk`に`{free_bytes, needed_bytes, largest_build_bytes}`。`largest_build_bytes`は上の直近のrunの大きさ）を記録し、inboxの`review and integrate`になる。resumeはしない。supervisorの次のpassの`check_disk`は、上の「判定と掃除」のとおり掃除し、足りなければ`cost`のaskを開く。空けた後に人が`dagq integrate <task>`を打てば、上の「人が打つ`integrate`」の確かめを通って検証からやり直す
 - 閾値が決まらない・空きが読めないときは確かめずにやり直す
 
 ## inboxに知らせる
 
-掃除の後もclaimか着地の閾値を下回れば、queueで1件の`cost`のask（`kind: queue_hold`、`reason_category: cost`、`subject: disk`、optionsは`done` / `wait`）を開く（ADR-0047の決定42）。着地を待つrunは`affected`に足され（`ask_updated`）、questionの末尾の`Affected runs:`に並ぶ。ログインのaskと違い、sessionを止めるものではないので、`hold_of`（sessionの待ちと停滞の見張りがログインの控えを見る）には当たらない。claimだけが足りないときはrunを持たない（`NewHold::run_id`が`None`）。通知（`cmux notify`）は最初の1回だけ。
+掃除の後もclaimか着地の閾値を下回れば、queueで1件の`cost`のask（`kind: queue_hold`、`reason_category: cost`、`subject: disk`、optionsは`done` / `wait`）を開く（ADR-0047の決定42）。着地を待つrunは`affected`に足され（`ask_updated`）、questionの末尾の`Affected runs:`に並ぶ。ログインのaskと違い、sessionを止めるものではないので、`hold_of`（sessionの待ちと停滞の見張りがログインの控えを見る）には当たらない。claimだけが足りないときはrunを持たない（`NewHold::run_id`が`None`）。通知（`cmux notify`）は最初の1回だけ。questionは、掃除したもの（ビルド成果物、`completed` / `canceled`のtaskのrunのworktreeとClaude Codeのscratchpad、`git worktree prune`）と、閾値が直近のrunの大きさ（ビルド成果物の最大値とscratchpadの最大値の和）に係数を掛けたものであることを書く。人の`integrate`が断るときのエラーも同じ言い方で大きさを書く（task 1100）
 
 - 同じ不足の間は開き直さない。supervisorはこの不足でaskを開いたことを覚え、空きが戻るまで新しく開かない
 - `done`（人が空けた）: supervisorがaskを閉じ、すぐ掃除し直して確かめる。まだ足りなければもう1件開く

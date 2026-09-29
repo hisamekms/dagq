@@ -104,6 +104,21 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     assert!(ask.affected.is_empty());
     assert_eq!(ask.task_id, None);
     assert!(ask.question.contains("0.5 GiB free"), "{}", ask.question);
+    // Task 1100: it names the scratchpads among what was cleaned and in
+    // the size of a run the needs follow.
+    assert!(
+        ask.question.contains(
+            "the worktrees and the Claude Code scratchpads of completed and canceled tasks' runs"
+        ),
+        "{}",
+        ask.question
+    );
+    assert!(
+        ask.question
+            .contains("the largest build outputs plus the largest Claude Code scratchpad"),
+        "{}",
+        ask.question
+    );
     assert!(!ask.question.contains("Affected:"));
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -439,5 +454,130 @@ fn a_persons_integrate_without_a_threshold_or_a_reading_lands() {
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     let (_dir, repo, db, _run) = awaiting_run();
     let outcome = integrate_on(&db, &repo, gibibyte_needed(), unreadable).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+}
+
+/// The scratchpad whose presence makes the scratchpad test's disk short,
+/// and the free bytes it reads once it is gone.
+static SCRATCHPAD: Mutex<Option<PathBuf>> = Mutex::new(None);
+static FREE_AFTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(4 * GIB);
+
+fn short_while_scratchpad(_: &Path) -> Option<u64> {
+    let left = SCRATCHPAD.lock().unwrap_or_else(PoisonError::into_inner);
+    Some(if left.as_ref().is_some_and(|dir| dir.exists()) {
+        1
+    } else {
+        FREE_AFTER.load(Ordering::SeqCst)
+    })
+}
+
+/// Task 1100: short of room, the cleanup also removes the Claude Code
+/// scratchpad of a run whose task was canceled, and `auto_repaired` counts
+/// its bytes with the worktree's. The size of a run the thresholds follow
+/// is then the largest build outputs and the largest scratchpad together.
+#[test]
+fn a_cleanup_for_room_removes_the_scratchpads_and_the_needs_count_them() {
+    const SCRATCH: usize = 1 << 20;
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let first = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue
+            .transition(TaskId::new(1), TaskAction::Cancel)
+            .unwrap();
+        add_ready_task(&mut queue, "second task", &[]);
+        queue.show(TaskId::new(1)).unwrap().runs[0].clone()
+    };
+    assert_eq!(queue_events(&db, "build_outputs_removed").len(), 1);
+    let root = dir.path().join("claude-tmp");
+    let scratchpad = scratchpad_of(&root, first.worktree_path().unwrap());
+    fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
+    fs::write(
+        scratchpad.join("session/scratchpad/big"),
+        vec![0u8; SCRATCH],
+    )
+    .unwrap();
+    *SCRATCHPAD.lock().unwrap() = Some(scratchpad.clone());
+    let options = SuperviseOptions {
+        free_space: short_while_scratchpad,
+        scratchpad_roots: Some(vec![root.clone()]),
+        ..supervise_options(1, true)
+    };
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    assert!(!scratchpad.exists());
+    let removed = queue_events(&db, "scratchpad_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    let scratched = removed[0]["bytes"].as_u64().unwrap();
+    assert!(scratched >= SCRATCH as u64, "{scratched}");
+    let worktree = queue_events(&db, "worktree_removed");
+    assert_eq!(worktree.len(), 1, "{worktree:?}");
+    let repaired = queue_events(&db, "auto_repaired");
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["repair"], "disk_cleanup");
+    assert_eq!(
+        repaired[0]["bytes"].as_u64().unwrap(),
+        worktree[0]["bytes"].as_u64().unwrap() + scratched
+    );
+    assert_eq!(repaired[0]["detail"]["runs"], json!([first.id().as_str()]));
+    assert!(queue_events(&db, "claim_held").is_empty());
+
+    // A run's size is the largest build and the largest scratchpad: a
+    // claim needs twice that, more than any build alone.
+    let built = queue_events(&db, "build_outputs_removed")
+        .iter()
+        .map(|event| event["bytes"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    let largest = built + scratched;
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(2), TaskAction::Cancel)
+        .unwrap();
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "third task", &[]);
+    FREE_AFTER.store(2 * largest - 1, Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    let held = queue_events(&db, "claim_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["reason"], "disk_space");
+    assert_eq!(held[0]["threshold"], json!((2 * largest) as f64));
+}
+
+/// Task 1100: a person's `integrate` follows the same run size: the
+/// largest `scratchpad_removed` adds to the largest `build_outputs_removed`.
+#[test]
+fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
+    let (_dir, repo, db, run) = awaiting_run();
+    let queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::BuildOutputsRemoved,
+            json!({"bytes": GIB / 4}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ScratchpadRemoved,
+            json!({"bytes": GIB * 3 / 8}),
+        )
+        .unwrap();
+    // 0.625 GiB times 1.5 is above the half a gibibyte free; the build
+    // alone (0.375 GiB) would not be.
+    let error = format!(
+        "{:#}",
+        integrate_on(&db, &repo, Some(DiskConfig::default()), half_a_gibibyte).unwrap_err()
+    );
+    assert!(error.contains("below the 0.9 GiB"), "{error}");
+    assert!(error.contains("0.6 GiB, times"), "{error}");
+    assert!(
+        error.contains("the largest build outputs plus the largest Claude Code scratchpad"),
+        "{error}"
+    );
+    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), two_gibibytes).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
 }

@@ -886,6 +886,20 @@ pub fn or_none(text: &str) -> &str {
     }
 }
 
+/// The size of a recent run a disk threshold follows from
+/// ([`crate::domain::disk::run_size`]), as the sizes
+/// [`crate::domain::disk::DiskConfig::needs`] takes: read from the latest
+/// `sample_runs` of each of `build_outputs_removed` and
+/// `scratchpad_removed` (task 1100).
+pub fn recent_run_sizes<L: RunLog + ?Sized>(log: &L, sample_runs: i64) -> anyhow::Result<Vec<u64>> {
+    let limit = usize::try_from(sample_runs).unwrap_or(0);
+    let mut events = Vec::new();
+    for kind in crate::domain::disk::RUN_SIZE_EVENTS {
+        events.extend(log.latest_events_of(kind, limit)?);
+    }
+    Ok(crate::domain::disk::run_size(&events).into_iter().collect())
+}
+
 /// `path` as text; the runtime keeps every path it records as UTF-8.
 pub fn path_text(path: &std::path::Path) -> anyhow::Result<String> {
     use anyhow::Context;

@@ -300,6 +300,13 @@ pub struct SuperviseOptions {
     pub exit: Option<crate::domain::exit::ExitConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// The directories Claude Code keeps the sessions' scratchpads under,
+    /// whose ended runs' scratchpads the supervisor removes (task 1100);
+    /// `None` is the host's, looked for at each cleanup
+    /// ([`crate::infrastructure::run_files::claude_scratchpad_roots`]),
+    /// which the CLI gives; a caller of the library (the tests) looks
+    /// under none unless it gives its own.
+    pub scratchpad_roots: Option<Vec<PathBuf>>,
     /// Write the KPI reports of each day and week under `<queue dir>/reports/`
     /// (ADR-0051 decision 20): off unless asked for (`supervise
     /// --report-daily`, on by default in the CLI).
@@ -461,6 +468,7 @@ impl SuperviseOptions {
             resume: None,
             exit: None,
             free_space: free_disk_bytes,
+            scratchpad_roots: Some(Vec::new()),
             report_daily: false,
             forecast_snapshots: false,
             forecast_check: crate::application::supervise::FORECAST_CHECK,
@@ -903,6 +911,15 @@ pub fn supervise_with_reviewer(
         review_material: &review_material,
         load_average: options.load_average,
         free_space: options.free_space,
+        scratchpad_roots: options.scratchpad_roots.clone().map_or_else(
+            || {
+                Arc::new(crate::infrastructure::run_files::claude_scratchpad_roots)
+                    as crate::application::supervise::ScratchpadRoots
+            },
+            |roots| {
+                Arc::new(move || roots.clone()) as crate::application::supervise::ScratchpadRoots
+            },
+        ),
         host_versions,
         reports,
         max_improvement_proposals,

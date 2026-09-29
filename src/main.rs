@@ -2803,6 +2803,8 @@ fn execute(cli: Cli) -> Result<Value> {
                         host_metrics_retention_days,
                     )
                 }),
+                // The host's Claude Code scratchpads (task 1100).
+                scratchpad_roots: None,
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
             dagq::compose::supervise(

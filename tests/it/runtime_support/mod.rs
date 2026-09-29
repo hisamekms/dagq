@@ -1594,6 +1594,18 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
     }
 }
 
+/// The Claude Code scratchpad of the session run in `worktree` under
+/// `root` (task 1100): the path with each character but an ASCII letter or
+/// digit turned into `-`, written here without the runtime's function.
+pub fn scratchpad_of(root: &Path, worktree: &str) -> PathBuf {
+    root.join(
+        worktree
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>(),
+    )
+}
+
 /// The clock of one supervisor in these tests: the wall clock when its
 /// options were made, advanced by the monotonic clock. The supervisor's
 /// heartbeat thread waits its 2 seconds on the monotonic clock, which stops

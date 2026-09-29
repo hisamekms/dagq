@@ -443,6 +443,16 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
         rusqlite::params![run.id(), std::process::id()],
     )
     .unwrap();
+    // Task 1100: the Claude Code scratchpad of its session is not removed
+    // while the lease is live.
+    let root = _dir.path().join("claude-tmp");
+    let scratchpad = scratchpad_of(&root, run.worktree_path().unwrap());
+    fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
+    fs::write(scratchpad.join("session/scratchpad/notes"), "x").unwrap();
+    let sweeping = SuperviseOptions {
+        scratchpad_roots: Some(vec![root.clone()]),
+        ..sweeping_options()
+    };
     let before = closes_of(&queue, &run).len();
     let candidate = |queue: &SqliteQueue| {
         queue
@@ -459,15 +469,21 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
             .iter()
             .any(|w| w.run_id == *run.id())
     );
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping).unwrap();
     assert_eq!(closes_of(&queue, &run).len(), before);
     assert!(!backend.closed().contains(&"left-ws".to_owned()));
+    assert!(scratchpad.join("session/scratchpad/notes").is_file());
+    assert!(payloads_of(&queue, &run, "scratchpad_removed").is_empty());
 
     // Its holder dies before releasing it: the lease is stale.
     raw.execute("UPDATE run_leases SET pid=?1", [dead_pid()])
         .unwrap();
     assert!(candidate(&queue));
-    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    assert!(!scratchpad.exists());
+    let removed = payloads_of(&queue, &run, "scratchpad_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "task_completed");
     let closed = closes_of(&queue, &run);
     assert_eq!(
         closed[before..],
@@ -660,4 +676,110 @@ fn the_sweep_removes_the_runners_of_planners_whose_wrapper_is_done() {
     for dir in [&exited_dir, &dead_dir, &closed_dir, &alive_dir] {
         assert!(dir.join("prompt.txt").is_file());
     }
+}
+
+/// Task 1100: once a run's task is over, the sweep removes the Claude Code
+/// scratchpad of its session (named after its worktree) under each root,
+/// recorded as `scratchpad_removed` with the paths and the bytes. A run
+/// whose task goes on keeps its scratchpad; a link in its place is not
+/// followed, a root without it and other directories are left alone, and
+/// another sweep records nothing.
+#[test]
+fn a_task_over_loses_the_claude_scratchpads_of_its_runs() {
+    let (dir, repo, db) = fixture();
+    {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        add_ready_task(&mut queue, "second task", &[]);
+    }
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let canceled = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let going_on = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+    assert_eq!(canceled.status(), RunStatus::Failed);
+
+    let (first, second, empty) = (
+        dir.path().join("tmp-a"),
+        dir.path().join("tmp-b"),
+        dir.path().join("tmp-c"),
+    );
+    let fill = |dir: &Path| {
+        fs::create_dir_all(dir.join("session/scratchpad/dagq-worker/target")).unwrap();
+        fs::write(
+            dir.join("session/scratchpad/dagq-worker/target/built"),
+            vec![0u8; 8192],
+        )
+        .unwrap();
+    };
+    let removed_a = scratchpad_of(&first, canceled.worktree_path().unwrap());
+    let removed_b = scratchpad_of(&second, canceled.worktree_path().unwrap());
+    let kept = scratchpad_of(&first, going_on.worktree_path().unwrap());
+    fill(&removed_a);
+    fill(&removed_b);
+    fill(&kept);
+    let other = first.join("-Users-someone-elsewhere");
+    fill(&other);
+    // In the third root, a link where the scratchpad would be.
+    let outside = dir.path().join("outside");
+    fill(&outside);
+    fs::create_dir_all(&empty).unwrap();
+    let link = scratchpad_of(&empty, canceled.worktree_path().unwrap());
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let options = SuperviseOptions {
+        scratchpad_roots: Some(vec![first.clone(), second.clone(), empty.clone()]),
+        ..sweeping_options()
+    };
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+
+    assert!(!removed_a.exists());
+    assert!(!removed_b.exists());
+    assert!(first.is_dir() && second.is_dir());
+    assert!(
+        kept.join("session/scratchpad/dagq-worker/target/built")
+            .is_file()
+    );
+    assert!(
+        other
+            .join("session/scratchpad/dagq-worker/target/built")
+            .is_file()
+    );
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        outside
+            .join("session/scratchpad/dagq-worker/target/built")
+            .is_file()
+    );
+    let removed = payloads_of(&queue, &canceled, "scratchpad_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(
+        removed[0]["paths"],
+        json!([removed_a.to_string_lossy(), removed_b.to_string_lossy()])
+    );
+    assert_eq!(removed[0]["reason"], "task_canceled");
+    assert_eq!(removed[0]["by"], "supervisor");
+    let bytes = removed[0]["bytes"].as_u64().unwrap();
+    assert!(bytes >= 2 * 8192, "{bytes}");
+    assert_eq!(payloads_of(&queue, &canceled, "worktree_removed").len(), 1);
+    assert!(payloads_of(&queue, &going_on, "scratchpad_removed").is_empty());
+
+    // Nothing is left: another sweep records nothing and fails nothing.
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    assert_eq!(
+        payloads_of(&queue, &canceled, "scratchpad_removed").len(),
+        1
+    );
+    assert!(payloads_of(&queue, &canceled, "cleanup_failed").is_empty());
+    assert!(payloads_of(&queue, &going_on, "cleanup_failed").is_empty());
 }

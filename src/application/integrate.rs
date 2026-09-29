@@ -35,7 +35,7 @@ use crate::domain::{
     CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
     Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus,
     Task, TaskId, TaskRun,
-    disk::{BUILD_OUTPUTS_REMOVED, DiskConfig, gib},
+    disk::{DiskConfig, gib},
     event_kind, evidence_missing_reason, heartbeat_stale,
     landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
     measure::{LoadSummary, LoadWindow},
@@ -506,7 +506,7 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
         let largest =
             largest_build.map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
         bail!(
-            "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the largest build of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+            "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
             gib(free as f64),
             gib(need as f64),
         );
@@ -515,7 +515,8 @@ fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()
 }
 
 /// The free disk space below a landing's threshold (task 377): what is
-/// free, what is needed, and the largest recent build it follows.
+/// free, what is needed, and the recent run size it follows (the largest
+/// build outputs plus the largest scratchpad).
 #[derive(Debug, Clone, Copy)]
 struct DiskShort {
     free: u64,
@@ -534,19 +535,15 @@ impl DiskShort {
 }
 
 /// Whether `free` is short of the landing threshold `config` sets over the
-/// latest `build_outputs_removed`: `None` with room, no threshold or no
+/// sizes of the recent runs (`build_outputs_removed` and
+/// `scratchpad_removed`): `None` with room, no threshold or no
 /// reading.
 fn disk_short(
     queue: &dyn Queue,
     config: &DiskConfig,
     free: Option<u64>,
 ) -> Result<Option<DiskShort>> {
-    let limit = usize::try_from(config.sample_runs).unwrap_or(0);
-    let builds: Vec<u64> = queue
-        .latest_events_of(BUILD_OUTPUTS_REMOVED, limit)?
-        .iter()
-        .filter_map(|event| event.payload.get("bytes").and_then(Value::as_u64))
-        .collect();
+    let builds = crate::application::recent_run_sizes(queue, config.sample_runs)?;
     let needs = config.needs(&builds);
     Ok(match (free, needs.landing) {
         (Some(free), Some(need)) if free < need => Some(DiskShort {

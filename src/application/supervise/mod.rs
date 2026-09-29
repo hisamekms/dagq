@@ -337,6 +337,9 @@ pub struct Ports<'a> {
     pub load_average: fn() -> Option<f64>,
     /// The free bytes of the file system of a path (task 377).
     pub free_space: fn(&Path) -> Option<u64>,
+    /// The directories Claude Code keeps the sessions' scratchpads under,
+    /// read at each cleanup (task 1100).
+    pub scratchpad_roots: ScratchpadRoots,
     /// The versions of Claude Code (given `--claude`) and of the host's
     /// `rustc` (run in the given checkout) a claim records (task 197).
     pub host_versions: fn(&Path, Option<&Path>, &Path) -> HostVersions,
@@ -368,6 +371,10 @@ pub struct Ports<'a> {
     pub broker: Option<BrokerPort>,
     pub layout: Layout,
 }
+
+/// Lists the directories Claude Code keeps the sessions' scratchpads
+/// under (task 1100).
+pub type ScratchpadRoots = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
 
 /// Reads `[conflicts]` of the main checkout's `dagq.toml` (ADR-0080).
 pub type ConflictsFile =
@@ -638,6 +645,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         resume_config: settings.resume,
         exit_config: settings.exit.clone(),
         free_space: ports.free_space,
+        scratchpad_roots: ports.scratchpad_roots.clone(),
         disk: disk::DiskWatch::default(),
         free: None,
         cleanup: cleanup::CleanupWatch::default(),
@@ -849,6 +857,8 @@ struct Supervisor<'a> {
     exit_config: crate::domain::exit::ExitConfig,
     /// Reads the free bytes of the file system of a path.
     free_space: fn(&Path) -> Option<u64>,
+    /// Lists the directories of the Claude Code scratchpads (task 1100).
+    scratchpad_roots: ScratchpadRoots,
     /// The disk between passes (task 377).
     disk: disk::DiskWatch,
     /// The free bytes of the queue's directory read this pass.

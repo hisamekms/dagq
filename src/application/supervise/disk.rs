@@ -17,10 +17,10 @@ use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     claim_hold::LANDINGS,
-    disk::{BUILD_OUTPUTS_REMOVED, DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, gib},
+    disk::{DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, gib},
 };
 
-/// How long the needs read from the recent builds are kept.
+/// How long the needs read from the recent runs' sizes are kept.
 const NEEDS_INTERVAL: Duration = Duration::from_secs(60);
 /// Least time between two cleanups for the disk.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -29,7 +29,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs, the worktrees of completed and canceled tasks, `git worktree prune`) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the largest build of the recent runs times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs, the worktrees and the Claude Code scratchpads of completed and canceled tasks' runs, `git worktree prune`) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad of the recent runs, times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
 /// What the supervisor knows of the disk between passes.
 #[derive(Debug, Default)]
@@ -126,20 +126,16 @@ impl Supervisor<'_> {
             .or_else(|| self.layout.db.parent().and_then(self.free_space))
     }
     /// What a claim and a landing need, read again every
-    /// [`NEEDS_INTERVAL`] from the latest `build_outputs_removed`.
+    /// [`NEEDS_INTERVAL`] from the latest `build_outputs_removed` and
+    /// `scratchpad_removed`.
     pub(super) fn disk_needs(&mut self) -> Result<DiskNeeds> {
         if let Some((at, needs)) = self.disk.needs
             && at.elapsed() < NEEDS_INTERVAL
         {
             return Ok(needs);
         }
-        let limit = usize::try_from(self.disk_config.sample_runs).unwrap_or(0);
-        let builds: Vec<u64> = self
-            .queue
-            .latest_events_of(BUILD_OUTPUTS_REMOVED, limit)?
-            .iter()
-            .filter_map(|event| event.payload.get("bytes").and_then(Value::as_u64))
-            .collect();
+        let builds =
+            crate::application::recent_run_sizes(&*self.queue, self.disk_config.sample_runs)?;
         let needs = self.disk_config.needs(&builds);
         self.disk.needs = Some((Instant::now(), needs));
         Ok(needs)
@@ -316,7 +312,9 @@ impl Cleaned {
     pub(super) fn add(&mut self, run: &RunId, bytes: u64) {
         if bytes > 0 {
             self.bytes += bytes;
-            self.runs.push(run.clone());
+            if !self.runs.contains(run) {
+                self.runs.push(run.clone());
+            }
         }
     }
 }

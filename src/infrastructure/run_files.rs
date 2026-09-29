@@ -13,6 +13,34 @@ use anyhow::{Context, Result};
 
 use crate::application::RunFiles;
 
+/// The directories Claude Code keeps its sessions' scratchpads under on
+/// this host (task 1100): `claude-<uid>` in the system's `/tmp` (where it
+/// puts them, not in `$TMPDIR`), in `$TMPDIR` and in `$CLAUDE_CODE_TMPDIR`
+/// when set, each with its links resolved, those that exist, without
+/// repeats. The supervisor removes the scratchpad of an ended run under
+/// each.
+pub fn claude_scratchpad_roots() -> Vec<PathBuf> {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let name = format!("claude-{}", unsafe { libc::getuid() });
+    let mut bases = vec![PathBuf::from("/tmp")];
+    bases.extend(
+        ["TMPDIR", "CLAUDE_CODE_TMPDIR"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from),
+    );
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for base in bases {
+        let Ok(root) = fs::canonicalize(base.join(&name)) else {
+            continue;
+        };
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
 /// The run files as the local file system holds them.
 pub struct LocalRunFiles;
 
@@ -165,6 +193,17 @@ fn backtick_run_and_last_byte(path: &Path) -> Result<(usize, Option<u8>)> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn the_scratchpad_roots_are_existing_claude_directories_without_repeats() {
+        let roots = claude_scratchpad_roots();
+        let name = format!("claude-{}", unsafe { libc::getuid() });
+        for (i, root) in roots.iter().enumerate() {
+            assert!(root.is_absolute() && root.is_dir(), "{}", root.display());
+            assert_eq!(root.file_name().unwrap().to_str(), Some(name.as_str()));
+            assert!(!roots[..i].contains(root));
+        }
+    }
 
     #[test]
     fn local_run_files_read_what_they_wrote() {

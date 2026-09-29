@@ -4,8 +4,8 @@ type: design
 title: "Run worktrees"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -22,9 +22,16 @@ related:
 
 - **runの`runner`**（task 696、goal 54の(3)）: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し。1個約9MB）を消す。対象のrunはslotに無く生きているleaseも無いので、そのsessionのwrapperを走らせるものは居ない。resumeはleaseを取ってから写し直すので、消した後のresumeも動く。jobが通り過ぎるまでrunは予約されているので、loopがその間にleaseを取って写した`runner`を消すことはない。`needs_session`でresumeを待つrun（taskがまだ終わっていないもの）は対象外で、`runner`は残る。eventは記録せず（logの1行だけ）、`bytes`にも数えない。失敗はlogだけで、次の掃除で再び試す。worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す
 
-`bytes`は消したものがディスクで占めていた量（blocks × 512、hard linkは1回だけ数える）。どちらのeventも人の手の代わりにruntimeが直したもので、goal 34の自動修正の件数に数える。
+- **runのClaude Codeのscratchpad**（task 1100。2026-09-29に、着地したrunのscratchpadが消されずに合計約20GB残り、空き容量不足の`queue_hold`が8回開いた）: taskが`completed` / `canceled`のrunについて、同じjobが、そのrunのsession（worker）がClaude Codeのscratchpadを置くディレクトリを消す。workerは使い捨てのrepositoryや計測用の`target/`をそこに置くので、1 runで数GBになりうる
+  - 名前: Claude Codeは、sessionのcwdのpathの英数字（ASCII）以外の文字をすべて`-`にした名前（`~/.claude/projects/`と同じ）のディレクトリの下に、sessionごとの`<session id>/scratchpad`を作る。runのsessionのcwdはrunのworktreeなので、runtimeはDBのworktreeのpath（`<runs>/<run-id>/worktree`）からこの名前を求める（例: `/Users/me/.local/share/dagq/<hash>/runs/<run-id>/worktree`は`-Users-me--local-share-dagq-<hash>-runs-<run-id>-worktree`。`/`だけでなく`.`も`-`になる）。名前は英数字と`-`だけで`/`も`..`も含まないので、親ディレクトリの直下から出ない。Claude Codeは200文字を超える名前をhashで縮めるが、その形は再現しないので、200文字を超えるものは探さない（今のworktreeのpathは約110文字）
+  - 親ディレクトリ: Claude Codeは`$TMPDIR`ではなくsystemの`/tmp`の下の`claude-<uid>`に置く（macOSでは`/private/tmp/claude-<uid>`。2026-09-29にhostで確かめた。`$TMPDIR`の下には無かった）。runtimeは`/tmp`・`$TMPDIR`・（設定されていれば）`$CLAUDE_CODE_TMPDIR`の下の`claude-<uid>`のうち在るものを、linkを解いて重複を除き、掃除のjobを始めるたびに求めて全部見る（`infrastructure::run_files::claude_scratchpad_roots`。CLIの`supervise`がこれを使う。libraryの`SuperviseOptions::new`の既定はどこも見ず、testは`scratchpad_roots`に自分の親ディレクトリを渡す）
+  - 消し方: 求めたディレクトリがどの親にも無ければ何もしない。在ってもdirectoryでなくlinkなら触れない。中はlinkをたどらずに大きさを測って（`tree_size`）消す。求めたディレクトリの外（同じ親の他のproject、`$TMPDIR`の他の一時ファイル、人が開いたplanner・inbox・supervisorのsession（cwdがmain checkoutでrunに紐づかない）のscratchpad）には触れない
+  - 消す条件は上のworktreeを消すのと同じ（slotに無く、生きているleaseが無く、taskが`completed` / `canceled`）で、worktreeがもう無くても、branchがもう無くても消す。taskがまだ終わっていないrunのもの（resumeが同じworktreeで続けうる）は残す。前からあったrunのscratchpadも、taskの終わったrunはどれも毎回の掃除の候補なので、最初の掃除が拾う
+  - 何か消せば`scratchpad_removed`（`paths`（消したディレクトリ）、`bytes`、`by: supervisor`、`reason`: `task_completed` / `task_canceled`）をrunに記録する。測ってから消すまでの間に消えていれば（別のsupervisorの掃除やClaude Code自身が消した）何も記録しない。親ディレクトリごとに扱うので、1つの親で失敗しても他の親で消せたものは記録する。消せなければ`cleanup_failed`（`path`はscratchpadのディレクトリ、`message`は`scratchpad <path> could not be cleaned: ...`）にして、worktreeと同じくプロセスごとにpathあたり1回だけ記録し、次の掃除で再び試す
 
-空き容量がclaimか着地の検証に足りないときも、supervisorは同じ掃除と`git worktree prune`を走らせ、何か消えれば`auto_repaired`（`repair: disk_cleanup`）を記録する（[空き容量を確かめる](disk-space.md)、task 377）。その閾値は直近の`build_outputs_removed`の`bytes`の最大値から決める。
+`bytes`は消したものがディスクで占めていた量（blocks × 512、hard linkは1回だけ数える）。どのeventも人の手の代わりにruntimeが直したもので、goal 34の自動修正の件数に数える。
+
+空き容量がclaimか着地の検証に足りないときも、supervisorは同じ掃除と`git worktree prune`を走らせ、何か消えれば`auto_repaired`（`repair: disk_cleanup`。`bytes`はworktree・ビルド成果物・scratchpadの合計）を記録する（[空き容量を確かめる](disk-space.md)、task 377）。その閾値は直近のrunの大きさ（直近の`build_outputs_removed`の`bytes`の最大値と、直近の`scratchpad_removed`の`bytes`の最大値の和）から決める。
 
 ## loopの外で掃除する
 
@@ -32,7 +39,7 @@ related:
 
 - 下の契機は掃除を頼むだけ（`request_cleanup`）。jobが無ければloopがその場で候補（`ended_run_worktrees`からslotのrunを除いたもの、taskの指定があればそのtaskのrun）を選んでjobを起こし、jobが走っていれば頼みを溜めて（全runか、taskの集合）、jobが終わった後の周回で次のjobにする。jobは同時に1つだけなので、同じworktreeを二重に掃除しない
 - jobが選んだrunは、jobがそのrunを通り過ぎるまで予約される。loopは終わったrunにleaseを取る前（triageの`begin_triage`、resumeの`begin_resume`）に予約のlockを取り、予約されたrunはその周回は取らない（loopの中で同期に掃除していたときと同じく、掃除がtriageより先になる）。そうして取らなかったrunがあれば、loopはそのjobをrunと同じく待つ（`supervise --once`がjobの後にtriageやresumeをしてから終わるように）。jobは候補ごとに、同じlockの中で消す前にqueueを読み直し（自分の接続で`ended_run_worktrees`）、選ばれたときと同じ状態で候補に残っているものだけを掃除する。選ばれた後にleaseが付いた（別のsupervisorがclaimした）run、状態が変わったrunやtaskは飛ばし、次の掃除が選び直す。どちらが先でも、掃除中のworktreeのrunがclaimされることはない
-- eventはloopが記録する。loopは周回の最初にjobが終わっていればjoinし、jobが返した結果から`build_outputs_removed`・`worktree_removed`・`cleanup_failed`をtask 376と同じpayloadで記録する（`cleanup_failed`はプロセスごとにworktreeあたり1回）
+- eventはloopが記録する。loopは周回の最初にjobが終わっていればjoinし、jobが返した結果から`build_outputs_removed`・`worktree_removed`・`scratchpad_removed`・`cleanup_failed`をtask 376（scratchpadはtask 1100）と同じpayloadで記録する（`cleanup_failed`はプロセスごとにworktreeあたり1回）
 - 空き容量のための掃除（[空き容量を確かめる](disk-space.md)）も同じjobに乗る。そのjobは最後に`git worktree prune`を行い、終わった周回で空きを読み直して`auto_repaired`を記録する。空きが足りずにそのjobを待つあいだ、claimと着地は控えるが`claim_held` / `landing_held`もaskも記録せず、終わった後の周回で読み直した空きで判定する。loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。空き容量のための掃除を頼んだときに別のjobが走っていれば、そのjobを空き容量のための掃除として扱い（claimと着地はそのjobだけを待ち、消した分を`auto_repaired`に数える）、残り（そのjobが選ばなかったrunと`git worktree prune`）は控えずに次のjobで行う
 - stopかhandoffでは、jobは今のworktreeを終えたところで止まり、溜めた頼みは捨てる（残りは次のsupervisorの最初の掃除が拾う）。handoffのexecはjobの終わりを待つ。loopが終わるときは、走っているjobと溜めた頼みのjobを待ってeventを記録する（errorで終わったときは、jobは今のworktreeを終えたところで止まり、それを待って記録する）
 

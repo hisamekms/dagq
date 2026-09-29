@@ -375,3 +375,154 @@ fn a_worktree_left_pointing_at_an_old_repository_is_repaired_and_removed() {
     assert!(removed[0]["bytes"].as_u64().unwrap() > 0);
     assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
 }
+
+/// Run files whose removal of a directory under a `raced` directory finds
+/// it gone (another cleanup removed it first), and under a `denied` one
+/// fails.
+struct RacyFiles;
+
+impl RunFiles for RacyFiles {
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_dir_all(dir)
+    }
+    fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_new_dir(dir)
+    }
+    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        LocalRunFiles.write(path, contents)
+    }
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.copy(from, to)
+    }
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read(path)
+    }
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        LocalRunFiles.read_to_string(path)
+    }
+    fn modified(&self, path: &Path) -> io::Result<SystemTime> {
+        LocalRunFiles.modified(path)
+    }
+    fn read_stamped(&self, path: &Path) -> Result<Option<(SystemTime, Vec<u8>)>> {
+        LocalRunFiles.read_stamped(path)
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        LocalRunFiles.is_file(path)
+    }
+    fn is_dir(&self, path: &Path) -> bool {
+        LocalRunFiles.is_dir(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        LocalRunFiles.exists(path)
+    }
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        LocalRunFiles.read_dir(dir)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.rename(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_file(path)
+    }
+    fn tree_size(&self, dir: &Path) -> io::Result<Option<u64>> {
+        LocalRunFiles.tree_size(dir)
+    }
+    fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
+        match dir
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+        {
+            // Someone else removes it between its measure and its removal.
+            Some("raced") => {
+                LocalRunFiles.remove_dir_all(dir)?;
+                Err(io::ErrorKind::NotFound.into())
+            }
+            Some("denied") => Err(io::ErrorKind::PermissionDenied.into()),
+            _ => LocalRunFiles.remove_dir_all(dir),
+        }
+    }
+    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
+        LocalRunFiles.append_line(path, line)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        LocalRunFiles.canonicalize(path)
+    }
+    fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()> {
+        LocalRunFiles.write_fenced(path, text, info, body)
+    }
+    fn now(&self) -> SystemTime {
+        LocalRunFiles.now()
+    }
+}
+
+/// Task 1100: a scratchpad another cleanup removed between its measure and
+/// its removal is no failure, and one that cannot be removed under a root
+/// records `cleanup_failed` while what was removed under another root is
+/// recorded as `scratchpad_removed`; a later sweep tries it again.
+#[test]
+fn a_scratchpad_gone_meanwhile_is_no_failure_and_one_failing_root_keeps_the_others() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let roots: Vec<PathBuf> = ["raced", "denied", "kept"]
+        .iter()
+        .map(|name| dir.path().join(name))
+        .collect();
+    let scratchpads: Vec<PathBuf> = roots
+        .iter()
+        .map(|root| scratchpad_of(root, run.worktree_path().unwrap()))
+        .collect();
+    for scratchpad in &scratchpads {
+        fs::create_dir_all(scratchpad.join("session/scratchpad")).unwrap();
+        fs::write(scratchpad.join("session/scratchpad/notes"), "x").unwrap();
+    }
+    let options = SuperviseOptions {
+        files: Some(RunFilesPort(Arc::new(RacyFiles))),
+        scratchpad_roots: Some(roots.clone()),
+        ..sweeping_options()
+    };
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+
+    assert!(!scratchpads[0].exists());
+    assert!(scratchpads[1].is_dir());
+    assert!(!scratchpads[2].exists());
+    let removed = payloads_of(&queue, &run, "scratchpad_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(
+        removed[0]["paths"],
+        json!([scratchpads[2].to_string_lossy()])
+    );
+    let failed = payloads_of(&queue, &run, "cleanup_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["path"], scratchpads[1].to_string_lossy().as_ref());
+    assert!(
+        failed[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("scratchpad "),
+        "{failed:?}"
+    );
+
+    // Once it can be removed, the next sweep does.
+    let options = SuperviseOptions {
+        scratchpad_roots: Some(roots),
+        ..sweeping_options()
+    };
+    supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    assert!(!scratchpads[1].exists());
+    let removed = payloads_of(&queue, &run, "scratchpad_removed");
+    assert_eq!(removed.len(), 2, "{removed:?}");
+    assert_eq!(
+        removed[1]["paths"],
+        json!([scratchpads[1].to_string_lossy()])
+    );
+}

@@ -16,6 +16,10 @@
 //! the queue again under that lock: a run leased since it was picked (by
 //! another supervisor) is left alone. A stop or a handoff lets the job end after its current
 //! worktree; the next sweep picks up the rest.
+//!
+//! The job also removes what an ended run whose task is over left outside
+//! its worktree: the Claude Code scratchpad of its session (task 1100,
+//! [`scratchpad_dir_name`]).
 
 use super::*;
 use crate::application::EndedRunWorktree;
@@ -130,11 +134,38 @@ enum Outcome {
         missing: bool,
         repaired: bool,
     },
+    /// The Claude Code scratchpads of a run whose task is over.
+    Scratchpads {
+        run_id: RunId,
+        task_status: TaskStatus,
+        paths: Vec<String>,
+        bytes: u64,
+    },
     Failed {
         run_id: RunId,
+        /// `worktree` or `scratchpad`.
+        what: &'static str,
         path: String,
         error: anyhow::Error,
     },
+}
+
+/// The longest name Claude Code gives a project's directory whole; it
+/// shortens a longer one with a hash, which is not looked for.
+const SCRATCHPAD_NAME_MAX: usize = 200;
+
+/// The name of the directory Claude Code keeps the scratchpads of the
+/// sessions started in `cwd` under (task 1100): `cwd` with every character
+/// but an ASCII letter or digit turned into `-` (so `/.local/` becomes
+/// `--local-`), as it names `~/.claude/projects/` too. `None` when longer
+/// than [`SCRATCHPAD_NAME_MAX`]. The name holds no `/` and no `..`, so it
+/// stays directly under the directory it is joined to.
+pub(super) fn scratchpad_dir_name(cwd: &str) -> Option<String> {
+    let name: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    (!name.is_empty() && name.len() <= SCRATCHPAD_NAME_MAX).then_some(name)
 }
 
 /// What the job works with, all of it shared with the loop.
@@ -147,6 +178,8 @@ struct JobPorts {
     cleaning: Arc<Mutex<Vec<RunId>>>,
     stop: Arc<AtomicBool>,
     prune: bool,
+    /// Where Claude Code keeps the sessions' scratchpads (task 1100).
+    scratchpad_roots: Vec<PathBuf>,
 }
 
 impl Supervisor<'_> {
@@ -240,6 +273,7 @@ impl Supervisor<'_> {
             cleaning: self.cleanup.cleaning.clone(),
             stop: self.cleanup.stop.clone(),
             prune: request.prune,
+            scratchpad_roots: (self.scratchpad_roots)(),
         };
         let handle = spawn_traced(move || run_job(&ports, candidates));
         self.cleanup.job = Some(Job {
@@ -291,17 +325,32 @@ impl Supervisor<'_> {
                     self.queue
                         .record_runtime_event(&run_id, EventKind::WorktreeRemoved, payload)
                 }
+                Outcome::Scratchpads {
+                    run_id,
+                    task_status,
+                    paths,
+                    bytes,
+                } => {
+                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its Claude Code scratchpad(s) {} ({bytes} bytes)", task_status.as_str(), paths.join(", "));
+                    cleaned.add(&run_id, bytes);
+                    self.queue.record_runtime_event(
+                        &run_id,
+                        EventKind::ScratchpadRemoved,
+                        json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())}),
+                    )
+                }
                 Outcome::Failed {
                     run_id,
+                    what,
                     path,
                     error,
                 } => {
                     if self.sweep_failures.contains(&path) {
-                        warn!(run_id = %run_id, "run {run_id}: worktree {path} still could not be cleaned: {error:#}");
+                        warn!(run_id = %run_id, "run {run_id}: {what} {path} still could not be cleaned: {error:#}");
                         continue;
                     }
                     self.sweep_failures.push(path.clone());
-                    let message = format!("worktree {path} could not be cleaned: {error:#}");
+                    let message = format!("{what} {path} could not be cleaned: {error:#}");
                     warn!(run_id = %run_id, "run {run_id}: {message}");
                     self.queue.record_runtime_event(
                         &run_id,
@@ -348,22 +397,21 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
                 }
             }
         };
-        let result = if still {
+        if still {
             remove_run_runner(ports, &candidate);
-            clean_worktree(ports, &candidate, &mut branches, &mut pruned)
-        } else {
-            Ok(None)
-        };
-        lock_cleaning(&ports.cleaning).retain(|run| *run != candidate.run_id);
-        match result {
-            Ok(Some(outcome)) => outcomes.push(outcome),
-            Ok(None) => {}
-            Err(error) => outcomes.push(Outcome::Failed {
-                run_id: candidate.run_id.clone(),
-                path: candidate.worktree.clone(),
-                error,
-            }),
+            match clean_worktree(ports, &candidate, &mut branches, &mut pruned) {
+                Ok(Some(outcome)) => outcomes.push(outcome),
+                Ok(None) => {}
+                Err(error) => outcomes.push(Outcome::Failed {
+                    run_id: candidate.run_id.clone(),
+                    what: "worktree",
+                    path: candidate.worktree.clone(),
+                    error,
+                }),
+            }
+            remove_scratchpads(ports, &candidate, &mut outcomes);
         }
+        lock_cleaning(&ports.cleaning).retain(|run| *run != candidate.run_id);
     }
     lock_cleaning(&ports.cleaning).clear();
     if ports.prune
@@ -393,6 +441,70 @@ fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) {
         Err(error) => {
             warn!(run_id = %candidate.run_id, error = %format_args!("{error:#}"), "run {}: its runner could not be removed: {error:#}", candidate.run_id);
         }
+    }
+}
+
+/// Remove the Claude Code scratchpads of an ended run whose task is over
+/// (task 1100): the directory named [`scratchpad_dir_name`] after its
+/// worktree, the cwd of its session, under each of the scratchpad roots.
+/// A run whose task goes on keeps them, as a resume may go on in them. A
+/// directory that is not there, or is a link, is left alone; nothing
+/// outside the directory is followed, and one gone before its removal
+/// (another supervisor's cleanup, or Claude Code's) is no failure. What
+/// was removed is pushed to `outcomes` with a failure under another root.
+fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
+    if !matches!(
+        candidate.task_status,
+        TaskStatus::Completed | TaskStatus::Canceled
+    ) || !Path::new(&candidate.worktree).starts_with(&ports.runs_dir)
+    {
+        return;
+    }
+    let Some(name) = scratchpad_dir_name(&candidate.worktree) else {
+        return;
+    };
+    let mut paths = Vec::new();
+    let mut bytes = 0;
+    for root in &ports.scratchpad_roots {
+        let dir = root.join(&name);
+        let removed = ports
+            .files
+            .tree_size(&dir)
+            .with_context(|| format!("measure {}", dir.display()))
+            .and_then(|size| {
+                // `None` for no directory there, and for a link.
+                let Some(size) = size else {
+                    return Ok(None);
+                };
+                match ports.files.remove_dir_all(&dir) {
+                    Ok(()) => Ok(Some(size)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => {
+                        Err(anyhow::Error::new(error).context(format!("remove {}", dir.display())))
+                    }
+                }
+            });
+        match removed {
+            Ok(Some(size)) => {
+                paths.push(dir.to_string_lossy().into_owned());
+                bytes += size;
+            }
+            Ok(None) => {}
+            Err(error) => outcomes.push(Outcome::Failed {
+                run_id: candidate.run_id.clone(),
+                what: "scratchpad",
+                path: dir.to_string_lossy().into_owned(),
+                error,
+            }),
+        }
+    }
+    if !paths.is_empty() {
+        outcomes.push(Outcome::Scratchpads {
+            run_id: candidate.run_id.clone(),
+            task_status: candidate.task_status,
+            paths,
+            bytes,
+        });
     }
 }
 
@@ -509,4 +621,28 @@ fn remove_worktree(repository: &dyn Repository, worktree: &Path, branch: &str) -
         .remove_worktree_and_branch(worktree, branch)
         .with_context(|| format!("{error:#}; repaired, and removing it again failed"))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scratchpad_is_named_after_its_cwd_as_claude_code_names_it() {
+        assert_eq!(
+            scratchpad_dir_name(
+                "/Users/me/.local/share/dagq/7706/runs/c0480993-f9e9-4a81-ade7-b2551b7134f3/worktree"
+            )
+            .as_deref(),
+            Some(
+                "-Users-me--local-share-dagq-7706-runs-c0480993-f9e9-4a81-ade7-b2551b7134f3-worktree"
+            )
+        );
+        // Nothing to climb out of the directory it is joined to.
+        assert_eq!(scratchpad_dir_name("/../x_y").as_deref(), Some("----x-y"));
+        assert_eq!(scratchpad_dir_name(""), None);
+        let long = format!("/{}", "a".repeat(SCRATCHPAD_NAME_MAX));
+        assert_eq!(scratchpad_dir_name(&long), None);
+        assert!(scratchpad_dir_name(&long[..SCRATCHPAD_NAME_MAX]).is_some());
+    }
 }

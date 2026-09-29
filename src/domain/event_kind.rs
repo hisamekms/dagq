@@ -196,6 +196,7 @@ event_kinds! {
     RunWaitingStarted => "run_waiting_started",
     RuntimeError => "runtime_error",
     ScopeViolation => "scope_violation",
+    ScratchpadRemoved => "scratchpad_removed",
     ScreenCaptureFailed => "screen_capture_failed",
     SessionClosed => "session_closed",
     SessionExited => "session_exited",
@@ -589,6 +590,9 @@ pub const RUN_INTEGRATED: &str = EventKind::RunIntegrated.as_str();
 pub const RUN_PLANNED: &str = EventKind::RunPlanned.as_str();
 pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
 pub const SCOPE_VIOLATION: &str = EventKind::ScopeViolation.as_str();
+/// The supervisor removed the Claude Code scratchpads of an ended run
+/// whose task is over (`paths`, `bytes`, `by`, `reason`; task 1100).
+pub const SCRATCHPAD_REMOVED: &str = EventKind::ScratchpadRemoved.as_str();
 pub const SCREEN_CAPTURE_FAILED: &str = EventKind::ScreenCaptureFailed.as_str();
 pub const SESSION_CLOSED: &str = EventKind::SessionClosed.as_str();
 pub const SESSION_EXITED: &str = EventKind::SessionExited.as_str();
@@ -841,6 +845,7 @@ mod tests {
             (EventKind::RunWaitingStarted, "run_waiting_started"),
             (EventKind::RuntimeError, "runtime_error"),
             (EventKind::ScopeViolation, "scope_violation"),
+            (EventKind::ScratchpadRemoved, "scratchpad_removed"),
             (EventKind::ScreenCaptureFailed, "screen_capture_failed"),
             (EventKind::SessionClosed, "session_closed"),
             (EventKind::SessionExited, "session_exited"),
