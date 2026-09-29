@@ -462,15 +462,25 @@ pub fn machine_status(podman: &dyn Podman, name: &str) -> BrokerResult<MachineSt
 }
 
 /// What [`ensure_machine`] did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MachineOutcome {
     pub initialized: bool,
     pub started: bool,
+    /// The machine was stopped and started once more because its start
+    /// failed or its connection did not answer (`restart_reason`).
+    pub restarted: bool,
+    /// Why it was restarted: podman's words for the failed start or the
+    /// connection that did not answer.
+    pub restart_reason: Option<String>,
 }
 
-/// Make dagq's machine exist and run, under the host lock (ADR-t827-3
-/// decisions 4 and 5): init it with `spec`'s resources when missing, start
-/// it when stopped, nothing when it runs. When another machine runs,
+/// Make dagq's machine exist, run and answer on its connection, under the
+/// host lock (ADR-t827-3 decisions 4 and 5): init it with `spec`'s
+/// resources when missing, start it when stopped, nothing when it runs and
+/// answers. A start that fails, or a machine whose connection does not
+/// answer (`podman --connection dagq info`) after its start or while it is
+/// listed as running, is stopped and started once more; `machine_failed`
+/// when that does not help either. When another machine runs,
 /// `machine_busy` without starting (or stopping) anything.
 pub fn ensure_machine(
     podman: &dyn Podman,
@@ -495,33 +505,89 @@ fn ensure_machine_held(podman: &dyn Podman, spec: &MachineSpec) -> BrokerResult<
         outcome.initialized = true;
         status = machine_status(podman, &spec.name)?;
     }
-    match status.state {
-        MachineState::Running => Ok(outcome),
-        MachineState::Missing => Err(BrokerFailure::new(
-            FailureCode::MachineFailed,
-            format!(
-                "podman machine init {} succeeded but the machine is not listed",
-                spec.name
-            ),
-        )),
-        MachineState::Stopped if !status.others_running.is_empty() => Err(BrokerFailure::new(
-            FailureCode::MachineBusy,
-            format!(
-                "the machine {} cannot start while {} runs; dagq does not stop another machine",
-                spec.name,
-                status.others_running.join(", ")
-            ),
-        )),
-        MachineState::Stopped => {
-            checked(
-                podman,
-                &spec.start_args(),
+    let trouble = match status.state {
+        MachineState::Running => unanswered(podman, &spec.name)?,
+        MachineState::Missing => {
+            return Err(BrokerFailure::new(
                 FailureCode::MachineFailed,
-                &format!("podman machine start {}", spec.name),
-            )?;
-            outcome.started = true;
-            Ok(outcome)
+                format!(
+                    "podman machine init {} succeeded but the machine is not listed",
+                    spec.name
+                ),
+            ));
         }
+        MachineState::Stopped if !status.others_running.is_empty() => {
+            return Err(BrokerFailure::new(
+                FailureCode::MachineBusy,
+                format!(
+                    "the machine {} cannot start while {} runs; dagq does not stop another machine",
+                    spec.name,
+                    status.others_running.join(", ")
+                ),
+            ));
+        }
+        MachineState::Stopped => {
+            outcome.started = true;
+            let start = podman.run(&spec.start_args())?;
+            if start.success {
+                unanswered(podman, &spec.name)?
+            } else {
+                Some(format!(
+                    "podman machine start {} failed: {}",
+                    spec.name,
+                    start.words()
+                ))
+            }
+        }
+    };
+    if let Some(reason) = trouble {
+        restart_machine(podman, spec, &reason)?;
+        outcome.started = true;
+        outcome.restarted = true;
+        outcome.restart_reason = Some(reason);
+    }
+    Ok(outcome)
+}
+
+/// Why dagq's machine's connection does not answer, or `None` when it
+/// does: a started machine can be listed as running while its ssh does not
+/// take connections yet (podman 6.1.2 right after a stop).
+fn unanswered(podman: &dyn Podman, name: &str) -> BrokerResult<Option<String>> {
+    let output = podman.run(&on_machine(
+        name,
+        &["info", "--format", "{{.Version.Version}}"],
+    ))?;
+    Ok((!output.success)
+        .then(|| format!("podman --connection {name} info failed: {}", output.words())))
+}
+
+/// Stop dagq's machine and start it again, once, after `reason`; its
+/// connection must answer afterwards, else `machine_failed`. A failed stop
+/// (the machine may not have come up at all) does not keep it from the
+/// start, and is named when the start fails too.
+fn restart_machine(podman: &dyn Podman, spec: &MachineSpec, reason: &str) -> BrokerResult<()> {
+    let name = &spec.name;
+    let stop = podman.run(&args(["machine", "stop", name]))?;
+    let stopped = if stop.success {
+        String::new()
+    } else {
+        format!(" (podman machine stop {name} failed: {})", stop.words())
+    };
+    let start = podman.run(&spec.start_args())?;
+    let again = if start.success {
+        unanswered(podman, name)?
+    } else {
+        Some(format!(
+            "podman machine start {name} failed: {}",
+            start.words()
+        ))
+    };
+    match again {
+        None => Ok(()),
+        Some(again) => Err(BrokerFailure::new(
+            FailureCode::MachineFailed,
+            format!("{reason}; after stopping and starting it once more{stopped}, {again}"),
+        )),
     }
 }
 
@@ -1902,7 +1968,8 @@ mod tests {
             outcome,
             MachineOutcome {
                 initialized: true,
-                started: true
+                started: true,
+                ..MachineOutcome::default()
             }
         );
         assert_eq!(podman.called("machine init"), 1);
@@ -1928,7 +1995,8 @@ mod tests {
             ensure_machine(&podman, &lock, &spec).unwrap(),
             MachineOutcome {
                 initialized: false,
-                started: true
+                started: true,
+                ..MachineOutcome::default()
             }
         );
         assert_eq!(
@@ -1945,7 +2013,138 @@ mod tests {
                 MachineOutcome::default()
             );
         }
-        assert_eq!(podman.calls(), [list().join(" "), list().join(" ")]);
+        // A running machine is only listed and asked whether it answers.
+        let probe = "--connection dagq info --format {{.Version.Version}}";
+        assert_eq!(
+            podman.calls(),
+            [
+                list().join(" "),
+                probe.into(),
+                list().join(" "),
+                probe.into()
+            ]
+        );
+    }
+
+    fn info() -> [&'static str; 3] {
+        ["--connection", "dagq", "info"]
+    }
+
+    #[test]
+    fn a_start_that_fails_with_eof_is_stopped_and_started_once_more() {
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED)])
+            .on(&["machine", "start"], vec![fail("Error: EOF"), ok("")])
+            .on(&info(), vec![ok("6.1.2")]);
+        let lock = CountingLock::default();
+        let outcome = ensure_machine(&podman, &lock, &MachineSpec::default()).unwrap();
+        assert!(outcome.started && outcome.restarted, "{outcome:?}");
+        assert!(!outcome.initialized);
+        let reason = outcome.restart_reason.unwrap();
+        assert!(
+            reason.contains("podman machine start dagq failed"),
+            "{reason}"
+        );
+        assert!(reason.contains("EOF"), "{reason}");
+        assert_eq!(podman.called("machine start"), 2);
+        assert_eq!(podman.called("machine stop dagq"), 1);
+        // Stopped between the two starts, and asked after the second.
+        let steps: Vec<String> = podman
+            .calls()
+            .into_iter()
+            .filter(|call| !call.starts_with("machine list"))
+            .map(|call| call.split(' ').take(3).collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "machine start --no-info",
+                "machine stop dagq",
+                "machine start --no-info",
+                "--connection dagq info"
+            ]
+        );
+        assert_eq!(lock.held.get(), 1);
+    }
+
+    #[test]
+    fn a_started_machine_that_does_not_answer_is_restarted_once() {
+        let refused =
+            "Cannot connect to Podman: ssh: connect to 127.0.0.1:65003: connection refused";
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED)])
+            .on(&info(), vec![fail(refused), ok("6.1.2")]);
+        let lock = CountingLock::default();
+        let outcome = ensure_machine(&podman, &lock, &MachineSpec::default()).unwrap();
+        assert!(outcome.started && outcome.restarted, "{outcome:?}");
+        assert!(
+            outcome
+                .restart_reason
+                .as_deref()
+                .unwrap()
+                .contains("connection refused")
+        );
+        assert_eq!(podman.called("machine start"), 2);
+        assert_eq!(podman.called("machine stop dagq"), 1);
+        assert_eq!(podman.called("--connection dagq info"), 2);
+
+        // Listed as running but not answering: the same once more.
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING)])
+            .on(&info(), vec![fail(refused), ok("6.1.2")]);
+        let outcome = ensure_machine(&podman, &lock, &MachineSpec::default()).unwrap();
+        assert!(outcome.restarted, "{outcome:?}");
+        assert_eq!(podman.called("machine stop dagq"), 1);
+        assert_eq!(podman.called("machine start"), 1);
+    }
+
+    #[test]
+    fn a_restart_that_does_not_help_is_machine_failed_after_one_try() {
+        let spec = MachineSpec::default();
+        let lock = CountingLock::default();
+        // The start fails twice.
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED)])
+            .on(&["machine", "start"], vec![fail("Error: EOF")]);
+        let error = ensure_machine(&podman, &lock, &spec).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert!(error.message.contains("once more"), "{error}");
+        assert_eq!(podman.called("machine start"), 2);
+        assert_eq!(podman.called("machine stop dagq"), 1);
+        assert_eq!(podman.called("--connection dagq info"), 0);
+        // The connection never answers, and the stop failed too: named.
+        let podman = Script::default()
+            .on(&list(), vec![ok(STOPPED)])
+            .on(&["machine", "stop"], vec![fail("not running")])
+            .on(&info(), vec![fail("connection refused")]);
+        let error = ensure_machine(&podman, &lock, &spec).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert!(error.message.contains("not running"), "{error}");
+        assert!(error.message.contains("connection refused"), "{error}");
+        assert_eq!(podman.called("machine start"), 2);
+        assert_eq!(podman.called("machine stop dagq"), 1);
+        assert_eq!(podman.called("--connection dagq info"), 2);
+        // Listed as running: one stop and one start, no more.
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING)])
+            .on(&info(), vec![fail("connection refused")]);
+        let error = ensure_machine(&podman, &lock, &spec).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert_eq!(podman.called("machine start"), 1);
+        assert_eq!(podman.called("machine stop dagq"), 1);
+        // No podman in the middle is still podman_missing, not retried.
+        assert_eq!(
+            unanswered(
+                &Script {
+                    missing: true,
+                    ..Script::default()
+                },
+                MACHINE
+            )
+            .unwrap_err()
+            .code,
+            FailureCode::PodmanMissing
+        );
     }
 
     #[test]
@@ -1957,6 +2156,7 @@ mod tests {
         assert!(error.message.contains("podman-machine-default"), "{error}");
         assert_eq!(podman.called("machine start"), 0);
         assert_eq!(podman.called("machine stop"), 0);
+        assert_eq!(podman.called("--connection dagq info"), 0);
         let status = machine_status(&podman, MACHINE).unwrap();
         assert_eq!(status.state, MachineState::Stopped);
         assert_eq!(status.others_running, ["podman-machine-default"]);
