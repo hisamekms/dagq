@@ -9,7 +9,7 @@ dagq runs development tasks in cmux workspaces and isolated Git worktrees. This 
 
 A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering, submitting and closing belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, then runs and lands the queue; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
+Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push), `reference/provider.md` (a worker's provider and route, fallbacks, turns) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
 
 Every state change is checked against your role (`DAGQ_ROLE`) by a default-deny policy; a refusal (`<role> may not ...`) changes nothing and is recorded. Take it as the answer and never work around it; the check is advisory on the host, not a sandbox (`reference/authority.md`).
 
@@ -45,7 +45,7 @@ A goal has no verification commands; a goal-level check is a final task dependin
 
 ### Register the tasks
 
-Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` (the kind of change; the values are the repository's `[tasks] changes`, their meaning its rules). `--kind` is still accepted but is going away: give it to no new task. What each means is in `reference/register.md`, the combinations per changed target in `reference/scope.md`.
+Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` (the kind of change; the values are the repository's `[tasks] changes`, their meaning its rules), and the worker's `--provider claude|codex` / `--headless` (default: Claude interactive; `edit` changes them; `reference/provider.md`). `--kind` is still accepted but is going away: give it to no new task. What each means is in `reference/register.md`, the combinations per changed target in `reference/scope.md`.
 
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \
@@ -61,7 +61,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 
 ## 3. Inspect
 
-`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID]` (waits, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went), `observe --history`, `notes` / `note`, `stats` (time per run, goal and session kind, `alerts`), `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
+`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID]` (waits, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went; a run's `requested_provider`, `actual_provider`, `worker_mode` and `provider_switched` also in `show`), `observe --history`, `notes` / `note`, `stats` (time per run, goal and session kind, `alerts`), `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
 
 ## 4. Report results
 

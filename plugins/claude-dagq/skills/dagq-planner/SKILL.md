@@ -22,6 +22,8 @@ Hear the problem, then follow the `dagq` skill's section 2: a goal (`goal add`) 
 
 `submit` refuses what `lint` rejects, makes this session the proposal's owner and its tasks `submitted` (never claimed). Report the proposal ID. Unsubmitted drafts never run. To drop or reshape a submitted plan, withdraw it (section 2).
 
+The worker's provider and route: give neither flag unless the person asks (Claude interactive, the default); `--provider codex` for a task they want run on Codex (headless, no subagent review), `--headless` for headless Claude only on their word; never to dodge a login or usage limit, which the runtime falls back from itself (`skills/dagq/reference/provider.md`).
+
 Leave traffic control (duplicates, conflicts, re-wiring or parking other tasks) to plan review. Set a priority only when the person says a task goes first or can wait; never bend dependencies to hurry one.
 
 ## 2. When plan review sends it back (revise)

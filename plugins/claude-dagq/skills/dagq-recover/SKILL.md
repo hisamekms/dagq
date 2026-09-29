@@ -38,14 +38,14 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 ## 5. Start, stop and update the runtime
 
 ```sh
-"$DAGQ" up --plugin-dir "$CLAUDE_PLUGIN_ROOT"            # add --parallel N, --max-waiting N, --auto-update
+"$DAGQ" up --plugin-dir "$CLAUDE_PLUGIN_ROOT"            # add --parallel N, --max-waiting N, --auto-update, --claude EXE --codex EXE
 "$DAGQ" up --in-cmux --plugin-dir "$CLAUDE_PLUGIN_ROOT"  # only when the preflight sends you there
 "$DAGQ" down            # stop claiming; the supervisor drains its runs and exits
 "$DAGQ" down --wait     # the same, and block until it is gone
 "$DAGQ" install         # build main, swap the binary, hand over
 ```
 
-`up` is idempotent: one resident supervisor and the inbox workspace, no planner (a person opens each with `dagq plan`). `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`: supervisors take it over without waiting; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` kills the supervisor and loses its active runs: only on the person's explicit word. `reference/up-down.md`: outcomes, the in-cmux case, logs.
+`up` is idempotent: one resident supervisor and the inbox workspace, no planner (a person opens each with `dagq plan`). `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`: supervisors take it over without waiting; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` kills the supervisor and loses its active runs: only on the person's explicit word. `--claude` and `--codex` (Codex workers) are fixed on the supervisor as real paths: from a cmux terminal pass `~/.local/bin/claude` and `~/.local/bin/codex`, and after updating either, `down --wait` and `up` again. `reference/up-down.md`: outcomes, the in-cmux case, logs.
 
 ## 6. Review by hand, and a failed push
 
@@ -53,7 +53,7 @@ Attention `review by hand` (`review_failed`: the supervisor's headless review fa
 
 ## 7. A run's session: dialogs, stalls, stuck exits, undelivered answers
 
-A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (also for an `answer_prompt` with no options, `input_not_ready`, and a `stalled` `send_unconfirmed`: send Enter or the text; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
+A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (also for an `answer_prompt` with no options, `input_not_ready`, and a `stalled` `send_unconfirmed`: send Enter or the text; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). A headless run (`worker_mode: headless`) has no screen and takes no keys: none of this applies; its `stalled` ask is in `reference/stalled.md`. What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
 
 ## 8. Bypass plan review, and a failed plan review
 

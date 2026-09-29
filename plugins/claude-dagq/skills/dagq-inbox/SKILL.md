@@ -7,9 +7,9 @@ description: Be a dagq queue's inbox: start from status --role inbox, wait for i
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill (`"$DAGQ" --resolve`). Never open or edit the queue database; go through the CLI only.
 
-Roles (ADR-0044): the **supervisor** claims, runs, validates, reviews, resumes and lands runs, and runs headless jobs (review, plan review, the **recovery job**); a **worker** is one run's session; a **planner** is an on-demand session that writes goals and tasks (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Each ask also notifies it (`cmux notify`).
+Roles (ADR-0044): the **supervisor** runs and lands runs and runs the headless jobs (review, plan review, the **recovery job**); a **worker** is one run's session; a **planner** writes goals and tasks on demand (`dagq-planner`); the **observer** is a periodic job. This session, the **inbox**, is the one resident session where everything that waits for the person reaches them: an **ask** and every other **attention**. Each ask also notifies it (`cmux notify`).
 
-Only what needs a person comes here (ADR-0047). The runtime fixes known cases itself (an unsent Enter, an undelivered `/exit`, a known dialog, a resume or a stale receipt; `auto_repaired`), and the recovery job fixes what it can of the rest (failed runs, a stuck `/exit`, an unknown dialog, stuck background work). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
+Only what needs a person comes here (ADR-0047). The runtime fixes known cases itself (`auto_repaired`: an unsent Enter or `/exit`, a known dialog, a resume, a stale receipt), and the recovery job what it can of the rest (failed runs, a stuck `/exit`, an unknown dialog, stuck background work). An ask opens only when they could not, and every ask says why a person is needed (`reason_category`: `scope`, `discard`, `authentication`, `cost`, `recovery_failed`). Do none of their work by hand.
 
 This session holds no state of its own. After a restart, compaction or `/clear`, start again from step 1 (the SessionStart hook prints `status --role inbox`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
 
@@ -44,7 +44,7 @@ It prints each open ask in full, oldest first. Take them one at a time:
 
 A run waiting on an ask holds no `--parallel` slot (`reference/status.md`, "Runs waiting for a person"). For context, read `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave an ask the person does not want to answer yet open.
 
-Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `approve_plan`, `decide`, `stalled`, `worker_question`, `planner_question`, `answer_prompt`, `stuck_exit`, `blocked`, `queue_hold`, `update_failed` / `approve_update`), its options, and the answers the runtime applies (`propose`, `dismiss`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
+Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `decide`, `stalled`, `queue_hold`, ...), its options, and the answers the runtime applies (`propose`, `dismiss`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
 
 ## 4. Report the other attention, act only on the person's word
 
@@ -54,8 +54,9 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 - `send the answer of ask <id> to the worker and close it`: the supervisor could not type it; `session.md` too.
 - `triage by hand` (`triage_failed`): an ended run's recovery job failed. Show `last_error`; the person decides with `dagq-recover` section 4. A live run's failed recovery job opens that alert's own ask (`stuck_exit`, `answer_prompt`, `stalled`; `reason_category` `recovery_failed`, ADR-t609-1), shown and answered like any other; `recover by hand` (`recovery_failed`) comes only from one an older runtime recorded (section 4 too).
 - `decide the draft in a planner` (`draft_planner_exhausted`), `decide the finding in a planner` (`finding_planner_exhausted`), `decide the waiting tasks in a planner` (`dependency_stranded`), `check the planner` (`planner_unresponsive`), `plan review by hand` (`plan_review_failed`): tell the person, who works in a planner (`dagq-recover` section 8).
+- A worker provider that cannot be used: runs switch to the other by themselves; the person acts only on a `queue_hold` ask (login, limit). Codex's hold is `status`'s `provider_hold`; headless runs take no keys (`skills/dagq/reference/provider.md`).
 - `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH, so it claims and lands nothing; the person installs it. It clears by itself.
-- `report the update` (`update_installed`): tell the person its `version` and `commit` (or `release`), and its `reason` when it has one: after a plugin update, the inbox and planner sessions load the new plugin once the person reopens them.
+- `report the update` (`update_installed`): tell the person its `version`, `commit` (or `release`) and any `reason`; after a plugin update, reopened inbox and planner sessions load the new plugin.
 - `report the review` (`throughput_review_reported`): a notice, `reference/watch.md`.
 - `fix the push command` (`kpi_push_abandoned`): the KPI push command (`[push]` of `host.toml`) gave up a message after three failures; the person fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).

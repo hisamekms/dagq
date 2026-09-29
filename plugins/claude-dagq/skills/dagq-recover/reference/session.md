@@ -4,6 +4,8 @@ Read this to carry out, on the person's word, an answer that has to reach a run'
 
 Take `workspace_id`, `worktree_path`, the run `id` and `last_error` from `"$DAGQ" show ID` (add `--full` when `last_error` is cut at 300 characters). A run's workspace is named `[<repo>]worker#<task-id> - <task title>` with the description `dagq role=worker queue=<queue hash> run=<run-id> task=<id>`; a resumed session's is titled the same with the description `run <run-id> resume`. Names are for people; the runtime finds workspaces by `workspace_id`.
 
+A run on the headless route (`worker_mode: headless` in `show`: Codex, or Claude registered with `--headless`) has no agent screen: its workspace runs only the session wrapper, and each turn is one non-interactive call. Nothing in this file applies to it: no key or text is sent to its workspace, no `answer_prompt` or `stuck_exit` ask opens for it, and the supervisor sends a worker's answer as the next turn. Its `stalled` ask is `reference/stalled.md`, "A headless run's `stalled` ask"; the route and fallbacks are `skills/dagq/reference/provider.md`.
+
 ## cmux commands
 
 ```sh

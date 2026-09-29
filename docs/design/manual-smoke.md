@@ -1,7 +1,7 @@
 ---
 id: design-manual-smoke
 type: design
-title: Manual smoke of the paths that include real Claude
+title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
 updated: 2026-09-29
@@ -11,17 +11,21 @@ related:
   - adr-0036
   - design-supervisor-lifecycle
   - design-provider-lifecycle
+  - adr-t813-1
+  - adr-t813-2
+  - adr-t813-3
 ---
 
-# Manual smoke of the paths that include real Claude
+# Manual smoke of the paths that include real Claude and Codex
 
-実 Claude Code を含む経路は自動 test にしない（AGENTS.md の「テストの制約」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
+実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（AGENTS.md の「テストの制約」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
 
-手順は 3 つある。
+手順は 4 つある。
 
 - [故障経路のスモーク](#故障経路のスモーク): 使い捨て repository で異常系 6 シナリオを起こし、二重起動と成果の喪失が無いことを確かめる。
 - [独立 task 1 件の完走](#独立-task-1-件の完走): この repository の本番 queue で、登録から着地まで人が DB を直さずに通ることを確かめる。
 - [作業の内訳のスモーク](#作業の内訳のスモーク): 使い捨て repository で実 Claude Code の worker に background のコマンド・async の subagent・つないだコマンドをさせ、作業の内訳（task 514）の記録を transcript と突き合わせる。
+- [非対話の worker のスモーク](#非対話の-worker-のスモーク): 使い捨て repository で実 Codex と実 Claude の非対話の worker を 1 本ずつ着地させ、turn の記録と provider・経路の記録を確かめる。
 
 ## 故障経路のスモーク
 
@@ -128,3 +132,32 @@ background のコマンドの summary は `Background command "<Bash tool の de
 - **harness が拒んだコマンドも失敗した実行に数える**: `sleep 40 && cargo build --release` は `<tool_use_error>Blocked: ...`（`is_error: true`、0 秒）で実行されなかったが、`commands.build` の `runs` と `failed` に 1 ずつ入った。
 - **Ctrl-B**: `cmux send-key --workspace <worker> ctrl+b` は `OK` を返したが、コマンドは background に移らなかった。pty に `\x02` を書くと移った。
 - **worker の `dagq`**: worker の workspace は supervisor の `XDG_DATA_HOME` を継がず、PATH の `dagq` は固定バイナリ `~/.local/bin/dagq` に解決する。worker の最初の `dagq ask` は既定の `~/.local/share/dagq/<hash>/queue.db`（存在しない）を開こうとして失敗し、worker は `XDG_DATA_HOME` を付けて打ち直した（固定バイナリが scratch の queue に ask を書いた。本番 queue には触れていない）。worker に `dagq` を打たせるシナリオでは、使い捨て repository の `dagq.toml` の `[run.env]` で `XDG_DATA_HOME` と scratch のバイナリを先にした `PATH` を渡す（未確認）か、task の description に wrapper の path を書く。
+
+## 非対話の worker のスモーク
+
+非対話の worker の経路（[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)、[非対話のworker](supervisor-lifecycle/headless-worker.md)）と Codex の worker（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）は、stub の provider（`tests/it/runtime_headless.rs`・`runtime_codex.rs`・`runtime_provider_switch.rs`）でだけ自動 test される。実物の CLI の出力の形・認証・sandbox・session（thread）の resume は stub では確かめられないので、Claude Code か Codex CLI の版を上げたとき、turn の組み立て（`turn_command`）か出力の読み手（`ClaudeTurnReader`・`CodexTurnReader`）か Codex の権限（`-c` と rules）を変えたときに、実 Codex と実 Claude の非対話の worker を 1 本ずつ使い捨て repository で着地させる。人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。
+
+### 手順
+
+1. [隔離](#隔離)のとおり scratch に使い捨て repository `dagq-smoke`（`seed.txt` と `CLAUDE.md` を commit）、bare の `origin`、確かめたい commit の scratch のバイナリ、`env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID XDG_DATA_HOME=<scratch>/xdg <scratch のバイナリ>` の wrapper（`tq`）を用意し、`tq init` する。非対話の経路は folder trust の dialog に当たらない（[provider-lifecycle](provider-lifecycle.md#workerのproviderと経路)）ので、trust の承認は要らない。
+2. 前提を確かめて記録する: `~/.local/bin/claude --version`、`~/.local/bin/codex --version`、`codex login status`（ログイン済み）、Claude のログイン（`claude -p 'say ok'` が答える）。`~/.codex/config.toml`・`~/.codex/auth.json`・`~/.claude` は書き換えない（runtime も書かない）。
+3. task を 2 件登録して `ready` にする。どちらも `--verify 'test -f seed.txt'` と、description に「`smoke-<provider>.txt` に 1 行足して commit し、receipt を書く」。
+   - Codex: `tq add "codex headless smoke" --provider codex ...`
+   - Claude: `tq add "claude headless smoke" --headless ...`。description に「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する」を足し、answer の turn（同じ session の resume）も通す。Codex の worker の sandbox の中の `dagq ask` はまだ queue に届かない（[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker) の「まだ無いもの」）ので、Codex の task には ask を求めない。
+   - worker が `dagq` を打つ task のために、使い捨て repository の `dagq.toml` の `[run.env]` に `XDG_DATA_HOME = "<scratch>/xdg"` を置く（[作業の内訳のスモーク](#作業の内訳のスモーク)の注の「worker の `dagq`」）。
+   - `tq ready ID --bypass-review` を add が返した ID だけに打つ。
+4. 専用の cmux workspace で `tq supervise --parallel 2 --claude ~/.local/bin/claude --codex ~/.local/bin/codex --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。`tq status` の `supervisors[].providers` で claude と codex がどちらも `found: true`、codex の `modes` が `["headless"]` であることを見る。
+5. Claude の task の `worker_question` に `tq answer <id> --text 'yes'` と答える。
+6. 両方の run が着地したら次を集めて確かめる。
+   - `tq show ID`: task `completed`、run `integrated`、run の `requested_provider` と `actual_provider` が task の provider のまま（切り替えが無い）、`worker_mode: headless`。
+   - `tq events --run RUN --full`: `run_claimed` の `provider`・`requested_provider`・`worker_mode`・`provider_version`・`codex_version`（supervisor が Codex の worker を動かすので、どちらの run にも載る）。`turn_requested` / `turn_started` / `turn_finished` の列（`outcome: succeeded`、`failure: null`、`usage` と `tokens`）。Codex は `turn_session_identified`（thread の id）と、`turn_finished` の `tokens_total`。Claude は answer の turn が同じ session の resume（`turn_started` の `session_id` が run の id）。`provider_switched` が無い。
+   - run dir の `turns/turn-NNNNNN.jsonl` が CLI の出力（Claude は stream-json、Codex は `--json` の JSONL）で、`turns/` の依頼の記録と対になっている。
+   - Codex の run: 着地した commit に `.codex/rules/dagq-deny.rules` が入っていない（`info/exclude`）。`~/.codex/config.toml` の更新時刻が変わっていない。
+   - `tq stats --full` の `runs[]` の `provider`・`actual_provider`・`route`・`turns`（`by_provider`）。`tq kpi --by provider` と `--by route` に 2 本が分かれて出る。
+   - `origin/main` に task ごとに 1 commit。
+7. 余力があれば切り替えも見る: supervisor を止め、`--codex <scratch>/no-such-codex` で起動し直して Codex の task をもう 1 件流すと、非対話の Claude で始まり（`provider_switched`、`phase: start`、`reason: executable_missing`）着地する。
+8. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止め、`doctor` の `unfinished_runs` が空で、run の pid の Claude・Codex が残っていないことを見て、workspace group を消す。
+
+### 結果（2026-09-29、task 820 の run cdcc8000）
+
+行っていない。この手順は task 820（goal 57 の文書の task）の受け入れ条件の 1 つだが、task 820 は dagq の worker として動き、worker は使い捨ての queue を作れず操作もできない（[隔離](#隔離)。`init`・`add`・`supervise` は `authorization_denied` になる。task 983、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回しない。そのため手順だけを書き、実行は receipt の `follow_ups`（`ops`）として人か inbox に任せた。その時点の host の版は Claude Code 2.1.284（`~/.local/bin/claude` の link 先）と codex-cli 0.155.1（`~/.local/bin/codex` の link 先は `~/.codex/packages/standalone/releases/0.155.1-aarch64-apple-darwin/bin/codex`）。stub の provider での自動 test（上に挙げた `tests/it` の 3 本）は着地済みの task 815〜818 が持つ。人か inbox が流したら、この節に版・run ごとの確認点の結果・見つけた問題を足す。
