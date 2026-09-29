@@ -2642,6 +2642,7 @@ fn run_session(
             provider,
             other,
             spawner,
+            processes: &SystemProcesses,
             files: &LocalRunFiles,
             pid: std::process::id(),
             own_workspace,

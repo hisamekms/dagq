@@ -30,7 +30,7 @@ use std::{
 };
 
 use super::{
-    AgentProvider, Queue, RunFiles, Spawned, Spawner, TurnReader,
+    AgentProvider, ProcessControl, Queue, RunFiles, Spawned, Spawner, TurnReader,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -61,6 +61,8 @@ pub(super) struct Turns<'a> {
     /// binary has none.
     pub(super) other: Option<&'a dyn AgentProvider>,
     pub(super) spawner: &'a dyn Spawner,
+    /// Lists the turn's descendants and signals them ([`stop_turn`]).
+    pub(super) processes: &'a dyn ProcessControl,
     pub(super) files: &'a dyn RunFiles,
     pub(super) pid: u32,
     /// The wrapper of a `needs_session` run's resume: it waits for the
@@ -112,6 +114,22 @@ struct Stop {
     outcome: TurnOutcome,
     failure: Option<TurnFailure>,
     why: String,
+}
+
+/// Stop a turn that still runs: SIGKILL to its process group and to each
+/// of its descendants by pid. A provider may run a command in a group of
+/// its own (Codex does: its pgid is the command's pid), which a signal to
+/// the turn's group does not reach; the descendants are listed before the
+/// group is killed, as a descendant whose parent was killed has 1 for a
+/// parent and is no longer found (task 1085).
+fn stop_turn(processes: &dyn ProcessControl, child: &mut dyn Spawned) -> Result<()> {
+    let descendants = processes.descendants(child.id());
+    child.kill_group()?;
+    for pid in descendants {
+        // One that ended since it was listed has nothing left to stop.
+        let _ = processes.kill(pid);
+    }
+    Ok(())
 }
 
 /// Whether starting a turn failed because its executable could not be run
@@ -412,7 +430,7 @@ impl<'a> Turns<'a> {
             }
             Err(error) => {
                 // Nothing else stops it once the wrapper is gone.
-                if child.kill_group().is_ok() && child.wait().is_ok() {
+                if stop_turn(self.processes, &mut *child).is_ok() && child.wait().is_ok() {
                     *child_may_be_alive = false;
                 }
                 Err(error)
@@ -761,7 +779,9 @@ impl<'a> Turns<'a> {
                 && let Some(exit) = child.try_wait()?
             {
                 // What the turn left running in its group ends with it,
-                // as the worker is told.
+                // as the worker is told. What it left outside its group is
+                // no longer found as its descendant (its parent is 1 now)
+                // and is left running (headless-worker.md).
                 let _ = child.kill_group();
                 return Ok((Some(exit), None, tail));
             }
@@ -790,7 +810,7 @@ impl<'a> Turns<'a> {
             }
             if let Some(stop) = stop {
                 say(&format!("stopping the turn: {}", stop.why));
-                child.kill_group()?;
+                stop_turn(self.processes, child)?;
                 let _ = child.wait();
                 return Ok((None, Some(stop), tail));
             }

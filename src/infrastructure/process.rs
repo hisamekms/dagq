@@ -87,7 +87,9 @@ extern "C" fn stop_groups(signal: libc::c_int) {
 /// when it is hung up, terminated or interrupted: a headless turn of the
 /// session wrapper leads a session of its own with no terminal, and would
 /// outlive a wrapper whose workspace was closed (ADR-t813-1 decision 3).
-/// Only the wrapper installs it.
+/// Only the wrapper installs it. It stops the groups alone: listing a
+/// turn's descendants (`ps`) is not async-signal-safe, so a command the
+/// turn runs in a group of its own is left to `stop_processes`.
 pub fn stop_groups_on_exit_signals() {
     for signal in [libc::SIGHUP, libc::SIGTERM, libc::SIGINT] {
         // SAFETY: the handler only reads atomics and calls

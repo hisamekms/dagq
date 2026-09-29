@@ -17,7 +17,7 @@ use std::{
 
 use super::headless_session::Turns;
 use super::{
-    AgentProvider, Queue, RunFiles, Spawner, WorkspaceBackend,
+    AgentProvider, ProcessControl, Queue, RunFiles, Spawner, WorkspaceBackend,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -108,6 +108,9 @@ pub struct Session<'a> {
     /// supervisor moves there (ADR-t813-2); `None` when there is none.
     pub other: Option<&'a dyn AgentProvider>,
     pub spawner: &'a dyn Spawner,
+    /// Lists and signals processes: a headless turn is stopped with its
+    /// descendants, which may run outside its group.
+    pub processes: &'a dyn ProcessControl,
     pub files: &'a dyn RunFiles,
     pub pid: u32,
     /// Closed when the run refuses this wrapper and records no such
@@ -130,6 +133,7 @@ pub fn run_session(
         provider,
         other,
         spawner,
+        processes,
         files,
         pid,
         own_workspace,
@@ -162,6 +166,7 @@ pub fn run_session(
             provider,
             other,
             spawner,
+            processes,
             files,
             pid,
             resume,

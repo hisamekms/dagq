@@ -792,3 +792,134 @@ esac"#
         [(json!(1), json!(false)), (json!(2), json!(true))]
     );
 }
+
+/// A turn's line that starts a `sleep` in a process group of its own, as
+/// Codex runs its commands (task 1061: the command's pgid is its own pid),
+/// and writes its pid to `outside.pid` in the run directory.
+const OUTSIDE_THE_GROUP: &str = r#"perl -e 'setpgrp(0, 0); exec "sleep", "600"' >/dev/null 2>&1 &
+echo $! > "$RUN_DIR/outside.pid""#;
+
+/// The pid the turn wrote to `name` in `run`'s directory.
+fn written_pid(run: &TaskRun, name: &str) -> u32 {
+    fs::read_to_string(Path::new(run.run_dir().unwrap()).join(name))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Kills `pid` when dropped, so that a test that fails leaves no `sleep`.
+struct Reaped(u32);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        // Only while it runs: a pid that ended may be another's by now.
+        if running(self.0) {
+            // SAFETY: kill(2) takes no pointer; the pid is the test's own
+            // sleep.
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+}
+
+/// Whether `pid` still runs after a few seconds' wait for it to end.
+fn still_running(pid: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while running(pid) {
+        if Instant::now() >= deadline {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// Task 1085 (1): a turn past its limit is stopped with the command it runs
+/// in a process group of its own, which a signal to the turn's group does
+/// not reach.
+#[test]
+fn a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            "{OUTSIDE_THE_GROUP}\ni=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"
+        ),
+    );
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) = supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        dagq::domain::stall::StallConfig {
+            turn_limit_secs: 2,
+            ..Default::default()
+        },
+        &[],
+    );
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db);
+    let outside = Reaped(written_pid(&detail.runs[0], "outside.pid"));
+    let finished = payloads(&detail, "turn_finished");
+    assert_eq!(finished[0]["outcome"], "timed_out", "{finished:?}");
+    assert!(
+        !still_running(outside.0),
+        "the command outside the turn's group outlived the turn"
+    );
+}
+
+/// Task 1085 (1): the exit request stops a running turn with the command it
+/// runs in a process group of its own.
+#[test]
+fn the_exit_request_stops_a_turn_with_its_command_outside_its_group() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!("{OUTSIDE_THE_GROUP}\nsay working; : > \"$RUN_DIR/turns/exit\"; sleep 30"),
+    );
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db);
+    let outside = Reaped(written_pid(&detail.runs[0], "outside.pid"));
+    let finished = payloads(&detail, "turn_finished");
+    assert_eq!(finished[0]["outcome"], "stopped", "{finished:?}");
+    assert_eq!(
+        finished[0]["stopped"],
+        "the supervisor asked the session to exit"
+    );
+    assert!(
+        !still_running(outside.0),
+        "the command outside the turn's group outlived the turn"
+    );
+}
+
+/// Task 1085 (2): a turn that ends by itself has what it left in its group
+/// stopped, and what it left in a group of its own left running: its
+/// parent is 1 by then, so it is no longer found as the turn's
+/// (headless-worker.md).
+#[test]
+fn a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            "{OUTSIDE_THE_GROUP}\nsleep 600 >/dev/null 2>&1 &\necho $! > \"$RUN_DIR/inside.pid\"\n{FINISH}"
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    let run = &detail.runs[0];
+    let outside = Reaped(written_pid(run, "outside.pid"));
+    let inside = Reaped(written_pid(run, "inside.pid"));
+    assert!(!still_running(inside.0), "the turn's group outlived it");
+    assert!(running(outside.0));
+}

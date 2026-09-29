@@ -261,8 +261,10 @@ impl AgentProvider for Codex {
     /// resume --json … <thread id>` after it (`resume` has no `-C`, so the
     /// worktree is its working directory either way), with
     /// [`SANDBOX_CONFIG`] and the run's [`writable_roots`] as `-c` on each,
-    /// the prompt after `--`. It leads a session of its own: stopped, Codex
-    /// leaves its commands running unless its group is stopped with it.
+    /// the prompt after `--`. It leads a session of its own, but Codex runs
+    /// each command in a process group of the command's own, which a
+    /// signal to the turn's group does not reach (task 1061): the wrapper
+    /// stops a turn with its descendants by pid as well (task 1085).
     fn turn_command(
         &self,
         run: &TaskRun,
