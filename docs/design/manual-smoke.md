@@ -164,6 +164,86 @@ background のコマンドの summary は `Background command "<Bash tool の de
 
 行っていない。この手順は task 820（goal 57 の文書の task）の受け入れ条件の 1 つだが、task 820 は dagq の worker として動き、worker は使い捨ての queue を作れず操作もできない（[隔離](#隔離)。`init`・`add`・`supervise` は `authorization_denied` になる。task 983、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回しない。そのため手順だけを書き、実行は receipt の `follow_ups`（`ops`）として人か inbox に任せた。その時点の host の版は Claude Code 2.1.284（`~/.local/bin/claude` の link 先）と codex-cli 0.155.1（`~/.local/bin/codex` の link 先は `~/.codex/packages/standalone/releases/0.155.1-aarch64-apple-darwin/bin/codex`）。stub の provider での自動 test（上に挙げた `tests/it` の 3 本）は着地済みの task 815〜818 が持つ。人か inbox が流したら、この節に版・run ごとの確認点の結果・見つけた問題を足す。
 
+## 非対話の Claude の前提の確認
+
+非対話の Claude の経路（[非対話の worker](supervisor-lifecycle/headless-worker.md)）が前提にしていて、stub では確かめられない 3 点を、実 `claude -p` で確かめた（task 864、2026-09-30）。queue も supervisor も使わず、scratch の使い捨て repository `dagq-worker-t864-1e1fe057`（`git init -b main` と `seed.txt` の 1 commit）で `claude` を直接起動した。Claude Code は 2.1.285（`~/.local/bin/claude` の link 先 `~/.local/share/claude/versions/2.1.285`）。本番の queue・`~/.local/bin/dagq`・`~/.claude` の設定は変えていない（2. で `~/.claude/projects` に置いた transcript と、1. の turn が書いた transcript は、終わってから消した）。Claude Code の版を上げたとき、または読み手（`src/infrastructure/claude_turns.rs`）・turn の止め方（`headless_session.rs` の `stop_turn`）・`turn_session_exists` を変えたときに、同じ手順で確かめ直す。
+
+### 1. turn の process group と Bash tool の子
+
+打ったもの: python の driver（`subprocess.Popen(..., start_new_session=True)`。runtime の `CommandSpec::new_session` と同じく turn を自分の process group と session で起動する）で次を起動した。
+
+```sh
+claude -p --output-format stream-json --verbose --session-id <uuid> --permission-mode auto --model sonnet -- '<prompt>'
+```
+
+prompt は Bash tool で 1 つずつ次を打たせるもの: `nohup sleep 7101 >/dev/null 2>&1 &`、`(sleep 7102 &)`、`python3 -c 'import os,time; os.setsid(); time.sleep(7103)' >/dev/null 2>&1 &`、`run_in_background: true` の `sleep 7104`、前景の `python3 -c 'import time; time.sleep(40)'`（前景の `sleep 40` は Claude Code の harness が「standalone sleep」として拒むので python にした）。前景の python が走っている間に `ps -axo pid,ppid,pgid,command` を取り、turn の group に signal を送ってから、もう一度 `ps` を取った。3 通り流した: (a) turn が自分で終わる、(b) group に SIGTERM、(c) group に SIGKILL（runtime の `kill_group` と同じ signal）。
+
+観察（(c) の run。pid は一例）:
+
+| process | pid | ppid | pgid |
+| --- | --- | --- | --- |
+| `claude -p ...`（turn） | 50530 | driver | 50530 |
+| Bash tool の shell（`/bin/zsh -c source ~/.claude/shell-snapshots/... eval 'sleep 7104'`、background） | 59046 | 50530 | 59046 |
+| `sleep 7104` | 59051 | 59046 | 59046 |
+| Bash tool の shell（前景の python） | 61377 | 50530 | 61377 |
+| 前景の python | 61386 | 61377 | 61377 |
+| `nohup sleep 7101 &` | 54609 | 1 | 54607 |
+| `(sleep 7102 &)` | 55530 | 1 | 55526 |
+| `os.setsid()` の python | 56873 | 1 | 56873 |
+
+- Claude Code は Bash tool の 1 回ごとに shell を別の process group（pgid がその shell の pid）で起動する。turn の group にいるのは `claude` 自身だけで、tool のコマンドはどれも turn の group に入らない（Codex と同じ形。[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md) の 4.）。
+- `&` で切り離したもの（`nohup … &`・`( … &)`・`setsid`）は、tool の shell が終わった時点で親が 1 になり、turn の子孫でもなくなる。
+- (a) turn が自分で終わったとき: `claude` は終わる前に `run_in_background` の task（`sleep 7104`）を止めた（stream に `task_updated`・`task_notification`）。`&` で切り離した 3 つは親 1 のまま残った。
+- (b) group に SIGTERM: `claude` が自分で片付け、前景の python は exit code 137（`claude` が SIGKILL で止めた。stream の `tool_result` が `Exit code 137`）、`sleep 7104` も止まった。`claude` は 143 で終わった。`&` で切り離した 3 つは残った。
+- (c) group に SIGKILL: `claude` だけが止まり、2 つの tool の shell とその子（`sleep 7104`・前景の python）は親 1 になって残った。`&` で切り離した 3 つも残った。
+
+結論: group への signal だけでは Claude の turn の tool のコマンドに届かない。今の実装の `stop_turn` は group を止める前に子孫を pid で集めて止めるので、(c) で残った tool の shell とその子は止まる（前提どおり）。一方 `&` で切り離したものは、turn の途中で止めても自分で終わっても、group にも子孫にも入らずに残る。[非対話の worker](supervisor-lifecycle/headless-worker.md#wrapperがturnを止めるとき) の「turn が自分で終わったときも group に残ったもの（`nohup … &` など）を止める」は Claude では当たらない（`nohup … &` は group に居ない）ので、その節を直した。残ったものは run の worktree で動く process として復旧 job の `stop_processes` が pid で止められる（cwd が worktree のものに限る）。runtime の修正の要否は receipt の follow_up にした。後始末: 残った process は pid で止めた。
+
+### 2. 未ログインの最初の turn
+
+打ったもの（未ログインは、空の dir を `CLAUDE_CONFIG_DIR` にして作った。人の `~/.claude` と keychain には触れない）:
+
+```sh
+env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
+  claude -p --output-format stream-json --verbose --session-id <uuid> --permission-mode auto -- 'say ok' </dev/null
+```
+
+観察:
+
+- 終了コード 1。stream は 3 行: `system/init`（`apiKeySource: "none"`、`claude_code_version: "2.1.285"`、`permissionMode: "auto"`）、`assistant`（`"error": "authentication_failed"`、`model: "<synthetic>"`、text `Not logged in · Please run /login`）、`result`（`subtype: "success"`・`is_error: true`・`api_error_status: null`・`terminal_reason: "api_error"`）。task 812 の測定（[headless-worker-spike](../plans/headless-worker-spike.md)）と同じ形。
+- transcript は残る: `<CLAUDE_CONFIG_DIR>/projects/<cwd を符号化した名前>/<uuid>.jsonl`（27 行。`user` の prompt、`<synthetic>` の `assistant`、`last-prompt`、`cost-state` など）。したがって `turn_session_exists` は真になり、次の turn は `--resume` になる（前提どおり）。
+- 同じ `--session-id` でもう一度呼ぶと、stream に何も出さず stderr に `Error: Session ID <uuid> is already in use.` を出して終了コード 1（前提どおり。resume しなければ次の turn は必ず失敗する）。
+- 未ログインのまま `--resume <uuid>` すると、同じ `session_id` で 1 と同じ `authentication_failed` の 3 行になる（終了コード 1）。
+- その transcript をログイン済みの設定の `~/.claude/projects/<同じ名前>/` に写し、`claude -p --output-format stream-json --verbose --resume <uuid> --permission-mode auto --model haiku -- 'Quote my previous message in this conversation verbatim, or say NONE.'` を打つと、`session_id` がそのままで `result` が `is_error: false`・`result: "say ok"`（終了コード 0）。未ログインで終わった session に、ログインした後の `--resume` で続けられる。
+- 気づいたこと: cwd の path が長いと（この run では 207 文字）、Claude Code は project の dir の名前を途中で切って hash を付ける（`...-dagq-worker-t864-1-tcfei3`）。`ClaudeTranscripts::path` は `encode_cwd` の名前で見つからなければ `projects/` の全ての dir から `<session id>.jsonl` を探すので、`turn_session_exists` はこの場合も真になる。run の worktree の path（`~/.local/share/dagq/<hash>/runs/<run id>/worktree`）は 110 文字ほどで切られない。
+
+結論: 実装の前提（答える前に失敗した turn も transcript を残し、次は `--resume` になり、その resume で続けられる）と合っている。runtime の修正は要らない。
+
+### 3. `rate_limit_event` の `status: rejected` と overage
+
+再現できなかった。この測定の間の `rate_limit_event` はどれも上限の手前で、`status` は `allowed_warning` だった（2 回の turn で 4 件）:
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1791090000,"rateLimitType":"seven_day","utilization":0.87,"isUsingOverage":false,"surpassedThreshold":0.75,"unifiedWindows":{"five_hour":{"utilization":0.07,"resetsAt":1790726400},"seven_day":{"utilization":0.87,"resetsAt":1791090000}}}}
+```
+
+`allowed_warning` は task 812 の測定には無かった値で、読み手は `rejected` だけを見るので、この値で turn を止めることはない（前提どおり）。このアカウントは task 812 の測定で `overageStatus: "rejected"`・`overageDisabledReason: "out_of_credits"` で、overage で賄える状態を作れない。
+
+公開の文書に `rate_limit_event` の各欄の意味の説明は見つけられなかったので、CLI の実行ファイル（2.1.285）の文字列から読んだ（実装の細部で、版で変わりうる）:
+
+- 応答の header から作る値は、`status` が header の `anthropic-ratelimit-unified-status`（`allowed_warning` は `allowed` に畳んでから、しきい値を超えた window があれば `allowed_warning` に戻す）、`isUsingOverage` が「`status` が `rejected` で、かつ `overageStatus` が `allowed` か `allowed_warning`」。つまり overage で賄っているときは `status: "rejected"` と `isUsingOverage: true` が同時に出る。
+- CLI 自身が「止まっている」とみなす条件は `status === "rejected" && isUsingOverage !== true && overageInUse !== true`（と `resetsAt` があること）で、`isUsingOverage` が真なら上限のエラーの文を出さない（`overageStatus` が `allowed_warning` なら「usage limit に近い」の警告だけ）。
+- 429 の応答から作る値は `status: "rejected"`・`isUsingOverage: false` で、header の `anthropic-ratelimit-unified-overage-status` があれば `overageStatus` に入る。
+
+結論: overage で賄える状態では `status: rejected` が出うる（`isUsingOverage: true` を伴う）。今の読み手（`ClaudeTurnReader::line`）は `status == "rejected"` だけで `usage_limit` にして turn を止めるので、その状態では誤って止める。`isUsingOverage` か `overageInUse` が真なら止めない、という runtime の修正を receipt の follow_up にした。実物の stream では確かめていないので、次に確かめる手順を残す。
+
+次に上限に当たったときの手順:
+
+1. 非対話の Claude の run の `turns/turn-NNNNNN.jsonl` が stream の全体を持つ。`turn_finished` の `failure` が `usage_limit` になった run があれば、その file を scratch に写して残す（run dir は後始末で消えうる）。
+2. `grep rate_limit_event turns/turn-*.jsonl` で、`status`・`isUsingOverage`・`overageInUse`・`overageStatus`・`overageDisabledReason`・`rateLimitType` を読む。同じ turn に `system/api_retry`（`error_status: 429`）や `result.api_error_status: 429` があるかも見る。
+3. 対話の session の worker が上限に当たったときは stream が無いので、使い捨て repository で `claude -p --output-format stream-json --verbose -- 'say ok'` を 1 回打って保存する（上限の間は短い turn でも同じ event が出る見込み）。
+4. overage が使えるアカウント（`overageStatus` が `allowed`）で、`status: rejected` と `isUsingOverage: true` の行の後に turn が `is_error: false` で終わるかを見る。見られたら、この節に行と結論を足す。
+
 ## Codex の goal review のスモーク
 
 `[roles.goal_review]` の `provider = "codex"` の goal review（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、[Goal review](supervisor-lifecycle/goal-review.md) の 3、[provider-lifecycle](provider-lifecycle.md#codexのheadless-job)）は、spike の JSONL と rollout を書く stub の `codex`（`tests/it/goal_review_codex.rs`）でだけ自動 test される。実 Codex の出力の形・read-only の sandbox の中の `dagq` の読み取り・rollout の model・認証の失敗の文言は stub では確かめられないので、codex-cli の版を上げたとき、Codex の job の起動（`Codex::headless_command`・`apply_launch`）か読み手（`last_message`・`job_session`・`job_failure`）を変えたときに、使い捨て repository で 1 回流す。人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。

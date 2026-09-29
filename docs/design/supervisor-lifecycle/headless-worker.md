@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -63,7 +63,7 @@ workspaceのterminalにはwrapperがturnの要約（turnの開始、agentの文�
 
 ## wrapperがturnを止めるとき
 
-wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、既定1秒ごと）、次のどれかでturnを止める。止めるときは、先にturnのprocessの子孫をpidで集め（`ProcessControl::descendants`）、turnのprocess groupにSIGKILLを送り（`Spawned::kill_group`）、集めた子孫にも1つずつpidでSIGKILLを送る（`headless_session.rs`の`stop_turn`、task 1085）。Codexは実行するコマンドをcodexと別のprocess group（pgidがコマンド自身のpid）で走らせるので、groupへのsignalだけではコマンド（`cargo test`など）が親1のまま残る（task 1061の測定、[codex-headless-jobs-spike](../../plans/codex-headless-jobs-spike.md)の4.）。子孫はgroupを止める前に集める（止めた後は親が1になって辿れない）。signalはSIGINTでなくSIGKILLにする: 子孫をpidで直接止めるのでproviderに片付けを任せる必要がなく、応答しないproviderを待たない。Claudeの非対話のturnにも同じ経路を使う。
+wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、既定1秒ごと）、次のどれかでturnを止める。止めるときは、先にturnのprocessの子孫をpidで集め（`ProcessControl::descendants`）、turnのprocess groupにSIGKILLを送り（`Spawned::kill_group`）、集めた子孫にも1つずつpidでSIGKILLを送る（`headless_session.rs`の`stop_turn`、task 1085）。Codexは実行するコマンドをcodexと別のprocess group（pgidがコマンド自身のpid）で走らせるので、groupへのsignalだけではコマンド（`cargo test`など）が親1のまま残る（task 1061の測定、[codex-headless-jobs-spike](../../plans/codex-headless-jobs-spike.md)の4.）。Claude Code（2.1.285）もBash toolの1回ごとにshellを別のprocess group（pgidがそのshellのpid）で起動し、turnのgroupには`claude`自身しか居ないので、groupへのSIGKILLだけではtoolのshellとその子が親1のまま残る（task 864の測定、[manual-smoke](../manual-smoke.md#非対話の-claude-の前提の確認)の1.）。子孫はgroupを止める前に集める（止めた後は親が1になって辿れない）。signalはSIGINTでなくSIGKILLにする: 子孫をpidで直接止めるのでproviderに片付けを任せる必要がなく、応答しないproviderを待たない。Claudeの非対話のturnにも同じ経路を使う。
 
 | 理由 | `outcome` | 条件 |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ wrapperはturnの出力を`turn_*.jsonl`から読みながら（wait interval、
 
 閾値は[Stall thresholds](stall-thresholds.md)の`turn_silence_secs`と`turn_limit_secs`で、supervisorが`limits.json`に書いてwrapperがturnのたびに読む。
 
-turnが自分で終わったときも、wrapperはそのprocess groupに残ったもの（`nohup … &`など）を止める。groupの外に残った子孫（turnのprocessが別のgroupで起動し、turnの終わりより長く生きるもの）は止めない。理由: (a) turnのprocessが終わった時点でその子は親が1になっていて、親子関係ではturnのものと見分けられない。(b) turnの途中で集めたpidを後で止めると、その間に終わったpidを別のprocessが使っていれば無関係のprocessを止めうる（見張りのたびに`ps`を打つ負荷もかかる）。(c) Codexはturnを終える前に実行したコマンドの終わりを待つので、自分で終わったturnがgroupの外に残すのは、agentがわざと切り離したものに限られる。残ったものはrunのworktreeで動くprocessとして、復旧jobの`stop_processes`がpidで止められる（`run_processes`はworktreeで動くprocessを含む）。この振る舞いはtest（`runtime_headless::a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group`）が確かめる。
+turnが自分で終わったときも、wrapperはそのprocess groupに残ったものを止める。ただしClaudeもCodexもtoolのコマンドをturnと別のgroupで走らせるので、`nohup … &`のように切り離したものはturnのgroupに居らず、これでは止まらない（task 864の測定）。groupの外に残った子孫（turnのprocessが別のgroupで起動し、turnの終わりより長く生きるもの）は止めない。理由: (a) turnのprocessが終わった時点でその子は親が1になっていて、親子関係ではturnのものと見分けられない。(b) turnの途中で集めたpidを後で止めると、その間に終わったpidを別のprocessが使っていれば無関係のprocessを止めうる（見張りのたびに`ps`を打つ負荷もかかる）。(c) Codexはturnを終える前に実行したコマンドの終わりを待つので、自分で終わったturnがgroupの外に残すのは、agentがわざと切り離したものに限られる（Claudeも終わる前に`run_in_background`のtaskを止める。task 864の測定）。残ったものはrunのworktreeで動くprocessとして、復旧jobの`stop_processes`がpidで止められる（`run_processes`はworktreeで動くprocessを含む）。この振る舞いはtest（`runtime_headless::a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group`）が確かめる。
 
 wrapper自身がturnの途中で終わるとき（エラー）は、上と同じく子孫とturnのgroupを止めてから終わる。hangup・terminate・interruptのsignal（workspaceのclose、`stop_processes`）で終わるときは、`stop_groups_on_exit_signals`（`src/infrastructure/process.rs`。実のwrapperの入口`compose::session`だけが入れる）が、このprocessが`new_session`で起動してまだ止めていないgroupだけを止める。signal handlerの中では子孫を集める`ps`を呼べず（async-signal-safeでない）、wrapperは子孫のpidを見張りのたびに記録してもいない（上の(b)）ので、groupの外のコマンドはhandlerでは止めない。`stop_processes`は自分でrunのprocess（wrapperの子孫とworktreeで動くもの）をpidで止めるのでそのコマンドも止まり、workspaceのcloseで残ったものは上と同じくworktreeで動くprocessとして`stop_processes`が止められる。turnは端末を持たないので、止めなければwrapperより長く生きる。
 
