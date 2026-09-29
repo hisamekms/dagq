@@ -554,6 +554,9 @@ pub fn direction(kpi: &str) -> Option<Direction> {
         // constraint to watch, neither better higher nor lower.
         _ if kpi.starts_with("landing_utilization") => None,
         _ if kpi.starts_with("session_active") => None,
+        // How many jobs ran, and the share of each verdict (goal 73): what
+        // the jobs said, neither better higher nor lower.
+        _ if kpi.starts_with("job.count.") || kpi.starts_with("job.verdict.") => None,
         // The forecast's errors (ADR-0070 decision 4): only the size of
         // the error is better lower; the ratio and the rates have a target
         // range instead.

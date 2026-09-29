@@ -106,6 +106,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
 | `forecast.p50_error` / `forecast.p50_abs_error` / `forecast.p50_error_ratio` / `forecast.p90_hit_rate` / `forecast.late_rate` / `forecast.early_rate` | 完了見込みの答え合わせ（下の[完了見込みの答え合わせ](#完了見込みの答え合わせ)） | 答え合わせの層 |
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` / `plan.follow_up_duplicate_rate` / `plan.follow_up_draft_secs` | 計画の品質（下の[計画の品質](#計画の品質)）。`plan.revise_rate`は`code=`の層も持つ（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | 計画の層と`code=` |
+| `job.count.<kind>` / `job.failed_rate.<kind>` / `job.secs.<kind>` / `job.verdict.<kind>.<verdict>` | worker以外のheadlessのjob（`review` / `recovery` / `plan_review` / `goal_review` / `observer`）の件数・失敗の割合・所要時間の秒・verdictごとの割合（下の[headlessのjobの系列](#headlessのjobの系列)） | `all`・`provider=`・`model=` |
 | `review.sendback_rate` | reviewにかかったrunのうちreviseかconcernを受けたものの割合（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | `all`・`code=`・`kind=`・`change=` |
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
@@ -152,6 +153,16 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 - 出力は`split`（境の時刻と印）、`before` / `after`（窓と、そこで終わったrunの数、`partial`、窓の`host`（[hostの負荷](#hostの負荷)））、`confounders`（境の変更以外で、2つの窓の中と間にある印を時刻の順に、`position`: `before` / `between` / `after`）、`overlapping`（範囲にかかる重なった変更のまとまり）、`strata`（KPI→層→`before`・`after`の値（`n`・中央値・p90・範囲）と`comparison`と同じ差と判定。層は`all`と`kind=`・`change=`・`area=`（`[areas]`のあるとき）・`parallel=`・`load=`・`build=`と、`--by`で選んだ軸（`--by group`なら`group=`など）。後の窓が今を越えていれば`partial`で判定しない）、`summary`（kind→`kind=`の層の`lead_time`・`phase.*`・`land_phase.*`。kindは`--kind`で選んだもの、無ければ`strata`に`kind=`の層として現れたkindすべて（`unknown`を含む、名前の順）。runtimeは`runtime`などの特定のkindを既定に持たない（ADR-t624-1の決定3）。選び方は`domain::kpi::compare`）、`change_summary`（change→`change=`の層の同じKPI。changeは`--change`で選んだもの、無ければ`strata`に現れたchangeすべて（`unknown`を含む、名前の順）。runtimeは特定のchangeを既定に持たない（ADR-t980-1の決定6(b)）。層が無ければ出さない）、`area_summary`（area→`area=`の層の同じKPI。areaは`--area`で選んだもの、無ければ`strata`に現れたareaすべて（`unknown`・`other`を含む、名前の順）。`[areas]`が無ければ出さない（ADR-t980-1の決定6(b)））。区間は自動では縮めない。
 
 `toolchain=`の層（hostの`rustc`）は、queueのrepositoryがdagqのソースのときだけ出す（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。判定はまだ実装していない。
+
+## headlessのjobの系列
+
+goal 73（task 1066）。期間の窓の`stats`の`jobs`（[stats](stats.md#headlessのjob)）をそのまま読み、jobの種類ごとに4つのKPIを出す。ClaudeとCodexのgoal reviewを並べて比べるために、層は`all`と、jobの起動のprovider（`provider=<claude|codex>`。`launch.provider`で、無い古い記録は`claude`）と実際のmodel（`model=<model>`。jobのsessionの`session_closed`の`model`、記録の無いjobは`unknown`）で、`--change` / `--area`の層と同じく`--by`によらず常に出す。runの層の`--by provider` / `--by model`（workerの属性）とはKPIの名前で分かれる。jobはtaskの`change`・areaを持たないので`change=`・`area=`・`kind=`の層は持たない。`--goal`は`stats`と同じくそのgoalのjobだけを数える。
+
+- `job.count.<kind>`: 期間に終わったjobの数（失敗を含む。数えるKPI）。良い向きは持たない。記録が0でも5つの種類の`all`を出す
+- `job.failed_rate.<kind>`: `failed ÷ count`。`n`は`count`。良い向きは小さい
+- `job.secs.<kind>`: jobの所要時間の秒の分布（`median`・`p90`・`min`・`max`）。良い向きは小さい
+- `job.verdict.<kind>.<verdict>`: verdictを返したjob（`stats`の`verdicts`の合計）のうちそのverdictだった割合。`n`はverdictを返したjobの数。その層に1件も無いverdictの層は出さない。良い向きは持たない（verdictの分布を比べる値）
+- `details.jobs`: 同じ窓の`stats`の`jobs`の写し（`by_provider`・`by_model`の件数・`verdicts`）
 
 ## 差し戻しの分類コードごとの系列
 

@@ -10,6 +10,7 @@ use super::{Report, ReportFile};
 use crate::domain::{
     host_metrics::PROCESS_KINDS,
     kpi::{ALL, Change, Measure, PeriodKpis, TargetReport},
+    stats::jobs::JOB_KINDS,
 };
 
 /// The KPIs the trend lists first, in this order; the others follow by name.
@@ -105,6 +106,7 @@ pub fn render_html(report: &Report) -> String {
         forecast(&mut page, latest, &report.kpi.targets);
         landing(&mut page, latest);
         host_cpu(&mut page, latest);
+        jobs(&mut page, latest);
         kpis(&mut page, latest);
     }
     findings(&mut page, report);
@@ -445,6 +447,52 @@ fn host_cpu(page: &mut String, period: &PeriodKpis) {
     page.push_str("</p>");
 }
 
+/// The headless jobs of the period (goal 73), per kind and per provider
+/// they ran on: how many, the share failed, the median time and the share
+/// of each verdict. Kinds without a job are left out, and so is the section
+/// when no job ran.
+fn jobs(page: &mut String, period: &PeriodKpis) {
+    let kpis = &period.window.kpis;
+    let mut rows = String::new();
+    for kind in JOB_KINDS {
+        let Some(counts) = kpis.get(&format!("job.count.{kind}")) else {
+            continue;
+        };
+        let verdict_prefix = format!("job.verdict.{kind}.");
+        for (stratum, count) in counts.iter().filter(|(stratum, count)| {
+            (stratum.as_str() == ALL || stratum.starts_with("provider=")) && count.n > 0
+        }) {
+            let get = |kpi: &str| kpis.get(kpi).and_then(|strata| strata.get(stratum));
+            let failed = format!("job.failed_rate.{kind}");
+            let secs_kpi = format!("job.secs.{kind}");
+            let verdicts: Vec<String> = kpis
+                .iter()
+                .filter_map(|(name, strata)| {
+                    let verdict = name.strip_prefix(&verdict_prefix)?;
+                    let share = strata.get(stratum)?.value;
+                    Some(format!("{} {}", esc(verdict), value(name, share)))
+                })
+                .collect();
+            let _ = write!(
+                rows,
+                "<tr><td><code>{}</code></td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+                esc(kind),
+                esc(stratum.strip_prefix("provider=").unwrap_or(stratum)),
+                count.n,
+                value(&failed, get(&failed).and_then(|m| m.value)),
+                value(&secs_kpi, get(&secs_kpi).and_then(|m| m.median)),
+                verdicts.join(", "),
+            );
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    page.push_str("<h2>Headless jobs</h2><div class=\"scroll\"><table><tr><th>job</th><th>provider</th><th class=\"num\">jobs</th><th class=\"num\">failed</th><th class=\"num\">median</th><th>verdicts</th></tr>");
+    page.push_str(&rows);
+    page.push_str("</table></div>");
+}
+
 fn kpis(page: &mut String, period: &PeriodKpis) {
     let _ = write!(page, "<h2>KPIs of {}</h2>", esc(&period.label));
     let row = |page: &mut String, name: &str, stratum: Option<&str>, measure: &Measure| {
@@ -673,11 +721,14 @@ fn unit(kpi: &str) -> Unit {
                 | "forecast.p50_error_ratio"
         )
         || kpi.starts_with("session_active_ratio.")
+        || kpi.starts_with("job.verdict.")
+        || kpi.starts_with("job.failed_rate.")
     {
         Unit::Ratio
     } else if durations.iter().any(|prefix| kpi.starts_with(prefix))
         || kpi.starts_with("session_active.")
         || kpi.starts_with("cpu_per_landing.")
+        || kpi.starts_with("job.secs.")
         || matches!(
             kpi,
             "lead_time"

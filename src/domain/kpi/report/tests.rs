@@ -641,3 +641,47 @@ fn a_report_shows_the_host_cpu_per_landing() {
         .contains("Host CPU")
     );
 }
+
+/// The headless jobs of the period (goal 73) per kind and per provider:
+/// how many, the share failed, the median time and the share of each
+/// verdict; no section when no job ran.
+#[test]
+fn a_report_shows_the_headless_jobs_per_provider() {
+    use crate::domain::kpi::Measure;
+    let thursday = MONDAY + 3 * DAY + 12 * HOUR;
+    let now = MONDAY + 4 * DAY + 12 * HOUR;
+    let mut report = report(now, thursday, Period::Day);
+    assert!(!render_html(&report).contains("<h2>Headless jobs</h2>"));
+    let kpis = &mut report.kpi.periods.last_mut().unwrap().window.kpis;
+    for (stratum, count, failed, secs, achieved) in [
+        ("all", 3, 1.0, vec![60, 120], 1.0),
+        ("provider=claude", 1, 0.0, vec![120], 1.0),
+        ("provider=codex", 2, 1.0, vec![60], 1.0),
+        ("model=gpt-5.5", 2, 1.0, vec![60], 1.0),
+    ] {
+        let mut put = |name: &str, measure: Measure| {
+            kpis.entry(name.to_owned())
+                .or_default()
+                .insert(stratum.to_owned(), measure);
+        };
+        put("job.count.goal_review", Measure::count(count));
+        put("job.failed_rate.goal_review", Measure::ratio(failed, count));
+        put("job.secs.goal_review", Measure::secs(secs));
+        put(
+            "job.verdict.goal_review.achieved",
+            Measure::ratio(achieved, count - usize::from(failed > 0.0)),
+        );
+    }
+    let html = render_html(&report);
+    assert!(html.contains("<h2>Headless jobs</h2>"), "{html}");
+    assert!(html.contains(
+        "<tr><td><code>goal_review</code></td><td>codex</td><td class=\"num\">2</td><td class=\"num\">50.0%</td><td class=\"num\">1m 00s</td><td>achieved 100.0%</td></tr>"
+    ), "{html}");
+    assert!(html.contains("<td>claude</td><td class=\"num\">1</td><td class=\"num\">0.0%</td>"));
+    assert!(html.contains("<td>all</td><td class=\"num\">3</td>"));
+    // The model's strata are in the table by stratum, not in this section.
+    let jobs = html.find("<h2>Headless jobs</h2>").unwrap();
+    let kpis = html.find("<h2>KPIs of").unwrap();
+    assert!(jobs < kpis);
+    assert!(!html[jobs..kpis].contains("model="));
+}

@@ -2630,3 +2630,130 @@ fn the_worker_question_waits_are_split_by_topic_and_night() {
         0
     );
 }
+
+/// The headless jobs per kind (goal 73), split by the provider they ran on
+/// (`claude` for a start that named none) and the model their session
+/// used: Claude's and Codex's goal reviews side by side, how many, the
+/// share failed, how long they took and the share of each verdict.
+#[test]
+fn the_goal_reviews_of_claude_and_codex_compare_by_provider_and_model() {
+    let mut queue = Queue::default();
+    let tuesday = MONDAY + DAY + 10 * HOUR;
+    let goal_event = |queue: &mut Queue, kind: &str, payload: Value, secs: i64| {
+        queue.queue_event(kind, payload, secs);
+        queue.events.last_mut().unwrap().goal_id = Some(GoalId::new(9));
+    };
+    let reviews = [
+        // (id, provider, model, verdict or failed, seconds)
+        (1, None, None, Some("achieved"), 100),
+        (
+            2,
+            Some("claude"),
+            Some("claude-opus-5-5"),
+            Some("gaps"),
+            300,
+        ),
+        (3, Some("codex"), Some("gpt-5.5"), Some("achieved"), 60),
+        (4, Some("codex"), Some("gpt-5.5"), None, 20),
+        (5, Some("codex"), None, Some("gaps"), 80),
+    ];
+    for (id, provider, model, verdict, secs) in reviews {
+        let at = tuesday + id * HOUR;
+        let session = format!("s-{id}");
+        let mut started = json!({"goal_review_id": id, "session_id": session});
+        if let Some(provider) = provider {
+            started["launch"] = json!({"role": "goal_review", "provider": provider});
+        }
+        goal_event(&mut queue, "goal_review_started", started, at);
+        match verdict {
+            Some(verdict) => goal_event(
+                &mut queue,
+                "goal_review_finished",
+                json!({"goal_review_id": id, "verdict": verdict, "duration_secs": secs}),
+                at + secs,
+            ),
+            None => goal_event(
+                &mut queue,
+                "goal_review_failed",
+                json!({"goal_review_id": id, "duration_secs": secs}),
+                at + secs,
+            ),
+        }
+        if let Some(model) = model {
+            queue.queue_event(
+                "session_closed",
+                json!({"kind": "goal_review", "session_id": session, "model": model}),
+                at + secs,
+            );
+        }
+    }
+    let kpi = queue.kpi(
+        MONDAY + 2 * DAY + HOUR,
+        &KpiConfig::default(),
+        &KpiQuery {
+            last: 2,
+            ..KpiQuery::default()
+        },
+    );
+    let day = &kpi.periods[0];
+    let count = |stratum: &str| measure(day, "job.count.goal_review", stratum).value;
+    assert_eq!(count(ALL), Some(5.0));
+    assert_eq!(count("provider=claude"), Some(2.0));
+    assert_eq!(count("provider=codex"), Some(3.0));
+    assert_eq!(count("model=gpt-5.5"), Some(2.0));
+    assert_eq!(count("model=unknown"), Some(2.0));
+    let failed = |stratum: &str| {
+        let measure = measure(day, "job.failed_rate.goal_review", stratum);
+        (measure.n, measure.value)
+    };
+    assert_eq!(failed("provider=claude"), (2, Some(0.0)));
+    assert_eq!(failed("provider=codex"), (3, Some(0.333)));
+    let secs = |stratum: &str| {
+        let measure = measure(day, "job.secs.goal_review", stratum);
+        (measure.median, measure.max)
+    };
+    assert_eq!(secs("provider=claude"), (Some(200.0), Some(300.0)));
+    assert_eq!(secs("provider=codex"), (Some(60.0), Some(80.0)));
+    // The share of the jobs that gave a verdict.
+    let verdict = |name: &str, stratum: &str| {
+        let measure = measure(day, name, stratum);
+        (measure.n, measure.value)
+    };
+    assert_eq!(
+        verdict("job.verdict.goal_review.achieved", "provider=claude"),
+        (2, Some(0.5))
+    );
+    assert_eq!(
+        verdict("job.verdict.goal_review.achieved", "provider=codex"),
+        (2, Some(0.5))
+    );
+    assert_eq!(
+        verdict("job.verdict.goal_review.gaps", "model=claude-opus-5-5"),
+        (1, Some(1.0))
+    );
+    // Every kind is listed, with no job too.
+    assert_eq!(measure(day, "job.count.review", ALL).value, Some(0.0));
+    assert_eq!(direction("job.count.goal_review"), None);
+    assert_eq!(direction("job.verdict.goal_review.gaps"), None);
+    assert_eq!(
+        direction("job.failed_rate.goal_review"),
+        Some(Direction::Lower)
+    );
+    let details = &day.window.details["jobs"]["goal_review"];
+    assert_eq!(details["by_provider"]["codex"]["failed"], 1);
+    assert_eq!(details["by_provider"]["claude"]["verdicts"]["gaps"], 1);
+    // A goal counts its own goal reviews only.
+    let other = queue.kpi(
+        MONDAY + 2 * DAY + HOUR,
+        &KpiConfig::default(),
+        &KpiQuery {
+            last: 2,
+            goal_id: Some(GoalId::new(8)),
+            ..KpiQuery::default()
+        },
+    );
+    assert_eq!(
+        measure(&other.periods[0], "job.count.goal_review", ALL).value,
+        Some(0.0)
+    );
+}

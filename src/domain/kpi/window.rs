@@ -787,6 +787,51 @@ impl<'a> Context<'a> {
             );
         }
 
+        // The headless jobs other than the worker's (goal 73), as `stats`'
+        // `jobs` counts them: per kind, over all of them and per provider
+        // and model, so that the providers' jobs compare side by side.
+        for (kind, jobs) in &stats.jobs {
+            let groups = std::iter::once((ALL.to_owned(), &jobs.all))
+                .chain(
+                    jobs.by_provider
+                        .iter()
+                        .map(|(provider, group)| (format!("provider={provider}"), group)),
+                )
+                .chain(
+                    jobs.by_model
+                        .iter()
+                        .map(|(model, group)| (format!("model={model}"), group)),
+                );
+            for (stratum, group) in groups {
+                let count = usize::try_from(group.count).unwrap_or(0);
+                put(
+                    &format!("job.count.{kind}"),
+                    &stratum,
+                    Measure::count(count),
+                );
+                put(
+                    &format!("job.failed_rate.{kind}"),
+                    &stratum,
+                    Measure::ratio(float(group.failed), count),
+                );
+                put(
+                    &format!("job.secs.{kind}"),
+                    &stratum,
+                    Measure::secs(group.secs_values.iter().copied()),
+                );
+                // Over the jobs that gave a verdict.
+                let ended = usize::try_from(group.verdicts.values().sum::<i64>()).unwrap_or(0);
+                for (verdict, verdicts) in &group.verdicts {
+                    put(
+                        &format!("job.verdict.{kind}.{verdict}"),
+                        &stratum,
+                        Measure::ratio(float(*verdicts), ended),
+                    );
+                }
+            }
+        }
+        details.insert("jobs", json(&stats.jobs));
+
         // The quality of the plans (ADR-0079 decision 7): split by the
         // judging plan review session's model and effort and by the
         // proposal's features.

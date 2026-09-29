@@ -21,6 +21,7 @@ pub mod drafts;
 pub mod escalations;
 pub mod failed_tests;
 pub mod follow_up_categories;
+pub mod jobs;
 pub mod landing;
 pub mod landing_utilization;
 pub mod measures;
@@ -552,6 +553,11 @@ pub struct Stats {
     /// The workers moved to the other provider (`provider_switched`,
     /// ADR-t813-2) in the same window as `asks`, and Codex's holds.
     pub provider_switches: providers::ProviderSwitchStats,
+    /// The headless jobs other than the worker's (goal 73) that ended in
+    /// the same window as `asks`, per kind: how many, how many failed, how
+    /// long they took and their verdicts, per provider and per model too.
+    /// With `--goal`, only that goal's runs', proposals' and goal reviews'.
+    pub jobs: BTreeMap<&'static str, jobs::JobStats>,
     /// The steps of the automatic update of the fixed binary (`update_*`,
     /// ADR-0073 decision 17) in the same window as `asks`: by kind, the
     /// failures by stage and the builds installed. Empty with `--goal`.
@@ -1030,6 +1036,13 @@ pub fn stats(
     );
     let auto_repairs = auto_repairs::auto_repairs(events, window_start, next_cursor, counts);
     let provider_switches = providers::provider_switches(events, window_start, next_cursor, counts);
+    // A goal review is the goal's event, with no task.
+    let jobs = jobs::jobs(events, window_start, next_cursor, |event| {
+        match (event.task_id, event.goal_id) {
+            (None, Some(goal)) => query.goal_id.is_none_or(|only| only == goal),
+            (task_id, _) => counts(task_id),
+        }
+    });
     let updates = updates::updates(events, window_start, next_cursor, counts);
     let draft_flow = drafts::draft_flow(
         events,
@@ -1196,6 +1209,7 @@ pub fn stats(
         claim_deferrals,
         auto_repairs,
         provider_switches,
+        jobs,
         updates,
         draft_flow,
         follow_up_categories,
