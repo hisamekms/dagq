@@ -62,6 +62,16 @@ runtime_planners = 2
 # [tasks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 982 を含んでから足した。
 changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
 
+[roles.goal_review]
+# goal review の job を Codex（codex exec の読み取りだけの sandbox）で動かし、Claude の goal review と
+# provider・model で並べて比べる（goal 73、ADR-t1063-1、task 1067。書式と振る舞いは
+# docs/design/supervisor-lifecycle/actor-model.md の provider）。model と effort は書かず、
+# Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する。
+# 他の役割は provider を書かず、今までどおり Claude で動く（codex を受け付けるのは goal_review だけ）。
+# [roles.<role>] の provider を知らない旧バイナリは dagq.toml を読めなくなるので、
+# 固定バイナリが task 1065 を含んでから足した。
+provider = "codex"
+
 [areas]
 # stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
 # 書式と求め方は docs/design/supervisor-lifecycle/kpi.md の「area」）。glob は --paths と同じ規則で重なってよく、

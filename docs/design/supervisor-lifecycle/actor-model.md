@@ -43,7 +43,7 @@ worker以外のアクターのsessionのmodelとeffortの設定と、provider・
 - **あるとき**: 表の`model`と`effort`を`AgentProvider::apply_launch`が`AgentProvider::select_model`（task 576の仕組み。Claude Codeでは`--model <model> --effort <effort>`をoptionの末尾、`--`の前）で渡す。片方だけ書いたときは、もう片方は既定（`claude-opus-5-5` / `medium`）を明示して渡す
 - **読めないとき**: supervisorとobserverはwarnをlogに出して今までと同じ起動にする（壊れた`dagq.toml`はprovisioningがerrorにする）。`dagq plan`は結果の`warnings`に足して今までと同じ起動でplannerを開く（`[roles]`の外の誤りや新しいバイナリだけが知る表で、人のplannerを開けなくしない）
 - 設定は読む時点ごとに読み直すので、supervisorの再起動なしに次のjobから効く
-- この repositoryの`dagq.toml`には役割の表を置かない（highに上げるのは基準値がたまってから人とplannerが決める。ADR-0079の決定7の(d)）。旧バイナリは`[roles.*]`を未知の表として拒むので、足すのはそれを知るバイナリに入れ替えた後にする
+- この repositoryの`dagq.toml`の役割の表は`[roles.goal_review]`の`provider = "codex"`だけで（task 1067、goal 73。下の[provider](#provider)）、どの役割にも`model` / `effort`は置かない（highに上げるのは基準値がたまってから人とplannerが決める。ADR-0079の決定7の(d)）。旧バイナリは`[roles.*]`を未知の表として拒み、`provider`を知らないバイナリも拒むので、足すのはそれを知るバイナリ（task 1065）に入れ替えた後にした
 
 ## provider
 
