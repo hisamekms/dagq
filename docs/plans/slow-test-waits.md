@@ -26,7 +26,7 @@ goal 68（testの実時間の待ちを減らし、着地の検証のtest段とwo
 - (c) fixture: git init、seedのcommit、`SqliteQueue::init`
 - (d) 処理: 上のどれでもない残り。supervisorのpass、stubのsession、git、review stubなど
 
-この文書はsrc/とtests/を変えない。修正はfollow-upのtaskが行う（5章）。productionのtimeoutと閾値の値も変えない（goal 68の制約）。
+この文書はsrc/とtests/を変えない。修正はfollow-upのtaskが行う（5章と7章）。7章はtask 1049（F6）が(d)処理の内訳を足したものである。productionのtimeoutと閾値の値も変えない（goal 68の制約）。
 
 ## 要点
 
@@ -44,7 +44,8 @@ goal 68（testの実時間の待ちを減らし、着地の検証のtest段とwo
   - F3 Durationのtimeoutの短縮: 4〜6秒
   - F5 heartbeatと引き継ぎの見張り: 約3秒
 
-  合わせて約64〜132秒で、6並列のtest段の約460秒（2,780÷6）の13〜28%にあたる。(d)の58%は、まだ分けきれていない（F6で測る）。
+  合わせて約64〜132秒で、6並列のtest段の約460秒（2,780÷6）の13〜28%にあたる。
+- **testの時間の約半分はtest processが起動する`git`の待ちである（7章、F6。wrapperありの回で312秒のうち158秒）。** `/usr/bin/git`のxcrunのshimが1回の起動を約2倍にし、supervisorは毎passで着地のbranchを`git`2本で確かめる。supervisorの起動の大半は、testが書いたばかりの`claude-stub`の最初のexec（macOSが新しい実行fileに0.2〜1.3秒かける）である。候補G1〜G3で、test段は合わせて約53〜99秒（G4を足すとさらに10〜22秒）縮む見込み。
 
 ## 1. 遅いtestの上位30本とmoduleごとの合計
 
@@ -347,7 +348,7 @@ stall以外の秒単位の設定:
 | F3 | (a) | `Duration`のtimeoutの見直し（`exit_timeout` 1秒→短く、`HELD`/`STAGE_TIMEOUT`をeventで確かめる形に） | なし | 25〜35 | 4〜6 |
 | F4 | (a)(b) | 「越えても何も起きない」の固定のsleepを、supervisorのpassの回数（例: `candidates_sampled`の増え）を待つ形に置き換える。stubの`sleep 5`・`sleep 3`・`slow_exit`を閾値に合わせて縮める | なし（passの数を読む口が無ければ小さく足す） | 65〜75 | 11〜13 |
 | F5 | (a)(b) | 引き継ぎの見張りとheartbeat（2秒おき・unix秒）のtest用の間隔、cli_versionの3秒のsleep | あり（test用の経路） | 15〜20 | 約3 |
-| F6 | (d) | 処理の内訳の測定。supervisorの起動からstall_config_loadedまでの0.5〜2.7秒、1回のpassの中のgitと`ps`の起動の回数、review stubのretry | 測定だけ | —（F6の結果で決める） | — |
+| F6 | (d) | 処理の内訳の測定。supervisorの起動からstall_config_loadedまでの0.5〜2.7秒、1回のpassの中のgitと`ps`の起動の回数、review stubのretry | 測定だけ | —（7章。結果は候補G1〜G4） | — |
 
 各候補の見積もりの根拠:
 
@@ -371,6 +372,164 @@ stall以外の秒単位の設定:
 ## 6. 残っている不確かさ
 
 - **integrateの条件でのfixtureの時間**: instrumentあり・6〜8並列の下での`SqliteQueue::init`は直接測っていない（3章）。
-- **(d)の中身**: supervisorの起動、pass、stubのsessionの時間を分けていない（F6）。
+- **(d)の中身**: 7章（F6）で分けた。7章の実験は各3回で、loadによる合計の揺れ（±45秒）が単独の候補の差と同じ規模なので、単独の効果は仕組みごとの数字と合わせて読む。
 - **cli_versionの2本**: DBが残らないので、(a)は推定である。
 - **ローカルの測定の条件**: 直列で、instrumentなしで、load 10〜45だった。integrateの条件（6〜8並列、instrumentあり、load中央値19）とは違う。30本の合計はintegrateの中央値の1.08倍で、規模は合っている。
+
+## 7. (d)処理の内訳（F6、task 1049）
+
+2章の(d)（上位30本の58%）を、関門と同じ条件（instrumentあり・6並列）で分けた。F1（fixtureのtemplate）とF2（秒未満の閾値）が着地した後のbase a494154で測ったので、2章の数字（F1・F2の前）とは全体の秒が違う。
+
+### 要点
+
+- **testの時間の約半分は、test processが起動する`git`の待ちである。** 30本で`git`を7,873回起動し、合計158秒（1回の平均20ms）だった。同じ回（r4）の30本の合計312秒の51%にあたる。loopの中の`git`は閾値を待つ区間（(a)(b)）にも走るので、全部が(d)に入るわけではない。そのうち4,046回（79秒）は、supervisorが毎passで着地のbranchを確かめる`git symbolic-ref`と`git show-ref`の2本である。1回のpassで起動する`git`は平均4.15回だった（r4の1,555 pass）。
+- **`/usr/bin/git`はCommand Line Toolsのxcrunのshimで、1回の起動を約2倍にする。** 単独で測ると中央値16ms、実体の`/Library/Developer/CommandLineTools/usr/bin/git`は8〜10msだった。
+- **supervisorの起動（fixtureの後から`stall_config_loaded`まで）の大半は、testが書いたばかりの`claude-stub`の最初のexecである。** macOSは新しく書かれた実行fileの最初のexecに0.2〜1.3秒かける。すでに実行したfileへのsymlinkとhardlinkは6ms前後で済む。1つのtest processの最初のagentのpreflight（`claude-stub --version`）は中央値228〜313ms（r3とbaseの3回）だった。30本の起動の合計18〜27秒のうち、14〜18秒がこれにあたる（stubの実験で縮んだ分）。
+- **review stubがverdictを出さずにretryする分は、30本で約15〜22秒だった。** 既定のreviewer（`claude-stub`）は`test provider`としか出さないので、reviewは毎回2回目の試行まで走る。`review_retried`は44回で、1回0.3〜0.4秒だった（2回目以降の試行は54回あり、残りの10回はresumeの後のreviewの試行である）。
+- **psは小さい。** 157回・2.8秒（passあたり0.1回）で、修正の候補にしない。fixtureはF1の後で40回・0.7秒になった。
+- **検証の実験（commitしない変更、各3回）では、git・着地のbranch・stubの3つを合わせると、30本の合計が中央値296秒から212秒に縮んだ（−29%）。** 合わせたときのloadは、比べた基準と同じか高い（load1の平均22〜32、基準は18〜21）。
+
+### 手順
+
+- 2026-09-29 09:16〜09:36 JSTに、このrunのworktree（base a494154）で流した。対象は2章の30本（1章の上位32本のうち`dagq::it`の30本）である。
+- コマンドは`cargo llvm-cov nextest --locked --workspace --no-report --test it -E '<30本のtest(=…)>'`である。`NEXTEST_TEST_THREADS=6`・`RUST_TEST_THREADS=6`と、`dagq.toml`の`[run.env]`の`RUSTC_WRAPPER`・`CARGO_BUILD_JOBS=4`を渡した。関門と同じく、instrumentありで6並列になる。
+- loadは`~/.local/share/dagq-hostmetrics/metrics.csv`の`load1`を使い、各回のnextestの開始から終了（前後15秒を含む）の平均と最大を取った。並行する他のrunの負荷の下で流した。
+- **commitしない計測用の変更**を次のとおり入れ、計測後に`git checkout -- src tests`で戻した。
+  - `src/lib.rs`に、時刻（ミリ秒）・pid・`NEXTEST_TEST_NAME`・印を1行ずつ`$MEASURE_DIR/trace.log`に書く関数を足した。
+  - `src/application/supervise/mod.rs`で、supervisorの入口・cmuxとagentのpreflightの後・queueを開いた後・`stall_config_loaded`・loopの始めと終わりに印を書いた。loopの1回のpassの中の区切り（先頭、`check_provider_holds`の後、`return_waiting_runs`の後、`fill_slots`の後、plan reviewの後、`tick`の後）にも印を書いた。
+  - `tests/it/runtime_support/mod.rs`で、`fixture()`の始めと終わり、`supervise_with`と`supervise_reviewed`の入口、`StubSpawner`のspawnとstubの終了に印を書いた。`Fixture`のdropでは、queue DBを`$MEASURE_DIR/db/`にcopyした。sessionとreviewの時間は、このDBの`session_opened`・`session_closed`・`review_retried`から読んだ。
+- `git`・`ps`・`lsof`の起動は、PATHの先頭に置いた同名の小さなwrapper（実体を子processで起動して待ち、開始時刻・所要時間・親のpid・引数を`spawn.log`に書く）で数えた。runtimeは`git`の場所をcanonicalizeするので、wrapperはsymlinkではなく実行fileのcopyにした。親のpidがtest processのものを「test processの起動」（in-processのsupervisorとtestのhelper）、それ以外を「子の起動」（stubのscriptが打つ`git commit`など）として分けた。
+- wrapperは1回の起動に数ms（1回の追加のexec）を足す。wrapperありの回（r2 382秒、r4 312秒）は、なしの回（r3 272秒）より長かったが、wrapperなしのbaseの3回も292〜381秒に揺れたので、差のどれだけがwrapperによるかは分けられない。そのため、起動の回数と所要時間はwrapperありの回（r4）から、それ以外の秒はwrapperなしの回（r3）から取った。所要時間はwrapperの中で実体の起動から終了までを測ったもので、wrapper自身の起動は含まない。
+
+### 30本の内訳（r3: wrapperなし、load1 平均15.5・最大18.9。起動の回数と秒はr4: wrapperあり、load1 平均15.5・最大19.6）
+
+| 部分 | 回数 | 秒 | 1回あたり |
+| --- | --- | --- | --- |
+| testの時間の合計 | 30本 | 272.5 | — |
+| fixture（F1のtemplateのcopy） | 40 | 0.7 | 18ms |
+| `supervise_with`・`supervise_reviewed`の入口から、supervisorの入口まで（portsの組み立て。`git`を約6回起動する） | 55 | 5.7 | 103ms |
+| supervisorの入口から`stall_config_loaded`まで | 70 | 19.2 | — |
+| 　うちtest processの最初のagentのpreflight（`claude-stub --version`の最初のexec） | 29 | 13.9 | 中央値228ms |
+| 　うち2回目以降のpreflight | 41 | 5.1 | 中央値17ms |
+| 　うちqueueを開いてから`stall_config_loaded`まで | 70 | 0.3 | 4ms |
+| supervisorのloop | 1,762 pass | 202.5 | passの中央値69ms・p90 244ms |
+| 　pass先頭〜`check_provider_holds`（heartbeat、host metrics、run.env、**着地のbranch**、conflicts、disk、hold） | 1,762 | 59.5（29%） | 平均34ms |
+| 　`fill_slots`（claim・resume・triage・着地） | — | 19.7（10%） | — |
+| 　`tick`（slotごとのsessionの見張り・validating・reviewの起動） | 1,670 | 45.3（22%） | 平均27ms |
+| 　`tick`の後の`TEST_TICK`（20ms）のsleep | 1,670 | 42.4（21%） | — |
+| 　slotが空のときのidleのsleep（うち28秒はcli_versionの子のsupervisor） | — | 31.1（15%） | — |
+| test processの`git`の起動（r4） | 7,873 | 158.3 | 平均20.1ms |
+| 　うち着地のbranch（`symbolic-ref --quiet refs/remotes/origin/HEAD`と`show-ref --verify --quiet`） | 4,046 | 79.0 | 19.5ms |
+| 　うちloopの中 | 6,449 | 130.3 | passあたり4.15回（r4の1,555 pass） |
+| 子の`git`の起動（stubのscriptのcommitなど、r4） | 375 | 9.6 | 25.6ms |
+| test processの`ps`の起動（`running()`、idle processの見張りなど、r4） | 157 | 2.8 | 17.6ms（passあたり0.10回） |
+| test processの`lsof`の起動（r4） | 20 | 2.6 | 129ms |
+| reviewのjob（`session_opened`から`session_closed`まで） | 115 | 38.7 | 0.34秒 |
+| 　うち2回目以降の試行（うち`review_retried`が44回、残りはresumeの後の試行） | 54 | 18.1 | 0.34秒 |
+| workerのsession（stubの起動からsessionの終わりまで） | 61 | 63.6 | 1.04秒 |
+| resumeのsession | 23 | 45.8 | 1.99秒 |
+| reviseのsession | 2 | 14.4 | 7.2秒 |
+
+読み方:
+
+- sessionとreviewのjobの時間は、supervisorのloopと重なる。loopはそれを待っているので、足し合わせない。
+- sessionの時間の多くはstubの`sleep`と、閾値を越えるまでの待ち（2章の(a)(b)）である。sessionの中のgitは子の`git`（375回・9.6秒）で、下のG1のshimの分が効く。
+- 着地のbranchの確かめは、passごとに毎回2本の`git`を起動する。loopの中の`git`（6,449回）の約6割はこれである。残りは、`tick`のreviewの材料（1回のreviewの起動に`diff`×3・`log`・`rev-parse`・`status`・`worktree list`などの約8本）と、claim・resume・着地の`git`である。
+- `git`の1回の起動（20ms）の約半分はxcrunのshimである。load 14〜16で単独に40回ずつ測ると、`/usr/bin/git`は中央値16ms、実体は8〜10msだった。`ps`と`/usr/bin/true`の起動は約4msだった。
+- 新しく書いたfileの最初のexecの時間を、単独で測った（load 15、8回ずつ）。書いたばかりのscriptは中央値514ms（187〜795ms）、同じ中身のcopyも525ms、すでに実行したfileへのhardlinkは6ms、symlinkは5msだった。同じpathに同じ中身を書き直したときも10msで、新しいfileだけが遅い。
+
+### testごとの内訳（全体・起動・pass・session・reviewはr3、gitとpsの起動はr4）
+
+| test | 全体（秒） | supervise | supervisorの起動（秒） | うち最初のagentのpreflight（秒） | pass | gitの起動÷pass（r4のpass） | gitの起動（回・秒） | psの起動（回・秒） | worker・resume・reviseのsession（秒） | reviewのjob（秒、retryの回数） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cli_version::auto_update_installs_each_runtime_landing_and_puts_a_b… | 37.7 | 4 | 1.93 | 1.81 | 19 | 4.5 | 85・1.6 | 4・0.20 | 0.0 | 0.0（0） |
+| runtime_waiting_stages::a_question_while_resuming_waits_outside_the… | 14.2 | 2 | 0.27 | 0.23 | 174 | 3.8 | 482・10.2 | 6・0.02 | 10.8 | 2.0（3） |
+| cli_version::install_hands_a_running_supervisor_over_under_its_pid_… | 13.9 | 3 | 2.49 | 2.43 | 8 | 4.2 | 34・0.6 | 3・0.13 | 0.0 | 0.0（0） |
+| runtime_waiting_stages::a_resume_question_past_the_limit_waits_in_i… | 13.7 | 2 | 0.41 | 0.40 | 179 | 4.0 | 479・11.0 | 6・0.02 | 18.8 | 1.8（3） |
+| runtime_waiting_stages::a_question_while_revising_waits_outside_the… | 12.2 | 1 | 0.23 | 0.23 | 178 | 3.0 | 404・8.5 | 3・0.01 | 11.9 | 0.9（0） |
+| runtime_review::a_failed_review_span_ends_with_its_job_not_with_the… | 11.9 | 4 | 1.65 | 0.21 | 107 | 3.2 | 323・6.2 | 5・0.12 | 8.2 | 2.6（1） |
+| runtime_resume::conflict_only_resumes_are_not_counted_and_a_used_up… | 11.9 | 2 | 0.22 | 0.21 | 74 | 6.5 | 439・9.0 | 6・0.02 | 6.1 | 1.8（3） |
+| runtime_review::a_failed_review_closes_the_session_and_asks_a_perso… | 11.1 | 8 | 0.96 | 0.21 | 78 | 5.4 | 430・8.2 | 7・0.11 | 4.7 | 3.0（2） |
+| runtime_headless::a_silent_turn_is_stopped_and_its_recovery_job_res… | 10.9 | 1 | 1.13 | 1.12 | 113 | 3.6 | 338・6.5 | 3・0.04 | 8.0 | 0.3（0） |
+| lifecycle_install::a_handoff_looks_again_at_a_supervisor_that_took_… | 9.6 | 0 | 0.00 | 0.00 | 0 | 0.0 | 0・0.0 | 0・0.00 | 0.0 | 0.0（0） |
+| runtime_claim_defer::a_task_meeting_a_run_on_a_hotspot_waits_and_th… | 8.3 | 3 | 1.46 | 1.44 | 23 | 12.8 | 295・5.7 | 10・0.03 | 0.6 | 3.8（5） |
+| runtime_stall::an_input_the_supervisor_did_not_send_holds_the_nudge… | 7.7 | 2 | 0.46 | 0.23 | 81 | 3.1 | 228・4.2 | 4・0.01 | 6.2 | 1.1（2） |
+| runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchan… | 7.6 | 2 | 0.24 | 0.21 | 47 | 6.8 | 293・5.6 | 4・0.02 | 2.7 | 1.5（2） |
+| runtime_review::a_run_the_supervisor_lands_closes_its_landing_ask | 7.5 | 4 | 0.51 | 0.24 | 52 | 5.8 | 298・5.3 | 4・0.01 | 3.4 | 1.3（0） |
+| runtime_screen_idle_input::a_markerless_resumed_session_gets_its_an… | 7.5 | 2 | 0.30 | 0.28 | 39 | 7.2 | 275・4.9 | 6・0.02 | 3.6 | 2.5（3） |
+| runtime_resume::a_request_lost_twice_is_asked_to_the_inbox | 7.2 | 2 | 0.23 | 0.21 | 34 | 8.3 | 274・5.6 | 12・0.39 | 3.1 | 1.3（2） |
+| runtime_resume_exit_retry::used_up_retries_over_a_dialog_close_a_re… | 7.2 | 2 | 0.24 | 0.21 | 46 | 6.4 | 280・5.6 | 4・0.01 | 2.6 | 1.5（2） |
+| runtime_precheck::precheck_conflicts_up_to_the_conflict_only_limit_… | 6.9 | 1 | 0.26 | 0.26 | 60 | 5.3 | 382・7.8 | 7・0.03 | 5.2 | 1.8（0） |
+| runtime_resume::a_resumed_session_gets_its_request_only_once_its_in… | 6.9 | 2 | 0.39 | 0.37 | 58 | 5.8 | 284・5.9 | 4・0.02 | 2.9 | 1.2（2） |
+| runtime_resume::a_resumed_session_that_ignores_exit_is_let_go | 6.8 | 4 | 0.27 | 0.21 | 42 | 7.6 | 304・6.1 | 6・0.11 | 2.6 | 1.2（2） |
+| runtime_evidence::a_diff_outside_the_e2e_paths_lands_without_e2e_un… | 6.8 | 2 | 2.37 | 1.28 | 25 | 7.0 | 183・3.7 | 4・0.01 | 1.2 | 1.3（2） |
+| runtime_stall_recovery::a_stall_past_its_three_recovery_jobs_is_ask… | 6.7 | 1 | 0.21 | 0.21 | 70 | 3.0 | 199・3.8 | 7・0.28 | 5.5 | 0.3（0） |
+| runtime_resume::resuming_stops_after_three_attempts | 6.6 | 5 | 0.27 | 0.20 | 28 | 10.5 | 273・5.7 | 6・0.11 | 1.7 | 1.2（2） |
+| runtime_integrate::the_push_follows_the_repository_table_of_dagq_toml | 6.1 | 3 | 0.69 | 0.25 | 27 | 10.6 | 287・5.9 | 6・0.02 | 0.3 | 1.6（3） |
+| worker_escalation::missing_evidence_and_a_scope_violation_keep_the_… | 5.6 | 2 | 0.45 | 0.23 | 14 | 18.9 | 284・6.7 | 8・0.03 | 0.4 | 2.4（4） |
+| runtime_screen_idle_input::a_markerless_revised_session_gets_its_an… | 5.3 | 1 | 0.22 | 0.21 | 52 | 3.6 | 191・3.5 | 2・0.01 | 3.7 | 0.7（0） |
+| runtime_repair::a_live_escalation_is_recorded_at_the_recovery_jobs_… | 5.1 | 2 | 0.75 | 0.33 | 49 | 4.7 | 212・4.4 | 6・0.19 | 2.4 | 0.5（0） |
+| runtime_stall::a_session_idle_after_its_nudge_gets_one_stalled_ask_… | 3.7 | 1 | 0.23 | 0.22 | 33 | 3.4 | 101・1.8 | 4・0.10 | 3.1 | 0.6（1） |
+| runtime_repair::a_process_without_cpu_progress_is_an_idle_process_a… | 3.1 | 1 | 0.20 | 0.19 | 26 | 4.5 | 109・2.3 | 7・0.49 | 2.1 | 0.2（0） |
+| runtime_repair::a_long_process_that_uses_cpu_time_is_not_an_idle_pr… | 2.9 | 1 | 0.26 | 0.25 | 26 | 4.5 | 107・2.1 | 3・0.21 | 1.9 | 0.2（0） |
+| **合計** | **272.5** | 70 | **19.2** | 13.9 | 1762 | — | 7873・**158.3** | 157・2.8 | 123.7 | 38.7（44） |
+
+lifecycle_install::a_handoff_looks_again_…は`common::lifecycle`のfixtureと`dagq`の子processを使うので、計測用の印を入れていない（0になっている）。cli_versionの2本は、`dagq supervise`を子processで起動する。そのためsupervisorの起動（1本あたり1.9〜2.5秒）には、instrumentありのbinaryの起動と`claude-stub`の最初のexecが入る。
+
+### 検証の実験（commitしない変更、各3回、交互に流した）
+
+内訳の上位を、commitしない変更で外したときの30本の合計を測った。load1の平均と最大を添える。loadで回ごとの秒が±45秒ほど揺れるので、合計の比較は3回の中央値で読む。仕組みごとの数字（passの先頭の区切りまでの時間、supervisorの起動）は、loadの揺れにあまり左右されない。
+
+- base: 変更なし
+- landing: `check_landing_branch`を1つのprocessで1秒に1回までにした（測るための変更で、修正案ではない）
+- stub: `claude_stub()`が、1回実行済みの共有のscriptへのsymlinkを置く形にした
+- clt: PATHの先頭に`/Library/Developer/CommandLineTools/usr/bin`を置き、`git`の実体を直接起動させた
+- all: landing・stub・cltを合わせた
+
+| 変種 | 1回目 | 2回目 | 3回目 | 中央値 | passあたりの先頭の区切りまでの時間（平均） | supervisorの起動の合計 |
+| --- | --- | --- | --- | --- | --- | --- |
+| base | 380.7秒（load 18.4/27.4） | 292.0秒（20.0/25.3） | 296.3秒（20.6/23.0） | **296.3秒** | 38〜58ms | 17.8〜27.3秒 |
+| landing | 358.9秒（30.8/35.6） | 305.6秒（28.7/31.2） | 255.3秒（15.2/20.1） | 305.6秒 | 8〜15ms（中央値1〜2ms） | 15.7〜22.3秒 |
+| stub | 364.6秒（36.3/39.5） | 286.2秒（25.6/31.2） | 297.8秒（13.2/14.5） | 297.8秒 | 46〜59ms | **3.4〜9.7秒** |
+| clt | 271.1秒（33.8/39.5） | 269.6秒（21.0/21.1） | 299.6秒（23.5/31.6） | **271.1秒** | 19〜27ms | 30.5〜47.8秒 |
+| all | 196.4秒（23.3/26.8） | 211.6秒（21.9/23.0） | 240.2秒（31.9/32.2） | **211.6秒** | 7〜11ms | 3.3〜4.5秒 |
+
+括弧の中はload1の平均/最大。30本はどの回もすべて通った。
+
+読み方:
+
+- **clt**は、同じかそれより高いloadで、合計が中央値で25秒（8%）縮んだ。passの先頭の区切りまでは38〜58msから19〜27ms、`tick`は平均33〜63msから22〜33msになった。`git`の1回が半分になった分である。supervisorの起動はかえって長く出た。これは`claude-stub`の最初のexecで、loadの高い時間帯に当たった揺れとみる（gitとは関係しない）。
+- **landing**は、passの先頭の区切りまでを1/4〜1/5にした。ただし合計は基準との差がloadの揺れの内に収まった。閾値や固定のsleepで壁時計の時間が決まるtestでは、passが速くなると、同じ時間の中でpassの回数が増える（1,364〜1,760回から2,047〜3,227回）だけで、testの時間は縮まない。縮むのは、eventが続けて起きる区間（claim、validating、着地）だけである。
+- **stub**は、supervisorの起動の合計を17.8〜27.3秒から3.4〜9.7秒に縮めた（test processの最初のpreflightは中央値237〜313msから13〜17ms）。合計の差（中央値で+1.5秒）はloadの揺れに埋もれた。
+- **all**は中央値で85秒（29%）縮んだ。3つを合わせると、passが軽くなり、eventが続く区間が縮む。そのため、1つずつの差の和より大きく出た。
+
+### 次の修正の候補と見積もり
+
+見積もりの前提は次のとおり。
+
+- 全体への広げ方: 30本での割合を、1章の`runtime_*`の群（474本・2,116秒。F1・F2の前の値）に当てる。上位30本は待ちの多いtestなので、群の全体では割合がこれより小さいこともありうる。そのため幅を持たせる。
+- test段はtestの時間の合計の減り÷`NEXTEST_TEST_THREADS`（6）。
+- workerの手元のtestとstressの5周も、同じ割合で縮む。
+- どの候補もproductionのtimeoutと閾値の値と意味を変えない（goal 68の制約）。
+
+| 候補 | 中身 | srcの変更 | 30本で縮んだ・縮む秒 | 縮むtestの秒（全体） | test段（÷6） |
+| --- | --- | --- | --- | --- | --- |
+| G1 | `git`の実体を1回だけ解決して使う。`/usr/bin/git`がxcrunのshimのときは、`xcrun --find git`か`git --exec-path`で実体を求め、`GitRepository`の`git`とtestのhelperの`git`をそれにする | あり（`executable(Path::new("git"))`の解決。productionのsupervisorと`integrate`の`git`も速くなる） | 25（実験の中央値、8%） | 105〜170（5〜8%） | 18〜28 |
+| G2 | 着地のbranchの確かめを毎passで`git`を2本起動する形から、refのfile（`refs/remotes/<remote>/HEAD`・`packed-refs`など）の変化を見て変わったときだけ確かめる形などに変える。`ADR-t615-1`の「解決しなければclaimと着地を止め、解決したらすぐ再開する」は保つ | あり | 単独では揺れの内（passの先頭の区切りまでは1/4〜1/5） | 0〜105（0〜5%）。G1・G3と合わせると効く | 0〜18 |
+| G3 | testが書く実行fileのstub（`claude_stub`・`headless_claude`など、`from_mode(0o7…)`の35箇所）のうち中身がtestに依らないものを、F1のtemplateと同じく1回だけ作って実行し、testのdirにはsymlinkかhardlinkを置く。中身がtestごとに違うもの（DBのpathを埋めるもの）は、pathを引数かenvで渡す形にしてから共有する | なし（tests/だけ） | 14〜18（supervisorの起動の合計の差） | 70〜150（supervisorを使う約340本×0.2〜0.45秒） | 12〜25 |
+| G4 | 既定のreviewer（`claude-stub`）がverdictを出さないreviewのretryを、testから0回にする経路を足す（retryそのものを確かめるtestは今の回数のまま）。または、approve_landingのaskを待つtestだけがverdictなしのreviewerを使い、他のtestは`verdict("pass", …)`を使う | あり（retryの回数をtestから入れる経路）か、なし（testのreviewerの使い分け） | 15〜22（`review_retried`の44回） | 約65〜130（3〜6%） | 10〜22 |
+| G1＋G2＋G3 | 上の3つを合わせたもの | — | 85（実験の中央値、29%） | 320〜590（15〜28%） | 53〜99 |
+
+候補にしないもの:
+
+- `ps`（157回・2.8秒）、queueを開くまで（70回・0.3秒）、fixture（F1の後で40回・0.7秒）は小さい。
+- `lsof`は1回129〜424msと重いが、30本で20回・2.6〜8.5秒で、主にruntime_resumeの一部のtestに限られる。G1〜G4の後に残れば見直す。
+- `TEST_TICK`（20ms）のsleep（30本で1,670回×20ms＝約33秒。表の42.4秒は次のpassのheartbeatまでを含む）は、task 567で50msから縮めたものである。これ以上縮めるとpassが増え、G1とG2の前ではpassの`git`がかえって増える。
+- cli_versionの子のsupervisorのidleの待ち（28秒）は、F5（引き継ぎの見張りと`--update-interval`）が扱う。
+
+進め方:
+
+- G1とG3は独立で、見積もりも実験で確かめた。先に着手する。
+- G2はproductionの振る舞い（着地のbranchを確かめる頻度）に触れるので、`ADR-t615-1`と照らしてから変える。productionのsupervisorでも、passごとの`git`の2本が減る。
+- G4は、retryを確かめるtestと、verdictのないreviewの後のaskを確かめるtestを弱めないことを先に確かめる。
+- どの候補も、前後の比較は1章の手順（直近のintegrateのlog、load1を併記）と、この章の手順（30本、instrumentあり、6並列）の両方で行う。
