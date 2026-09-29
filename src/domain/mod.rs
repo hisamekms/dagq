@@ -750,6 +750,7 @@ pub mod actor;
 pub mod actor_model;
 pub mod areas;
 pub mod authorization;
+pub mod broker;
 pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;
@@ -1637,6 +1638,12 @@ pub enum AttentionNext {
     /// a person fixes the command or the service behind it. It ends with
     /// the next push that succeeds.
     FixPush,
+    /// The supervisor could not start the queue's resource broker, or its
+    /// health failed again after the restart (`broker_unhealthy`,
+    /// ADR-t827-3 decision 3): a person reads `dagq broker status` and
+    /// fixes what it names (a machine of theirs running, say). It ends once
+    /// the broker runs again.
+    BrokerStatus,
     /// The supervisor gave up on a run whose session it kept open through
     /// validation, review, revise or its `/exit`, and could not send that
     /// session `/exit` (a `runtime_error` with `lease_released` and
@@ -1690,6 +1697,7 @@ impl fmt::Display for AttentionNext {
             Self::ReportUpdate => f.write_str("report the update"),
             Self::ReportReview => f.write_str("report the review"),
             Self::FixPush => f.write_str("fix the push command"),
+            Self::BrokerStatus => f.write_str("dagq broker status"),
             Self::ExitSession => f.write_str("exit the session"),
         }
     }
@@ -1726,6 +1734,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     UPDATE_INSTALLED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
     kpi::push::KPI_PUSH_ABANDONED,
+    broker::BROKER_UNHEALTHY,
     "ask_opened",
     "ask_answered",
     "ask_delivery_failed",
@@ -1902,6 +1911,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // A throughput review's conclusion is a notice too (ADR-t996-1).
         (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => Some(AttentionNext::ReportReview),
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
+        (broker::BROKER_UNHEALTHY, _) => Some(AttentionNext::BrokerStatus),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
         }
@@ -2711,6 +2721,13 @@ mod attention_tests {
             ),
             ("kpi_push_failed", json!({"attempt": 1}), None),
             (
+                "broker_unhealthy",
+                json!({"reason": "machine_busy"}),
+                Some(BrokerStatus),
+            ),
+            ("broker_healthy", json!({}), None),
+            ("broker_started", json!({"port": 1}), None),
+            (
                 "push_finished",
                 json!({"remote": "origin", "commit": "c"}),
                 None,
@@ -2921,6 +2938,7 @@ mod attention_tests {
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(ReportReview.to_string(), "report the review");
         assert_eq!(FixPush.to_string(), "fix the push command");
+        assert_eq!(BrokerStatus.to_string(), "dagq broker status");
         assert_eq!(
             DecideWaiting.to_string(),
             "decide the waiting tasks in a planner"

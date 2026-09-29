@@ -18,7 +18,8 @@
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
 //! and `[tasks] changes` names the set of changes a task declares one of.
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
-//! a run (ADR-t963-1 decision 2).
+//! a run (ADR-t963-1 decision 2). `[broker]` holds the resource broker's
+//! mode and the limits of its server (ADR-t827-4 decision 4).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -37,6 +38,7 @@ use crate::{
         ChangeSet, TaskChange,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         areas::AreaMap,
+        broker::{BrokerConfig, BrokerMode},
         disk::DiskConfig,
         exit::ExitConfig,
         kpi::KpiSettings,
@@ -96,7 +98,10 @@ const TASKS_CHANGES: &str = "changes";
 const E2E_TABLE: &str = "e2e";
 /// The one key of `[e2e]`.
 const E2E_PATHS: &str = "paths";
-const TABLES: [&str; 14] = [
+/// `[broker]`: the resource broker's mode and limits (ADR-t827-4
+/// decision 4).
+const BROKER_TABLE: &str = "broker";
+const TABLES: [&str; 15] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -111,6 +116,7 @@ const TABLES: [&str; 14] = [
     AREAS_TABLE,
     TASKS_TABLE,
     E2E_TABLE,
+    BROKER_TABLE,
 ];
 /// The one key of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -177,6 +183,9 @@ pub struct Config {
     pub changes: Option<ChangeSet>,
     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
     pub e2e_paths: Vec<String>,
+    /// `[broker]` (ADR-t827-4 decision 4), the defaults (mode `disabled`)
+    /// for the keys it does not set.
+    pub broker: BrokerConfig,
 }
 
 /// Parse the whole file.
@@ -191,6 +200,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut exit_keys: Vec<String> = Vec::new();
     let mut trial_keys: Vec<String> = Vec::new();
     let mut supervisor_keys: Vec<String> = Vec::new();
+    let mut broker_keys: Vec<String> = Vec::new();
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
@@ -235,7 +245,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -285,6 +295,48 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         .map_err(anyhow::Error::msg)
                         .with_context(with)?,
                 );
+            }
+            Some(BROKER_TABLE) => {
+                ensure!(
+                    BrokerConfig::KEYS.contains(&key),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{BROKER_TABLE}]; the keys are {}",
+                    BrokerConfig::KEYS.join(", ")
+                );
+                ensure!(
+                    !broker_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let value = rest.trim();
+                let broker = &mut config.broker;
+                match key {
+                    "mode" => {
+                        let text = parse_string(value).with_context(with)?;
+                        broker.mode = BrokerMode::parse(&text)
+                            .with_context(|| {
+                                format!(
+                                    "expected \"disabled\", \"preferred\" or \"required\", not {text:?}"
+                                )
+                            })
+                            .with_context(with)?;
+                    }
+                    "exec_allow" => {
+                        broker.exec_allow = parse_string_array(value).with_context(with)?
+                    }
+                    "exec_env" => broker.exec_env = parse_string_array(value).with_context(with)?,
+                    _ => {
+                        let number = parse_positive(value, "number")
+                            .with_context(with)?
+                            .unsigned_abs();
+                        match key {
+                            "exec_timeout_secs" => broker.exec_timeout_secs = number,
+                            "exec_max_timeout_secs" => broker.exec_max_timeout_secs = number,
+                            "output_limit_bytes" => broker.output_limit_bytes = number,
+                            _ => broker.fs_limit_bytes = number,
+                        }
+                    }
+                }
+                broker_keys.push(key.to_owned());
             }
             Some(E2E_TABLE) => {
                 ensure!(
@@ -540,11 +592,16 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
+    config
+        .broker
+        .check()
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("{CONFIG_FILE_NAME}: [{BROKER_TABLE}]"))?;
     config.areas = areas
         .map(|areas| AreaMap::new(areas).map_err(anyhow::Error::msg))
         .transpose()
@@ -802,6 +859,18 @@ pub fn load_supervisor_config(root: &Path) -> Result<Option<SupervisorConfig>> {
             .with_context(|| format!("parse {}", path.display()))?
             .supervisor,
     ))
+}
+
+/// `[broker]` of the `dagq.toml` in `root` (ADR-t827-4 decision 4); no
+/// file, no table or no key is the default, mode `disabled`.
+pub fn load_broker_config(root: &Path) -> Result<BrokerConfig> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(BrokerConfig::default());
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .broker)
 }
 
 /// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
@@ -1497,6 +1566,63 @@ LITERAL = 'no \n escapes # here'
     }
 
     #[test]
+    fn parses_the_broker_table() {
+        // No table is the default: disabled.
+        assert_eq!(parse_config("").unwrap().broker, BrokerConfig::default());
+        let config = parse_config(
+            "[broker]\nmode = \"preferred\" # the contract\nexec_allow = [\"sh\", \"ls\"]\nexec_env = []\nexec_timeout_secs = 30\nexec_max_timeout_secs = 120\noutput_limit_bytes = 2048\nfs_limit_bytes = 4096\n",
+        )
+        .unwrap()
+        .broker;
+        assert_eq!(
+            config,
+            BrokerConfig {
+                mode: BrokerMode::Preferred,
+                exec_allow: vec!["sh".into(), "ls".into()],
+                exec_env: Vec::new(),
+                exec_timeout_secs: 30,
+                exec_max_timeout_secs: 120,
+                output_limit_bytes: 2048,
+                fs_limit_bytes: 4096,
+            }
+        );
+        for (text, error) in [
+            ("[broker]\nmode = \"on\"\n", "dagq.toml:2: value of mode"),
+            ("[broker]\nport = 1\n", "unknown key port in [broker]"),
+            (
+                "[broker]\nmode = \"preferred\"\nmode = \"disabled\"\n",
+                "mode is defined twice",
+            ),
+            (
+                "[broker]\nexec_timeout_secs = 0\n",
+                "value of exec_timeout_secs",
+            ),
+            (
+                "[broker]\nexec_timeout_secs = 400\n",
+                "above exec_max_timeout_secs",
+            ),
+            ("[broker]\n[broker]\n", "[broker] is defined twice"),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_broker_config(dir.path()).unwrap(),
+            BrokerConfig::default()
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[broker]\nmode = \"required\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_broker_config(dir.path()).unwrap().mode,
+            BrokerMode::Required
+        );
+    }
+
+    #[test]
     fn parses_the_disk_table() {
         let config = parse_config(
             "[disk]\nsample_runs = 5\nclaim_factor = 2.5 # more\nintegrate_factor = 1\nmin_free_bytes = 1_000\n",
@@ -1852,7 +1978,7 @@ LITERAL = 'no \n escapes # here'
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[supervisors]\n").unwrap();
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
-            error.contains("[supervisor], [areas], [tasks], [e2e] and [kpi]"),
+            error.contains("[supervisor], [areas], [tasks], [e2e], [broker] and [kpi]"),
             "{error}"
         );
     }

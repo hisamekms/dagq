@@ -73,6 +73,98 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
     );
 }
 
+/// With `[broker]` mode other than `disabled`, `up` looks for podman on
+/// the supervisor's PATH and starts no supervisor without it (ADR-t827-3
+/// decision 2); `host.toml` lowering the mode to `disabled` needs none, and
+/// `required` (Phase 2) is refused. Without `[broker]` nothing is looked
+/// for (every other test here).
+#[test]
+fn up_refuses_a_broker_mode_without_podman_on_its_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = fixture();
+    let bin = fixture.repo.parent().unwrap().join("tools");
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        fixture.repo.join("dagq.toml"),
+        "[broker]\nmode = \"preferred\"\n",
+    )
+    .unwrap();
+    fixture.environment.path = format!("{}:/nonexistent", bin.display());
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    // Not the host's own host.toml.
+    let one_shot = dagq::compose::OneShot {
+        host_config: Some(bin.join("no-host.toml")),
+        ..dagq::compose::OneShot::system()
+    };
+    let try_up =
+        |fixture: &Fixture, cmux: &FakeCmux, launchd: &FakeLaunchd, processes: &FakeProcesses| {
+            one_shot.up(
+                &fixture.location,
+                &fixture.repo,
+                cmux,
+                launchd,
+                processes,
+                &fixture.environment,
+                &fixture.options,
+            )
+        };
+    let up =
+        |fixture: &Fixture, cmux: &FakeCmux, launchd: &FakeLaunchd, processes: &FakeProcesses| {
+            try_up(fixture, cmux, launchd, processes).unwrap()
+        };
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(
+        error.contains("needs podman")
+            && error.contains("brew install podman")
+            && error.contains("the supervisor was not started"),
+        "{error}"
+    );
+    let registered = || {
+        SqliteQueue::open(&fixture.location.db)
+            .unwrap()
+            .supervisors()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(registered(), 0);
+    assert!(launchd.installs.lock().unwrap().is_empty());
+
+    // The host lowers the mode: no podman is needed.
+    let host = fixture.location.queue_dir.join("host.toml");
+    fs::write(&host, "[broker]\nmode = \"disabled\"\n").unwrap();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    assert_eq!(report.get("broker"), None, "{report}");
+    fs::remove_file(&host).unwrap();
+
+    // Found: `up` goes on and says where.
+    let podman = bin.join("podman");
+    fs::write(&podman, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["broker"]["mode"], "preferred", "{report}");
+    assert_eq!(report["broker"]["podman"], podman.to_str().unwrap());
+
+    fs::write(
+        fixture.repo.join("dagq.toml"),
+        "[broker]\nmode = \"required\"\n",
+    )
+    .unwrap();
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(
+        error.contains("mode = \"required\"") && error.contains("the supervisor was not started"),
+        "{error}"
+    );
+}
+
 /// A mistake in the language stops `up` before it starts anything; a
 /// language set is in `up`'s report and the inbox's first prompt
 /// (ADR-t616-2).

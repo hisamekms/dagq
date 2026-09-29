@@ -17,7 +17,7 @@ use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
     LANDING_OPTIONS, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
     SessionRole, SupervisorMode, SupervisorPulse, SupervisorRegistration, TaskId, TaskRun,
-    UPDATE_FAILED_OPTIONS, event_attention, event_kind, heartbeat_stale,
+    UPDATE_FAILED_OPTIONS, broker, event_attention, event_kind, heartbeat_stale,
     kpi::push::{KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS},
     queue_hold::{self, HoldJob},
     reason, recheck, run_attention, run_attention_of,
@@ -956,6 +956,27 @@ pub fn attention(
                 .map(truncate_reason),
             last_error_code: None,
             next: AttentionNext::FixPush,
+        });
+    }
+    // The queue's resource broker that could not start, or stays
+    // unhealthy after its restart, waits for a person until it runs again
+    // (ADR-t827-3 decision 3).
+    if let Some(event) = queue.latest_queue_event(&broker::BROKER_ATTENTION_KINDS)?
+        && broker::attention_stands(Some(event.kind.as_str()))
+    {
+        let reason = event.payload.get("reason").and_then(Value::as_str);
+        let message = event.payload.get("message").and_then(Value::as_str);
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: reason.unwrap_or("unhealthy").into(),
+            kind: broker::BROKER_UNHEALTHY.into(),
+            last_error: message.map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::BrokerStatus,
         });
     }
     // A proposal whose plan review failed, or whose planner did not answer

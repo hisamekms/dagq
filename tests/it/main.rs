@@ -65,6 +65,7 @@ mod runtime_abandon;
 mod runtime_actor_env;
 mod runtime_adopt;
 mod runtime_ask;
+mod runtime_broker;
 mod runtime_candidates;
 mod runtime_claim;
 mod runtime_claim_defer;

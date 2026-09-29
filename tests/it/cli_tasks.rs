@@ -132,7 +132,7 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             );
             assert_eq!(
                 broker["recorded"],
-                serde_json::json!({"port": null, "container": null, "image": null, "state": null})
+                serde_json::json!({"port": null, "container": null, "image": null, "state": null, "build": null, "started_at": null})
             );
             // Where `claude` and `codex` resolve depends on the host's PATH
             // too (ADR-t813-2); only which providers and modes are checked.

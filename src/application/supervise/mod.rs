@@ -100,6 +100,7 @@ use crate::domain::{
 };
 
 mod adopt;
+mod broker;
 mod claim_defer;
 mod cleanup;
 mod deliver;
@@ -139,6 +140,7 @@ mod triage;
 mod update;
 mod waiting;
 
+pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub use self::host_metrics::HostMetricsPort;
@@ -358,6 +360,9 @@ pub struct Ports<'a> {
     /// Records the host's load under `<queue dir>/host/` (task 516);
     /// `None` records none.
     pub host_metrics: Option<HostMetricsPort>,
+    /// Keeps the queue's resource broker (ADR-t827-3 decision 2); `None`
+    /// for the mode `disabled`, which calls no podman.
+    pub broker: Option<BrokerPort>,
     pub layout: Layout,
 }
 
@@ -620,6 +625,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         release: release::ReleaseWatch::default(),
         host_metrics_port: ports.host_metrics.clone(),
         host_metrics: host_metrics::HostMetricsWatch::default(),
+        broker_port: ports.broker.clone(),
+        broker: broker::BrokerWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
@@ -803,6 +810,10 @@ struct Supervisor<'a> {
     host_metrics_port: Option<HostMetricsPort>,
     /// The sample job of the host's load.
     host_metrics: host_metrics::HostMetricsWatch,
+    /// Keeps the queue's broker; `None` for the mode `disabled`.
+    broker_port: Option<BrokerPort>,
+    /// The broker's job and what the supervisor knows of it.
+    broker: broker::BrokerWatch,
     /// Reads the limit on the improvement proposals running.
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     /// The report job and the day the reports were last found written.
@@ -992,6 +1003,11 @@ impl Supervisor<'_> {
             if let Err(error) = self.queue.deregister_supervisor(&self.token) {
                 warn!(error = %format_args!("{error:#}"), "supervisor registration could not be removed: {error:#}");
             }
+            // After the deregistration, so the last of the supervisors a
+            // `down` stops sees no other one left (ADR-t827-3 decision 2).
+            if result.is_ok() && options.stop.load(Ordering::SeqCst) {
+                self.stop_broker_after_down();
+            }
         }
         result
     }
@@ -1068,6 +1084,7 @@ impl Supervisor<'_> {
                         && !self.host_metrics.running()
                         && !self.forecast.running()
                         && !self.release.running()
+                        && !self.broker.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
                         let runs = self.prepare_handoff();
@@ -1087,6 +1104,9 @@ impl Supervisor<'_> {
                         }));
                     }
                     self.draining = true;
+                    // A broker job in progress is reaped, none started: an
+                    // exec would orphan its podman command.
+                    self.broker_pass(false);
                     self.poll_observer();
                     self.throughput_review_pass(options, false);
                     self.report_pass(false);
@@ -1098,6 +1118,10 @@ impl Supervisor<'_> {
                     continue;
                 }
             }
+            // Before the claims, off the loop: the broker made ready or its
+            // health looked at (ADR-t827-3 decision 2). No claim waits for
+            // it.
+            self.broker_pass(!stopping && self.claiming);
             if self.claiming && !stopping {
                 self.fill_slots(self.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.parallel);

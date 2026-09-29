@@ -341,9 +341,32 @@ pub struct SuperviseOptions {
     /// unless asked for (`supervise --host-metrics-interval`, 30 seconds
     /// by default in the CLI).
     pub host_metrics: Option<HostMetricsSettings>,
+    /// The ports of the queue's resource broker and how often its health
+    /// is looked at (ADR-t827-3); `None` is podman, the health over
+    /// loopback and [`crate::application::supervise::BROKER_HEALTH_INTERVAL`].
+    /// Only a mode other than `disabled` uses them. Tests set them.
+    pub broker: Option<BrokerOptions>,
     /// Counts the supervisor loop's passes, one at the top of each; tests
     /// keep a clone and wait for passes past a threshold (task 1046).
     pub passes: Arc<AtomicU64>,
+}
+
+/// What [`SuperviseOptions::broker`] gives the supervisor's broker.
+#[derive(Clone)]
+pub struct BrokerOptions {
+    pub ports: crate::infrastructure::broker_queue::BrokerPorts,
+    pub health_interval: Duration,
+    /// How long a start or a restart waits for the health.
+    pub health_timeout: Duration,
+}
+
+impl std::fmt::Debug for BrokerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerOptions")
+            .field("health_interval", &self.health_interval)
+            .field("health_timeout", &self.health_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How the supervisor records the host's load (task 516).
@@ -432,6 +455,7 @@ impl SuperviseOptions {
             release_current: None,
             codex: PathBuf::from("codex"),
             host_metrics: None,
+            broker: None,
             passes: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -766,6 +790,60 @@ pub fn supervise_with_reviewer(
             }),
         }
     });
+    // The resource broker (ADR-t827-3 decision 2): `[broker]` of dagq.toml
+    // lowered by host.toml; `disabled` gives no port and calls no podman,
+    // `required` does not start (Phase 2).
+    let broker = {
+        let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let host_wide = options
+            .host_config
+            .clone()
+            .or_else(crate::infrastructure::kpi_config::host_wide_file);
+        let setup = load_broker_setup(Some(&main_checkout), &queue_dir, host_wide.as_deref())?;
+        for warning in &setup.host.warnings {
+            tracing::warn!("[broker] of host.toml: {warning}");
+        }
+        if let Some(reason) = setup.mode.unsupported() {
+            bail!("{reason}; the supervisor was not started");
+        }
+        match setup.mode {
+            crate::domain::broker::BrokerMode::Disabled => None,
+            mode => {
+                let settings = options.broker.clone();
+                let ports = match &settings {
+                    Some(settings) => settings.ports.clone(),
+                    None => crate::infrastructure::broker_queue::system_ports(
+                        setup.host.config.podman.as_deref().map(Path::new),
+                        &data_home()?,
+                        crate::infrastructure::broker_queue::image_checkout(
+                            None,
+                            Some(&main_checkout),
+                        ),
+                    ),
+                };
+                let mut control = queue_broker(
+                    queue_dir.clone(),
+                    layout.runs_dir.clone(),
+                    layout.queue_hash.clone(),
+                    Some(layout.common_dir.clone()),
+                    &setup,
+                    ports,
+                );
+                if let Some(settings) = &settings {
+                    control.health_timeout = settings.health_timeout;
+                    control.health_interval = settings.health_interval.min(control.health_interval);
+                }
+                Some(crate::application::supervise::BrokerPort {
+                    mode,
+                    control: Arc::new(control),
+                    health_interval: settings.map_or(
+                        crate::application::supervise::BROKER_HEALTH_INTERVAL,
+                        |settings| settings.health_interval,
+                    ),
+                })
+            }
+        }
+    };
     let ports = Ports {
         // The supervisor's own transitions (ADR-t728-1 decision 4).
         queues: Arc::new(SqliteOpener {
@@ -805,6 +883,7 @@ pub fn supervise_with_reviewer(
         forecasts,
         release: Some(release),
         host_metrics,
+        broker,
         layout,
     };
     supervisor::supervise(
@@ -851,6 +930,12 @@ pub struct OneShot {
     /// How long one verification command of `integrate` may run in all
     /// ([`VERIFICATION_TIMEOUT`]; tests shorten it, task 639).
     pub verification_timeout: std::time::Duration,
+    /// The ports of the queue's resource broker `down` stops; `None` is
+    /// podman. Tests set them.
+    pub broker: Option<BrokerOptions>,
+    /// The host-wide `host.toml` `up` and `down` read `[broker]` from;
+    /// `None` is `$XDG_CONFIG_HOME/dagq/host.toml`. Tests set it.
+    pub host_config: Option<PathBuf>,
 }
 
 impl OneShot {
@@ -861,7 +946,16 @@ impl OneShot {
             disk: None,
             free_space: free_disk_bytes,
             verification_timeout: VERIFICATION_TIMEOUT,
+            broker: None,
+            host_config: None,
         }
+    }
+
+    /// The host-wide `host.toml` `up` and `down` read.
+    fn host_wide(&self) -> Option<PathBuf> {
+        self.host_config
+            .clone()
+            .or_else(crate::infrastructure::kpi_config::host_wide_file)
     }
 
     /// The wall clock and random UUIDs, what the binary runs with.
@@ -1868,7 +1962,105 @@ same in one step",
                     executable: claude.to_owned(),
                 })
             },
+            broker: self,
         }
+    }
+}
+
+impl lifecycle::BrokerLifecycle for OneShot {
+    fn preflight(&self, checkout: &Path, db: &Path, path: &str) -> Result<Option<Value>> {
+        let queue_dir = db.parent().context("queue database has no directory")?;
+        let setup = load_broker_setup(Some(checkout), queue_dir, self.host_wide().as_deref())?;
+        if setup.mode == crate::domain::broker::BrokerMode::Disabled {
+            return Ok(None);
+        }
+        if let Some(reason) = setup.mode.unsupported() {
+            bail!("{reason}");
+        }
+        // The supervisor runs podman from this PATH (ADR-t827-3 decision
+        // 2); a person installs it, dagq does not.
+        let wanted = setup.host.config.podman.as_deref().unwrap_or("podman");
+        let podman = crate::infrastructure::run_env::resolve_program(
+            wanted,
+            Some(std::ffi::OsStr::new(path)),
+        )
+        .with_context(|| {
+            format!(
+                "[broker] mode = \"{}\" of dagq.toml needs podman, and {wanted} is not found (PATH: {path}); \
+a person installs it (brew install podman), or sets [broker] mode = \"disabled\" in the queue's host.toml",
+                setup.mode.as_str()
+            )
+        })?;
+        Ok(Some(json!({
+            "mode": setup.mode,
+            "podman": podman,
+            "warnings": setup.host.warnings,
+        })))
+    }
+
+    fn after_drain(&self, db: &Path, drained: bool) -> Result<Option<Value>> {
+        let queue = self.open_read_only(db)?;
+        let checkout = bound_checkout(&queue)?;
+        let queue_dir = db.parent().context("queue database has no directory")?;
+        let setup = load_broker_setup(checkout.as_deref(), queue_dir, self.host_wide().as_deref())?;
+        if setup.mode == crate::domain::broker::BrokerMode::Disabled {
+            return Ok(None);
+        }
+        if !drained {
+            return Ok(Some(json!({
+                "stopped": false,
+                "reason": "the supervisor still drains: it stops the broker once its drain ends",
+            })));
+        }
+        let location = QueueLocation::explicit(&db.canonicalize()?);
+        let common_dir = queue.repository_binding()?.map(PathBuf::from);
+        drop(queue);
+        let ports = match &self.broker {
+            Some(options) => options.ports.clone(),
+            None => crate::infrastructure::broker_queue::system_ports(
+                setup.host.config.podman.as_deref().map(Path::new),
+                &data_home()?,
+                None,
+            ),
+        };
+        let broker = queue_broker(
+            location.queue_dir.clone(),
+            location.runs_dir.clone(),
+            location.hash(),
+            common_dir,
+            &setup,
+            ports,
+        );
+        let report = broker.stop()?;
+        // The supervisor may have stopped it at the end of its drain.
+        if report.container_stopped || report.machine_stopped {
+            self.open(db)?.record_queue_event(
+                EventKind::BrokerStopped,
+                json!({
+                    "container": broker.container(),
+                    "container_stopped": report.container_stopped,
+                    "machine_stopped": report.machine_stopped,
+                    "by": "down",
+                }),
+            )?;
+        }
+        Ok(Some(json!({"stopped": true, "stop": report})))
+    }
+
+    fn request_stop(&self, db: &Path, supervisors: &[LeaseToken]) -> Result<bool> {
+        let queue = self.open_read_only(db)?;
+        let checkout = bound_checkout(&queue)?;
+        drop(queue);
+        let queue_dir = db.parent().context("queue database has no directory")?;
+        let setup = load_broker_setup(checkout.as_deref(), queue_dir, self.host_wide().as_deref())?;
+        if setup.mode == crate::domain::broker::BrokerMode::Disabled {
+            return Ok(false);
+        }
+        self.open(db)?.record_queue_event(
+            EventKind::BrokerStopRequested,
+            json!({"supervisors": supervisors, "by": "down"}),
+        )?;
+        Ok(true)
     }
 }
 
@@ -2641,123 +2833,151 @@ pub struct BrokerStartOptions {
     pub cwd: PathBuf,
 }
 
-fn broker_container(
-    location: &QueueLocation,
-    port: u16,
-) -> std::result::Result<
-    crate::application::broker::ContainerSpec,
-    crate::application::broker::BrokerFailure,
-> {
-    use crate::application::broker::{
-        BrokerFailure, ContainerLimits, ContainerSpec, FailureCode, MACHINE, container_name,
-        image_name,
+/// What the queue's broker is set to: the mode in force, the
+/// repository's `[broker]` and the host's.
+#[derive(Debug, Clone)]
+pub struct BrokerSetup {
+    pub mode: crate::domain::broker::BrokerMode,
+    pub repository: crate::domain::broker::BrokerConfig,
+    pub host: crate::infrastructure::broker_config::LoadedHostBroker,
+}
+
+/// `[broker]` of the `dagq.toml` in `checkout` (none without a checkout)
+/// and of the queue's `host.toml` over the host-wide one (ADR-t827-4
+/// decision 4). A `dagq.toml` that cannot be read is an error.
+pub fn load_broker_setup(
+    checkout: Option<&Path>,
+    queue_dir: &Path,
+    host_wide: Option<&Path>,
+) -> Result<BrokerSetup> {
+    let repository = match checkout {
+        Some(checkout) => crate::infrastructure::run_env::load_broker_config(checkout)?,
+        None => crate::domain::broker::BrokerConfig::default(),
     };
-    let git_common_dir = location.git_common_dir.clone().ok_or_else(|| {
-        BrokerFailure::new(
-            FailureCode::RepositoryUnknown,
-            "run from inside the repository the queue belongs to: the broker mounts its Git common dir",
-        )
-    })?;
-    Ok(ContainerSpec {
-        machine: MACHINE.to_owned(),
-        name: container_name(&location.hash()),
-        image: image_name(crate::VERSION),
-        host_port: port,
-        queue_dir: location.queue_dir.clone(),
-        runs_dir: location.runs_dir.clone(),
-        git_common_dir,
-        limits: ContainerLimits::default(),
+    let host = crate::infrastructure::broker_config::load_host_broker(queue_dir, host_wide);
+    Ok(BrokerSetup {
+        mode: crate::domain::broker::resolve_mode(repository.mode, &host.config),
+        repository,
+        host,
     })
+}
+
+/// The queue's broker with `setup`'s resources and limits.
+fn queue_broker(
+    queue_dir: PathBuf,
+    runs_dir: PathBuf,
+    queue_hash: String,
+    git_common_dir: Option<PathBuf>,
+    setup: &BrokerSetup,
+    ports: crate::infrastructure::broker_queue::BrokerPorts,
+) -> crate::infrastructure::broker_queue::QueueBroker {
+    use crate::application::broker::{ContainerLimits, MachineSpec};
+    let host = &setup.host.config;
+    crate::infrastructure::broker_queue::QueueBroker {
+        machine: MachineSpec::with_host(host),
+        limits: ContainerLimits::with_host(host),
+        serve_limits: setup.repository.serve_args(),
+        port: host.fixed_port(),
+        ..crate::infrastructure::broker_queue::QueueBroker::new(
+            queue_dir,
+            runs_dir,
+            queue_hash,
+            git_common_dir,
+            ports,
+        )
+    }
+}
+
+/// The queue's broker for `dagq broker` and `down`: `setup`, the podman
+/// given (else `host.toml`'s, else on `PATH`), the image from `source` or
+/// the checkout this binary was built from or `checkout`.
+fn location_broker(
+    location: &QueueLocation,
+    setup: &BrokerSetup,
+    podman: Option<&Path>,
+    source: Option<PathBuf>,
+    checkout: Option<&Path>,
+) -> Result<crate::infrastructure::broker_queue::QueueBroker> {
+    use crate::infrastructure::broker_queue::{image_checkout, system_ports};
+    let podman = podman
+        .map(Path::to_path_buf)
+        .or_else(|| setup.host.config.podman.as_ref().map(PathBuf::from));
+    let ports = system_ports(
+        podman.as_deref(),
+        &data_home()?,
+        image_checkout(source, checkout),
+    );
+    Ok(queue_broker(
+        location.queue_dir.clone(),
+        location.runs_dir.clone(),
+        location.hash(),
+        location.git_common_dir.clone(),
+        setup,
+        ports,
+    ))
+}
+
+/// The setup with only the host's `[broker]`, for a `dagq.toml` that
+/// cannot be read.
+fn host_setup(location: &QueueLocation) -> BrokerSetup {
+    BrokerSetup {
+        mode: crate::domain::broker::BrokerMode::Disabled,
+        repository: crate::domain::broker::BrokerConfig::default(),
+        host: crate::infrastructure::broker_config::load_host_broker(
+            &location.queue_dir,
+            crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+        ),
+    }
+}
+
+/// The podman given, else `host.toml`'s, else on `PATH`; `podman_missing`
+/// when there is none.
+fn podman_of(
+    podman: Option<&Path>,
+    setup: &BrokerSetup,
+) -> std::result::Result<PathBuf, crate::application::broker::BrokerFailure> {
+    let configured = podman
+        .map(Path::to_path_buf)
+        .or_else(|| setup.host.config.podman.as_ref().map(PathBuf::from));
+    crate::infrastructure::broker_podman::PodmanCli::resolve(configured.as_deref())
+        .map(|podman| podman.executable)
+}
+
+/// The broker's setup for the queue of `location`, its `dagq.toml` read
+/// from the main checkout of `cwd` (none outside a repository).
+fn location_setup(location: &QueueLocation, cwd: &Path) -> Result<BrokerSetup> {
+    let checkout = main_checkout_of(cwd).ok();
+    load_broker_setup(
+        checkout.as_deref(),
+        &location.queue_dir,
+        crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+    )
 }
 
 /// `dagq broker start`: make the queue's broker run in dagq's Podman
 /// machine and answer health on `127.0.0.1` ([`crate::application::broker::start`]).
 /// The queue's lock keeps two starts of one queue apart; the machine has
 /// its own host-wide lock. A failure is recorded in `state.json` and
-/// returned as the [`crate::application::broker::BrokerFailure`].
+/// returned as the [`crate::application::broker::BrokerFailure`]. It
+/// starts the broker whatever the mode: a person or a test asks for it.
 pub fn broker_start(location: &QueueLocation, options: &BrokerStartOptions) -> Result<Value> {
-    use crate::application::broker::{
-        self as broker, BrokerFailure, FailureCode, HEALTH_TIMEOUT, HostLock, MachineSpec,
-    };
-    use crate::infrastructure::broker_podman::{
-        BrokerState, CheckoutSource, FileLock, HttpHealth, PodmanCli, free_port, tokens_active,
-    };
-    let podman = PodmanCli::resolve(options.podman.as_deref())?;
-    let queue_dir = &location.queue_dir;
-    let _queue = FileLock::queue(queue_dir).hold()?;
-    let mut state = BrokerState::read(queue_dir);
-    let port = match options.port.or(state.port) {
-        Some(port) => port,
-        None => free_port()?,
-    };
-    let container = broker_container(location, port)?;
-    let source = match &options.source {
-        Some(checkout) => CheckoutSource {
-            checkout: checkout.clone(),
-        },
-        None => CheckoutSource::of_this_build()
-            .or_else(|| {
-                main_checkout_of(&options.cwd)
-                    .ok()
-                    .filter(|checkout| CheckoutSource::is_source(checkout))
-                    .map(|checkout| CheckoutSource { checkout })
-            })
-            .ok_or_else(|| {
-                BrokerFailure::new(
-                    FailureCode::ImageSourceMissing,
-                    "no dagq checkout to build the broker's image from: pass --source",
-                )
-            })?,
-    };
-    // What the container mounts must exist before podman mounts it.
-    crate::infrastructure::broker_token::ensure_key(queue_dir)?;
-    for dir in [
-        location.runs_dir.clone(),
-        container.active(),
-        container.audit(),
-        container.git_common_dir.join("hooks"),
-    ] {
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    }
-    let machine = MachineSpec::default();
-    let host_lock = FileLock::machine(&data_home()?);
-    let health = HttpHealth::default();
-    let ports = broker::Ports {
-        podman: &podman,
-        host_lock: &host_lock,
-        health: &health,
-    };
-    let scratch = broker::broker_dir(queue_dir).join("build-context");
-    let started = broker::start(
-        &ports,
-        &broker::StartRequest {
-            machine: &machine,
-            container: &container,
-            build: crate::VERSION,
-            source: &source,
-            scratch: &scratch,
-            in_use: tokens_active(queue_dir),
-            health_timeout: HEALTH_TIMEOUT,
-            health_interval: Duration::from_millis(500),
-        },
-    );
-    let _ = std::fs::remove_dir_all(&scratch);
-    state.port = Some(port);
-    state.container = Some(container.name.clone());
-    // A container kept for the runs that still hold tokens runs the image
-    // recorded before.
-    if !matches!(&started, Ok(report) if report.container_outcome.kept_stale) {
-        state.image = Some(container.image.clone());
-    }
-    state.state = Some(match &started {
-        Ok(_) => "running".to_owned(),
-        Err(failure) => failure.code.as_str().to_owned(),
-    });
-    state.write(queue_dir)?;
-    let report = started?;
+    let setup = location_setup(location, &options.cwd)?;
+    // No podman is its own failure before anything else.
+    podman_of(options.podman.as_deref(), &setup)?;
+    let checkout = main_checkout_of(&options.cwd).ok();
+    let mut broker = location_broker(
+        location,
+        &setup,
+        options.podman.as_deref(),
+        options.source.clone(),
+        checkout.as_deref(),
+    )?;
+    broker.port = options.port.or(broker.port);
+    let report = broker.start()?;
+    let port = report.port;
     Ok(json!({
         "state": "running",
-        "machine": machine,
+        "machine": broker.machine,
         "start": report,
         "url": format!("http://127.0.0.1:{port}"),
     }))
@@ -2766,24 +2986,13 @@ pub fn broker_start(location: &QueueLocation, options: &BrokerStartOptions) -> R
 /// `dagq broker stop`: stop the queue's container, then dagq's machine when
 /// no container runs on it.
 pub fn broker_stop(location: &QueueLocation, podman: Option<&Path>) -> Result<Value> {
-    use crate::application::broker::{self as broker, HostLock, MACHINE, container_name};
-    use crate::infrastructure::broker_podman::{BrokerState, FileLock, HttpHealth, PodmanCli};
-    let podman = PodmanCli::resolve(podman)?;
-    let queue_dir = &location.queue_dir;
-    let _queue = FileLock::queue(queue_dir).hold()?;
-    let host_lock = FileLock::machine(&data_home()?);
-    let health = HttpHealth::default();
-    let ports = broker::Ports {
-        podman: &podman,
-        host_lock: &host_lock,
-        health: &health,
-    };
-    let container = container_name(&location.hash());
-    let report = broker::stop(&ports, MACHINE, &container)?;
-    let mut state = BrokerState::read(queue_dir);
-    state.container = Some(container);
-    state.state = Some("stopped".to_owned());
-    state.write(queue_dir)?;
+    // Only host.toml's podman and machine matter to a stop: a dagq.toml
+    // that cannot be read does not keep it from stopping.
+    let setup = location_setup(location, &std::env::current_dir()?)
+        .unwrap_or_else(|_| host_setup(location));
+    podman_of(podman, &setup)?;
+    let broker = location_broker(location, &setup, podman, None, None)?;
+    let report = broker.stop()?;
     Ok(json!({"state": "stopped", "stop": report}))
 }
 
@@ -2791,40 +3000,38 @@ pub fn broker_stop(location: &QueueLocation, podman: Option<&Path>) -> Result<Va
 /// health, read without changing anything. No podman is a state
 /// (`podman_missing`), not an error.
 pub fn broker_status(location: &QueueLocation, podman: Option<&Path>) -> Result<Value> {
-    use crate::application::broker;
-    use crate::infrastructure::broker_podman::{BrokerState, FileLock, HttpHealth, PodmanCli};
+    use crate::infrastructure::broker_podman::{BrokerState, PodmanCli};
     let state = BrokerState::read(&location.queue_dir);
-    let podman = match PodmanCli::resolve(podman) {
-        Ok(podman) => podman,
-        Err(failure) => {
-            return Ok(json!({
-                "state": failure.code.as_str(),
-                "error": failure.to_json(),
-                "recorded": state,
-            }));
-        }
+    let setup = location_setup(location, &std::env::current_dir()?);
+    let mode = match &setup {
+        Ok(setup) => json!(setup.mode),
+        Err(error) => json!({"error": format!("{error:#}")}),
     };
-    let container = match broker_container(location, state.port.unwrap_or(0)) {
-        Ok(container) => container,
-        Err(failure) => {
-            return Ok(json!({
-                "state": failure.code.as_str(),
-                "error": failure.to_json(),
-                "recorded": state,
-            }));
-        }
+    let setup = setup.unwrap_or_else(|_| host_setup(location));
+    let podman = podman
+        .map(Path::to_path_buf)
+        .or_else(|| setup.host.config.podman.as_ref().map(PathBuf::from));
+    let unavailable = |failure: crate::application::broker::BrokerFailure| {
+        json!({
+            "mode": mode,
+            "state": failure.code.as_str(),
+            "error": failure.to_json(),
+            "recorded": state,
+        })
     };
-    let host_lock = FileLock::machine(&data_home()?);
-    let health = HttpHealth::default();
-    let ports = broker::Ports {
-        podman: &podman,
-        host_lock: &host_lock,
-        health: &health,
+    let executable = match PodmanCli::resolve(podman.as_deref()) {
+        Ok(podman) => podman.executable,
+        Err(failure) => return Ok(unavailable(failure)),
     };
-    let report = broker::status(&ports, &container, state.port, crate::VERSION);
+    let broker = location_broker(location, &setup, podman.as_deref(), None, None)?;
+    let report = match broker.status() {
+        Ok(report) => report,
+        Err(failure) => return Ok(unavailable(failure)),
+    };
     let mut value = serde_json::to_value(report)?;
+    value["mode"] = mode;
     value["client"] = broker_client_report();
-    value["podman"] = json!(podman.executable);
+    value["podman"] = json!(executable);
     value["recorded"] = serde_json::to_value(state)?;
     Ok(value)
 }

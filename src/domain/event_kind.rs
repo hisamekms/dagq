@@ -45,6 +45,12 @@ event_kinds! {
     AuthorizationDenied => "authorization_denied",
     AutoRepaired => "auto_repaired",
     BackendCallFailed => "backend_call_failed",
+    BrokerHealthy => "broker_healthy",
+    BrokerImageBuilt => "broker_image_built",
+    BrokerStarted => "broker_started",
+    BrokerStopRequested => "broker_stop_requested",
+    BrokerStopped => "broker_stopped",
+    BrokerUnhealthy => "broker_unhealthy",
     BuildOutputsRemoved => "build_outputs_removed",
     CandidatesSampled => "candidates_sampled",
     ClaimDeferralEnded => "claim_deferral_ended",
@@ -353,6 +359,14 @@ impl EventKind {
                 | UsageLimited
                 // The cleanup for the disk (task 377) is about no run.
                 | AutoRepaired
+                // The supervisor's resource broker (ADR-t827-3 decisions
+                // 2 and 3) is the queue's.
+                | BrokerHealthy
+                | BrokerImageBuilt
+                | BrokerStarted
+                | BrokerStopRequested
+                | BrokerStopped
+                | BrokerUnhealthy
                 // The stop of a gone supervisor's plan or goal review (task
                 // 443).
                 | HeadlessJobStopped
@@ -661,6 +675,12 @@ mod tests {
             (EventKind::AuthorizationDenied, "authorization_denied"),
             (EventKind::AutoRepaired, "auto_repaired"),
             (EventKind::BackendCallFailed, "backend_call_failed"),
+            (EventKind::BrokerHealthy, "broker_healthy"),
+            (EventKind::BrokerImageBuilt, "broker_image_built"),
+            (EventKind::BrokerStarted, "broker_started"),
+            (EventKind::BrokerStopRequested, "broker_stop_requested"),
+            (EventKind::BrokerStopped, "broker_stopped"),
+            (EventKind::BrokerUnhealthy, "broker_unhealthy"),
             (EventKind::BuildOutputsRemoved, "build_outputs_removed"),
             (EventKind::CandidatesSampled, "candidates_sampled"),
             (EventKind::ClaimDeferralEnded, "claim_deferral_ended"),

@@ -307,8 +307,16 @@ pub struct BrokerState {
     pub port: Option<u16>,
     pub container: Option<String>,
     pub image: Option<String>,
-    /// `running`, `stopped`, or a failure's code.
+    /// `building` (the supervisor builds the image), `running`,
+    /// `stopped`, or a failure's code.
     pub state: Option<String>,
+    /// The build identifier of the dagq that made the container.
+    #[serde(default)]
+    pub build: Option<String>,
+    /// When the container last answered its health after a start (unix
+    /// seconds).
+    #[serde(default)]
+    pub started_at: Option<i64>,
 }
 
 impl BrokerState {
@@ -561,6 +569,8 @@ mod tests {
             container: Some("c".to_owned()),
             image: Some("i".to_owned()),
             state: Some("running".to_owned()),
+            build: Some("0.4.0-dev+abc".to_owned()),
+            started_at: Some(1),
         };
         state.write(dir.path()).unwrap();
         assert_eq!(BrokerState::read(dir.path()), state);

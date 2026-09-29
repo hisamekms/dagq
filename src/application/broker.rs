@@ -331,6 +331,18 @@ impl Default for MachineSpec {
 }
 
 impl MachineSpec {
+    /// The defaults with the host's overrides of `host.toml`'s `[broker]`
+    /// (ADR-t827-3 decision 7): the name stays dagq's.
+    pub fn with_host(host: &crate::domain::broker::HostBroker) -> Self {
+        let default = Self::default();
+        Self {
+            cpus: host.machine_cpus.unwrap_or(default.cpus),
+            memory_mib: host.machine_memory_mib.unwrap_or(default.memory_mib),
+            disk_gib: host.machine_disk_gib.unwrap_or(default.disk_gib),
+            ..default
+        }
+    }
+
     /// `podman machine init`: rootless, the default volumes (ADR-t827-3
     /// decision 6), and `--update-connection=false` so the machine does
     /// not become the default connection even when it is the first.
@@ -611,6 +623,19 @@ pub fn ensure_image(
     if image_exists(podman, machine, image)? {
         return Ok(false);
     }
+    build_image(podman, machine, image, build, source, scratch)?;
+    Ok(true)
+}
+
+/// Stage the build context in `scratch` and build `image` from it.
+fn build_image(
+    podman: &dyn Podman,
+    machine: &str,
+    image: &str,
+    build: &str,
+    source: &dyn ImageSource,
+    scratch: &Path,
+) -> BrokerResult<()> {
     let rust_version = source.stage(scratch)?;
     checked(
         podman,
@@ -618,7 +643,7 @@ pub fn ensure_image(
         FailureCode::ImageBuildFailed,
         &format!("podman build {image}"),
     )?;
-    Ok(true)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +663,18 @@ impl Default for ContainerLimits {
             memory: "512m".to_owned(),
             cpus: "1".to_owned(),
             pids: 256,
+        }
+    }
+}
+
+impl ContainerLimits {
+    /// The defaults with the host's overrides of `host.toml`'s `[broker]`.
+    pub fn with_host(host: &crate::domain::broker::HostBroker) -> Self {
+        let default = Self::default();
+        Self {
+            memory: host.container_memory.clone().unwrap_or(default.memory),
+            cpus: host.container_cpus.clone().unwrap_or(default.cpus),
+            pids: host.container_pids.unwrap_or(default.pids),
         }
     }
 }
@@ -671,6 +708,9 @@ pub struct ContainerSpec {
     /// The repository's Git common dir (`git rev-parse --git-common-dir`).
     pub git_common_dir: PathBuf,
     pub limits: ContainerLimits,
+    /// The flags of `serve` from `[broker]` of `dagq.toml` that differ
+    /// from its defaults ([`crate::domain::broker::BrokerConfig::serve_args`]).
+    pub serve_limits: Vec<String>,
 }
 
 /// `<queue dir>/broker`.
@@ -716,7 +756,7 @@ impl ContainerSpec {
     /// `dagq-broker serve`'s arguments inside the container.
     pub fn serve_args(&self) -> Vec<String> {
         let path = |path: PathBuf| path.display().to_string();
-        vec![
+        let mut all = vec![
             "serve".to_owned(),
             "--container".to_owned(),
             "--listen".to_owned(),
@@ -729,7 +769,9 @@ impl ContainerSpec {
             path(self.audit()),
             "--root".to_owned(),
             path(self.runs_dir.clone()),
-        ]
+        ];
+        all.extend(self.serve_limits.iter().cloned());
+        all
     }
 
     /// The SHA-256 of the arguments of `podman run` but the label itself:
@@ -1007,6 +1049,9 @@ pub struct StartRequest<'a> {
     pub in_use: bool,
     pub health_timeout: Duration,
     pub health_interval: Duration,
+    /// Called once the image is known to be missing, before its build
+    /// starts (the supervisor records the state `building`).
+    pub on_build: Option<&'a dyn Fn()>,
 }
 
 /// What [`start`] did.
@@ -1015,6 +1060,8 @@ pub struct StartReport {
     pub machine: MachineOutcome,
     pub image: String,
     pub image_built: bool,
+    /// How long the build took, when there was one.
+    pub build_ms: Option<u64>,
     pub container: String,
     pub container_outcome: ContainerOutcome,
     pub port: u16,
@@ -1042,15 +1089,27 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
     // (ADR-t827-3 decision 5).
     let _held = ports.host_lock.hold()?;
     let machine = ensure_machine_held(ports.podman, request.machine)?;
-    let image = |podman: &dyn Podman| {
-        ensure_image(
+    // The image, built when missing: the supervisor is told before the
+    // build starts (`building`), and the build is timed.
+    let mut build_ms = None;
+    let mut image = |podman: &dyn Podman| -> BrokerResult<bool> {
+        if image_exists(podman, &spec.machine, &spec.image)? {
+            return Ok(false);
+        }
+        if let Some(on_build) = request.on_build {
+            on_build();
+        }
+        let started = Instant::now();
+        build_image(
             podman,
             &spec.machine,
             &spec.image,
             request.build,
             request.source,
             request.scratch,
-        )
+        )?;
+        build_ms = Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        Ok(true)
     };
     let healthy = || {
         wait_healthy(
@@ -1101,6 +1160,7 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
         machine,
         image: spec.image.clone(),
         image_built,
+        build_ms,
         container: spec.name.clone(),
         container_outcome,
         port: spec.host_port,
@@ -1109,6 +1169,54 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
         build_matches,
         rebuilt,
     })
+}
+
+/// Make the queue's container again and wait for its health: the
+/// automatic repair of a broker whose health failed in a row (ADR-t827-3
+/// decision 3, ADR-0047's first layer). The host lock is held throughout,
+/// so the machine is not stopped under it; a machine that does not run is
+/// not started here (the next [`start`] does that).
+pub fn restart(
+    ports: &Ports,
+    spec: &ContainerSpec,
+    health_timeout: Duration,
+    health_interval: Duration,
+) -> BrokerResult<dagq_broker_protocol::HealthResponse> {
+    let _held = ports.host_lock.hold()?;
+    let machine = machine_status(ports.podman, &spec.machine)?;
+    if machine.state != MachineState::Running {
+        return Err(BrokerFailure::new(
+            if machine.others_running.is_empty() {
+                FailureCode::MachineFailed
+            } else {
+                FailureCode::MachineBusy
+            },
+            format!("the machine {} does not run", spec.machine),
+        ));
+    }
+    stop_container(ports.podman, &spec.machine, &spec.name)?;
+    ensure_container(ports.podman, spec, false)?;
+    wait_healthy(
+        ports.health,
+        spec.host_port,
+        health_timeout,
+        health_interval,
+    )
+}
+
+/// The queue's broker as the supervisor and `down` drive it (ADR-t827-3
+/// decision 2): each call is one of the steps above on the queue's own
+/// machine, image and container, and records what it did in the queue's
+/// `state.json`. The adapter holds the ports and the queue's settings.
+pub trait BrokerControl: Send + Sync {
+    /// [`start`], with the state `building` while the image builds.
+    fn ensure(&self) -> BrokerResult<StartReport>;
+    /// One look at the health of the running container.
+    fn health(&self) -> Result<(), String>;
+    /// [`restart`].
+    fn restart(&self) -> BrokerResult<()>;
+    /// [`stop`].
+    fn stop(&self) -> BrokerResult<StopReport>;
 }
 
 /// What [`stop`] did.
@@ -1366,6 +1474,7 @@ mod tests {
             runs_dir: PathBuf::from("/Users/me/.local/share/dagq/abc123/runs"),
             git_common_dir: PathBuf::from("/Users/me/src/repo/.git"),
             limits: ContainerLimits::default(),
+            serve_limits: Vec::new(),
         }
     }
 
@@ -1912,6 +2021,7 @@ mod tests {
             in_use: false,
             health_timeout: Duration::ZERO,
             health_interval: Duration::ZERO,
+            on_build: None,
         };
         // From nothing: init, start, build, run.
         let podman = start_script(
@@ -2006,6 +2116,7 @@ mod tests {
             in_use,
             health_timeout: Duration::ZERO,
             health_interval: Duration::ZERO,
+            on_build: None,
         };
         let rebuilding = || {
             Script::default()
@@ -2114,6 +2225,163 @@ mod tests {
         assert!(!report.matches);
         assert_eq!(report.build.as_deref(), Some("b"));
         assert_eq!(report.error.unwrap()["code"], "version_mismatch");
+    }
+
+    #[test]
+    fn the_hosts_resources_reach_machine_init_and_podman_run() {
+        use crate::domain::broker::HostBroker;
+        // No override: the defaults.
+        assert_eq!(
+            MachineSpec::with_host(&HostBroker::default()),
+            MachineSpec::default()
+        );
+        assert_eq!(
+            ContainerLimits::with_host(&HostBroker::default()),
+            ContainerLimits::default()
+        );
+        let host = HostBroker {
+            machine_cpus: Some(2),
+            machine_memory_mib: Some(2048),
+            machine_disk_gib: Some(20),
+            container_memory: Some("1g".into()),
+            container_cpus: Some("2".into()),
+            container_pids: Some(512),
+            ..HostBroker::default()
+        };
+        let machine = MachineSpec::with_host(&host);
+        assert_eq!(machine.name, MACHINE);
+        assert_eq!(
+            machine.init_args(),
+            [
+                "machine",
+                "init",
+                "--cpus",
+                "2",
+                "--memory",
+                "2048",
+                "--disk-size",
+                "20",
+                "--update-connection=false",
+                "dagq"
+            ]
+        );
+        let mut container = spec();
+        container.limits = ContainerLimits::with_host(&host);
+        container.serve_limits = vec!["--exec-allow".into(), "ls".into()];
+        let run = container.run_args().join(" ");
+        assert!(
+            run.contains("--memory 1g --cpus 2 --pids-limit 512"),
+            "{run}"
+        );
+        assert!(run.ends_with(" --exec-allow ls"), "{run}");
+        // Other limits are another container.
+        assert_ne!(container.fingerprint(), spec().fingerprint());
+    }
+
+    #[test]
+    fn start_says_when_the_image_builds() {
+        let spec = spec();
+        let machine = MachineSpec::default();
+        let source = Source(Cell::new(0));
+        let lock = CountingLock::default();
+        let health = Healthy(Ok(dagq_broker_protocol::HealthResponse::ok("b")));
+        let told = Cell::new(0);
+        let on_build = || told.set(told.get() + 1);
+        let request = StartRequest {
+            machine: &machine,
+            container: &spec,
+            build: "b",
+            source: &source,
+            scratch: Path::new("/scratch"),
+            in_use: false,
+            health_timeout: Duration::ZERO,
+            health_interval: Duration::ZERO,
+            on_build: Some(&on_build),
+        };
+        let podman = start_script(vec![ok(RUNNING)], false, PodmanOutput::default());
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        assert!(report.image_built && report.build_ms.is_some());
+        assert_eq!(told.get(), 1);
+        assert_eq!(podman.called("--connection dagq image exists"), 1);
+        // With the image there, no build and no word of one.
+        let podman = start_script(vec![ok(RUNNING)], true, inspect(true, &spec.image));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        assert!(!report.image_built && report.build_ms.is_none());
+        assert_eq!(told.get(), 1);
+    }
+
+    #[test]
+    fn restart_makes_the_container_again_on_a_running_machine_only() {
+        let spec = spec();
+        let lock = CountingLock::default();
+        let health = Healthy(Ok(dagq_broker_protocol::HealthResponse::ok("b")));
+        // The container is there, then removed.
+        let podman = Script::default()
+            .on(&list(), vec![ok(RUNNING)])
+            .on(
+                &["--connection", "dagq", "container", "exists"],
+                vec![ok(""), fail("")],
+            )
+            .on(
+                &["--connection", "dagq", "container", "inspect"],
+                vec![inspect(true, &spec.image)],
+            );
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        restart(&ports, &spec, Duration::ZERO, Duration::ZERO).unwrap();
+        assert_eq!(
+            podman.called("--connection dagq rm --force --time 10 dagq-broker-abc123"),
+            1
+        );
+        assert_eq!(podman.called("--connection dagq run --detach"), 1);
+        assert_eq!(lock.held.get(), 1);
+        // Still silent after it: unhealthy.
+        let silent = Healthy(Err("refused".to_owned()));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &silent,
+        };
+        assert_eq!(
+            restart(&ports, &spec, Duration::ZERO, Duration::ZERO)
+                .unwrap_err()
+                .code,
+            FailureCode::Unhealthy
+        );
+        // A machine that does not run is not started here; a person's
+        // machine running is machine_busy.
+        for (machines, code) in [
+            (STOPPED, FailureCode::MachineFailed),
+            (OTHER_RUNNING, FailureCode::MachineBusy),
+        ] {
+            let podman = start_script(vec![ok(machines)], true, inspect(true, &spec.image));
+            let ports = Ports {
+                podman: &podman,
+                host_lock: &lock,
+                health: &health,
+            };
+            assert_eq!(
+                restart(&ports, &spec, Duration::ZERO, Duration::ZERO)
+                    .unwrap_err()
+                    .code,
+                code
+            );
+            assert_eq!(podman.called("--connection dagq run"), 0);
+            assert_eq!(podman.called("machine start"), 0);
+        }
     }
 
     #[test]
