@@ -1097,7 +1097,9 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
     // A landing branch that no longer resolves (here: main vanished)
     // holds the claims while the supervisor stays (ADR-t615-1). An error
     // out of the loop itself (here: main names no commit) ends the process
-    // with nothing active, so it deregisters too.
+    // with nothing active, so it deregisters too. Main may vanish in the
+    // middle of a pass here; the claim holds then too
+    // (`main_vanishing_after_the_landing_branch_check_holds_the_claim`).
     let options = supervise_options(1, false);
     let mut supervisor = Some({
         let (db, repo, backend, options) =
@@ -1143,6 +1145,74 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
     assert!(error.contains("Needed a single revision"), "{error}");
     assert!(queue.supervisors().unwrap().is_empty());
     assert!(queue.show(TaskId::new(1)).unwrap().runs.is_empty());
+}
+
+thread_local! {
+    /// The repository whose main [`load_deleting_main`] deletes, once, on
+    /// the supervisor's thread only.
+    static DELETE_MAIN_IN: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A load average port that deletes `refs/heads/main` of the repository
+/// armed in [`DELETE_MAIN_IN`] the first time it is read. A pass with no
+/// run reads the load only when it judges the claim hold, after the check
+/// of the landing branch at the top of the pass and before the claim reads
+/// main.
+fn load_deleting_main() -> Option<f64> {
+    if let Some(repo) = DELETE_MAIN_IN.with(|armed| armed.borrow_mut().take()) {
+        git(&repo, &["update-ref", "-d", "refs/heads/main"]);
+    }
+    None
+}
+
+/// Main vanishing between the check of the landing branch at the top of a
+/// pass and the claim holds the claims like a landing branch that did not
+/// resolve at the top (ADR-t615-1): the pass ends without a run and the
+/// loop does not fail. Before the claim reread the landing branch, it
+/// ended the loop with the error of `main_head`, which deregistered a
+/// resident supervisor in the second stage of
+/// `resident_supervisor_without_runs_is_listed_until_it_stops` (task 1018).
+#[test]
+fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, true, VALID_AGENT);
+    let options = SuperviseOptions {
+        load_average: load_deleting_main,
+        ..supervise_options(1, true)
+    };
+    DELETE_MAIN_IN.with(|armed| *armed.borrow_mut() = Some(repo.clone()));
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert!(
+        DELETE_MAIN_IN.with(|armed| armed.borrow().is_none()),
+        "the pass never read the load"
+    );
+    assert_eq!(outcome["outcome"], "finished", "{outcome}");
+    assert_eq!(outcome["runs"], json!([]));
+    assert_eq!(outcome["errors"], json!([]));
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "--quiet", "refs/heads/main"])
+        .bounded_output()
+        .unwrap()
+        .status;
+    assert!(!status.success(), "main survived the pass");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    // A failed backend call reads the load too; none deleted main before
+    // the check at the top of the pass.
+    assert!(
+        queue
+            .all_events()
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "backend_call_failed")
+    );
+    let task = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(task.task.status(), TaskStatus::Ready);
+    assert!(task.runs.is_empty());
+    assert!(queue.run_leases().unwrap().is_empty());
+    assert!(queue.supervisors().unwrap().is_empty());
 }
 
 /// A supervisor's progress goes to its process's JSON Lines file in the
