@@ -44,13 +44,23 @@ related:
 ## コマンド（`throughput-review`、`src/throughput_review.rs`）
 
 1. 期間を`--at`（無ければqueueの時計の今）と`--utc-offset`（無ければhostの時間帯）で決め、着地を読む。毎時は判定し、当たらなければ上のとおりskippedで終わる（`--dry-run`は判定に関わらずpromptを返す）
-2. 入力（`input.json`）: `period`、`landings`（期間の合計、前の同じ長さの期間の合計、毎時は判定と同じ26時間・日次は24時間の`by_hour`・週次は7日の`by_day`、期間の`run_integrated`の最大200件）、`hourly`（毎時の判定）、`kpi`（毎時は日の2期間、日次は日の8期間、週次は週の5期間。`at`は期間の終わりの直前）、`stats`（毎時は直前6時間、日次・週次は期間）、`claim_deferred`（`stats`と同じ範囲の`claim_deferred`の`reason`ごとの件数）、`asks`（同じ範囲で開いたaskの`kind`ごとの件数と、今開いているaskの`kind`ごとの件数）、`timelines`（期間に着地したrunのうち最初のeventから着地までが長い3件の`timeline`、gapは300秒以上）。読めない部分は`{"error": ...}`
-3. `<queue dir>/reports/reviews/<mode>-<period>/`（あれば`-1`…を付ける）を作り、`prompt.md`・`input.json`を書き、`throughput_review_started`（`mode`・`period`・`reasons`・`dir`・`session_id`・`launch`。`launch`は`provider`を含む。[Actor model](actor-model.md)）を記録する
+2. 入力（`input.json`）: `period`、`landings`（期間の合計、前の同じ長さの期間の合計、毎時は判定と同じ26時間・日次は24時間の`by_hour`・週次は7日の`by_day`、期間の`run_integrated`の最大200件）、`hourly`（毎時の判定）、`kpi`（毎時は日の2期間、日次は日の8期間、週次は週の5期間。`at`は期間の終わりの直前）、`stats`（毎時は直前6時間、日次・週次は期間）、`claim_deferred`（`stats`と同じ範囲の`claim_deferred`の`reason`ごとの件数）、`asks`（同じ範囲で開いたaskの`kind`ごとの件数と、今開いているaskの`kind`ごとの件数）、`timelines`（期間に着地したrunのうち最初のeventから着地までが長い3件の`timeline`、gapは300秒以上）。読めない部分は`{"error": ...}`。promptにはこの全体ではなく、下の「promptの入力」の要約だけを載せる
+3. `<queue dir>/reports/reviews/<mode>-<period>/`（あれば`-1`…を付ける）を作り、`prompt.md`・`input.json`（入力の全体）を書き、`throughput_review_started`（`mode`・`period`・`reasons`・`dir`・`session_id`・`launch`。`launch`は`provider`を含む。[Actor model](actor-model.md)）を記録する
 4. agentはactor executorの`HeadlessProgram::Job`（権限の意図`ACCESS`は`queue_cli`で、Claude Codeは`--allowedTools Bash(dagq:*)`に訳す。MCPを読まない。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で`DAGQ_ROLE=throughput-review-job`・`DAGQ_ACTOR_ID=throughput-review-job:<mode>:<period>`として起動し、stdoutとstderrを`output.log`に書く（結果はproviderの`job_reply`が`output.log`から取り出した返答から読む）。時間の上限は`--timeout`（既定1800秒）で、過ぎたら子孫ごとkillする。model / effortは`dagq.toml`の`[roles.throughput_review]`（無ければproviderの既定）
 5. 成功したら`output.log`を`parse_output`で読む: `## Conclusion`の見出しの下の行（無ければ先頭の行）を最大5行（`MAX_CONCLUSION_LINES`）の結論にし、`next_move`でfenceしたJSON（`summary`・`detail`・`why`）を次の一手として外した残りを全文として`review.md`に、結論・次の一手・読めなかった理由（`next_move_error`）・findingのIDを`review.json`に書く
 6. 週次だけ、次の一手をfindingにする: kind `throughput`、対象queue、subject `weekly/<period>`、summaryは`summary`、detailは`detail`と`Why:`、根拠は`throughput_review_started`のevent、`propose`（proposalを求める印）の理由は`why`、記録者は`supervisor`。runtimeのplannerの既存の経路（[Finding planners](finding-planners.md)）でproposalになり、`[kpi] max_improvement_proposals`に従う。毎時・日次の出力にblockがあっても記録しない
 7. `throughput_review_reported`（`mode`・`period`・`reasons`・`conclusion`・`path`（`review.md`）・`dir`・`finding_id`・`next_move_error`）を記録する。これがinbox宛ての知らせるだけのattention（`report the review`）
-8. `throughput_review_finished`（`mode`・`period`・`outcome`（`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗））・`exit_code`・`error`・`reasons`・`dir`・`duration_secs`、成功なら`reported_event_id`・`finding_id`・`path`）を記録する。失敗はlogとこのeventに残るだけで、attentionにもaskにもならず、claimと着地を止めない
+8. `throughput_review_finished`（`mode`・`period`・`outcome`（`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗））・`exit_code`・`error`・`reasons`・`dir`・`duration_secs`、成功なら`reported_event_id`・`finding_id`・`path`）を記録する。`outcome`が`error`か`failed`のもの（modeを問わない）はinbox宛ての知らせるだけのattention（`check the failed review`、task 1099）になり、askにはならず、claimと着地を止めない。失敗した期間はやり直さない（上の「期限」）。skippedと`succeeded`はattentionではない。attentionなので、KPIの`attentions_per_landing`（queueのeventのattentionも数える）にも加わる
+
+## promptの入力（task 1099）
+
+Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。引数とenvの合計はhostの`ARG_MAX`（macOSで1MiB）を超えられないが、日次・週次の入力の全体は数MB（2026-09-28の日次で2.75MB、2026-W39の週次で1.27MB。大きいのは`kpi.periods`の各期間の全KPIの全層・比較・marks、`stats`の`runs`・`versions`・`goals`、`timelines`）で、起動が`Argument list too long (os error 7)`で失敗していた。stdinで渡してもこの大きさはagentの文脈に収まらないので、promptに載せる入力を要約して上限を設ける（providerのinterfaceは変えない）。
+
+- 上限: prompt全体が`PROMPT_LIMIT`（128KiB）以下、そのうち入力（pretty JSON）が`PROMPT_INPUT_LIMIT`（96KiB）以下。残りは指示・手順・言語の行。`ARG_MAX`の1/8で、envを足しても当たらない。2026-09-28の日次の入力は要約で約62KB、2026-W39の週次は約70KBで、どれも落とさずに収まる
+- 要約（`prompt_input`）: `period`、`landings`（`events`を除く）、`hourly`、`kpi`（`cores`、`periods`は各期間の`label`・`partial`・`runs`だけ、`latest`は見直す期間（最後の期間）の各KPIの`all`層と、その`comparison`の`all`層（`judged`・`delta`を除く）と`unavailable`、`targets`は各目標から`periods`を除き、最後の期間の判定を`latest`に置いたもの）、`stats`（`parts`に`overall`・`landing_utilization`・`waiting`・`claim_deferrals`・`claim_holds`・`landing_holds`・`escalations`・`backend_failures`・`verification_failures`・`provider_switches`（`PROMPT_STATS`）、`omitted`に残りのkeyの名前）、`claim_deferred`、`asks`、`timelines`（`run_id`と`secs`だけ）。読めなかった部分の`{"error": ...}`はそのまま載せる。kpi.mdの手順のCadenceが日次（外れ値と目標割れ）・週次（手順1〜5）で見る数値は`latest`と`targets`と`stats.parts`にあり、層ごとの値・過去の期間の値・runごとの値・timelineはjobが読むコマンドで取りに行く
+- 切り詰め: 要約がなお`PROMPT_INPUT_LIMIT`を超えるときは、`stats` → `kpi.latest` → `timelines` → `kpi.targets` → `kpi.periods` → `asks` → `claim_deferred` → `landings` → `kpi`（形の分からない`kpi`は丸ごと載るので最後）の順（`DROP_ORDER`。大きく、コマンドで読み直しやすいものから）に、収まるまで丸ごと落とし、落としたものを`omitted_to_fit`に名前で残す。`period`と`hourly`は落とさない
+- promptは要約だと明かし、入力の全体が見直しのdirの`input.json`にあること（人が読むためのもの）と、細部は`kpi`（他の期間・層・host）・`stats --since <入力のstatsの始め（毎時は期間の終わりの6時間前、日次・週次は期間の始め）> --until <期間の終わり> --full`（run）・`timeline RUN`（長いrun）・`events --full`（着地は`--kind run_integrated`）で取りに行くことを指示する。dry runはdirを作らず、作るはずのdirの`input.json`を名指す
+- jobの権限（`ACCESS`の`queue_cli`）は広げない。`input.json`を読ませるにはClaude Codeの`Read`を許すことになり、queueの外のファイルも読めるようになる。要約から外したものはどれも読むコマンドで同じものが得られるので、ファイルを読む必要はない
 
 ## 権限
 
@@ -58,11 +68,12 @@ related:
 
 ## event
 
-`throughput_review_started` / `throughput_review_finished` / `throughput_review_reported`はqueueのevent（task・goal・runを持たない）。attentionは`throughput_review_reported`だけ（[Events and watch](events-watch.md)）。`events`・`watch`のcompact形はこのeventに`mode`・`period`・`reasons`・`conclusion`・`path`・`finding_id`を載せる。
+`throughput_review_started` / `throughput_review_finished` / `throughput_review_reported`はqueueのevent（task・goal・runを持たない）。attentionは`throughput_review_reported`（`report the review`）と、`outcome`が`error` / `failed`の`throughput_review_finished`（`check the failed review`。task 1099）の2つで、どちらも知らせるだけ（[Events and watch](events-watch.md)）。`events`・`watch`のcompact形は`throughput_review_reported`に`mode`・`period`・`reasons`・`conclusion`・`path`・`finding_id`を、`throughput_review_finished`に`mode`・`period`・`outcome`・`dir`（`output.log`のあるdir）と`exit_code`・`reason`（payloadの`error`）を載せる。
 
 ## test
 
 - `src/domain/throughput_review.rs`: 期間とラベル（日本時間の時・日・ISO週、0時の時）、bucketの数え方、平常の時間・50%と3件の両方が要ること・3時間続く低下と着地の無い時間は続くあいだ毎時起動すること、execで引き継いだ子の選び方（`children_finished`）・判定の入力の長さ、出力の結論（見出しあり・なし、5行まで）と次の一手（読めない・summaryが空・閉じていないblockは本文に残す）、期間の記録の有無と35分以内の始まり
-- `src/throughput_review.rs`: `reference/kpi.md`の節だけを写すこと、頻度ごとのpromptと週次だけが次の一手を求めること
-- `tests/it/runtime_throughput_review.rs`: 規則に当たらない時間はagentを起動せずskippedだけを書くこと（dry runはpromptを返す）、当たった時間の保存（`review.md`・`review.json`・`input.json`）とroleとMCPなしと、jobのnote・finding・mark・readyが拒まれることと`kpi`は読めること、inboxの`events`（`watch`と同じ判定）に`report the review`と結論が載ること、週次の次の一手がproposalを求めるfindingになること、失敗が`failed`の記録だけでattentionにならないこと、supervisorが時・日・週を1度ずつ始めて同じ期間を2度始めないことと`throughput_review: false`で始めないこと、失敗するjobがclaimと着地を止めないこと
+- `src/throughput_review.rs`: `reference/kpi.md`の節だけを写すこと、頻度ごとのpromptと週次だけが次の一手を求めること、promptが`input.json`の場所と読むコマンド（`kpi`・`stats`・`timeline`・`events`）で細部を取りに行く指示を持つこと、MB級の入力の要約が上限に収まり見直しに要る部分を残すこと、上限を超える要約が`DROP_ORDER`の順に落として`omitted_to_fit`に名を残すこと
+- `src/domain/mod.rs`: `throughput_review_finished`は`error` / `failed`だけが`check the failed review`で、skippedと`succeeded`はattentionでないこと
+- `tests/it/runtime_throughput_review.rs`: 規則に当たらない時間はagentを起動せずskippedだけを書くこと（dry runはpromptを返す）、当たった時間の保存（`review.md`・`review.json`・`input.json`）とroleとMCPなしと、jobのnote・finding・mark・readyが拒まれることと`kpi`は読めること、inboxの`events`（`watch`と同じ判定）に`report the review`と結論が載ること、週次の次の一手がproposalを求めるfindingになること、`failed`（非0終了）と`error`（起動できない）の失敗がinboxの`events`に`check the failed review`として載りaskを開かないこと、MB級の入力（8日分のmarks）の日次と週次がagent（promptを引数で受けるstub）を起動して`succeeded`になりpromptが`PROMPT_LIMIT`以下であること、supervisorが時・日・週を1度ずつ始めて同じ期間を2度始めないことと`throughput_review: false`で始めないこと、失敗するjobがclaimと着地を止めずattentionだけを残すこと
 - `tests/it/cli_*.rs`のroleの一覧に`throughput-review-job`を足し、状態を変えるコマンドが拒まれることを確かめる

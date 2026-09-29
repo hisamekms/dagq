@@ -1548,6 +1548,13 @@ pub enum AttentionNext {
     /// (`throughput_review_reported`, ADR-t996-1 decision 3): a notice the
     /// inbox shows the person, who acts on nothing.
     ReportReview,
+    /// A throughput review of the supervisor's ended `error` (it could not
+    /// start, ran out of time, or its review could not be saved) or
+    /// `failed` (its agent exited non-zero) (`throughput_review_finished`,
+    /// task 1099): a notice the inbox shows the person with the review's
+    /// directory, whose log says why. The period is not reviewed again,
+    /// and nothing waits on it.
+    CheckReview,
     /// The host's KPI push command failed on a message three times and the
     /// message was given up (`kpi_push_abandoned`, ADR-0051 decision 23):
     /// a person fixes the command or the service behind it. It ends with
@@ -1611,6 +1618,7 @@ impl fmt::Display for AttentionNext {
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
             Self::ReportReview => f.write_str("report the review"),
+            Self::CheckReview => f.write_str("check the failed review"),
             Self::FixPush => f.write_str("fix the push command"),
             Self::BrokerStatus => f.write_str("dagq broker status"),
             Self::ExitSession => f.write_str("exit the session"),
@@ -1648,6 +1656,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     run_env::RUN_ENV_PROGRAM_MISSING,
     UPDATE_INSTALLED,
     event_kind::THROUGHPUT_REVIEW_REPORTED,
+    event_kind::THROUGHPUT_REVIEW_FINISHED,
     kpi::push::KPI_PUSH_ABANDONED,
     broker::BROKER_UNHEALTHY,
     "ask_opened",
@@ -1825,6 +1834,16 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
         // A throughput review's conclusion is a notice too (ADR-t996-1).
         (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => Some(AttentionNext::ReportReview),
+        // One that did not reach its conclusion is a notice as well (task
+        // 1099); a skipped hour and a success are none.
+        (event_kind::THROUGHPUT_REVIEW_FINISHED, _)
+            if matches!(
+                payload.get("outcome").and_then(serde_json::Value::as_str),
+                Some("error" | "failed")
+            ) =>
+        {
+            Some(AttentionNext::CheckReview)
+        }
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         (broker::BROKER_UNHEALTHY, _) => Some(AttentionNext::BrokerStatus),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
@@ -2788,6 +2807,21 @@ mod attention_tests {
                 json!({"outcome": "skipped"}),
                 None,
             ),
+            (
+                "throughput_review_finished",
+                json!({"outcome": "succeeded"}),
+                None,
+            ),
+            (
+                "throughput_review_finished",
+                json!({"outcome": "error", "error": "Argument list too long"}),
+                Some(CheckReview),
+            ),
+            (
+                "throughput_review_finished",
+                json!({"outcome": "failed", "exit_code": 1}),
+                Some(CheckReview),
+            ),
             ("update_started", json!({"commit": "abc"}), None),
             (
                 "dependency_stranded",
@@ -2852,6 +2886,7 @@ mod attention_tests {
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(ReportReview.to_string(), "report the review");
+        assert_eq!(CheckReview.to_string(), "check the failed review");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(BrokerStatus.to_string(), "dagq broker status");
         assert_eq!(

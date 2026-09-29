@@ -1,14 +1,28 @@
 //! Runtime tests: the throughput review (ADR-t996-1).
 use crate::runtime_support;
 use dagq::domain::throughput_review::{HOUR_MS, ReviewMode, window};
-use dagq::throughput_review::{ReviewOptions, review};
+use dagq::throughput_review::{PROMPT_LIMIT, ReviewOptions, review};
 
 use runtime_support::*;
 
 /// The review's provider double: the headless job is a shell script in the
 /// review's directory, with the environment the command gives the agent.
+/// Like Claude's `claude -p`, it takes the prompt as an argument, so a
+/// prompt past the host's `ARG_MAX` fails to start (task 1099).
 struct ReviewProvider {
     script: String,
+    /// The program run instead of `/bin/sh`: one that does not exist
+    /// fails to start.
+    program: &'static str,
+}
+
+impl ReviewProvider {
+    fn new(script: &str) -> Self {
+        Self {
+            script: script.into(),
+            program: "/bin/sh",
+        }
+    }
 }
 
 impl AgentProvider for ReviewProvider {
@@ -28,8 +42,14 @@ impl AgentProvider for ReviewProvider {
         );
         assert!(prompt.contains("Raising throughput: the weekly review"));
         assert_eq!(access, JobAccess::QueueCli);
-        let mut command = CommandSpec::new("/bin/sh");
-        command.current_dir(cwd).arg("-c").arg(&self.script);
+        assert!(prompt.len() <= PROMPT_LIMIT, "{}", prompt.len());
+        let mut command = CommandSpec::new(self.program);
+        command
+            .current_dir(cwd)
+            .arg("-c")
+            .arg(&self.script)
+            .arg("--")
+            .arg(prompt);
         Ok(command)
     }
     /// The script's `$0`, which it writes to `mcp.txt`.
@@ -109,9 +129,7 @@ printf '```next_move\n{"summary": "split the e2e", "why": "verify is the constra
 fn an_hour_no_rule_meets_starts_no_agent() {
     let (_dir, _repo, db) = fixture();
     land(&db, &[4; 28]);
-    let provider = ReviewProvider {
-        script: "exit 9".into(),
-    };
+    let provider = ReviewProvider::new("exit 9");
     let skipped = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
     assert_eq!(skipped["outcome"], "skipped", "{skipped}");
     assert_eq!(skipped["period"], "2026-09-29T03");
@@ -151,9 +169,7 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     let mut hours = vec![4; 27];
     hours.push(10);
     land(&db, &hours);
-    let provider = ReviewProvider {
-        script: REVIEWER.into(),
-    };
+    let provider = ReviewProvider::new(REVIEWER);
     let done = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
     assert_eq!(done["outcome"], "succeeded", "{done}");
     assert_eq!(done["reasons"], json!(["deviation"]));
@@ -254,9 +270,7 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
 #[test]
 fn the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal() {
     let (_dir, _repo, db) = fixture();
-    let provider = ReviewProvider {
-        script: REVIEWER.into(),
-    };
+    let provider = ReviewProvider::new(REVIEWER);
     let done = review(&db, &provider, &options(ReviewMode::Weekly)).unwrap();
     assert_eq!(done["outcome"], "succeeded", "{done}");
     assert_eq!(done["period"], "2026-W39");
@@ -286,12 +300,18 @@ fn the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal() 
     assert_eq!(input["hourly"], Value::Null);
 }
 
+/// The inbox's attention events: the compact form `watch` reads.
+fn attentions(db: &Path) -> Vec<Value> {
+    dagq::watch::events(db, EventId::new(0), 100, false).unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
 #[test]
-fn a_failed_review_is_recorded_and_tells_the_inbox_nothing() {
+fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     let (_dir, _repo, db) = fixture();
-    let provider = ReviewProvider {
-        script: "echo broken >&2; exit 2".into(),
-    };
+    let provider = ReviewProvider::new("echo broken >&2; exit 2");
     let failed = review(&db, &provider, &options(ReviewMode::Daily)).unwrap();
     assert_eq!(failed["outcome"], "failed", "{failed}");
     assert_eq!(failed["exit_code"], 2);
@@ -308,6 +328,100 @@ fn a_failed_review_is_recorded_and_tells_the_inbox_nothing() {
         queue_events(&db, "throughput_review_finished")[0]["outcome"],
         "failed"
     );
+    // A job that cannot start ends `error` (task 1099: its prompt was past
+    // `ARG_MAX`).
+    let unstartable = ReviewProvider {
+        program: "/nonexistent/claude",
+        ..ReviewProvider::new("exit 0")
+    };
+    let error = review(&db, &unstartable, &options(ReviewMode::Weekly)).unwrap();
+    assert_eq!(error["outcome"], "error", "{error}");
+    assert!(
+        error["error"].as_str().unwrap().contains("start"),
+        "{error}"
+    );
+    // Both reach the inbox as notices that ask nothing (task 1099).
+    let notices: Vec<Value> = attentions(&db)
+        .into_iter()
+        .filter(|event| event["kind"] == "throughput_review_finished")
+        .collect();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    for (notice, (mode, period, outcome)) in notices.iter().zip([
+        ("daily", "2026-09-28", "failed"),
+        ("weekly", "2026-W39", "error"),
+    ]) {
+        assert_eq!(notice["next"], "check the failed review", "{notice}");
+        assert_eq!(notice["mode"], mode);
+        assert_eq!(notice["period"], period);
+        assert_eq!(notice["outcome"], outcome);
+        assert!(notice["dir"].as_str().unwrap().contains("reports/reviews/"));
+    }
+    assert!(notices[1]["reason"].as_str().unwrap().contains("start"));
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .asks(dagq::infrastructure::asks::AskQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Record `per_day` marks with long labels on each of the days from
+/// 2026-09-21 to 2026-09-28 (UTC): `kpi` lists each period's marks, so the
+/// review's inputs grow to a production day's MBs.
+fn mark_the_days(db: &Path, per_day: usize) {
+    let mut connection = Connection::open(db).unwrap();
+    let batch = connection.transaction().unwrap();
+    let start = window(ReviewMode::Daily, AT * 1000, 0).start_ms - 7 * 24 * HOUR_MS;
+    for day in 0..8 {
+        for n in 0..per_day {
+            let at = start + day * 24 * HOUR_MS + i64::try_from(n).unwrap() * 60_000;
+            batch
+                .execute(
+                    "INSERT INTO run_events(kind,payload,created_at) VALUES ('mark_recorded',?1,?2)",
+                    [
+                        json!({"label": format!("mark {day}/{n} {}", "x".repeat(800)), "note": null, "at": null, "by": "human"})
+                            .to_string(),
+                        dagq::domain::transcript::millis_text(at),
+                    ],
+                )
+                .unwrap();
+        }
+    }
+    batch.commit().unwrap();
+}
+
+#[test]
+fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_prompt() {
+    let (_dir, _repo, db) = fixture();
+    mark_the_days(&db, 150);
+    let provider = ReviewProvider::new(REVIEWER);
+    for mode in [ReviewMode::Daily, ReviewMode::Weekly] {
+        let done = review(&db, &provider, &options(mode)).unwrap();
+        assert_eq!(done["outcome"], "succeeded", "{done}");
+        let dir = PathBuf::from(done["dir"].as_str().unwrap());
+        // The agent started: it wrote its role.
+        assert_eq!(
+            fs::read_to_string(dir.join("role.txt")).unwrap(),
+            "throughput-review-job"
+        );
+        let input = fs::read_to_string(dir.join("input.json")).unwrap();
+        assert!(
+            input.len() > 1024 * 1024,
+            "{}: {}",
+            mode.as_str(),
+            input.len()
+        );
+        let prompt = fs::read_to_string(dir.join("prompt.md")).unwrap();
+        assert!(
+            prompt.len() <= PROMPT_LIMIT,
+            "{}: {}",
+            mode.as_str(),
+            prompt.len()
+        );
+        assert!(prompt.contains(&dir.join("input.json").display().to_string()));
+    }
+    assert_eq!(queue_events(&db, "throughput_review_reported").len(), 2);
 }
 
 /// A Claude Code stand-in for the supervisor's review: `--version` for the
@@ -523,4 +637,23 @@ fn a_failing_review_stops_no_claim_nor_landing() {
         "{outcomes:?}"
     );
     assert!(queue_events(&db, "throughput_review_reported").is_empty());
+    // Each failure reaches the inbox as a notice, and none as an ask.
+    let notices = attentions(&db)
+        .into_iter()
+        .filter(|event| event["next"] == "check the failed review")
+        .count();
+    assert_eq!(
+        notices,
+        outcomes
+            .iter()
+            .filter(|(_, outcome)| outcome == "failed")
+            .count()
+    );
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .asks(dagq::infrastructure::asks::AskQuery::default())
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -12,7 +12,9 @@
 //! `<queue dir>/reports/reviews/`, records the weekly next move as a
 //! finding marked for a proposal, and records `throughput_review_reported`,
 //! the inbox's notice. A failed job leaves its log and a failed
-//! `throughput_review_finished`, and nothing else.
+//! `throughput_review_finished`, itself a notice to the inbox (task 1099).
+//! The prompt carries a summary of the inputs within [`PROMPT_LIMIT`]
+//! ([`prompt_input`]); the whole is the job directory's `input.json`.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -54,6 +56,46 @@ const TIMELINE_GAP_SECS: i64 = 300;
 const LANDING_EVENTS: usize = 200;
 /// The finding kind of the weekly next move.
 pub const FINDING_KIND: &str = "throughput";
+/// The most the prompt may hold, in bytes (task 1099). Claude's headless
+/// job takes the prompt as an argument of `claude -p`, and the arguments
+/// and the environment together may not pass the host's `ARG_MAX` (1 MiB
+/// on macOS); the whole inputs of a day or a week are MBs.
+pub const PROMPT_LIMIT: usize = 128 * 1024;
+/// The most the inputs in the prompt ([`prompt_input`], pretty JSON) may
+/// hold, in bytes: the rest of [`PROMPT_LIMIT`] holds the instructions,
+/// the procedure and the language line.
+pub const PROMPT_INPUT_LIMIT: usize = 96 * 1024;
+/// The parts of `stats` the prompt carries: the whole of the period, its
+/// serial landing slot, the waits and holds, and the failures. The rest
+/// (the runs, the builds, the goals, …) is for the job to read with
+/// `stats --full`.
+const PROMPT_STATS: &[&str] = &[
+    "overall",
+    "landing_utilization",
+    "waiting",
+    "claim_deferrals",
+    "claim_holds",
+    "landing_holds",
+    "escalations",
+    "backend_failures",
+    "verification_failures",
+    "provider_switches",
+];
+/// What [`prompt_input`] leaves out, in this order, while the inputs pass
+/// [`PROMPT_INPUT_LIMIT`]: the largest and the easiest to read again
+/// first.
+const DROP_ORDER: &[&[&str]] = &[
+    &["stats"],
+    &["kpi", "latest"],
+    &["timelines"],
+    &["kpi", "targets"],
+    &["kpi", "periods"],
+    &["asks"],
+    &["claim_deferred"],
+    &["landings"],
+    // A `kpi` of a shape not known passes whole: it goes last.
+    &["kpi"],
+];
 
 /// The dagq skill's KPI reference, whose weekly review the job follows: the
 /// prompt carries the procedure from there, not a copy of its own.
@@ -156,8 +198,14 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
         checkout.as_deref(),
         options.user_config.as_deref(),
     );
+    // A dry run makes no directory: its prompt names where one would be.
+    let dir = if options.dry_run {
+        reviews_dir(&db).join(format!("{}-{}", period.mode.as_str(), period.label))
+    } else {
+        review_dir(&db, &period)?
+    };
     let prompt = crate::domain::language::with_instruction(
-        review_prompt(&period, &command, &input)?,
+        review_prompt(&period, &command, &input, &dir.join("input.json"))?,
         language.as_ref(),
     );
     if options.dry_run {
@@ -169,7 +217,6 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
             "prompt": prompt,
         }));
     }
-    let dir = review_dir(&db, &period)?;
     fs::write(dir.join("prompt.md"), &prompt)?;
     fs::write(
         dir.join("input.json"),
@@ -398,12 +445,7 @@ fn gather(
         ReviewMode::Daily => (24, HOUR_MS, "by_hour"),
         ReviewMode::Weekly => (7, DAY_MS, "by_day"),
     };
-    // The hourly review reads the stats of the last 6 hours: the moving
-    // average the procedure's hourly look reads.
-    let stats_from = match period.mode {
-        ReviewMode::Hourly => period.end_ms - 6 * HOUR_MS,
-        _ => period.start_ms,
-    };
+    let stats_from = stats_from(period);
     let one_shot = crate::compose::OneShot::new(queue.generators().clone());
     let or_error =
         |value: Result<Value>| value.unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
@@ -461,6 +503,16 @@ fn gather(
         "asks": or_error(asks(queue, stats_from, period.end_ms)),
         "timelines": or_error(timelines(queue, &in_period)),
     }))
+}
+
+/// Where the inputs' `stats`, claims deferred and asks begin: the hourly
+/// review reads the last 6 hours, the moving average the procedure's
+/// hourly look reads; the others their period.
+fn stats_from(period: &Window) -> i64 {
+    match period.mode {
+        ReviewMode::Hourly => period.end_ms - 6 * HOUR_MS,
+        _ => period.start_ms,
+    }
 }
 
 /// The events of `kinds` in `[from, to)` counted by their payload's `key`.
@@ -568,7 +620,12 @@ fn review_launch(checkout: Option<&Path>) -> ActorLaunch {
 
 /// The job's instructions: its cadence's part of the weekly review, the
 /// form of its output, the procedure itself and the inputs.
-pub fn review_prompt(period: &Window, dagq: &str, input: &Value) -> Result<String> {
+pub fn review_prompt(
+    period: &Window,
+    dagq: &str,
+    input: &Value,
+    input_path: &Path,
+) -> Result<String> {
     let cadence = match period.mode {
         ReviewMode::Hourly => format!(
             "This is the hourly review of the hour {label}. The runtime's rules found it worth a look (`hourly.reasons` in the inputs: \
@@ -615,12 +672,180 @@ pub fn review_prompt(period: &Window, dagq: &str, input: &Value) -> Result<Strin
          \n\
          {procedure}\n\
          \n\
-         Inputs (JSON: the period, its landings (`by_hour` or `by_day`, oldest first, and the period before's total), the hourly rules' judgment, `kpi`, `stats`, \
-         the claims deferred and the asks by reason and kind, and the timelines of the longest runs that landed):\n\
+         Inputs, a summary (JSON: the period, its landings (`by_hour` or `by_day`, oldest first, and the period before's total), the hourly rules' judgment, \
+         `kpi` (`periods`: each period's runs; `latest`: the period under review, each KPI's `all` stratum with its `comparison` to the period before and the 7 days before; \
+         `targets`: each target's state and its latest value), the parts of `stats` in `stats.parts` (`stats.omitted` names the others), \
+         the claims deferred and the asks by reason and kind, and the longest runs that landed with their seconds). \
+         The whole inputs are saved in `{input_path}` in the review's directory for a person; you read the details through the commands above instead: \
+         `kpi` for the other periods, strata and the host (`--period`, `--last`, `--area`, `--change`), `stats --since {start} --until {end} --full` for the runs, \
+         `timeline RUN` for each of the longest runs, and `events --full` for the landings (`--kind run_integrated`) and anything else. \
+         `omitted_to_fit`, when present, names what was left out to keep this prompt small; read it with the commands too:\n\
          ```json\n{input}\n```\n",
         procedure = procedure(),
-        input = serde_json::to_string_pretty(input)?,
+        input_path = input_path.display(),
+        start = millis_text(stats_from(period)),
+        end = millis_text(period.end_ms),
+        input = serde_json::to_string_pretty(&prompt_input(input))?,
     ))
+}
+
+/// The part of the review's `input` the prompt carries (task 1099): the
+/// period, the landings without their events, the hourly judgment, `kpi`
+/// cut to each period's runs, the period under review's `all` stratum and
+/// the targets' states, [`PROMPT_STATS`] of `stats`, the claims deferred,
+/// the asks, and the longest runs without their timelines. While it passes
+/// [`PROMPT_INPUT_LIMIT`], the parts of [`DROP_ORDER`] go, named in
+/// `omitted_to_fit`.
+pub fn prompt_input(input: &Value) -> Value {
+    let mut summary = json!({
+        "period": input["period"],
+        "landings": without(&input["landings"], &["events"]),
+        "hourly": input["hourly"],
+        "kpi": kpi_summary(&input["kpi"]),
+        "stats": stats_summary(&input["stats"]),
+        "claim_deferred": input["claim_deferred"],
+        "asks": input["asks"],
+        "timelines": timelines_summary(&input["timelines"]),
+    });
+    let mut omitted = Vec::new();
+    for path in DROP_ORDER {
+        if pretty_len(&summary) <= PROMPT_INPUT_LIMIT {
+            break;
+        }
+        let (last, parents) = path.split_last().expect("a path has a key");
+        let parent = parents
+            .iter()
+            .try_fold(&mut summary, |value, key| value.get_mut(*key));
+        if let Some(Value::Object(parent)) = parent
+            && parent.remove(*last).is_some_and(|part| !part.is_null())
+        {
+            omitted.push(path.join("."));
+        }
+    }
+    if !omitted.is_empty() {
+        summary["omitted_to_fit"] = json!(omitted);
+    }
+    summary
+}
+
+fn pretty_len(value: &Value) -> usize {
+    serde_json::to_string_pretty(value).map_or(usize::MAX, |text| text.len())
+}
+
+/// `value` without `keys`, when it is an object.
+fn without(value: &Value, keys: &[&str]) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| !keys.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `kpi` cut for the prompt: the periods' labels and runs, the period
+/// under review's KPIs in the `all` stratum with their comparison, and the
+/// targets without their periods but for the latest value. An error, or a
+/// shape not known, passes as it is.
+fn kpi_summary(kpi: &Value) -> Value {
+    let Some(periods) = kpi.get("periods").and_then(Value::as_array) else {
+        return kpi.clone();
+    };
+    let listed: Vec<Value> = periods
+        .iter()
+        .map(|period| {
+            json!({
+                "label": period["label"],
+                "partial": period["partial"],
+                "runs": period["runs"],
+            })
+        })
+        .collect();
+    let latest = periods.last().map(|period| {
+        let comparison = &period["comparison"];
+        let kpis: serde_json::Map<String, Value> = period["kpis"]
+            .as_object()
+            .map(|kpis| {
+                kpis.iter()
+                    .map(|(name, strata)| {
+                        let compared = &comparison[name]["all"];
+                        let mut value = json!({"all": strata["all"]});
+                        if compared.is_object() {
+                            value["comparison"] = without(compared, &["judged", "delta"]);
+                        }
+                        (name.clone(), value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        json!({
+            "label": period["label"],
+            "partial": period["partial"],
+            "runs": period["runs"],
+            "unavailable": period["unavailable"],
+            "kpis": kpis,
+        })
+    });
+    let targets: Vec<Value> = kpi["targets"]
+        .as_array()
+        .map(|targets| {
+            targets
+                .iter()
+                .map(|target| {
+                    let latest = target["periods"]
+                        .as_array()
+                        .and_then(|periods| periods.last())
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let mut target = without(target, &["periods"]);
+                    target["latest"] = latest;
+                    target
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "cores": kpi["cores"],
+        "periods": listed,
+        "latest": latest,
+        "targets": targets,
+    })
+}
+
+/// [`PROMPT_STATS`] of `stats` under `parts`, and the names of the rest
+/// under `omitted`. An error passes as it is.
+fn stats_summary(stats: &Value) -> Value {
+    let Some(object) = stats
+        .as_object()
+        .filter(|stats| !stats.contains_key("error"))
+    else {
+        return stats.clone();
+    };
+    let parts: serde_json::Map<String, Value> = object
+        .iter()
+        .filter(|(key, _)| PROMPT_STATS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let omitted: Vec<&String> = object
+        .keys()
+        .filter(|key| !PROMPT_STATS.contains(&key.as_str()))
+        .collect();
+    json!({"parts": parts, "omitted": omitted})
+}
+
+/// The longest runs with their seconds, without the timelines.
+fn timelines_summary(timelines: &Value) -> Value {
+    match timelines.as_array() {
+        Some(runs) => Value::Array(
+            runs.iter()
+                .map(|run| json!({"run_id": run["run_id"], "secs": run["secs"]}))
+                .collect(),
+        ),
+        None => timelines.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -639,16 +864,34 @@ mod tests {
     fn the_prompt_names_its_cadence_and_only_the_weekly_one_asks_for_a_next_move() {
         let input = json!({"landings": {"total": 3}});
         let at = |mode| window(mode, 1_790_655_900_000, 9 * HOUR_MS);
-        let hourly = review_prompt(&at(ReviewMode::Hourly), "dagq", &input).unwrap();
+        let hourly = review_prompt(
+            &at(ReviewMode::Hourly),
+            "dagq",
+            &input,
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
         assert!(
             hourly.contains("hourly review of the hour 2026-09-29T12"),
             "{hourly}"
         );
         assert!(hourly.contains("`sustained_drop`"));
         assert!(!hourly.contains("```next_move"));
-        let daily = review_prompt(&at(ReviewMode::Daily), "dagq", &input).unwrap();
+        let daily = review_prompt(
+            &at(ReviewMode::Daily),
+            "dagq",
+            &input,
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
         assert!(daily.contains("daily review of 2026-09-28"));
-        let weekly = review_prompt(&at(ReviewMode::Weekly), "dagq", &input).unwrap();
+        let weekly = review_prompt(
+            &at(ReviewMode::Weekly),
+            "dagq",
+            &input,
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
         assert!(weekly.contains("steps 1 to 5"));
         assert!(weekly.contains("```next_move"));
         for prompt in [&hourly, &daily, &weekly] {
@@ -660,6 +903,163 @@ mod tests {
             // removed `--kind`.
             assert!(prompt.contains("[--area A] [--change C]"));
             assert!(!prompt.contains("--kind runtime"));
+            // The details are the job's to read with its commands; the
+            // whole inputs are in the review's directory (task 1099).
+            assert!(prompt.contains("`/q/input.json`"), "{prompt}");
+            // The range of the inputs' `stats`: 6 hours for the hourly one.
+            let since = if prompt == &hourly {
+                "2026-09-28T22:00:00.000Z"
+            } else {
+                ""
+            };
+            assert!(
+                prompt.contains(&format!("stats --since {since}")),
+                "{prompt}"
+            );
+            assert!(prompt.contains("you read the details through the commands above"));
+            assert!(prompt.contains("`dagq kpi [--period day|week]"));
+            assert!(prompt.contains("`dagq stats [--since TIME] [--full]`"));
+            assert!(prompt.contains("`dagq events --full --kind KIND"));
+            assert!(prompt.contains("`timeline RUN` for each of the longest runs"));
         }
+        assert!(
+            daily.contains(
+                "`stats --since 2026-09-27T15:00:00.000Z --until 2026-09-28T15:00:00.000Z --full`"
+            ),
+            "{daily}"
+        );
+    }
+
+    /// A KPI period of `kpis` KPIs, each with `strata` strata and a
+    /// comparison, and `marks` marks with long labels: the shape `kpi`
+    /// gives, as large as a production day's.
+    fn kpi_period(label: &str, kpis: usize, strata: usize, marks: usize) -> Value {
+        let strata = |value: Value| -> Value {
+            let mut all = serde_json::Map::new();
+            all.insert("all".into(), value.clone());
+            for n in 0..strata {
+                all.insert(format!("change=c{n}"), value.clone());
+            }
+            Value::Object(all)
+        };
+        let mut values = serde_json::Map::new();
+        let mut comparison = serde_json::Map::new();
+        for n in 0..kpis {
+            values.insert(
+                format!("kpi_{n}"),
+                strata(json!({"max": 23541.0, "median": 11241.0, "min": 7168.0, "n": 3, "p90": 23541.0})),
+            );
+            comparison.insert(
+                format!("kpi_{n}"),
+                strata(json!({"baseline_7d": 526.0, "delta": 11024.0, "judged": true, "previous": 217.0,
+                              "ratio": 51.802, "reason": null, "verdict": "worsened"})),
+            );
+        }
+        let marks: Vec<Value> = (0..marks)
+            .map(|n| json!({"id": n, "kind": "mark_recorded", "label": "x".repeat(400)}))
+            .collect();
+        json!({"label": label, "partial": false, "runs": 111, "kpis": values,
+               "comparison": comparison, "marks": marks, "unavailable": {}})
+    }
+
+    #[test]
+    fn the_prompt_carries_a_summary_of_the_inputs_within_its_limit() {
+        let periods: Vec<Value> = (21..=28)
+            .map(|day| kpi_period(&format!("2026-09-{day}"), 110, 6, 80))
+            .collect();
+        let targets: Vec<Value> = (0..5)
+            .map(|n| json!({"kpi": format!("kpi_{n}"), "stratum": "all", "state": if n == 0 { "breach" } else { "ok" },
+                            "streak": n, "min": null, "max": 0.6,
+                            "periods": (21..=28).map(|day| json!({"period": format!("2026-09-{day}"), "value": day, "met": true})).collect::<Vec<_>>()}))
+            .collect();
+        let runs: Vec<Value> = (0..400)
+            .map(|n| json!({"run_id": format!("run-{n}"), "work": n, "detail": "y".repeat(300)}))
+            .collect();
+        let events: Vec<Value> = (0..200)
+            .map(|n| json!({"id": n, "run_id": format!("run-{n}"), "task_id": n, "created_at": "2026-09-28T01:00:00.000Z"}))
+            .collect();
+        let input = json!({
+            "period": {"mode": "daily", "label": "2026-09-28"},
+            "landings": {"total": 109, "previous_period_total": 158, "by_hour": vec![4; 24], "events": events},
+            "hourly": null,
+            "kpi": {"cores": 8, "periods": periods, "targets": targets},
+            "stats": {"overall": {"landed": 109}, "landing_utilization": {"utilization": 0.481},
+                      "runs": runs, "versions": "v".repeat(100_000)},
+            "claim_deferred": {"count": 3, "by": {"load": 3}},
+            "asks": {"opened": {"count": 1}},
+            "timelines": (0..3).map(|n| json!({"run_id": format!("run-{n}"), "secs": 40477 - n, "timeline": {"commands": "z".repeat(50_000)}})).collect::<Vec<_>>(),
+        });
+        assert!(input.to_string().len() > 1024 * 1024, "the input is MBs");
+        let summary = prompt_input(&input);
+        assert!(
+            pretty_len(&summary) <= PROMPT_INPUT_LIMIT,
+            "{}",
+            pretty_len(&summary)
+        );
+        assert_eq!(summary["landings"]["total"], 109);
+        assert!(summary["landings"].get("events").is_none());
+        assert_eq!(summary["kpi"]["periods"].as_array().unwrap().len(), 8);
+        assert_eq!(summary["kpi"]["periods"][7]["runs"], 111);
+        let latest = &summary["kpi"]["latest"];
+        assert_eq!(latest["label"], "2026-09-28");
+        assert_eq!(latest["kpis"]["kpi_0"]["all"]["median"], 11241.0);
+        assert_eq!(latest["kpis"]["kpi_0"]["comparison"]["verdict"], "worsened");
+        assert!(latest["kpis"]["kpi_0"].get("change=c0").is_none());
+        assert!(latest.get("marks").is_none());
+        assert_eq!(summary["kpi"]["targets"][0]["state"], "breach");
+        assert_eq!(summary["kpi"]["targets"][0]["latest"]["value"], 28);
+        assert!(summary["kpi"]["targets"][0].get("periods").is_none());
+        assert_eq!(
+            summary["stats"]["parts"]["landing_utilization"]["utilization"],
+            0.481
+        );
+        assert_eq!(summary["stats"]["omitted"], json!(["runs", "versions"]));
+        assert_eq!(
+            summary["timelines"],
+            json!([
+                {"run_id": "run-0", "secs": 40477},
+                {"run_id": "run-1", "secs": 40476},
+                {"run_id": "run-2", "secs": 40475},
+            ])
+        );
+        assert!(summary.get("omitted_to_fit").is_none());
+        let window = window(ReviewMode::Daily, 1_790_655_900_000, 0);
+        let prompt = review_prompt(
+            &window,
+            "dagq --db /q/queue.db",
+            &input,
+            Path::new("/q/input.json"),
+        )
+        .unwrap();
+        assert!(prompt.len() <= PROMPT_LIMIT, "{}", prompt.len());
+        // An error passes as it is.
+        let failed = prompt_input(
+            &json!({"kpi": {"error": "no"}, "stats": {"error": "no"}, "timelines": {"error": "no"}}),
+        );
+        assert_eq!(failed["kpi"], json!({"error": "no"}));
+        assert_eq!(failed["stats"], json!({"error": "no"}));
+        assert_eq!(failed["timelines"], json!({"error": "no"}));
+    }
+
+    #[test]
+    fn a_summary_past_its_limit_drops_the_parts_in_order_and_names_them() {
+        let huge = "s".repeat(PROMPT_INPUT_LIMIT);
+        let input = json!({
+            "period": {"label": "2026-W39"},
+            "landings": {"total": 5},
+            "stats": {"overall": huge},
+            "kpi": {"cores": 8, "periods": [{"label": "2026-W39", "kpis": {"a": {"all": {"value": huge}}}}], "targets": []},
+        });
+        let summary = prompt_input(&input);
+        assert!(pretty_len(&summary) <= PROMPT_INPUT_LIMIT);
+        assert_eq!(summary["omitted_to_fit"], json!(["stats", "kpi.latest"]));
+        assert_eq!(summary["kpi"]["periods"][0]["label"], "2026-W39");
+        assert_eq!(summary["landings"]["total"], 5);
+        // Everything but the period goes when nothing else fits.
+        let input = json!({"period": {"label": "x"}, "landings": {"total": huge}});
+        let summary = prompt_input(&input);
+        assert_eq!(summary["period"]["label"], "x");
+        assert!(summary.get("landings").is_none());
+        assert_eq!(summary["omitted_to_fit"], json!(["landings"]));
     }
 }

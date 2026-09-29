@@ -759,7 +759,10 @@ enum Command {
     /// DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq skill's
     /// reference/kpi.md; the review is saved under <queue dir>/reports/reviews/ and its conclusion reaches
     /// the inbox as throughput_review_reported (next: report the review). A weekly next move becomes a
-    /// finding marked for a proposal. The agent loads no MCP server; the supervisor starts this on its timer.
+    /// finding marked for a proposal. A review that fails or cannot start reaches the inbox as its
+    /// throughput_review_finished (next: check the failed review). The prompt carries a summary of the
+    /// inputs; the whole is input.json in the review's directory. The agent loads no MCP server; the
+    /// supervisor starts this on its timer.
     ThroughputReview {
         #[arg(long, default_value = "hourly", value_parser = ["hourly", "daily", "weekly"])]
         mode: String,
