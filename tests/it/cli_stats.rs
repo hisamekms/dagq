@@ -999,7 +999,7 @@ mod stats {
         };
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("queue.db");
-        ok(&db, &["init"]);
+        crate::common::template::queue(&db);
         let empty = ok(&db, &["stats"]);
         assert_eq!(empty["runs"], json!([]));
         assert_eq!(empty["alerts"], json!([]));
@@ -1082,7 +1082,7 @@ mod stats {
         use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("queue.db");
-        ok(&db, &["init"]);
+        crate::common::template::queue(&db);
         // No file yet: an empty summary.
         let empty = ok(&db, &["stats"]);
         assert_eq!(empty["host"]["samples"], 0);

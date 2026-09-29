@@ -14,7 +14,7 @@ use serde_json::Value;
 /// binary does not know written directly); the run's ID.
 fn run_with_events(db: &Path, events: &[(&str, serde_json::Value, &str)]) -> String {
     use dagq::domain::{ClaimOutcome, CommitSha};
-    ok(db, &["init"]);
+    common::template::queue(db);
     ok(db, &["goal", "add", "measured"]);
     ok(db, &["add", "first", "--goal", "1"]);
     ok(db, &["ready", "1", "--bypass-review"]);
@@ -611,7 +611,8 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
     );
 
     // A run's timeline and the stats pass an unknown event by.
-    let (_dir, db) = queue();
+    let timeline_dir = tempfile::tempdir().unwrap();
+    let db = timeline_dir.path().join("queue.db");
     let run = run_with_events(
         &db,
         &[
@@ -633,7 +634,6 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
 #[test]
 fn status_and_doctor_show_every_actor_on_the_host_advisory() {
     let (_dir, db) = queue();
-    ok(&db, &["init"]);
     for args in [&["status"][..], &["doctor"], &["doctor", "--full"]] {
         let report = ok(&db, args);
         let actors = report["actors"].as_array().unwrap();

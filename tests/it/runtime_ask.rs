@@ -653,7 +653,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
     };
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue.db");
-    let mut queue = SqliteQueue::init(&db).unwrap();
+    let mut queue = crate::common::template::queue(&db);
     let source = queue
         .add(NewTask {
             title: "source".into(),

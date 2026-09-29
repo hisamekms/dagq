@@ -405,7 +405,7 @@ fn text(template: &str, ids: &HashMap<i64, i64>) -> String {
 
 fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf) {
     let db = dir.path().join("queue.db");
-    let mut queue = SqliteQueue::init(&db).unwrap();
+    let mut queue = crate::common::template::queue(&db);
     let ids: HashMap<i64, i64> = FIXTURES
         .iter()
         .enumerate()

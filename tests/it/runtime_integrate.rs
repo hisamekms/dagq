@@ -541,10 +541,7 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     // Another repository is refused even though it also has a main branch.
     let other = dir.path().join("other");
     fs::create_dir(&other).unwrap();
-    git(&other, &["init", "-b", "main"]);
-    git(&other, &["config", "user.name", "test"]);
-    git(&other, &["config", "user.email", "test@example.invalid"]);
-    git(&other, &["commit", "--allow-empty", "-m", "unrelated"]);
+    crate::common::template::repository(&other, "unrelated\n");
     let error = format!("{:#}", integrate(&db, 1, &other).unwrap_err());
     assert!(error.contains("the queue is bound to"), "{error}");
     assert!(integrate(&db, 1, &dir.path().join("missing")).is_err());
@@ -1735,21 +1732,7 @@ fn rebind_is_refused_while_a_run_is_integrating() {
         .unwrap();
     let other = dir.path().join("other");
     fs::create_dir(&other).unwrap();
-    git(&other, &["init", "-q", "-b", "main"]);
-    git(
-        &other,
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "seed",
-        ],
-    );
+    crate::common::template::repository(&other, "other\n");
     let refused = runtime::rebind(&db, &other).unwrap_err().to_string();
     assert!(refused.contains("is integrating"), "{refused}");
 }

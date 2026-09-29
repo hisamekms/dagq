@@ -11,12 +11,13 @@ use tempfile::TempDir;
 
 use super::{Bounded, WithoutActor};
 
-/// A fresh queue, `queue.db` in a new temporary directory, after `init`.
-/// The directory lives as long as the returned guard.
+/// A fresh queue, `queue.db` in a new temporary directory, as `init` with
+/// `--db` leaves it (migrated, bound to no repository), copied from the
+/// template (task 1060). The directory lives as long as the returned guard.
 pub fn queue() -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue.db");
-    ok(&db, &["init"]);
+    super::template::queue(&db);
     (dir, db)
 }
 

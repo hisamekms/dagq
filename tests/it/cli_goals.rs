@@ -12,7 +12,7 @@ use serde_json::Value;
 fn goals_group_tasks_and_report_counts_by_status() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("goals.db");
-    ok(&db, &["init"]);
+    common::template::queue(&db);
     assert_eq!(ok(&db, &["goal", "list"]), serde_json::json!([]));
     let goal = ok(
         &db,
