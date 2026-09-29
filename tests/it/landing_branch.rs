@@ -326,3 +326,84 @@ fn a_landing_that_renames_the_branch_still_lands_and_pushes_on_its_branch() {
     assert_eq!(git_out(&origin, &["rev-parse", "refs/heads/trunk"]), head);
     assert_eq!(git_out(&origin, &["rev-parse", "refs/heads/other"]), other);
 }
+
+/// `integrate --no-push` pushes nothing and looks at no remote, but records
+/// the remote `[repository]` names (the one `push = false` and `doctor`
+/// show) with the landing branch; `[repository]` that cannot be read after
+/// the landing records `origin` and the landing stands.
+#[test]
+fn no_push_records_the_configured_remote() {
+    let no_push = |db: &Path, repo: &Path| {
+        runtime::integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None).unwrap()
+    };
+    let (_dir, repo, db) = renamed("trunk");
+    fs::write(
+        repo.join("dagq.toml"),
+        "[repository]\nbranch = \"trunk\"\nremote = \"upstream\"\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "push to upstream"]);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+
+    let landed = no_push(&db, &repo);
+    assert_eq!(landed["outcome"], "integrated", "{landed}");
+    assert_eq!(
+        landed["push"],
+        json!({"outcome": "skipped", "remote": "upstream", "branch": "trunk", "error": null, "reason": "--no-push"})
+    );
+    let head = git_out(&repo, &["rev-parse", "trunk"]);
+    assert_eq!(
+        events_of(&db, run.id(), "push_skipped"),
+        [json!({"remote": "upstream", "branch": "trunk", "commit": head, "reason": "--no-push"})]
+    );
+
+    // The landed commit leaves `[repository]` unreadable (a remote name Git
+    // rejects): the landing began on trunk and stands, and origin is recorded.
+    let (_dir, repo, db) = renamed("trunk");
+    fs::write(repo.join("dagq.toml"), "[repository]\nbranch = \"trunk\"\n").unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "name the landing branch"]);
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        "printf '[repository]\\nbranch = \"trunk\"\\nremote = \"bad..name\"\\n' > dagq.toml && git add dagq.toml && git commit -q -m break; receipt \"$(git rev-parse HEAD)\"",
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let landed = no_push(&db, &repo);
+    assert_eq!(landed["outcome"], "integrated", "{landed}");
+    assert_eq!(landed["task"]["status"], "completed", "{landed}");
+    assert_eq!(
+        landed["push"],
+        json!({"outcome": "skipped", "remote": "origin", "branch": "trunk", "error": null, "reason": "--no-push"})
+    );
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    let head = git_out(&repo, &["rev-parse", "trunk"]);
+    assert_eq!(
+        events_of(&db, run.id(), "push_skipped"),
+        [json!({"remote": "origin", "branch": "trunk", "commit": head, "reason": "--no-push"})]
+    );
+    let doctor = runtime::doctor(&db, false).unwrap();
+    assert!(
+        doctor["repository"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not a valid remote name")),
+        "{doctor}"
+    );
+}

@@ -1759,6 +1759,9 @@ impl Repository for GitRepository {
     fn landing_branch(&self) -> Result<LandingBranch> {
         GitRepository::landing_branch(self)
     }
+    fn repository_config(&self) -> Result<RepositoryConfig> {
+        GitRepository::repository_config(self)
+    }
     fn is_dagq_source(&self) -> bool {
         GitRepository::is_dagq_source(self)
     }

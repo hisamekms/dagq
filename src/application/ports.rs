@@ -2620,6 +2620,13 @@ pub trait Repository {
     fn landing_branch(&self) -> Result<crate::domain::landing_branch::LandingBranch> {
         Ok(crate::domain::landing_branch::LandingBranch::main())
     }
+    /// `[repository]` of the main checkout's `dagq.toml`, read again on
+    /// every call; a repository without one has the default (`origin`,
+    /// pushed). `integrate --no-push` reads it only to record the remote
+    /// it did not push to.
+    fn repository_config(&self) -> Result<crate::domain::landing_branch::RepositoryConfig> {
+        Ok(Default::default())
+    }
     /// Whether the repository is dagq's source (ADR-t614-1), judged again
     /// on every call; what only dagq's own development needs runs only
     /// there.

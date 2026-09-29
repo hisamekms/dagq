@@ -4,8 +4,8 @@ type: design
 title: "Landing branch"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -61,7 +61,7 @@ push = false
 
 ### 着地ごとに1度解決する
 
-1回の着地（`integrate`と、supervisorが行う着地。どちらも`land_integrating`）はbranchを開始時に1度だけ解決し、依頼文に書くrebase先の名前、`advance_main`のff先（`branch refs/heads/<branch>`をcheckoutしているworktreeの判定も含む）、pushの`refs/heads/<branch>:refs/heads/<branch>`と`push_*`のeventの`branch`に同じものを使う。着地するcommitが`[repository] branch`を書き換えると、main checkoutでの`merge --ff-only`がその`dagq.toml`を書き換えるが、その着地のpushは開始時のbranchへ行き、新しい指定は次の着地から効く。rebase先とff元のcommit（main head）は、それより前に着地の枠を取る`begin`が`main_head`で読む（その間に指定が変わると、`update-ref`は古い値の検査で、`merge --ff-only`はfast-forwardにならずに失敗し、branchは動かない）。pushのremoteと`push`（下の「pushの解決」）は今までどおり着地の後に`push_config`で読む。
+1回の着地（`integrate`と、supervisorが行う着地。どちらも`land_integrating`）はbranchを開始時に1度だけ解決し、依頼文に書くrebase先の名前、`advance_main`のff先（`branch refs/heads/<branch>`をcheckoutしているworktreeの判定も含む）、pushの`refs/heads/<branch>:refs/heads/<branch>`と`push_*`のeventの`branch`に同じものを使う。着地するcommitが`[repository] branch`を書き換えると、main checkoutでの`merge --ff-only`がその`dagq.toml`を書き換えるが、その着地のpushは開始時のbranchへ行き、新しい指定は次の着地から効く。rebase先とff元のcommit（main head）は、それより前に着地の枠を取る`begin`が`main_head`で読む（その間に指定が変わると、`update-ref`は古い値の検査で、`merge --ff-only`はfast-forwardにならずに失敗し、branchは動かない）。pushのremoteと`push`（下の「pushの解決」）は今までどおり着地の後に`push_config`で読む（`--no-push`（`integrate --no-push`と、それで承認されたrunをsupervisorが着地させるとき）は`MainRemote`を渡さないので、記録する`remote`だけを`Repository`の`repository_config`で着地の後に読む）。
 
 解決の結果は`branch`（名前）と`branch_source`（`config` / `remote_head` / `main` / `master`）で表す。
 
@@ -79,7 +79,7 @@ push = false
 
 | 状況 | 結果 | event |
 | --- | --- | --- |
-| `integrate --no-push` | pushしない | `push_skipped`（`reason: "--no-push"`） |
+| `integrate --no-push` | pushしない。remoteの有無も見ない | `push_skipped`（`reason: "--no-push"`、`remote`は着地の後に読んだ`[repository] remote`（既定`origin`。読めなければ`origin`で、着地は失敗にしない）） |
 | `push = false` | remoteを見ずにpushしない | `push_skipped`（`reason: "push = false in dagq.toml"`） |
 | `remote`を書かず、`origin`が無い | pushしない（今までどおり） | `push_skipped`（`reason: "the repository has no remote origin"`） |
 | `remote`を書き、そのremoteが無い | 設定の誤り。着地は取り消さない | `push_failed`（`error`にremoteが無いこと） |

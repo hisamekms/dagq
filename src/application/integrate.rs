@@ -646,7 +646,15 @@ fn land_integrating(
             );
             close_landing_asks(queue, &run);
             remove_landed_worktree(queue, repository, &run);
-            let push = push_main(queue, grant, &onto, ctx.remote, run.id(), &landing.commit);
+            let push = push_main(
+                queue,
+                repository,
+                grant,
+                &onto,
+                ctx.remote,
+                run.id(),
+                &landing.commit,
+            );
             let follow_ups = register_follow_ups(queue, &task, run.id(), proposed.as_ref());
             IntegrationOutcome::Integrated {
                 task: Box::new(task),
@@ -709,10 +717,13 @@ fn land_integrating(
 /// `onto` is the landing branch resolved when the landing began, not
 /// resolved again from the dagq.toml the landing may have rewritten.
 /// `push = false` and a missing default remote skip the push; a configured
-/// remote that is missing fails it. A failure to record is only reported:
-/// the landing stands either way.
+/// remote that is missing fails it. `--no-push` (no `remote`) skips it and
+/// records the remote `[repository]` names, `origin` when it cannot be
+/// read, without looking at the remote. A failure to record is only
+/// reported: the landing stands either way.
 fn push_main(
     queue: &dyn Queue,
+    repository: &dyn Repository,
     grant: &PushGrant,
     onto: &LandingBranch,
     remote: Option<&dyn MainRemote>,
@@ -731,7 +742,15 @@ fn push_main(
         report(PushResult::Failed, remote, Some(format!("{error:#}")), None)
     };
     let report = match remote {
-        None => report(PushResult::Skipped, DEFAULT_REMOTE, None, Some("--no-push")),
+        None => {
+            let config = repository.repository_config().unwrap_or_default();
+            report(
+                PushResult::Skipped,
+                config.remote(),
+                None,
+                Some("--no-push"),
+            )
+        }
         Some(main_remote) => match main_remote.push_config() {
             Err(error) => failed(DEFAULT_REMOTE, &error),
             Ok(config) if !config.push() => report(
