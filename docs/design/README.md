@@ -4,8 +4,8 @@ type: design
 title: Current design documents
 status: current
 created: 2026-09-21
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-30
+last_verified: 2026-09-30
 tags:
   - architecture
 ---
@@ -25,3 +25,4 @@ tags:
 - [Plugin integration](plugin-integration.md)
 - [Manual smoke](manual-smoke.md)
 - [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）
+- [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す）

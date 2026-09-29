@@ -73,5 +73,22 @@ jobs:
       # default-members says (ADR-t828-1).
       # The e2e tests in tests/e2e.rs need a running cmux, so they stay
       # #[ignore]d here and are run by the worker before integrate.
+      # The output is also kept for the slow-tests step below. shell: bash
+      # runs with -o pipefail, so the step fails exactly when cargo llvm-cov
+      # nextest fails (tee does not hide its exit status).
       - name: cargo llvm-cov nextest
-        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines 80
+        shell: bash
+        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines 80 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+
+      # The slowest tests and the counts over 1, 5 and 30 seconds, in the job
+      # summary (scripts/slow-tests.sh, docs/design/slow-tests.md). It runs
+      # after a failed test step too, and its own failure never fails CI.
+      - name: Slow tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          if [ -s "$RUNNER_TEMP/nextest.log" ]; then
+            sh scripts/slow-tests.sh "$RUNNER_TEMP/nextest.log" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no nextest output to summarise"
+          fi
