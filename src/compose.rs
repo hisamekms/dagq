@@ -836,8 +836,9 @@ pub fn supervise_with_reviewer(
     });
     // The resource broker (ADR-t827-3 decision 2): `[broker]` of dagq.toml
     // lowered by host.toml; `disabled` gives no port and calls no podman,
+    // only revoking the tokens an earlier mode left (task 1125), and
     // `required` does not start (Phase 2).
-    let broker = {
+    let (broker, broker_leftovers) = {
         let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
         let host_wide = options
             .host_config
@@ -850,8 +851,12 @@ pub fn supervise_with_reviewer(
         if let Some(reason) = setup.mode.unsupported() {
             bail!("{reason}; the supervisor was not started");
         }
+        let tokens: Arc<dyn crate::application::broker_run::RunTokens> =
+            Arc::new(crate::infrastructure::broker_token::QueueRunTokens {
+                queue_dir: queue_dir.clone(),
+            });
         match setup.mode {
-            crate::domain::broker::BrokerMode::Disabled => None,
+            crate::domain::broker::BrokerMode::Disabled => (None, Some(tokens)),
             mode => {
                 let settings = options.broker.clone();
                 let ports = match &settings {
@@ -896,18 +901,17 @@ pub fn supervise_with_reviewer(
                         "workers get no broker tools: {failure}"
                     );
                 }
-                Some(crate::application::supervise::BrokerPort {
+                let port = crate::application::supervise::BrokerPort {
                     mode,
-                    tokens: Arc::new(crate::infrastructure::broker_token::QueueRunTokens {
-                        queue_dir: queue_dir.clone(),
-                    }),
+                    tokens,
                     client,
                     control: Arc::new(control),
                     health_interval: settings.map_or(
                         crate::application::supervise::BROKER_HEALTH_INTERVAL,
                         |settings| settings.health_interval,
                     ),
-                })
+                };
+                (Some(port), None)
             }
         }
     };
@@ -968,6 +972,7 @@ pub fn supervise_with_reviewer(
         release: Some(release),
         host_metrics,
         broker,
+        broker_leftovers,
         layout,
     };
     supervisor::supervise(

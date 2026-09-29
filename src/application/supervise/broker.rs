@@ -26,6 +26,13 @@
 //! command); a job still running when the loop ends otherwise is left to
 //! finish on its own.
 //!
+//! A `disabled` supervisor has no port and calls no podman, but a queue
+//! run `preferred` before may have left tokens: each pass (and the one
+//! before it stops) revokes every active mark's run, live or ended, with
+//! the reason `mode_disabled`, and a run it starts or resumes loses any
+//! MCP configuration left in its dir, so no worker is handed the tools of
+//! a broker that no longer serves it (task 1125).
+//!
 //! [Broker]: ../../../docs/design/broker.md
 
 use super::*;
@@ -39,6 +46,9 @@ use crate::domain::broker::{
 pub const BROKER_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 /// Failed looks in a row before the container is restarted.
 pub const BROKER_FAILURES: u32 = 3;
+/// The reason of `broker_token_revoked` for a token a `disabled`
+/// supervisor found left by an earlier mode.
+const MODE_DISABLED: &str = "mode_disabled";
 
 /// What the supervisor drives the queue's broker with.
 #[derive(Clone)]
@@ -374,12 +384,16 @@ impl Supervisor<'_> {
     /// configuration in place, and record `broker_token_issued`. A broker
     /// that cannot be used is `broker_unavailable` with its `reason`, and
     /// the worker starts without the tools; nothing stops the run. With
-    /// `disabled` nothing happens. Whether the tools were given.
+    /// `disabled` only what an earlier mode left of the run goes
+    /// (`mode_disabled`). Whether the tools were given.
     pub(super) fn broker_grant(&mut self, run: &TaskRun) -> bool {
         let Some(port) = self.broker_port.clone() else {
+            if let Some(tokens) = self.broker_leftovers.clone() {
+                self.broker_revoke(&*tokens, run, MODE_DISABLED);
+            }
             return false;
         };
-        self.broker_revoke(&port, run, "reissued");
+        self.broker_revoke(&*port.tokens, run, "reissued");
         let grant = match self.broker_offer(&port, run) {
             Ok(grant) => grant,
             Err((reason, message)) => {
@@ -416,8 +430,8 @@ impl Supervisor<'_> {
     }
 
     /// Revoke every token of `run` (`reason` in `broker_token_revoked`).
-    fn broker_revoke(&mut self, port: &BrokerPort, run: &TaskRun, reason: &str) {
-        match port.tokens.revoke(run.id(), run.run_dir().map(Path::new)) {
+    fn broker_revoke(&mut self, tokens: &dyn RunTokens, run: &TaskRun, reason: &str) {
+        match tokens.revoke(run.id(), run.run_dir().map(Path::new)) {
             Ok(revoked) => {
                 for jti in revoked {
                     info!(run_id = %run.id(), jti, reason, "run {}'s broker token is revoked ({reason})", run.id());
@@ -439,9 +453,13 @@ impl Supervisor<'_> {
     /// of runs the queue does not know, and issue again the token of a
     /// live run with less than [`RENEW_BEFORE_SECS`] left. A run that
     /// ended while no supervisor ran is revoked by the next one's first
-    /// pass.
+    /// pass. With `disabled`, every token held goes instead
+    /// ([`Self::broker_sweep_disabled`]).
     pub(super) fn broker_sweep(&mut self) {
         let Some(port) = self.broker_port.clone() else {
+            if let Some(tokens) = self.broker_leftovers.clone() {
+                self.broker_sweep_disabled(&*tokens);
+            }
             return;
         };
         let held = match port.tokens.held() {
@@ -473,7 +491,7 @@ impl Supervisor<'_> {
                 continue;
             };
             if broker_run_ended(run.status()) {
-                self.broker_revoke(&port, &run, run.status().as_str());
+                self.broker_revoke(&*port.tokens, &run, run.status().as_str());
                 continue;
             }
             // A mark the run's token file does not hold (an older token
@@ -516,6 +534,48 @@ impl Supervisor<'_> {
                 }
                 Err(error) => {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s broker token could not be issued again: {error:#}", run.id());
+                }
+            }
+        }
+    }
+
+    /// With `disabled` (task 1125): revoke the tokens an earlier mode left,
+    /// the live runs' too, since no broker serves them now: each run's
+    /// marks, token file and `<run dir>/broker` go, one
+    /// `broker_token_revoked` (`mode_disabled`) per mark. Only files: no
+    /// podman. A mark naming no run of the queue goes with its token file.
+    fn broker_sweep_disabled(&mut self, tokens: &dyn RunTokens) {
+        let held = match tokens.held() {
+            Ok(held) => held,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the broker's tokens left by an earlier mode could not be read: {error:#}");
+                return;
+            }
+        };
+        let mut runs: Vec<String> = held.into_iter().map(|token| token.run_id).collect();
+        runs.sort();
+        runs.dedup();
+        for run_id in runs {
+            let id = RunId::new(&run_id).ok();
+            match id.as_ref().and_then(|id| self.queue.run(id).ok()) {
+                Some(run) => self.broker_revoke(tokens, &run, MODE_DISABLED),
+                None => {
+                    warn!(
+                        run = run_id,
+                        "a broker token names no run of the queue: retired"
+                    );
+                    let removed = match &id {
+                        Some(id) => tokens.revoke(id, None).map(|_| ()),
+                        // A mark whose run id is not one: only its marks.
+                        None => tokens.held().and_then(|held| {
+                            held.iter()
+                                .filter(|token| token.run_id == run_id)
+                                .try_for_each(|token| tokens.retire(&token.jti))
+                        }),
+                    };
+                    if let Err(error) = removed {
+                        warn!(error = %format_args!("{error:#}"), "a broker token could not be retired: {error:#}");
+                    }
                 }
             }
         }

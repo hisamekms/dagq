@@ -1042,3 +1042,175 @@ fn a_run_that_fails_or_is_interrupted_loses_its_token() {
     assert_revoked(succeeded, "succeeded");
     assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 0);
 }
+
+/// A queue run `preferred` and then put back to `disabled` (task 1125):
+/// the disabled supervisor's first pass revokes every token left, the
+/// live run's (awaiting its landing) and the ended one's (interrupted
+/// while no supervisor ran) alike, with the reason `mode_disabled`: the
+/// marks, the token files and the runs' MCP configurations go. It calls
+/// no podman for it.
+#[test]
+fn a_disabled_supervisor_revokes_the_tokens_an_earlier_mode_left() {
+    let (fixture, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    broker_mode(&repo, "preferred");
+    let podman = FakePodman::new(RUNNING);
+    podman.image.store(true, Ordering::SeqCst);
+    let client = fixture.dir.path().join("dagq-broker-client");
+    fs::write(&client, "").unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        broker: Some(BrokerOptions {
+            client: Some(client.clone()),
+            ..broker_options(&podman)
+        }),
+        ..options_with(&podman, &repo, false)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |_| {
+        has_kind(&db, "broker_started")
+    });
+    let (live, ended) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        (
+            add_ready_task(&mut queue, "lands later", &[]),
+            add_ready_task(&mut queue, "interrupted later", &[]),
+        )
+    };
+    let run_of = |task: TaskId| SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        [live, ended].iter().all(|task| {
+            queue
+                .show(*task)
+                .unwrap()
+                .runs
+                .first()
+                .is_some_and(|run| run.status() == RunStatus::AwaitingIntegration)
+        })
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='interrupted' WHERE id=?1",
+            [run_of(ended).id().as_str()],
+        )
+        .unwrap();
+    let queue = queue_dir(&db);
+    let jtis: Vec<(TaskId, String)> = [live, ended]
+        .into_iter()
+        .map(|task| {
+            let run = run_of(task);
+            let issued = events_of(&db, run.id(), "broker_token_issued");
+            assert_eq!(issued.len(), 1, "{task} {issued:?}");
+            let run_dir = PathBuf::from(run.run_dir().unwrap());
+            assert!(run_dir.join("broker/mcp.json").is_file(), "{task}");
+            (task, issued[0]["jti"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 2);
+
+    // Back to `disabled` (host.toml lowers it): the first pass revokes both.
+    fs::write(queue.join("host.toml"), "[broker]\nmode = \"disabled\"\n").unwrap();
+    let calls = podman.calls().len();
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(podman.calls().len(), calls, "{:?}", podman.calls());
+    for (task, jti) in &jtis {
+        let run = run_of(*task);
+        assert_eq!(
+            events_of(&db, run.id(), "broker_token_revoked"),
+            [json!({"jti": jti, "reason": "mode_disabled"})],
+            "{task}"
+        );
+        assert!(!queue.join("broker/active").join(jti).exists(), "{task}");
+        assert!(
+            !queue.join("broker/tokens").join(run.id().as_str()).exists(),
+            "{task}"
+        );
+        assert!(
+            !PathBuf::from(run.run_dir().unwrap())
+                .join("broker")
+                .exists(),
+            "{task}"
+        );
+        assert_eq!(
+            dagq::application::broker_run::worker_mcp_config(&run),
+            None,
+            "{task}"
+        );
+    }
+    assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 0);
+    // Nothing left to revoke: the next pass records nothing more.
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(kinds(&db, "broker_token_revoked").len(), 2);
+    assert_eq!(podman.calls().len(), calls);
+}
+
+/// A run parked as `needs_session` that an earlier `preferred` left its
+/// token file and MCP configuration, but no active mark the sweep would
+/// find (a revoke that failed partway), is resumed by a `disabled`
+/// supervisor without the broker's tools (task 1125): the resume's grant
+/// removes what is left, so the configuration (what the executor hands the
+/// resume and a headless turn as `--mcp-config` and `--allowedTools
+/// mcp__dagq-broker`) is gone before the resumed session starts, its
+/// resume message says nothing of the tools, and no token is issued
+/// again.
+#[test]
+fn a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it() {
+    use dagq::application::broker_run::{Grant, RunTokens, worker_mcp_config};
+    let (fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    let queue = queue_dir(&db);
+    let tokens = dagq::infrastructure::broker_token::QueueRunTokens {
+        queue_dir: queue.clone(),
+    };
+    let client = fixture.dir.path().join("dagq-broker-client");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let issued = tokens
+        .issue(&run, &Grant { client, port: 8750 }, now)
+        .unwrap();
+    tokens.retire(&issued.jti).unwrap();
+    assert!(tokens.held().unwrap().is_empty());
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    assert!(worker_mcp_config(&run).is_some());
+
+    backend.resume_script_for(
+        2,
+        "await_message; dir=\"$(dirname \"$RECEIPT\")\"; [ -e \"$dir/broker\" ] && : > \"$dir/broker-seen\"; grep -q dagq-broker \"$MESSAGE\" && : > \"$dir/broker-told\"; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let podman = FakePodman::new(RUNNING);
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(podman.calls().is_empty(), "{:?}", podman.calls());
+    assert!(
+        !events_of(&db, run.id(), "resume_started").is_empty(),
+        "the run was resumed"
+    );
+    assert!(!run_dir.join("broker-seen").exists());
+    assert!(!run_dir.join("broker-told").exists());
+    assert!(!run_dir.join("broker").exists());
+    // No mark was left, so no token to record as revoked or issued.
+    assert_eq!(kinds(&db, "broker_%"), []);
+    assert!(!queue.join("broker/tokens").join(run.id().as_str()).exists());
+    assert!(tokens.held().unwrap().is_empty());
+}

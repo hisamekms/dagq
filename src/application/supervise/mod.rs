@@ -372,6 +372,9 @@ pub struct Ports<'a> {
     /// Keeps the queue's resource broker (ADR-t827-3 decision 2); `None`
     /// for the mode `disabled`, which calls no podman.
     pub broker: Option<BrokerPort>,
+    /// With the mode `disabled` only: the runs' tokens an earlier mode
+    /// left, revoked with no podman (task 1125); `None` otherwise.
+    pub broker_leftovers: Option<Arc<dyn crate::application::broker_run::RunTokens>>,
     pub layout: Layout,
 }
 
@@ -649,6 +652,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         host_metrics_port: ports.host_metrics.clone(),
         host_metrics: host_metrics::HostMetricsWatch::default(),
         broker_port: ports.broker.clone(),
+        broker_leftovers: ports.broker_leftovers.clone(),
         broker: broker::BrokerWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
@@ -838,6 +842,8 @@ struct Supervisor<'a> {
     host_metrics: host_metrics::HostMetricsWatch,
     /// Keeps the queue's broker; `None` for the mode `disabled`.
     broker_port: Option<BrokerPort>,
+    /// The tokens a `disabled` supervisor revokes (task 1125).
+    broker_leftovers: Option<Arc<dyn crate::application::broker_run::RunTokens>>,
     /// The broker's job and what the supervisor knows of it.
     broker: broker::BrokerWatch,
     /// Reads the limit on the improvement proposals running.
