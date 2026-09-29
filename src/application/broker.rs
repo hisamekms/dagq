@@ -743,6 +743,12 @@ pub struct ImagePrune {
     /// The images or containers could not be listed, so nothing was
     /// removed.
     pub error: Option<String>,
+    /// The ids of the dangling images (`<none>`, the build stages of the
+    /// multi-stage Containerfile) `podman image prune --force` removed
+    /// ([`prune_dangling`]).
+    pub dangling_removed: Vec<String>,
+    /// Why `podman image prune` failed, when it did.
+    pub dangling_error: Option<String>,
 }
 
 /// An image [`prune_images`] could not remove.
@@ -883,6 +889,31 @@ pub fn prune_images(podman: &dyn Podman, machine: &str, current: &str) -> ImageP
         }
     }
     prune
+}
+
+/// Remove the dangling images on dagq's machine: `podman image prune
+/// --force`, without `--all` or a filter, so only images with no tag go
+/// (the build stages each build leaves as `<none>`), never one a container
+/// (a build under way included) uses, and the build cache stays. Nothing
+/// here fails: the removed ids, or why the prune failed, go in `prune`.
+pub fn prune_dangling(podman: &dyn Podman, machine: &str, prune: &mut ImagePrune) {
+    match checked(
+        podman,
+        &on_machine(machine, &["image", "prune", "--force"]),
+        FailureCode::PodmanFailed,
+        "podman image prune",
+    ) {
+        Ok(output) => {
+            prune.dangling_removed = output
+                .stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        Err(failure) => prune.dangling_error = Some(failure.message),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,7 +1344,8 @@ pub struct StartReport {
     /// The image under this build's tag answered another build, so it was
     /// removed with its container and built again.
     pub rebuilt: bool,
-    /// The old images removed once the broker answered ([`prune_images`]).
+    /// The old images removed once the broker answered ([`prune_images`]),
+    /// and the dangling ones ([`prune_dangling`]).
     pub images: ImagePrune,
 }
 
@@ -1323,7 +1355,8 @@ pub struct StartReport {
 /// answers another build than dagq's, while no run holds a token for it,
 /// has its image built again once; a second mismatch
 /// is a [`FailureCode::VersionMismatch`] (ADR-t827-1 decision 7). Once the
-/// broker answers, the old images go ([`prune_images`]).
+/// broker answers, the old images go ([`prune_images`]), and then the
+/// dangling ones ([`prune_dangling`]).
 pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport> {
     let spec = request.container;
     // The host lock is held throughout, so a `stop` or a test's
@@ -1398,7 +1431,8 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
         }
     }
     let build_matches = health.build == request.build;
-    let images = prune_images(ports.podman, &spec.machine, &spec.image);
+    let mut images = prune_images(ports.podman, &spec.machine, &spec.image);
+    prune_dangling(ports.podman, &spec.machine, &mut images);
     Ok(StartReport {
         machine,
         image: spec.image.clone(),
@@ -2578,6 +2612,9 @@ mod tests {
             error.message.contains("answers build old, not dagq's b"),
             "{error}"
         );
+        // Nothing is pruned after a mismatch.
+        assert_eq!(podman.called("--connection dagq image prune"), 0);
+        assert_eq!(podman.called("--connection dagq images"), 0);
 
         // A container of another image kept for the runs that hold tokens
         // for it answers its own build, and stays as it is.
@@ -2878,6 +2915,100 @@ mod tests {
             ..Script::default()
         };
         assert!(prune_images(&missing, MACHINE, &spec.image).error.is_some());
+    }
+
+    #[test]
+    fn start_prunes_the_dangling_images_once_after_the_old_ones() {
+        let spec = spec();
+        let machine = MachineSpec::default();
+        let source = Source(Cell::new(0));
+        let lock = CountingLock::default();
+        let health = Healthy(Ok(dagq_broker_protocol::HealthResponse::ok("b")));
+        let request = StartRequest {
+            machine: &machine,
+            container: &spec,
+            build: "b",
+            source: &source,
+            scratch: Path::new("/scratch"),
+            in_use: false,
+            health_timeout: Duration::ZERO,
+            health_interval: Duration::ZERO,
+            on_build: None,
+        };
+        let listed = images(&[
+            ("i-current", &[spec.image.as_str()], 400),
+            ("i-previous", &["localhost/dagq-broker:0.1.0"], 300),
+            ("i-oldest", &["localhost/dagq-broker:oldest"], 50),
+        ]);
+        let script = |prune: PodmanOutput| {
+            start_script(vec![ok(RUNNING)], true, inspect(true, &spec.image))
+                .on(&["--connection", "dagq", "images"], vec![listed.clone()])
+                .on(&["--connection", "dagq", "ps"], vec![containers(&[])])
+                .on(&["--connection", "dagq", "image", "prune"], vec![prune])
+        };
+
+        // Once, after the tagged images, with neither --all nor a filter.
+        let podman = script(ok("sha256:aaa\nsha256:bbb\n"));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        let calls = podman.calls();
+        let prunes: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.contains("image prune"))
+            .collect();
+        assert_eq!(prunes, ["--connection dagq image prune --force"]);
+        let prune_at = calls
+            .iter()
+            .position(|call| call.contains("image prune"))
+            .unwrap();
+        let rm_at = calls
+            .iter()
+            .rposition(|call| call.contains("image rm"))
+            .unwrap();
+        assert!(rm_at < prune_at, "{calls:?}");
+        assert_eq!(report.images.removed, ["localhost/dagq-broker:oldest"]);
+        assert_eq!(report.images.dangling_removed, ["sha256:aaa", "sha256:bbb"]);
+        assert!(report.images.dangling_error.is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["images"]["dangling_removed"][1], "sha256:bbb");
+
+        // Nothing dangling: nothing removed, nothing failed.
+        let podman = script(ok(""));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        assert!(report.images.dangling_removed.is_empty());
+        assert!(report.images.dangling_error.is_none());
+
+        // A prune that fails does not fail the start, and is reported.
+        let podman = script(fail("image prune: machine went away"));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        assert!(report.images.dangling_removed.is_empty());
+        let error = report.images.dangling_error.unwrap();
+        assert!(
+            error.contains("podman image prune failed: image prune: machine went away"),
+            "{error}"
+        );
+        // Neither does podman that cannot run by then.
+        let mut prune = ImagePrune::default();
+        let missing = Script {
+            missing: true,
+            ..Script::default()
+        };
+        prune_dangling(&missing, MACHINE, &mut prune);
+        assert!(prune.dangling_error.is_some());
     }
 
     #[test]
