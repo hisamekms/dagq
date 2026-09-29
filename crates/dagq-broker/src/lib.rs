@@ -61,6 +61,9 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<(), String> {
         }
         [command, rest @ ..] if command == "serve" => {
             let config = Config::parse(rest).map_err(|error| format!("{NAME} serve: {error}"))?;
+            for warning in &config.warnings {
+                eprintln!("{NAME} serve: {warning}");
+            }
             let backends = Backends {
                 fs: Arc::new(FsBackend::new(config.roots.clone())),
                 process: Arc::new(ProcessBackend::new(config.roots.clone())),

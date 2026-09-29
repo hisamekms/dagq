@@ -154,7 +154,7 @@ resolver = "3"
 | `--root <dir>`（複数可） | 必須（1つ以上、絶対パス） | mountしたruns dir。tokenの`workspace`がどのrootの下にも無ければ`workspace_violation` |
 | `--exec-timeout-secs` / `--exec-max-timeout-secs` / `--output-limit-bytes` | 60 / 300 / 1048576 | 上限の既定値（backendに渡す） |
 | `--fs-limit-bytes` | 4194304 | fsの中身の上限（`fs.read`が返す中身、`fs.write`・`fs.edit`が書く中身、`fs.edit`が読むファイル、`fs.list`の応答）。超えれば`output_limit` |
-| `--exec-allow <name>` / `--exec-env <name>`（複数可） | 空 | execのallowlist（backendに渡す） |
+| `--exec-allow <name>` / `--exec-env <name>`（複数可） | 空 | execのallowlist（backendに渡す）。`--exec-allow`にinterpreterの一覧の名前（basenameで比べる）があれば、起動時にstderrへ名前つきのwarningを1行ずつ出して起動は続ける。`--exec-env`に`LD_`・`DYLD_`で始まる名前（大文字小文字を区別した前方一致）があれば名前つきのerrorで起動しない（exit 2）。どちらもenvの値やtokenを出さない（「process.exec」の注意） |
 
 - bindしたら`{"listening":"<addr>","build":"<build>"}`の1行をstdoutに出す（port 0で選ばれたportをtestと起動側が読む）
 - HTTPは`std::net`の上の自前の小さなserver（1接続1要求・1接続1 thread で同時に32接続まで（超えた接続は答えずに閉じる）、本体は`Content-Length`だけで`Transfer-Encoding`は拒む、本体は届いた分だけ伸ばして読む、応答は`Connection: close`、要求の全体を読む期限と書きのtimeoutは30秒、要求の頭は16 KiBまで）。以前の例の`tiny_http`はofflineのbuildで使えず、要るのはloopbackで自分のclientと話すことだけなので足さない
@@ -309,7 +309,11 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
 - 応答は`{exit_code, stdout, stderr, duration_ms}`で、`exit_code`はsignalで終わったとき`null`。auditには`program`・`argc`・`argv_sha256`・`exit_code`・`duration_ms`・`bytes_in`・`bytes_out`を残し、引数・env・stdin・出力は残さない。errorのmessageにも出力・stdin・envの値を入れない
 - 走るのはcontainerの中で、containerのmemory・cpu・pidsの上限に入る。imageにはtoolchainが無く、軽いコマンド（`sh`・`ls`・`cat`・`grep`など、allowlistにあるもの）だけ。使い捨てのrepositoryの代表のtaskもそれで済むものにする（ADR-t827-3決定9）
 - `sh`をallowlistに入れると、shellからimageの中の`git`も走らせられる（containerに資格情報もremoteへの経路の設定も無いので上流へのpushは通らないが、同じrepositoryの他のrefは書き換えうる）。使い捨てのrepositoryの検証のためだけに使い、既定には入れない
-- allowlistが見るのは`argv[0]`だけなので、他のプログラムを走らせるもの（`sh`・`env`・`xargs`・`find`など）を入れると、そこから`git`もworkspaceの外のcwdも走らせられる（誤りを止める仕組みで境界ではない）。`exec_env`に`LD_PRELOAD`・`DYLD_*`のような読み込みを変えるenvの名前を入れない
+- allowlistが見るのは`argv[0]`だけなので、他のプログラムを走らせるもの（interpreter）を入れると、そこから`git`もworkspaceの外のcwdも走らせられる（誤りを止める仕組みで境界ではない）。serveのconfigの読み込み（`crates/dagq-broker/src/config.rs`の`INTERPRETERS`。`dagq.toml`の`[broker] exec_allow`・`exec_env`はdagqがserveのflagにして渡す予定（dagqはまだ読まない）なので、そうなれば両方に効く。task 917）は、`--exec-allow`の名前のbasenameが次の一覧にあれば拒まずに`dagq-broker serve: warning: `--exec-allow <name>` runs other programs; ...`を起動時にstderr（containerのlog）へ1行ずつ出す。使い捨てのrepositoryの検証が`sh`を使うので（ADR-t827-3決定9）拒まない
+  - shell: `sh`・`bash`・`zsh`・`dash`・`ksh`・`mksh`・`ash`・`busybox`・`fish`・`csh`・`tcsh`
+  - 引数のコマンドを走らせるもの: `env`・`xargs`・`find`・`nice`・`nohup`・`timeout`・`time`・`stdbuf`・`setsid`・`flock`・`chroot`・`sudo`・`doas`・`su`・`script`・`watch`・`parallel`・`make`
+  - 言語のinterpreter: `python`・`python2`・`python3`・`perl`・`ruby`・`node`・`deno`・`bun`・`php`・`lua`・`tclsh`・`awk`・`gawk`・`mawk`・`nawk`
+- `exec_env`（`--exec-env`）に`LD_PRELOAD`・`LD_LIBRARY_PATH`・`LD_AUDIT`などの`LD_*`と、`DYLD_INSERT_LIBRARIES`などの`DYLD_*`（子の読み込みを変えるenv）の名前があれば、正当な用途が無いのでserveは``--exec-env <name>` changes what the child loads; ...`のerrorで起動しない（config.rsの`LOADER_ENV_PREFIXES`。大文字小文字を区別した前方一致で、`ld_preload`や`OLD_PATH`は当たらない）
 - 監視の1巡りで読むのはpipeごとに1回（64 KiB）までで、書く速さが読む速さを上回っても毎巡りで上限と期限を見る。期限の時点で子がもう終わっていれば`timeout`にせず、終わったものとして残りを読む
 - `process.shell`（shellの文字列を受けるop）は作らない。要るならADRが別のcapabilityとして決める
 

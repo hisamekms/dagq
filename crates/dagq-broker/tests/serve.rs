@@ -555,6 +555,82 @@ fn refuses_to_listen_beyond_loopback_outside_the_container() {
 }
 
 #[test]
+fn warns_on_stderr_about_interpreters_in_the_allowlist_and_keeps_serving() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(root.join("key"), KEY).unwrap();
+    fs::create_dir_all(root.join("active")).unwrap();
+    fs::create_dir_all(root.join("runs")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dagq-broker"))
+        .arg("serve")
+        .args(["--listen", "127.0.0.1:0"])
+        .arg("--key")
+        .arg(root.join("key"))
+        .arg("--active")
+        .arg(root.join("active"))
+        .arg("--audit")
+        .arg(root.join("audit"))
+        .arg("--root")
+        .arg(root.join("runs"))
+        .args(["--exec-allow", "sh", "--exec-allow", "ls"])
+        .args(["--exec-allow", "python3", "--exec-env", "LANG"])
+        .env(HOST_SECRET_NAME, HOST_SECRET_VALUE)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start dagq-broker serve");
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = send.send(line);
+    });
+    let line = receive
+        .recv_timeout(LIMIT)
+        .expect("dagq-broker serve prints where it listens");
+    let listening: Value = serde_json::from_str(&line).expect(&line);
+    let addr: SocketAddr = listening["listening"].as_str().unwrap().parse().unwrap();
+    // Still serving after the warnings.
+    let mut stream = TcpStream::connect_timeout(&addr, LIMIT).unwrap();
+    stream.set_read_timeout(Some(LIMIT)).unwrap();
+    stream
+        .write_all(b"GET /v1/health HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    let _ = child.kill();
+    let _ = child.wait();
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut text);
+        let _ = send.send(text);
+    });
+    let text = receive.recv_timeout(LIMIT).expect("stderr closes");
+    let warnings: Vec<&str> = text.lines().filter(|l| l.contains("warning:")).collect();
+    assert_eq!(warnings.len(), 2, "{text}");
+    assert!(warnings[0].contains("`--exec-allow sh`"), "{text}");
+    assert!(warnings[1].contains("`--exec-allow python3`"), "{text}");
+    assert!(!text.contains("`--exec-allow ls`"), "{text}");
+    assert!(!text.contains(HOST_SECRET_VALUE), "{text}");
+}
+
+#[test]
+fn refuses_to_start_with_a_loader_env_name() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"] {
+        let output = serve_output(&["--listen", "127.0.0.1:0", "--exec-env", name], dir.path());
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(&format!("`--exec-env {name}`")), "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
 fn fs_operations_work_in_the_workspace_and_every_one_is_audited() {
     let broker = Broker::start_with(&["--fs-limit-bytes", "64"]);
     let claims = broker.claims("jti-fs", &BrokerCapability::ALL);

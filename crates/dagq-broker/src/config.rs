@@ -19,6 +19,27 @@ pub const DEFAULT_OUTPUT_LIMIT_BYTES: u64 = 1024 * 1024;
 /// and a `fs.write` or `fs.edit` writes.
 pub const DEFAULT_FS_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Programs that run other programs: with one of them in `--exec-allow`,
+/// `process.exec` can run `git` or leave the workspace's cwd through it,
+/// since the allowlist looks at `argv[0]` only. `serve` warns about them
+/// (compared by basename) and does not refuse them: the throwaway
+/// repository's verification needs `sh` (ADR-t827-3 decision 9).
+pub const INTERPRETERS: &[&str] = &[
+    // shells
+    "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "busybox", "fish", "csh", "tcsh",
+    // run a command given as arguments
+    "env", "xargs", "find", "nice", "nohup", "timeout", "time", "stdbuf", "setsid", "flock",
+    "chroot", "sudo", "doas", "su", "script", "watch", "parallel", "make",
+    // language interpreters
+    "python", "python2", "python3", "perl", "ruby", "node", "deno", "bun", "php", "lua", "tclsh",
+    "awk", "gawk", "mawk", "nawk",
+];
+
+/// The prefixes of env names that change what a child loads (the dynamic
+/// loader's `LD_*` and macOS's `DYLD_*`), compared case-sensitively.
+/// `--exec-env` refuses them: they have no legitimate use there.
+pub const LOADER_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+
 /// The limits the backends enforce on the server's side (ADR-t827-2
 /// decision 8), and what `process.exec` may run and receive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +88,9 @@ pub struct Config {
     /// under one of them.
     pub roots: Vec<PathBuf>,
     pub limits: Limits,
+    /// What `serve` says on stderr at startup, one line each (the
+    /// interpreters in `--exec-allow`); it names the program only.
+    pub warnings: Vec<String>,
 }
 
 impl Config {
@@ -117,6 +141,25 @@ impl Config {
                     .to_owned(),
             );
         }
+        if let Some(name) = limits.exec_env.iter().find(|name| {
+            LOADER_ENV_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        }) {
+            return Err(format!(
+                "`--exec-env {name}` changes what the child loads; `LD_*` and `DYLD_*` names are refused"
+            ));
+        }
+        let warnings = limits
+            .exec_allow
+            .iter()
+            .filter(|name| is_interpreter(name))
+            .map(|name| {
+                format!(
+                    "warning: `--exec-allow {name}` runs other programs; process.exec can run git and leave the workspace through it"
+                )
+            })
+            .collect();
         if roots.is_empty() {
             return Err("`--root` is required (the mounted runs dir)".to_owned());
         }
@@ -131,8 +174,15 @@ impl Config {
             audit: audit.ok_or("`--audit` is required")?,
             roots,
             limits,
+            warnings,
         })
     }
+}
+
+/// Whether `name`'s basename is one of [`INTERPRETERS`].
+pub fn is_interpreter(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    INTERPRETERS.contains(&base)
 }
 
 fn number(flag: &str, value: &str) -> Result<u64, String> {
@@ -232,6 +282,73 @@ mod tests {
             }
         );
         assert_eq!(config.roots.len(), 2);
+    }
+
+    #[test]
+    fn warns_about_interpreters_in_the_allowlist_by_name() {
+        let config = with(&[
+            "--exec-allow",
+            "sh",
+            "--exec-allow",
+            "ls",
+            "--exec-allow",
+            "/usr/bin/python3",
+            "--exec-allow",
+            "xargs",
+        ])
+        .unwrap();
+        assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
+        for (warning, name) in config
+            .warnings
+            .iter()
+            .zip(["sh", "/usr/bin/python3", "xargs"])
+        {
+            assert!(warning.starts_with("warning: "), "{warning}");
+            assert!(
+                warning.contains(&format!("`--exec-allow {name}`")),
+                "{warning}"
+            );
+        }
+        for name in INTERPRETERS {
+            assert!(is_interpreter(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn no_warning_for_programs_that_run_nothing_else() {
+        let config = with(&[
+            "--exec-allow",
+            "ls",
+            "--exec-allow",
+            "cat",
+            "--exec-allow",
+            "grep",
+            "--exec-allow",
+            "shasum",
+        ])
+        .unwrap();
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert!(with(&[]).unwrap().warnings.is_empty());
+        assert!(!is_interpreter("shell-check"));
+        assert!(!is_interpreter("SH"));
+    }
+
+    #[test]
+    fn refuses_loader_env_names_by_name() {
+        for name in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+        ] {
+            let error = with(&["--exec-env", "LANG", "--exec-env", name]).unwrap_err();
+            assert!(error.contains(&format!("`--exec-env {name}`")), "{error}");
+            assert!(error.contains("refused"), "{error}");
+        }
+        // Case-sensitive prefixes: these are not the loader's names.
+        let config = with(&["--exec-env", "ld_preload", "--exec-env", "OLD_PATH"]).unwrap();
+        assert_eq!(config.limits.exec_env, ["ld_preload", "OLD_PATH"]);
     }
 
     #[test]
