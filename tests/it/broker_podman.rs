@@ -6,7 +6,7 @@
 //! The first run builds the image in the machine and takes minutes.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -140,7 +140,6 @@ fn the_broker_runs_in_its_container_and_answers_on_loopback_only() {
     };
     let port = free_port().unwrap();
     let options = BrokerStartOptions {
-        source: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
         port: Some(port),
         podman: None,
         cwd: dir.path().to_path_buf(),
@@ -150,6 +149,13 @@ fn the_broker_runs_in_its_container_and_answers_on_loopback_only() {
     assert_eq!(started["state"], "running");
     assert_eq!(started["start"]["container_outcome"]["created"], true);
     assert_eq!(started["start"]["health"]["status"], "ok");
+    // Built from the material this dagq embeds, as this dagq's build.
+    assert_eq!(
+        started["start"]["image"],
+        dagq::infrastructure::broker_image::image()
+    );
+    assert_eq!(started["start"]["health"]["build"], dagq::VERSION);
+    assert_eq!(started["start"]["build_matches"], true);
     // Again: nothing is made.
     let again = broker_start(&location, &options).unwrap();
     assert_eq!(again["start"]["image_built"], false);

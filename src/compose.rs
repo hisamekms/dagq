@@ -839,10 +839,6 @@ pub fn supervise_with_reviewer(
                     None => crate::infrastructure::broker_queue::system_ports(
                         setup.host.config.podman.as_deref().map(Path::new),
                         &data_home()?,
-                        crate::infrastructure::broker_queue::image_checkout(
-                            None,
-                            Some(&main_checkout),
-                        ),
                     ),
                 };
                 let mut control = queue_broker(
@@ -2051,7 +2047,6 @@ a person installs it (brew install podman), or sets [broker] mode = \"disabled\"
             None => crate::infrastructure::broker_queue::system_ports(
                 setup.host.config.podman.as_deref().map(Path::new),
                 &data_home()?,
-                None,
             ),
         };
         let broker = queue_broker(
@@ -2887,15 +2882,12 @@ pub fn marks(
 /// What `dagq broker start` is given.
 #[derive(Debug, Clone, Default)]
 pub struct BrokerStartOptions {
-    /// A dagq checkout to build the image from; else the checkout this
-    /// binary was built from, else the working directory's main checkout.
-    pub source: Option<PathBuf>,
     /// The port on `127.0.0.1`; else the one the queue used last, else a
     /// free one.
     pub port: Option<u16>,
     /// The podman executable; else `podman` on `PATH`.
     pub podman: Option<PathBuf>,
-    /// The working directory, for the source's fallback.
+    /// The working directory, for the repository's `dagq.toml`.
     pub cwd: PathBuf,
 }
 
@@ -2955,24 +2947,18 @@ fn queue_broker(
 }
 
 /// The queue's broker for `dagq broker` and `down`: `setup`, the podman
-/// given (else `host.toml`'s, else on `PATH`), the image from `source` or
-/// the checkout this binary was built from or `checkout`.
+/// given (else `host.toml`'s, else on `PATH`), and the image from the
+/// material this binary embeds.
 fn location_broker(
     location: &QueueLocation,
     setup: &BrokerSetup,
     podman: Option<&Path>,
-    source: Option<PathBuf>,
-    checkout: Option<&Path>,
 ) -> Result<crate::infrastructure::broker_queue::QueueBroker> {
-    use crate::infrastructure::broker_queue::{image_checkout, system_ports};
+    use crate::infrastructure::broker_queue::system_ports;
     let podman = podman
         .map(Path::to_path_buf)
         .or_else(|| setup.host.config.podman.as_ref().map(PathBuf::from));
-    let ports = system_ports(
-        podman.as_deref(),
-        &data_home()?,
-        image_checkout(source, checkout),
-    );
+    let ports = system_ports(podman.as_deref(), &data_home()?);
     Ok(queue_broker(
         location.queue_dir.clone(),
         location.runs_dir.clone(),
@@ -3030,14 +3016,7 @@ pub fn broker_start(location: &QueueLocation, options: &BrokerStartOptions) -> R
     let setup = location_setup(location, &options.cwd)?;
     // No podman is its own failure before anything else.
     podman_of(options.podman.as_deref(), &setup)?;
-    let checkout = main_checkout_of(&options.cwd).ok();
-    let mut broker = location_broker(
-        location,
-        &setup,
-        options.podman.as_deref(),
-        options.source.clone(),
-        checkout.as_deref(),
-    )?;
+    let mut broker = location_broker(location, &setup, options.podman.as_deref())?;
     broker.port = options.port.or(broker.port);
     let report = broker.start()?;
     let port = report.port;
@@ -3057,7 +3036,7 @@ pub fn broker_stop(location: &QueueLocation, podman: Option<&Path>) -> Result<Va
     let setup = location_setup(location, &std::env::current_dir()?)
         .unwrap_or_else(|_| host_setup(location));
     podman_of(podman, &setup)?;
-    let broker = location_broker(location, &setup, podman, None, None)?;
+    let broker = location_broker(location, &setup, podman)?;
     let report = broker.stop()?;
     Ok(json!({"state": "stopped", "stop": report}))
 }
@@ -3089,7 +3068,7 @@ pub fn broker_status(location: &QueueLocation, podman: Option<&Path>) -> Result<
         Ok(podman) => podman.executable,
         Err(failure) => return Ok(unavailable(failure)),
     };
-    let broker = location_broker(location, &setup, podman.as_deref(), None, None)?;
+    let broker = location_broker(location, &setup, podman.as_deref())?;
     let report = match broker.status() {
         Ok(report) => report,
         Err(failure) => return Ok(unavailable(failure)),
@@ -3144,7 +3123,7 @@ fn doctor_broker(db: &Path) -> Value {
         "error": podman.as_ref().err().map(|failure| failure.to_json()),
         "machine": crate::application::broker::MACHINE,
         "build": crate::VERSION,
-        "image": crate::application::broker::image_name(crate::VERSION),
+        "image": crate::infrastructure::broker_image::image(),
         "client": broker_client_report(),
         "recorded": BrokerState::read(queue_dir),
     })
@@ -3156,7 +3135,7 @@ fn doctor_broker(db: &Path) -> Value {
 fn status_broker(db: &Path) -> Value {
     use crate::infrastructure::broker_podman::BrokerState;
     let recorded = BrokerState::read(db.parent().unwrap_or(Path::new(".")));
-    let image = crate::application::broker::image_name(crate::VERSION);
+    let image = crate::infrastructure::broker_image::image();
     json!({
         "mode": "disabled",
         "state": recorded.state,

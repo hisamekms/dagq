@@ -554,23 +554,37 @@ pub fn release_machine(podman: &dyn Podman, lock: &dyn HostLock, name: &str) -> 
 // ---------------------------------------------------------------------------
 // The image.
 
-/// The image's tag for dagq's build identifier: `+` becomes `-`
-/// (`0.4.0-dev+abc.dirty` is `0.4.0-dev-abc-dirty`).
-pub fn image_tag(build: &str) -> String {
-    match build.split_once('+') {
+/// How many hex digits of the material's hash a `.dirty` build's tag
+/// carries.
+pub const MATERIAL_HASH_DIGITS: usize = 12;
+
+/// The image's tag for dagq's build identifier `build` whose embedded
+/// material has the SHA-256 `material` (hex): `+` and `.` become `-`
+/// (`0.4.0-dev+abc` is `0.4.0-dev-abc`, a release `0.4.0` is itself), and a
+/// `.dirty` build adds the first [`MATERIAL_HASH_DIGITS`] of the hash
+/// (`0.4.0-dev-abc-dirty-<hash>`), so two dirty builds of one commit with
+/// other material do not share a tag.
+pub fn image_tag(build: &str, material: &str) -> String {
+    let tag = match build.split_once('+') {
         Some((version, metadata)) => format!("{version}-{}", metadata.replace('.', "-")),
         None => build.to_owned(),
+    };
+    if build.ends_with(".dirty") {
+        let hash = material.get(..MATERIAL_HASH_DIGITS).unwrap_or(material);
+        format!("{tag}-{hash}")
+    } else {
+        tag
     }
 }
 
 /// `localhost/dagq-broker:<tag>`.
-pub fn image_name(build: &str) -> String {
-    format!("{IMAGE_REPOSITORY}:{}", image_tag(build))
+pub fn image_name(build: &str, material: &str) -> String {
+    format!("{IMAGE_REPOSITORY}:{}", image_tag(build, material))
 }
 
 /// Where the image's build context comes from: it puts the context (the
-/// Containerfile and the broker's sources) in a dir and names the Rust
-/// version of the build stage.
+/// Containerfile and the broker's sources, or the Containerfile alone for
+/// a release) in a dir and names the Rust version of the build stage.
 pub trait ImageSource {
     fn stage(&self, dir: &Path) -> BrokerResult<String>;
 }
@@ -1468,7 +1482,7 @@ mod tests {
         ContainerSpec {
             machine: MACHINE.to_owned(),
             name: container_name("abc123"),
-            image: image_name("0.4.0-dev+deadbeef"),
+            image: image_name("0.4.0-dev+deadbeef", ""),
             host_port: 41234,
             queue_dir: PathBuf::from("/Users/me/.local/share/dagq/abc123"),
             runs_dir: PathBuf::from("/Users/me/.local/share/dagq/abc123/runs"),
@@ -1633,11 +1647,29 @@ mod tests {
 
     #[test]
     fn image_tags_follow_the_build_identifier() {
-        assert_eq!(image_tag("0.4.0"), "0.4.0");
-        assert_eq!(image_tag("0.4.0-dev+abc"), "0.4.0-dev-abc");
-        assert_eq!(image_tag("0.4.0-dev+abc.dirty"), "0.4.0-dev-abc-dirty");
+        let one = "0123456789abcdef".repeat(4);
+        let other = "fedcba9876543210".repeat(4);
+        // A clean build and a release: the build identifier alone.
+        assert_eq!(image_tag("0.4.0", &one), "0.4.0");
+        assert_eq!(image_tag("0.4.0", &other), "0.4.0");
+        assert_eq!(image_tag("0.4.0-dev+abc", &one), "0.4.0-dev-abc");
+        assert_eq!(image_tag("0.4.0-dev+abc", &other), "0.4.0-dev-abc");
+        // A dirty build: the material's hash too, so other material is
+        // another tag.
         assert_eq!(
-            image_name("0.4.0-dev+abc"),
+            image_tag("0.4.0-dev+abc.dirty", &one),
+            "0.4.0-dev-abc-dirty-0123456789ab"
+        );
+        assert_eq!(
+            image_tag("0.4.0-dev+abc.dirty", &other),
+            "0.4.0-dev-abc-dirty-fedcba987654"
+        );
+        assert_eq!(
+            image_tag("0.4.0-dev+abc.dirty", "ab"),
+            "0.4.0-dev-abc-dirty-ab"
+        );
+        assert_eq!(
+            image_name("0.4.0-dev+abc", &one),
             "localhost/dagq-broker:0.4.0-dev-abc"
         );
         assert_eq!(container_name("h"), "dagq-broker-h");

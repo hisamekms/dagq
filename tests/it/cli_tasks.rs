@@ -87,7 +87,7 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
         assert_eq!(broker["build"], dagq::VERSION, "{command} {broker}");
         assert_eq!(
             broker["image"],
-            dagq::application::broker::image_name(dagq::VERSION),
+            dagq::infrastructure::broker_image::image(),
             "{command} {broker}"
         );
         assert!(

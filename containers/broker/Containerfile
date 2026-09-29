@@ -1,8 +1,12 @@
 # The image of the dagq resource broker (docs/design/broker.md "image",
-# ADR-t827-3 decision 8). dagq stages the build context
-# (src/infrastructure/broker_podman.rs `stage_context`): this file, the
-# sources of dagq-broker-protocol and dagq-broker, Cargo.lock, and a
-# workspace manifest narrowed to those two crates. It builds in dagq's own
+# ADR-t827-3 decision 8). dagq embeds its build context in its binary
+# (build.rs, src/broker_material.rs) and unpacks it to build the image
+# (src/infrastructure/broker_image.rs): a build from a checkout embeds this
+# file, the sources of dagq-broker-protocol and dagq-broker, Cargo.lock, and
+# a workspace manifest narrowed to those two crates; a release (dagq's
+# crates.io package, without crates/) embeds this file alone, with the lines
+# between the two `dagq:build-from-source` markers replaced by
+# `cargo install --locked dagq-broker@<version>`. It builds in dagq's own
 # Podman machine with `--build-arg RUST_VERSION` (from rust-toolchain.toml),
 # `--build-arg CARGO_BUILD_JOBS=1` (the machine is small) and
 # `--build-arg DAGQ_BROKER_IMAGE_BUILD=<dagq's build identifier>`.
@@ -16,6 +20,7 @@ ARG CARGO_BUILD_JOBS=1
 # build of the dagq that built the image (ADR-t827-1 decision 7).
 ARG DAGQ_BROKER_IMAGE_BUILD=
 RUN apk add --no-cache musl-dev
+# dagq:build-from-source begin
 WORKDIR /src
 COPY . .
 # No --locked: Cargo.lock is the whole workspace's, and only the lines of
@@ -23,6 +28,7 @@ COPY . .
 # ones it uses stay as locked.
 RUN cargo build --release -p dagq-broker \
  && install -m 0755 target/release/dagq-broker /dagq-broker
+# dagq:build-from-source end
 
 # The run stage: the broker and git only, no language toolchain
 # (ADR-t827-3 decision 9), and a non-root user. `podman run --userns=keep-id`

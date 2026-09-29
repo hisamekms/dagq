@@ -2,7 +2,8 @@
 //! which `dagq::VERSION` and `dagq --version` report, by the rule of
 //! `dagq_broker_protocol::build_id` that the broker's binaries share, and
 //! lists the queue's migrations for `src/infrastructure/schema.rs`
-//! (ADR-0067 decision 1).
+//! (ADR-0067 decision 1), and embeds the material of the broker's image
+//! (ADR-t827-1 decision 6, `src/broker_material.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,11 @@ use std::path::{Path, PathBuf};
 #[allow(dead_code)]
 #[path = "src/migration_numbers.rs"]
 mod migration_numbers;
+
+// Only collecting and writing the tar are used here; the binary unpacks it.
+#[allow(dead_code)]
+#[path = "src/broker_material.rs"]
+mod broker_material;
 
 fn main() {
     let manifest_dir =
@@ -22,6 +28,38 @@ fn main() {
     list_migrations(&manifest_dir);
     // The rule the broker's server and client embed too (ADR-t827-1).
     dagq_broker_protocol::build_id::emit(".");
+    embed_broker_material(&manifest_dir);
+}
+
+/// Write `$OUT_DIR/broker-image.tar`, the material of the broker's image
+/// that `src/infrastructure/broker_image.rs` embeds, and set
+/// `DAGQ_BROKER_RUST_VERSION` (the build stage's Rust, the channel of
+/// `rust-toolchain.toml`) and `DAGQ_BROKER_MATERIAL` (`source` or
+/// `release`).
+fn embed_broker_material(manifest_dir: &Path) {
+    let version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    let material = broker_material::collect(manifest_dir, &version)
+        .unwrap_or_else(|error| panic!("the broker's image material: {error}"));
+    let toolchain = manifest_dir.join("rust-toolchain.toml");
+    println!("cargo:rerun-if-changed={}", toolchain.display());
+    for path in &material.watched {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let rust = std::fs::read_to_string(&toolchain)
+        .ok()
+        .and_then(|text| broker_material::rust_version(&text))
+        .unwrap_or_else(|| {
+            std::env::var("CARGO_PKG_RUST_VERSION").expect("cargo sets CARGO_PKG_RUST_VERSION")
+        });
+    println!("cargo:rustc-env=DAGQ_BROKER_RUST_VERSION={rust}");
+    println!(
+        "cargo:rustc-env=DAGQ_BROKER_MATERIAL={}",
+        material.kind.as_str()
+    );
+    let bytes = broker_material::tar(&material.files)
+        .unwrap_or_else(|error| panic!("the broker's image material: {error}"));
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(out.join(broker_material::FILE), bytes).expect("write broker-image.tar");
 }
 
 /// Write `$OUT_DIR/migrations.rs`, the array of the migrations in order of

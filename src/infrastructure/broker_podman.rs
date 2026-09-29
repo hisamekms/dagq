@@ -3,9 +3,10 @@
 //! the host-wide lock of dagq's machine (`flock` on
 //! `$XDG_DATA_HOME/dagq/podman-machine.lock`), [`HttpHealth`] asks
 //! `GET /v1/health` on `127.0.0.1` with a hand-written HTTP/1.1 request
-//! (dagq has no HTTP dependency, ADR-t827-1 decision 2), [`CheckoutSource`]
-//! stages the image's build context from a dagq checkout, and
-//! [`BrokerState`] is `<queue dir>/broker/state.json`.
+//! (dagq has no HTTP dependency, ADR-t827-1 decision 2), and
+//! [`BrokerState`] is `<queue dir>/broker/state.json`. The image's build
+//! context comes from the material this binary embeds
+//! ([`super::broker_image`]).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -20,18 +21,14 @@ use dagq_broker_protocol::HealthResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::application::broker::{
-    BrokerFailure, BrokerResult, FailureCode, HealthProbe, HostLock, ImageSource, Podman,
-    PodmanOutput, broker_dir,
+    BrokerFailure, BrokerResult, FailureCode, HealthProbe, HostLock, Podman, PodmanOutput,
+    broker_dir,
 };
 
 /// The machine's lock file under dagq's data dir.
 pub const MACHINE_LOCK_FILE: &str = "podman-machine.lock";
 /// The queue's broker state file under `<queue dir>/broker`.
 pub const STATE_FILE: &str = "state.json";
-/// The Containerfile in a dagq checkout.
-pub const CONTAINERFILE: &str = "containers/broker/Containerfile";
-/// The crates the image builds, in a dagq checkout.
-pub const IMAGE_CRATES: [&str; 2] = ["crates/dagq-broker-protocol", "crates/dagq-broker"];
 
 /// The podman executable.
 #[derive(Debug, Clone)]
@@ -182,122 +179,6 @@ pub fn get_health(address: SocketAddr, timeout: Duration) -> Result<HealthRespon
 pub fn free_port() -> Result<u16> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("pick a free port")?;
     Ok(listener.local_addr()?.port())
-}
-
-/// A dagq checkout the image is built from.
-#[derive(Debug, Clone)]
-pub struct CheckoutSource {
-    pub checkout: PathBuf,
-}
-
-impl CheckoutSource {
-    /// The checkout this binary was built from, when it is still there and
-    /// has the broker's sources (a dev build, ADR-t827-1 decision 6).
-    pub fn of_this_build() -> Option<Self> {
-        let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Self::is_source(&checkout).then_some(Self { checkout })
-    }
-
-    /// Whether `dir` has what the image is built from.
-    pub fn is_source(dir: &Path) -> bool {
-        dir.join(CONTAINERFILE).is_file()
-            && dir.join("Cargo.lock").is_file()
-            && IMAGE_CRATES
-                .iter()
-                .all(|name| dir.join(name).join("Cargo.toml").is_file())
-    }
-}
-
-impl ImageSource for CheckoutSource {
-    fn stage(&self, dir: &Path) -> BrokerResult<String> {
-        stage_context(&self.checkout, dir).map_err(|error| {
-            BrokerFailure::new(
-                FailureCode::ImageSourceMissing,
-                format!(
-                    "stage the image's build context from {}: {error:#}",
-                    self.checkout.display()
-                ),
-            )
-        })
-    }
-}
-
-/// The workspace manifest of the image's build context: the two crates
-/// the server needs and nothing else.
-pub fn narrowed_manifest() -> String {
-    let members = IMAGE_CRATES
-        .iter()
-        .map(|name| format!("\"{name}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "# Written by dagq for the broker's image: the workspace narrowed to the server.\n\
-         [workspace]\nmembers = [{members}]\nresolver = \"3\"\n"
-    )
-}
-
-/// Put the image's build context in `dir` (emptied first): the
-/// Containerfile, `Cargo.lock`, the sources, manifests and build scripts of
-/// [`IMAGE_CRATES`] (without their tests) and [`narrowed_manifest`].
-/// Returns the Rust version of `rust-toolchain.toml` for the build stage.
-pub fn stage_context(checkout: &Path, dir: &Path) -> Result<String> {
-    if !CheckoutSource::is_source(checkout) {
-        anyhow::bail!(
-            "{} is not a dagq checkout with {CONTAINERFILE} and the broker's crates",
-            checkout.display()
-        );
-    }
-    if dir.exists() {
-        fs::remove_dir_all(dir).with_context(|| format!("empty {}", dir.display()))?;
-    }
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    fs::copy(checkout.join(CONTAINERFILE), dir.join("Containerfile"))
-        .context("copy the Containerfile")?;
-    fs::copy(checkout.join("Cargo.lock"), dir.join("Cargo.lock")).context("copy Cargo.lock")?;
-    fs::write(dir.join("Cargo.toml"), narrowed_manifest()).context("write Cargo.toml")?;
-    for name in IMAGE_CRATES {
-        let (from, to) = (checkout.join(name), dir.join(name));
-        fs::create_dir_all(&to)?;
-        fs::copy(from.join("Cargo.toml"), to.join("Cargo.toml"))
-            .with_context(|| format!("copy {name}/Cargo.toml"))?;
-        copy_tree(&from.join("src"), &to.join("src"))
-            .with_context(|| format!("copy {name}/src"))?;
-        // The server embeds its build identifier (without a Git
-        // worktree in the image, `+unknown` for a development version).
-        let script = from.join("build.rs");
-        if script.is_file() {
-            fs::copy(&script, to.join("build.rs"))
-                .with_context(|| format!("copy {name}/build.rs"))?;
-        }
-    }
-    rust_version(checkout)
-}
-
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let target = to.join(entry.file_name());
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
-/// The `channel` of the checkout's `rust-toolchain.toml`.
-pub fn rust_version(checkout: &Path) -> Result<String> {
-    let path = checkout.join("rust-toolchain.toml");
-    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    text.lines()
-        .filter_map(|line| line.trim().strip_prefix("channel"))
-        .filter_map(|rest| rest.trim().strip_prefix('='))
-        .map(|value| value.trim().trim_matches('"').to_owned())
-        .find(|value| !value.is_empty())
-        .with_context(|| format!("{} names no channel", path.display()))
 }
 
 /// `<queue dir>/broker/state.json`: what `dagq broker` last did, and the
@@ -503,64 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn the_context_is_the_server_and_nothing_else() {
-        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(CheckoutSource::is_source(checkout));
-        assert_eq!(
-            CheckoutSource::of_this_build().unwrap().checkout,
-            checkout.to_path_buf()
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let context = dir.path().join("context");
-        fs::create_dir_all(context.join("stale")).unwrap();
-        let version = CheckoutSource {
-            checkout: checkout.to_path_buf(),
-        }
-        .stage(&context)
-        .unwrap();
-        assert_eq!(version, rust_version(checkout).unwrap());
-        assert!(version.starts_with("1."), "{version}");
-        let mut top: Vec<String> = fs::read_dir(&context)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        top.sort();
-        assert_eq!(top, ["Cargo.lock", "Cargo.toml", "Containerfile", "crates"]);
-        let mut crates: Vec<String> = fs::read_dir(context.join("crates"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        crates.sort();
-        assert_eq!(crates, ["dagq-broker", "dagq-broker-protocol"]);
-        assert!(context.join("crates/dagq-broker/src/main.rs").is_file());
-        assert!(!context.join("crates/dagq-broker/tests").exists());
-        let manifest = fs::read_to_string(context.join("Cargo.toml")).unwrap();
-        assert!(
-            manifest
-                .contains("members = [\"crates/dagq-broker-protocol\", \"crates/dagq-broker\"]")
-        );
-        let error = CheckoutSource {
-            checkout: dir.path().to_path_buf(),
-        }
-        .stage(&context)
-        .unwrap_err();
-        assert_eq!(error.code, FailureCode::ImageSourceMissing);
-    }
-
-    #[test]
-    fn rust_version_reads_the_channel() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("rust-toolchain.toml"),
-            "[toolchain]\n# channel = \"old\"\nchannel = \"1.2.3\"\n",
-        )
-        .unwrap();
-        assert_eq!(rust_version(dir.path()).unwrap(), "1.2.3");
-        fs::write(dir.path().join("rust-toolchain.toml"), "[toolchain]\n").unwrap();
-        assert!(rust_version(dir.path()).is_err());
-    }
-
-    #[test]
     fn the_state_round_trips_and_tokens_are_seen() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(BrokerState::read(dir.path()), BrokerState::default());
@@ -580,24 +403,6 @@ mod tests {
         assert!(!tokens_active(dir.path()));
         fs::write(active.join("jti"), "run").unwrap();
         assert!(tokens_active(dir.path()));
-    }
-
-    #[test]
-    fn the_context_has_the_server_s_build_script() {
-        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
-        if !CheckoutSource::is_source(checkout) {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let context = dir.path().join("context");
-        stage_context(checkout, &context).unwrap();
-        assert!(context.join("crates/dagq-broker/build.rs").is_file());
-        assert!(
-            context
-                .join("crates/dagq-broker-protocol/src/build_id.rs")
-                .is_file()
-        );
-        assert!(!context.join("crates/dagq-broker/tests").exists());
     }
 
     #[test]

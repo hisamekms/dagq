@@ -15,6 +15,7 @@
 //! observation job, and [`runtime`] and [`lifecycle`] only re-export the
 //! names the tests use from before the move.
 pub mod application;
+pub mod broker_material;
 /// The build identifier's rule, shared with the broker's binaries.
 pub use dagq_broker_protocol::build_id;
 pub mod compose;

@@ -15,7 +15,7 @@ use dagq_broker_protocol::PROTOCOL_VERSION;
 use crate::application::broker::{
     self as broker, BrokerControl, BrokerFailure, BrokerResult, ContainerLimits, ContainerSpec,
     FailureCode, HEALTH_TIMEOUT, HealthProbe, HostLock, ImageSource, MachineSpec, Podman,
-    PodmanOutput, StartReport, StopReport, container_name, image_name,
+    PodmanOutput, StartReport, StopReport, container_name,
 };
 
 use super::broker_podman::{BrokerState, FileLock, free_port, tokens_active};
@@ -28,19 +28,6 @@ pub struct MissingPodman(pub BrokerFailure);
 impl Podman for MissingPodman {
     fn run(&self, _args: &[String]) -> BrokerResult<PodmanOutput> {
         Err(self.0.clone())
-    }
-}
-
-/// No checkout to build the image from: only a build fails, with
-/// `image_source_missing`; an image already built is used as it is.
-pub struct NoImageSource;
-
-impl ImageSource for NoImageSource {
-    fn stage(&self, _dir: &Path) -> BrokerResult<String> {
-        Err(BrokerFailure::new(
-            FailureCode::ImageSourceMissing,
-            "no dagq checkout to build the broker's image from: pass --source to `dagq broker start`",
-        ))
     }
 }
 
@@ -62,8 +49,11 @@ pub struct QueueBroker {
     /// The repository's Git common dir; `None` fails with
     /// `repository_unknown` when a container is to be made.
     pub git_common_dir: Option<PathBuf>,
-    /// This binary's build identifier, which names the image.
+    /// This binary's build identifier: the image is built as it, and a
+    /// broker whose health names another is not used.
     pub build: String,
+    /// The image of this build (`broker_image::image`).
+    pub image: String,
     pub machine: MachineSpec,
     pub limits: ContainerLimits,
     pub serve_limits: Vec<String>,
@@ -103,6 +93,7 @@ impl QueueBroker {
             queue_hash,
             git_common_dir,
             build: crate::VERSION.to_owned(),
+            image: super::broker_image::image(),
             machine: MachineSpec::default(),
             limits: ContainerLimits::default(),
             serve_limits: Vec::new(),
@@ -136,7 +127,7 @@ impl QueueBroker {
         Ok(ContainerSpec {
             machine: self.machine.name.clone(),
             name: self.container(),
-            image: image_name(&self.build),
+            image: self.image.clone(),
             host_port: port,
             queue_dir: self.queue_dir.clone(),
             runs_dir: self.runs_dir.clone(),
@@ -314,33 +305,13 @@ impl BrokerControl for QueueBroker {
     }
 }
 
-/// The checkout the image is built from: `explicit` (`--source`), else
-/// the checkout this binary was built from, else `fallback` (the main
-/// checkout) when it has the broker's sources.
-pub fn image_checkout(explicit: Option<PathBuf>, fallback: Option<&Path>) -> Option<PathBuf> {
-    use super::broker_podman::CheckoutSource;
-    explicit
-        .or_else(|| CheckoutSource::of_this_build().map(|source| source.checkout))
-        .or_else(|| {
-            fallback
-                .filter(|checkout| CheckoutSource::is_source(checkout))
-                .map(Path::to_path_buf)
-        })
-}
-
 /// The real ports: `podman` (`None` is `podman` on `PATH`), the host-wide
 /// lock under `data_home`, the health over loopback, and the image built
-/// from `checkout` ([`NoImageSource`] without one).
-pub fn system_ports(
-    podman: Option<&Path>,
-    data_home: &Path,
-    checkout: Option<PathBuf>,
-) -> BrokerPorts {
-    use super::broker_podman::{CheckoutSource, HttpHealth, PodmanCli};
-    let source: Arc<dyn ImageSource + Send + Sync> = match checkout {
-        Some(checkout) => Arc::new(CheckoutSource { checkout }),
-        None => Arc::new(NoImageSource),
-    };
+/// from the material this binary embeds (never a checkout's files).
+pub fn system_ports(podman: Option<&Path>, data_home: &Path) -> BrokerPorts {
+    use super::broker_image::EmbeddedSource;
+    use super::broker_podman::{HttpHealth, PodmanCli};
+    let source: Arc<dyn ImageSource + Send + Sync> = Arc::new(EmbeddedSource::of_this_build());
     let podman: Arc<dyn Podman + Send + Sync> = match PodmanCli::resolve(podman) {
         Ok(podman) => Arc::new(podman),
         Err(failure) => Arc::new(MissingPodman(failure)),
@@ -489,10 +460,6 @@ mod tests {
         assert_eq!(
             missing.run(&[]).unwrap_err().code,
             FailureCode::PodmanMissing
-        );
-        assert_eq!(
-            NoImageSource.stage(dir.path()).unwrap_err().code,
-            FailureCode::ImageSourceMissing
         );
     }
 }

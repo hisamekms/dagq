@@ -1330,13 +1330,10 @@ enum BrokerCommand {
         podman: Option<PathBuf>,
     },
     /// Make the queue's broker run: init and start dagq's own Podman machine with the fewest
-    /// resources when needed (never another machine), build the image when missing, run the
+    /// resources when needed (never another machine), build the image from the material this
+    /// binary embeds when missing (never a checkout's files), run the
     /// container publishing on 127.0.0.1 only, and wait for its health. Idempotent.
     Start {
-        /// dagq checkout to build the image from; defaults to the checkout this binary was built
-        /// from, else the working directory's main checkout.
-        #[arg(long)]
-        source: Option<PathBuf>,
         /// Port on 127.0.0.1; defaults to the queue's last one, else a free one.
         #[arg(long)]
         port: Option<u16>,
@@ -2081,14 +2078,9 @@ fn execute(cli: Cli) -> Result<Value> {
             BrokerCommand::Status { podman } => {
                 dagq::compose::broker_status(&location, podman.as_deref())
             }
-            BrokerCommand::Start {
-                source,
-                port,
-                podman,
-            } => dagq::compose::broker_start(
+            BrokerCommand::Start { port, podman } => dagq::compose::broker_start(
                 &location,
                 &dagq::compose::BrokerStartOptions {
-                    source,
                     port,
                     podman,
                     cwd: cwd.clone(),

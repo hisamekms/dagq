@@ -21,11 +21,14 @@ readme = "README.md"
 keywords = ["task-queue", "dag", "git-worktree", "cmux", "claude"]
 categories = ["command-line-utilities", "development-tools"]
 # Only what builds the binary: migrations are embedded with include_str!,
-# and build.rs embeds the build identifier.
+# build.rs embeds the build identifier, and the Containerfile is the broker
+# image's material a release embeds (its build stage's Rust is rust-version:
+# rust-toolchain.toml stays out, so that it does not pick an installer's
+# toolchain).
 # The integration tests are listed below instead of one binary per tests/*.rs
 # file (ADR-0078).
 autotests = false
-include = ["/build.rs", "/src/**", "/migrations/**", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/build.rs", "/src/**", "/migrations/**", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/containers/broker/Containerfile", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0"

@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod asks;
 pub mod binaries;
 pub mod broker_config;
+pub mod broker_image;
 pub mod broker_podman;
 pub mod broker_queue;
 pub mod broker_token;
