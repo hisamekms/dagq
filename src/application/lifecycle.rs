@@ -78,17 +78,7 @@ pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
 /// submits them as a proposal. A person opens one with `dagq plan` in a
 /// workspace `[<repo>]planner#<id>`; `up` opens none (ADR-0041 decision 6).
 pub const PLANNER_ROLE: &str = ActorRole::Planner.as_str();
-/// The kind of the session span the plugin's hook records for the session
-/// of the workspace (ADR-0048 decision 6): `inbox`, `planner` or
-/// `runtime_planner`. A workspace without it (opened before it) is taken
-/// from its `DAGQ_ROLE`.
-pub const SESSION_KIND_ENV: &str = "DAGQ_SESSION_KIND";
-/// The ID of the planner session a planner workspace runs (`planners.id`).
-pub const PLANNER_ID_ENV: &str = "DAGQ_PLANNER_ID";
-/// Who opened a planner session (ADR-0041 decision 7): `person` (the
-/// default when unset) or `runtime`, recorded as the owner of the
-/// proposals it submits.
-pub const PLANNER_ORIGIN_ENV: &str = "DAGQ_PLANNER_ORIGIN";
+pub use crate::domain::actor::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, SESSION_KIND_ENV};
 /// The cmux workspace a session runs in, set by cmux in every terminal:
 /// the planner workspace that owns the proposals it submits.
 pub const CMUX_WORKSPACE_ENV: &str = "CMUX_WORKSPACE_ID";

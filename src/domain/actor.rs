@@ -19,6 +19,30 @@ pub const ACTOR_ID_ENV: &str = "DAGQ_ACTOR_ID";
 pub const RUN_ID_ENV: &str = "DAGQ_RUN_ID";
 /// The task of the run a worker works on.
 pub const TASK_ID_ENV: &str = "DAGQ_TASK_ID";
+/// The kind of the session span the plugin's hook records for the session
+/// of the workspace (ADR-0048 decision 6): `inbox`, `planner` or
+/// `runtime_planner`. A workspace without it (opened before it) is taken
+/// from its `DAGQ_ROLE`.
+pub const SESSION_KIND_ENV: &str = "DAGQ_SESSION_KIND";
+/// The ID of the planner session a planner workspace runs (`planners.id`).
+pub const PLANNER_ID_ENV: &str = "DAGQ_PLANNER_ID";
+/// Who opened a planner session (ADR-0041 decision 7): `person` (the
+/// default when unset) or `runtime`, recorded as the owner of the
+/// proposals it submits.
+pub const PLANNER_ORIGIN_ENV: &str = "DAGQ_PLANNER_ORIGIN";
+/// Every variable that names the actor a process is (task 902). A process
+/// the runtime starts as an actor does not inherit from its starter those
+/// the actor itself does not set, so a job started from a worker's or a
+/// planner's session is not taken for that run, task or planner.
+pub const ACTOR_ENV: [&str; 7] = [
+    ROLE_ENV,
+    ACTOR_ID_ENV,
+    RUN_ID_ENV,
+    TASK_ID_ENV,
+    SESSION_KIND_ENV,
+    PLANNER_ID_ENV,
+    PLANNER_ORIGIN_ENV,
+];
 /// The `DAGQ_ROLE` every headless job ran under before the jobs got their
 /// own roles. A job an older binary started still carries it, so it is read
 /// as a read-only job for the migration (ADR-t728-1 decision 2).

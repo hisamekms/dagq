@@ -41,7 +41,7 @@ use super::{
 };
 use crate::domain::{
     ActorContext, ActorRole, PlannerId, PlannerOrigin, RunId, Task, TaskId, TaskRun, TrustLevel,
-    actor::{ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
+    actor::{ACTOR_ENV, ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
     actor_model::ActorLaunch,
     authorization::{Capability, grants},
     headless_job::JobAccess,
@@ -663,10 +663,17 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     provider.without_mcp(&mut command);
                 }
                 // The caller's variables first, then the actor's, which
-                // nothing the repository sets replaces.
-                command
-                    .envs(env)
-                    .envs(actor_env(self.queue, &actor, None, None)?);
+                // nothing the repository sets replaces. The actor variables
+                // the job's actor does not set are not inherited from the
+                // starter (a worker's or a planner's session), so the job
+                // is not taken for its run, task or planner (task 902).
+                let actor_env = actor_env(self.queue, &actor, None, None)?;
+                for name in ACTOR_ENV {
+                    if !actor_env.iter().any(|(key, _)| key == name) {
+                        command.env_remove(name);
+                    }
+                }
+                command.envs(env).envs(actor_env);
                 let child = self.spawner()?.spawn(&command, streams)?;
                 Ok(ActorHandle::Process(child))
             }
@@ -937,15 +944,25 @@ mod tests {
         }
     }
 
+    /// The variables `command` sets, in order.
     fn env_of(command: &CommandSpec) -> Vec<(String, String)> {
         command
             .get_envs()
-            .map(|(key, value)| {
-                (
+            .filter_map(|(key, value)| {
+                Some((
                     key.to_string_lossy().into_owned(),
-                    value.unwrap().to_string_lossy().into_owned(),
-                )
+                    value?.to_string_lossy().into_owned(),
+                ))
             })
+            .collect()
+    }
+
+    /// The variables `command` does not inherit, in order.
+    fn removed_of(command: &CommandSpec) -> Vec<String> {
+        command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
             .collect()
     }
 
@@ -1379,6 +1396,130 @@ mod tests {
                 ("DAGQ_ACTOR_ID", "observer:s1"),
             ])
         );
+        // The actor variables the observer does not set are not inherited
+        // from the starter's session (task 902), and removed before the
+        // variables the command sets.
+        assert_eq!(
+            removed_of(command),
+            [
+                "DAGQ_RUN_ID",
+                "DAGQ_TASK_ID",
+                "DAGQ_SESSION_KIND",
+                "DAGQ_PLANNER_ID",
+                "DAGQ_PLANNER_ORIGIN",
+            ]
+        );
+        let removes = command.get_envs().position(|(_, value)| value.is_none());
+        let sets = command.get_envs().position(|(_, value)| value.is_some());
+        assert!(removes < sets);
+    }
+
+    /// Every headless job starts without the actor variables its actor does
+    /// not set, and a job with a run gets its run and task (task 902).
+    #[test]
+    fn a_headless_job_inherits_no_actor_it_is_not() {
+        let (_, run) = claimed_run("r1");
+        let fake = Fake::default();
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_provider(&fake)
+            .with_spawner(&fake);
+        let dir = Path::new("/q/job");
+        let jobs = [
+            ActorContext::recovery_job(run.id(), "failed", 1),
+            ActorContext::plan_review_job(4, 1),
+            ActorContext::goal_review_job(5, 1),
+            ActorContext::instance(ActorRole::Observer, "s1"),
+        ];
+        for actor in jobs {
+            executor
+                .spawn(ActorExecutionSpec::new(
+                    actor,
+                    WorkspaceAccess::Scratch(dir.into()),
+                    job(dir),
+                ))
+                .unwrap();
+        }
+        let review = |actor: ActorContext| {
+            executor
+                .spawn(ActorExecutionSpec::new(
+                    actor,
+                    WorkspaceAccess::Read(dir.into()),
+                    ActorProgram::Headless {
+                        program: HeadlessProgram::Review {
+                            run: &run,
+                            prompt: "review",
+                            access: JobAccess::ReadFiles,
+                        },
+                        session_id: None,
+                        launch: None,
+                        without_mcp: false,
+                        env: Vec::new(),
+                        streams: Streams::Null,
+                    },
+                ))
+                .unwrap();
+        };
+        review(ActorContext::review_job(run.id(), 1));
+        review(ActorContext::review_job(run.id(), 2).with_run(run.id().clone(), run.task_id()));
+        let spawned = fake.spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 6);
+        for command in &spawned[..5] {
+            assert_eq!(
+                removed_of(command),
+                ACTOR_ENV[2..],
+                "{:?}",
+                command.get_program()
+            );
+            assert!(
+                !env_of(command)
+                    .iter()
+                    .any(|(key, _)| ACTOR_ENV[2..].contains(&key.as_str()))
+            );
+        }
+        let with_run = &spawned[5];
+        assert_eq!(removed_of(with_run), ACTOR_ENV[4..]);
+        let env = env_of(with_run);
+        assert!(
+            env.contains(&("DAGQ_RUN_ID".into(), "r1".into())),
+            "{env:?}"
+        );
+        assert!(
+            env.contains(&("DAGQ_TASK_ID".into(), "3".into())),
+            "{env:?}"
+        );
+    }
+
+    /// The actor variables a workspace names are its actor's, and the
+    /// workspace removes none: cmux gives it the env (task 902).
+    #[test]
+    fn the_actor_env_names_every_variable_actor_env_sets() {
+        let (_, run) = claimed_run("r1");
+        let queue = Path::new("/q/queue.db");
+        let planner = actor_env(
+            queue,
+            &ActorContext::instance(ActorRole::Planner, 4),
+            Some((PlannerOrigin::Runtime, PlannerId::new(4))),
+            None,
+        )
+        .unwrap();
+        let worker = actor_env(
+            queue,
+            &ActorContext::worker(run.id(), run.task_id()),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut named: Vec<_> = planner
+            .iter()
+            .chain(&worker)
+            .map(|(key, _)| key.as_str())
+            .filter(|key| *key != "DAGQ_QUEUE")
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        let mut all = ACTOR_ENV.to_vec();
+        all.sort_unstable();
+        assert_eq!(named, all);
     }
 
     #[test]

@@ -10,16 +10,8 @@
 use std::process::Command;
 
 /// The env of the caller's actor, which the test process's `dagq` children
-/// do not inherit.
-pub const ACTOR_ENV: [&str; 7] = [
-    "DAGQ_ROLE",
-    "DAGQ_ACTOR_ID",
-    "DAGQ_RUN_ID",
-    "DAGQ_TASK_ID",
-    "DAGQ_SESSION_KIND",
-    "DAGQ_PLANNER_ID",
-    "DAGQ_PLANNER_ORIGIN",
-];
+/// do not inherit: the runtime's own list (task 902).
+pub use dagq::domain::actor::ACTOR_ENV;
 
 pub trait WithoutActor {
     /// Drops the [`ACTOR_ENV`] the command would inherit from the test

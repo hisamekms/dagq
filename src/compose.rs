@@ -30,8 +30,8 @@ use crate::{
         install::{self as installation, Binaries, InstallOptions},
         integrate::{self as integration, IntegrateTarget, Integration, Integrator},
         lifecycle::{
-            self, DownOptions, Ports as LifecyclePorts, QueuePaths, ROLE_ENV, RepositoryPaths,
-            UpEnvironment, UpOptions,
+            self, DownOptions, Ports as LifecyclePorts, QueuePaths, RepositoryPaths, UpEnvironment,
+            UpOptions,
         },
         planner::{self, PlannerLaunch, PlannerProbes, PlannerWrapper},
         prompt,
@@ -694,14 +694,7 @@ pub fn supervise_with_reviewer(
         // The observe command's environment drops the supervisor's actor
         // variables, and the supervisor sets its own when it starts it
         // (`supervisor:<pid>`); its agent is the observer.
-        observer_env_remove: [
-            ROLE_ENV,
-            crate::domain::actor::ACTOR_ID_ENV,
-            crate::domain::actor::RUN_ID_ENV,
-            crate::domain::actor::TASK_ID_ENV,
-        ]
-        .map(str::to_owned)
-        .to_vec(),
+        observer_env_remove: crate::domain::actor::ACTOR_ENV.map(str::to_owned).to_vec(),
         planners_dir: planners_dir(&db),
         plugin_dir: options
             .plugin_dir
