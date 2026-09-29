@@ -294,7 +294,7 @@ fn an_exit_that_never_got_there_asks_for_a_passed_run_whose_worktree_changed() {
 /// A run whose session held the `/exit` after its passing review back past
 /// the exit timeout, left by a supervisor that died before it did anything
 /// about it: validated, reviewed, `/exit` sent and timed out.
-fn stuck_exit_after_a_pass(repo: &Path, db: &Path, backend: &TestWorkspace) -> TaskRun {
+pub(crate) fn stuck_exit_after_a_pass(repo: &Path, db: &Path, backend: &TestWorkspace) -> TaskRun {
     let run = start_run_under_dead_supervisor(repo, db, backend, "dead-supervisor");
     let idle = run.idle_marker_path().unwrap();
     wait_until(db, Duration::from_secs(20), |_| idle.is_file());
@@ -337,7 +337,7 @@ fn stuck_exit_after_a_pass(repo: &Path, db: &Path, backend: &TestWorkspace) -> T
 
 /// Supervise with `recovery` as the only recovery job's script, on a
 /// thread.
-fn supervise_recovering(
+pub(crate) fn supervise_recovering(
     db: &Path,
     repo: &Path,
     backend: &Arc<TestWorkspace>,
@@ -439,9 +439,13 @@ fn a_stuck_exit_after_a_pass_is_closed_and_landed_by_its_recovery_job() {
 /// A live session's recovery job that fails (here it exits non-zero) opens
 /// the `stuck_exit` ask (ADR-t609-1): its question says the job failed and
 /// why, its reason is `recovery_failed`, and no `recover by hand`
-/// attention is made. Returns the ask, once its `recovery_finished` is
-/// recorded too.
-fn failed_stuck_exit_job_ask(db: &Path, run: &TaskRun) -> dagq::domain::Ask {
+/// attention is made. `error` is part of why the job failed. Returns the
+/// ask, once its `recovery_finished` is recorded too.
+pub(crate) fn failed_stuck_exit_job_ask(
+    db: &Path,
+    run: &TaskRun,
+    error: &str,
+) -> dagq::domain::Ask {
     wait_until(db, Duration::from_secs(30), |queue| {
         !queue.asks(AskQuery::default()).unwrap().is_empty()
             && !events_of(db, run.id(), "recovery_finished").is_empty()
@@ -456,7 +460,7 @@ fn failed_stuck_exit_job_ask(db: &Path, run: &TaskRun) -> dagq::domain::Ask {
     assert_eq!(ask.reason_category, dagq::domain::AskReason::RecoveryFailed);
     for part in [
         "Its recovery job looked first, and the recovery job failed (",
-        "broken",
+        error,
         "Why a person: recovery_failed",
         "recovery-stuck_exit-1.prompt.txt",
     ] {
@@ -469,7 +473,7 @@ fn failed_stuck_exit_job_ask(db: &Path, run: &TaskRun) -> dagq::domain::Ask {
     assert_eq!(finished[0]["ask_id"], json!(ask.id));
     assert_eq!(finished[0]["reason_category"], "recovery_failed");
     assert!(
-        finished[0]["error"].as_str().unwrap().contains("broken"),
+        finished[0]["error"].as_str().unwrap().contains(error),
         "{finished:?}"
     );
     assert!(events_of(db, run.id(), "recovery_failed").is_empty());
@@ -490,7 +494,7 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_exit() {
     let run = stuck_exit_after_a_pass(&repo, &db, &backend);
     let (reviewer, supervisor) =
         supervise_recovering(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
-    let ask = failed_stuck_exit_job_ask(&db, &run);
+    let ask = failed_stuck_exit_job_ask(&db, &run, "broken");
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "exit").unwrap();
     let status = runtime::status(&db).unwrap();
@@ -530,7 +534,7 @@ fn a_failed_stuck_exit_job_opens_the_stuck_exit_ask_answered_wait() {
     let run = stuck_exit_after_a_pass(&repo, &db, &backend);
     let (reviewer, supervisor) =
         supervise_recovering(&db, &repo, &backend, "echo broken >&2; exit 3".to_owned());
-    let ask = failed_stuck_exit_job_ask(&db, &run);
+    let ask = failed_stuck_exit_job_ask(&db, &run, "broken");
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue.answer(ask.id, "wait").unwrap();
     queue.close_ask(ask.id).unwrap();

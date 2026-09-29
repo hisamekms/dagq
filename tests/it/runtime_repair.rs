@@ -25,7 +25,7 @@ fn background_alert() -> dagq::domain::stall::StallConfig {
 /// Supervise the fixture's task with [`ORPHAN_AGENT`], a background alert
 /// after a fifth of a second, and `recovery` as the recovery job's script,
 /// on a thread.
-fn supervise_long_background(
+pub(crate) fn supervise_long_background(
     db: &Path,
     repo: &Path,
     recovery: &str,
@@ -82,7 +82,7 @@ fn supervise_repair(
 
 /// A recovery job's script that prints `verdict` with `PID` replaced by the
 /// orphan's pid.
-fn recovery_verdict(verdict: &Value) -> String {
+pub(crate) fn recovery_verdict(verdict: &Value) -> String {
     let text = verdict.to_string().replace("\"PID\"", "$(cat bg.pid)");
     format!("printf '%s\\n' \"{}\"", text.replace('"', "\\\""))
 }
@@ -227,7 +227,7 @@ fn background_work_left_after_the_receipt_is_a_long_background_alert_for_the_rec
 
 /// Wait for the `stalled` ask of a `long_background` test, check that the
 /// orphan still runs, then stop it as a person would and let the run end.
-fn escalated_long_background(
+pub(crate) fn escalated_long_background(
     db: &Path,
     backend: &TestWorkspace,
     supervisor: thread::JoinHandle<Result<Value>>,
