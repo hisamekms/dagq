@@ -1095,6 +1095,31 @@ fn up_drains_a_supervisor_whose_agent_starts_another_binary() {
     );
 }
 
+/// Replace the queue at `db` with one made by only the first `version`
+/// migrations, as a binary of that schema left it. The queue is built up
+/// rather than cut down from the latest one, so a later migration does not
+/// change what this makes.
+fn queue_at_schema(db: &Path, version: usize) {
+    for side in ["", "-wal", "-shm"] {
+        let file = format!("{}{side}", db.display());
+        if Path::new(&file).exists() {
+            fs::remove_file(file).unwrap();
+        }
+    }
+    let conn = Connection::open(db).unwrap();
+    for migration in &dagq::infrastructure::schema::MIGRATIONS[..version] {
+        conn.execute_batch(migration).unwrap();
+    }
+    // What `migrate` writes with the migrations: the header and the floor.
+    conn.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {version};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor})
+         ON CONFLICT(singleton) DO UPDATE SET floor = excluded.floor;",
+        floor = dagq::infrastructure::schema::floor_for(version as i64),
+    ))
+    .unwrap();
+}
+
 /// `up` applies the queue's pending migrations first only when every one
 /// of them is compatible (ADR-0045 decision 15), and refuses a breaking one
 /// with the way to it, before it starts or touches anything. A migration
@@ -1105,39 +1130,7 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     let fixture = fixture();
     let db = &fixture.location.db;
     // The queue as the binary before the handoff columns left it.
-    Connection::open(db)
-        .unwrap()
-        .execute_batch(
-            "ALTER TABLE supervisors DROP COLUMN handoff_accepted;
-             ALTER TABLE supervisors DROP COLUMN handoff_binary;
-             ALTER TABLE supervisors DROP COLUMN handoff_requested_at;
-             ALTER TABLE supervisors DROP COLUMN auto_update;
-             ALTER TABLE supervisors DROP COLUMN max_waiting;
-             ALTER TABLE supervisors DROP COLUMN parallel_source;
-             ALTER TABLE supervisors DROP COLUMN max_waiting_source;
-             DROP TABLE binary_updates;
-             DROP TABLE draft_reopens;
-             DROP TABLE goal_reviews;
-             DROP TABLE headless_jobs;
-             DROP TABLE draft_bundles;
-             DROP TABLE draft_bundle_members;
-             ALTER TABLE tasks DROP COLUMN change;
-             ALTER TABLE asks DROP COLUMN answered_by;
-             ALTER TABLE asks DROP COLUMN option_index;
-             ALTER TABLE asks DROP COLUMN answer_authority;
-             ALTER TABLE asks DROP COLUMN answer_approval;
-             DROP INDEX planners_by_finding;
-             ALTER TABLE planners DROP COLUMN finding_id;
-             ALTER TABLE proposals DROP COLUMN owner_actor_id;
-             ALTER TABLE tasks DROP COLUMN worker_provider;
-             ALTER TABLE tasks DROP COLUMN worker_mode;
-             ALTER TABLE task_runs DROP COLUMN worker_mode;
-             ALTER TABLE supervisors DROP COLUMN providers;
-             ALTER TABLE supervisors DROP COLUMN runtime_planners;
-             ALTER TABLE supervisors DROP COLUMN runtime_planners_source;
-             PRAGMA user_version = 30;",
-        )
-        .unwrap();
+    queue_at_schema(db, 30);
     let cmux = FakeCmux::default();
     let launchd = FakeLaunchd::new(db);
     let processes = FakeProcesses::default();
@@ -1171,13 +1164,10 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     assert_eq!(report["migrated"], Value::Null, "{report}");
 
     // The compatible automatic-update migration (0033) pending, with the
-    // ones after it (0034 adds the task kind's column, which a later
-    // breaking migration drops again, so the latest queue has none to
-    // drop here): `up` applies them and goes on when no breaking one
+    // ones after it: `up` applies them and goes on when no breaking one
     // follows; otherwise it names only the breaking ones (ADR-0048 added
-    // 0035). Versions are
-    // looked up rather than written, so a later migration does not rewrite
-    // this test (ADR-0067 decision 4).
+    // 0035). Versions are looked up rather than written, so a later
+    // migration does not rewrite this test (ADR-0067 decision 4).
     let auto_update = dagq::infrastructure::schema::MIGRATIONS
         .iter()
         .position(|migration| migration.contains("CREATE TABLE binary_updates"))
@@ -1190,37 +1180,14 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
         .filter(|(_, migration)| !dagq::infrastructure::schema::is_compatible(migration))
         .map(|(index, _)| (index + 1).to_string())
         .collect();
-    Connection::open(db)
-        .unwrap()
-        .execute_batch(&format!(
-            "ALTER TABLE supervisors DROP COLUMN auto_update;
-             ALTER TABLE supervisors DROP COLUMN max_waiting;
-             ALTER TABLE supervisors DROP COLUMN parallel_source;
-             ALTER TABLE supervisors DROP COLUMN max_waiting_source;
-             DROP TABLE binary_updates;
-             DROP TABLE draft_reopens;
-             DROP TABLE goal_reviews;
-             DROP TABLE headless_jobs;
-             DROP TABLE draft_bundles;
-             DROP TABLE draft_bundle_members;
-             ALTER TABLE tasks DROP COLUMN change;
-             ALTER TABLE asks DROP COLUMN answered_by;
-             ALTER TABLE asks DROP COLUMN option_index;
-             ALTER TABLE asks DROP COLUMN answer_authority;
-             ALTER TABLE asks DROP COLUMN answer_approval;
-             DROP INDEX planners_by_finding;
-             ALTER TABLE planners DROP COLUMN finding_id;
-             ALTER TABLE proposals DROP COLUMN owner_actor_id;
-             ALTER TABLE tasks DROP COLUMN worker_provider;
-             ALTER TABLE tasks DROP COLUMN worker_mode;
-             ALTER TABLE task_runs DROP COLUMN worker_mode;
-             ALTER TABLE supervisors DROP COLUMN providers;
-             ALTER TABLE supervisors DROP COLUMN runtime_planners;
-             ALTER TABLE supervisors DROP COLUMN runtime_planners_source;
-             PRAGMA user_version = {};",
-            auto_update - 1
-        ))
-        .unwrap();
+    // A fresh queue at the schema before it, so the supervisor started
+    // above has no registration left to reuse.
+    let fixture = common::lifecycle::fixture();
+    let db = &fixture.location.db;
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(db);
+    let processes = FakeProcesses::default();
+    queue_at_schema(db, auto_update as usize - 1);
     if breaking_after.is_empty() {
         let report = up(&fixture, &cmux, &launchd, &processes);
         assert_eq!(

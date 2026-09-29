@@ -210,7 +210,13 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
                 "opens": true,
             });
         }
-        assert_eq!(report, expected, "{command}");
+        // Only the fields named here are compared, so a field another
+        // feature adds to `doctor` or `status` does not rewrite this test;
+        // that feature's own tests check its values.
+        let report = report.as_object().unwrap();
+        for (field, value) in expected.as_object().unwrap() {
+            assert_eq!(report.get(field), Some(value), "{command} {field}");
+        }
     }
     assert!(!invoke(&db, &["recover", "missing-run"]).status.success());
     assert!(!invoke(&db, &["show", "1"]).status.success());
