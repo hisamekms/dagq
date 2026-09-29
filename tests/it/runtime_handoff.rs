@@ -696,7 +696,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
             e2e_command: None,
             e2e_timeout: None,
             poll: None,
-            cmux: None,
+            cmux: Some(PathBuf::from("/usr/bin/true")),
             cargo: None,
         },
         ..supervise_options(1, true)

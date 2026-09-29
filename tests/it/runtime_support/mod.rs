@@ -137,6 +137,19 @@ impl Spawner for StubSpawner {
         let mut command = process::command(spec);
         // The spec's own actor (a worker's, a job's), not the tests' one.
         command.without_actor_env();
+        // A stub's `dagq` that names no `--cmux` finds the fake first: before
+        // the spec's PATH (the last it sets, as `process::command` applies
+        // them), the tests' own when it sets none, or alone when it removes it.
+        let path = match spec.get_envs().filter(|(key, _)| *key == "PATH").last() {
+            Some((_, value)) => value.map(ToOwned::to_owned).unwrap_or_default(),
+            None => std::env::var_os("PATH").unwrap_or_default(),
+        };
+        command.env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(fake_cmux_dir(&self.db)).chain(std::env::split_paths(&path)),
+            )?,
+        );
         command.stdin(Stdio::null());
         match streams {
             // The agent's terminal.
@@ -159,6 +172,34 @@ impl Spawner for StubSpawner {
         groups.push(child.id());
         Ok(Box::new(Stub(child)))
     }
+}
+
+/// The directory of a fake `cmux` next to the queue at `db`, which appends
+/// the arguments of each call to `calls` there and exits at once: what the
+/// stub agents' `dagq` (a notifying `ask`, a `stats`) resolves as `cmux`
+/// when it names none, so no test reaches the host's cmux or its inbox
+/// (task 1128).
+pub fn fake_cmux_dir(db: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = db.parent().unwrap().join("fake-cmux");
+    let stub = dir.join("cmux");
+    if !stub.exists() {
+        fs::create_dir_all(&dir).unwrap();
+        // Written aside and renamed, so a stub started at the same time
+        // never runs half a script.
+        let aside = dir.join(format!("cmux.{:?}", thread::current().id()));
+        fs::write(
+            &aside,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                dir.join("calls").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&aside, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&aside, &stub).unwrap();
+    }
+    dir
 }
 
 /// The host's processes as a supervisor in production sees them: a test's
@@ -1573,6 +1614,7 @@ pub fn await_passes(passes: &AtomicU64, n: u64) {
 
 /// Supervisor options with the test tick and the [`SteadyClock`].
 pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
+    let base = SuperviseOptions::new(parallel, once);
     SuperviseOptions {
         tick: TEST_TICK,
         idle_poll: TEST_TICK,
@@ -1593,7 +1635,13 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
             retries: 0,
             intervals: Vec::new(),
         }),
-        ..SuperviseOptions::new(parallel, once)
+        // An update's or a release's job that starts a supervisor again
+        // does not reach the host's cmux (task 1128).
+        update: dagq::application::supervise::UpdateSettings {
+            cmux: Some(PathBuf::from("/usr/bin/true")),
+            ..base.update.clone()
+        },
+        ..base
     }
 }
 
@@ -2099,7 +2147,7 @@ pub fn stats_full(db: &Path) -> Value {
         .without_actor_env()
         .arg("--db")
         .arg(db)
-        .args(["stats", "--full"])
+        .args(["stats", "--full", "--cmux", "/usr/bin/true"])
         .bounded_output()
         .unwrap();
     assert!(

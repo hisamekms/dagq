@@ -233,7 +233,7 @@ fn stats_compare_the_groups() {
         .without_actor_env()
         .arg("--db")
         .arg(&db)
-        .args(["stats", "--full"])
+        .args(["stats", "--full", "--cmux", "/usr/bin/true"])
         .bounded_output()
         .unwrap();
     assert!(

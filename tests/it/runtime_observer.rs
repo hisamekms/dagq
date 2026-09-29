@@ -131,7 +131,7 @@ q finding record --kind capacity --queue --subject idle_slots --summary 'slots i
 q ask --kind blocked --because recovery_failed --finding 2 --question 'slots idle while task 1 is ready' --option 'leave it' --cmux /usr/bin/true
 q ask --kind blocked --because recovery_failed --finding 2 --question 'the same alert again' --cmux /usr/bin/true
 if q ready 1 2> ready.err; then exit 3; fi
-if q ask --kind decide --because recovery_failed --task 1 --question 'decide?' 2> ask.err; then exit 4; fi
+if q ask --kind decide --because recovery_failed --task 1 --question 'decide?' --cmux /usr/bin/true 2> ask.err; then exit 4; fi
 if q goal ready 1 2> goal.err; then exit 5; fi
 if q note --task 1 --text 'seen' 2> note.err; then exit 6; fi
 if q goal add --draft 'claim faster' 2> draft.err; then exit 7; fi

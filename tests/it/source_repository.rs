@@ -30,7 +30,7 @@ fn install(repo: &Path, home: &Path) -> (bool, String) {
         .current_dir(repo)
         .env("XDG_DATA_HOME", home.join("data"))
         .env("HOME", home)
-        .args(["install", "--to"])
+        .args(["install", "--cmux", "/usr/bin/true", "--to"])
         .arg(home.join("bin").join("dagq"))
         .bounded_output()
         .unwrap();
