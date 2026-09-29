@@ -198,6 +198,8 @@ fn a_timed_out_run_is_kept_while_the_other_run_is_accepted() {
     add_ready_task(&mut queue, "healthy", &[]);
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     backend.script_for(1, HELD_AGENT);
+    // Kept at a second: the healthy session exits at its /exit under the
+    // same timeout, and may take longer than a short one on a loaded host.
     backend.exit_timeout = Duration::from_secs(1);
     let backend = Arc::new(backend);
     let supervisor = {
@@ -1056,7 +1058,7 @@ fn adopted_exit_request_times_out_from_its_recorded_request() {
 fn adopted_run_does_not_record_an_exit_timeout_twice() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1136,7 +1138,7 @@ fn adopted_run_does_not_record_an_exit_timeout_twice() {
 fn adopted_run_does_not_ask_about_its_exit_twice() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1223,7 +1225,7 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
 fn adopted_run_asks_about_an_exit_that_timed_out_again() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();

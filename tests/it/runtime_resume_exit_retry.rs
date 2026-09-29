@@ -84,6 +84,9 @@ fn a_resumed_sessions_held_exit_is_typed_again_into_a_ready_input_box() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_, first_landed) = parked_conflict(&repo, &db, &backend);
+    // Kept at a second: the session has to take the first /exit away (a
+    // shell loop polling every 50ms) before the first retry, due at the
+    // timeout, types it again; a loaded host can stall that loop.
     backend.exit_timeout = Duration::from_secs(1);
     backend.resume_script_for(2, IGNORES_FIRST_EXIT);
     let before = backend.exits_sent.load(Ordering::SeqCst);
@@ -137,6 +140,8 @@ fn used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it() {
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     review_passed(&db, &run);
+    // Kept at a second: the dialog shown 300ms after the /exit (and the
+    // test's poll) must be on the screen before the first retry reads it.
     backend.exit_timeout = Duration::from_secs(1);
     backend.close_ends_session = true;
     backend.resume_script_for(2, IGNORES_FIRST_EXIT);
@@ -211,7 +216,7 @@ fn used_up_retries_of_an_unreviewed_resume_go_to_the_stuck_exit_ask() {
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, _) = parked_conflict(&repo, &db, &backend);
     let exit_timeout = backend.exit_timeout;
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     backend.close_ends_session = true;
     backend.resume_script_for(
         2,

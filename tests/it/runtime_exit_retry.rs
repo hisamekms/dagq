@@ -25,6 +25,11 @@ const DIALOG_SCREEN: &str = "\
  Esc to cancel
 ";
 
+/// The exit timeout of the tests that show a screen with [`show_after_exit`]:
+/// its 300ms and a loaded host's poll must end well before the first retry
+/// reads the screen, which a shorter timeout would not leave room for.
+const SHOW_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Supervisor options that retry a held `/exit` `retries` times, `interval`
 /// apart.
 fn retrying(retries: usize, interval: Duration) -> SuperviseOptions {
@@ -60,7 +65,9 @@ fn reviewed_with(
 }
 
 /// Wait for the `/exit` to be requested, then, once its own submit has
-/// read the screen (well within the exit timeout), show `screen`.
+/// read the screen (well within the exit timeout), show `screen`. The tests
+/// that use it keep [`SHOW_AFTER_EXIT_TIMEOUT`]: the first retry has to
+/// read `screen`, 300ms after the `/exit` and the test's own poll.
 fn show_after_exit(db: &Path, backend: &TestWorkspace, screen: &str) {
     wait_until(db, common::STEP_LIMIT, |queue| {
         !payloads(&queue.show(TaskId::new(1)).unwrap(), "exit_requested").is_empty()
@@ -77,6 +84,9 @@ fn show_after_exit(db: &Path, backend: &TestWorkspace, screen: &str) {
 fn a_held_exit_is_typed_again_into_a_ready_input_box() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IGNORES_FIRST_EXIT);
+    // Kept at a second: the session has to take the first /exit away (a
+    // shell loop polling every 50ms) before the first retry, due at the
+    // timeout, types it again; a loaded host can stall that loop.
     backend.exit_timeout = Duration::from_secs(1);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
     let outcome = reviewed_with(
@@ -129,7 +139,7 @@ fn a_held_exit_is_typed_again_into_a_ready_input_box() {
 fn used_up_retries_over_a_dialog_close_the_workspace_of_a_landing_run() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IGNORES_FIRST_EXIT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = SHOW_AFTER_EXIT_TIMEOUT;
     backend.close_ends_session = true;
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
@@ -190,7 +200,7 @@ fn used_up_retries_over_a_dialog_close_the_workspace_of_a_landing_run() {
 fn used_up_retries_of_a_run_that_does_not_land_go_to_the_stuck_exit_ask() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = SHOW_AFTER_EXIT_TIMEOUT;
     let backend = Arc::new(backend);
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
@@ -247,7 +257,7 @@ fn used_up_retries_of_a_run_that_does_not_land_go_to_the_stuck_exit_ask() {
 fn an_adopter_carries_the_retries_of_the_exit_on() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -351,7 +361,7 @@ fn retried(attempt: usize) -> (&'static str, Value) {
 fn the_running_sessions_exit_is_retried_after_its_timeout() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     record(&db, &run, &[exit_requested()]);
@@ -491,7 +501,7 @@ fn used_up_retries_do_not_close_when(
 ) {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IGNORES_FIRST_EXIT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = SHOW_AFTER_EXIT_TIMEOUT;
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
         "pass",
@@ -588,7 +598,7 @@ fn used_up_retries_do_not_close_a_run_with_an_open_worker_question() {
 fn an_adopter_after_used_up_retries(mark: impl FnOnce(&Path, &TaskRun)) {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
     record(

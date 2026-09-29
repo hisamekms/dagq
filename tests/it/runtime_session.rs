@@ -1652,7 +1652,7 @@ fn an_idle_marker_after_a_typed_answer_counts_for_idle() {
 fn unanswered_exit_request_times_out_and_keeps_the_run() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, HELD_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let screen = (1..=20)
         .map(|n| format!("line {n}"))
         .chain(["❯ 1. Exit anyway".into(), "  2. Cancel".into()])
@@ -1712,7 +1712,7 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
         .unwrap();
     assert_eq!(
         timed_out.payload,
-        json!({"code": "exit_timeout", "workspace_id": WORKSPACE_ID, "timeout_secs": 1})
+        json!({"code": "exit_timeout", "workspace_id": WORKSPACE_ID, "timeout_secs": backend.exit_timeout.as_secs()})
     );
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
     // One stuck_exit ask by the supervisor, with the screen's last 15 lines.

@@ -1243,7 +1243,7 @@ fn a_silent_wrapper_with_a_live_session_is_asked_to_exit_then_raised_to_the_inbo
         false,
         &format!("commit work; receipt \"$(git rev-parse HEAD)\"; await_exit; {HOLD}"),
     );
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     SqliteQueue::open(&db)
         .unwrap()
@@ -1371,7 +1371,7 @@ fn a_silent_wrapper_whose_process_is_gone_is_given_up_as_before() {
 fn a_resumed_session_with_a_silent_wrapper_is_asked_to_exit_then_let_go() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let (run, _) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(2, &format!("await_message; {HOLD}"));
@@ -1475,7 +1475,7 @@ fn a_silent_wrapper_that_dies_after_the_exit_closes_its_ask() {
         false,
         &format!("commit work; receipt \"$(git rev-parse HEAD)\"; await_exit; {HOLD}"),
     );
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());

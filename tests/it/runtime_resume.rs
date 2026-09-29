@@ -1718,7 +1718,7 @@ fn a_resumed_session_that_ignores_exit_is_let_go() {
     // may take longer than a second to do so under load: with this timeout
     // it would be let go as stuck too (task 770).
     let exit_timeout = backend.exit_timeout;
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     backend.resume_script_for(2, &format!("await_message; idle; {HOLD}"));
     let outcome = supervise(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");

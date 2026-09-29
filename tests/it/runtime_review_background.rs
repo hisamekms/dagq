@@ -266,7 +266,7 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
              while [ ! -f \"$MESSAGE\" ]; do sleep 0.05; done; idle; {HOLD}"
         ),
     );
-    backend.exit_timeout = Duration::from_secs(1);
+    backend.exit_timeout = Duration::from_millis(500);
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[verdict(
         "revise",
@@ -305,7 +305,7 @@ fn a_revise_session_that_holds_exit_back_raises_a_stuck_exit_ask() {
     assert!(position(&kinds, "revise_requested") < position(&kinds, "exit_requested"));
     assert!(!kinds.contains(&"revise_finished"), "{kinds:?}");
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 1);
-    // The ask follows the /exit's timeout (1s) and its recovery job, not
+    // The ask follows the /exit's timeout (500ms) and its recovery job, not
     // the resume timeout: measured from the /exit, not from the start.
     let at = |kind: &str, ask_kind: Option<&str>| {
         let event = detail

@@ -3,16 +3,52 @@
 //! decisions 1 and 15 to 18).
 use crate::{common, runtime_support};
 use dagq::domain::EventKind;
+use dagq::domain::stats::timestamp_millis;
 
 use runtime_support::*;
 
-/// Longer than the resume timeout these tests give a stage: a question
-/// held this long would have ended the stage if its clock ran on.
-const HELD: Duration = Duration::from_secs(8);
-
 /// The resume timeout of these tests: long enough for a session to ask
-/// once its request arrived on a loaded host, shorter than [`HELD`].
+/// once its request arrived on a loaded host.
 const STAGE_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Past the stage timeout, how much longer a question is held: covers the
+/// whole second the event's time is not precise to and the moment between
+/// the stage's request being typed and its clock starting.
+const HELD_MARGIN: Duration = Duration::from_millis(1500);
+
+/// Hold the question that stopped `run`'s stage until its clock, had it run
+/// on, would have run out: [`STAGE_TIMEOUT`] and [`HELD_MARGIN`] past the
+/// `kind` event, which follows the question and so the request that started
+/// the clock; then wait for passes of the supervisor that would have ended
+/// the stage. The time the test already spent since then counts, instead of
+/// a fixed sleep past the timeout from wherever the test got to (task 1047).
+/// Returns how long after that event the hold ended.
+fn hold_past_the_stage_timeout(
+    db: &Path,
+    run: &TaskRun,
+    kind: &str,
+    passes: &AtomicU64,
+) -> Duration {
+    let event = SqliteQueue::open(db)
+        .unwrap()
+        .run_events(run.id())
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind} of {}", run.id()));
+    let at = UNIX_EPOCH
+        + Duration::from_millis(
+            u64::try_from(timestamp_millis(&event.created_at).unwrap()).unwrap(),
+        );
+    let until = at + STAGE_TIMEOUT + HELD_MARGIN;
+    if let Ok(left) = until.duration_since(SystemTime::now()) {
+        thread::sleep(left);
+    }
+    await_passes(passes, SOME_PASSES);
+    let held = SystemTime::now().duration_since(at).unwrap();
+    assert!(held > STAGE_TIMEOUT, "held {held:?} after {kind}");
+    held
+}
 
 /// A worker that asks a `worker_question` while it revises: once the revise
 /// request arrives it asks, goes idle, waits for the answer in `$MESSAGE`
@@ -133,6 +169,8 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
     backend.resume_timeout = STAGE_TIMEOUT;
     backend.script_for(2, BESIDE_AGENT);
     let backend = Arc::new(backend);
+    let options = supervise_options(1, true);
+    let passes = options.passes.clone();
     // The first revise, the second task's pass while the first waits, and
     // the pass of the first once answered.
     let reviewer = Arc::new(TestReviewer::new(&[
@@ -140,13 +178,7 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
         verdict("pass", &[], "fine"),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = supervise_in_thread(
-        &db,
-        &repo,
-        &backend,
-        Some(&reviewer),
-        supervise_options(1, true),
-    );
+    let supervisor = supervise_in_thread(&db, &repo, &backend, Some(&reviewer), options);
     wait_until(&db, Duration::from_secs(60), |queue| {
         run_of(queue, 2).is_some_and(|run| run.status() == RunStatus::Integrated)
     });
@@ -171,7 +203,7 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
     assert_eq!(status["waiting"][0]["phase"], "revise");
     assert_eq!(status["waiting"][0]["state"], "waiting");
     // Held past the resume timeout: the revise goes on waiting.
-    thread::sleep(HELD);
+    hold_past_the_stage_timeout(&db, &first, "run_waiting_started", &passes);
     let kinds = kinds_of(&db, 1);
     assert!(!kinds.iter().any(|k| k == "exit_requested"), "{kinds:?}");
     assert!(!kinds.iter().any(|k| k == "run_waiting_ended"), "{kinds:?}");
@@ -191,6 +223,11 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
     let ended = events_of(&db, first.id(), "run_waiting_ended");
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0]["cause"], "answered");
+    // The wait, with the revise's clock stopped, outlasted its timeout.
+    assert!(
+        ended[0]["waited_secs"].as_u64().unwrap() >= STAGE_TIMEOUT.as_secs(),
+        "{ended:?}"
+    );
     let kinds = kinds_of(&db, 1);
     assert!(at(&kinds, "run_slot_regained") < at(&kinds, "ask_delivered"));
     assert!(at(&kinds, "ask_delivered") < at(&kinds, "revise_finished"));
@@ -219,7 +256,9 @@ fn a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer() {
     backend.resume_script_for(2, &resume_asking(false));
     backend.script_for(3, BESIDE_AGENT);
     let backend = Arc::new(backend);
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, supervise_options(1, true));
+    let options = supervise_options(1, true);
+    let passes = options.passes.clone();
+    let supervisor = supervise_in_thread(&db, &repo, &backend, None, options);
     wait_until(&db, Duration::from_secs(60), |queue| {
         run_of(queue, 3).is_some_and(|three| queue.run_lease(three.id()).unwrap().is_none())
     });
@@ -242,7 +281,7 @@ fn a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer() {
             .unwrap()
     };
     assert!(id_of(2, "run_waiting_started") < id_of(3, "run_claimed"));
-    thread::sleep(HELD);
+    hold_past_the_stage_timeout(&db, &run, "run_waiting_started", &passes);
     let kinds = kinds_of(&db, 2);
     assert!(!kinds.iter().any(|k| k == "resume_finished"), "{kinds:?}");
     let resumed = at(&kinds, "resume_started");
@@ -267,9 +306,12 @@ fn a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer() {
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    assert_eq!(
-        payloads(&detail, "run_waiting_ended")[0]["cause"],
-        "answered"
+    let ended = payloads(&detail, "run_waiting_ended");
+    assert_eq!(ended[0]["cause"], "answered");
+    // The wait, with the resume's clock stopped, outlasted its timeout.
+    assert!(
+        ended[0]["waited_secs"].as_u64().unwrap() >= STAGE_TIMEOUT.as_secs(),
+        "{ended:?}"
     );
     assert!(
         backend
@@ -314,6 +356,7 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
         max_waiting: Some(1),
         ..supervise_options(2, true)
     };
+    let passes = options.passes.clone();
     let supervisor = supervise_in_thread(&db, &repo, &backend, None, options);
     // The third task's first session takes the one wait.
     wait_until(&db, Duration::from_secs(60), |queue| {
@@ -333,7 +376,7 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
     assert_eq!(deferrals[0]["ask_kind"], "worker_question");
     assert_eq!(deferrals[0]["waiting"], 1);
     assert_eq!(deferrals[0]["limit"], 1);
-    thread::sleep(HELD);
+    hold_past_the_stage_timeout(&db, &run, "run_waiting_deferred", &passes);
     let kinds = kinds_of(&db, 2);
     let resumed = at(&kinds, "resume_started");
     assert!(
