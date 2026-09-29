@@ -1070,15 +1070,19 @@ fn adopted_run_does_not_record_an_exit_timeout_twice() {
             .unwrap();
     }
     age_lease(&db, &run, 31);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    // Well past the adopter's own timeout.
-    thread::sleep(Duration::from_millis(1500));
+    // Past the adopter's own timeout, counted from the adoption before now,
+    // and passes after it.
+    thread::sleep(backend.exit_timeout);
+    await_passes(&passes, SOME_PASSES);
     // The stuck_exit ask follows once its recovery job escalated, a process
     // of its own that may take longer than that.
     wait_until(&db, Duration::from_secs(30), |queue| {
@@ -1161,14 +1165,19 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
         .ask;
     queue.answer(asked.id, "sent /exit").unwrap();
     age_lease(&db, &run, 31);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    thread::sleep(Duration::from_millis(2500));
+    // Past the adopter's own timeout, counted from the adoption before now,
+    // and passes after it.
+    thread::sleep(backend.exit_timeout);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(
         queue
             .asks(AskQuery {
@@ -1178,6 +1187,16 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
             .unwrap()
             .len(),
         1
+    );
+    // No recovery job started for the exit either: its ask would open only
+    // once that job escalated, later than these passes.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(
+        payloads(&detail, "recovery_requested")
+            .iter()
+            .all(|p| p["alert"] != "stuck_exit"),
+        "{:?}",
+        event_kinds(&detail)
     );
     fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
@@ -1288,7 +1307,7 @@ fn exited_wrapper_and_validating_runs_are_adopted_and_validated() {
     // send /exit to a session that already exited.
     backend.script_for(
         1,
-        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; sleep 1",
+        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; sleep 0.1",
     );
     let exited = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-a");
     let validating = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-b");

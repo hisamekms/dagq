@@ -23,9 +23,15 @@ while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
 sleep 0.05; idle
 "#;
 
-/// Wait for the notice's input marker of `run`, and hold a while past it:
-/// `during` sees the queue while the notice's turn runs.
-fn while_the_notice_runs(db: &Path, run: &TaskRun, during: impl FnOnce(&mut SqliteQueue)) {
+/// Wait for the notice's input marker of `run`, and hold past it for some
+/// passes of the supervisor that counts `passes`: `during` sees the queue
+/// while the notice's turn runs.
+fn while_the_notice_runs(
+    db: &Path,
+    run: &TaskRun,
+    passes: &AtomicU64,
+    during: impl FnOnce(&mut SqliteQueue),
+) {
     let input = Path::new(&run.idle_marker_path().unwrap()).with_file_name("prompt-submit.json");
     let started = Instant::now();
     while !input.exists() {
@@ -35,8 +41,8 @@ fn while_the_notice_runs(db: &Path, run: &TaskRun, during: impl FnOnce(&mut Sqli
         );
         thread::sleep(Duration::from_millis(20));
     }
-    // Several ticks of the supervisor.
-    thread::sleep(Duration::from_millis(1500));
+    // Several passes of the supervisor.
+    await_passes(passes, SOME_PASSES);
     during(&mut SqliteQueue::open(db).unwrap());
     fs::write(
         exit_request_path(run.run_dir().unwrap()).with_extension("go"),
@@ -78,11 +84,13 @@ fn a_resumed_session_at_work_on_a_notice_after_its_idle_is_not_ended() {
     // The turn the notice started shows at work.
     *backend.screen.lock().unwrap() = WORKING_SCREEN.into();
     let backend = Arc::new(backend);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
-    while_the_notice_runs(&db, &run, |queue| {
+    while_the_notice_runs(&db, &run, &passes, |queue| {
         let detail = queue.show(TaskId::new(2)).unwrap();
         assert!(payloads(&detail, "resume_started").len() == 1);
         let kinds = event_kinds(&detail);
@@ -124,6 +132,8 @@ await_exit"
         verdict("revise", &["add a line to change.txt"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
@@ -135,7 +145,7 @@ await_exit"
                 &claude_stub(&db),
                 &*reviewer,
                 Path::new(env!("CARGO_BIN_EXE_dagq")),
-                &supervise_options(4, true),
+                &options,
             )
         })
     };
@@ -155,7 +165,7 @@ await_exit"
             thread::sleep(Duration::from_millis(20));
         }
     };
-    while_the_notice_runs(&db, &run, |queue| {
+    while_the_notice_runs(&db, &run, &passes, |queue| {
         let detail = queue.show(TaskId::new(1)).unwrap();
         let kinds = event_kinds(&detail);
         assert!(kinds.contains(&"revise_requested"), "{kinds:?}");

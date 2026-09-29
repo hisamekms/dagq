@@ -666,6 +666,8 @@ fn adopted_run_waiting_for_its_exit_after_a_pass_asks_once_and_lands() {
     }
     age_lease(&db, &run, 31);
     let reviewer = Arc::new(TestReviewer::new(&[verdict("concern", &["x"], "never")]));
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend, reviewer) =
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
@@ -677,14 +679,15 @@ fn adopted_run_waiting_for_its_exit_after_a_pass_asks_once_and_lands() {
                 &claude_stub(&db),
                 &*reviewer,
                 Path::new(env!("CARGO_BIN_EXE_dagq")),
-                &supervise_options(4, true),
+                &options,
             )
         })
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !queue.asks(AskQuery::default()).unwrap().is_empty()
     });
-    thread::sleep(Duration::from_millis(1500));
+    // Passes after the ask: none asks again, sends /exit or reviews again.
+    await_passes(&passes, SOME_PASSES);
     let asks = queue.asks(AskQuery::default()).unwrap();
     assert_eq!(asks.len(), 1, "{asks:?}");
     let ask = asks[0].clone();

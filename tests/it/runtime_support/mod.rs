@@ -42,7 +42,7 @@ pub use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, LazyLock, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicI64, AtomicUsize, Ordering},
+        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -1461,6 +1461,37 @@ pub fn claude_stub(db: &Path) -> PathBuf {
 /// instead of 50 shortened most runtime tests (task 567).
 pub const TEST_TICK: Duration = Duration::from_millis(20);
 
+/// How many passes of the supervisor a check that nothing happens (past a
+/// threshold, or at all) waits for with [`await_passes`]: the fixed sleeps
+/// it replaced let the 20 ms tick run some dozens of passes unloaded, and a
+/// handful under load (task 1046).
+pub const SOME_PASSES: u64 = 5;
+
+/// Wait for `n` whole passes of the supervisor whose
+/// [`SuperviseOptions::passes`] `passes` is, all started after this call: a
+/// check that nothing happens past a threshold waits out the threshold and
+/// then these passes, instead of a fixed sleep well past it (task 1046).
+pub fn await_passes(passes: &AtomicU64, n: u64) {
+    // The pass in progress now may have looked before the call: the next
+    // `n` start after it, and the start of the one after them shows the
+    // last of them ended.
+    let from = passes.load(Ordering::SeqCst);
+    let target = from + n + 1;
+    let started = Instant::now();
+    loop {
+        let now = passes.load(Ordering::SeqCst);
+        if now >= target {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the supervisor made {} of the {n} passes waited for in 60 seconds",
+            now.saturating_sub(from + 1)
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Supervisor options with the test tick and the [`SteadyClock`].
 pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
     SuperviseOptions {
@@ -2410,6 +2441,17 @@ pub fn supervise_reviewed(
     backend: &TestWorkspace,
     reviewer: &TestReviewer,
 ) -> Value {
+    supervise_reviewed_with(db, repo, backend, reviewer, &supervise_options(4, true))
+}
+
+/// [`supervise_reviewed`] with `options`.
+pub fn supervise_reviewed_with(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    options: &SuperviseOptions,
+) -> Value {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
     let outcome = runtime::supervise_with_reviewer(
         db,
@@ -2418,7 +2460,7 @@ pub fn supervise_reviewed(
         &claude_stub(db),
         reviewer,
         Path::new(env!("CARGO_BIN_EXE_dagq")),
-        &supervise_options(4, true),
+        options,
     )
     .unwrap();
     backend.join();

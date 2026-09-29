@@ -13,10 +13,20 @@ commit work; receipt "$(git rev-parse HEAD)"; idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done; rm "$MESSAGE"
 "#;
 
-/// A `revise` verdict that takes a while, so that a question can be asked
-/// during the review, seconds before the revise request.
-fn slow_revise() -> String {
-    format!("sleep 3; {}", verdict("revise", &["add a line"], "one gap"))
+/// A `revise` verdict that waits for [`ask_during_review`] (its file next to
+/// the queue `db`), so that a question can be asked during the review, in
+/// an earlier second than the revise request.
+fn slow_revise(db: &std::path::Path) -> String {
+    format!(
+        "while [ ! -f '{}' ]; do sleep 0.05; done; {}",
+        review_go(db).display(),
+        verdict("revise", &["add a line"], "one gap")
+    )
+}
+
+/// The file that lets [`slow_revise`] print its verdict.
+fn review_go(db: &std::path::Path) -> std::path::PathBuf {
+    db.with_file_name("review.go")
 }
 
 /// Opens, during the run's review, the `worker_question` a worker asked
@@ -44,7 +54,19 @@ fn ask_during_review(db: &std::path::Path) -> AskId {
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"revise_requested"), "{kinds:?}");
+    // The review ends in a later second than the ask's.
+    while unix_now() <= ask.created_at {
+        thread::sleep(Duration::from_millis(20));
+    }
+    fs::write(review_go(db), "").unwrap();
     ask.id
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 /// Waits for the revise request and checks that `ask` was created in an
@@ -62,19 +84,24 @@ fn await_revise_after(db: &std::path::Path, ask: AskId) {
     assert!(created_at < sent_at, "{created_at} {sent_at}");
 }
 
+/// The supervisor under test, and the count of its passes.
 fn run_supervisor(
     db: &std::path::Path,
     repo: &std::path::Path,
     backend: &Arc<TestWorkspace>,
     reviewer: &Arc<TestReviewer>,
-) -> thread::JoinHandle<Value> {
+) -> (thread::JoinHandle<Value>, Arc<AtomicU64>) {
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let (db, repo, backend, reviewer) = (
         db.to_owned(),
         repo.to_owned(),
         backend.clone(),
         reviewer.clone(),
     );
-    thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
+    let supervisor =
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options));
+    (supervisor, passes)
 }
 
 /// The revise's `approve_landing` ask, with the worker's question from
@@ -114,10 +141,10 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
         ),
     ));
     let reviewer = Arc::new(TestReviewer::new(&[
-        slow_revise(),
+        slow_revise(&db),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, passes) = run_supervisor(&db, &repo, &backend, &reviewer);
     let ask = ask_during_review(&db);
     await_revise_after(&db, ask);
     // Answered while the revise waits: the answer is the inbox's.
@@ -128,7 +155,7 @@ fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0]["runtime_delivers"], false, "{}", answered[0]);
     // The revise watch polls a while with the answer there.
-    thread::sleep(Duration::from_millis(600));
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(payloads(&detail, "ask_delivered").is_empty());
     assert_eq!(backend.texts().len(), 1, "{:?}", backend.texts());
@@ -163,8 +190,8 @@ fn a_question_open_from_before_the_revise_does_not_hold_an_idle_session() {
         false,
         &format!("{WAITS_FOR_REVISE}idle; await_exit\n"),
     ));
-    let reviewer = Arc::new(TestReviewer::new(&[slow_revise()]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
+    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
     let ask = ask_during_review(&db);
     await_revise_after(&db, ask);
     let outcome = joined(supervisor, "the supervisor thread to return");
@@ -183,8 +210,8 @@ fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     let mut backend = TestWorkspace::new(&db, false, &format!("{WAITS_FOR_REVISE}await_exit\n"));
     backend.resume_timeout = Duration::from_secs(2);
     let backend = Arc::new(backend);
-    let reviewer = Arc::new(TestReviewer::new(&[slow_revise()]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
+    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
     let ask = ask_during_review(&db);
     await_revise_after(&db, ask);
     let outcome = joined(supervisor, "the supervisor thread to return");
@@ -232,7 +259,7 @@ fn a_receipt_rewritten_after_an_open_question_is_judged() {
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
     let outcome = joined(supervisor, "the supervisor thread to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
@@ -270,7 +297,7 @@ fn a_mismatched_receipt_rewritten_after_an_open_question_is_judged() {
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
     let outcome = joined(supervisor, "the supervisor thread to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
@@ -306,7 +333,7 @@ fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
         &["add a line"],
         "one gap",
     )]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
     let outcome = joined(supervisor, "the supervisor thread to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -350,7 +377,7 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
         verdict("revise", &["add a line"], "one gap"),
         verdict("pass", &[], "fixed"),
     ]));
-    let supervisor = run_supervisor(&db, &repo, &backend, &reviewer);
+    let (supervisor, passes) = run_supervisor(&db, &repo, &backend, &reviewer);
     wait_until(&db, Duration::from_secs(30), |queue| {
         queue
             .asks(AskQuery::default())
@@ -360,8 +387,10 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = open_question(&mut queue);
-    // Idle at its question for longer than the resume timeout.
-    thread::sleep(Duration::from_secs(3));
+    // Idle at its question past the resume timeout, which runs from the
+    // revise request before the question, and passes after it.
+    thread::sleep(backend.resume_timeout);
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"exit_requested"), "{kinds:?}");

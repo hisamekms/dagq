@@ -37,7 +37,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -247,6 +247,10 @@ pub struct LoopSettings {
     /// `[exit]`: the retries of a `/exit` a session held back (ADR-0047
     /// decision 25).
     pub exit: crate::domain::exit::ExitConfig,
+    /// Counts the loop's passes, one at the top of each; only read by
+    /// tests, which wait for passes after a threshold instead of a fixed
+    /// sleep (task 1046).
+    pub passes: Arc<AtomicU64>,
 }
 
 /// Where the supervisor works and what it starts: the queue database and
@@ -993,6 +997,7 @@ impl Supervisor<'_> {
     }
     fn drive(&mut self, options: &LoopSettings) -> Result<Value> {
         loop {
+            options.passes.fetch_add(1, Ordering::SeqCst);
             if let Err(error) = self.heartbeat.check() {
                 // Supervisor-level failure: note it on every run and keep the
                 // leases and the registration; they go stale once this

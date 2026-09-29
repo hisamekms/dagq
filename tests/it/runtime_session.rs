@@ -442,14 +442,39 @@ fn exit_requested_precedes_a_session_exit_that_beats_the_send() {
 #[test]
 fn missing_or_stale_idle_marker_does_not_request_exit() {
     // No marker at all, then a marker older than the receipt (an earlier turn).
-    // Both sessions end by themselves, as with a person's /exit.
+    // Both sessions end by themselves, as with a person's /exit, once the
+    // supervisor made some passes past their receipt.
+    const ENDS: &str = "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done";
     for script in [
-        "commit work; receipt \"$(git rev-parse HEAD)\"; sleep 1",
-        "idle; touch -t 200001010000 \"$IDLE\"; commit work; receipt \"$(git rev-parse HEAD)\"; sleep 1",
+        format!("commit work; receipt \"$(git rev-parse HEAD)\"; {ENDS}"),
+        format!(
+            "idle; touch -t 200001010000 \"$IDLE\"; commit work; receipt \"$(git rev-parse HEAD)\"; {ENDS}"
+        ),
     ] {
         let (_dir, repo, db) = fixture();
-        let backend = TestWorkspace::new(&db, false, script);
-        let outcome = supervise(&db, &repo, &backend).unwrap();
+        let backend = Arc::new(TestWorkspace::new(&db, false, &script));
+        let options = supervise_options(4, true);
+        let passes = options.passes.clone();
+        let supervisor = {
+            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+            thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+        };
+        wait_until(&db, Duration::from_secs(30), |queue| {
+            has_event(queue, "receipt_observed")
+        });
+        await_passes(&passes, SOME_PASSES);
+        let run = SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap()
+            .runs[0]
+            .clone();
+        fs::write(
+            exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+            "",
+        )
+        .unwrap();
+        let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
         backend.join();
         assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
         assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
@@ -963,9 +988,11 @@ fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
     let mut backend = TestWorkspace::new(&db, false, ASKING_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
     let backend = Arc::new(backend);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !queue.asks(Default::default()).unwrap().is_empty()
@@ -985,10 +1012,12 @@ fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
     // A dialog-like screen while the ask is unclosed is not read or recorded.
     *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
     // A poll that looked for the ask just before it was registered is over.
-    thread::sleep(Duration::from_millis(200));
+    await_passes(&passes, 1);
     let captured = backend.captures.load(Ordering::SeqCst);
-    // Well past `prompt_wait`, when the screen would otherwise be read.
-    thread::sleep(Duration::from_millis(1000));
+    // Past `prompt_wait`, when the screen would otherwise be read, and
+    // passes after it.
+    thread::sleep(backend.prompt_wait);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(backend.captures.load(Ordering::SeqCst), captured);
     let status = runtime::status(&db).unwrap();
     assert!(
@@ -1002,7 +1031,7 @@ fn an_answered_worker_question_is_typed_into_the_idle_worker_and_closed() {
 
     // Answered while the worker has not gone idle since asking: not typed.
     queue.answer(ask.id, "use blue").unwrap();
-    thread::sleep(Duration::from_millis(500));
+    await_passes(&passes, SOME_PASSES);
     assert!(backend.texts().is_empty());
     let status = runtime::status(&db).unwrap();
     let attention = ask_attention(&status, ask.id);
@@ -1548,7 +1577,7 @@ const IDLE_AFTER_ANSWER_AGENT: &str = r#"
 while [ ! -f "$EXIT.idle" ]; do sleep 0.05; done
 idle
 while [ ! -f "$MESSAGE" ]; do sleep 0.05; done
-sleep 1
+sleep 0.2
 idle
 : > "$EXIT.took"
 while [ ! -f "$EXIT.go" ]; do sleep 0.05; done
@@ -1568,9 +1597,11 @@ fn an_idle_marker_after_a_typed_answer_counts_for_idle() {
     let mut backend = TestWorkspace::new(&db, false, IDLE_AFTER_ANSWER_AGENT);
     backend.prompt_wait = Duration::from_millis(300);
     let backend = Arc::new(backend);
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !queue.asks(Default::default()).unwrap().is_empty()
@@ -1590,12 +1621,15 @@ fn an_idle_marker_after_a_typed_answer_counts_for_idle() {
         thread::sleep(Duration::from_millis(20));
     }
     // A poll that looked at the marker just before it was written, and may
-    // still read the screen, is over well past `prompt_wait`.
-    thread::sleep(Duration::from_millis(1000));
+    // still read the screen, is over past `prompt_wait` and passes after it.
+    thread::sleep(backend.prompt_wait);
+    await_passes(&passes, SOME_PASSES);
     let captured = backend.captures.load(Ordering::SeqCst);
     *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
-    // Well past `prompt_wait`, when the screen would otherwise be read.
-    thread::sleep(Duration::from_millis(1000));
+    // Past `prompt_wait`, when the screen would otherwise be read, and
+    // passes after it.
+    thread::sleep(backend.prompt_wait);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(backend.captures.load(Ordering::SeqCst), captured);
     *backend.screen.lock().unwrap() = WORK_SCREEN.into();
     fs::write(exit.with_extension("go"), "").unwrap();

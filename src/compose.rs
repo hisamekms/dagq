@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64},
+    },
     time::Duration,
 };
 
@@ -338,6 +341,9 @@ pub struct SuperviseOptions {
     /// unless asked for (`supervise --host-metrics-interval`, 30 seconds
     /// by default in the CLI).
     pub host_metrics: Option<HostMetricsSettings>,
+    /// Counts the supervisor loop's passes, one at the top of each; tests
+    /// keep a clone and wait for passes past a threshold (task 1046).
+    pub passes: Arc<AtomicU64>,
 }
 
 /// How the supervisor records the host's load (task 516).
@@ -426,6 +432,7 @@ impl SuperviseOptions {
             release_current: None,
             codex: PathBuf::from("codex"),
             host_metrics: None,
+            passes: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -470,6 +477,7 @@ impl SuperviseOptions {
             disk,
             resume,
             exit,
+            passes: self.passes.clone(),
         }
     }
 }

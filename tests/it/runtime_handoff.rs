@@ -60,13 +60,25 @@ fn supervise_after_handoff(
     backend: &TestWorkspace,
     token: &str,
 ) -> Result<Value> {
+    supervise_after_handoff_with(db, repo, backend, token, supervise_options(4, true))
+}
+
+/// [`supervise_after_handoff`] with `options` (its passes counted where a
+/// test reads them).
+fn supervise_after_handoff_with(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    token: &str,
+    options: SuperviseOptions,
+) -> Result<Value> {
     supervise_with(
         db,
         repo,
         backend,
         &SuperviseOptions {
             handoff_token: Some(LeaseToken::new(token)),
-            ..supervise_options(4, true)
+            ..options
         },
     )
 }
@@ -306,13 +318,15 @@ fn a_handoff_after_a_recovery_repair_of_the_exit_times_it_from_the_repair() {
         )
         .unwrap();
 
+    let options = supervise_options(4, true);
+    let passes = options.passes.clone();
     let next = {
         let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
-        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+        thread::spawn(move || supervise_after_handoff_with(&db, &repo, &backend, &token, options))
     };
     wait_until(&db, Duration::from_secs(30), |_| !snapshot.exists());
-    // Many ticks of the next process.
-    thread::sleep(Duration::from_secs(2));
+    // Several passes of the next process.
+    await_passes(&passes, SOME_PASSES);
     let detail = queue.show(TaskId::new(1)).unwrap();
     let kinds = event_kinds(&detail);
     assert!(!kinds.contains(&"exit_request_timed_out"), "{kinds:?}");

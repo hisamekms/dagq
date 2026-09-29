@@ -598,22 +598,20 @@ fn an_adopter_after_used_up_retries(mark: impl FnOnce(&Path, &TaskRun)) {
     );
     mark(&db, &run);
     age_lease(&db, &run, 31);
+    let interval = Duration::from_millis(200);
+    let options = retrying(2, interval);
+    let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || {
-            supervise_with(
-                &db,
-                &repo,
-                &backend,
-                &retrying(2, Duration::from_millis(200)),
-            )
-        })
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, common::STEP_LIMIT, |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
     });
-    // Well past the interval after the last retry.
-    thread::sleep(Duration::from_millis(1000));
+    // Past the adopter's own exit timeout and the interval after it, when
+    // a retry would be sent, and passes after that.
+    thread::sleep(backend.exit_timeout + interval);
+    await_passes(&passes, SOME_PASSES);
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
     fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();

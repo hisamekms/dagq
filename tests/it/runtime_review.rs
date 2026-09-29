@@ -894,12 +894,12 @@ fn a_review_that_could_not_start_names_no_output_of_its_own() {
 /// A failed review's span ends with its job (task 541): the job that
 /// failed, timed out, printed no readable verdict twice, or could not start
 /// closes the review span as `job_finished` when it ends, before the
-/// session's `/exit`, which here takes a second more; `review_failed` and
-/// its ask still follow the exit.
+/// session's `/exit`, which here takes half a second more; `review_failed`
+/// and its ask still follow the exit.
 #[test]
 fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     use dagq::domain::stats::rfc3339_millis;
-    let slow_exit = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; sleep 1";
+    let slow_exit = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; sleep 0.5";
     for (scripts, timeout, reviews) in [
         (vec!["echo broken >&2; exit 3".to_owned()], 60, 1),
         (vec!["sleep 30".to_owned()], 1, 1),
@@ -945,12 +945,12 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
         );
         let closed = reviews_closed.last().unwrap();
         let failed = event("review_failed");
-        // Closed before the /exit was even asked, and a second or more
-        // before the session exited and `review_failed` was recorded.
+        // Closed before the /exit was even asked, and half a second or
+        // more before the session exited and `review_failed` was recorded.
         assert!(closed.id < event("exit_requested").id, "{scripts:?}");
         let at = |e: &dagq::domain::RunEvent| rfc3339_millis(&e.created_at).unwrap();
         assert!(
-            at(event("session_exited")) - at(closed) >= 1000,
+            at(event("session_exited")) - at(closed) >= 500,
             "{} then {}",
             closed.created_at,
             event("session_exited").created_at
