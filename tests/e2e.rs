@@ -444,18 +444,30 @@ fn checked(args: &[&str], output: std::process::Output) -> Value {
 
 /// The workspace is pinned, has the sidebar color `color` (cmux lists a
 /// named color by its hex value) and carries the status pill `pill` as
-/// `cmux list-status` prints it.
+/// `cmux list-status` prints it. cmux answers `workspace-action` before its
+/// listing shows the change: with other e2e tests driving cmux, a pin sent
+/// right after an unpin is listed as `pinned: false` for up to ~0.5s (task
+/// 1120), so the look is waited for, not read once.
 fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
-    let listed = listed_workspace(cmux, id).unwrap();
-    assert_eq!(listed["pinned"], true, "{listed}");
-    assert_eq!(listed["custom_color"], color, "{listed}");
-    let status = Command::new(cmux)
-        .args(["list-status", "--workspace", id])
-        .bounded_output()
-        .unwrap();
-    assert!(status.status.success(), "{status:?}");
-    let status = String::from_utf8_lossy(&status.stdout);
-    assert!(status.lines().any(|line| line == pill), "{status}");
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+        let listed = listed_workspace(cmux, id).unwrap();
+        let status = Command::new(cmux)
+            .args(["list-status", "--workspace", id])
+            .bounded_output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
+        let status = String::from_utf8_lossy(&status.stdout).into_owned();
+        let listed_ok = listed["pinned"] == true && listed["custom_color"] == color;
+        if listed_ok && status.lines().any(|line| line == pill) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workspace {id} never got its look: {listed}\n{status}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// `cmux workspace env <id> --json`: the environment the workspace was
@@ -2101,6 +2113,12 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         .bounded_output()
         .unwrap();
     assert!(unpin.status.success(), "{unpin:?}");
+    // The inbox has lost its pin before `up` runs, as cmux lists it.
+    let deadline = Instant::now() + WAIT_LIMIT;
+    while listed_workspace(cmux, &inbox).unwrap()["pinned"] != false {
+        assert!(Instant::now() < deadline, "the unpin never showed up");
+        thread::sleep(Duration::from_millis(200));
+    }
     let third = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
     assert_eq!(third["inbox"]["outcome"], "reused", "{third}");
     assert_eq!(third["warnings"], serde_json::json!([]), "{third}");
