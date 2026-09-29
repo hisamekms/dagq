@@ -4,8 +4,8 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: provider
 related:
   - adr-0004
@@ -181,7 +181,7 @@ runのsessionの区間（`worker` / `resume` / `revise`）は、閉じるとき�
 
 - **読むもの**: 区間（`[開始, 終わり)`、推定で閉じたときは最後のレコードを含む。トークン数と同じ範囲）の`assistant`のレコードの`message.model`と、レコードの`effort`（`low` / `medium` / `high` / `xhigh`など）。sidechain（subagent）のレコードと、`<synthetic>`（Claude Codeが自分で書いたmessage）は数えない。`message.id`が同じレコードは1つのmessageとして最初のものだけを数える
 - **eventのpayload**: `session_closed`の`model`と`effort`は、最も多くのmessageを書いた組（同数なら後に使った組）。区間の中で組が変わったら、組ごとの`{model, effort, messages}`を多い順に`models`に並べる（1組なら書かない）。`effort`を書かない版のtranscriptでは`effort`はnull
-- **対象**: `worker` / `resume` / `revise`と、headlessのjobの`review` / `triage` / `plan_review` / `goal_review` / `observer`、hookが記録する`inbox` / `planner` / `runtime_planner`（task 387）。復旧（`recover`）のjobは区間を持たない
+- **対象**: `worker` / `resume` / `revise`と、headlessのjobの`review` / `triage` / `plan_review` / `goal_review` / `observer` / `throughput_review`（task 1086。区間の閉じ方は[スループットの見直し](supervisor-lifecycle/throughput-review.md#sessionの区間task-1086)）、hookが記録する`inbox` / `planner` / `runtime_planner`（task 387）。復旧（`recover`）のjobは区間を持たない
 - **起動の意図**: worker以外のアクターのjobとplannerの区間の`session_opened`は、起動したmodel / effortと出どころ（`dagq.toml`の`[roles.<role>]`・既定・差し戻しの段上げ）の`launch`を持つ（task 580、[Actor model](supervisor-lifecycle/actor-model.md)）。既定（`source: default`）では何も渡していないので`model` / `effort`はnullで、実際の値はここで読む`session_closed`のもの
 - **読めないとき**: transcriptが読めない、またはどのmessageもmodelを持たなければ何も書かない。区間を閉じたevent・run・jobの結果は変わらず、区間は失敗にならない
 - 読み口: `stats`の`sessions.by_kind[kind].models`（[stats](supervisor-lifecycle/stats.md#claude-session)）と、plan reviewのsessionを判断したsessionとして並べる`kpi`の計画の品質（[kpi](supervisor-lifecycle/kpi.md#計画の品質)）

@@ -23,12 +23,15 @@ pub const TRIAGE: &str = "triage";
 pub const OBSERVER: &str = "observer";
 pub const PLAN_REVIEW: &str = "plan_review";
 pub const GOAL_REVIEW: &str = "goal_review";
+/// The throughput review's job (ADR-t996-1), of the queue like the
+/// observer's.
+pub const THROUGHPUT_REVIEW: &str = "throughput_review";
 pub const RUNTIME_PLANNER: &str = "runtime_planner";
 pub const INBOX: &str = "inbox";
 pub const PLANNER: &str = "planner";
 
 /// Every kind of span, in the order `stats` lists them.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     WORKER,
     RESUME,
     REVISE,
@@ -37,6 +40,7 @@ pub const KINDS: [&str; 11] = [
     OBSERVER,
     PLAN_REVIEW,
     GOAL_REVIEW,
+    THROUGHPUT_REVIEW,
     RUNTIME_PLANNER,
     INBOX,
     PLANNER,
@@ -62,7 +66,8 @@ pub enum Scope {
     /// An event of a proposal's plan review (on its first task): the spans
     /// of that proposal.
     Proposal,
-    /// An event of the queue itself: the observer's spans.
+    /// An event of the queue itself: the spans of its job
+    /// ([`queue_span_kind`]), the observer's or the throughput review's.
     Queue,
     /// An event of a goal's goal review (on the goal): the spans of that
     /// goal's reviews.
@@ -79,17 +84,39 @@ pub fn scope(kind: &str) -> Option<Scope> {
         "plan_review_started" | "plan_review_finished" | "plan_review_failed" => {
             Some(Scope::Proposal)
         }
-        "observe_started" | "observe_finished" => Some(Scope::Queue),
+        "observe_started"
+        | "observe_finished"
+        | "throughput_review_started"
+        | "throughput_review_finished" => Some(Scope::Queue),
         "goal_review_started" | "goal_review_finished" | "goal_review_failed" => Some(Scope::Goal),
         _ => None,
     }
 }
+
+/// The kind of the spans an event of the queue ([`Scope::Queue`]) of
+/// `kind` is about: each job of the queue has its own, and an event of one
+/// neither sees nor closes the other's.
+pub fn queue_span_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "observe_started" | "observe_finished" => Some(OBSERVER),
+        "throughput_review_started" | "throughput_review_finished" => Some(THROUGHPUT_REVIEW),
+        _ => None,
+    }
+}
+
+/// How long a throughput review's span may stay open without its finish
+/// before an event of the throughput review closes it as `inferred`: as
+/// long as its start counts as running (the job's timeout and a margin),
+/// by when the job finished or was killed.
+pub const THROUGHPUT_REVIEW_OPEN_MS: i64 = super::throughput_review::RUNNING_MS;
 
 /// A span that is open: its `session_opened` event and payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenSpan {
     pub opened_event_id: EventId,
     pub payload: Value,
+    /// When it opened (unix milliseconds), when that is known.
+    pub opened_ms: Option<i64>,
 }
 
 impl OpenSpan {
@@ -126,6 +153,9 @@ pub struct SpanContext {
     /// tokens from the run's turns rather than a transcript.
     pub route: Option<String>,
     pub provider: Option<String>,
+    /// When the event happened (unix milliseconds): what a span left open
+    /// past its time is measured against (a throughput review's).
+    pub at_ms: Option<i64>,
 }
 
 /// The `route` of a headless run's session span.
@@ -341,6 +371,54 @@ pub fn changes(
                 reason: JOB_FINISHED,
             })
             .collect(),
+        // Throughput reviews may run side by side (one a handoff left
+        // running, another supervisor's), so a start closes only the span
+        // of its own period (a review of it that died, started again) and
+        // the spans open past their time; a finish closes its own span,
+        // by the session id, and the spans open past their time.
+        "throughput_review_started" | "throughput_review_finished" => {
+            let started = kind == "throughput_review_started";
+            let own = |span: &OpenSpan| {
+                if started {
+                    span.payload["mode"] == payload["mode"]
+                        && span.payload["period"] == payload["period"]
+                } else {
+                    payload["session_id"].is_string()
+                        && span.payload["session_id"] == payload["session_id"]
+                }
+            };
+            let stale = |span: &OpenSpan| {
+                span.opened_ms
+                    .zip(context.at_ms)
+                    .is_some_and(|(opened, at)| at - opened >= THROUGHPUT_REVIEW_OPEN_MS)
+            };
+            let mut changes: Vec<SpanChange> = open
+                .iter()
+                .filter(|span| span.kind() == THROUGHPUT_REVIEW)
+                .filter_map(|span| {
+                    let reason = if own(span) {
+                        if started { INFERRED } else { JOB_FINISHED }
+                    } else if stale(span) {
+                        INFERRED
+                    } else {
+                        return None;
+                    };
+                    Some(SpanChange::Close {
+                        span: span.clone(),
+                        reason,
+                    })
+                })
+                .collect();
+            if started {
+                let mut opened = job(THROUGHPUT_REVIEW, payload, text("dir"));
+                if let SpanChange::Open(opened) = &mut opened {
+                    opened["mode"] = payload["mode"].clone();
+                    opened["period"] = payload["period"].clone();
+                }
+                changes.push(opened);
+            }
+            changes
+        }
         _ => Vec::new(),
     }
 }
@@ -549,6 +627,7 @@ mod tests {
         OpenSpan {
             opened_event_id: EventId::new(id),
             payload,
+            opened_ms: None,
         }
     }
 
@@ -575,7 +654,15 @@ mod tests {
         assert_eq!(scope("run_claimed"), None);
         assert_eq!(scope(SESSION_OPENED), None);
         assert_eq!(scope("goal_review_failed"), Some(Scope::Goal));
-        assert_eq!(KINDS.len(), 11);
+        assert_eq!(scope("throughput_review_started"), Some(Scope::Queue));
+        assert_eq!(scope("throughput_review_finished"), Some(Scope::Queue));
+        assert_eq!(queue_span_kind("observe_finished"), Some(OBSERVER));
+        assert_eq!(
+            queue_span_kind("throughput_review_started"),
+            Some(THROUGHPUT_REVIEW)
+        );
+        assert_eq!(queue_span_kind("goal_review_started"), None);
+        assert_eq!(KINDS.len(), 12);
     }
 
     /// The worker's session opens with the run's id, goes on as a revise,
@@ -849,6 +936,117 @@ mod tests {
         );
         assert_eq!(closed(&finished[0]), (11, JOB_FINISHED));
         assert!(changes("run_claimed", &json!({}), &[], &context).is_empty());
+    }
+
+    /// Throughput reviews run side by side: a start closes only a span of
+    /// its own period and those open past their time, a finish its own
+    /// span by the session id and those open past their time.
+    #[test]
+    fn throughput_review_spans_close_by_session_period_or_age() {
+        let at = |ms| SpanContext {
+            at_ms: Some(ms),
+            ..SpanContext::default()
+        };
+        let aged = |id, ms, payload| OpenSpan {
+            opened_ms: Some(ms),
+            ..span(id, payload)
+        };
+        let launch = json!({"role": "throughput_review", "provider": "claude"});
+        let started = changes(
+            "throughput_review_started",
+            &json!({"mode": "hourly", "period": "2026-09-29T13", "dir": "/r/h13",
+                    "session_id": "s-h13", "launch": launch}),
+            &[],
+            &at(0),
+        );
+        assert_eq!(started.len(), 1);
+        let hourly = opened(&started[0]).clone();
+        assert_eq!(hourly["kind"], THROUGHPUT_REVIEW);
+        assert_eq!(hourly["session_id"], "s-h13");
+        assert_eq!(hourly["cwd"], "/r/h13");
+        assert_eq!(hourly["mode"], "hourly");
+        assert_eq!(hourly["period"], "2026-09-29T13");
+        assert_eq!(hourly["launch"], launch);
+
+        // A daily review starting while the hourly one runs (a handoff left
+        // it running) leaves it open, and so does an observer's event.
+        let running = aged(10, 0, hourly.clone());
+        let observer = aged(9, 0, json!({"kind": OBSERVER, "cwd": "/obs"}));
+        let daily = changes(
+            "throughput_review_started",
+            &json!({"mode": "daily", "period": "2026-09-28", "dir": "/r/d", "session_id": "s-d"}),
+            &[observer, running.clone()],
+            &at(60_000),
+        );
+        assert_eq!(daily.len(), 1);
+        let daily = aged(11, 60_000, opened(&daily[0]).clone());
+
+        // The hourly finish closes its own span only.
+        let finished = changes(
+            "throughput_review_finished",
+            &json!({"mode": "hourly", "period": "2026-09-29T13", "outcome": "succeeded",
+                    "session_id": "s-h13"}),
+            &[running.clone(), daily.clone()],
+            &at(120_000),
+        );
+        assert_eq!(finished.len(), 1);
+        assert_eq!(closed(&finished[0]), (10, JOB_FINISHED));
+
+        // A skipped hour names no session: it closes only what is past its
+        // time, as inferred.
+        let skipped = json!({"mode": "hourly", "period": "2026-09-29T14", "outcome": "skipped"});
+        assert!(
+            changes(
+                "throughput_review_finished",
+                &skipped,
+                std::slice::from_ref(&daily),
+                &at(120_000)
+            )
+            .is_empty()
+        );
+        let late = changes(
+            "throughput_review_finished",
+            &skipped,
+            std::slice::from_ref(&daily),
+            &at(60_000 + THROUGHPUT_REVIEW_OPEN_MS),
+        );
+        assert_eq!(late.len(), 1);
+        assert_eq!(closed(&late[0]), (11, INFERRED));
+
+        // A review of the same period started again: the earlier one died.
+        let again = changes(
+            "throughput_review_started",
+            &json!({"mode": "hourly", "period": "2026-09-29T13", "dir": "/r/h13b", "session_id": "s-h13b"}),
+            &[running, daily],
+            &at(120_000),
+        );
+        assert_eq!(again.len(), 2);
+        assert_eq!(closed(&again[0]), (10, INFERRED));
+        assert_eq!(opened(&again[1])["session_id"], "s-h13b");
+
+        // A span with no time recorded is not aged out.
+        assert!(
+            changes(
+                "throughput_review_finished",
+                &skipped,
+                &[span(
+                    12,
+                    json!({"kind": THROUGHPUT_REVIEW, "session_id": "x"})
+                )],
+                &at(i64::MAX / 2),
+            )
+            .is_empty()
+        );
+        // The observer's events leave the throughput review's spans alone.
+        assert!(
+            changes(
+                "observe_finished",
+                &json!({"dir": "/r/h13"}),
+                &[aged(13, 0, hourly)],
+                &at(THROUGHPUT_REVIEW_OPEN_MS * 2),
+            )
+            .is_empty()
+        );
     }
 
     #[test]

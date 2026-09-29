@@ -231,6 +231,31 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
         json!({"role": "throughput_review", "provider": "claude", "model": null,
                "effort": null, "source": "default"})
     );
+    // Its start opens its session's span and its finish, naming the same
+    // session, closes it (task 1086); `stats` counts it under its kind.
+    let session = &started[0]["session_id"];
+    assert_eq!(
+        queue_events(&db, "throughput_review_finished")[0]["session_id"],
+        *session
+    );
+    let opened = queue_events(&db, "session_opened");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["kind"], "throughput_review");
+    assert_eq!(opened[0]["session_id"], *session);
+    assert_eq!(opened[0]["mode"], "hourly");
+    assert_eq!(opened[0]["period"], "2026-09-29T03");
+    assert_eq!(opened[0]["cwd"], json!(dir));
+    assert_eq!(opened[0]["launch"], started[0]["launch"]);
+    let closed = queue_events(&db, "session_closed");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!(closed[0]["kind"], "throughput_review");
+    assert_eq!(closed[0]["session_id"], *session);
+    assert_eq!(closed[0]["reason"], "job_finished");
+    let stats = crate::common::cli::ok(&db, &["stats", "--full"]);
+    assert_eq!(
+        stats["sessions"]["by_kind"]["throughput_review"]["count"], 1,
+        "{stats}"
+    );
     // Nothing changed state but the review's own record.
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_eq!(

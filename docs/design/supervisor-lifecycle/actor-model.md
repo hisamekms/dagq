@@ -4,8 +4,8 @@ type: design
 title: "Actor model"
 status: current
 created: 2026-09-27
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -80,13 +80,14 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
 - `provider`: sessionを起動したprovider（task 1062、goal 73）。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ`domain::Provider`（`claude` / `codex`）。`ActorLaunch::default_of`は`domain::actor_model::ROLE_PROVIDER`（`claude`）を、`RoleModels::launch`は表の`provider`（無ければ`claude`。上の[provider](#provider)、task 1065）を入れ、段上げ（`escalated`）は元のproviderを引き継ぐ。`provider`の無い過去の`launch`（task 1062より前の記録）は`ActorLaunch::recorded`が`claude`として読む（それより前はClaudeでしか動かなかった）
 - `switched_from` / `switch_reason`: 使えないproviderから切り替えて起動したjobだけ（task 1065）。例: `{"role": "goal_review", "provider": "claude", "model": null, "effort": null, "source": "default", "switched_from": "codex", "switch_reason": "authentication"}`
 - `source`: `default`（渡していない。`model` / `effort`はnullで、実際の値はsessionが閉じたときの`session_closed`の`model` / `effort`が持つ）、`dagq.toml`、`revise_escalation`。`escalated_from` / `escalation_reason`は段上げのときだけ
-- **jobの開始のevent**: `review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`・`throughput_review_started`の`launch`、生きているrunの復旧のjobは`recovery_requested`の`launch`（生きているrunのjobのpromptのfactsにも、その後の終わったrunのjobのfactsにも含めない）。どれも`provider`を持つ。jobの区間の`session_opened`（`domain::sessions::changes`の`job`）は開始のeventの`launch`を写す（生きているrunの復旧のjobとスループットの見直しのjobは区間を持たない）。終わったrunの復旧のjobは`triage_started`の`launch`（`ActorLaunch::recorded`）で起動する
+- **jobの開始のevent**: `review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`・`throughput_review_started`の`launch`、生きているrunの復旧のjobは`recovery_requested`の`launch`（生きているrunのjobのpromptのfactsにも、その後の終わったrunのjobのfactsにも含めない）。どれも`provider`を持つ。jobの区間の`session_opened`（`domain::sessions::changes`の`job`）は開始のeventの`launch`を写す（生きているrunの復旧のjobは区間を持たない）。終わったrunの復旧のjobは`triage_started`の`launch`（`ActorLaunch::recorded`）で起動する
 - **planner**: 開く側（`open_person_planner` / `open_runtime_planner` / `open_draft_planner`）が決め、`dagq plan`の結果の`launch`、workspaceの`--env DAGQ_LAUNCH=<launchのJSON>`、wrapperのargvの`planner-session ... --model <model> --effort <effort>`（渡すときだけ）にする。wrapper（`run_planner_session`）は`planner_command`の後に`select_model`で渡す。pluginのhookが記録するplannerの区間の`session_opened`は`DAGQ_LAUNCH`を`launch`に写す（`SessionHook::launch`。JSONのobjectとして読めなければ写さない）。同じworkspaceで人が`claude`を打ち直したsessionも同じ`launch`を持つが、その起動には引数が無い
 - **reviseの配送**: `plan_revise_sent`に`launch`（新しく開いたplannerのもの、生きているplannerへの配送ではnull）、`effort_raised`（effortが実際に上がったか。`xhigh`・`max`のまま、または知らない値ではfalse）、`effort_not_raised`（生きているplannerへの配送で上げなかった理由、それ以外はnull）
 
 計測の層別（`kpi`の`model=` / `effort=`）はtranscriptから読んだ`session_closed`の値を使う（task 579）。`launch`は起動の意図と出どころで、`default`のsessionの実際の値はtranscriptが持つ。
 
 - **goal review**（task 1062）: `goal_review_started`に`launch`と、runtimeが起動前に決めてjobに渡す`session_id`（ADR-0048の決定4。Claude Codeには`--session-id`）と`cwd`（jobを起動したrepositoryのcheckout）を記録する。これで他のjobと同じく区間（`session_opened` / `session_closed`、kind `goal_review`）を持ち、`session_closed`にtranscriptから読んだ実際の`model` / `effort`が入る（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。それより前の`goal_review_started`には`launch`も`session_id`も無い
+- **スループットの見直し**（task 1086）: `throughput_review_started`の`session_id`・`launch`・`dir`で、observerと同じqueueの区間（kind `throughput_review`）を開き、同じ`session_id`の`throughput_review_finished`で閉じる。`session_closed`には他のjobと同じ経路（task 579）でtranscriptから読んだ実際の`model` / `effort`が入る。見直しは同時に複数走りうる（execの引き継ぎで前のprocessが残したjob、別のsupervisorのjob）ので、始まりは同じ`mode`と`period`の区間だけを、終わりは自分の区間だけを閉じ、終わりの無いまま35分（`RUNNING_MS`）を過ぎた区間は次の見直しのeventで`inferred`として閉じる（規則は[スループットの見直し](throughput-review.md#sessionの区間task-1086)）
 - **実際のmodelをjobの終わりのeventに写さない**: 実際の`model` / `effort`は区間の`session_closed`だけが持ち、`review_finished`・`goal_review_finished`などjobの終わりのeventには写さない。`session_closed`はjobの終わりのeventと同じトランザクション・同じ時刻に書かれ、`opened_event_id`で開始のevent（`launch`）と、payloadの`plan_review_id` / `goal_review_id`・runでjobと結べるので、写すと同じ値を2か所に持つだけになる。`stats`の`sessions`（kindごと）と`kpi`の`model=` / `effort=`の層は既に`session_closed`を読む
 - **Codexのjobの実際のmodelとthread**（task 1065）: Codexはsessionのidをrunを始める前に受け取らず（threadを自分で名付ける）、transcriptも無いので、Codexのgoal reviewは`goal_review_started`の`session_id`をnullにし、終わりのevent（`goal_review_finished` / `goal_review_failed`）に`session_id`（threadのid）・`model`（rolloutから読んだ実際のmodel）・`model_unknown`（読めなかった理由。読めたときは無い）を写す（`domain::headless_job::JobSession::record`）。区間の`session_closed`も同じ値を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。上の「写さない」はClaudeのjobの話で、Codexのjobは終わりのeventしか値の出どころが無いので写す。`stats`のjobの`by_model`は、開始の`session_id`の`session_closed`が無ければ終わりのeventの`model`を読む
 - **`headless_jobs.provider`**（schema v55、`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjob（review・復旧・plan review・goal review）のプロセスの行に、起動したprovider（`JobSubject::provider`。goal reviewは行き先のprovider、他は`ROLE_PROVIDER`）を書く。`NOT NULL DEFAULT 'claude'`なので、migrationより前の行と、列を知らない古いバイナリが書く行は`claude`と読める（[Headless job processes](headless-job-processes.md)）
@@ -101,6 +102,7 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
 - `tests/it/actor_model.rs`: 表が無いとき復旧のjobとreviewに何も渡さず`default`を記録し、`[roles.review]`・`[roles.recovery]`があれば渡して`dagq.toml`を記録する（区間の`launch`も）
 - `tests/it/plan_review.rs`: `a_revise_without_a_live_planner_opens_planners_within_the_limit`（既定のplan reviewと、開き直したplannerの`high`への段上げ）、`a_revise_goes_to_the_live_planner_...`（生きているplannerは上げない）、`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`（`[roles.plan_review]`と、`[roles.runtime_planner]`の`high`から`xhigh`）
 - `tests/it/runtime_observer.rs`の`the_observer_takes_its_role_table_and_records_what_it_started_with`
+- `infrastructure::sessions`の`a_throughput_review_span_records_its_launch_and_the_model_of_its_transcript`（スループットの見直しの区間の`launch`、`session_closed`のtranscriptの`model` / `effort`、並ぶ見直しと時間を過ぎた区間の閉じ方、observerの区間が変わらないこと。task 1086）
 - `tests/it/goal_review.rs`の`a_goal_review_records_its_launch_and_session_and_takes_its_role_table`（`goal_review_started`の`launch`・`session_id`・`cwd`、区間の`session_opened` / `session_closed`、`[roles.goal_review]`が起動に効くこと）と、`infrastructure::sessions`の`a_goal_review_span_records_its_launch_and_the_model_of_its_transcript`（transcriptの`model` / `effort`が`session_closed`に入ること、`interrupted`の行の区間を`inferred`で閉じること）
 - `tests/it/runtime_stall_recovery.rs`（生きているrunの`recovery_requested`の`launch.provider`）、`tests/it/runtime_throughput_review.rs`（`throughput_review_started`の`launch`）、`infrastructure::headless_jobs`の`a_job_records_its_provider_and_one_without_reads_as_claude`
 - `tests/it/lifecycle_plan.rs`: `plan_gives_the_planner_the_model_and_effort_of_its_role`（`[roles.planner]`と、壊れた値でwarningを出して既定で開くこと）、既定の`DAGQ_LAUNCH`、runtimeのplannerの段上げ、wrapperが`select_model`で渡すこと

@@ -3319,7 +3319,8 @@ mod tests {
             json["sessions"]["by_kind"]["worker"]["active_ratio"],
             Value::Null
         );
-        assert_eq!(json["sessions"]["by_kind"].as_object().unwrap().len(), 11);
+        assert_eq!(json["sessions"]["by_kind"].as_object().unwrap().len(), 12);
+        assert_eq!(json["sessions"]["by_kind"]["throughput_review"]["count"], 0);
         let worker = &all.sessions.by_kind["worker"];
         assert_eq!((worker.count, worker.open_now), (2, 1));
         assert_eq!(worker.open.summary.total, 100 + 700);

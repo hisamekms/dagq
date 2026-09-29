@@ -4,8 +4,8 @@ type: design
 title: "スループットの見直し（`throughput-review`）"
 status: current
 created: 2026-09-29
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -50,7 +50,17 @@ related:
 5. 成功したら`output.log`を`parse_output`で読む: `## Conclusion`の見出しの下の行（無ければ先頭の行）を最大5行（`MAX_CONCLUSION_LINES`）の結論にし、`next_move`でfenceしたJSON（`summary`・`detail`・`why`）を次の一手として外した残りを全文として`review.md`に、結論・次の一手・読めなかった理由（`next_move_error`）・findingのIDを`review.json`に書く
 6. 週次だけ、次の一手をfindingにする: kind `throughput`、対象queue、subject `weekly/<period>`、summaryは`summary`、detailは`detail`と`Why:`、根拠は`throughput_review_started`のevent、`propose`（proposalを求める印）の理由は`why`、記録者は`supervisor`。runtimeのplannerの既存の経路（[Finding planners](finding-planners.md)）でproposalになり、`[kpi] max_improvement_proposals`に従う。毎時・日次の出力にblockがあっても記録しない
 7. `throughput_review_reported`（`mode`・`period`・`reasons`・`conclusion`・`path`（`review.md`）・`dir`・`finding_id`・`next_move_error`）を記録する。これがinbox宛ての知らせるだけのattention（`report the review`）
-8. `throughput_review_finished`（`mode`・`period`・`outcome`（`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗））・`exit_code`・`error`・`reasons`・`dir`・`duration_secs`、成功なら`reported_event_id`・`finding_id`・`path`）を記録する。`outcome`が`error`か`failed`のもの（modeを問わない）はinbox宛ての知らせるだけのattention（`check the failed review`、task 1099）になり、askにはならず、claimと着地を止めない。失敗した期間はやり直さない（上の「期限」）。skippedと`succeeded`はattentionではない。attentionなので、KPIの`attentions_per_landing`（queueのeventのattentionも数える）にも加わる
+8. `throughput_review_finished`（`mode`・`period`・`outcome`（`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗））・`exit_code`・`error`・`reasons`・`dir`・`session_id`（startと同じ。区間を閉じる鍵、task 1086。skippedには無い）・`duration_secs`、成功なら`reported_event_id`・`finding_id`・`path`）を記録する。`outcome`が`error`か`failed`のもの（modeを問わない）はinbox宛ての知らせるだけのattention（`check the failed review`、task 1099）になり、askにはならず、claimと着地を止めない。失敗した期間はやり直さない（上の「期限」）。skippedと`succeeded`はattentionではない。attentionなので、KPIの`attentions_per_landing`（queueのeventのattentionも数える）にも加わる
+
+## sessionの区間（task 1086）
+
+jobのsessionは、他のheadlessのjob（review・triage・plan review・goal review・observer）と同じく区間（`session_opened` / `session_closed`、[Actor model](actor-model.md)・[stats](stats.md)）を持つ。区間はobserverと同じqueueのevent（task・goal・runを持たない）で、kindは`throughput_review`（`domain::sessions::THROUGHPUT_REVIEW`）。queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_span_kind`）、observerのeventはobserverの区間だけを、見直しのeventは見直しの区間だけを開け閉めする（observerの扱いは変えていない）。
+
+- 開く: `throughput_review_started`が開く。payloadは`kind`・`session_id`（runtimeがjobに渡したもの）・`cwd`（見直しのdir。Claude Codeのtranscriptはこのcwdとsession idで探す）・`attempt`（null）・`launch`・`mode`・`period`
+- 閉じる（`job_finished`）: `session_id`の一致する`throughput_review_finished`が閉じる。閉じるときtranscriptの実際のmodel / effort・turn・active time・tokensが他のjobと同じ経路（task 579、`read_before`で書き込みの前に読む）で`session_closed`に入る
+- 重なり: 見直しは同時に複数走りうる。execの引き継ぎではjobを殺さないので、前のprocessが残したjob（例: 週次）が走るあいだに次のprocessが別の期間（例: 毎時）を始め、supervisorが複数あれば別のsupervisorのjobも走る（同じ期間は`running`が35分のあいだ始めさせない）。そのため始まりは他の区間を閉じず、終わりは自分の`session_id`の区間だけを閉じる
+- 終わりの無い区間（jobが死んだ・supervisorの停止で殺された・記録の前に落ちた）は`inferred`で閉じる。規則: (1) 同じ`mode`と`period`の`throughput_review_started`が来たら、前の区間を閉じる（`RUNNING_MS`を過ぎて始め直されたので、前のjobは終わっている）。(2) 見直しのevent（`throughput_review_started`・skippedを含む`throughput_review_finished`）が記録されたとき、開いてから`RUNNING_MS`（35分。jobの時間の上限`--timeout`の既定1800秒と余裕。`domain::sessions::THROUGHPUT_REVIEW_OPEN_MS`）以上たった区間を閉じる。その時までにjobは終わったか時間切れで殺されている。毎時の判定はskippedでも`throughput_review_finished`を書くので、supervisorが動いていれば残った区間はおおむね1時間半以内に閉じる。`inferred`の区間はtranscriptの最後の記録で終わる（ADR-0048 決定 7）。supervisorが居ないあいだは閉じない
+- `stats`の`sessions.by_kind`に`throughput_review`が出る
 
 ## promptの入力（task 1099）
 
@@ -76,4 +86,7 @@ Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（[
 - `src/throughput_review.rs`: `reference/kpi.md`の節だけを写すこと、頻度ごとのpromptと週次だけが次の一手を求めること、promptが`input.json`の場所と読むコマンド（`kpi`・`stats`・`timeline`・`events`）で細部を取りに行く指示を持つこと、MB級の入力の要約が上限に収まり見直しに要る部分を残すこと、上限を超える要約が`DROP_ORDER`の順に落として`omitted_to_fit`に名を残すこと
 - `src/domain/mod.rs`: `throughput_review_finished`は`error` / `failed`だけが`check the failed review`で、skippedと`succeeded`はattentionでないこと
 - `tests/it/runtime_throughput_review.rs`: 規則に当たらない時間はagentを起動せずskippedだけを書くこと（dry runはpromptを返す）、当たった時間の保存（`review.md`・`review.json`・`input.json`）とroleとMCPなしと、jobのnote・finding・mark・readyが拒まれることと`kpi`は読めること、inboxの`events`（`watch`と同じ判定）に`report the review`と結論が載ること、週次の次の一手がproposalを求めるfindingになること、`failed`（非0終了）と`error`（起動できない）の失敗がinboxの`events`に`check the failed review`として載りaskを開かないこと、MB級の入力（8日分のmarks）の日次と週次がagent（promptを引数で受けるstub）を起動して`succeeded`になりpromptが`PROMPT_LIMIT`以下であること、supervisorが時・日・週を1度ずつ始めて同じ期間を2度始めないことと`throughput_review: false`で始めないこと、失敗するjobがclaimと着地を止めずattentionだけを残すこと
+- `src/domain/sessions.rs`: 見直しの区間が始まりで開き、自分の`session_id`の終わりで閉じ、別の期間の見直しとobserverの区間を閉じないこと、同じ期間の始め直しと`RUNNING_MS`を過ぎた区間を`inferred`で閉じること（`throughput_review_spans_close_by_session_period_or_age`）
+- `src/infrastructure/sessions.rs`: 区間がqueueのeventで開き、終わりでtranscriptのmodel / effortを`read_before`で読んで閉じること、並ぶ見直しが開いたまま残り、時間を過ぎた区間がskippedの終わりで`inferred`としてtranscriptの最後で閉じること、observerの区間は自分の終わりでだけ閉じること（`a_throughput_review_span_records_its_launch_and_the_model_of_its_transcript`）
+- `tests/it/runtime_throughput_review.rs`の当たった時間のtest: 区間が開いて`job_finished`で閉じ、`stats`の`sessions.by_kind.throughput_review`に数えられること
 - `tests/it/cli_*.rs`のroleの一覧に`throughput-review-job`を足し、状態を変えるコマンドが拒まれることを確かめる

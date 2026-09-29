@@ -271,6 +271,8 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
         "error": error,
         "reasons": reasons,
         "dir": dir,
+        // The span this review's start opened closes by it.
+        "session_id": session_id,
         "duration_secs": clock.elapsed().as_secs(),
         // Who to reap: a supervisor that exec'd while this ran is still its
         // parent and waits on it by these.

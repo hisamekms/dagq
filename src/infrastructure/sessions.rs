@@ -27,7 +27,7 @@ use crate::{
         sessions::{
             GOAL_REVIEW, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW,
             RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS, Scope,
-            SessionHook, SpanChange, SpanContext, changes, hook_changes, scope,
+            SessionHook, SpanChange, SpanContext, changes, hook_changes, queue_span_kind, scope,
         },
         stats::rfc3339_millis,
         tokens,
@@ -115,14 +115,12 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
             }
         }
         Closing::Queue(kind, payload) => {
-            if scope(kind) == Some(Scope::Queue) {
-                let open = open_spans(
-                    conn,
-                    "o.task_id IS NULL AND o.goal_id IS NULL AND json_extract(o.payload,'$.kind')='observer'",
-                    "c.task_id IS NULL AND c.goal_id IS NULL",
-                    params![],
-                )?;
-                changes(kind, payload, &open, &SpanContext::default())
+            if let Some(open) = queue_open_spans(conn, kind)? {
+                let context = SpanContext {
+                    at_ms: rfc3339_millis(&now(conn)?),
+                    ..SpanContext::default()
+                };
+                changes(kind, payload, &open, &context)
                     .into_iter()
                     .filter_map(|change| match change {
                         SpanChange::Close { span, .. } => Some(span),
@@ -205,15 +203,23 @@ pub(super) fn follow(
                 },
             )
         }
-        (Scope::Queue, None, None) => (
-            open_spans(
-                conn,
-                "o.task_id IS NULL AND o.goal_id IS NULL AND json_extract(o.payload,'$.kind')='observer'",
-                "c.task_id IS NULL AND c.goal_id IS NULL",
-                params![],
-            )?,
-            SpanContext::default(),
-        ),
+        (Scope::Queue, None, None) => {
+            let Some(open) = queue_open_spans(conn, kind)? else {
+                return Ok(());
+            };
+            let at: String = conn.query_row(
+                "SELECT created_at FROM run_events WHERE id=?1",
+                [event_id],
+                |r| r.get(0),
+            )?;
+            (
+                open,
+                SpanContext {
+                    at_ms: rfc3339_millis(&at),
+                    ..SpanContext::default()
+                },
+            )
+        }
         _ => return Ok(()),
     };
     write_changes(
@@ -1102,6 +1108,23 @@ pub(super) fn close_gone_hook_spans(conn: &Connection, gone: &[EventId]) -> Resu
     Ok(closed)
 }
 
+/// The open spans of the job of the queue an event of `kind` is about
+/// ([`queue_span_kind`]: the observer's or the throughput review's), or
+/// `None` when it is not an event of the queue's spans.
+fn queue_open_spans(conn: &Connection, kind: &str) -> Result<Option<Vec<OpenSpan>>> {
+    let Some(span_kind) = queue_span_kind(kind).filter(|_| scope(kind) == Some(Scope::Queue))
+    else {
+        return Ok(None);
+    };
+    open_spans(
+        conn,
+        "o.task_id IS NULL AND o.goal_id IS NULL AND json_extract(o.payload,'$.kind')=?1",
+        "c.task_id IS NULL AND c.goal_id IS NULL",
+        params![span_kind],
+    )
+    .map(Some)
+}
+
 /// The `session_opened` events matching `opened` that no `session_closed`
 /// matching `closed` names, oldest first. Both conditions share `params`.
 fn open_spans(
@@ -1111,7 +1134,7 @@ fn open_spans(
     params: impl rusqlite::Params,
 ) -> Result<Vec<OpenSpan>> {
     let sql = format!(
-        "SELECT o.id, o.payload FROM run_events o
+        "SELECT o.id, o.payload, o.created_at FROM run_events o
          WHERE o.kind='{SESSION_OPENED}' AND {opened}
            AND NOT EXISTS (SELECT 1 FROM run_events c
                            WHERE c.kind='{SESSION_CLOSED}' AND {closed}
@@ -1124,6 +1147,7 @@ fn open_spans(
             Ok(OpenSpan {
                 opened_event_id: r.get("id")?,
                 payload: json_col(r, "payload")?,
+                opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
@@ -1156,6 +1180,7 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         goal_ids: Vec::new(),
         route,
         provider,
+        at_ms: None,
     })
 }
 
@@ -2362,6 +2387,120 @@ mod tests {
         // Another goal event opens or closes nothing.
         goal_event(conn, goal, EventKind::GoalReviewRearmed, json!({})).unwrap();
         assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
+    }
+
+    /// A throughput review's span (task 1086) opens with its
+    /// `throughput_review_started` on the queue, with its session id, dir,
+    /// mode, period and launch, and closes with its own finish taking the
+    /// model and effort of its transcript, read before the write
+    /// transaction; a review running beside it stays open, one open past
+    /// its time closes as `inferred` at the next event of the throughput
+    /// review, and the observer's spans are not touched by either.
+    #[test]
+    fn a_throughput_review_span_records_its_launch_and_the_model_of_its_transcript() {
+        use crate::domain::sessions::{OBSERVER, THROUGHPUT_REVIEW, THROUGHPUT_REVIEW_OPEN_MS};
+        let dir = tempfile::tempdir().unwrap();
+        let (queue, _, _) = run_queue(dir.path());
+        let conn = &queue.conn;
+        let write = |cwd: &str, session: &str, base: i64, model: &str, effort: &str| {
+            let project = dir
+                .path()
+                .join("config/projects")
+                .join(cwd.replace('/', "-"));
+            std::fs::create_dir_all(&project).unwrap();
+            let lines = [
+                json!({"type": "user", "timestamp": millis_text(base + 1000),
+                       "sessionId": session, "message": {"content": "go"}}),
+                json!({"type": "assistant", "timestamp": millis_text(base + 2000),
+                       "sessionId": session, "version": "2.1.283", "effort": effort,
+                       "message": {"id": session, "model": model, "content": [],
+                                   "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+            ]
+            .map(|line| line.to_string());
+            std::fs::write(project.join(format!("{session}.jsonl")), lines.join("\n")).unwrap();
+        };
+        let launch = crate::domain::actor_model::ActorLaunch::default_of(
+            crate::domain::actor_model::ModelRole::ThroughputReview,
+        )
+        .to_value();
+        let record = |kind: EventKind, payload: Value| {
+            queue.record_queue_event(kind, payload).unwrap();
+        };
+        record(
+            EventKind::ObserveStarted,
+            json!({"mode": "hourly", "dir": "/obs", "session_id": "s-obs"}),
+        );
+        record(
+            EventKind::ThroughputReviewStarted,
+            json!({"mode": "hourly", "period": "2026-09-29T13", "dir": "/tr/h",
+                   "session_id": "s-h", "launch": launch}),
+        );
+        let start = retime(conn, 0, 100);
+        write("/tr/h", "s-h", start, "claude-opus-5-5", "high");
+        // A daily review starts while the hourly one runs (as after an
+        // exec's handoff): both stay open.
+        record(
+            EventKind::ThroughputReviewStarted,
+            json!({"mode": "daily", "period": "2026-09-28", "dir": "/tr/d",
+                   "session_id": "s-d", "launch": launch}),
+        );
+        let daily_from = latest(conn) - 2;
+        let opened = of_kind(&queue, SESSION_OPENED);
+        assert_eq!(opened.len(), 3);
+        let hourly = &opened[1];
+        assert_eq!(hourly.task_id, None);
+        assert_eq!(hourly.run_id, None);
+        assert_eq!(hourly.payload["kind"], THROUGHPUT_REVIEW);
+        assert_eq!(hourly.payload["session_id"], "s-h");
+        assert_eq!(hourly.payload["cwd"], "/tr/h");
+        assert_eq!(hourly.payload["mode"], "hourly");
+        assert_eq!(hourly.payload["period"], "2026-09-29T13");
+        assert_eq!(hourly.payload["launch"], launch);
+        assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
+
+        READS.set(0);
+        record(
+            EventKind::ThroughputReviewFinished,
+            json!({"mode": "hourly", "period": "2026-09-29T13", "outcome": "succeeded",
+                   "dir": "/tr/h", "session_id": "s-h"}),
+        );
+        assert_eq!(READS.get(), 1);
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].task_id, None);
+        assert_eq!(closed[0].payload["kind"], THROUGHPUT_REVIEW);
+        assert_eq!(closed[0].payload["session_id"], "s-h");
+        assert_eq!(closed[0].payload["reason"], JOB_FINISHED);
+        assert_eq!(closed[0].payload["model"], "claude-opus-5-5");
+        assert_eq!(closed[0].payload["effort"], "high");
+        assert_eq!(closed[0].payload["active"], "recorded");
+
+        // The daily review died without its finish: a skipped hour closes
+        // it once it has been open past its time, at its transcript's end.
+        let old = THROUGHPUT_REVIEW_OPEN_MS / 1000 + 60;
+        let daily_start = retime(conn, daily_from, old);
+        write("/tr/d", "s-d", daily_start, "claude-sonnet-5", "medium");
+        record(
+            EventKind::ThroughputReviewFinished,
+            json!({"mode": "hourly", "period": "2026-09-29T14", "outcome": "skipped"}),
+        );
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 2);
+        assert_eq!(closed[1].payload["session_id"], "s-d");
+        assert_eq!(closed[1].payload["reason"], INFERRED);
+        assert_eq!(closed[1].payload["model"], "claude-sonnet-5");
+        assert_eq!(closed[1].payload["effort"], "medium");
+        assert_eq!(
+            rfc3339_millis(&closed[1].created_at),
+            Some(daily_start + 2000)
+        );
+        // The observer's span, older than both, is still open: only its own
+        // finish closes it.
+        record(EventKind::ObserveFinished, json!({"dir": "/obs"}));
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 3);
+        assert_eq!(closed[2].payload["kind"], OBSERVER);
+        assert_eq!(closed[2].payload["reason"], JOB_FINISHED);
     }
 
     /// Write the transcript of `session` of a span in `cwd`: two turns,
