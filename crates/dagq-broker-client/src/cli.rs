@@ -55,6 +55,8 @@ pub enum Command {
     GitAdd(git::AddRequest),
     GitCommit(git::CommitRequest),
     GitRestore(git::RestoreRequest),
+    /// The worker's MCP server on stdio ([`crate::mcp`]).
+    Mcp,
 }
 
 /// Run the command line `args` (without the program name) with `env`,
@@ -73,6 +75,9 @@ pub fn run(
             return EXIT_USAGE;
         }
     };
+    if invocation.command == Command::Mcp {
+        return mcp(invocation, env, stdin, out, err);
+    }
     match execute(invocation, env, stdin) {
         Ok(text) => match writeln!(out, "{text}").and_then(|()| out.flush()) {
             Ok(()) => EXIT_OK,
@@ -94,27 +99,64 @@ pub fn run(
     }
 }
 
+/// Serve MCP until stdin ends. Without a usable URL the server does not
+/// start (exit 3); a missing token file fails each call instead.
+fn mcp(
+    invocation: Invocation,
+    env: &dyn Fn(&str) -> Option<String>,
+    stdin: &mut dyn Read,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let client = match client(&invocation, env) {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = writeln!(err, "{NAME}: {error}");
+            return EXIT_CLIENT;
+        }
+    };
+    match crate::mcp::serve(&client, &mut std::io::BufReader::new(stdin), out) {
+        Ok(()) => EXIT_OK,
+        Err(error) => {
+            let _ = writeln!(err, "{NAME}: mcp: {error}");
+            EXIT_CLIENT
+        }
+    }
+}
+
+/// The token file of `--token-file` or `DAGQ_BROKER_TOKEN_FILE`.
+fn token_file(invocation: &Invocation, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    invocation.token_file.clone().or_else(|| {
+        env(TOKEN_FILE_ENV)
+            .filter(|file| !file.is_empty())
+            .map(PathBuf::from)
+    })
+}
+
+/// The client of `--url` or `DAGQ_BROKER_URL` with the token file.
+fn client(
+    invocation: &Invocation,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<BrokerClient, ClientError> {
+    let url = invocation
+        .url
+        .clone()
+        .or_else(|| env(URL_ENV).filter(|url| !url.is_empty()))
+        .ok_or_else(|| ClientError::Config(format!("no --url and {URL_ENV} is not set")))?;
+    Ok(BrokerClient::new(
+        Endpoint::parse(&url)?,
+        token_file(invocation, env),
+    ))
+}
+
 fn execute(
     invocation: Invocation,
     env: &dyn Fn(&str) -> Option<String>,
     stdin: &mut dyn Read,
 ) -> Result<String, ClientError> {
-    let token_file = invocation.token_file.or_else(|| {
-        env(TOKEN_FILE_ENV)
-            .filter(|file| !file.is_empty())
-            .map(PathBuf::from)
-    });
-    let client = || -> Result<BrokerClient, ClientError> {
-        let url = invocation
-            .url
-            .clone()
-            .or_else(|| env(URL_ENV).filter(|url| !url.is_empty()))
-            .ok_or_else(|| ClientError::Config(format!("no --url and {URL_ENV} is not set")))?;
-        Ok(BrokerClient::new(
-            Endpoint::parse(&url)?,
-            token_file.clone(),
-        ))
-    };
+    let token_file = token_file(&invocation, env);
+    let client = client(&invocation, env);
+    let client = || client.clone();
     match invocation.command {
         Command::Version => Ok(format!("{NAME} {BUILD}")),
         Command::Help => Ok(usage()),
@@ -177,6 +219,7 @@ fn execute(
         Command::GitAdd(request) => Ok(to_json(&client()?.git_add(&request)?)),
         Command::GitCommit(request) => Ok(to_json(&client()?.git_commit(&request)?)),
         Command::GitRestore(request) => Ok(to_json(&client()?.git_restore(&request)?)),
+        Command::Mcp => unreachable!("mcp is served by `run`"),
     }
 }
 
@@ -324,13 +367,15 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
             no_positional(words.positional)?;
             Command::Health { json }
         }
-        "token inspect" | "git status" => {
+        "token inspect" | "git status" | "mcp" => {
             if let Some(flag) = words.next_flag() {
                 return Err(unknown(flag));
             }
             no_positional(words.positional)?;
             if name == "git status" {
                 Command::GitStatus
+            } else if name == "mcp" {
+                Command::Mcp
             } else {
                 Command::TokenInspect
             }
@@ -515,7 +560,8 @@ Commands:
   git show [--commit REV] [PATH]...
   git add PATH...
   git commit --message TEXT
-  git restore [--staged] PATH..."
+  git restore [--staged] PATH...
+  mcp                                 the worker's MCP server on stdio"
     )
 }
 
@@ -658,7 +704,8 @@ mod tests {
             (&[][..], "no command"),
             (&["--url"][..], "needs a value"),
             (&["frobnicate"][..], "unknown command `frobnicate`"),
-            (&["mcp"][..], "unknown command `mcp`"),
+            (&["mcp", "--x"][..], "unknown flag `--x`"),
+            (&["mcp", "a"][..], "unexpected arguments"),
             (&["fs"][..], "needs a subcommand"),
             (&["git", "push"][..], "unknown command `git push`"),
             (&["--version", "x"][..], "unexpected arguments"),
@@ -730,10 +777,15 @@ mod tests {
         let (code, out, _) = run_with(&["--help"], &[]);
         assert_eq!(code, EXIT_OK);
         assert!(out.starts_with("Usage: dagq-broker-client"));
+        assert_eq!(command(&["mcp"]), Ok(Command::Mcp));
+        // The MCP server does not start without a broker to ask.
         let (code, out, err) = run_with(&["mcp"], &[]);
-        assert_eq!(code, EXIT_USAGE);
+        assert_eq!(code, EXIT_CLIENT);
         assert!(out.is_empty());
-        assert!(err.contains("unknown command"), "{err}");
+        assert!(err.contains("no --url"), "{err}");
+        // With one, it serves until stdin ends (here at once).
+        let (code, out, err) = run_with(&["--url", "http://127.0.0.1:9", "mcp"], &[]);
+        assert_eq!((code, out.as_str(), err.as_str()), (EXIT_OK, "", ""));
         let (code, _, err) = run_with(&["health"], &[]);
         assert_eq!(code, EXIT_CLIENT);
         assert!(
