@@ -64,11 +64,23 @@ fn supervise_thread(
     stall: dagq::domain::stall::StallConfig,
     recoveries: &[String],
 ) -> (Arc<TestReviewer>, thread::JoinHandle<Result<Value>>) {
+    supervise_thread_in(db, repo, backend, stall, recoveries, 4)
+}
+
+/// [`supervise_thread`] with `parallel` slots.
+fn supervise_thread_in(
+    db: &Path,
+    repo: &Path,
+    backend: Arc<TestWorkspace>,
+    stall: dagq::domain::stall::StallConfig,
+    recoveries: &[String],
+    parallel: usize,
+) -> (Arc<TestReviewer>, thread::JoinHandle<Result<Value>>) {
     let reviewer =
         Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(recoveries));
     let options = SuperviseOptions {
         stall: Some(stall),
-        ..supervise_options(4, true)
+        ..supervise_options(parallel, true)
     };
     let supervisor = {
         let (db, repo, backend, reviewer) = (
@@ -591,6 +603,158 @@ esac"#
             .iter()
             .any(|p| p["detection"] == "ask" && p["outcome"] == "answered_instruction"),
         "{resolved:?}"
+    );
+}
+
+/// Task 1104: a headless run's `stalled` ask offers `stop`; a person's
+/// `stop` is sent as the session's exit request (never as a turn), the ask
+/// closes with `answered_stop`, and the run, ended without a receipt, fails
+/// and goes to its recovery job (alert `failed`).
+#[test]
+fn a_stop_answer_ends_the_headless_session_and_its_run_goes_to_recovery() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), "denied; say refused");
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !stalled_asks(queue).is_empty()
+    });
+    let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
+    assert_eq!(ask.options, ["wait", "intervene", "stop", "propose"]);
+    assert!(
+        ask.question
+            .contains("`stop` to have the supervisor end the session"),
+        "{}",
+        ask.question
+    );
+    assert!(
+        ask.question.contains("goes to its recovery job"),
+        "{}",
+        ask.question
+    );
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "stop")
+        .unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Failed);
+    // Only the first turn ran: `stop` was no turn's prompt.
+    let calls = stub_calls(run);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let turns = Path::new(run.run_dir().unwrap()).join("turns");
+    assert!(turns.join("exit").exists());
+    for entry in fs::read_dir(&turns).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name.starts_with("request") {
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(!text.contains("answer to ask"), "{name}: {text}");
+        }
+    }
+    assert!(payloads(&detail, "turn_requested").is_empty());
+    let resolved = payloads(&detail, "stall_resolved");
+    let stops: Vec<_> = resolved
+        .iter()
+        .filter(|p| p["detection"] == "ask" && p["outcome"] == "answered_stop")
+        .collect();
+    assert_eq!(stops.len(), 1, "{resolved:?}");
+    assert_eq!(stops[0]["ask_id"], json!(ask.id));
+    let closed = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
+    assert!(closed.closed_at.is_some(), "{closed:?}");
+    let requested = payloads(&detail, "recovery_requested");
+    assert!(
+        requested.iter().any(|p| p["alert"] == "failed"),
+        "{requested:?}"
+    );
+}
+
+/// Task 1104: a headless run waiting outside its one slot for its
+/// `stalled` ask gets the `stop` only once it is back in the slot: while
+/// another task holds the slot the exit is not requested, and the ask stays
+/// answered and open; once the slot is free the run goes back, the exit is
+/// requested and the ask closed (`answered_stop`), and the run fails and
+/// goes to its recovery job.
+#[test]
+fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), "denied; say refused");
+    // The task that takes the slot meanwhile finishes once the test lets it.
+    let gate = dir.path().join("gate");
+    backend.script_for(
+        3,
+        &format!(
+            "while [ ! -f '{}' ]; do sleep 0.05; done\n{VALID_AGENT}",
+            gate.display()
+        ),
+    );
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) =
+        supervise_thread_in(&db, &repo, backend.clone(), Default::default(), &[], 1);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == "run_waiting_started")
+    });
+    let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
+    assert_eq!(ask.options, ["wait", "intervene", "stop", "propose"]);
+    // Added now, so the headless task took the slot first.
+    let other = add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "other", &[]);
+    assert_eq!(other, TaskId::new(3));
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !queue.show(other).unwrap().runs.is_empty()
+    });
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "stop")
+        .unwrap();
+    let run = detail(&db).runs[0].clone();
+    // The answer ends the wait; the run waits for the slot to go back.
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        !events_of(&db, run.id(), "run_waiting_ended").is_empty()
+    });
+    let ended = events_of(&db, run.id(), "run_waiting_ended");
+    assert_eq!(ended[0]["cause"], "answered", "{ended:?}");
+    assert_eq!(ended[0]["ask_id"], json!(ask.id));
+    thread::sleep(Duration::from_millis(500));
+    let exit = Path::new(run.run_dir().unwrap()).join("turns").join("exit");
+    assert!(!exit.exists(), "the exit was requested out of the slot");
+    assert!(
+        events_of(&db, run.id(), "stall_resolved")
+            .iter()
+            .all(|p| p["outcome"] != "answered_stop")
+    );
+    let open = SqliteQueue::open(&db).unwrap().read_ask(ask.id).unwrap();
+    assert!(open.closed_at.is_none(), "{open:?}");
+
+    fs::write(&gate, "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Failed);
+    assert!(exit.exists());
+    assert_eq!(stub_calls(run).len(), 1, "{:?}", stub_calls(run));
+    assert!(payloads(&detail, "turn_requested").is_empty());
+    let kinds = event_kinds(&detail);
+    let stop = detail
+        .events
+        .iter()
+        .position(|e| e.kind == "stall_resolved" && e.payload["outcome"] == "answered_stop")
+        .expect("answered_stop");
+    assert!(position(&kinds, "run_slot_regained") < stop, "{kinds:?}");
+    assert!(
+        payloads(&detail, "recovery_requested")
+            .iter()
+            .any(|p| p["alert"] == "failed")
     );
 }
 

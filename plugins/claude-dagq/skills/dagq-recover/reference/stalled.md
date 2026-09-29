@@ -1,4 +1,4 @@
-# A `stalled` ask: `wait`, `intervene`, and stepping in
+# A `stalled` ask: `wait`, `intervene`, `stop`, and stepping in
 
 Read this to carry out, on the person's word, the answer to a `stalled` ask (the `dagq-recover` skill, section 7). The rules are ADR-0043 decision 1 and ADR-0047 decision 40; the runtime's side is in `docs/design/supervisor-lifecycle/idle-without-receipt.md`.
 
@@ -44,4 +44,5 @@ A run on the headless route (`worker_mode: headless` in `show`, `skills/dagq/ref
 
 - **`wait`** and **`propose`**: as above; no new ask until the next turn ends.
 - **An instruction** (any text other than the options): the supervisor sends it as `answer to ask <id>: <text>` for the next turn and closes the ask itself (`stall_resolved`, `answered_instruction`); nothing is typed by hand. A run waiting outside its slot gets it once it is back in one.
-- **`intervene`**: read what the turns did (`"$DAGQ" timeline RUN`, `"$DAGQ" events --run RUN --full` for `turn_finished` and `permission_denials`, the turns' output under the run dir's `turns/`) and bring it to the person. Usually the next step is an instruction answered as above. To stop the run, the person ends its session wrapper (section 2 of the skill: never a signal by name); what follows is as for any ended session (section 1 to 4 of the skill), then `ask close <id>` if the supervisor has not closed it.
+- **`stop`** (offered only on a headless run's ask): the supervisor writes the session's exit request once, as after a review's pass (the wrapper stops a running turn and exits), closes the ask itself (`stall_resolved`, `answered_stop`) and never sends `stop` as a turn. The run then ends without a receipt: validating fails it and its recovery job (alert `failed`) takes it, as for any ended session (section 1 to 4 of the skill). A run waiting outside its slot gets it once it is back in one. Nobody ends the wrapper, touches `turns/` or signals a process by hand.
+- **`intervene`**: read what the turns did (`"$DAGQ" timeline RUN`, `"$DAGQ" events --run RUN --full` for `turn_finished` and `permission_denials`, the turns' output under the run dir's `turns/`) and bring it to the person. The ask stays answered and unclosed, and a headless session takes no turn by itself, so no new ask follows: read the turns before answering, and answer with an instruction or `stop` rather than `intervene` whenever you can.

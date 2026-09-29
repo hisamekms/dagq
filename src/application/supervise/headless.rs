@@ -79,6 +79,13 @@ pub(super) fn stalled_answer_what(ask: AskId) -> String {
     format!("answer of the stalled ask {ask}")
 }
 
+/// Whether the exit of the headless session of `run` is requested and not
+/// yet dropped with its session.
+pub(super) fn exit_requested(sv: &Supervisor<'_>, run: &TaskRun) -> bool {
+    run.run_dir()
+        .is_some_and(|dir| sv.files.exists(&exit_path(Path::new(dir))))
+}
+
 /// The request `what` written for the headless session of `run`, waiting
 /// or taken, if there is one: a supervisor that stopped after writing it
 /// left it for its adopter to find, so the request is not written twice.

@@ -48,6 +48,11 @@ pub(super) const SEND_THRESHOLD: &str = "send_confirm_secs";
 /// if it stays idle, or have a person step in.
 pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "intervene"];
 
+/// The option a headless session's `stalled` ask adds after
+/// [`STALLED_OPTIONS`]: the supervisor has the session end (its exit
+/// request), and the run goes on as one that ended without a receipt.
+pub(super) const STOP_OPTION: &str = "stop";
+
 /// The options of a `stalled` ask: [`STALLED_OPTIONS`], then those of the
 /// recovery job's `note`, each once (ADR-0047 decision 40).
 pub(super) fn stalled_options(note: Option<&Note>) -> Vec<String> {
@@ -67,6 +72,14 @@ pub(super) const STALL_MOVED_CLOSED: &str = "the session moved on; closed by the
 /// ([`crate::domain::stats::thresholds::answer_waits`]).
 fn answered_wait(answer: Option<&str>) -> bool {
     answer.is_some_and(crate::domain::stats::thresholds::answer_waits)
+}
+
+/// Whether the supervisor delivers `answer` of a headless session's
+/// `stalled` ask from the run's slot: `stop` (the exit request) or an
+/// instruction (the next turn), not `wait`, `propose` or `intervene`.
+pub(super) fn headless_delivers(answer: &str) -> bool {
+    let answer = answer.trim();
+    !answered_wait(Some(answer)) && !answer.starts_with("intervene")
 }
 
 pub(super) const STALL_EXITED_CLOSED: &str = "the session exited; closed by the runtime";
@@ -291,8 +304,9 @@ impl StallWatch {
                 })
                 .and_then(at_event)
         };
-        // A person stepped in on an ask closed since.
-        watch.held = latest_outcome("answered_intervene");
+        // A person stepped in, or had the session stopped, on an ask closed
+        // since.
+        watch.held = latest_outcome("answered_intervene").max(latest_outcome("answered_stop"));
         watch.wait_from = latest_outcome("answered_wait");
         // An instruction a recovery job had typed is an input too, and its
         // repair restarted the count.
@@ -1333,7 +1347,7 @@ impl StallWatch {
             // A headless session has no screen and takes no keys: a
             // person steps in through the run (ADR-t813-1 decision 4).
             format!(
-                "The headless session of run {run_id} (task {task_id}) ended its turn without a receipt or an open question ({idle_secs}s ago, phase: {PHASE}), {nudged}.{recovered} Answer `wait` to leave the session alone (the supervisor asks again after its next turn), or `intervene` to step in yourself (a headless session takes no keys: stop the run and recover it, see the dagq-recover skill). Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\n{turns}",
+                "The headless session of run {run_id} (task {task_id}) ended its turn without a receipt or an open question ({idle_secs}s ago, phase: {PHASE}), {nudged}.{recovered} Answer `wait` to leave the session alone (the supervisor asks again after its next turn), `stop` to have the supervisor end the session (its exit request; the run then ends without a receipt and goes to its recovery job), or `intervene` to read what its turns did and bring it to a person (a headless session takes no keys: an instruction is usually answered as the text of the next turn, see the dagq-recover skill). Any other text is sent as the session's next turn. Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\n{turns}",
                 run_id = run.id(),
                 task_id = run.task_id(),
                 turns = turns_excerpt(sv, run),
@@ -1350,7 +1364,10 @@ impl StallWatch {
                 threshold = sv.stall.idle_without_receipt_secs,
             )
         };
-        let options = stalled_options(note);
+        let mut options = stalled_options(note);
+        if headless(run) && !options.iter().any(|o| o == STOP_OPTION) {
+            options.insert(STALLED_OPTIONS.len(), STOP_OPTION.to_owned());
+        }
         let outcome = ask::ask(
             &mut *sv.queue,
             &sv.layout.main_checkout,
@@ -1492,10 +1509,42 @@ impl StallWatch {
                 }
                 info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered wait; counting its idle again", ask.id, run.id());
             }
+            // `stop` has a headless session end: its exit request, sent
+            // once (the wrapper stops a running turn and exits), never as
+            // a turn. The run then ends without a receipt: validating fails
+            // it and its recovery job takes it (task 1104).
+            Some(answer) if headless(run) && answer == STOP_OPTION => {
+                // Sent once the run is back in its slot.
+                if !send {
+                    return Ok(());
+                }
+                // Written before the ask is closed: an adopter of a
+                // supervisor that stopped in between finds it and closes
+                // the ask without writing it again.
+                if exit_requested(sv, run) {
+                    info!(ask_id = %ask.id, run_id = %run.id(), "the exit of {} was already requested; stalled ask {} not sent again", run.id(), ask.id);
+                } else {
+                    let workspace = run.workspace_id().unwrap_or_default().to_owned();
+                    submit(sv, run, &workspace, Input::Exit, "/exit")?;
+                }
+                sv.queue.close_ask(ask.id)?;
+                Self::resolved(
+                    sv,
+                    run,
+                    "ask",
+                    Some((ask.id, asked.threshold)),
+                    asked.detected_after_secs,
+                    asked.at,
+                    "answered_stop",
+                )?;
+                self.asked = None;
+                self.held = Some(now);
+                warn!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered stop; the headless session is asked to exit, and the run goes to its recovery job without a receipt", ask.id, run.id());
+            }
             // A headless session takes no keys: a person's answer other
             // than `intervene` is its next turn's prompt (ADR-t813-1
             // decision 6).
-            Some(answer) if headless(run) && !answer.starts_with("intervene") => {
+            Some(answer) if headless(run) && headless_delivers(answer) => {
                 // Sent once the run is back in its slot.
                 if !send {
                     return Ok(());

@@ -362,6 +362,27 @@ impl Supervisor<'_> {
                 return Ok(Step::Continue);
             }
         }
+        // A headless session takes no turn by itself, so it never moves
+        // while it waits: an answer of its `stalled` ask that the
+        // supervisor delivers (`stop`, or an instruction) ends the wait, and
+        // is sent once the run is back in its slot (task 1104).
+        if headless(&run) {
+            for (id, kind) in &held {
+                if *kind != AskKind::Stalled {
+                    continue;
+                }
+                let ask = self.queue.read_ask(*id)?;
+                if ask.closed_at.is_none()
+                    && ask
+                        .answer
+                        .as_deref()
+                        .is_some_and(super::stall::headless_delivers)
+                {
+                    self.end_wait(slot, WaitCause::Answered, Some((*id, kind.clone())))?;
+                    return Ok(Step::Continue);
+                }
+            }
+        }
         let held_kind = |kind: AskKind| held.iter().find(|(_, k)| *k == kind).cloned();
         // A receipt the first session wrote during the wait moved it on,
         // whatever it waited for (its `SessionWatch` closes the asks).
