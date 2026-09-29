@@ -25,7 +25,7 @@ categories = ["command-line-utilities", "development-tools"]
 # The integration tests are listed below instead of one binary per tests/*.rs
 # file (ADR-0078).
 autotests = false
-include = ["/build.rs", "/src/**", "/migrations/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/build.rs", "/src/**", "/migrations/**", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0"

@@ -581,6 +581,12 @@ enum Command {
         /// Also run the daily observation of the last 24 hours once a day.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         observe_daily: bool,
+        /// Start the throughput reviews (ADR-t996-1): each hour one whose landings the runtime's rules
+        /// find off (an hour that meets none starts no agent), each day one of yesterday and each week
+        /// one of the ISO week before, saved under the queue's reports/reviews/ and told to the inbox.
+        /// Default true, or false with --once.
+        #[arg(long, action = clap::ArgAction::Set)]
+        throughput_review: Option<bool>,
         /// Write the KPI reports of each finished day and ISO week under the queue's reports/
         /// on the first pass after local midnight (ADR-0051 decision 20).
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -746,6 +752,33 @@ enum Command {
         /// The daily observation: trends over the last 24 hours; leaves the cursor alone.
         #[arg(long)]
         daily: bool,
+        /// Seconds the agent may run before it is killed.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Claude Code executable; a bare name is resolved on PATH.
+        #[arg(long, default_value = "claude")]
+        claude: PathBuf,
+    },
+    /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
+    /// (daily) or the ISO week before this one (weekly). An hour the runtime's rules find unremarkable starts
+    /// no agent and records throughput_review_finished with outcome skipped. Otherwise headless Claude under
+    /// DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq skill's
+    /// reference/kpi.md; the review is saved under <queue dir>/reports/reviews/ and its conclusion reaches
+    /// the inbox as throughput_review_reported (next: report the review). A weekly next move becomes a
+    /// finding marked for a proposal. The agent loads no MCP server; the supervisor starts this on its timer.
+    ThroughputReview {
+        #[arg(long, default_value = "hourly", value_parser = ["hourly", "daily", "weekly"])]
+        mode: String,
+        /// The unix second whose latest finished period is reviewed; now by default.
+        #[arg(long)]
+        at: Option<i64>,
+        /// The time zone the hours, days and weeks begin in, in seconds east of UTC; the host's by
+        /// default.
+        #[arg(long, allow_hyphen_values = true)]
+        utc_offset: Option<i64>,
+        /// Print the prompt instead of starting the agent, whatever the rules made of the hour.
+        #[arg(long)]
+        dry_run: bool,
         /// Seconds the agent may run before it is killed.
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
@@ -1507,6 +1540,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Plan { .. }
         | Command::Supervise { .. }
         | Command::Observe { history: false, .. }
+        | Command::ThroughputReview { .. }
         | Command::Integrate { .. }
         | Command::Review { .. }
         | Command::Recover { .. }
@@ -1663,7 +1697,10 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         } => Operation::Broker,
         Command::Plan { .. } => Operation::Plan,
         Command::Supervise { .. } => Operation::Supervise,
-        Command::Observe { history: false, .. } => Operation::Observe,
+        // Starting a job of the supervisor's timer, as `observe` (ADR-t996-1).
+        Command::Observe { history: false, .. } | Command::ThroughputReview { .. } => {
+            Operation::Observe
+        }
         Command::Integrate { id, next, .. } => {
             Operation::Integrate(id.filter(|_| !next).map(TaskId::new))
         }
@@ -2673,6 +2710,7 @@ fn execute(cli: Cli) -> Result<Value> {
             log_dir: _,
             observe_interval,
             observe_daily,
+            throughput_review,
             report_daily,
             forecast_snapshots,
             host_metrics_interval,
@@ -2701,6 +2739,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     3600
                 })),
                 observe_daily,
+                throughput_review: throughput_review.unwrap_or(!once),
                 report_daily,
                 forecast_snapshots,
                 generators,
@@ -3088,6 +3127,35 @@ fn execute(cli: Cli) -> Result<Value> {
                 },
             )?
         }
+        Command::ThroughputReview {
+            mode,
+            at,
+            utc_offset,
+            dry_run,
+            timeout,
+            claude,
+        } => {
+            use dagq::infrastructure::adapters::{ClaudeCode, executable};
+            // A dry run starts nothing, so it needs no Claude Code.
+            let executable = if dry_run {
+                claude
+            } else {
+                executable(&claude)?
+            };
+            dagq::throughput_review::review(
+                &db,
+                &ClaudeCode { executable },
+                &dagq::throughput_review::ReviewOptions {
+                    mode: mode.parse()?,
+                    at,
+                    dry_run,
+                    timeout: Duration::from_secs(timeout),
+                    dagq: env::current_exe()?,
+                    user_config: dagq::infrastructure::language::user_config_file(),
+                    utc_offset,
+                },
+            )?
+        }
         Command::Recover { run } => one_shot.recover(&db, &RunId::new(run)?)?,
         Command::Session {
             run,
@@ -3151,6 +3219,7 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
         )),
         Command::Integrate { .. } => Some(("integrate", location.log_dir.clone())),
         Command::Observe { history: false, .. } => Some(("observe", location.log_dir.clone())),
+        Command::ThroughputReview { .. } => Some(("throughput-review", location.log_dir.clone())),
         Command::Session { .. } => Some(("session", location.log_dir.clone())),
         Command::PlannerSession { .. } => Some(("planner-session", location.log_dir.clone())),
         Command::AutoUpdate { .. } => Some(("auto-update", location.log_dir.clone())),
@@ -3460,6 +3529,7 @@ mod tests {
             ("broker stop", &[]),
             ("plan", &[]),
             ("supervise", &[]),
+            ("throughput-review", &[]),
             ("integrate", &["1"]),
             ("recover", &["r1"]),
             ("review", &["1"]),

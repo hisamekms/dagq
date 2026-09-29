@@ -136,6 +136,7 @@ fn workers_jobs_the_observer_and_the_planner_neither_answer_nor_close() {
         "recovery-job",
         "plan-review-job",
         "goal-review-job",
+        "throughput-review-job",
         "observer",
     ] {
         actors.push(vec![("DAGQ_ROLE", role)]);

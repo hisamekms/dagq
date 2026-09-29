@@ -37,6 +37,7 @@ string_enum!(ActorRole {
     RecoveryJob => "recovery-job",
     PlanReviewJob => "plan-review-job",
     GoalReviewJob => "goal-review-job",
+    ThroughputReviewJob => "throughput-review-job",
     Observer => "observer",
     Supervisor => "supervisor",
     Wrapper => "wrapper",
@@ -52,7 +53,7 @@ string_enum!(TrustLevel {
 });
 
 impl ActorRole {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::User,
         Self::Inbox,
         Self::Planner,
@@ -61,6 +62,7 @@ impl ActorRole {
         Self::RecoveryJob,
         Self::PlanReviewJob,
         Self::GoalReviewJob,
+        Self::ThroughputReviewJob,
         Self::Observer,
         Self::Supervisor,
         Self::Wrapper,
@@ -80,6 +82,7 @@ impl ActorRole {
             | Self::RecoveryJob
             | Self::PlanReviewJob
             | Self::GoalReviewJob
+            | Self::ThroughputReviewJob
             | Self::Observer => TrustLevel::UntrustedAgent,
         }
     }
@@ -90,7 +93,11 @@ impl ActorRole {
     pub const fn is_headless_job(self) -> bool {
         matches!(
             self,
-            Self::ReviewJob | Self::RecoveryJob | Self::PlanReviewJob | Self::GoalReviewJob
+            Self::ReviewJob
+                | Self::RecoveryJob
+                | Self::PlanReviewJob
+                | Self::GoalReviewJob
+                | Self::ThroughputReviewJob
         )
     }
 
@@ -170,6 +177,17 @@ impl ActorContext {
     /// The goal review `attempt` of a goal.
     pub fn goal_review_job(goal: impl std::fmt::Display, attempt: impl std::fmt::Display) -> Self {
         Self::instance(ActorRole::GoalReviewJob, format_args!("{goal}:{attempt}"))
+    }
+
+    /// The throughput review of `mode` for `period` (ADR-t996-1).
+    pub fn throughput_review_job(
+        mode: impl std::fmt::Display,
+        period: impl std::fmt::Display,
+    ) -> Self {
+        Self::instance(
+            ActorRole::ThroughputReviewJob,
+            format_args!("{mode}:{period}"),
+        )
     }
 
     pub fn with_run(mut self, run: RunId, task: TaskId) -> Self {
@@ -332,7 +350,8 @@ mod tests {
                 "review-job",
                 "recovery-job",
                 "plan-review-job",
-                "goal-review-job"
+                "goal-review-job",
+                "throughput-review-job"
             ]
         );
     }

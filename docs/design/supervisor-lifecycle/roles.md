@@ -4,8 +4,8 @@ type: design
 title: "Roles"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -30,7 +30,7 @@ related:
 
 runtimeはactorを型で表す（[ADR-t728-1](../../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定2・4。`src/domain/actor.rs`）。
 
-- `ActorRole`: `user`・`inbox`・`planner`・`worker`・`review-job`・`recovery-job`・`plan-review-job`・`goal-review-job`・`observer`・`supervisor`・`wrapper`・`integrator`（`desk`はgoal 48のtask 504が作るときに足す）。workspaceを持つ役割の`SessionRole`（`supervisor`・`worker`・`planner`・`inbox`・`observer`）は`SessionRole::actor_role`で`ActorRole`に写る。
+- `ActorRole`: `user`・`inbox`・`planner`・`worker`・`review-job`・`recovery-job`・`plan-review-job`・`goal-review-job`・`throughput-review-job`・`observer`・`supervisor`・`wrapper`・`integrator`（`desk`はgoal 48のtask 504が作るときに足す）。workspaceを持つ役割の`SessionRole`（`supervisor`・`worker`・`planner`・`inbox`・`observer`）は`SessionRole::actor_role`で`ActorRole`に写る。
 - `TrustLevel`: roleだけから決まる。`user`は`Human`、`supervisor`・`wrapper`・`integrator`は`TrustedControlPlane`、それ以外（AI actor）は`UntrustedAgent`。promptや名前から推し量らない。
 - `ActorContext`: `actor_id`・`role`・`trust`・`run_id`・`task_id`。
 
@@ -48,6 +48,7 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 | recovery job | 終わったrunと生きているrunの復旧 | `recovery-job` | `recovery-job:<run id>:<alert>:<attempt>` | |
 | plan review job | proposalのplan review | `plan-review-job` | `plan-review-job:<proposal id>:<attempt>` | |
 | goal review job | goalのgoal review | `goal-review-job` | `goal-review-job:<goal id>:<attempt>` | |
+| throughput review job | 毎時・日次・週次のスループットの見直し | `throughput-review-job` | `throughput-review-job:<mode>:<期間>` | 読むだけ。結論はsupervisorの`throughput-review`コマンドが保存しinboxに知らせる（[スループットの見直し](throughput-review.md)） |
 | observer | `dagq observe`が起動するagent | `observer` | `observer:<session id>` | |
 
 どれも`DAGQ_QUEUE`も持つ。`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`は`[run.env]`で上書きできない（`DAGQ_`の予約）。環境は`actor_env`（`src/application/actor_executor.rs`）の1か所で作り、順は`DAGQ_ROLE`・`DAGQ_QUEUE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`、inboxとplannerのsessionの区間の種類`DAGQ_SESSION_KIND`、plannerの`DAGQ_PLANNER_ORIGIN`・`DAGQ_PLANNER_ID`・`DAGQ_LAUNCH`で、workerのworkspaceはその後に`[run.env]`を足す。headlessのjobは呼び出し元の変数（reviewの`[run.env]`、observerの`PATH`）の後にこれを足すので、actorの変数は上書きされない。in-cmuxのsupervisorのworkspaceもAI actorではないが同じ形の環境を持つ。
@@ -81,7 +82,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
   ```
 
 - `HostActorExecutor`は`ExecutionConfig`を持ち（`with_config`、既定は全actorが`host`）、`spawn`でactorのroleの`backend`が`host`でなければ起動を拒む。
-- `status`と`doctor`（要約と`--full`）は`actors`に、AI actor（`TrustLevel`が`untrusted_agent`のrole: inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・observer）ごとの`role`・`backend`・`enforcement`・`sandboxed`を出す（`actor_executions`）。今は全て`host`・`advisory`・`false`で、host実行がsandboxではないことをここでも明示する。
+- `status`と`doctor`（要約と`--full`）は`actors`に、AI actor（`TrustLevel`が`untrusted_agent`のrole: inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・observer）ごとの`role`・`backend`・`enforcement`・`sandboxed`を出す（`actor_executions`）。今は全て`host`・`advisory`・`false`で、host実行がsandboxではないことをここでも明示する。
 
 ### CLIでの解釈
 

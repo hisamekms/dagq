@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 tags:
   - security
@@ -30,7 +30,7 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 | --- | --- | --- |
 | 人（`Human`） | user | `DAGQ_ROLE`の無い呼び出し。host実行の互換のためにそう扱う（下の「host実行は助言的」） |
 | 信頼する制御側（`TrustedControlPlane`） | supervisor・wrapper・integrator | 決定的なRustのコード。AIを含まない |
-| 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
+| 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
 
 `TrustLevel`はroleだけから決まり（`src/domain/actor.rs`）、promptや名前から推し量らない。`DAGQ_ROLE`の未知の値は`unknown DAGQ_ROLE`で止まり、queueを開かない（fail closed）。`desk`（goal 48）と`update-job`は予約の名前で、まだ`ActorRole`に無い。
 
@@ -54,7 +54,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 | worker | ○（watchと`queue.export`は持たないが、下の注） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | △ 自分のrunだけ | — | — | — | — |
 | review-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
 | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
-| plan-review-job・goal-review-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
+| plan-review-job・goal-review-job・throughput-review-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
 | observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — | — | — | — | — |
 | supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | ○（recordは—） | ○ | ○ | ○ | — |
 | wrapper | 読み取り | — | — / — | — | — | — / — | — | ○ | — | — | — | — |

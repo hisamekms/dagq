@@ -502,6 +502,7 @@ mod tests {
                 ActorRole::RecoveryJob,
                 ActorRole::PlanReviewJob,
                 ActorRole::GoalReviewJob,
+                ActorRole::ThroughputReviewJob,
             ]
             .map(|role| ActorContext::instance(role, 1)),
         );

@@ -174,6 +174,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("broker stop", &[C::ServiceLifecycle]),
     ("plan", &[C::PlannerOpen]),
     ("supervise", &[C::Supervise]),
+    ("throughput-review", &[C::ObserveRun]),
     ("integrate", &[C::IntegrationRequest]),
     ("recover", &[C::RunRecover]),
     ("review", &[C::PrepareReview]),

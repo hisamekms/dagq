@@ -651,6 +651,7 @@ fn status_and_doctor_show_every_actor_on_the_host_advisory() {
                 "recovery-job",
                 "plan-review-job",
                 "goal-review-job",
+                "throughput-review-job",
                 "observer",
             ],
             "{args:?}"

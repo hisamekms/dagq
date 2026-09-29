@@ -212,12 +212,25 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     let clock = Instant::now();
     // `failed`: the agent exited non-zero or by a signal; `error`: it could
     // not start or ran past the timeout.
-    let (outcome, exit_code, error) =
-        match run_agent(provider, &db, &dir, &prompt, &session_id, &launch, options) {
-            Ok(Some(0)) => ("succeeded", Some(0), None),
-            Ok(code) => ("failed", code, None),
-            Err(error) => ("error", None, Some(format!("{error:#}"))),
-        };
+    let (outcome, exit_code, error) = match run_agent(
+        provider,
+        &db,
+        &dir,
+        &prompt,
+        &HeadlessAgent {
+            actor: observer_actor(&session_id),
+            session_id: &session_id,
+            launch: &launch,
+            dagq: &options.dagq,
+            timeout: options.timeout,
+            what: "the observer",
+            allowed_tools: ALLOWED_TOOLS,
+        },
+    ) {
+        Ok(Some(0)) => ("succeeded", Some(0), None),
+        Ok(code) => ("failed", code, None),
+        Err(error) => ("error", None, Some(format!("{error:#}"))),
+    };
     // An agent stopped at a login that ran out or the usage limit joins
     // the queue's hold ask (ADR-0047 decision 42, task 438): no observer
     // starts again until a person answers it.
@@ -523,22 +536,35 @@ fn observer_actor(session_id: &str) -> ActorContext {
     ActorContext::instance(ActorRole::Observer, session_id)
 }
 
+/// Who a headless job of the queue's (the observer, the throughput review)
+/// runs as and how.
+pub(crate) struct HeadlessAgent<'a> {
+    pub actor: ActorContext,
+    pub session_id: &'a str,
+    pub launch: &'a ActorLaunch,
+    /// The `dagq` binary the agent calls; its directory goes first on PATH.
+    pub dagq: &'a Path,
+    pub timeout: Duration,
+    /// The job as the errors name it.
+    pub what: &'a str,
+    /// The tools the agent may use beyond reading.
+    pub allowed_tools: &'a [&'a str],
+}
+
 /// Start the agent in `dir` with its output in `output.log`, and wait for
 /// it up to the timeout (then kill it and what it started, so no Bash
 /// child of the agent outlives it: an error). The exit code, or `None`
 /// when a signal ended it.
-fn run_agent(
+pub(crate) fn run_agent(
     provider: &dyn AgentProvider,
     db: &Path,
     dir: &Path,
     prompt: &str,
-    session_id: &str,
-    launch: &ActorLaunch,
-    options: &ObserveOptions,
+    agent: &HeadlessAgent<'_>,
 ) -> Result<Option<i32>> {
     let log = dir.join("output.log");
     let mut path = std::env::var_os("PATH").unwrap_or_default();
-    if let Some(bin) = options.dagq.parent() {
+    if let Some(bin) = agent.dagq.parent() {
         let mut paths = vec![bin.to_path_buf()];
         paths.extend(std::env::split_paths(&path));
         path = std::env::join_paths(paths)?;
@@ -551,26 +577,26 @@ fn run_agent(
         .with_spawner(&LocalSpawner)
         .spawn(
             ActorExecutionSpec::new(
-                observer_actor(session_id),
+                agent.actor.clone(),
                 WorkspaceAccess::Scratch(dir.to_path_buf()),
                 ActorProgram::Headless {
                     program: HeadlessProgram::Job {
                         cwd: dir,
                         prompt,
-                        allowed_tools: ALLOWED_TOOLS,
+                        allowed_tools: agent.allowed_tools,
                     },
-                    session_id: Some(session_id),
-                    launch: Some(launch),
+                    session_id: Some(agent.session_id),
+                    launch: Some(agent.launch),
                     without_mcp: true,
                     env: vec![("PATH".to_owned(), path)],
                     streams: Streams::Log(&log),
                 },
             )
-            .with_timeout(options.timeout),
+            .with_timeout(agent.timeout),
         )
-        .context("start the observer agent")?
+        .with_context(|| format!("start {}'s agent", agent.what))?
         .process()?;
-    let deadline = Instant::now() + options.timeout;
+    let deadline = Instant::now() + agent.timeout;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status.code);
@@ -585,8 +611,9 @@ fn run_agent(
                 let _ = SystemProcesses.kill(pid);
             }
             anyhow::bail!(
-                "the observer did not finish within {}s",
-                options.timeout.as_secs()
+                "{} did not finish within {}s",
+                agent.what,
+                agent.timeout.as_secs()
             );
         }
         thread::sleep(Duration::from_millis(200));

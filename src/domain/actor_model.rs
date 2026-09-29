@@ -21,16 +21,18 @@ string_enum!(ModelRole {
     Review => "review",
     Recovery => "recovery",
     Observer => "observer",
+    ThroughputReview => "throughput_review",
     RuntimePlanner => "runtime_planner",
     Planner => "planner",
 });
 
 impl ModelRole {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::PlanReview,
         Self::Review,
         Self::Recovery,
         Self::Observer,
+        Self::ThroughputReview,
         Self::RuntimePlanner,
         Self::Planner,
     ];

@@ -220,6 +220,9 @@ event_kinds! {
     TaskStatusChanged => "task_status_changed",
     TaskSubmitted => "task_submitted",
     TaskWeightPredicted => "task_weight_predicted",
+    ThroughputReviewFinished => "throughput_review_finished",
+    ThroughputReviewReported => "throughput_review_reported",
+    ThroughputReviewStarted => "throughput_review_started",
     TriageDecided => "triage_decided",
     TriageFailed => "triage_failed",
     TriageFinished => "triage_finished",
@@ -271,6 +274,10 @@ impl EventKind {
                 | AuthorizationDenied
                 | ObserveStarted
                 | ObserveFinished
+                // The throughput review (ADR-t996-1) is about the queue.
+                | ThroughputReviewStarted
+                | ThroughputReviewFinished
+                | ThroughputReviewReported
                 | AskOpened
                 | AskAnswered
                 | AskClosed
@@ -594,6 +601,14 @@ pub const TASK_REOPENED: &str = EventKind::TaskReopened.as_str();
 pub const TASK_STATUS_CHANGED: &str = EventKind::TaskStatusChanged.as_str();
 pub const TASK_SUBMITTED: &str = EventKind::TaskSubmitted.as_str();
 pub const TASK_WEIGHT_PREDICTED: &str = EventKind::TaskWeightPredicted.as_str();
+/// A throughput review ended (ADR-t996-1): `mode`, `period`, `outcome`
+/// (`skipped` for an hour no rule hit, `succeeded`, `failed`, `error`).
+pub const THROUGHPUT_REVIEW_FINISHED: &str = EventKind::ThroughputReviewFinished.as_str();
+/// A throughput review's conclusion for the inbox: a notice (`report the
+/// review`) that asks nothing.
+pub const THROUGHPUT_REVIEW_REPORTED: &str = EventKind::ThroughputReviewReported.as_str();
+/// A throughput review started its job.
+pub const THROUGHPUT_REVIEW_STARTED: &str = EventKind::ThroughputReviewStarted.as_str();
 pub const TRIAGE_DECIDED: &str = EventKind::TriageDecided.as_str();
 pub const TRIAGE_FAILED: &str = EventKind::TriageFailed.as_str();
 pub const TRIAGE_FINISHED: &str = EventKind::TriageFinished.as_str();
@@ -839,6 +854,18 @@ mod tests {
             (EventKind::TaskStatusChanged, "task_status_changed"),
             (EventKind::TaskSubmitted, "task_submitted"),
             (EventKind::TaskWeightPredicted, "task_weight_predicted"),
+            (
+                EventKind::ThroughputReviewFinished,
+                "throughput_review_finished",
+            ),
+            (
+                EventKind::ThroughputReviewReported,
+                "throughput_review_reported",
+            ),
+            (
+                EventKind::ThroughputReviewStarted,
+                "throughput_review_started",
+            ),
             (EventKind::TriageDecided, "triage_decided"),
             (EventKind::TriageFailed, "triage_failed"),
             (EventKind::TriageFinished, "triage_finished"),

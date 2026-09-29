@@ -134,6 +134,7 @@ mod stale;
 mod stall;
 mod stall_recovery;
 mod sweep;
+mod throughput_review;
 mod triage;
 mod update;
 mod waiting;
@@ -203,6 +204,12 @@ pub struct LoopSettings {
     pub observe_interval: Duration,
     /// Also run the daily observation once every 24 hours.
     pub observe_daily: bool,
+    /// Start the throughput reviews of each hour, day and ISO week
+    /// (ADR-t996-1).
+    pub throughput_review: bool,
+    /// The host's time zone at a unix second, seconds east of UTC: where the
+    /// hours, days and weeks of the throughput reviews begin.
+    pub utc_offset: fn(i64) -> i64,
     /// Pause between two passes over the active runs; tests shorten it.
     pub tick: Duration,
     /// Pause between two looks for claimable work while no run is active.
@@ -567,6 +574,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         provisioning_error: None,
         observer: None,
         observers_launched: Vec::new(),
+        throughput_review: throughput_review::ThroughputReviewWatch::default(),
         last_sweep: None,
         last_turns: None,
         process_sample: None,
@@ -690,6 +698,9 @@ struct Supervisor<'a> {
     /// When this process last launched each observation, so one that dies
     /// before it records anything is not relaunched on every pass.
     observers_launched: Vec<(ObserveMode, Instant)>,
+    /// The throughput review running now (ADR-t996-1), and the periods this
+    /// process started.
+    throughput_review: throughput_review::ThroughputReviewWatch,
     /// When this process last swept the workspaces of ended runs
     /// (`LoopSettings::sweep_interval`); `None` until the first pass sweeps.
     last_sweep: Option<Instant>,
@@ -958,6 +969,7 @@ impl Supervisor<'_> {
         if self.exec.is_none() {
             // Only a loop that ended on an error leaves one running.
             self.stop_observer("with the supervisor");
+            self.stop_throughput_review("with the supervisor");
         }
         if self.exec.is_none() && self.heartbeat.check().is_ok() {
             // The mark of the stop (ADR-0051 decision 10); an exec leaves it
@@ -1071,6 +1083,7 @@ impl Supervisor<'_> {
                     }
                     self.draining = true;
                     self.poll_observer();
+                    self.throughput_review_pass(options, false);
                     self.report_pass(false);
                     self.forecast_pass(false);
                     self.release_pass(false);
@@ -1102,6 +1115,12 @@ impl Supervisor<'_> {
             // (ADR-t906-1 decision 1 (3)), draining or not: a drain waits
             // for their answers.
             self.inbox_nudge_pass();
+            // Reaped on every pass, started only by a supervisor at work that
+            // no login or usage limit holds.
+            self.throughput_review_pass(
+                options,
+                !stopping && self.claiming && self.queue_hold.is_none(),
+            );
             if !stopping && self.claiming {
                 if self.queue_hold.is_none() {
                     self.start_observer_when_due(options);
@@ -1126,6 +1145,7 @@ impl Supervisor<'_> {
                 // that claims if there is room now. Any other cleanup is
                 // joined once the loop ends.
                 let job = self.observer.is_some()
+                    || self.throughput_review.running()
                     || self.report.running()
                     || self.forecast.running()
                     || self.release.running()

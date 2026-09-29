@@ -114,6 +114,7 @@ mod runtime_stall;
 mod runtime_stall_end;
 mod runtime_stall_recovery;
 mod runtime_sweep;
+mod runtime_throughput_review;
 mod runtime_triage;
 mod runtime_verify_flaky;
 mod runtime_verify_retry;

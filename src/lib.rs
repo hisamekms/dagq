@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod migration_numbers;
 pub mod observer;
 pub mod runtime;
+pub mod throughput_review;
 pub mod view;
 pub mod watch;
 

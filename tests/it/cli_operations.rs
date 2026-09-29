@@ -73,6 +73,7 @@ fn workers_jobs_and_the_observer_land_recover_and_run_the_service_not_at_all() {
         "recovery-job",
         "plan-review-job",
         "goal-review-job",
+        "throughput-review-job",
         "observer",
     ] {
         actors.push(vec![("DAGQ_ROLE", role)]);

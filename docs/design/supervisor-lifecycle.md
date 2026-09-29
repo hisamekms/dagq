@@ -4,10 +4,11 @@ type: design
 title: Supervisor and workspace lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
+  - design-supervisor-lifecycle-throughput-review
   - design-supervisor-lifecycle-host-metrics
   - design-supervisor-lifecycle-actor-model
   - design-supervisor-lifecycle-goal-review
@@ -219,6 +220,10 @@ live session alert (long_background, idle_process, stuck_exit, prompt_waiting)
 ## Observer
 
 - [Observer](supervisor-lifecycle/observer.md)
+
+## スループットの見直し
+
+- [スループットの見直し（`throughput-review`）](supervisor-lifecycle/throughput-review.md)（supervisorがtimerで毎時（runtimeの規則に当たった時間だけ）・日次・週次に読むだけのheadlessのjobを始め、結果を`<queue dir>/reports/reviews/`に残し、inboxに知らせるだけのattention（`report the review`）で届ける。週次の次の一手はproposalを求めるfindingになる。[ADR-t996-1](../adr/2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md)）
 
 ## `session` wrapper
 

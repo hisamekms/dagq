@@ -18,3 +18,12 @@ Pass the cursor from `status --role inbox` (or from the last `watch` that return
 ## One watch, never a status poll
 
 Keep exactly one watch running: start a new one only after the previous one has ended, and never beside it. Never poll `status` in a loop instead; `watch` is the only wait. After compaction or `/clear`, check the session's background tasks first: if a watch is still running, let its notice arrive instead of starting a second one.
+
+## The throughput review's notice
+
+`report the review` (`throughput_review_reported`, a queue event with no task) is the supervisor's throughput review of the last whole hour, of yesterday or of the ISO week before (ADR-t996-1). It asks nothing: there is no ask to answer or close, and it does not stay in `status`.
+
+- Show the person its `mode`, `period` and `conclusion` lines as they are, with `path` (the whole review, `review.md` under `<queue dir>/reports/reviews/`). An hourly one also has `reasons`: `deviation` (the hour's landings far off the 6 hours before), `sustained_drop` (the 3-hour average well below the 24-hour one for 3 hours) or `no_landing`.
+- A weekly one with `finding_id` proposed one change: it is a finding marked for a proposal, which a runtime planner takes up. Tell the person its ID; nothing is yours to do.
+- Only an hour the runtime's rules flag reaches you. Say nothing about the quiet hours, and run no hourly, daily or weekly review of your own (a cron of the inbox's that did it before the runtime did is to be stopped).
+- A review that failed reaches you not at all: it is a `throughput_review_finished` with `outcome` `failed` or `error` and its log in the review's directory, and it holds no claim nor landing.

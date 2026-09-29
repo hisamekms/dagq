@@ -799,6 +799,7 @@ pub mod source_repository;
 pub mod stall;
 pub mod stats;
 pub mod task;
+pub mod throughput_review;
 pub mod timeline;
 pub mod tokens;
 pub mod transcript;
@@ -1627,6 +1628,10 @@ pub enum AttentionNext {
     /// (`update_installed`, ADR-0073 decision 17): a notice the inbox
     /// passes on to the person, who acts on nothing.
     ReportUpdate,
+    /// A throughput review of the supervisor's reached its conclusion
+    /// (`throughput_review_reported`, ADR-t996-1 decision 3): a notice the
+    /// inbox shows the person, who acts on nothing.
+    ReportReview,
     /// The host's KPI push command failed on a message three times and the
     /// message was given up (`kpi_push_abandoned`, ADR-0051 decision 23):
     /// a person fixes the command or the service behind it. It ends with
@@ -1683,6 +1688,7 @@ impl fmt::Display for AttentionNext {
             Self::DecideWaiting => f.write_str("decide the waiting tasks in a planner"),
             Self::InstallTool => f.write_str("install tool"),
             Self::ReportUpdate => f.write_str("report the update"),
+            Self::ReportReview => f.write_str("report the review"),
             Self::FixPush => f.write_str("fix the push command"),
             Self::ExitSession => f.write_str("exit the session"),
         }
@@ -1718,6 +1724,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
     UPDATE_INSTALLED,
+    event_kind::THROUGHPUT_REVIEW_REPORTED,
     kpi::push::KPI_PUSH_ABANDONED,
     "ask_opened",
     "ask_answered",
@@ -1892,6 +1899,8 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
+        // A throughput review's conclusion is a notice too (ADR-t996-1).
+        (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => Some(AttentionNext::ReportReview),
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
@@ -2837,6 +2846,16 @@ mod attention_tests {
                 json!({"commit": "abc", "version": "0.4.0-dev+abc"}),
                 Some(ReportUpdate),
             ),
+            (
+                "throughput_review_reported",
+                json!({"mode": "weekly", "period": "2026-W39", "conclusion": ["x"]}),
+                Some(ReportReview),
+            ),
+            (
+                "throughput_review_finished",
+                json!({"outcome": "skipped"}),
+                None,
+            ),
             ("update_started", json!({"commit": "abc"}), None),
             (
                 "dependency_stranded",
@@ -2900,6 +2919,7 @@ mod attention_tests {
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(ReportUpdate.to_string(), "report the update");
+        assert_eq!(ReportReview.to_string(), "report the review");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(
             DecideWaiting.to_string(),

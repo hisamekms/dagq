@@ -205,6 +205,7 @@ impl ActorProgram<'_> {
                 ActorRole::RecoveryJob,
                 ActorRole::PlanReviewJob,
                 ActorRole::GoalReviewJob,
+                ActorRole::ThroughputReviewJob,
                 ActorRole::Observer,
             ],
         }

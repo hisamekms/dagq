@@ -91,6 +91,10 @@ impl Supervisor<'_> {
     /// next process takes over.
     pub(super) fn prepare_handoff(&mut self) -> usize {
         self.stop_observer("for the handoff; it runs again when due");
+        // The throughput review goes on through the exec and records its
+        // own finish; its start keeps the next process from starting it
+        // again (a weekly review may take longer than the time between two
+        // updates).
         // Its row stays unfinished under this token; the next process's
         // first plan review marks it interrupted and reviews again.
         if let Some(mut watch) = self.plan_review.take() {

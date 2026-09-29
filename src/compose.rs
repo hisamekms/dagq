@@ -237,6 +237,12 @@ pub struct SuperviseOptions {
     pub observe_interval: Duration,
     /// Also run the daily observation once every 24 hours.
     pub observe_daily: bool,
+    /// Start the throughput reviews of each hour, day and ISO week
+    /// (ADR-t996-1): off unless asked for (`supervise --throughput-review`,
+    /// on by default in the CLI but for `--once`).
+    pub throughput_review: bool,
+    /// The host's time zone at a unix second; tests fix it.
+    pub utc_offset: fn(i64) -> i64,
     /// Pause between two passes over the active runs; tests shorten it.
     pub tick: Duration,
     /// Pause between two looks for claimable work while no run is active.
@@ -386,6 +392,8 @@ impl SuperviseOptions {
             stop: Arc::new(AtomicBool::new(false)),
             observe_interval: Duration::ZERO,
             observe_daily: false,
+            throughput_review: false,
+            utc_offset: clock::local_utc_offset,
             tick: TICK,
             idle_poll: IDLE_POLL,
             sweep_interval: SWEEP_INTERVAL,
@@ -447,6 +455,8 @@ impl SuperviseOptions {
             stop: self.stop.clone(),
             observe_interval: self.observe_interval,
             observe_daily: self.observe_daily,
+            throughput_review: self.throughput_review,
+            utc_offset: self.utc_offset,
             tick: self.tick,
             idle_poll: self.idle_poll,
             sweep_interval: self.sweep_interval,

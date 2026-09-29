@@ -84,6 +84,7 @@ fn workers_jobs_and_the_observer_change_no_plan_and_each_refusal_is_recorded() {
         "recovery-job",
         "plan-review-job",
         "goal-review-job",
+        "throughput-review-job",
         "observer",
     ] {
         actors.push((role, vec![("DAGQ_ROLE", role.to_owned())]));

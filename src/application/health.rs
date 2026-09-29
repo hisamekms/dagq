@@ -735,6 +735,22 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
+    if event.kind == crate::domain::event_kind::THROUGHPUT_REVIEW_REPORTED {
+        // What the inbox shows the person of a throughput review
+        // (ADR-t996-1): its period, conclusion and where the whole is.
+        for key in [
+            "mode",
+            "period",
+            "reasons",
+            "conclusion",
+            "path",
+            "finding_id",
+        ] {
+            if let Some(value) = payload.get(key) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
     if let Some(code) = payload.get(reason::CODE_KEY) {
         object.insert(reason::CODE_KEY.into(), code.clone());
     }

@@ -377,7 +377,8 @@ const WORKER: &[Capability] = &[
 const REVIEW_JOB: &[Capability] = &[C::QueueRead, C::ReviewSubmit];
 /// A recovery job reads; its verdict comes back as data on its own run.
 const RECOVERY_JOB: &[Capability] = &[C::QueueRead, C::TriageSubmit];
-/// Plan review and goal review read; the supervisor applies their verdicts.
+/// Plan review, goal review and the throughput review read; the supervisor
+/// applies their verdicts and saves the review.
 const READ_ONLY: &[Capability] = &[C::QueueRead];
 
 /// The observer (ADR-0044 decision 4): reads, records and resolves
@@ -434,7 +435,9 @@ pub const fn grants(role: ActorRole) -> &'static [Capability] {
         ActorRole::Worker => WORKER,
         ActorRole::ReviewJob => REVIEW_JOB,
         ActorRole::RecoveryJob => RECOVERY_JOB,
-        ActorRole::PlanReviewJob | ActorRole::GoalReviewJob => READ_ONLY,
+        ActorRole::PlanReviewJob | ActorRole::GoalReviewJob | ActorRole::ThroughputReviewJob => {
+            READ_ONLY
+        }
         ActorRole::Observer => OBSERVER,
         ActorRole::Supervisor => SUPERVISOR,
         ActorRole::Wrapper => WRAPPER,
@@ -539,11 +542,12 @@ mod tests {
         ActorContext::instance(role, 1)
     }
 
-    const JOBS: [ActorRole; 4] = [
+    const JOBS: [ActorRole; 5] = [
         ActorRole::ReviewJob,
         ActorRole::RecoveryJob,
         ActorRole::PlanReviewJob,
         ActorRole::GoalReviewJob,
+        ActorRole::ThroughputReviewJob,
     ];
 
     #[test]
@@ -821,8 +825,17 @@ mod tests {
                 );
             }
         }
-        for job in [ActorRole::PlanReviewJob, ActorRole::GoalReviewJob] {
-            for capability in [C::ReviewSubmit, C::TriageSubmit] {
+        for job in [
+            ActorRole::PlanReviewJob,
+            ActorRole::GoalReviewJob,
+            ActorRole::ThroughputReviewJob,
+        ] {
+            for capability in [
+                C::ReviewSubmit,
+                C::TriageSubmit,
+                C::FindingAsk,
+                C::MarkWrite,
+            ] {
                 assert!(!allowed(&role(job), capability, &Resource::Queue));
             }
         }
