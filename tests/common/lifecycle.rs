@@ -17,7 +17,7 @@ use dagq::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -200,10 +200,22 @@ pub struct FakeProcesses {
     /// This user's processes as `list` gives them; `None` fails the
     /// listing, the way a process control that cannot list does.
     pub listed: Mutex<Option<Vec<ProcessInfo>>>,
+    /// How many times each pid was asked whether it lives: a test waits
+    /// for the looks of a handoff and its watch instead of a fixed sleep
+    /// (task 1048).
+    pub looks: Mutex<HashMap<u32, usize>>,
+}
+
+impl FakeProcesses {
+    /// How many times `pid` was asked whether it lives.
+    pub fn looks_at(&self, pid: u32) -> usize {
+        self.looks.lock().unwrap().get(&pid).copied().unwrap_or(0)
+    }
 }
 
 impl ProcessControl for FakeProcesses {
     fn alive(&self, pid: u32) -> bool {
+        *self.looks.lock().unwrap().entry(pid).or_default() += 1;
         !self.dead.lock().unwrap().contains(&pid)
     }
     fn terminate(&self, pid: u32) -> Result<()> {

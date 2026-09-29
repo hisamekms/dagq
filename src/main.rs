@@ -112,6 +112,10 @@ enum Command {
         /// Seconds the e2e may run before it counts as failed.
         #[arg(long, hide = true, default_value_t = 1800)]
         e2e_timeout: u64,
+        /// Milliseconds between two looks at the supervisors asked to hand off (tests shorten
+        /// it, task 1048).
+        #[arg(long, hide = true, default_value_t = 500)]
+        poll_ms: u64,
     },
     /// Show which queue this directory resolves to, without opening it.
     Locate,
@@ -641,6 +645,22 @@ enum Command {
         /// The cargo the release update's job installs a release with (tests give a stub).
         #[arg(long, hide = true)]
         update_cargo: Option<PathBuf>,
+        /// Milliseconds the automatic update's job waits between two looks at the handoff and
+        /// at the new supervisor's heartbeat (tests; the job's default is 500).
+        #[arg(long, hide = true)]
+        update_poll_ms: Option<u64>,
+        /// Milliseconds between two heartbeats of the registration and the leases (tests; 2000
+        /// by default, task 1048).
+        #[arg(long, hide = true)]
+        heartbeat_interval_ms: Option<u64>,
+        /// Milliseconds between two looks for work while no run is active (tests; 2000 by
+        /// default).
+        #[arg(long, hide = true)]
+        idle_poll_ms: Option<u64>,
+        /// Milliseconds between two passes while a run or a job is active (tests; 1000 by
+        /// default).
+        #[arg(long, hide = true)]
+        tick_ms: Option<u64>,
     },
     /// The automatic update's job (ADR-0045 decision 17), which the supervisor starts: build
     /// main's COMMIT in the queue's update checkout, check it, put it in place of --to like
@@ -685,6 +705,10 @@ enum Command {
         /// Seconds the new supervisor may take to heartbeat on.
         #[arg(long, default_value_t = 60)]
         watch_timeout: u64,
+        /// Milliseconds between two looks at the handoff and at the new supervisor's heartbeat
+        /// (tests shorten it, task 1048).
+        #[arg(long, hide = true, default_value_t = 500)]
+        poll_ms: u64,
     },
     /// The release update's job (ADR-t618-1 decision 5), which a supervisor of a release build
     /// starts: `cargo install` RELEASE under the queue's update directory, check it, put it in
@@ -1976,6 +2000,7 @@ fn execute(cli: Cli) -> Result<Value> {
         skip_e2e,
         e2e_command,
         e2e_timeout,
+        poll_ms,
     } = cli.command
     {
         use dagq::application::install::{E2eGate, E2eSettings, InstallOptions, Source};
@@ -2041,7 +2066,7 @@ fn execute(cli: Cli) -> Result<Value> {
             allow_breaking,
             restart,
             handoff_timeout: Duration::from_secs(handoff_timeout),
-            poll: Duration::from_millis(500),
+            poll: Duration::from_millis(poll_ms),
             e2e,
         };
         if let Some(release) = release {
@@ -2760,11 +2785,15 @@ fn execute(cli: Cli) -> Result<Value> {
             update_e2e_command,
             update_e2e_timeout,
             update_cargo,
+            update_poll_ms,
+            heartbeat_interval_ms,
+            idle_poll_ms,
+            tick_ms,
         } => {
             use dagq::compose::SuperviseOptions;
             use dagq::infrastructure::adapters::{Cmux, executable};
             let cmux = executable(&cmux)?;
-            let options = SuperviseOptions {
+            let mut options = SuperviseOptions {
                 stop: install_stop_signal()?,
                 // A one-shot pass observes only when asked to.
                 observe_interval: Duration::from_secs(observe_interval.unwrap_or(if once {
@@ -2788,6 +2817,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     build_command: update_build_command,
                     e2e_command: update_e2e_command,
                     e2e_timeout: update_e2e_timeout.map(Duration::from_secs),
+                    poll: update_poll_ms.map(Duration::from_millis),
                     cmux: Some(cmux.clone()),
                     cargo: update_cargo,
                 },
@@ -2809,6 +2839,17 @@ fn execute(cli: Cli) -> Result<Value> {
                 scratchpad_roots: None,
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
+            // Tests shorten the heartbeat and the pauses between passes
+            // (task 1048).
+            if let Some(ms) = heartbeat_interval_ms {
+                options.heartbeat_interval = Duration::from_millis(ms);
+            }
+            if let Some(ms) = idle_poll_ms {
+                options.idle_poll = Duration::from_millis(ms);
+            }
+            if let Some(ms) = tick_ms {
+                options.tick = Duration::from_millis(ms);
+            }
             dagq::compose::supervise(
                 &db,
                 &checkout(repo),
@@ -2897,6 +2938,7 @@ fn execute(cli: Cli) -> Result<Value> {
             plugin_dir,
             handoff_timeout,
             watch_timeout,
+            poll_ms,
         } => {
             use dagq::infrastructure::adapters::executable;
             drop(queue);
@@ -2917,6 +2959,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     plugin_dir,
                     handoff_timeout: Duration::from_secs(handoff_timeout),
                     watch_timeout: Duration::from_secs(watch_timeout),
+                    poll: Duration::from_millis(poll_ms),
                 },
             )?
         }

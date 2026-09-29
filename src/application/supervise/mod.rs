@@ -216,6 +216,9 @@ pub struct LoopSettings {
     pub tick: Duration,
     /// Pause between two looks for claimable work while no run is active.
     pub idle_poll: Duration,
+    /// How often the registration and the leases are heartbeat
+    /// ([`HEARTBEAT_INTERVAL`]; tests shorten it).
+    pub heartbeat_interval: Duration,
     /// Least time between two sweeps of the workspaces of ended runs; the
     /// first pass sweeps at once.
     pub sweep_interval: Duration,
@@ -393,8 +396,13 @@ pub fn spawn_traced<T: Send + 'static>(
     thread::spawn(move || tracing::dispatcher::with_default(&dispatch, work))
 }
 
+/// How often a process heartbeats its registration and leases. The
+/// handoff's watch waits for the new supervisor's next heartbeat, so tests
+/// shorten it (`supervise --heartbeat-interval-ms`, task 1048).
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+
 /// One process heartbeats its registration (a resident supervisor) and every
-/// lease it holds with a single token.
+/// lease it holds with a single token, every `interval`.
 pub struct Heartbeat {
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
@@ -402,7 +410,7 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    pub fn start(queues: Arc<dyn QueueOpener>, token: LeaseToken) -> Self {
+    pub fn start(queues: Arc<dyn QueueOpener>, token: LeaseToken, interval: Duration) -> Self {
         let (stop, recv) = mpsc::channel();
         let failed = Arc::new(AtomicBool::new(false));
         let flag = failed.clone();
@@ -411,7 +419,7 @@ impl Heartbeat {
                 let mut queue = queues.open()?;
                 loop {
                     queue.heartbeat(&token)?;
-                    match recv.recv_timeout(Duration::from_secs(2)) {
+                    match recv.recv_timeout(interval) {
                         Err(mpsc::RecvTimeoutError::Timeout) => (),
                         _ => break,
                     }
@@ -556,7 +564,11 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             "previous_version": previous_version,
         }),
     )?;
-    let heartbeat = Heartbeat::start(ports.queues.clone(), token.clone());
+    let heartbeat = Heartbeat::start(
+        ports.queues.clone(),
+        token.clone(),
+        settings.heartbeat_interval,
+    );
     let cmux = RecordingBackend::over(
         ports.cmux,
         ports.queues.clone(),

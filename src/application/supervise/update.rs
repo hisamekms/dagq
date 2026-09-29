@@ -37,6 +37,10 @@ pub struct UpdateSettings {
     pub e2e_command: Option<String>,
     /// How long the job's e2e may run; `None` is the job's default.
     pub e2e_timeout: Option<Duration>,
+    /// How often the job looks at the handoff and at the new supervisor's
+    /// heartbeat; `None` is the job's default (tests shorten it, task
+    /// 1048).
+    pub poll: Option<Duration>,
     /// The cmux the job's `up` uses when it starts an in-cmux supervisor
     /// again.
     pub cmux: Option<PathBuf>,
@@ -53,6 +57,7 @@ impl Default for UpdateSettings {
             build_command: None,
             e2e_command: None,
             e2e_timeout: None,
+            poll: None,
             cmux: None,
             cargo: None,
         }
@@ -73,6 +78,10 @@ pub(super) struct UpdateWatch {
     /// The repository was found not to be dagq's source, and that was
     /// logged; cleared once it is again.
     not_source: bool,
+    /// Main's head the last look past the source check logged as building
+    /// nothing, so each head is logged once (tests wait for the line
+    /// instead of a fixed sleep, task 1048).
+    passed: Option<String>,
 }
 
 impl Supervisor<'_> {
@@ -116,6 +125,11 @@ impl Supervisor<'_> {
                 );
             }
             self.update.not_source = true;
+            // Read after the source check, so a head logged here was looked
+            // at as not dagq's source.
+            if let Ok(head) = self.repository.main_head() {
+                self.log_nothing_built(head.as_str(), "the repository is not dagq's source");
+            }
             return Ok(());
         }
         self.update.not_source = false;
@@ -172,11 +186,21 @@ impl Supervisor<'_> {
                 None => true,
             };
             if !changes {
+                self.log_nothing_built(&head, "it changes no runtime path");
                 self.update.seen = Some(head);
                 return Ok(());
             }
         }
         self.start_update_job(&head, base.as_deref(), options)
+    }
+
+    /// Log once per head that a look at main's `head` builds nothing, and
+    /// why.
+    fn log_nothing_built(&mut self, head: &str, why: &str) {
+        if self.update.passed.as_deref() != Some(head) {
+            info!("automatic update: main's {head} builds nothing: {why}");
+            self.update.passed = Some(head.to_owned());
+        }
     }
 
     /// A job that died before it recorded how it ended (killed, a reboot):
@@ -300,6 +324,9 @@ to wait for the next landing that changes the runtime.",
             command
                 .arg("--e2e-timeout")
                 .arg(timeout.as_secs().to_string());
+        }
+        if let Some(poll) = options.update.poll {
+            command.arg("--poll-ms").arg(poll.as_millis().to_string());
         }
         let job = self.spawner.spawn(
             &command,

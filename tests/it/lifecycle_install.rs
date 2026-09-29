@@ -712,8 +712,46 @@ fn auto_supervisor(fixture: &Fixture) -> SqliteQueue {
     queue
 }
 
+/// Wait until the handoff of `pid` is done and the job's watch looked at
+/// it, from the looks at whether it lives from now on. Called once the
+/// supervisor is in its final state (taken, registered again): at most one
+/// look from now on read the queue before that state, each of the
+/// others read it, the handoff's first of them takes the supervisor and
+/// ends the handoff's looks at it, and the watch's first read the
+/// heartbeat it waits to see pass. Three looks cover the handoff's two and
+/// the watch's first (task 1048). Stands in for a sleep past the next unix
+/// second.
+fn until_watched(processes: &FakeProcesses, pid: u32) {
+    let before = processes.looks_at(pid);
+    wait_until(processes, pid, || processes.looks_at(pid) >= before + 3);
+}
+
+/// The supervisor's next heartbeat, written a second later than now: the
+/// watch compares unix seconds, and this stands in for the beat a live
+/// supervisor writes in the next second (task 1048).
+fn heartbeat_later(fixture: &Fixture, token: &str) {
+    struct Later;
+    impl dagq::application::Clock for Later {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::SystemTime::now() + Duration::from_secs(1)
+        }
+    }
+    use dagq::application::QueueOpener;
+    let mut generators = dagq::infrastructure::clock::system();
+    generators.clock = std::sync::Arc::new(Later);
+    dagq::infrastructure::runtime_store::SqliteOpener {
+        db: fixture.location.db.clone(),
+        generators,
+        actor: None,
+    }
+    .open()
+    .unwrap()
+    .heartbeat(&LeaseToken::new(token))
+    .unwrap();
+}
+
 /// Take the handoff the way the exec'd binary does, and heartbeat on
-/// (`alive`) or die a moment later.
+/// (`alive`) or die once the job's watch looked at it.
 fn take_and_heartbeat(fixture: &Fixture, processes: &FakeProcesses, alive: bool) {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     wait_until(processes, UPDATED_PID, || {
@@ -725,9 +763,9 @@ fn take_and_heartbeat(fixture: &Fixture, processes: &FakeProcesses, alive: bool)
     queue
         .resume_registration(&LeaseToken::new("auto"), UPDATED_PID, VERSION)
         .unwrap();
-    thread::sleep(Duration::from_millis(1100));
+    until_watched(processes, UPDATED_PID);
     if alive {
-        queue.heartbeat(&LeaseToken::new("auto")).unwrap();
+        heartbeat_later(fixture, "auto");
     } else {
         processes.dead.lock().unwrap().insert(UPDATED_PID);
     }
@@ -1206,7 +1244,11 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
         }
         _ => token.to_owned(),
     };
-    thread::sleep(Duration::from_millis(1100));
+    // Back under the old build, it fails the handoff without the job
+    // asking whether it lives: nothing to wait for.
+    if !matches!(then, Afterwards::ExecFails) {
+        until_watched(processes, pid);
+    }
     match then {
         Afterwards::Die | Afterwards::ReregisterAndDie => {
             processes.dead.lock().unwrap().insert(pid);
@@ -1217,7 +1259,7 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
                 .unwrap();
         }
         _ => {
-            queue.heartbeat(&LeaseToken::new(&serving)).unwrap();
+            heartbeat_later(fixture, &serving);
         }
     }
 }
@@ -1686,14 +1728,16 @@ fn take_at_withdrawal(fixture: &Fixture, token: &str) {
 }
 
 /// After the withdrawal [`take_at_withdrawal`] armed, do `late` as the
-/// supervisor `token` of `pid`, heartbeating on a moment later when it
-/// came back.
+/// supervisor `token` of `pid`; when it came back under an update job's
+/// `watch`, heartbeat on once the watch looked at it. `install` and
+/// `hand_off` watch no heartbeat, so nothing is waited for then.
 fn back_after_withdrawal(
     fixture: &Fixture,
     processes: &FakeProcesses,
     token: &str,
     pid: u32,
     late: Late,
+    watch: bool,
 ) {
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let db = rusqlite::Connection::open(&fixture.location.db).unwrap();
@@ -1723,8 +1767,10 @@ fn back_after_withdrawal(
         }
         Late::Nothing => return,
     };
-    thread::sleep(Duration::from_millis(1100));
-    queue.heartbeat(&LeaseToken::new(&serving)).unwrap();
+    if watch {
+        until_watched(processes, pid);
+        heartbeat_later(fixture, &serving);
+    }
 }
 
 /// A supervisor still asked when the handoff's wait runs out fails it when
@@ -1746,7 +1792,9 @@ fn a_handoff_looks_again_at_a_supervisor_that_took_it_as_the_wait_ran_out() {
         let handed = thread::scope(|scope| {
             if let Some(late) = late {
                 let (fixture, processes, pid) = (&fixture, &processes, registration.pid);
-                scope.spawn(move || back_after_withdrawal(fixture, processes, "old", pid, late));
+                scope.spawn(move || {
+                    back_after_withdrawal(fixture, processes, "old", pid, late, false)
+                });
             }
             dagq::lifecycle::hand_off(
                 &queue,
@@ -1821,7 +1869,14 @@ fn install_counts_a_supervisor_that_took_the_handoff_as_the_wait_ran_out() {
         options.handoff_timeout = Duration::from_secs(1);
         let result = thread::scope(|scope| {
             scope.spawn(|| {
-                back_after_withdrawal(&fixture, &processes, "first", std::process::id(), late)
+                back_after_withdrawal(
+                    &fixture,
+                    &processes,
+                    "first",
+                    std::process::id(),
+                    late,
+                    false,
+                )
             });
             install_with(&fixture, &binaries, &processes, &no_down, &options)
         });
@@ -1864,6 +1919,7 @@ fn the_update_job_installs_past_a_supervisor_that_took_the_handoff_as_the_wait_r
                 "auto",
                 UPDATED_PID,
                 Late::Resume(VERSION),
+                true,
             )
         });
         run_update_job(&fixture, &binaries, &processes, &restarted)

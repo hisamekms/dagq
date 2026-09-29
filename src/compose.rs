@@ -111,6 +111,9 @@ pub struct AutoUpdateJob {
     pub plugin_dir: Option<PathBuf>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
+    /// Between two looks at the handoff and at the new supervisor's
+    /// heartbeat (`auto-update --poll-ms`, 500 ms by default).
+    pub poll: Duration,
 }
 
 /// The log of the automatic update's e2e next to its build's:
@@ -248,8 +251,12 @@ pub struct SuperviseOptions {
     pub utc_offset: fn(i64) -> i64,
     /// Pause between two passes over the active runs; tests shorten it.
     pub tick: Duration,
-    /// Pause between two looks for claimable work while no run is active.
+    /// Pause between two looks for claimable work while no run is active;
+    /// tests shorten it (`supervise --idle-poll-ms`).
     pub idle_poll: Duration,
+    /// How often the supervisor heartbeats its registration and leases;
+    /// tests shorten it (`supervise --heartbeat-interval-ms`, task 1048).
+    pub heartbeat_interval: Duration,
     /// Least time between two sweeps of the workspaces of ended runs; tests
     /// shorten it.
     pub sweep_interval: Duration,
@@ -453,6 +460,7 @@ impl SuperviseOptions {
             utc_offset: clock::local_utc_offset,
             tick: TICK,
             idle_poll: IDLE_POLL,
+            heartbeat_interval: supervisor::HEARTBEAT_INTERVAL,
             sweep_interval: SWEEP_INTERVAL,
             generators: clock::system(),
             stall: None,
@@ -521,6 +529,7 @@ impl SuperviseOptions {
             utc_offset: self.utc_offset,
             tick: self.tick,
             idle_poll: self.idle_poll,
+            heartbeat_interval: self.heartbeat_interval,
             sweep_interval: self.sweep_interval,
             stall,
             conflicts,
@@ -1135,6 +1144,7 @@ impl OneShot {
                 actor: None,
             }),
             request.token.clone(),
+            supervisor::HEARTBEAT_INTERVAL,
         );
         let outcome = integrator.land(&mut integration, &request)?;
         drop(heartbeat); // Stops the lease heartbeat before this process reports.
@@ -1750,7 +1760,7 @@ same in one step",
                 restart: restart_arguments.clone(),
                 handoff_timeout: job.handoff_timeout,
                 watch_timeout: job.watch_timeout,
-                poll: Duration::from_millis(500),
+                poll: job.poll,
                 pid: std::process::id(),
             },
         )

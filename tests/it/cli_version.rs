@@ -368,6 +368,20 @@ fn a_timed_out_wait_runs_the_cleanups_before_the_exit() {
     assert!(!dir.path().join("unregistered").exists());
 }
 
+/// The hidden flags a `supervise` of these tests runs with (task 1048): it
+/// passes every 100ms instead of every 1s (a job, the throughput review
+/// among them, is active) or 2s (idle), so it takes a handoff sooner, and
+/// heartbeats every 100ms instead of 2s, so the watch after a handoff sees
+/// the next heartbeat (unix seconds) at the next second.
+const FAST_SUPERVISOR: [&str; 6] = [
+    "--tick-ms",
+    "100",
+    "--idle-poll-ms",
+    "100",
+    "--heartbeat-interval-ms",
+    "100",
+];
+
 /// `install` puts a binary in place by a rename that keeps the old one as
 /// `<name>.previous`, and hands a running supervisor over to it (ADR-0045
 /// decisions 10, 11, 14): the supervisor process execs the new file under
@@ -439,6 +453,8 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
         .arg(&cmux)
         .arg("--claude")
         .arg(&claude)
+        // Looks for the handoff every 100ms instead of 2s (task 1048).
+        .args(FAST_SUPERVISOR)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -463,6 +479,8 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
             fixed.to_str().unwrap(),
             "--handoff-timeout",
             "60",
+            "--poll-ms",
+            "50",
         ];
         full.extend_from_slice(args);
         let report = ok(&db, &full);
@@ -563,6 +581,7 @@ exec '{bin}' \"$@\"\n"
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
     std::fs::copy(bin, &fixed).unwrap();
+    let log = dir.path().join("supervisor.log");
     let mut supervisor = Command::new(&fixed)
         .without_actor_env()
         .arg("--db")
@@ -578,10 +597,24 @@ exec '{bin}' \"$@\"\n"
         .arg(&build)
         // The e2e gate (ADR-t963-1) passes without running the e2e.
         .args(["--update-e2e-command", "echo 'test e2e::stub ... ok'"])
+        // The job's watch sees the next heartbeat sooner (task 1048).
+        .args(FAST_SUPERVISOR)
+        .args(["--update-poll-ms", "50"])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Every process of the supervisor, the exec'd ones too, appends
+        // here: the looks at main are waited for in it.
+        .stderr(std::fs::File::create(&log).unwrap())
         .spawn()
         .unwrap();
+    // Waits for the look at main's `sha` that builds nothing, for `why`;
+    // a later look at the same head starts no job either.
+    let looked = |sha: &str, why: &str| {
+        let (line, log) = (
+            format!("automatic update: main's {sha} builds nothing: {why}"),
+            &log,
+        );
+        move || std::fs::read_to_string(log).is_ok_and(|text| text.contains(&line))
+    };
     let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
     let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
         let started = std::time::Instant::now();
@@ -633,7 +666,10 @@ exec '{bin}' \"$@\"\n"
             .any(|u| u.kind == "update_started" && u.payload["commit"] == sha)
     };
     let docs = commit("docs/notes.md");
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    wait(
+        "the look at the documentation change",
+        &mut looked(&docs, "it changes no runtime path"),
+    );
     assert!(!started(&docs), "{:?}", updates());
 
     let source = commit("src/lib.rs");
@@ -649,8 +685,16 @@ exec '{bin}' \"$@\"\n"
     // Once the repository is not dagq's source (ADR-t614-1), runtime
     // landings build nothing; they do again once it is.
     // Committed before the working file changes, so no look sees the new
-    // manifest with the old head.
+    // manifest with the old head; the working file leaves dagq first, so no
+    // look sees dagq's manifest with the new head either.
     let manifest = |name: &str| {
+        if name != "dagq" {
+            std::fs::write(
+                repo.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n"),
+            )
+            .unwrap();
+        }
         let staged = dir.path().join("Cargo.toml.staged");
         std::fs::write(&staged, format!("[package]\nname = \"{name}\"\n")).unwrap();
         let blob = git(&["hash-object", "-w", staged.to_str().unwrap()]);
@@ -665,7 +709,10 @@ exec '{bin}' \"$@\"\n"
     };
     let renamed = manifest("myapp");
     let elsewhere = commit("src/elsewhere.rs");
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    wait(
+        "the look at the runtime change outside dagq's source",
+        &mut looked(&elsewhere, "the repository is not dagq's source"),
+    );
     assert!(
         !started(&renamed) && !started(&elsewhere),
         "{:?}",
