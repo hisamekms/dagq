@@ -662,6 +662,11 @@ pub struct TestWorkspace {
     /// `send_text` records the call and then fails, as a `cmux send` to a
     /// workspace that went away does.
     pub text_fails: bool,
+    /// A `send_text` of an answer to an ask returns only in a later second
+    /// than the session's turn on it ended: once the session wrote
+    /// `answered` next to its receipt, and past the next second, as a
+    /// `cmux send` that is slow under load does (task 971).
+    pub answer_send_outlasts_turn: bool,
     /// `exists` fails, as `cmux workspace list` does when cmux is gone.
     pub exists_fails: bool,
     /// Workspaces cmux lists although this backend did not open them (a
@@ -728,6 +733,7 @@ impl TestWorkspace {
             groups: Mutex::new(Vec::new()),
             group_fails: false,
             send_times_out: false,
+            answer_send_outlasts_turn: false,
             resume_scripts: Mutex::new(HashMap::new()),
             resumes: Mutex::new(Vec::new()),
             resume_tags: Mutex::new(Vec::new()),
@@ -1030,9 +1036,21 @@ impl WorkspaceBackend for TestWorkspace {
             *self.armed_screen.lock().unwrap() = Some(after);
         }
         drop(screen);
-        let path = resume_message_path(&self.session_run_dir(workspace_id));
+        let run_dir = self.session_run_dir(workspace_id);
+        let path = resume_message_path(&run_dir);
         fs::write(path.with_extension("tmp"), text)?;
         fs::rename(path.with_extension("tmp"), path)?;
+        if self.answer_send_outlasts_turn && text.starts_with("answer to ask") {
+            let answered = Path::new(&run_dir).join("answered");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !answered.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            let second = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            while SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() <= second {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
         Ok(())
     }
     fn send_enter(&self, _: &str) -> Result<()> {

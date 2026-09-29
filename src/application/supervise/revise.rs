@@ -27,6 +27,11 @@ pub(super) struct ReviseWatch {
     /// besides [`SessionWatch::asks_from`]: a session that rewrote its
     /// receipt after its questions went on past them (task 583).
     pub(super) questions_from: i64,
+    /// The second this watch's own delivery of an answer closed the last
+    /// `worker_question` in: that close is the answer typed at `input_at`,
+    /// not one delivered by hand, and moves no clock (task 971, as a
+    /// resume's since task 931).
+    pub(super) delivered_closed: Option<i64>,
 }
 
 /// What the live session was asked to fix (ADR-0027 decisions 2 and 4).
@@ -120,6 +125,7 @@ impl ReviseWatch {
             start,
             live,
             questions_from: 0,
+            delivered_closed: None,
         })
     }
 
@@ -208,6 +214,7 @@ impl ReviseWatch {
         if let Some(typed) = self.live.deliver_answers(sv, run)? {
             self.live.input_at = Some(typed);
             self.sent = Instant::now();
+            self.delivered_closed = sv.queue.last_worker_question_closed(run.id())?;
             self.start = self.live.answer_start.take();
         }
         if let Some(agent) = processes
@@ -265,11 +272,15 @@ impl ReviseWatch {
         // An answer delivered by hand (or by the supervisor this one
         // adopted the run from) is input too: the idle marker of the stop at
         // the question is older than it. Its close is known to the second: a
-        // close in a later second than the last input moves it there (one
-        // this watch typed closes in the second it was typed).
+        // close in a later second than the last input moves it there. The
+        // close of an answer this watch typed is recorded after the send,
+        // often in a later second: it is that input, and moving the last
+        // input to it would leave unseen an idle the session wrote right
+        // after the answer (task 971).
         let input_at = self.live.input_at.unwrap_or(self.sent_at);
         if let Some(closed) = sv.queue.last_worker_question_closed(run.id())?
             && closed > unix_seconds(input_at)
+            && self.delivered_closed.is_none_or(|own| closed > own)
         {
             self.live.input_at = Some(UNIX_EPOCH + Duration::from_secs(closed.max(0) as u64));
             self.sent = Instant::now();
