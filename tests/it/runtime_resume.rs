@@ -2078,6 +2078,7 @@ fn stats_ties_a_deferred_landing_to_the_landing_that_broke_it() {
             "code": "rebase_conflict",
         }])
     );
+    assert_eq!(broken["rebased_onto"], json!([]));
     let attempts = broken["resume_attempts"].as_array().unwrap();
     assert_eq!(
         attempts

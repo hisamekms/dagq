@@ -50,7 +50,7 @@ pub use measures::{
     RunVerifyFailure, VersionStats, Versions,
 };
 pub use predictions::{RunActual, RunPrediction};
-pub use retries::{BrokenBy, ResumeAttempt, ResumeBreakdown, Retries};
+pub use retries::{BrokenBy, RebasedOnto, ResumeAttempt, ResumeBreakdown, Retries};
 pub use sessions::{GoalKindSessions, KindSessions, RunKindSessions, SessionWindow, Sessions};
 pub use thresholds::ThresholdStats;
 pub use tokens::{RunTokens, TokenSummary, TokenTotals};

@@ -3,7 +3,10 @@
 //! it, and how each resume ended. Derived from `run_events` like the rest
 //! of `stats`: a deferral's `main` (or, without one, that of the attempt's
 //! `integration_started`) is the commit a landing's `run_integrated`
-//! recorded as its `result_commit`, which ties the two runs.
+//! recorded as its `result_commit`, which ties the two runs. A
+//! `verification_failed` deferral onto a landing that passed the same
+//! command at its own landing does not name it (task 974): the failed tests
+//! passed on that main, so it is kept in `rebased_onto` instead.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
@@ -42,6 +45,21 @@ pub struct BrokenBy {
     pub main: String,
     /// The code of this run's first deferral onto that commit.
     pub code: String,
+}
+
+/// A landing this run was rebased onto and failed a verification command
+/// that the landing itself passed at its own landing (task 974): not named
+/// in `broken_by`, only read as where the run was rebased to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RebasedOnto {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub landed_at: String,
+    pub main: String,
+    /// The code of this run's first such deferral (`verification_failed`).
+    pub code: String,
+    /// The tests that deferral names as failed; empty when it names none.
+    pub failed_tests: Vec<String>,
 }
 
 /// One `resume_started` of a run and how it ended.
@@ -91,8 +109,13 @@ pub struct Retries {
     pub conflict_files: Vec<String>,
     /// The landings the run was deferred after (a deferral whose code is
     /// in [`BREAKING_CODES`] onto the main commit another run landed), in
-    /// order, one per landing.
+    /// order, one per landing. A `verification_failed` deferral onto a
+    /// landing that passed the same command does not name it.
     pub broken_by: Vec<BrokenBy>,
+    /// The landings the run was rebased onto and failed a verification
+    /// command they had passed, in order, one per landing and none that
+    /// `broken_by` names.
+    pub rebased_onto: Vec<RebasedOnto>,
     /// How many other runs this run's landing broke.
     pub broke_runs: i64,
     pub resume_attempts: Vec<ResumeAttempt>,
@@ -106,14 +129,34 @@ struct Walk {
     conflicts: BTreeSet<String>,
     /// The main of the current `integrate` attempt.
     main: Option<String>,
-    /// Each deferral's main and code.
-    deferred: Vec<(String, String)>,
+    /// Each deferral onto a main.
+    deferred: Vec<Deferral>,
+    /// The verification commands the current `integrate` attempt passed.
+    passed: BTreeSet<String>,
     /// The code of the latest parking event.
     parked: Option<String>,
     /// The latest resume's start (unix milliseconds), while it is open.
     resume_start: Option<i64>,
     /// The resume that resolved, until the run is parked again.
     watching: Option<usize>,
+}
+
+/// An `integration_deferred` onto a main: its code, and for a failed
+/// verification the command and the tests it named.
+struct Deferral {
+    main: String,
+    code: String,
+    command: Option<String>,
+    failed_tests: Vec<String>,
+}
+
+/// A landing on main: its run, task, time, and the verification commands
+/// its landing attempt passed.
+struct Landed {
+    run_id: RunId,
+    task_id: TaskId,
+    at: String,
+    passed: BTreeSet<String>,
 }
 
 fn text(value: &Value) -> Option<String> {
@@ -144,7 +187,7 @@ fn escalation(payload: &Value) -> Option<(String, String)> {
 /// The retries of every run of `events` (ascending id).
 pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
     let mut walks: HashMap<RunId, Walk> = HashMap::new();
-    let mut landings: HashMap<String, (RunId, TaskId, String)> = HashMap::new();
+    let mut landings: HashMap<String, Landed> = HashMap::new();
     for event in events {
         let (Some(run_id), Some(task_id)) = (&event.run_id, event.task_id) else {
             continue;
@@ -166,6 +209,12 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
             "integration_started" => {
                 walk.retries.integrate_attempts += 1;
                 walk.main = text(&event.payload["main"]);
+                walk.passed.clear();
+            }
+            "verification_command"
+                if event.payload["phase"] == "integration" && event.payload["exit_code"] == 0 =>
+            {
+                walk.passed.extend(text(&event.payload["command"]));
             }
             "integration_deferred" => {
                 *walk.retries.deferrals.entry(code().to_owned()).or_default() += 1;
@@ -173,14 +222,30 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                     walk.conflicts.extend(files.iter().filter_map(text));
                 }
                 if let Some(main) = text(&event.payload["main"]).or_else(|| walk.main.clone()) {
-                    walk.deferred.push((main, code().to_owned()));
+                    walk.deferred.push(Deferral {
+                        main,
+                        code: code().to_owned(),
+                        command: text(&event.payload["command"]),
+                        failed_tests: event.payload["failed_tests"]
+                            .as_array()
+                            .map(|names| names.iter().filter_map(text).collect())
+                            .unwrap_or_default(),
+                    });
                 }
             }
             "run_integrated" => {
                 if let Some(commit) =
                     text(&event.payload["result_commit"]).or_else(|| text(&event.payload["commit"]))
                 {
-                    landings.insert(commit, (run_id.clone(), task_id, event.created_at.clone()));
+                    landings.insert(
+                        commit,
+                        Landed {
+                            run_id: run_id.clone(),
+                            task_id,
+                            at: event.created_at.clone(),
+                            passed: std::mem::take(&mut walk.passed),
+                        },
+                    );
                 }
             }
             "resume_started" => {
@@ -243,26 +308,60 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
     let mut broke: HashMap<RunId, BTreeSet<RunId>> = HashMap::new();
     for (run_id, walk) in &mut walks {
         walk.retries.conflict_files = std::mem::take(&mut walk.conflicts).into_iter().collect();
-        for (main, code) in &walk.deferred {
+        for deferral in &walk.deferred {
+            let code = &deferral.code;
             if !BREAKING_CODES.contains(&code.as_str()) {
                 continue;
             }
-            let Some((landed, task_id, landed_at)) = landings.get(main) else {
+            let Some(landed) = landings.get(&deferral.main) else {
                 continue;
             };
-            let broken_by = &mut walk.retries.broken_by;
-            if landed == run_id || broken_by.iter().any(|by| by.run_id == *landed) {
+            let retries = &mut walk.retries;
+            if landed.run_id == *run_id
+                || retries
+                    .broken_by
+                    .iter()
+                    .any(|by| by.run_id == landed.run_id)
+            {
                 continue;
             }
-            broken_by.push(BrokenBy {
-                task_id: *task_id,
-                run_id: landed.clone(),
-                landed_at: landed_at.clone(),
-                main: main.clone(),
+            // The landing passed the command that failed here: the failure
+            // is this run's change or its meeting with main, not the landing's.
+            let passed = code == "verification_failed"
+                && deferral
+                    .command
+                    .as_ref()
+                    .is_some_and(|command| landed.passed.contains(command));
+            if passed {
+                if !retries
+                    .rebased_onto
+                    .iter()
+                    .any(|onto| onto.run_id == landed.run_id)
+                {
+                    retries.rebased_onto.push(RebasedOnto {
+                        task_id: landed.task_id,
+                        run_id: landed.run_id.clone(),
+                        landed_at: landed.at.clone(),
+                        main: deferral.main.clone(),
+                        code: code.clone(),
+                        failed_tests: deferral.failed_tests.clone(),
+                    });
+                }
+                continue;
+            }
+            // Named by a later deferral: named only, not also rebased onto.
+            retries
+                .rebased_onto
+                .retain(|onto| onto.run_id != landed.run_id);
+            retries.broken_by.push(BrokenBy {
+                task_id: landed.task_id,
+                run_id: landed.run_id.clone(),
+                landed_at: landed.at.clone(),
+                main: deferral.main.clone(),
                 code: code.clone(),
             });
             broke
-                .entry(landed.clone())
+                .entry(landed.run_id.clone())
                 .or_default()
                 .insert(run_id.clone());
         }
@@ -529,6 +628,51 @@ mod tests {
             resume_breakdown(std::iter::empty()).all.resolved_percent,
             None
         );
+    }
+
+    /// Task 974: a landing first kept as rebased onto (it passed the
+    /// failed command) and later named by a conflict onto it is named only.
+    #[test]
+    fn a_landing_named_later_leaves_rebased_onto() {
+        let passed = json!({"phase": "integration", "command": "t", "exit_code": 0});
+        let events = [
+            event(1, A, 1, "integration_started", json!({"main": "m0"}), 1),
+            // A pass of an earlier attempt does not count for the landing.
+            event(2, A, 1, "verification_command", passed.clone(), 2),
+            event(3, A, 1, "integration_started", json!({"main": "m0"}), 3),
+            event(4, A, 1, "verification_command", passed, 4),
+            event(5, A, 1, "run_integrated", json!({"result_commit": "m1"}), 5),
+            event(6, B, 2, "integration_started", json!({"main": "m1"}), 6),
+            event(
+                7,
+                B,
+                2,
+                "integration_deferred",
+                json!({"code": "verification_failed", "command": "t"}),
+                7,
+            ),
+            event(
+                8,
+                B,
+                2,
+                "integration_deferred",
+                json!({"code": "rebase_conflict", "main": "m1"}),
+                8,
+            ),
+        ];
+        let all = retries(&events);
+        let b = &all[&RunId::new(B).unwrap()];
+        assert!(b.rebased_onto.is_empty());
+        assert_eq!(b.broken_by.len(), 1);
+        assert_eq!(b.broken_by[0].code, "rebase_conflict");
+        assert_eq!(all[&RunId::new(A).unwrap()].broke_runs, 1);
+        // Without the conflict, B only rebased onto A.
+        let all = retries(&events[..7]);
+        let b = &all[&RunId::new(B).unwrap()];
+        assert!(b.broken_by.is_empty());
+        assert_eq!(b.rebased_onto[0].run_id, RunId::new(A).unwrap());
+        assert!(b.rebased_onto[0].failed_tests.is_empty());
+        assert_eq!(all[&RunId::new(A).unwrap()].broke_runs, 0);
     }
 
     #[test]

@@ -544,7 +544,7 @@ mod stats {
                 "validated_at": "2026-09-23T12:12:00.000Z",
                 "landed_at": "2026-09-23T12:32:00.000Z",
                 "integrate_attempts": 1, "deferrals": {}, "conflict_files": [],
-                "broken_by": [], "broke_runs": 0,
+                "broken_by": [], "rebased_onto": [], "broke_runs": 0,
                 "resume_attempts": [{
                     "attempt": 1, "reason": "unknown",
                     "started_at": "2026-09-23T12:13:00.000Z",
@@ -939,6 +939,145 @@ mod stats {
             })["runs"],
             json!([])
         );
+    }
+
+    /// Task 974: a `verification_failed` deferral onto a landing that
+    /// passed the same command at its own landing does not name it in
+    /// `broken_by` nor count in its `broke_runs`; it is kept in
+    /// `rebased_onto`. A landing that did not pass the command (skipped, or
+    /// another command failed) is named as before, as is any
+    /// `rebase_conflict`.
+    #[test]
+    fn a_verification_failure_onto_a_landing_that_passed_it_names_no_one() {
+        let mut events = Events::default();
+        let test = "cargo test --locked";
+        let integrate = |events: &mut Events, task: i64, run: &str, minute: i64, main: &str| {
+            events.push(
+                task,
+                Some(run),
+                "integration_started",
+                minute,
+                json!({"main": main}),
+            );
+        };
+        let defer = |events: &mut Events,
+                     task: i64,
+                     run: &str,
+                     minute: i64,
+                     main: &str,
+                     code: &str,
+                     command: &str| {
+            events.push(
+                task,
+                Some(run),
+                "integration_deferred",
+                minute,
+                json!({"code": code, "main": main, "command": command,
+                       "failed_tests": ["it::a::b"], "status": "needs_session"}),
+            );
+        };
+        for task in 1..=5 {
+            events.run(task, &format!("r{task}"), "run_claimed", 0);
+        }
+        // r1 lands m1 after passing the tests; r2 lands m2 on it without
+        // verifying (as a landing with no gate).
+        integrate(&mut events, 1, "r1", 1, "m0");
+        events.push(
+            1,
+            Some("r1"),
+            "verification_command",
+            2,
+            json!({"phase": "integration", "command": test, "exit_code": 0}),
+        );
+        events.push(
+            1,
+            Some("r1"),
+            "run_integrated",
+            3,
+            json!({"result_commit": "m1"}),
+        );
+        integrate(&mut events, 2, "r2", 4, "m1");
+        events.push(
+            2,
+            Some("r2"),
+            "run_integrated",
+            5,
+            json!({"result_commit": "m2"}),
+        );
+        // r3 fails the tests onto m1 (passed there), then onto m2 (not).
+        integrate(&mut events, 3, "r3", 6, "m1");
+        events.push(
+            3,
+            Some("r3"),
+            "verification_command",
+            7,
+            json!({"phase": "integration", "command": test, "exit_code": 101}),
+        );
+        defer(&mut events, 3, "r3", 7, "m1", "verification_failed", test);
+        integrate(&mut events, 3, "r3", 10, "m2");
+        defer(&mut events, 3, "r3", 11, "m2", "verification_failed", test);
+        // r4 conflicts onto m1: named as before.
+        integrate(&mut events, 4, "r4", 12, "m1");
+        defer(&mut events, 4, "r4", 12, "m1", "rebase_conflict", test);
+        // r5 fails a command r1 did not pass onto m1: named.
+        integrate(&mut events, 5, "r5", 13, "m1");
+        defer(
+            &mut events,
+            5,
+            "r5",
+            13,
+            "m1",
+            "verification_failed",
+            "cargo clippy",
+        );
+        // They land in the end, so their rows are listed.
+        for task in 3..=5 {
+            let commit = format!("m{task}");
+            events.push(
+                task,
+                Some(&format!("r{task}")),
+                "run_integrated",
+                20 + task,
+                json!({"result_commit": commit}),
+            );
+        }
+        let report = value(&stats(
+            &events.0,
+            &HashMap::new(),
+            at(60),
+            SlotSnapshot::default(),
+            &StatsQuery {
+                full: true,
+                ..Default::default()
+            },
+            &LiveSnapshot::default(),
+        ));
+        let runs = report["runs"].as_array().unwrap();
+        let row = |id: &str| {
+            runs.iter()
+                .find(|row| row["run_id"] == id)
+                .unwrap_or_else(|| panic!("no run {id} in {report}"))
+        };
+        let named = |id: &str| -> Vec<(Value, Value)> {
+            row(id)["broken_by"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|by| (by["run_id"].clone(), by["code"].clone()))
+                .collect()
+        };
+        assert_eq!(
+            row("r3")["rebased_onto"],
+            json!([{"task_id": 1, "run_id": "r1", "landed_at": "2026-09-23T12:03:00.000Z",
+                    "main": "m1", "code": "verification_failed", "failed_tests": ["it::a::b"]}])
+        );
+        assert_eq!(named("r3"), [(json!("r2"), json!("verification_failed"))]);
+        assert_eq!(named("r4"), [(json!("r1"), json!("rebase_conflict"))]);
+        assert_eq!(row("r4")["rebased_onto"], json!([]));
+        assert_eq!(named("r5"), [(json!("r1"), json!("verification_failed"))]);
+        // r1 broke r4 and r5, not r3; r2 broke r3.
+        assert_eq!(row("r1")["broke_runs"], 2);
+        assert_eq!(row("r2")["broke_runs"], 1);
     }
 
     /// `landing_utilization` (goal 72): the `integrate` attempts, landed
