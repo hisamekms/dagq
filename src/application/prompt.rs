@@ -8,6 +8,7 @@
 
 use crate::domain::event_kind;
 use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
+use crate::domain::headless_job::JobAccess;
 use crate::domain::resume::ResumeConfig;
 use crate::domain::review_reason;
 use anyhow::{Context, Result};
@@ -1473,9 +1474,13 @@ fn reason_codes_section(codes: &[(&str, &str)]) -> String {
     )
 }
 
-/// The tools the headless triage may use beyond what needs no permission:
-/// reading only.
-pub const TRIAGE_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
+/// What the headless triage (the recovery job) may do beyond what needs no
+/// permission: read files only (ADR-t1063-1 decision 2).
+pub const TRIAGE_ACCESS: JobAccess = JobAccess::ReadFiles;
+
+/// What the headless review of a run may do: read files only, since the
+/// live worker session owns the worktree (ADR-0027, ADR-t1063-1 decision 2).
+pub const REVIEW_ACCESS: JobAccess = JobAccess::ReadFiles;
 
 /// Bytes of each log, receipt and screen the triage prompt carries (their
 /// ends).
@@ -1895,11 +1900,15 @@ pub(crate) fn revise_request(
     Ok(lines.join("\n"))
 }
 
-/// The tools the headless plan review may use beyond what needs no
-/// permission: reading files, and the dagq CLI (ADR-0044 decision 22). It
-/// runs with the reviewer's role in its environment, like the review, so
-/// the CLI refuses every dagq command that writes.
-pub const PLAN_REVIEW_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Bash(dagq:*)"];
+/// What the headless plan review may do beyond what needs no permission:
+/// read files, and run the dagq CLI (ADR-0044 decision 22, ADR-t1063-1
+/// decision 2). It runs with the reviewer's role in its environment, like
+/// the review, so the CLI refuses every dagq command that writes.
+pub const PLAN_REVIEW_ACCESS: JobAccess = JobAccess::ReadFilesAndQueueCli;
+
+/// What the headless goal review may do: the same as the plan review (read
+/// files, and run the dagq CLI, whose policy lets it only read).
+pub const GOAL_REVIEW_ACCESS: JobAccess = JobAccess::ReadFilesAndQueueCli;
 
 /// Characters of a precedent's question and answer the plan review prompt
 /// and the revise request quote.

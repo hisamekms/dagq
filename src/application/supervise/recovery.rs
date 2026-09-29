@@ -602,7 +602,7 @@ impl RecoveryWatch {
         else {
             return Ok(None);
         };
-        let Some(output) = job.job.poll(&*sv.files)? else {
+        let Some(output) = job.job.poll(&*sv.files, sv.reviewer)? else {
             return Ok(None);
         };
         let job = self.job.take().expect("polled above");
@@ -1049,7 +1049,7 @@ pub(super) fn start_job(
                 program: HeadlessProgram::Job {
                     cwd: dir,
                     prompt,
-                    allowed_tools: TRIAGE_TOOLS,
+                    access: TRIAGE_ACCESS,
                 },
                 session_id,
                 launch: Some(launch),

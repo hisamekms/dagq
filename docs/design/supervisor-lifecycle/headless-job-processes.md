@@ -29,6 +29,10 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
 - jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書く。終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
 - timeoutの停止（`HeadlessJob::stop`）は、killの前に`ProcessControl::descendants`（`ps -U <uid> -o pid=,ppid=,…`の親子の連なり）でjobの子孫を集め、jobをSIGKILLしてwaitした後、子孫もSIGKILLする。`claude -p`のBashとその子がjobより長く残らない。
 
+## 起動と終わりのinterface
+
+jobは[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)のinterfaceでproviderにつながる（task 1064）: 権限は意図（`JobAccess`）で渡し、`HeadlessJob::poll`はjobを起動したprovider（supervisorの`reviewer`）の`job_reply`でstdoutから取り出した最終の返答を返し（失敗なら理由の文）、失敗したjobの分類は`Supervisor::job_failure`（`AgentSignals::job_failure`、共通の`JobFailure`）で読む。
+
 ## 引き継ぎ
 
 - supervisorはループの各passの先頭で（claim・adopt・triage・plan review・goal reviewがjobを立てる前に）、`orphaned_headless_jobs(token, own)`を読む。自分以外のtokenの未完了の行のうち、そのsupervisorが登録に無いか、heartbeatが`HEARTBEAT_TIMEOUT_SECS`（30秒）より古いものが対象。プロセスの起動の直後（execの後なら`rebuild_own_runs`の前）の1回だけは、自分のtokenの未完了の行も対象にする（execされたプロセスは前のbinaryのjobを知らない。handoffはexecの前にjobを止めるので、普通はもう居ない）。

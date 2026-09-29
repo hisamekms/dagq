@@ -368,6 +368,10 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 
 `SwitchPhase`（`start` / `answer` / `revise` / `resume` / `nudge`）は切り替え先で行う呼び出しの種類。runの切り替えは`MAX_PROVIDER_SWITCHES`（2）回まで。
 
+### headless jobの権限の意図と失敗の分類（`JobAccess`・`JobFailure`）
+
+[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定2・4（task 1064）。`domain::headless_job`の閉じた集合。`JobAccess`はheadless jobがproviderに渡す権限の意図（`read_files` / `read_files_and_queue_cli` / `queue_cli`）、`JobFailure`はproviderの実装がjobの失敗を訳す共通の分類（`executable_missing` / `launch_failed` / `authentication` / `usage_limit` / `other`）で、最初の4つは上の`SwitchReason`と同じ値（`JobFailure::switch_reason`）、`authentication` / `usage_limit`は人しか動かせない壁（`JobFailure::wall`）。値の意味とClaude Codeの訳は[Agent provider lifecycle](provider-lifecycle.md#headless-jobのinterface)。
+
 ### 理由の分類コード（`code`）
 
 [ADR-0034](../adr/0034-domain-events-carry-reason-codes-actor-and-configuration-changes.md)の決定1（task 195）。失敗・保留・中断を記録するイベントは、payloadに`code`（`domain::ReasonCode`、snake_caseの閉じた集合）と、コードごとの構造化した値を持つ。今の`reason` / `message` / `error` / `last_error`の自由文は項目も文言も変えずに残す。コードは「なぜ」で、「どの工程で」はイベントのkindが持つ（同じ`backend_timeout`が`runtime_error`にも`screen_capture_failed`にも付く）。足す値にpath・workspace ID・pidなどマシン依存の値は入れない（[ADR-0032](../adr/0032-classify-records-into-domain-events-diagnostics-coordination-and-bodies.md)。既存の項目の`workspace_id`などはそのまま）。schemaは変えず、`task_runs`に列は足さない。コードが入る前のイベントには`code`が無く、読む側はそれを許す。コードの一覧は`ReasonCode::ALL`と`meaning()`が正で、名前を変えるにはADRが要る。

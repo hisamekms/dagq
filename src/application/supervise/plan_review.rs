@@ -22,7 +22,7 @@ use crate::{
         },
         planner_idle_marker,
         prompt::{
-            DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_TOOLS, PlanReviewMaterial,
+            DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_ACCESS, PlanReviewMaterial,
             plan_review_prompt, plan_revise_request, precedent_line,
         },
         screen_idle::{self, Inference, ScreenIdle},
@@ -167,7 +167,7 @@ impl Supervisor<'_> {
                     program: HeadlessProgram::Job {
                         cwd: &self.layout.repo_root,
                         prompt: &prompt,
-                        allowed_tools: PLAN_REVIEW_TOOLS,
+                        access: PLAN_REVIEW_ACCESS,
                     },
                     session_id: Some(&job.session_id),
                     launch: Some(launch),
@@ -383,7 +383,7 @@ impl Supervisor<'_> {
         let Some(watch) = self.plan_review.as_mut() else {
             return Ok(false);
         };
-        let Some(outcome) = watch.headless.poll(&*self.files)? else {
+        let Some(outcome) = watch.headless.poll(&*self.files, self.reviewer)? else {
             return Ok(false);
         };
         let watch = self.plan_review.take().expect("polled above");

@@ -21,13 +21,13 @@ impl AgentProvider for ReviewProvider {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         bail!("the throughput review has no run")
     }
-    fn headless_command(&self, cwd: &Path, prompt: &str, allowed: &[&str]) -> Result<CommandSpec> {
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         assert!(
             prompt.contains("You are the throughput review job"),
             "{prompt}"
         );
         assert!(prompt.contains("Raising throughput: the weekly review"));
-        assert_eq!(allowed, ["Bash(dagq:*)"]);
+        assert_eq!(access, JobAccess::QueueCli);
         let mut command = CommandSpec::new("/bin/sh");
         command.current_dir(cwd).arg("-c").arg(&self.script);
         Ok(command)
@@ -36,7 +36,7 @@ impl AgentProvider for ReviewProvider {
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["no-mcp"]);
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("the throughput review reviews no run")
     }
 }

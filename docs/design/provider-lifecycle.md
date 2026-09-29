@@ -12,6 +12,7 @@ related:
   - adr-t813-1
   - adr-t813-2
   - adr-t813-3
+  - adr-t1063-1
   - plan-headless-worker-spike
   - adr-0040
   - adr-0048
@@ -29,8 +30,9 @@ AgentProvider
   preflight()              -- 実装済み: 実行可能性の確認
   command(run, prompt)     -- 実装済み: wrapperが起動するコマンド
   resume_command(run)      -- 実装済み: needs_sessionのrunを同じ会話で開き直すコマンド
-  headless_command(cwd, prompt, allowed_tools) -- 実装済み: observerのheadless job（runを持たない）
-  review_command(run, prompt) -- 実装済み: supervisorのheadless review（stdoutがverdict JSON）
+  headless_command(cwd, prompt, access) -- 実装済み: runを持たないheadless job（復旧・plan review・goal review・スループットの見直し・observer）。accessは権限の意図（JobAccess）
+  review_command(run, prompt, access) -- 実装済み: supervisorのheadless review（返答がverdict JSON）
+  job_reply(stdout)        -- 実装済み: jobの出力から取り出した最終の返答のtext（既定とClaude Codeはstdoutそのまま）
   review_timeout()         -- 実装済み: headless reviewの上限（既定600秒）
   assign_session_id(command, session_id) -- 実装済み: headless jobのsessionにruntimeが決めたsession_idを付ける（既定は何もしない）
   inbox_command(prompt, plugin_dir) -- 実装済み: inboxのworkspaceが動かすagent（settingsなし）
@@ -42,9 +44,12 @@ AgentSignals
   idle_hook(content)       -- 実装済み: idle markerの内容（background_running、evidenceに記録するhookのフィールド）
   idle_hook_failure(log)   -- 実装済み: debug logの末尾からidleのhookの失敗の行（既定はなし。Claude Codeは`Hook Stop`と`error`を含む最後の行。ADR-t803-1）
   screen_background(screen) -- 実装済み: 画面にbackgroundの処理が動いている表示があるか（既定は`None`＝読めない、backgroundなしとして扱う。Claude Codeは入力欄の下のstatus lineの`3 shells`などの数。画面からのidleの推定がmarkerの`background_running`と同じに扱う。task 823）
+  job_failure(output)      -- 実装済み: 失敗したheadless jobの出力から共通の失敗の分類（JobFailure。既定は`other`）
+
+job_start_failure(error)   -- 口だけ実装済み: jobのプロセスを起動できなかったerrorの共通の分類（applicationの関数。呼ぶのはproviderの切り替えを入れる後続のtask）
 ```
 
-providerのメソッドはapplicationのユースケースが直接呼ばず、`ActorExecutor`（`HostActorExecutor`）が呼ぶ。AI actorの起動は全てexecutorを通り、roleとcapabilityの集合をspecに持ち、環境とClaudeのsettingsはroleごとに1か所で決まる（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。settingsを書くのはadapterの`write_settings`で、どの設定を書くかはapplicationの`agent_settings`が決める。
+providerのメソッドはapplicationのユースケースが直接呼ばず、`ActorExecutor`（`HostActorExecutor`）が呼ぶ。AI actorの起動は全てexecutorを通り、roleとcapabilityの集合をspecに持ち、環境はroleごとに1か所で決まる（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。Claude Codeのsettings（hookと`permissions.deny`）はClaude Codeの実装のものなので、どの設定を書くか（`AgentSettings`、`agent_settings(role, planner origin)`）もそれを書く`write_settings`もadapter（`src/infrastructure/adapters.rs`）が持つ（ADR-t1063-1の決定3、task 1064）。headless jobの側は権限の意図（下の「headless jobのinterface」）だけを渡し、settingsを選ばない。
 
 `AgentSignals`はsupervisorが生きているsessionのagentについて読むもの（画面とidle marker）で、形式がagent固有なのでproviderのadapterが実装する（Claude Codeは`src/infrastructure/claude.rs`）。applicationはkindの名前・画面の抜粋・background workの有無（idle markerからと画面から）だけを受け取り、それがrunにとって何を意味するか（askにする、`/exit`を待つ）を決める。
 
@@ -59,6 +64,26 @@ workerの`command()`と`resume_command()`、runtimeが立てるplanner（`Planne
 `review_command()`（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定2、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）はsupervisorが受理したrunをreviewさせる非対話のコマンドを返す。Claude Code adapterは`claude -p --debug-file <run-dir>/claude-review.log --add-dir <run-dir> --settings <run-dir>/claude-review-settings.json --allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit -- <prompt>`をworktreeで起動する（worktreeは生きているworkerのsessionのものなので、reviewは読むだけ）。`claude-review-settings.json`は`autoMode.environment`だけで`Stop` hookを持たない: reviewの間もworkerのsessionは開いたままなので、reviewがidle markerを書くとsupervisorのidle判定（reviseの往復）を誤らせる。cmux workspaceは作らず、stdin / stdout / stderrはruntimeが繋ぐ（stdinはnull、stdoutとstderrは`<run-dir>/review-<attempt>.out` / `.err`）。runtimeは`review_timeout()`を過ぎたらkillし、stdoutの`{"verdict": "pass" | "revise" | "concern", "reasons": [..], "summary": ".."}`を読む（[supervisor-lifecycle](supervisor-lifecycle/review.md#review-supervisor)）。`headless_command()`と1つのportにしないのは、reviewがrunに属し、そのrun directoryの設定・debug file・`--add-dir`と禁止するtoolを要るのに対し、observerのjobにはrunが無いため。reviewの子プロセスにはruntimeが`DAGQ_ROLE=review-job`・`DAGQ_ACTOR_ID`と`DAGQ_QUEUE`を渡し、CLIはreview jobに読むコマンドだけを許す（[Roles](supervisor-lifecycle/roles.md#actors)）。print mode（`-p`）はfolder trustの判定を飛ばす（[binary から読める判定](#binary-から読める判定)の1）ので、reviewはtrust dialogで止まらない。
 
 headlessのjob（review・triage・plan review・goal review・observer）のsessionには、runtimeが起動前にUUIDを作って`assign_session_id()`で付ける（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定4）。Claude Code adapterは`--session-id <uuid>`をoptionの最後（promptの前の`--`の前）に足す。jobのtranscriptはjobが終わる前から`<session_id>.jsonl`として特定でき、`-p`のstdout（verdictのJSON）の形は変わらない。session_idはjobを始めるevent（`review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`）のpayloadの`session_id`に記録し、同じ値がjobのsessionの区間（`session_opened`）に載る。reviewとobserverはsupervisorとobserverが、triage・plan review・goal reviewはその開始を記録するqueueが作る。jobのsettingsにhookは足さない。session_idを付けられないproviderは既定の実装（何もしない）のままでよく、区間は`session_id`を持つが、transcriptと突き合わせられない。
+
+## headless jobのinterface
+
+[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定2〜4（task 1064）。worker以外のheadless job（review・復旧・plan review・goal review・スループットの見直し・observer）は、providerに次の3つだけでつながり、Claude Codeの道具名・出力の形・失敗の文言を持たない。どのproviderでjobを動かすかの設定と、使えないproviderからの切り替えは後続のtask（今は全てのjobがClaude Code）。
+
+- **権限の意図**（`domain::headless_job::JobAccess`）: jobは`HeadlessProgram::Job { cwd, prompt, access }` / `HeadlessProgram::Review { run, prompt, access }`で、許可の要らないこと（promptを読み、返答する）の他に何をしてよいかを意図で渡す。providerの実装が自分の仕組みに訳す。値:
+
+  | 値 | 意図 | job（定数） | Claude Codeの訳 |
+  | --- | --- | --- | --- |
+  | `read_files` | 自分のディレクトリ（reviewはrunのworktreeとrun directory）のファイルを読むだけ。コマンドは打たない | 復旧job（`TRIAGE_ACCESS`）、review（`REVIEW_ACCESS`） | `--allowedTools Read Grep Glob`。reviewは`--allowedTools Read,Grep,Glob --disallowedTools Bash,Edit,Write,NotebookEdit` |
+  | `read_files_and_queue_cli` | ファイルを読み、`dagq`のCLIを打てる。CLIで何を変えられるかはroleのpolicy（[Authorization](authorization.md)）が決め、plan reviewとgoal reviewには読むコマンドだけを許す | plan review（`PLAN_REVIEW_ACCESS`）、goal review（`GOAL_REVIEW_ACCESS`） | `--allowedTools Read Grep Glob Bash(dagq:*)` |
+  | `queue_cli` | `dagq`のCLIだけを打てる（observerはfindingと`blocked`のaskを書ける） | observer（`observer::ACCESS`）、スループットの見直し（`throughput_review::ACCESS`） | `--allowedTools Bash(dagq:*)` |
+
+  Claude Codeの訳は`claude_tools(access)`（ファイルを読むなら`Read`・`Grep`・`Glob`、CLIを打てるなら`Bash(dagq:*)`）で、reviewはそれを`,`でつないで`--allowedTools`に、`Edit`・`Write`・`NotebookEdit`（CLIを打てなければ`Bash`も）を`--disallowedTools`に渡す。訳の結果はtask 1064より前の道具名の一覧と同じで、`src/infrastructure/adapters.rs`のunit test（`each_jobs_intent_starts_claude_with_the_tools_it_had`・`the_review_starts_claude_with_the_tools_it_had`）と`tests/e2e.rs`のreviewのstubが引数を確かめる。Codexは読み取りだけのsandboxに訳す予定（後続のtask）。
+
+- **最終の返答のtext**（`AgentProvider::job_reply(stdout)`）: jobはverdictや結果を、providerの実装が出力から取り出した最終の返答のtextから読む（`HeadlessJob::poll`がjobを起動したprovider（supervisorの`reviewer`）の`job_reply`を通し、スループットの見直しは`output.log`を通す）。既定とClaude Codeは`claude -p`がtextの出力で最終の返答だけを印字するので、stdoutをそのまま返す（今までと同じ結果）。スループットの見直しの`output.log`はstdoutとstderrを合わせたもの（`Streams::Log`）なので、出力をJSONLで読むproviderをこのjobに乗せるtaskは、stdoutを分けて書くよう直す。verdictの検査と適用はproviderによらず同じ。
+
+- **失敗の共通の分類**（`domain::headless_job::JobFailure`）: `executable_missing`（実行ファイルが無い）、`launch_failed`（起動できない）、`authentication`（loginが切れた）、`usage_limit`（利用上限・rate limit）、`other`（非0の終了、時間切れ、読めないverdictなどの一般の失敗）。最初の4つはworkerの`SwitchReason`（[domain-model](domain-model.md#providerの切り替えの理由switchreason)、task 818）と同じ値で、`JobFailure::switch_reason`で写せる。`other`はproviderを切り替えない。起動のerrorは`application::job_start_failure`が分類する（errorの連なりに`NotFound`のio errorがあれば`executable_missing`、他は`launch_failed`。今はまだどのjobも呼ばず、起動の失敗は今までどおりjobの失敗の文として記録する。使うのは役割ごとのproviderと切り替えを入れる後続のtask）。失敗したjobの出力（stdoutとstderr）は`AgentSignals::job_failure`でprovider（Claude Codeは`infrastructure::claude::job_failure`。`job_wall`の壁を`authentication` / `usage_limit`に、それ以外を`other`に）が分類する。人しか動かせない壁（[Queue hold](supervisor-lifecycle/queue-hold.md)）は`JobFailure::wall`で読む。
+
+- **settings**: jobにhookや`permissions.deny`を持たせるかはproviderの実装が決める。Claude Codeはreviewにだけreviewのsettings（hookなし、roleの`permissions.deny`）を書き、他のjobにはdagqのsettingsを書かない（`AgentSettings::None`。道具は`--allowedTools`が絞る）。読み取りだけのsandboxで動くproviderのjobには代わりを作らない（ADR-t1063-1の決定3）。
 
 ## Claude sessionの区間
 

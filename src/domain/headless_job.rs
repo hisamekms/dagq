@@ -3,7 +3,9 @@
 //! the one that started it died can stop it before it starts its own, and
 //! a job's timeout stops the processes the job started too.
 
-use super::recovery::ProcessInfo;
+use serde::{Deserialize, Serialize};
+
+use super::{DomainError, provider_switch::SwitchReason, queue_hold::Wall, recovery::ProcessInfo};
 
 /// `headless_jobs.kind` of a headless review of a run (ADR-0027).
 pub const REVIEW: &str = "review";
@@ -30,6 +32,76 @@ pub const GONE: &str = "gone";
 /// another process now (or whose start could not be told): it is not
 /// touched.
 pub const NOT_THE_JOB: &str = "not_the_job";
+
+string_enum!(JobAccess {
+    ReadFiles => "read_files",
+    ReadFilesAndQueueCli => "read_files_and_queue_cli",
+    QueueCli => "queue_cli",
+});
+
+/// What a headless job may do, as an intent rather than a provider's tool
+/// names (ADR-t1063-1 decision 2): the job names it, and the provider's
+/// implementation turns it into its own mechanism (Claude Code's allowed
+/// tools, a sandbox). Beyond it the job may do only what needs no
+/// permission (reading its prompt and answering).
+impl JobAccess {
+    /// Whether the job may read the files of its directory (and, for the
+    /// review, the run's).
+    pub const fn reads_files(self) -> bool {
+        matches!(self, Self::ReadFiles | Self::ReadFilesAndQueueCli)
+    }
+
+    /// Whether the job may run the `dagq` CLI; what it may change through
+    /// it is its role's policy (ADR-t728-1), not this.
+    pub const fn runs_queue_cli(self) -> bool {
+        matches!(self, Self::ReadFilesAndQueueCli | Self::QueueCli)
+    }
+}
+
+string_enum!(JobFailure {
+    ExecutableMissing => "executable_missing",
+    LaunchFailed => "launch_failed",
+    Authentication => "authentication",
+    UsageLimit => "usage_limit",
+    Other => "other",
+});
+
+/// Why a headless job did not start or failed, whatever its provider
+/// (ADR-t1063-1 decision 4): the provider's implementation reads its own
+/// output into this. The first four are the worker's reasons for a
+/// provider that cannot be used ([`SwitchReason`], ADR-t813-2 decision 2),
+/// by the same values; `other` is any other failure (a non-zero exit, the
+/// timeout, a verdict that does not parse), which moves no job.
+impl JobFailure {
+    /// The reason a provider cannot be used that this failure is, if any.
+    pub const fn switch_reason(self) -> Option<SwitchReason> {
+        match self {
+            Self::ExecutableMissing => Some(SwitchReason::ExecutableMissing),
+            Self::LaunchFailed => Some(SwitchReason::LaunchFailed),
+            Self::Authentication => Some(SwitchReason::Authentication),
+            Self::UsageLimit => Some(SwitchReason::UsageLimit),
+            Self::Other => None,
+        }
+    }
+
+    /// The wall only a person moves that the job stopped at (task 438): a
+    /// login that ran out, or the usage limit.
+    pub const fn wall(self) -> Option<Wall> {
+        match self {
+            Self::Authentication => Some(Wall::Authentication),
+            Self::UsageLimit => Some(Wall::UsageLimit),
+            Self::ExecutableMissing | Self::LaunchFailed | Self::Other => None,
+        }
+    }
+
+    /// The failure a wall is.
+    pub const fn of_wall(wall: Wall) -> Self {
+        match wall {
+            Wall::Authentication => Self::Authentication,
+            Wall::UsageLimit => Self::UsageLimit,
+        }
+    }
+}
 
 /// What a supervisor that takes over does with the process of a job of a
 /// gone supervisor, from what `ps` says of the pid now.
@@ -123,5 +195,49 @@ mod tests {
         assert_eq!(takeover(true, Some("a"), Some("b")), Takeover::NotTheJob);
         assert_eq!(takeover(true, None, Some("b")), Takeover::NotTheJob);
         assert_eq!(takeover(true, Some("a"), None), Takeover::NotTheJob);
+    }
+
+    #[test]
+    fn job_access_says_what_the_job_may_do() {
+        assert!(JobAccess::ReadFiles.reads_files());
+        assert!(!JobAccess::ReadFiles.runs_queue_cli());
+        assert!(JobAccess::ReadFilesAndQueueCli.reads_files());
+        assert!(JobAccess::ReadFilesAndQueueCli.runs_queue_cli());
+        assert!(!JobAccess::QueueCli.reads_files());
+        assert!(JobAccess::QueueCli.runs_queue_cli());
+        for access in [
+            JobAccess::ReadFiles,
+            JobAccess::ReadFilesAndQueueCli,
+            JobAccess::QueueCli,
+        ] {
+            assert_eq!(access.as_str().parse::<JobAccess>().unwrap(), access);
+        }
+    }
+
+    #[test]
+    fn job_failures_share_the_workers_reasons() {
+        for (failure, reason) in [
+            (
+                JobFailure::ExecutableMissing,
+                SwitchReason::ExecutableMissing,
+            ),
+            (JobFailure::LaunchFailed, SwitchReason::LaunchFailed),
+            (JobFailure::Authentication, SwitchReason::Authentication),
+            (JobFailure::UsageLimit, SwitchReason::UsageLimit),
+        ] {
+            assert_eq!(failure.switch_reason(), Some(reason));
+            assert_eq!(failure.as_str(), reason.as_str());
+        }
+        assert_eq!(JobFailure::Other.switch_reason(), None);
+        assert_eq!(
+            JobFailure::Authentication.wall(),
+            Some(Wall::Authentication)
+        );
+        assert_eq!(JobFailure::UsageLimit.wall(), Some(Wall::UsageLimit));
+        assert_eq!(JobFailure::LaunchFailed.wall(), None);
+        assert_eq!(JobFailure::Other.wall(), None);
+        for wall in [Wall::Authentication, Wall::UsageLimit] {
+            assert_eq!(JobFailure::of_wall(wall).wall(), Some(wall));
+        }
     }
 }

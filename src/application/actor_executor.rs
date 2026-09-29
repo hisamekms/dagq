@@ -4,8 +4,11 @@
 //! it may touch, its resource limits and what to start) and starts it. The
 //! worker and its resume, every planner, the inbox, the review, recovery,
 //! plan review and goal review jobs and the observer are all started here,
-//! and the environment ([`actor_env`]) and the Claude settings
-//! ([`agent_settings`]) of each role are made in this one place.
+//! and the environment ([`actor_env`]) of each role is made in this one
+//! place. What a role's agent is given beyond it (Claude Code's settings,
+//! hooks and `permissions.deny`, or none) is the provider's implementation's
+//! to decide (ADR-t1063-1 decision 3): a headless job names only its intent
+//! ([`JobAccess`]).
 //!
 //! [`HostActorExecutor`] is the only backend: it starts the actor as a
 //! process of this user on this host, through the [`AgentProvider`] (Claude
@@ -41,6 +44,7 @@ use crate::domain::{
     actor::{ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
     actor_model::ActorLaunch,
     authorization::{Capability, grants},
+    headless_job::JobAccess,
     sessions::{self, LAUNCH_ENV},
 };
 
@@ -113,15 +117,21 @@ pub enum WorkspaceCommand<'a> {
 
 /// What a headless job runs.
 pub enum HeadlessProgram<'a> {
-    /// The review of an accepted run (ADR-0027).
-    Review { run: &'a TaskRun, prompt: &'a str },
-    /// A job in `cwd` allowed `allowed_tools` beyond what needs no
-    /// permission: the recovery job, the plan and goal reviews, the
-    /// observer.
+    /// The review of an accepted run (ADR-0027), allowed what `access`
+    /// says.
+    Review {
+        run: &'a TaskRun,
+        prompt: &'a str,
+        access: JobAccess,
+    },
+    /// A job in `cwd` allowed what `access` says beyond what needs no
+    /// permission (ADR-t1063-1 decision 2): the recovery job, the plan and
+    /// goal reviews, the throughput review, the observer. The provider
+    /// turns the intent into its own mechanism.
     Job {
         cwd: &'a Path,
         prompt: &'a str,
-        allowed_tools: &'a [&'a str],
+        access: JobAccess,
     },
 }
 
@@ -340,37 +350,6 @@ pub trait ActorExecutor {
     fn backend(&self) -> ExecutorBackend;
     fn enforcement(&self) -> EnforcementLevel;
     fn spawn(&self, spec: ActorExecutionSpec<'_>) -> Result<ActorHandle>;
-}
-
-/// The Claude settings a role's agent starts with (ADR-t728-1): the one
-/// place that decides them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentSettings {
-    /// None of dagq's: the inbox, and the headless jobs other than the
-    /// review, which the provider's tool flags restrict.
-    None,
-    /// The review's: no hooks, so it never writes the live worker session's
-    /// idle marker.
-    Review,
-    /// A session's: the `Stop` hook writing the idle marker, the
-    /// `UserPromptSubmit` hook, and `permissions.deny` of signals by name;
-    /// with the prompt suggestions off in a session nobody types in.
-    Session { suggestions: bool },
-}
-
-/// The settings of the agent of `role`, a planner's by its `origin`: a
-/// worker and a planner the runtime opened are sessions without
-/// suggestions, a person's planner keeps them, the review has its own, and
-/// the rest none.
-pub fn agent_settings(role: ActorRole, origin: Option<PlannerOrigin>) -> AgentSettings {
-    match role {
-        ActorRole::Worker => AgentSettings::Session { suggestions: false },
-        ActorRole::Planner => AgentSettings::Session {
-            suggestions: origin == Some(PlannerOrigin::Person),
-        },
-        ActorRole::ReviewJob => AgentSettings::Review,
-        _ => AgentSettings::None,
-    }
 }
 
 /// The environment of `actor` on the queue at `queue` (ADR-0026,
@@ -655,14 +634,16 @@ impl ActorExecutor for HostActorExecutor<'_> {
             } => {
                 let provider = self.provider()?;
                 let mut command = match program {
-                    HeadlessProgram::Review { run, prompt } => {
-                        provider.review_command(run, prompt)?
-                    }
+                    HeadlessProgram::Review {
+                        run,
+                        prompt,
+                        access,
+                    } => provider.review_command(run, prompt, access)?,
                     HeadlessProgram::Job {
                         cwd,
                         prompt,
-                        allowed_tools,
-                    } => provider.headless_command(cwd, prompt, allowed_tools)?,
+                        access,
+                    } => provider.headless_command(cwd, prompt, access)?,
                 };
                 if let Some(session_id) = session_id {
                     provider.assign_session_id(&mut command, session_id);
@@ -777,19 +758,27 @@ mod tests {
             command.arg("--resume").arg(run.id().as_str());
             Ok(command)
         }
-        fn review_command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
+        fn review_command(
+            &self,
+            run: &TaskRun,
+            prompt: &str,
+            access: JobAccess,
+        ) -> Result<CommandSpec> {
             let mut command = CommandSpec::new("review");
-            command.arg(run.id().as_str()).arg(prompt);
+            command
+                .arg(run.id().as_str())
+                .arg(access.as_str())
+                .arg(prompt);
             Ok(command)
         }
         fn headless_command(
             &self,
             cwd: &Path,
             prompt: &str,
-            allowed_tools: &[&str],
+            access: JobAccess,
         ) -> Result<CommandSpec> {
             let mut command = CommandSpec::new("job");
-            command.current_dir(cwd).args(allowed_tools).arg(prompt);
+            command.current_dir(cwd).arg(access.as_str()).arg(prompt);
             Ok(command)
         }
         fn inbox_command(&self, prompt: &str, plugin_dir: Option<&Path>) -> Result<CommandSpec> {
@@ -960,7 +949,7 @@ mod tests {
             program: HeadlessProgram::Job {
                 cwd,
                 prompt: "p",
-                allowed_tools: &[],
+                access: JobAccess::QueueCli,
             },
             session_id: None,
             launch: None,
@@ -975,27 +964,6 @@ mod tests {
         let executor = HostActorExecutor::new(Path::new("/q/queue.db"));
         assert_eq!(executor.backend().as_str(), "host");
         assert_eq!(executor.enforcement().as_str(), "advisory");
-    }
-
-    #[test]
-    fn every_role_gets_its_settings_from_one_table() {
-        for role in ActorRole::ALL {
-            let expected = match role {
-                ActorRole::Worker => AgentSettings::Session { suggestions: false },
-                ActorRole::Planner => AgentSettings::Session { suggestions: false },
-                ActorRole::ReviewJob => AgentSettings::Review,
-                _ => AgentSettings::None,
-            };
-            assert_eq!(agent_settings(role, None), expected, "{role:?}");
-        }
-        assert_eq!(
-            agent_settings(ActorRole::Planner, Some(PlannerOrigin::Person)),
-            AgentSettings::Session { suggestions: true }
-        );
-        assert_eq!(
-            agent_settings(ActorRole::Planner, Some(PlannerOrigin::Runtime)),
-            AgentSettings::Session { suggestions: false }
-        );
     }
 
     #[test]
@@ -1362,7 +1330,7 @@ mod tests {
                         program: HeadlessProgram::Job {
                             cwd: dir,
                             prompt: "observe",
-                            allowed_tools: &["Bash(dagq:*)"],
+                            access: JobAccess::QueueCli,
                         },
                         session_id: Some("s1"),
                         launch: Some(&launch),
@@ -1386,6 +1354,8 @@ mod tests {
             .collect();
         assert!(args.contains(&"--session-id".to_owned()), "{args:?}");
         assert!(args.contains(&"--strict-mcp-config".to_owned()), "{args:?}");
+        // The provider gets the job's intent, not a provider's tool names.
+        assert!(args.contains(&"queue_cli".to_owned()), "{args:?}");
         assert_eq!(command.get_current_dir(), Some(dir));
         let env = env_of(command);
         assert_eq!(

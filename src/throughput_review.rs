@@ -28,6 +28,7 @@ use crate::{
         ActorContext, EventFilter, EventId, EventKind, FindingTarget, NewFinding, RunEvent, RunId,
         actor_model::{ActorLaunch, ModelRole},
         event_kind::{ASK_OPENED, RUN_INTEGRATED},
+        headless_job::JobAccess,
         kpi::{DAY_MS, KpiQuery, Period},
         stats::{Cursor, StatsQuery, timestamp_millis},
         throughput_review::{
@@ -42,8 +43,8 @@ use crate::{
 
 /// How long one review may take before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// The tools the job may use: the queue CLI only.
-pub const ALLOWED_TOOLS: &[&str] = &["Bash(dagq:*)"];
+/// What the job may do: run the queue CLI only (ADR-t1063-1 decision 2).
+pub const ACCESS: JobAccess = JobAccess::QueueCli;
 /// The runs landed in the period whose timelines the input carries, the
 /// longest first.
 pub const TIMELINES: usize = 3;
@@ -207,7 +208,7 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
             dagq: &options.dagq,
             timeout: options.timeout,
             what: "the throughput review",
-            allowed_tools: ALLOWED_TOOLS,
+            access: ACCESS,
         },
     );
     let (outcome, exit_code, error) = match ran {
@@ -232,7 +233,14 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
     if outcome == "succeeded" {
         // A review that could not be saved or reported is a failed one:
         // the event says why, and the loop goes on.
-        match report(&mut queue, &dir, &period, reasons.as_deref(), started) {
+        match report(
+            &mut queue,
+            provider,
+            &dir,
+            &period,
+            reasons.as_deref(),
+            started,
+        ) {
             Ok(reported) => {
                 payload["reported_event_id"] = json!(reported.event_id);
                 payload["finding_id"] = json!(reported.finding_id);
@@ -269,12 +277,16 @@ struct Reported {
 /// `throughput_review_reported` for the inbox.
 fn report(
     queue: &mut SqliteQueue,
+    provider: &dyn AgentProvider,
     dir: &Path,
     period: &Window,
     reasons: Option<&[crate::domain::throughput_review::HourlyReason]>,
     started: EventId,
 ) -> Result<Reported> {
     let output = fs::read_to_string(dir.join("output.log")).context("read the review's output")?;
+    // The reply its provider reads out of the output (ADR-t1063-1 decision
+    // 2), whatever the provider.
+    let output = provider.job_reply(&output);
     let ReviewOutput {
         conclusion,
         text,

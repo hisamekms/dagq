@@ -63,7 +63,7 @@ use super::{
     or_none, path_text,
     prompt::{
         GoalPredecessorSummary, HEADLESS_NEVER, Inheritance, PredecessorSummary, RecoveryMaterial,
-        ResumeKind, ResumeRequest, TRIAGE_TOOLS, answer_text, continue_text, ended_run_material,
+        ResumeKind, ResumeRequest, TRIAGE_ACCESS, answer_text, continue_text, ended_run_material,
         prompt, recovery_instruction, recovery_prompt, resume_request, review_prompt,
         revise_mismatch_request, revise_request, siblings_in_progress, stale_receipt_nudge,
         stall_nudge,
@@ -2082,7 +2082,7 @@ impl Supervisor<'_> {
             }
             Phase::Landing(_) => unreachable!("joined above"),
             Phase::Recovery(watch) => {
-                let Some(outcome) = watch.poll(&*self.files)? else {
+                let Some(outcome) = watch.poll(&*self.files, self.reviewer)? else {
                     return Ok(Step::Continue);
                 };
                 let (round, alert, attempt) = (watch.round, watch.alert, watch.attempt);
@@ -2205,7 +2205,7 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::Review(watch) => {
-                let Some(outcome) = watch.poll(&*self.files)? else {
+                let Some(outcome) = watch.poll(&*self.files, self.reviewer)? else {
                     return Ok(Step::Continue);
                 };
                 let attempt = watch.attempt;

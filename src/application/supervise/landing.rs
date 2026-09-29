@@ -3,6 +3,7 @@
 //! landing itself (ADR-0023, ADR-0027).
 
 use super::*;
+use crate::application::prompt::REVIEW_ACCESS;
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
@@ -243,6 +244,7 @@ impl Supervisor<'_> {
                         program: HeadlessProgram::Review {
                             run,
                             prompt: &prompt,
+                            access: REVIEW_ACCESS,
                         },
                         session_id: Some(session_id),
                         launch: Some(launch),

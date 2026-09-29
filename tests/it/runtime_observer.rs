@@ -1,6 +1,7 @@
 //! Runtime tests: The observer.
 use crate::{common, runtime_support};
 use dagq::domain::EventKind;
+use dagq::domain::headless_job::JobAccess;
 
 use runtime_support::*;
 
@@ -20,9 +21,9 @@ impl AgentProvider for ObserverProvider {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         bail!("the observer has no run")
     }
-    fn headless_command(&self, cwd: &Path, prompt: &str, allowed: &[&str]) -> Result<CommandSpec> {
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         assert!(prompt.contains("You are the observer"), "{prompt}");
-        assert_eq!(allowed, ["Bash(dagq:*)"]);
+        assert_eq!(access, JobAccess::QueueCli);
         let mut command = CommandSpec::new("/bin/sh");
         command.current_dir(cwd).arg("-c").arg(&self.script);
         Ok(command)
@@ -35,7 +36,7 @@ impl AgentProvider for ObserverProvider {
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
         command.env("MODEL", format!("{model} {effort}"));
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("the observer reviews no run")
     }
 }
@@ -845,7 +846,7 @@ impl AgentProvider for BreachRecorder {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         bail!("the observer has no run")
     }
-    fn headless_command(&self, cwd: &Path, prompt: &str, _: &[&str]) -> Result<CommandSpec> {
+    fn headless_command(&self, cwd: &Path, prompt: &str, _: JobAccess) -> Result<CommandSpec> {
         let start = prompt.rfind("```json\n").unwrap() + "```json\n".len();
         let end = prompt.rfind("\n```").unwrap();
         let input: Value = serde_json::from_str(&prompt[start..end]).unwrap();
@@ -869,7 +870,7 @@ impl AgentProvider for BreachRecorder {
     }
     fn without_mcp(&self, _: &mut CommandSpec) {}
     fn select_model(&self, _: &mut CommandSpec, _: &str, _: &str) {}
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("the observer reviews no run")
     }
 }

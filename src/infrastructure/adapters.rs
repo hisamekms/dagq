@@ -2,13 +2,11 @@ use crate::{
     application::{
         AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, PluginState,
         ProcessControl, Repository, SupervisorEnvironment, TurnReader, WorkspaceBackend,
-        WorkspaceTags,
-        actor_executor::{AgentSettings, agent_settings},
-        execution::permission_deny,
-        stats::WorkspaceListing,
+        WorkspaceTags, execution::permission_deny, stats::WorkspaceListing,
     },
     domain::{
         ActorRole, CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
+        headless_job::JobAccess,
         landing_branch::{self, LandingBranch, PushTarget, RepositoryConfig, RepositorySettings},
         measure::HostVersions,
         recovery::ProcessInfo,
@@ -2643,28 +2641,37 @@ impl AgentProvider for ClaudeCode {
         Ok(command)
     }
 
-    /// `claude -p` (print mode): no terminal, no trust dialog; a tool that
-    /// needs permission and is not in `allowed_tools` is refused.
-    fn headless_command(
-        &self,
-        cwd: &Path,
-        prompt: &str,
-        allowed_tools: &[&str],
-    ) -> Result<CommandSpec> {
+    /// `claude -p` (print mode): no terminal, no trust dialog, no settings
+    /// of dagq's ([`AgentSettings::None`]); a tool that needs permission
+    /// and is not among the tools of `access` ([`claude_tools`]) is
+    /// refused.
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(&self.executable);
         command.current_dir(cwd).arg("-p");
-        if !allowed_tools.is_empty() {
-            command.arg("--allowedTools").args(allowed_tools);
+        let tools = claude_tools(access);
+        if !tools.is_empty() {
+            command.arg("--allowedTools").args(tools);
         }
         command.arg("--").arg(prompt);
         Ok(command)
     }
+    /// `claude -p` prints the final reply of the job only (its default
+    /// text output): the reply is stdout as it is.
+    fn job_reply(&self, stdout: &str) -> String {
+        stdout.to_owned()
+    }
     /// `claude -p` in the worktree with `claude-review-settings.json` of
     /// the run directory: the worker's settings without its `Stop` hook, so
     /// the review never writes the live session's idle marker. It may only
-    /// read (`Read`, `Grep`, `Glob` allowed; `Bash`, `Edit`, `Write`,
-    /// `NotebookEdit` disallowed); `review.md` is in the run directory.
-    fn review_command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
+    /// do what `access` says (for [`JobAccess::ReadFiles`], `Read`, `Grep`,
+    /// `Glob` allowed; `Bash`, `Edit`, `Write`, `NotebookEdit`
+    /// disallowed); `review.md` is in the run directory.
+    fn review_command(
+        &self,
+        run: &TaskRun,
+        prompt: &str,
+        access: JobAccess,
+    ) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join("claude-review-settings.json");
         write_settings(
@@ -2685,11 +2692,11 @@ impl AgentProvider for ClaudeCode {
             .arg("--settings")
             .arg(&settings)
             .arg("--allowedTools")
-            .arg("Read,Grep,Glob")
+            .arg(claude_tools(access).join(","))
             // The live worker session owns the worktree: the review never
             // edits it or runs commands in it.
             .arg("--disallowedTools")
-            .arg("Bash,Edit,Write,NotebookEdit")
+            .arg(review_disallowed_tools(access).join(","))
             .arg("--")
             .arg(prompt);
         Ok(command)
@@ -2797,6 +2804,66 @@ pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
             "environment": ["$defaults"]
         }
     }))?)
+}
+
+/// The Claude settings a role's agent starts with (ADR-t728-1): the one
+/// place that decides them. They are Claude Code's, so they belong to its
+/// implementation (ADR-t1063-1 decision 3): a headless job names only its
+/// intent ([`JobAccess`]), and another provider gives its jobs its own
+/// mechanism or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSettings {
+    /// None of dagq's: the inbox, and the headless jobs other than the
+    /// review, which their allowed tools ([`claude_tools`]) restrict.
+    None,
+    /// The review's: no hooks, so it never writes the live worker session's
+    /// idle marker.
+    Review,
+    /// A session's: the `Stop` hook writing the idle marker, the
+    /// `UserPromptSubmit` hook, and `permissions.deny` of signals by name;
+    /// with the prompt suggestions off in a session nobody types in.
+    Session { suggestions: bool },
+}
+
+/// The settings of the agent of `role`, a planner's by its `origin`: a
+/// worker and a planner the runtime opened are sessions without
+/// suggestions, a person's planner keeps them, the review has its own, and
+/// the rest none.
+pub fn agent_settings(role: ActorRole, origin: Option<PlannerOrigin>) -> AgentSettings {
+    match role {
+        ActorRole::Worker => AgentSettings::Session { suggestions: false },
+        ActorRole::Planner => AgentSettings::Session {
+            suggestions: origin == Some(PlannerOrigin::Person),
+        },
+        ActorRole::ReviewJob => AgentSettings::Review,
+        _ => AgentSettings::None,
+    }
+}
+
+/// Claude Code's tools a headless job of `access` is allowed beyond what
+/// needs no permission (ADR-t1063-1 decision 2): reading files is `Read`,
+/// `Grep` and `Glob`, the queue CLI `Bash(dagq:*)`.
+pub fn claude_tools(access: JobAccess) -> Vec<&'static str> {
+    let mut tools = Vec::new();
+    if access.reads_files() {
+        tools.extend(["Read", "Grep", "Glob"]);
+    }
+    if access.runs_queue_cli() {
+        tools.push("Bash(dagq:*)");
+    }
+    tools
+}
+
+/// Claude Code's tools the review of `access` is refused outright: it
+/// never edits the worktree the live worker session owns, and runs no
+/// command unless it may run the queue CLI.
+fn review_disallowed_tools(access: JobAccess) -> Vec<&'static str> {
+    let mut tools = Vec::new();
+    if !access.runs_queue_cli() {
+        tools.push("Bash");
+    }
+    tools.extend(["Edit", "Write", "NotebookEdit"]);
+    tools
 }
 
 /// Write the settings of the agent of `role` (a planner's by its
@@ -3403,7 +3470,7 @@ mod tests {
             executable: "/bin/claude".into(),
         };
         let command = claude
-            .headless_command(Path::new("/tmp/obs"), "observe", &["Bash(dagq:*)"])
+            .headless_command(Path::new("/tmp/obs"), "observe", JobAccess::QueueCli)
             .unwrap();
         assert_eq!(command.get_program(), "/bin/claude");
         assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/obs")));
@@ -3411,18 +3478,22 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             ["-p", "--allowedTools", "Bash(dagq:*)", "--", "observe"]
         );
-        let bare = claude
-            .headless_command(Path::new("/tmp"), "p", &[])
-            .unwrap();
-        assert_eq!(bare.get_args().collect::<Vec<_>>(), ["-p", "--", "p"]);
         // A job's session id goes among the options (ADR-0048 decision 4).
         let mut named = claude
-            .headless_command(Path::new("/tmp"), "p", &[])
+            .headless_command(Path::new("/tmp"), "p", JobAccess::QueueCli)
             .unwrap();
         claude.assign_session_id(&mut named, "s-1");
         assert_eq!(
             named.get_args().collect::<Vec<_>>(),
-            ["-p", "--session-id", "s-1", "--", "p"]
+            [
+                "-p",
+                "--allowedTools",
+                "Bash(dagq:*)",
+                "--session-id",
+                "s-1",
+                "--",
+                "p"
+            ]
         );
         // The observer loads no MCP server (ADR-0044).
         claude.without_mcp(&mut named);
@@ -3430,6 +3501,8 @@ mod tests {
             named.get_args().collect::<Vec<_>>(),
             [
                 "-p",
+                "--allowedTools",
+                "Bash(dagq:*)",
                 "--session-id",
                 "s-1",
                 "--strict-mcp-config",
@@ -3442,8 +3515,142 @@ mod tests {
         assert_eq!(plain.get_args().collect::<Vec<_>>(), ["a", "b"]);
     }
 
+    /// Every headless job's intent becomes the same `--allowedTools` its
+    /// Claude job was started with before jobs named intents (task 1064):
+    /// the recovery job reads files, the plan and goal reviews read files
+    /// and run the queue CLI, the observer and the throughput review run
+    /// the queue CLI only.
+    #[test]
+    fn each_jobs_intent_starts_claude_with_the_tools_it_had() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        for (job, access, tools) in [
+            (
+                "recovery",
+                crate::application::prompt::TRIAGE_ACCESS,
+                &["Read", "Grep", "Glob"][..],
+            ),
+            (
+                "plan review",
+                crate::application::prompt::PLAN_REVIEW_ACCESS,
+                &["Read", "Grep", "Glob", "Bash(dagq:*)"][..],
+            ),
+            (
+                "goal review",
+                crate::application::prompt::GOAL_REVIEW_ACCESS,
+                &["Read", "Grep", "Glob", "Bash(dagq:*)"][..],
+            ),
+            ("observer", crate::observer::ACCESS, &["Bash(dagq:*)"][..]),
+            (
+                "throughput review",
+                crate::throughput_review::ACCESS,
+                &["Bash(dagq:*)"][..],
+            ),
+        ] {
+            let command = claude
+                .headless_command(Path::new("/tmp/job"), "p", access)
+                .unwrap();
+            let mut expected = vec!["-p", "--allowedTools"];
+            expected.extend(tools);
+            expected.extend(["--", "p"]);
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{job}");
+        }
+    }
+
+    #[test]
+    fn the_review_starts_claude_with_the_tools_it_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_in(dir.path());
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let command = claude
+            .review_command(&run, "review it", crate::application::prompt::REVIEW_ACCESS)
+            .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let run_dir = dir.path().join("run");
+        let run_dir = run_dir.to_string_lossy();
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--debug-file",
+                &format!("{run_dir}/claude-review.log"),
+                "--add-dir",
+                &run_dir,
+                "--settings",
+                &format!("{run_dir}/claude-review-settings.json"),
+                "--allowedTools",
+                "Read,Grep,Glob",
+                "--disallowedTools",
+                "Bash,Edit,Write,NotebookEdit",
+                "--",
+                "review it",
+            ]
+        );
+        // The review's settings carry no hook (it never writes the live
+        // session's idle marker).
+        let settings: Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join("run/claude-review-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings.get("hooks"), None);
+        // A review that may run the queue CLI keeps `Bash(dagq:*)` and is
+        // refused only the edits.
+        let command = claude
+            .review_command(&run, "p", JobAccess::ReadFilesAndQueueCli)
+            .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("Read,Grep,Glob,Bash(dagq:*)")));
+        assert!(args.contains(&std::ffi::OsStr::new("Edit,Write,NotebookEdit")));
+    }
+
+    #[test]
+    fn a_claude_jobs_reply_is_its_stdout() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let stdout = "Looked at it.\n{\"verdict\":\"pass\",\"summary\":\"ok\"}\n";
+        assert_eq!(claude.job_reply(stdout), stdout);
+    }
+
+    #[test]
+    fn every_role_gets_its_settings_from_one_table() {
+        for role in ActorRole::ALL {
+            let expected = match role {
+                ActorRole::Worker => AgentSettings::Session { suggestions: false },
+                ActorRole::Planner => AgentSettings::Session { suggestions: false },
+                ActorRole::ReviewJob => AgentSettings::Review,
+                _ => AgentSettings::None,
+            };
+            assert_eq!(agent_settings(role, None), expected, "{role:?}");
+        }
+        assert_eq!(
+            agent_settings(ActorRole::Planner, Some(PlannerOrigin::Person)),
+            AgentSettings::Session { suggestions: true }
+        );
+        assert_eq!(
+            agent_settings(ActorRole::Planner, Some(PlannerOrigin::Runtime)),
+            AgentSettings::Session { suggestions: false }
+        );
+    }
+
     fn run(repo_path: Option<&str>) -> TaskRun {
         TaskRun::restore(record(repo_path)).unwrap()
+    }
+
+    /// A run whose worktree and run directory are under `dir`.
+    fn run_in(dir: &Path) -> TaskRun {
+        let run_dir = dir.join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let mut record = record(None);
+        record.worktree_path = Some(dir.join("worktree").to_string_lossy().into_owned());
+        record.run_dir = Some(run_dir.to_string_lossy().into_owned());
+        TaskRun::restore(record).unwrap()
     }
 
     fn record(repo_path: Option<&str>) -> crate::domain::RunRecord {

@@ -396,17 +396,29 @@ pub trait AgentProvider {
     /// sends the resolution request to the terminal once it is up.
     fn resume_command(&self, run: &crate::domain::TaskRun) -> Result<CommandSpec>;
     /// A headless run of the agent for a job without a workspace (ADR-0024
-    /// decision 2): `prompt` in `cwd`, allowed only `allowed_tools` beyond
-    /// what needs no permission. The caller sets the environment and where
-    /// the output goes. A provider without one refuses.
+    /// decision 2): `prompt` in `cwd`, allowed what `access` says and
+    /// nothing else that needs permission (ADR-t1063-1 decision 2). The
+    /// provider turns `access` into its own mechanism, and gives the job
+    /// its own settings or none. The caller sets the environment and where
+    /// the output goes, and reads the job's reply through
+    /// [`AgentProvider::job_reply`]. A provider without one refuses.
     fn headless_command(
         &self,
         cwd: &std::path::Path,
         prompt: &str,
-        allowed_tools: &[&str],
+        access: crate::domain::headless_job::JobAccess,
     ) -> Result<CommandSpec> {
-        let _ = (cwd, prompt, allowed_tools);
+        let _ = (cwd, prompt, access);
         anyhow::bail!("this provider has no headless execution")
+    }
+    /// The final reply of a headless job (from
+    /// [`AgentProvider::headless_command`] or
+    /// [`AgentProvider::review_command`]) in what its process wrote to
+    /// `stdout` (ADR-t1063-1 decision 2): the text the job reads its
+    /// verdict or result from, whatever the provider's output looks like.
+    /// A provider whose job prints only its reply gives `stdout` back.
+    fn job_reply(&self, stdout: &str) -> String {
+        stdout.to_owned()
     }
     /// The agent of a planner session (ADR-0041 decisions 1, 6): an
     /// interactive agent in `planner.cwd` with `planner.prompt` as its first
@@ -431,11 +443,18 @@ pub trait AgentProvider {
     /// observer's job has no run.
     ///
     /// A non-interactive agent in the run's worktree with settings of the
-    /// run directory and `prompt` as its only input, whose
-    /// stdout is the verdict JSON. It must not touch the worker session's
-    /// idle marker. The runtime wires stdin, stdout and stderr, waits at
-    /// most [`AgentProvider::review_timeout`] and reads stdout.
-    fn review_command(&self, run: &crate::domain::TaskRun, prompt: &str) -> Result<CommandSpec>;
+    /// run directory and `prompt` as its only input, allowed what `access`
+    /// says (the review reads files only), whose reply
+    /// ([`AgentProvider::job_reply`]) is the verdict JSON. It must not
+    /// touch the worker session's idle marker. The runtime wires stdin,
+    /// stdout and stderr, waits at most [`AgentProvider::review_timeout`]
+    /// and reads stdout.
+    fn review_command(
+        &self,
+        run: &crate::domain::TaskRun,
+        prompt: &str,
+        access: crate::domain::headless_job::JobAccess,
+    ) -> Result<CommandSpec>;
     /// The agent of the inbox (ADR-0022): an interactive agent with
     /// `prompt` as its first message that loads `plugin_dir`, run as the
     /// command of its workspace, with no settings of dagq's (a person works
@@ -530,6 +549,24 @@ pub trait AgentProvider {
     /// (ADR-t813-1 decision 8). `None` when the provider says none.
     fn turn_permission_mode(&self) -> Option<&'static str> {
         None
+    }
+}
+
+/// Why a headless job's process could not be started, in the classes
+/// shared by every provider (ADR-t1063-1 decision 4): an executable that is
+/// not there is `executable_missing`, any other refusal of the start
+/// `launch_failed`.
+pub fn job_start_failure(error: &anyhow::Error) -> crate::domain::headless_job::JobFailure {
+    use crate::domain::headless_job::JobFailure;
+    let missing = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io| io.kind() == io::ErrorKind::NotFound)
+    });
+    if missing {
+        JobFailure::ExecutableMissing
+    } else {
+        JobFailure::LaunchFailed
     }
 }
 
@@ -687,10 +724,12 @@ pub trait AgentSignals {
             None
         }
     }
-    /// The wall the output of a headless job that failed (its stdout and
-    /// stderr) shows the agent stopped at (task 438).
-    fn job_wall(&self, _output: &str) -> Option<crate::domain::queue_hold::Wall> {
-        None
+    /// Why a headless job that failed did, from its output (its stdout and
+    /// stderr), in the classes shared by every provider (ADR-t1063-1
+    /// decision 4): a login that ran out and the usage limit are the walls
+    /// of task 438. A provider that cannot tell says `other`.
+    fn job_failure(&self, _output: &str) -> crate::domain::headless_job::JobFailure {
+        crate::domain::headless_job::JobFailure::Other
     }
     /// The inputs that switch a live worker session from `from` to `to`
     /// (ADR-0079 decision 5), each typed and submitted in turn before a
@@ -2700,4 +2739,24 @@ pub trait Verifier {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::headless_job::JobFailure;
+
+    #[test]
+    fn a_job_that_did_not_start_is_classed_by_why() {
+        let missing =
+            anyhow::Error::new(io::Error::from(io::ErrorKind::NotFound)).context("launch agent");
+        assert_eq!(job_start_failure(&missing), JobFailure::ExecutableMissing);
+        let refused = anyhow::Error::new(io::Error::from(io::ErrorKind::PermissionDenied))
+            .context("launch agent");
+        assert_eq!(job_start_failure(&refused), JobFailure::LaunchFailed);
+        assert_eq!(
+            job_start_failure(&anyhow::anyhow!("no provider")),
+            JobFailure::LaunchFailed
+        );
+    }
 }

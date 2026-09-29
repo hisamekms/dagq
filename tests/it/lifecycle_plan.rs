@@ -513,7 +513,12 @@ impl dagq::application::AgentProvider for PlannerAgent {
     fn resume_command(&self, _: &TaskRun) -> Result<dagq::application::CommandSpec> {
         bail!("not a run")
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<dagq::application::CommandSpec> {
+    fn review_command(
+        &self,
+        _: &TaskRun,
+        _: &str,
+        _: dagq::domain::headless_job::JobAccess,
+    ) -> Result<dagq::application::CommandSpec> {
         bail!("not a run")
     }
     fn wait_interval(&self) -> Duration {
@@ -558,7 +563,12 @@ impl dagq::application::AgentProvider for NoPlanner {
     fn resume_command(&self, _: &TaskRun) -> Result<dagq::application::CommandSpec> {
         bail!("not a run")
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<dagq::application::CommandSpec> {
+    fn review_command(
+        &self,
+        _: &TaskRun,
+        _: &str,
+        _: dagq::domain::headless_job::JobAccess,
+    ) -> Result<dagq::application::CommandSpec> {
         bail!("not a run")
     }
 }

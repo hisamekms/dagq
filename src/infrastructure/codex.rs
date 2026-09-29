@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::application::{AgentProvider, CommandSpec, TurnReader};
-use crate::domain::{TaskRun, turn::TurnSession};
+use crate::domain::{TaskRun, headless_job::JobAccess, turn::TurnSession};
 
 use super::{adapters::output, codex_turns::CodexTurnReader};
 
@@ -212,7 +212,7 @@ impl AgentProvider for Codex {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         bail!("Codex runs headless only: it has no interactive session")
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         bail!("Codex does not review: the review jobs stay Claude's")
     }
     /// `-m <model>` for a model of Codex's (a claim's Claude model is left
@@ -473,7 +473,11 @@ mod tests {
         );
         assert!(codex.command(&run, "p").is_err());
         assert!(codex.resume_command(&run).is_err());
-        assert!(codex.review_command(&run, "p").is_err());
+        assert!(
+            codex
+                .review_command(&run, "p", JobAccess::ReadFiles)
+                .is_err()
+        );
         assert!(codex.turn_session_from_output());
         assert!(codex.turn_reader().is_ok());
         assert!(

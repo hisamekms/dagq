@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::headless_job::JobFailure;
 use crate::{
     application::{HeadlessJobRecord, NewHeadlessJob},
     domain::headless_job::{Takeover, takeover},
@@ -80,11 +81,14 @@ pub(super) struct HeadlessJob {
 }
 
 impl HeadlessJob {
-    /// `Some` once the job ended: its stdout, or why it failed (a non-zero
-    /// exit, or the timeout, after which the process is killed).
+    /// `Some` once the job ended: its reply, as `provider` (the one that
+    /// started it) reads it out of its stdout (ADR-t1063-1 decision 2), or
+    /// why it failed (a non-zero exit, or the timeout, after which the
+    /// process is killed).
     pub(super) fn poll(
         &mut self,
         files: &dyn RunFiles,
+        provider: &dyn AgentProvider,
     ) -> Result<Option<std::result::Result<String, String>>> {
         let status = match self.child.try_wait()? {
             Some(status) => status,
@@ -107,9 +111,8 @@ impl HeadlessJob {
                 or_none(tail(stderr.trim(), 500))
             ))));
         }
-        Ok(Some(Ok(files
-            .read_to_string(&self.stdout)
-            .unwrap_or_default())))
+        let stdout = files.read_to_string(&self.stdout).unwrap_or_default();
+        Ok(Some(Ok(provider.job_reply(&stdout))))
     }
 
     /// Kill the job's process and the processes it started (a `claude -p`'s
@@ -197,11 +200,18 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Why a headless job failed, in the classes shared by every provider
+    /// (ADR-t1063-1 decision 4), as its provider's adapter reads the job's
+    /// output.
+    pub(super) fn job_failure(&self, job: &HeadlessJob) -> JobFailure {
+        self.signals.job_failure(&job.output(&*self.files))
+    }
+
     /// The wall only a person moves (a login that ran out, the usage
     /// limit) that the output of a headless job that failed shows it
     /// stopped at (ADR-0047 decision 42, task 438).
     pub(super) fn job_wall(&self, job: &HeadlessJob) -> Option<Wall> {
-        self.signals.job_wall(&job.output(&*self.files))
+        self.job_failure(job).wall()
     }
 
     /// Raise a headless job that failed at `wall` (task 438): the job joins
@@ -436,8 +446,12 @@ pub(super) enum ReviewEnd {
 
 impl ReviewWatch {
     /// `Some` once the review ended: its verdict, or why there is none.
-    pub(super) fn poll(&mut self, files: &dyn RunFiles) -> Result<Option<ReviewEnd>> {
-        Ok(self.job.poll(files)?.map(|output| match output {
+    pub(super) fn poll(
+        &mut self,
+        files: &dyn RunFiles,
+        provider: &dyn AgentProvider,
+    ) -> Result<Option<ReviewEnd>> {
+        Ok(self.job.poll(files, provider)?.map(|output| match output {
             Ok(stdout) => match ReviewVerdict::parse(&stdout) {
                 Ok(verdict) => ReviewEnd::Verdict(verdict),
                 Err(error) => ReviewEnd::Unreadable(error),
@@ -462,10 +476,165 @@ impl EndedRecovery {
     pub(super) fn poll(
         &mut self,
         files: &dyn RunFiles,
+        provider: &dyn AgentProvider,
     ) -> Result<Option<std::result::Result<RecoveryVerdict, String>>> {
         Ok(self
             .job
-            .poll(files)?
+            .poll(files, provider)?
             .map(|output| output.and_then(|stdout| RecoveryVerdict::parse(&stdout))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::{CommandSpec, Exit, memory_files::MemoryFiles};
+
+    /// A process that has exited already, as `success` says.
+    struct Ended {
+        success: bool,
+    }
+
+    impl Spawned for Ended {
+        fn id(&self) -> u32 {
+            42
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>> {
+            Ok(Some(Exit {
+                success: self.success,
+                code: Some(if self.success { 0 } else { 1 }),
+                signal: None,
+                description: format!("exit status: {}", if self.success { 0 } else { 1 }),
+            }))
+        }
+        fn kill(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn wait(&mut self) -> Result<Exit> {
+            Ok(self.try_wait()?.expect("ended"))
+        }
+    }
+
+    struct NoProcesses;
+
+    impl ProcessControl for NoProcesses {
+        fn alive(&self, _: u32) -> bool {
+            false
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A provider whose job writes a line of JSON around its reply, the
+    /// way an agent with a JSONL output does.
+    struct Wrapped;
+
+    impl AgentProvider for Wrapped {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn review_command(
+            &self,
+            _: &TaskRun,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn job_reply(&self, stdout: &str) -> String {
+            stdout
+                .lines()
+                .rev()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find_map(|line| line["text"].as_str().map(str::to_owned))
+                .unwrap_or_default()
+        }
+    }
+
+    /// The provider-independent reply of a Claude job.
+    struct Plain;
+
+    impl AgentProvider for Plain {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn review_command(
+            &self,
+            _: &TaskRun,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> Result<CommandSpec> {
+            unreachable!()
+        }
+    }
+
+    fn job(files: &MemoryFiles, success: bool, stdout: &str) -> HeadlessJob {
+        let (out, err) = (PathBuf::from("/job/out"), PathBuf::from("/job/err"));
+        files.put(&out, std::time::SystemTime::UNIX_EPOCH, stdout);
+        files.put(&err, std::time::SystemTime::UNIX_EPOCH, "it broke\n");
+        HeadlessJob {
+            what: "review",
+            child: Box::new(Ended { success }),
+            started: Instant::now(),
+            timeout: Duration::from_secs(60),
+            stdout: out,
+            stderr: err,
+            processes: Arc::new(NoProcesses),
+            record: None,
+        }
+    }
+
+    /// The job reads its verdict from the reply its provider reads out of
+    /// the output (ADR-t1063-1 decision 2), whatever that output is.
+    #[test]
+    fn a_job_reads_the_reply_its_provider_reads_out() {
+        let files = MemoryFiles::default();
+        let verdict = r#"{"verdict":"pass","summary":"ok"}"#;
+        let wrapped = format!(
+            "{}\n{}\n",
+            serde_json::json!({"type": "started"}),
+            serde_json::json!({"type": "reply", "text": verdict})
+        );
+        let reply = job(&files, true, &wrapped)
+            .poll(&files, &Wrapped)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, verdict);
+        // A provider whose job prints its reply only gives stdout back, as
+        // before jobs named their provider's reply.
+        let plain = format!("Looked at it.\n{verdict}\n");
+        let reply = job(&files, true, &plain)
+            .poll(&files, &Plain)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, plain);
+        // A job that failed is its failure, not a reply.
+        let failed = job(&files, false, &wrapped)
+            .poll(&files, &Wrapped)
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(failed.contains("it broke"), "{failed}");
     }
 }

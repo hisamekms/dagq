@@ -11,7 +11,7 @@ use crate::domain::language::with_instruction;
 use crate::{
     application::{
         GoalReviewApply, GoalReviewJob,
-        prompt::{GoalReviewMaterial, PLAN_REVIEW_TOOLS, goal_review_prompt},
+        prompt::{GOAL_REVIEW_ACCESS, GoalReviewMaterial, goal_review_prompt},
     },
     domain::{
         GoalId, Receipt, RunStatus,
@@ -121,7 +121,7 @@ impl Supervisor<'_> {
                     program: HeadlessProgram::Job {
                         cwd: &self.layout.repo_root,
                         prompt: &prompt,
-                        allowed_tools: PLAN_REVIEW_TOOLS,
+                        access: GOAL_REVIEW_ACCESS,
                     },
                     session_id: Some(&job.session_id),
                     launch: Some(launch),
@@ -233,7 +233,7 @@ impl Supervisor<'_> {
         let Some(watch) = self.goal_review.as_mut() else {
             return Ok(false);
         };
-        let Some(outcome) = watch.headless.poll(&*self.files)? else {
+        let Some(outcome) = watch.headless.poll(&*self.files, self.reviewer)? else {
             return Ok(false);
         };
         let watch = self.goal_review.take().expect("polled above");

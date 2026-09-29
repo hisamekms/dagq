@@ -6,6 +6,7 @@ use crate::common;
 pub use crate::common::{Bounded, WithoutActor};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
+pub use dagq::domain::headless_job::JobAccess;
 pub use dagq::{
     VERSION,
     application::{
@@ -371,7 +372,7 @@ impl AgentProvider for TestProvider {
     fn wait_interval(&self) -> Duration {
         TEST_TICK
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("sessions do not review")
     }
     /// Kept in [`session_models`] rather than passed on: `/bin/sh` takes
@@ -1225,7 +1226,7 @@ impl AgentProvider for HeadlessProvider {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         bail!("a headless worker starts no interactive session")
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("sessions do not review")
     }
     fn wait_interval(&self) -> Duration {
@@ -2373,12 +2374,12 @@ impl AgentProvider for TestReviewer {
     // A goal whose tasks all landed is not reviewed by this provider: its
     // goal review cannot start, and the goal stays open (tests/it/goal_review.rs
     // plays the goal review).
-    fn headless_command(&self, cwd: &Path, prompt: &str, tools: &[&str]) -> Result<CommandSpec> {
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         ensure!(
             !prompt.starts_with("You are the goal review"),
             "the test reviewer runs no goal review"
         );
-        assert_eq!(tools, runtime::TRIAGE_TOOLS);
+        assert_eq!(access, runtime::TRIAGE_ACCESS);
         let mut triages = self.triages.lock().unwrap();
         if triages.is_empty() && prompt.contains(LIVE_RECOVERY) {
             triages.push(format!("printf '%s\\n' '{ESCALATE}'"));
@@ -2395,7 +2396,13 @@ impl AgentProvider for TestReviewer {
         command.current_dir(cwd).arg("-c").arg(triages.remove(0));
         Ok(command)
     }
-    fn review_command(&self, run: &TaskRun, prompt: &str) -> Result<CommandSpec> {
+    fn review_command(
+        &self,
+        run: &TaskRun,
+        prompt: &str,
+        access: JobAccess,
+    ) -> Result<CommandSpec> {
+        assert_eq!(access, runtime::REVIEW_ACCESS);
         self.prompts.lock().unwrap().push(prompt.into());
         let mut scripts = self.scripts.lock().unwrap();
         let script = if scripts.len() > 1 {

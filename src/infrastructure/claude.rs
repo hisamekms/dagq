@@ -15,7 +15,10 @@ use serde_json::Value;
 use super::adapters::ClaudeCode;
 use crate::{
     application::{AgentSignals, DialogAnswer, IdleHook, InputSource, KnownDialog},
-    domain::{queue_hold::Wall, stall::BackgroundTask, worker_model::WorkerSession},
+    domain::{
+        headless_job::JobFailure, queue_hold::Wall, stall::BackgroundTask,
+        worker_model::WorkerSession,
+    },
 };
 
 /// `prompt_waiting` carries this many last non-empty lines of the screen.
@@ -240,6 +243,16 @@ pub fn job_wall(output: &str) -> Option<Wall> {
                 }
             })
     })
+}
+
+/// Why a Claude headless job failed, from its output, in the classes
+/// shared by every provider (ADR-t1063-1 decision 4): a login that ran out
+/// is `authentication`, the usage limit `usage_limit` ([`job_wall`]), and
+/// anything else `other`. An executable that is not there or does not start
+/// never gets to write output: the start's error says that
+/// ([`crate::application::job_start_failure`]).
+pub fn job_failure(output: &str) -> JobFailure {
+    job_wall(output).map_or(JobFailure::Other, JobFailure::of_wall)
 }
 
 /// The last non-empty lines of a screen, box borders and the `⎿` / `⏺` of
@@ -535,8 +548,8 @@ impl AgentSignals for ClaudeCode {
         usage_limited(screen)
     }
 
-    fn job_wall(&self, output: &str) -> Option<Wall> {
-        job_wall(output)
+    fn job_failure(&self, output: &str) -> JobFailure {
+        job_failure(output)
     }
 
     /// `/model <model>` when the model changes, then `/effort <effort>`:
@@ -1351,11 +1364,16 @@ worktree on  dagq/68a96a60 took 8h32m49s
             Some(Wall::Authentication)
         );
         assert_eq!(
-            claude.job_wall(
+            claude.job_failure(
                 "{\"type\":\"result\",\"is_error\":true,\"result\":\"API Error: 401 {\\\"type\\\":\\\"authentication_error\\\"} · Please run /login\"}\n"
             ),
-            Some(Wall::Authentication)
+            JobFailure::Authentication
         );
+        assert_eq!(
+            job_failure("Claude AI usage limit reached|1759000000\n"),
+            JobFailure::UsageLimit
+        );
+        assert_eq!(job_failure("no verdict here\n"), JobFailure::Other);
         assert_eq!(
             job_wall(
                 "{\"type\":\"result\",\"is_error\":true,\"result\":\"Claude AI usage limit reached|1759000000\"}"

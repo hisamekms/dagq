@@ -4,8 +4,8 @@ type: design
 title: "認証と利用上限のaskの待ちとanswer"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - adr-0047
@@ -24,12 +24,12 @@ Claude Codeのログインが切れるか利用上限に達すると、新しい
 
 ## 検知（task 438）
 
-文言の型は`infrastructure::claude`の1か所に置き、`AgentSignals`（`auth_required` / `usage_limited` / `screen_wall` / `job_wall`）で読む。壁は`domain::queue_hold::Wall`（`Authentication` / `UsageLimit`）で、askの理由と`subject`、記録するevent（`auth_required` / `usage_limited`）、questionの文面（`AUTH_QUESTION` / `USAGE_LIMIT_QUESTION`）を持つ。askは`NewHold::wall`で作る（optionsは`done` / `cancel_affected`、`asked_by: supervisor`）。
+文言の型は`infrastructure::claude`の1か所に置き、`AgentSignals`（`auth_required` / `usage_limited` / `screen_wall` / `job_failure`）で読む。headless jobの失敗は共通の分類`JobFailure`（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)、task 1064）で返り、`authentication` / `usage_limit`が壁（`JobFailure::wall`）になる。壁は`domain::queue_hold::Wall`（`Authentication` / `UsageLimit`）で、askの理由と`subject`、記録するevent（`auth_required` / `usage_limited`）、questionの文面（`AUTH_QUESTION` / `USAGE_LIMIT_QUESTION`）を持つ。askは`NewHold::wall`で作る（optionsは`done` / `cancel_affected`、`asked_by: supervisor`）。
 
 - **ログインの切れ**（`auth_required`）: 行（枠と`⎿` / `⏺`を除く）が`API Error: 401` / `Invalid API key` / `OAuth token has expired` / `OAuth token revoked`で始まり`/login`を含む
 - **利用上限**（`usage_limited`）: 行が`Claude AI usage limit reached` / `Claude usage limit reached` / `You've hit your limit` / `You've hit your usage limit` / `You've reached your usage limit` / `Credit balance is too low`で始まるか、`<24文字以内の窓の名前> limit reached ∙ resets ...`（`·`も）の形（`5-hour limit reached ∙ resets 3pm`、`Opus weekly limit reached · resets Mon 9am`）
 - **workerの画面**: 画面の最後の30行（`PROMPT_SCAN_LINES`）のどれかがその行なら、dialogの確認・受領の無いidleの判定・待ちの確認（`screen_wall`）が`raise_wall`でrunをaskに足し（無ければ開き）、足したrunに`auth_required` / `usage_limited`（`workspace_id`、`excerpt`、`screen_hash`、`ask_id`）を書く。促しもstalledのaskも出さない。答えの後も画面に残る文言は、直近の同じ種類のeventと同じ`screen_hash`で、そのaskがもうopenでなければ上げ直さない
-- **headless jobの出力**: 失敗したjob（exit非0・時間切れ・読めないverdict。verdictが読めて適用に失敗したものは読まない）のstdoutとstderr（observerは`output.log`）を`job_wall`が行ごとに読み、JSONの行は`result` / `error` / `message`の文字列も読む（先頭の`Error: `は除く）。成功したjobの出力は読まない（作業の中で文言を引用しても壁にしない）。見つかればjobをaskに足し（`Supervisor::raise_job_wall`、observerは`observer::hold_wall`）、`auth_required` / `usage_limited`（`job`、`entry`、`error`の末尾、`ask_id`）をjobのrunに、runの無いjob（plan review・goal review・observer）はqueueに書く。askの控えはそのpassから効く（同じpassで後から始まるはずのplan review・goal reviewも始めない）。jobごとの扱い:
+- **headless jobの出力**: 失敗したjob（exit非0・時間切れ・読めないverdict。verdictが読めて適用に失敗したものは読まない）のstdoutとstderr（observerは`output.log`）をClaude Codeの`job_failure`（中は`job_wall`）が行ごとに読み、JSONの行は`result` / `error` / `message`の文字列も読む（先頭の`Error: `は除く）。成功したjobの出力は読まない（作業の中で文言を引用しても壁にしない）。見つかればjobをaskに足し（`Supervisor::raise_job_wall`、observerは`observer::hold_wall`）、`auth_required` / `usage_limited`（`job`、`entry`、`error`の末尾、`ask_id`）をjobのrunに、runの無いjob（plan review・goal review・observer）はqueueに書く。askの控えはそのpassから効く（同じpassで後から始まるはずのplan review・goal reviewも始めない）。jobごとの扱い:
   - review: `review_failed`も`approve_landing`のaskも作らず、`Phase::ReviewHeld`でsessionを開いたまま待ち、控えが解けたpassでreviewをやり直す。`affected`に載るのはrunではなくreviewのjobなので、`cancel_affected`でもrunは手放さず、askが閉じた後にreviewをやり直す
   - 終わったrunの復旧job: 従来どおり`triage_failed`を書くが、askに居る間は`triage by hand`のattentionにしない。`done`が`job_restarted`で起動し直す
   - 生きているsessionの復旧job: そのalertのask（ADR-t609-1）を開かず、失敗も記録しない。控えが解けた後のpassでalertの次のjobが始まる

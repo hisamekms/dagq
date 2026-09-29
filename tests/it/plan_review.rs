@@ -9,6 +9,7 @@ use crate::common;
 use common::Bounded;
 
 use anyhow::{Result, bail};
+use dagq::domain::headless_job::JobAccess;
 use dagq::{
     application::{
         AgentProvider, CommandSpec, SupervisorEnvironment, TaskStore, WorkspaceBackend,
@@ -195,15 +196,18 @@ impl AgentProvider for StubReviewer {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         unreachable!("no run starts in these tests")
     }
-    fn headless_command(&self, cwd: &Path, prompt: &str, tools: &[&str]) -> Result<CommandSpec> {
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         // The run of an in-progress task is left by a supervisor that is
         // gone: its recovery job cannot start, and it waits (task 635).
-        if tools == runtime::TRIAGE_TOOLS {
+        if access == runtime::TRIAGE_ACCESS {
             bail!("no recovery job runs in these tests");
         }
         // Files and the dagq CLI; the reviewer role in its env makes the
-        // CLI refuse every command that writes.
-        assert_eq!(tools, ["Read", "Grep", "Glob", "Bash(dagq:*)"]);
+        // CLI refuse every command that writes. The plan and the goal
+        // review name the same intent.
+        assert_eq!(access, JobAccess::ReadFilesAndQueueCli);
+        assert_eq!(runtime::PLAN_REVIEW_ACCESS, access);
+        assert_eq!(runtime::GOAL_REVIEW_ACCESS, access);
         self.prompts.lock().unwrap().push(prompt.into());
         // The job has started: its row and its event are in the queue.
         if let Some((db, task)) = self.edit.lock().unwrap().take() {
@@ -236,7 +240,7 @@ impl AgentProvider for StubReviewer {
         command.current_dir(cwd).arg("-c").arg(script);
         Ok(command)
     }
-    fn review_command(&self, _: &TaskRun, _: &str) -> Result<CommandSpec> {
+    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
         unreachable!("no run is reviewed in these tests")
     }
     fn review_timeout(&self) -> Duration {

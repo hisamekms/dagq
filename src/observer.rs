@@ -32,6 +32,7 @@ use crate::{
     domain::{
         ActorContext, ActorRole, AskId, EventId, FindingQuery, NewHold, NoteQuery, RunEvent,
         actor_model::{ActorLaunch, ModelRole},
+        headless_job::JobAccess,
         queue_hold::{HoldJob, Wall},
         stats::StatsQuery,
     },
@@ -50,8 +51,9 @@ pub const HISTORY_LIMIT: usize = 20;
 pub const PROMPT_NOTES: usize = 20;
 /// How long one observer run may take before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// The tools the observer may use beyond reading: the queue CLI only.
-pub const ALLOWED_TOOLS: &[&str] = &["Bash(dagq:*)"];
+/// What the observer may do: run the queue CLI only (ADR-t1063-1 decision
+/// 2), which its role's policy lets write findings and `blocked` asks.
+pub const ACCESS: JobAccess = JobAccess::QueueCli;
 
 /// The supervisor starts the observations on its timer, so their modes
 /// belong to its use case.
@@ -224,7 +226,7 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
             dagq: &options.dagq,
             timeout: options.timeout,
             what: "the observer",
-            allowed_tools: ALLOWED_TOOLS,
+            access: ACCESS,
         },
     ) {
         Ok(Some(0)) => ("succeeded", Some(0), None),
@@ -238,7 +240,9 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         None
     } else {
         let output = fs::read_to_string(dir.join("output.log")).unwrap_or_default();
-        crate::infrastructure::claude::job_wall(&output)
+        // The observer's provider is Claude's until a role may choose
+        // another (goal 73); its adapter reads the shared failure classes.
+        crate::infrastructure::claude::job_failure(&output).wall()
     };
     // A hold that could not be written is logged: the observation's
     // finish is recorded either way.
@@ -547,8 +551,9 @@ pub(crate) struct HeadlessAgent<'a> {
     pub timeout: Duration,
     /// The job as the errors name it.
     pub what: &'a str,
-    /// The tools the agent may use beyond reading.
-    pub allowed_tools: &'a [&'a str],
+    /// What the agent may do, as an intent its provider turns into its
+    /// own mechanism.
+    pub access: JobAccess,
 }
 
 /// Start the agent in `dir` with its output in `output.log`, and wait for
@@ -583,7 +588,7 @@ pub(crate) fn run_agent(
                     program: HeadlessProgram::Job {
                         cwd: dir,
                         prompt,
-                        allowed_tools: agent.allowed_tools,
+                        access: agent.access,
                     },
                     session_id: Some(agent.session_id),
                     launch: Some(agent.launch),
