@@ -14,7 +14,7 @@ Split the goal into tasks, each one session in one worktree. Collect per task:
 
 - title (one line)
 - description (what to change and where; for runtime, the files it mainly touches)
-- acceptance (how a reviewer decides it is done)
+- acceptance (how a reviewer decides it is done). A worker cannot create or drive a throwaway queue (`init`, `add`, `up`, or `doctor` / `stats` / `kpi` run by hand against a real scratch queue): authorization gives it no `queue.admin`, and its state-changing commands reach only its own run and task. So write no such hand steps into a worker's acceptance: make the check a test (an integration test fixture or e2e), or keep it outside the task as a check for the person or the inbox.
 - verification commands (run by `integrate` after its rebase; repeat `--verify`)
 - dependencies (tasks that must be `completed` first, repeat `--depends-on`; to wait for another goal, `--depends-on-goal ID`: claimed only once that goal is closed `achieved`, `reference/inspect.md`)
 - `--context` (why it exists, what to read first)

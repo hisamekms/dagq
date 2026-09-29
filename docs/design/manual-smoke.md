@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude
 status: current
 created: 2026-09-25
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: operations
 related:
   - adr-0036
@@ -29,8 +29,10 @@ related:
 
 本番 queue と固定バイナリ `~/.local/bin/dagq` を汚さないため、すべてを scratch directory に閉じる。
 
+このスモークは人か inbox が行う。worker（dagq の run の session）は使い捨ての queue を作れず操作もできない（authorization の policy は worker に `queue.admin` を与えず、worker の状態を変えるコマンドは自分の run と task にしか効かない。[Authorization](authorization.md)、ADR-t728-1。task 983 で `dagq init` が `authorization_denied` になり、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回せず、実バイナリでの確認は integration test（`tests/it` の fixture）か e2e（`tests/e2e.rs`）に書き、実 queue での手の確認が要るものは receipt の `follow_ups` にして人か inbox に任せる。
+
 - **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う。`target/` のバイナリで本番 queue を開かない（開いただけでは migrate しなくなった（ADR-0045 決定 5）が、状態を変えるコマンドで未着地の遷移を本番に持ち込まない。緩める範囲は ADR-0045 決定 18）。
-- **repository**: `git init` した使い捨て repository。ディレクトリ名は、worker（dagq の run の session）が作るものは `dagq-worker-t<task ID>-<run ID の先頭 8 文字>`（例 `dagq-worker-t566-8d29f958`）、人が手で作るものは `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-worker-t566-8d29f958]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
+- **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
 - **queue**: 全コマンドを `XDG_DATA_HOME=<scratch>/xdg` で、repository を cwd にして打つ（queue は `<scratch>/xdg/dagq/<hash>/queue.db` に解決される）。これを 1 行の wrapper script（例 `tq`）にしておく。
 - **supervisor**: 専用の cmux workspace で `supervise --parallel 2 --claude <agent>` を起動し、`--log-dir` か `tee` で log を残す。`up` は使わない（inbox / planner の workspace と launchd agent を作るため）。`--once` は付けない。
 - **folder trust**: 実 Claude を使う前に、使い捨て repository の root で一度 `claude` を起動して trust dialog を承認する。worktree で dialog が出るかは親 repository の root が信頼済みかで決まる（[provider-lifecycle](provider-lifecycle.md#trust-prompt)）。承認しないと、最初の承認より前に起動した run session がすべて dialog で止まる。
@@ -87,7 +89,7 @@ run の session の作業の内訳（task 514。[provider-lifecycle](provider-li
 
 ### 手順
 
-1. [隔離](#隔離)のとおり scratch に使い捨て repository（`cargo init --lib` の crate に、15 秒 sleep する `#[test]` を 1 本足して commit。background の `cargo test` に時間がかかるようにする）、bare の `origin`、`XDG_DATA_HOME=<scratch>/xdg` と scratch のバイナリで打つ wrapper（`tq`）を用意し、trust dialog を承認しておく。wrapper は `env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` を付ける（dagq の run の session から打つと、本番 queue の worker の env を持っているため）。
+1. [隔離](#隔離)のとおり scratch に使い捨て repository（`cargo init --lib` の crate に、15 秒 sleep する `#[test]` を 1 本足して commit。background の `cargo test` に時間がかかるようにする）、bare の `origin`、`XDG_DATA_HOME=<scratch>/xdg` と scratch のバイナリで打つ wrapper（`tq`）を用意し、trust dialog を承認しておく。wrapper は `env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` を付ける（inbox や planner の session の terminal は本番 queue の `DAGQ_ROLE`（`inbox` / `planner`）と `DAGQ_QUEUE` を workspace の env に持つので、そのまま打つと scratch の queue の操作がその role の権限と記録で扱われる。人が scratch の queue を自分（`user`）として操作するために外すもので、worker の拒否を迂回するためのものではない。このスモークを worker は行わない（[隔離](#隔離)））。
 2. `tq add` で task を 1 件登録し（`--verify 'cargo test'`、`--kind runtime`）、`tq ready ID --bypass-review`。description で worker に順番どおり次をさせる: (a) `cargo build`、`cargo test`、`cargo test --test does_not_exist`（失敗する）をそれぞれ `run_in_background: true` で起動して完了の通知を待つ、(b) Agent tool を `run_in_background: true` で起動して完了の通知を待つ、(c) foreground で 15 秒以上かかるコマンド（`cargo test --release`）を実行し、その間に人が Ctrl-B で background に移す、(d) foreground で `cargo fmt && cargo test`、(e) commit と receipt。`sleep N && ...` は Claude Code の harness が `Blocked: sleep N followed by: ...` で拒むので使わない。
 3. 専用の cmux workspace で `tq supervise --parallel 1 --claude <実体の path> --log-dir ... --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。
 4. run が閉じたら次を集める: `tq events --all --full --run RUN`（`session_closed` の `work` と `session_exited` の `work_breakdown`）、run dir の `worktime.jsonl`、`tq stats --full`（`runs[].work_breakdown` と `overall.work_breakdown`）、`tq timeline RUN`（`commands`）、session の transcript（`~/.claude/projects/<cwd を符号化した名前>/<session_id>.jsonl`。worker の session_id は run ID と同じ）。
