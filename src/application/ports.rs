@@ -2626,6 +2626,24 @@ impl<
 {
 }
 
+/// One file's identity and change times as [`Repository::landing_branch_stamp`]
+/// reads them; `None` in [`LandingBranchStamp`] is a file that is not there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStamp {
+    pub modified: Option<SystemTime>,
+    pub len: u64,
+    /// The inode and the status change time (unix), which a rename of a
+    /// lock file or an edit in place within the modification time's
+    /// granularity still changes.
+    pub inode: u64,
+    pub changed: (i64, i64),
+}
+
+/// The files the landing branch is resolved from, each with its
+/// [`FileStamp`] (task 1078).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingBranchStamp(pub Vec<(PathBuf, Option<FileStamp>)>);
+
 /// The Git operations `integrate` and the supervisor use on the repository
 /// the queue is bound to and on its run worktrees. Commits are named by
 /// their full SHA; a failed Git command is an error with Git's message.
@@ -2634,6 +2652,13 @@ pub trait Repository {
     /// a repository that does not resolve one lands on `main`.
     fn landing_branch(&self) -> Result<crate::domain::landing_branch::LandingBranch> {
         Ok(crate::domain::landing_branch::LandingBranch::main())
+    }
+    /// A stamp of the files [`Self::landing_branch`] reads, taken without
+    /// starting Git (task 1078): equal stamps mean the resolution would
+    /// read the same inputs. `None` when the repository cannot tell, and
+    /// the caller resolves every time.
+    fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
+        None
     }
     /// `[repository]` of the main checkout's `dagq.toml`, read again on
     /// every call; a repository without one has the default (`origin`,

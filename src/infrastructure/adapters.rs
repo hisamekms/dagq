@@ -1,8 +1,8 @@
 use crate::{
     application::{
-        AgentProvider, CommandSpec, DetachedRefusal, MainRemote, PlannerCommand, PluginState,
-        ProcessControl, Repository, SupervisorEnvironment, TurnReader, WorkspaceBackend,
-        WorkspaceTags, execution::permission_deny, stats::WorkspaceListing,
+        AgentProvider, CommandSpec, DetachedRefusal, FileStamp, LandingBranchStamp, MainRemote,
+        PlannerCommand, PluginState, ProcessControl, Repository, SupervisorEnvironment, TurnReader,
+        WorkspaceBackend, WorkspaceTags, execution::permission_deny, stats::WorkspaceListing,
     },
     domain::{
         ActorRole, CommitSha, PlannerOrigin, Task, TaskId, TaskRun,
@@ -573,6 +573,18 @@ pub fn run_shell_to_log(
     })
 }
 
+/// `path`'s [`FileStamp`], `None` when it is not there (or not readable).
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).ok()?;
+    Some(FileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+        inode: metadata.ino(),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
 /// Canonical Git common directory of the repository containing `path`. Every
 /// worktree of a repository, including run worktrees, resolves to the same one.
 pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
@@ -792,6 +804,57 @@ impl GitRepository {
     /// what could not be resolved and points at `[repository]`.
     pub fn landing_branch(&self) -> Result<LandingBranch> {
         self.resolve_landing_branch(&self.repository_config()?)
+    }
+
+    /// A stamp of what [`Self::landing_branch`] reads, from the files'
+    /// metadata alone (task 1078): the main checkout's `dagq.toml`, the
+    /// repository's `config`, `packed-refs` and reftable list, the push
+    /// remote's HEAD, and the loose refs of the branches the resolution
+    /// may test (the configured one, or the one the remote's HEAD names,
+    /// `main` and `master`). Which remote and which branches come from the
+    /// files as they are now, so a change of them changes the paths too.
+    /// `None` without a main checkout.
+    pub fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
+        let checkout = self.checkout().ok()?;
+        // A file that does not parse resolves to an error; its own stamp
+        // below tells when it changes.
+        let config = load_repository_config(checkout).unwrap_or_default();
+        let remote = config.remote();
+        let common = &self.common_dir;
+        let remote_head = common.join("refs/remotes").join(remote).join("HEAD");
+        let branches = match &config.branch {
+            Some(name) => vec![name.clone()],
+            None => {
+                let prefix = format!("ref: refs/remotes/{remote}/");
+                fs::read_to_string(&remote_head)
+                    .ok()
+                    .and_then(|text| text.trim().strip_prefix(&prefix).map(str::to_owned))
+                    .into_iter()
+                    .chain(["main".to_owned(), "master".to_owned()])
+                    .collect()
+            }
+        };
+        let paths = [
+            checkout.join(crate::infrastructure::run_env::CONFIG_FILE_NAME),
+            common.join("config"),
+            common.join("packed-refs"),
+            common.join("reftable/tables.list"),
+            remote_head,
+        ]
+        .into_iter()
+        .chain(
+            branches
+                .iter()
+                .map(|name| common.join("refs/heads").join(name)),
+        );
+        Some(LandingBranchStamp(
+            paths
+                .map(|path| {
+                    let stamp = file_stamp(&path);
+                    (path, stamp)
+                })
+                .collect(),
+        ))
     }
 
     fn resolve_landing_branch(&self, config: &RepositoryConfig) -> Result<LandingBranch> {
@@ -1762,6 +1825,9 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
 impl Repository for GitRepository {
     fn landing_branch(&self) -> Result<LandingBranch> {
         GitRepository::landing_branch(self)
+    }
+    fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
+        GitRepository::landing_branch_stamp(self)
     }
     fn repository_config(&self) -> Result<RepositoryConfig> {
         GitRepository::repository_config(self)
@@ -3352,6 +3418,64 @@ mod tests {
         fs::write(dir.path().join("dagq.toml"), "[repository]\nbranch = 1\n").unwrap();
         let error = format!("{:#}", git.main_head().unwrap_err());
         assert!(error.contains("[repository]"), "{error}");
+    }
+
+    /// The stamp of the landing branch's inputs (task 1078) stays the same
+    /// while nothing it reads changes, and changes with the landing branch
+    /// deleted or created, a new commit on it, packed refs, the remote's
+    /// HEAD, the branch it names, and `dagq.toml`.
+    #[test]
+    fn the_landing_branch_stamp_follows_what_the_resolution_reads() {
+        let (dir, git) = committed_repository();
+        let run = |args: &[&str]| assert!(git_in(dir.path(), args).status.success(), "{args:?}");
+        let mut last = git.landing_branch_stamp().unwrap();
+        assert_eq!(git.landing_branch_stamp().unwrap(), last);
+        // Reading the branch, the log or the status changes nothing.
+        run(&["log", "-1"]);
+        run(&["status", "--short"]);
+        git.landing_branch().unwrap();
+        assert_eq!(git.landing_branch_stamp().unwrap(), last);
+        let changed = |step: &str, last: &mut LandingBranchStamp| {
+            let now = git.landing_branch_stamp().unwrap();
+            assert_ne!(&now, last, "{step}");
+            *last = now;
+        };
+        run(&["branch", "-m", "main", "trunk"]);
+        changed("main renamed away", &mut last);
+        run(&["branch", "master", "trunk"]);
+        changed("master created", &mut last);
+        run(&["update-ref", "-d", "refs/heads/master"]);
+        changed("master deleted", &mut last);
+        // origin's HEAD names trunk, then trunk moves on.
+        run(&["update-ref", "refs/remotes/origin/trunk", "trunk"]);
+        run(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ]);
+        changed("origin's HEAD set", &mut last);
+        run(&["commit", "-q", "--allow-empty", "-m", "on trunk"]);
+        changed("a commit on the branch origin's HEAD names", &mut last);
+        run(&["pack-refs", "--all"]);
+        changed("refs packed", &mut last);
+        run(&["update-ref", "-d", "refs/heads/trunk"]);
+        changed("a packed branch deleted", &mut last);
+        run(&[
+            "update-ref",
+            "refs/heads/trunk",
+            "refs/remotes/origin/trunk",
+        ]);
+        changed("the branch created again", &mut last);
+        fs::write(
+            dir.path().join("dagq.toml"),
+            "[repository]\nbranch = \"dev\"\n",
+        )
+        .unwrap();
+        changed("dagq.toml names a branch", &mut last);
+        run(&["update-ref", "refs/heads/dev", "trunk"]);
+        changed("the named branch created", &mut last);
+        assert_eq!(git.landing_branch().unwrap().name, "dev");
+        assert_eq!(git.landing_branch_stamp().unwrap(), last);
     }
 
     /// `landed_changes` reads the paths of many commits in one `git log`,

@@ -162,6 +162,12 @@ pub const SESSION_TURNS_INTERVAL: Duration = Duration::from_secs(600);
 /// the run ended and nobody leases it ([`cleanup`]).
 pub(super) const RUN_RUNNER_FILE: &str = "runner";
 
+/// The longest a pass keeps the landing branch's last resolution while the
+/// stamp of its inputs stays the same (task 1078): a bound for a change the
+/// stamp misses, such as an edit in place that keeps the size, the inode
+/// and a coarse modification time.
+pub const LANDING_BRANCH_RECHECK: Duration = Duration::from_secs(5);
+
 /// How far back the daily observation reads.
 pub const DAILY_WINDOW_SECS: i64 = 24 * 60 * 60;
 
@@ -216,6 +222,9 @@ pub struct LoopSettings {
     pub tick: Duration,
     /// Pause between two looks for claimable work while no run is active.
     pub idle_poll: Duration,
+    /// The longest a pass keeps the landing branch's resolution while its
+    /// inputs look unchanged ([`LANDING_BRANCH_RECHECK`]).
+    pub landing_recheck: Duration,
     /// How often the registration and the leases are heartbeat
     /// ([`HEARTBEAT_INTERVAL`]; tests shorten it).
     pub heartbeat_interval: Duration,
@@ -633,6 +642,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         run_env_missing: false,
         candidates: None,
         landing_unresolved: false,
+        landing_stamp: None,
         queue_hold: None,
         provider_holds: Vec::new(),
         moved: HashMap::new(),
@@ -809,6 +819,11 @@ struct Supervisor<'a> {
     /// (ADR-t615-1): nothing is claimed and no passed run lands until it
     /// does.
     landing_unresolved: bool,
+    /// The stamp of the landing branch's inputs taken before its last
+    /// resolution, and when (task 1078): a pass whose stamp is the same,
+    /// within [`LANDING_BRANCH_RECHECK`], keeps that resolution without
+    /// starting Git.
+    landing_stamp: Option<(crate::application::LandingBranchStamp, Instant)>,
     /// The open authentication or usage-limit ask read at the top of this
     /// pass (task 437): no new run is claimed and no headless job starts
     /// while it holds.
@@ -1090,7 +1105,7 @@ impl Supervisor<'_> {
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
-            self.check_landing_branch();
+            self.check_landing_branch(options.landing_recheck);
             self.mark_run_env_change()?;
             // Every pass, before any claim: a change of `[conflicts]` takes
             // effect without a restart (ADR-0080).
@@ -1360,7 +1375,7 @@ impl Supervisor<'_> {
             let base = match self.repository.main_head() {
                 Ok(base) => base,
                 Err(error) => {
-                    self.check_landing_branch();
+                    self.resolve_landing_branch();
                     if self.landing_unresolved {
                         break;
                     }
@@ -1507,9 +1522,30 @@ impl Supervisor<'_> {
         self.run_env_missing = !check.missing().is_empty();
         Ok(())
     }
-    /// Resolve the landing branch (ADR-t615-1) and hold claims and
-    /// landings while it does not resolve, warning when that changes.
-    fn check_landing_branch(&mut self) {
+    /// Resolve the landing branch (ADR-t615-1) when it did not resolve at
+    /// the last resolution, its inputs changed since then, or `recheck`
+    /// passed,
+    /// and hold claims and landings while it does not resolve (task 1078).
+    /// The stamp is taken before resolving, so a change during the
+    /// resolution differs from it at the next pass.
+    fn check_landing_branch(&mut self, recheck: Duration) {
+        let stamp = self.repository.landing_branch_stamp();
+        // Only a resolution that succeeded is kept: one that failed, maybe
+        // for a moment (a Git that did not start), is tried again at the
+        // next pass, so the claims resume there once it resolves.
+        if let (Some(stamp), Some((last, at))) = (&stamp, &self.landing_stamp)
+            && !self.landing_unresolved
+            && stamp == last
+            && at.elapsed() < recheck
+        {
+            return;
+        }
+        self.landing_stamp = stamp.map(|stamp| (stamp, Instant::now()));
+        self.resolve_landing_branch();
+    }
+    /// Resolve the landing branch now and hold claims and landings while it
+    /// does not resolve, warning when that changes.
+    fn resolve_landing_branch(&mut self) {
         match self.repository.landing_branch() {
             Ok(branch) => {
                 if self.landing_unresolved {

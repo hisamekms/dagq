@@ -254,6 +254,11 @@ pub struct SuperviseOptions {
     /// Pause between two looks for claimable work while no run is active;
     /// tests shorten it (`supervise --idle-poll-ms`).
     pub idle_poll: Duration,
+    /// The longest a pass keeps the landing branch's resolution while its
+    /// inputs look unchanged ([`supervisor::LANDING_BRANCH_RECHECK`]);
+    /// tests lengthen it to see a change caught by the inputs alone
+    /// (task 1078).
+    pub landing_recheck: Duration,
     /// How often the supervisor heartbeats its registration and leases;
     /// tests shorten it (`supervise --heartbeat-interval-ms`, task 1048).
     pub heartbeat_interval: Duration,
@@ -460,6 +465,7 @@ impl SuperviseOptions {
             utc_offset: clock::local_utc_offset,
             tick: TICK,
             idle_poll: IDLE_POLL,
+            landing_recheck: supervisor::LANDING_BRANCH_RECHECK,
             heartbeat_interval: supervisor::HEARTBEAT_INTERVAL,
             sweep_interval: SWEEP_INTERVAL,
             generators: clock::system(),
@@ -529,6 +535,7 @@ impl SuperviseOptions {
             utc_offset: self.utc_offset,
             tick: self.tick,
             idle_poll: self.idle_poll,
+            landing_recheck: self.landing_recheck,
             heartbeat_interval: self.heartbeat_interval,
             sweep_interval: self.sweep_interval,
             stall,

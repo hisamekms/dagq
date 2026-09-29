@@ -97,6 +97,23 @@ push = false
 - **`doctor`**: 状態を変えずに同じ解決を行い、`repository`の欄に上の欄と、解決できなければ`error`（`up`のerrorと同じ文面）を出す。既定の出力にも出す。
 - **ほかのコマンド**: `supervise`（起動時）・`integrate`など着地先を読むコマンドは、解決できなければ同じ文面のerrorで止まる（既定のbranchを仮定しない）。`stats`は`conflict_hotspots`の`history`を`unavailable`（`reason`に同じ文面）にして残りを出す。`plan`・`rebind`・`review`は着地先を読まない。supervisorが走っている間に解決できなくなったときは、pass の先頭の検査（`check_landing_branch`）で変化を1度warnし、解決するまでclaimと着地（review が pass した run の着地と、`approve_landing`の`land`の答えで着地の列に並んだrunの着地の開始（`start_approved_landings`））を始めない（`[run.env]`のプログラムが見つからないときと同じ扱い）。`land`の答えそのものは解決しない間もその場で適用してaskを閉じ、runを列に並べる（task 949、[Review](review.md#review-supervisor)の6）。
 
+### supervisorが確かめる頻度と条件
+
+pass の先頭の`check_landing_branch`は、毎passで`git`を起動しない（task 1078）。解決の入力のファイルの印（`GitRepository::landing_branch_stamp`。`Repository::landing_branch_stamp`）を`git`なしで読み、前の解決が解決できていて、前に解決したときの印と同じで、前の解決から`LANDING_BRANCH_RECHECK`（5秒）が経っていなければ、前の解決の結果をそのまま使う。印が変わったpass、5秒が経ったpass、前の解決が解決できなかった間の全てのpassでは、今までどおり`landing_branch`で解決し直す（`git symbolic-ref`と`git show-ref --verify`）。解決できない間は毎passで解決し直すので、一時の失敗（`git`が起動できなかったなど）でも、入力を見落としても、解決できるようになった次のpassで再開する。印は解決の前に読むので、解決の途中で入力が変わると、次のpassの印が前の印と違い、もう一度解決する。
+
+印に入れるファイル（それぞれの有無と、更新時刻・大きさ・inode・状態変更時刻（ctime））:
+
+- main checkoutの`dagq.toml`（`[repository]`の`branch`・`remote`）
+- Gitのcommon dirの`config`・`packed-refs`・`reftable/tables.list`（reftableのrepositoryではrefが全部ここに入る）
+- pushのremoteのHEAD（`refs/remotes/<remote>/HEAD`。remoteは`dagq.toml`を今読んだもの。読めなければ`origin`）
+- 解決が確かめうるbranchのloose ref（`refs/heads/<name>`）: `branch`を書いていればそのbranch、書いていなければremoteのHEADが今指すbranchと`main`・`master`
+
+どのファイルを見るか（remoteとbranch）も毎pass今の`dagq.toml`とremoteのHEADから決め直すので、指定やremoteのHEADが変わると見るファイルも変わる。Gitはrefの作成・削除・更新をlock fileのrenameで行うのでinodeが変わり、`pack-refs`は`packed-refs`を書き換える。branchの削除・そのbranchへのcommit・remoteのHEADの付け替え・`dagq.toml`の書き換えは、次のpassの印を変える（`src/infrastructure/adapters.rs`の`the_landing_branch_stamp_follows_what_the_resolution_reads`と、`tests/it/landing_branch.rs`の`a_running_supervisor_follows_each_change_of_the_landing_branch`が、見直しの間隔を1時間にしたsupervisorで、この変化のそれぞれで次のpassに止まり・再開することを確かめる）。
+
+5秒の上限を残すのは、印が見落としうる変化があるため: 大きさもinodeも変えないその場の書き換え（editorでない`dd`など）が、更新時刻と状態変更時刻の粒度（HFS+などでは1秒）の中で2回起きた場合。上限があるので、ADR-t615-1の「解決しない間はclaimと着地を止める」は、見落としがあっても5秒以内に当たる（再開の側は上のとおり次のpass）。そのほかに印が見ないもの（`refs/heads/<name>`自身がsymbolic refのときの指す先、`config.worktree`とincludeされたconfig）も、この上限で拾う。productionのsupervisorでも、1 passの`git`の起動が2本減る（5秒に1回は解決し直す）。
+
+main checkoutの無いrepository（印を読めない）と、`Repository`の既定の実装（testのfake）は、今までどおり毎passで解決する。変えないもの: 着地ごとに1度の解決（task 667）、`fill_slots`のclaimで`main_head`が失敗したときの解決し直し（task 1018。印に依らずその場で解決する）、`up`のpreflight、`doctor`、supervisorの起動時の解決。
+
 ## 既存のqueueの互換
 
 `[repository]`の無い`dagq.toml`（とファイルの無いrepository）では、`origin`のHEADが`main`を指すか、`main`が在れば着地先は`main`、pushは`origin`へ行う。dagq自身のrepositoryはこれに当たり、設定を足さずに今までと同じ振る舞いになる。DBのschemaとeventのkindは変わらない（payloadに`branch`が増えるだけ）。

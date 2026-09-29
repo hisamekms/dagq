@@ -4,7 +4,7 @@ type: plan
 title: 遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり
 status: active
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-09-30
 owners:
   - hisamekms
 tags:
@@ -533,3 +533,17 @@ lifecycle_install::a_handoff_looks_again_…は`common::lifecycle`のfixtureと`
 - G2はproductionの振る舞い（着地のbranchを確かめる頻度）に触れるので、`ADR-t615-1`と照らしてから変える。productionのsupervisorでも、passごとの`git`の2本が減る。
 - G4は、retryを確かめるtestと、verdictのないreviewの後のaskを確かめるtestを弱めないことを先に確かめる。
 - どの候補も、前後の比較は1章の手順（直近のintegrateのlog、load1を併記）と、この章の手順（30本、instrumentあり、6並列）の両方で行う。
+
+### G2の結果（task 1078）
+
+`check_landing_branch`は、解決の入力のファイルの印が変わったpassか、前の解決から5秒が経ったpassだけで`git`を起動する形になった（[Landing branch](../design/supervisor-lifecycle/landing-branch.md#supervisorが確かめる頻度と条件)）。
+
+- 2026-09-30 06:46〜06:48 JSTに、このrunのworktreeで測った。対象は30本のうちの6本（`runtime_waiting_stages::a_question_while_resuming_…`・`runtime_resume::a_request_lost_twice_…`・`runtime_review::a_run_the_supervisor_lands_closes_its_landing_ask`・`runtime_stall::a_session_idle_after_its_nudge_…`・`worker_escalation::missing_evidence_and_a_scope_violation_…`・`runtime_precheck::precheck_conflicts_up_to_…`）で、`cargo nextest run --locked --test it`（instrumentなし、6並列）である。
+- commitしない計測用の変更で、`check_landing_branch`の呼び出し（pass）を数え、envで前の形（毎passで解決する）に切り替えた。`git`の起動は、この章の手順と同じくPATHの先頭のwrapper（子のstubの`git`も含む）で数えた。前と後を交互に3回ずつ流した。
+
+| 変種 | pass | `git`の起動 | うち`symbolic-ref`と`show-ref` | passあたりの`git` | passあたりの`symbolic-ref`と`show-ref` | 6本のSummary |
+| --- | --- | --- | --- | --- | --- | --- |
+| 前（毎passで解決） | 317・295・309 | 1,951・1,896・1,926 | 901・857・885 | 6.27 | 2.87 | 16.9・16.7・16.7秒 |
+| 後（印が変わったときと5秒ごと） | 601・617・624 | 1,380・1,402・1,400 | 321・325・325 | 2.27 | 0.53 | 16.2・16.4・16.5秒 |
+
+load1は前後とも6〜19（`uptime`、各回の前後）。passあたりの`git`は約1/3になり、passは同じ時間の中で約2倍に増えた（passが軽くなった分）。6本の合計の時間はほぼ変わらない。7章の実験と同じく、閾値と固定のsleepで壁時計の時間が決まるtestでは、G2単独ではtestの時間は縮まない。後に残る`symbolic-ref`と`show-ref`は、`main_head`・`main_history`など着地先を使うたびに解決する箇所（claim・review・着地）のものである。

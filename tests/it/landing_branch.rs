@@ -407,3 +407,108 @@ fn no_push_records_the_configured_remote() {
         "{doctor}"
     );
 }
+
+/// A running supervisor resolves the landing branch again only when what
+/// the resolution reads changed (task 1078), and still holds the claims at
+/// the next pass after the branch stops resolving and resumes them at the
+/// next pass after it resolves again (ADR-t615-1): main deleted and
+/// created, renamed away and named by origin's HEAD, and a dagq.toml that
+/// names a missing branch and then the one there is. The recheck without
+/// a change is an hour here, so each stop can only come from the change
+/// itself; a branch that does not resolve is resolved again every pass.
+#[test]
+fn a_running_supervisor_follows_each_change_of_the_landing_branch() {
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let seed = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(&db, true, VALID_AGENT));
+    let options = SuperviseOptions {
+        landing_recheck: Duration::from_secs(3600),
+        ..supervise_options(1, false)
+    };
+    let (telemetry, captured) = Telemetry::capture();
+    let supervisor = {
+        let (db, repo, backend, options) =
+            (db.clone(), repo.clone(), backend.clone(), options.clone());
+        thread::spawn(move || telemetry.in_scope(|| supervise_with(&db, &repo, &backend, &options)))
+    };
+    wait_until(&db, Duration::from_secs(10), |queue| {
+        queue.supervisors().unwrap().len() == 1
+    });
+    const HELD: &str = "no task is claimed and no run lands until it resolves";
+    const RESUMED: &str = "claiming and landing resume";
+    // The `n`th hold and resume, in the order they were logged.
+    let transitions = |held: usize, resumed: usize| {
+        let started = Instant::now();
+        loop {
+            let text = captured.text();
+            let mut seen = Vec::new();
+            for line in text.lines() {
+                if line.contains(HELD) {
+                    seen.push("held");
+                } else if line.contains(RESUMED) {
+                    seen.push("resumed");
+                }
+            }
+            let counts = (
+                seen.iter().filter(|&&s| s == "held").count(),
+                seen.iter().filter(|&&s| s == "resumed").count(),
+            );
+            if counts == (held, resumed) {
+                return seen;
+            }
+            assert!(
+                counts.0 <= held && counts.1 <= resumed,
+                "{counts:?} past ({held}, {resumed}): {text}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "({held}, {resumed}) not logged; {counts:?}: {text}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let stages: [(&str, &dyn Fn()); 6] = [
+        ("main deleted", &|| {
+            git(&repo, &["update-ref", "-d", "refs/heads/main"])
+        }),
+        ("main created again", &|| {
+            git(&repo, &["update-ref", "refs/heads/main", &seed])
+        }),
+        ("main renamed to trunk", &|| {
+            git(&repo, &["branch", "-m", "main", "trunk"])
+        }),
+        ("origin's HEAD names trunk", &|| {
+            git(&repo, &["update-ref", "refs/remotes/origin/trunk", &seed]);
+            git(
+                &repo,
+                &[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/trunk",
+                ],
+            );
+        }),
+        ("dagq.toml names a missing branch", &|| {
+            fs::write(repo.join("dagq.toml"), "[repository]\nbranch = \"nope\"\n").unwrap()
+        }),
+        ("dagq.toml names trunk", &|| {
+            fs::write(repo.join("dagq.toml"), "[repository]\nbranch = \"trunk\"\n").unwrap()
+        }),
+    ];
+    for (index, (stage, change)) in stages.iter().enumerate() {
+        change();
+        let seen = transitions(index / 2 + 1, index.div_ceil(2));
+        assert_eq!(
+            seen.last().copied(),
+            Some(if index % 2 == 0 { "held" } else { "resumed" }),
+            "{stage}"
+        );
+    }
+    options.stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    assert_eq!(outcome["outcome"], "stopped", "{outcome}");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(queue.show(TaskId::new(1)).unwrap().runs.is_empty());
+}
