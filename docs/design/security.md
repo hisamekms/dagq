@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 tags:
   - security
@@ -94,6 +94,7 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 - DBの直接操作: queueのSQLiteファイルはこのユーザーが読み書きでき、CLIを通らずに状態とeventを書き換えられる
 - Gitとファイル: worktree・main checkout・`runs/`・固定バイナリを直接書き換えられ、pushの資格情報もこのユーザーのもの
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）
+- 古いバイナリへの戻し: 判定は呼ばれたバイナリのpolicyで決まるので、固定バイナリを戻すと、未知の`DAGQ_ROLE`を拒まない（task 729より前の）バイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
 
 `status`と`doctor`は`actors`に、AI actorごとの`backend: host`・`enforcement: advisory`・`sandboxed: false`を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。ActorExecutorのspec（workspace・capability・timeout）もhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
 

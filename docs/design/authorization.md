@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - adr-t728-1
@@ -20,6 +20,14 @@ related:
 actorが何をしてよいかは、`src/domain/authorization.rs`の`Authorizer`（`authorize(actor, capability, resource) -> Result<(), AuthorizationError>`）が決める（[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定5）。実装は静的なpolicyの`StaticPolicy`で、roleごとの許可の一覧（`grants(role)`）と、いくつかのroleのresourceの規則でできている。一覧に無い組み合わせは拒む（default deny）。resourceの持ち主や状態を規則が要るのに呼び出し元が知らない（`None`、`Resource::Unresolved`）ときも拒む（fail closed）。判定はClaudeを起動せずにunit testできる。
 
 host実行ではこの判定は助言的（advisory）で、sandboxでも隔離でもない。どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）。信頼の区分・actorごとのcapabilityの要約・迂回できる経路・Podmanとqueue serviceへの道筋は[Security](security.md)。actorの型と環境変数は[Roles](supervisor-lifecycle/roles.md#actors)。
+
+## 固定バイナリを戻したときの窓
+
+判定は、呼ばれた`dagq`のバイナリが持つpolicyで決まる。固定バイナリを前のものに戻すと（[`install --rollback`](supervisor-lifecycle/install.md)、自動更新の見張りの`restore`（[Auto-update](supervisor-lifecycle/auto-update.md)））、新しいバイナリが起動してまだ走っているjobの`dagq`の呼び出しは戻したバイナリに届く。戻したバイナリが`DAGQ_ROLE`の未知の値をfail closedにするparseを持たず、新しいroleを知らなければ、そのroleは制限を受けない。task 729より前のバイナリがこれに当たり、`DAGQ_ROLE`のうち`reviewer`だけを読み取りだけに制限し、`review-job`・`recovery-job`・`plan-review-job`・`goal-review-job`を知らないので、これらのjobの状態を変える呼び出しを拒まない（task 729より後のバイナリは知らないroleを`unknown DAGQ_ROLE`で拒む）。
+
+- 窓は、戻したrenameから、新しいバイナリが起動したjobが居なくなるまで。supervisorの引き継ぎはexecの前にheadlessのjobを止めるが（[Handoff](supervisor-lifecycle/handoff.md)、[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、それは検証と着地の進行中のslotを進め終えた区切りなので、それまでjobは走り続ける。引き継ぎを受けなかったsupervisor（`not_handed_off`）のjobと、supervisorが死んで起動し直すまでに残ったjob（引き継ぐsupervisorが`orphaned_headless_jobs`で止める）は、終わるか止められるまで走る
+- これは新しい弱点ではなく、host実行が助言的（advisory）であることの既知の限界の一例として受け入れる。どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）ので、古いバイナリに新しいroleを教えるコードは足さない
+- 気になるときは、戻す前に`down --wait`でjobを終わらせるか、戻した後に走っているjobを止める
 
 ## Capability
 
