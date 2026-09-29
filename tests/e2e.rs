@@ -18,6 +18,8 @@ mod cleanup;
 mod common;
 #[path = "e2e/headless.rs"]
 mod headless;
+#[path = "e2e/other_repository.rs"]
+mod other_repository;
 
 use cleanup::{
     GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_retrying, listed_group,
@@ -258,6 +260,14 @@ case "$prompt" in
     # Work until the test lets go: a supervisor handoff happens meanwhile.
     printf 'holding until %s/go\n' "$add_dir"
     while [ ! -f "$add_dir/go" ]; do sleep 0.2; done
+    ;;
+esac
+case "$prompt" in
+  *E2E-MIGRATION*)
+    # A migration whose number main already has.
+    mkdir -p migrations
+    printf 'CREATE TABLE e2e (id INTEGER);\n' > migrations/0001_e2e.sql
+    git add migrations/0001_e2e.sql
     ;;
 esac
 if [ -n "$mcp" ]; then
@@ -532,6 +542,13 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_on("main", &[])
+}
+
+/// [`fixture`] whose repository's default branch is `branch` and whose seed
+/// commit also has `files` (path, content) besides `seed.txt` and
+/// `dagq.toml`.
+fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
     let test = common::within(TEST_LIMIT, "the test to finish");
     let cmux = cmux_executable();
     let cmux_version = preflight(&cmux);
@@ -541,13 +558,18 @@ fn fixture() -> Fixture {
     let owner = claim_fixture_dir(dir.path());
     let repo = dir.path().join(E2E_REPO_NAME);
     fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-b", "main"]);
+    git(&repo, &["init", "-b", branch]);
     git(&repo, &["config", "user.name", "e2e"]);
     git(&repo, &["config", "user.email", "e2e@example.invalid"]);
     fs::write(repo.join("seed.txt"), "fixture\n").unwrap();
     // ADR-0023 decision 3: every run gets this env in its workspace and
     // its verification commands.
     fs::write(repo.join("dagq.toml"), E2E_DAGQ_TOML).unwrap();
+    for (path, content) in files {
+        let path = repo.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "seed"]);
     let base = git(&repo, &["rev-parse", "HEAD"]);

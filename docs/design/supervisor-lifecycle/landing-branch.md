@@ -100,3 +100,7 @@ push = false
 ## 既存のqueueの互換
 
 `[repository]`の無い`dagq.toml`（とファイルの無いrepository）では、`origin`のHEADが`main`を指すか、`main`が在れば着地先は`main`、pushは`origin`へ行う。dagq自身のrepositoryはこれに当たり、設定を足さずに今までと同じ振る舞いになる。DBのschemaとeventのkindは変わらない（payloadに`branch`が増えるだけ）。
+
+## e2e
+
+`tests/e2e/other_repository.rs`の`a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md`（goal 52）が、default branchが`master`で`origin`が無く、`Cargo.toml`も`AGENTS.md`も無い使い捨てのrepositoryで、stubのproviderのtaskをclaimから着地まで通す。`doctor`の`repository`が`branch: master`・`branch_source: master`・`remote_exists: false`で、着地は`master`への1つのsquash commit（`main`は作らない）、`push_skipped`の`reason`が`the repository has no remote origin`であることを見る。

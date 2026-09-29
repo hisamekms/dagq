@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: operations
 related:
   - adr-0036
@@ -20,12 +20,14 @@ related:
 
 実 Claude Code と実 Codex CLI を含む経路は自動 test にしない（AGENTS.md の「テストの制約」）。`tests/e2e.rs` のハッピーパスは stub を provider にするので、実 Claude の起動・ダイアログ・resume と、異常系の組み合わせはこの手順で人（または人に頼まれた session）が確かめる。runtime の振る舞いを大きく変えたとき、Claude Code か cmux の版を上げたときに流す。結果は task の receipt の `summary`（または `note`）に、版・シナリオごとの結果・見つけた問題を残す。
 
-手順は 4 つある。
+手順は 6 つある。
 
 - [故障経路のスモーク](#故障経路のスモーク): 使い捨て repository で異常系 6 シナリオを起こし、二重起動と成果の喪失が無いことを確かめる。
 - [独立 task 1 件の完走](#独立-task-1-件の完走): この repository の本番 queue で、登録から着地まで人が DB を直さずに通ることを確かめる。
 - [作業の内訳のスモーク](#作業の内訳のスモーク): 使い捨て repository で実 Claude Code の worker に background のコマンド・async の subagent・つないだコマンドをさせ、作業の内訳（task 514）の記録を transcript と突き合わせる。
 - [非対話の worker のスモーク](#非対話の-worker-のスモーク): 使い捨て repository で実 Codex と実 Claude の非対話の worker を 1 本ずつ着地させ、turn の記録と provider・経路の記録を確かめる。
+- [Codex の goal review のスモーク](#codex-の-goal-review-のスモーク): 使い捨て repository で goal review を実 Codex で動かし、launch と sandbox と記録を確かめる。
+- [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・`plan` から着地までを通す。
 
 ## 故障経路のスモーク
 
@@ -193,3 +195,27 @@ background のコマンドの summary は `Background command "<Bash tool の de
 ### 結果
 
 まだ行っていない（task 1065 は worker として動き、使い捨ての queue を作れないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。本番の queue で Codex の goal review を動かすのは、固定バイナリがこの task を含むものに入れ替わった後の task 1067 が `dagq.toml` に `provider` を書いてから。流したら、この節に版と確認点の結果を足す。
+
+## 他の repository のスモーク
+
+dagq のソースでない repository で使えること（goal 52）は、stub の provider の e2e（`tests/e2e/other_repository.rs` の `a_task_lands_on_master_of_a_repository_without_origin_cargo_toml_or_agents_md`。default branch が `master`・`origin` なし・`Cargo.toml` と `AGENTS.md` なしの repository で、`supervise --once` の task が着地し、main が取った番号の migration が振り直されない）でだけ自動 test される。e2e は `target/` のバイナリを `--claude` の stub と `supervise` で直接動かし、配布の経路（`cargo install`、marketplace から入れた plugin、plugin の launcher がバイナリを PATH から解決すること、`--plugin-dir` の無い `up` と `plan`）と実 Claude の planner・worker・review は通らない。それをこの手順で確かめる。リリースの前と、配布・`up`・`plan`・着地先の branch・push の解決を変えたときに流す。
+
+### 手順
+
+1. [隔離](#隔離)のとおり scratch を作る。ただしバイナリは scratch のコピーではなく、`cargo install --locked --root <scratch>/cargo dagq`（リリースを確かめるとき。まだ crates.io に無い版は、確かめたい commit の checkout で `cargo install --locked --root <scratch>/cargo --path .`）で入れる。`--root` を付け、`~/.cargo/bin` と固定バイナリ `~/.local/bin/dagq` を置き換えない。以後のコマンドは `PATH=<scratch>/cargo/bin:$PATH` と `XDG_DATA_HOME=<scratch>/xdg` で打ち（plugin の launcher と `up` は PATH で最初に見つかる `dagq` を使う）、`env -u DAGQ_ROLE -u DAGQ_QUEUE -u DAGQ_ACTOR_ID -u DAGQ_RUN_ID -u DAGQ_TASK_ID` で session の actor の env を外す。これを wrapper（`tq`）にし、`tq --version` が入れた版であることを見る。
+2. 使い捨て repository `dagq-smoke` を `git init -b master` で作り、`seed.txt` と `migrations/0001_x.sql`（中身は何でもよい）だけを commit する。`Cargo.toml`・`AGENTS.md`・`CLAUDE.md`・`dagq.toml` は置かず、`origin` も足さない。`git branch --list main` が空であることを見る。
+3. plugin を公式の手順で入れる: `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq --scope local`（使い捨て repository の中で打ち、その repository だけに入れる。user の scope の plugin を置き換えない）。`claude plugin list` に `claude-dagq@dagq` が入れた scope で出て、plugin の version がバイナリの version と major.minor で一致することを見る（食い違えば launcher が `{"warning": ...}` を stderr に出す。README の update の節）。
+4. repository の root で `claude` を一度起動して folder trust を承認し、`tq init` と `tq doctor` を打つ。`doctor` の `repository` が `branch: master`・`branch_source: master`・`remote: origin`・`remote_exists: false`・`push: true` で `error` が無いことを見る。
+5. 専用の cmux workspace で `tq up --in-cmux --claude ~/.local/bin/claude`（`--plugin-dir` も `--auto-update` も付けない。ソースでない repository の `--auto-update` は拒まれる）を打つ。`[dagq-smoke]supervisor` と `[dagq-smoke]inbox` が開き、出力の `repository` が 4 と同じで、preflight が installed の plugin を見つけて通ることを見る。
+6. `tq plan`（`--plugin-dir` なし）で planner を開き、「`smoke.txt` に 1 行足す task を 1 件、`--verify 'test -f seed.txt'` で」と頼む。planner が AGENTS.md の無い repository で verify・paths・evidence を決めて `submit` し、plan review が pass して task が ready になり、supervisor が claim することを見る（plan review が concern なら inbox の `approve_plan` に `ready` と答える）。
+7. run が着地したら確かめる。
+   - `tq show ID`: task `completed`、run `integrated`。
+   - `master` に 1 つの squash commit が乗り、checkout が追従して clean。`main` の branch は作られていない。
+   - `tq events --run RUN --full`: `push_skipped`（`remote: origin`・`branch: master`・`reason: the repository has no remote origin`）があり、`push_failed` の attention が inbox に出ていない。`migration_renumbered` と `migration_number_taken` が無い。
+   - `tq stats` と `tq kpi` が止まらずに出て、cargo 専用の計測（`work_breakdown` の `llvm_cov` など、`kpi --by toolchain`）が無い。
+   - worker・review・plan review の prompt（run dir と proposal の dir）に、dagq の repository に固有の規則（cargo・llvm-cov・e2e の推奨、ADR の番号、`AGENTS.md` を名指すこと）が載っていない。
+8. [故障経路のスモーク](#シナリオ)の後始末と同じく `tq down --wait` で supervisor を止め、inbox と planner の workspace を閉じ、`cmux workspace-group delete '[dagq-smoke]' --close-workspaces` で group を消す。`claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
+
+### 結果
+
+まだ行っていない（task 629 は worker として動き、使い捨ての queue を作れず、plugin も入れられないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。流したら、この節に版（dagq・plugin・Claude Code・cmux）と確認点の結果を足す。
