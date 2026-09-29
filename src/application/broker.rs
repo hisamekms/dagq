@@ -660,6 +660,165 @@ fn build_image(
     Ok(())
 }
 
+/// What [`prune_images`] did: the old images of [`IMAGE_REPOSITORY`] it
+/// removed, and the ones it could not (which do not fail the broker's
+/// start).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ImagePrune {
+    /// The images (`localhost/dagq-broker:<tag>`) removed.
+    pub removed: Vec<String>,
+    /// The images kept although they are neither the current nor the
+    /// previous one, because a container on the machine uses them (the one
+    /// kept for the runs that hold tokens, `kept_stale`, or another
+    /// queue's).
+    pub in_use: Vec<String>,
+    /// The images whose `podman image rm` failed, with its error.
+    pub failed: Vec<ImagePruneFailure>,
+    /// The images or containers could not be listed, so nothing was
+    /// removed.
+    pub error: Option<String>,
+}
+
+/// An image [`prune_images`] could not remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImagePruneFailure {
+    pub image: String,
+    pub error: String,
+}
+
+/// One tag of [`IMAGE_REPOSITORY`] on the machine.
+struct TaggedImage {
+    name: String,
+    id: String,
+    created: i64,
+}
+
+/// The tags of [`IMAGE_REPOSITORY`] on the machine, from `podman images`.
+/// Only names of that repository are read, so another repository's image
+/// (or another name of the same image) is never named for removal.
+fn broker_images(podman: &dyn Podman, machine: &str) -> BrokerResult<Vec<TaggedImage>> {
+    #[derive(Deserialize)]
+    struct Listed {
+        #[serde(rename = "Id", default)]
+        id: String,
+        #[serde(rename = "Names", default)]
+        names: Option<Vec<String>>,
+        #[serde(rename = "Created", default)]
+        created: i64,
+    }
+    let output = checked(
+        podman,
+        &on_machine(machine, &["images", "--format", "json"]),
+        FailureCode::PodmanFailed,
+        "podman images",
+    )?;
+    let listed: Vec<Listed> = serde_json::from_str(output.stdout.trim()).map_err(|error| {
+        BrokerFailure::new(
+            FailureCode::PodmanFailed,
+            format!("podman images printed what dagq cannot read: {error}"),
+        )
+    })?;
+    let prefix = format!("{IMAGE_REPOSITORY}:");
+    Ok(listed
+        .into_iter()
+        .flat_map(|image| {
+            let (id, created) = (image.id, image.created);
+            image
+                .names
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|name| name.starts_with(&prefix))
+                .map(move |name| TaggedImage {
+                    name,
+                    id: id.clone(),
+                    created,
+                })
+        })
+        .collect())
+}
+
+/// The images (names and ids) the containers on the machine use, from
+/// `podman ps --all`.
+fn container_images(podman: &dyn Podman, machine: &str) -> BrokerResult<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Listed {
+        #[serde(rename = "Image", default)]
+        image: String,
+        #[serde(rename = "ImageID", default)]
+        image_id: String,
+    }
+    let output = checked(
+        podman,
+        &on_machine(machine, &["ps", "--all", "--format", "json"]),
+        FailureCode::PodmanFailed,
+        "podman ps",
+    )?;
+    let listed: Vec<Listed> = serde_json::from_str(output.stdout.trim()).map_err(|error| {
+        BrokerFailure::new(
+            FailureCode::PodmanFailed,
+            format!("podman ps printed what dagq cannot read: {error}"),
+        )
+    })?;
+    Ok(listed
+        .into_iter()
+        .flat_map(|container| [container.image, container.image_id])
+        .filter(|word| !word.is_empty())
+        .collect())
+}
+
+/// Remove the old images of [`IMAGE_REPOSITORY`] on dagq's machine
+/// (ADR-t827-1, ADR-t827-3 decision 2): `current` stays, and so does the
+/// newest other one by its creation time (the previous; tags carry no
+/// order), and any a container on the machine uses (the one kept for the
+/// runs that hold tokens, or another queue's). The rest are removed by
+/// name with `podman image rm` without `--force`, which untags a name the
+/// image shares with another tag. Nothing here fails: what could not be
+/// listed or removed is in the result.
+pub fn prune_images(podman: &dyn Podman, machine: &str, current: &str) -> ImagePrune {
+    let mut prune = ImagePrune::default();
+    let listed = broker_images(podman, machine)
+        .and_then(|images| Ok((images, container_images(podman, machine)?)));
+    let (mut images, used) = match listed {
+        Ok(listed) => listed,
+        Err(failure) => {
+            prune.error = Some(failure.message);
+            return prune;
+        }
+    };
+    // The current image under any other tag of it is the current, not the
+    // previous.
+    let current_ids: Vec<String> = images
+        .iter()
+        .filter(|image| image.name == current && !image.id.is_empty())
+        .map(|image| image.id.clone())
+        .collect();
+    images.retain(|image| image.name != current && !current_ids.contains(&image.id));
+    // Newest first; the name breaks a tie so the choice does not depend on
+    // podman's order.
+    images.sort_by(|a, b| b.created.cmp(&a.created).then(b.name.cmp(&a.name)));
+    for image in images.into_iter().skip(1) {
+        if used
+            .iter()
+            .any(|word| *word == image.name || (!image.id.is_empty() && *word == image.id))
+        {
+            prune.in_use.push(image.name);
+            continue;
+        }
+        match podman.run(&on_machine(machine, &["image", "rm", &image.name])) {
+            Ok(output) if output.success => prune.removed.push(image.name),
+            Ok(output) => prune.failed.push(ImagePruneFailure {
+                image: image.name,
+                error: output.words().to_owned(),
+            }),
+            Err(failure) => prune.failed.push(ImagePruneFailure {
+                image: image.name,
+                error: failure.message,
+            }),
+        }
+    }
+    prune
+}
+
 // ---------------------------------------------------------------------------
 // The container.
 
@@ -1088,6 +1247,8 @@ pub struct StartReport {
     /// The image under this build's tag answered another build, so it was
     /// removed with its container and built again.
     pub rebuilt: bool,
+    /// The old images removed once the broker answered ([`prune_images`]).
+    pub images: ImagePrune,
 }
 
 /// Make the queue's broker run and answer health: the machine, the image,
@@ -1095,7 +1256,8 @@ pub struct StartReport {
 /// part is already there, so a second call changes nothing. A broker that
 /// answers another build than dagq's, while no run holds a token for it,
 /// has its image built again once; a second mismatch
-/// is a [`FailureCode::VersionMismatch`] (ADR-t827-1 decision 7).
+/// is a [`FailureCode::VersionMismatch`] (ADR-t827-1 decision 7). Once the
+/// broker answers, the old images go ([`prune_images`]).
 pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport> {
     let spec = request.container;
     // The host lock is held throughout, so a `stop` or a test's
@@ -1170,6 +1332,7 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
         }
     }
     let build_matches = health.build == request.build;
+    let images = prune_images(ports.podman, &spec.machine, &spec.image);
     Ok(StartReport {
         machine,
         image: spec.image.clone(),
@@ -1182,6 +1345,7 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
         build: request.build.to_owned(),
         build_matches,
         rebuilt,
+        images,
     })
 }
 
@@ -2315,6 +2479,205 @@ mod tests {
         assert!(run.ends_with(" --exec-allow ls"), "{run}");
         // Other limits are another container.
         assert_ne!(container.fingerprint(), spec().fingerprint());
+    }
+
+    /// `podman images --format json` of these `(id, names, created)`.
+    fn images(listed: &[(&str, &[&str], i64)]) -> PodmanOutput {
+        let listed: Vec<Value> = listed
+            .iter()
+            .map(|(id, names, created)| {
+                serde_json::json!({"Id": id, "Names": names, "Created": created})
+            })
+            .collect();
+        ok(&serde_json::to_string(&listed).unwrap())
+    }
+
+    /// `podman ps --all --format json` of containers of these images.
+    fn containers(images: &[&str]) -> PodmanOutput {
+        let listed: Vec<Value> = images
+            .iter()
+            .map(|image| serde_json::json!({"Image": image, "ImageID": "id-of-another"}))
+            .collect();
+        ok(&serde_json::to_string(&listed).unwrap())
+    }
+
+    fn pruning(listed: PodmanOutput, used: PodmanOutput) -> Script {
+        Script::default()
+            .on(&["--connection", "dagq", "images"], vec![listed])
+            .on(&["--connection", "dagq", "ps"], vec![used])
+    }
+
+    #[test]
+    fn start_removes_all_but_the_current_and_the_previous_image() {
+        let spec = spec();
+        let machine = MachineSpec::default();
+        let source = Source(Cell::new(0));
+        let lock = CountingLock::default();
+        let health = Healthy(Ok(dagq_broker_protocol::HealthResponse::ok("b")));
+        let request = StartRequest {
+            machine: &machine,
+            container: &spec,
+            build: "b",
+            source: &source,
+            scratch: Path::new("/scratch"),
+            in_use: false,
+            health_timeout: Duration::ZERO,
+            health_interval: Duration::ZERO,
+            on_build: None,
+        };
+        let listed = images(&[
+            ("i-older", &["localhost/dagq-broker:older"], 100),
+            ("i-current", &[spec.image.as_str()], 400),
+            ("i-oldest", &["localhost/dagq-broker:oldest"], 50),
+            // The previous by creation time, although its tag sorts first.
+            ("i-previous", &["localhost/dagq-broker:0.1.0"], 300),
+            ("i-other", &["localhost/other:old", "docker.io/x/y:1"], 1),
+        ]);
+        // Another tag of the current image is not the previous.
+        let podman = pruning(
+            images(&[
+                (
+                    "i-current",
+                    &[spec.image.as_str(), "localhost/dagq-broker:alias"],
+                    400,
+                ),
+                ("i-previous", &["localhost/dagq-broker:0.1.0"], 300),
+                ("i-oldest", &["localhost/dagq-broker:oldest"], 50),
+            ]),
+            containers(&[]),
+        );
+        let prune = prune_images(&podman, MACHINE, &spec.image);
+        assert_eq!(prune.removed, ["localhost/dagq-broker:oldest"]);
+        let podman = start_script(vec![ok(RUNNING)], true, inspect(true, &spec.image))
+            .on(&["--connection", "dagq", "images"], vec![listed.clone()])
+            .on(
+                &["--connection", "dagq", "ps"],
+                vec![containers(&[&spec.image])],
+            );
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        assert_eq!(
+            report.images.removed,
+            [
+                "localhost/dagq-broker:older",
+                "localhost/dagq-broker:oldest"
+            ]
+        );
+        assert!(report.images.failed.is_empty() && report.images.error.is_none());
+        let removals: Vec<String> = podman
+            .calls()
+            .into_iter()
+            .filter(|call| call.contains("image rm"))
+            .collect();
+        assert_eq!(
+            removals,
+            [
+                "--connection dagq image rm localhost/dagq-broker:older",
+                "--connection dagq image rm localhost/dagq-broker:oldest"
+            ]
+        );
+        // Every podman command is on dagq's machine (no machine command in
+        // this start, which found it running).
+        for call in podman.calls() {
+            assert!(
+                call.starts_with("--connection dagq ") || call.starts_with("machine list"),
+                "{call}"
+            );
+        }
+
+        // A container kept for the runs that hold tokens keeps its image,
+        // however old; the others still go.
+        let podman = pruning(
+            listed.clone(),
+            containers(&["localhost/dagq-broker:oldest", &spec.image]),
+        );
+        let prune = prune_images(&podman, MACHINE, &spec.image);
+        assert_eq!(prune.removed, ["localhost/dagq-broker:older"]);
+        assert_eq!(prune.in_use, ["localhost/dagq-broker:oldest"]);
+        // Matched by the image's id as well.
+        let podman = pruning(
+            listed.clone(),
+            ok(r#"[{"Image":"sha256:abc","ImageID":"i-older"}]"#),
+        );
+        let prune = prune_images(&podman, MACHINE, &spec.image);
+        assert_eq!(prune.removed, ["localhost/dagq-broker:oldest"]);
+        assert_eq!(prune.in_use, ["localhost/dagq-broker:older"]);
+
+        // A removal that fails is reported, and the start goes on.
+        let podman = start_script(vec![ok(RUNNING)], true, inspect(true, &spec.image))
+            .on(&["--connection", "dagq", "images"], vec![listed.clone()])
+            .on(&["--connection", "dagq", "ps"], vec![containers(&[])])
+            .on(
+                &[
+                    "--connection",
+                    "dagq",
+                    "image",
+                    "rm",
+                    "localhost/dagq-broker:older",
+                ],
+                vec![fail("image is in use by a container")],
+            );
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request).unwrap();
+        assert_eq!(report.images.removed, ["localhost/dagq-broker:oldest"]);
+        assert_eq!(
+            report.images.failed,
+            [ImagePruneFailure {
+                image: "localhost/dagq-broker:older".to_owned(),
+                error: "image is in use by a container".to_owned(),
+            }]
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["images"]["failed"][0]["image"],
+            "localhost/dagq-broker:older"
+        );
+
+        // Only the current image: nothing is removed.
+        let podman = pruning(
+            images(&[("i-current", &[spec.image.as_str()], 400)]),
+            containers(&[]),
+        );
+        assert_eq!(
+            prune_images(&podman, MACHINE, &spec.image),
+            ImagePrune::default()
+        );
+        assert_eq!(podman.called("--connection dagq image rm"), 0);
+        // The current and one previous: nothing either.
+        let podman = pruning(
+            images(&[
+                ("i-current", &[spec.image.as_str()], 400),
+                ("i-previous", &["localhost/dagq-broker:0.1.0"], 300),
+            ]),
+            containers(&[]),
+        );
+        assert_eq!(
+            prune_images(&podman, MACHINE, &spec.image),
+            ImagePrune::default()
+        );
+
+        // What cannot be listed removes nothing and is reported.
+        let podman = pruning(ok("garbage"), containers(&[]));
+        let prune = prune_images(&podman, MACHINE, &spec.image);
+        assert!(prune.error.unwrap().contains("podman images"));
+        assert_eq!(podman.called("--connection dagq image rm"), 0);
+        let podman = pruning(listed, fail("no machine"));
+        let prune = prune_images(&podman, MACHINE, &spec.image);
+        assert!(prune.error.unwrap().contains("podman ps failed"));
+        assert_eq!(podman.called("--connection dagq image rm"), 0);
+        let missing = Script {
+            missing: true,
+            ..Script::default()
+        };
+        assert!(prune_images(&missing, MACHINE, &spec.image).error.is_some());
     }
 
     #[test]

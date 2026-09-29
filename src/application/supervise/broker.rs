@@ -58,7 +58,7 @@ pub struct BrokerPort {
 
 /// What a broker job did.
 enum JobOutcome {
-    Ensured(std::result::Result<StartReport, BrokerFailure>),
+    Ensured(std::result::Result<Box<StartReport>, BrokerFailure>),
     Looked(std::result::Result<(), String>),
     Restarted(std::result::Result<(), BrokerFailure>),
 }
@@ -132,7 +132,7 @@ impl Supervisor<'_> {
             spawn_traced(move || JobOutcome::Looked(control.health()))
         } else {
             info!(mode = port.mode.as_str(), "making the queue's broker ready");
-            spawn_traced(move || JobOutcome::Ensured(control.ensure()))
+            spawn_traced(move || JobOutcome::Ensured(control.ensure().map(Box::new)))
         });
     }
 
@@ -164,6 +164,7 @@ impl Supervisor<'_> {
                         "container": report.container,
                         "container_outcome": report.container_outcome,
                         "machine": report.machine,
+                        "images": report.images,
                     }),
                 );
             }
