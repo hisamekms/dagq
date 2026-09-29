@@ -171,6 +171,9 @@ impl Supervisor<'_> {
             proposal_id: subject.proposal_id,
             goal_id: subject.goal_id,
             attempt: subject.attempt,
+            // Every headless job runs on Claude until a role may choose
+            // another provider (goal 73).
+            provider: crate::domain::actor_model::ROLE_PROVIDER,
             pid,
             process_start: self.processes.start_identity(pid),
             supervisor_token: self.token.clone(),

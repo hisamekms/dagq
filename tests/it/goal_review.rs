@@ -5,7 +5,7 @@
 
 use crate::common::WithoutActor;
 use crate::plan_review::{
-    Fixture, PlanWorkspace, StubReviewer, add, fixture, job_actors, options, supervise_with,
+    Fixture, PlanWorkspace, StubReviewer, add, fixture, git, job_actors, options, supervise_with,
 };
 
 use dagq::{
@@ -18,7 +18,7 @@ use dagq::{
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 /// Supervise once without planners of the runtime's, so a gap's draft
 /// stays as it is registered.
@@ -131,6 +131,79 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
     let again = StubReviewer::new(&[json!({"verdict": "achieved"})]);
     supervise(&fx, &again);
     assert!(again.prompts().is_empty());
+}
+
+/// Without `[roles.goal_review]` the goal review starts as before (no
+/// model or effort given); with it, the job is given its model and effort
+/// (ADR-0079 decision 7). Either way `goal_review_started` records the
+/// launch with its provider and the session id the runtime gave the job,
+/// and the job's span opens and closes on the goal's first task (task
+/// 1062).
+#[test]
+fn a_goal_review_records_its_launch_and_session_and_takes_its_role_table() {
+    let achieved = json!({"verdict": "achieved", "criteria": [], "summary": "done"});
+    let fx = fixture();
+    let (goal, done) = goal_done(&fx);
+    let reviewer = StubReviewer::new(std::slice::from_ref(&achieved));
+    supervise(&fx, &reviewer);
+    assert_eq!(reviewer.models(), []);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let started = &goal_events(&mut queue, goal, "goal_review_started")[0];
+    assert_eq!(
+        started["launch"],
+        json!({"role": "goal_review", "provider": "claude", "model": null, "effort": null,
+               "source": "default"})
+    );
+    assert_eq!(
+        started["cwd"],
+        fx.repo.canonicalize().unwrap().to_str().unwrap()
+    );
+    let session = started["session_id"].as_str().unwrap();
+    assert!(!session.is_empty());
+    let task_events = |queue: &mut SqliteQueue, kind: &str| -> Vec<Value> {
+        queue
+            .show(done)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| e.payload)
+            .collect()
+    };
+    let opened = task_events(&mut queue, "session_opened");
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0]["kind"], "goal_review");
+    assert_eq!(opened[0]["session_id"], session);
+    assert_eq!(opened[0]["goal_id"], json!(goal));
+    assert_eq!(opened[0]["goal_review_id"], started["goal_review_id"]);
+    assert_eq!(opened[0]["launch"], started["launch"]);
+    let closed = task_events(&mut queue, "session_closed");
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0]["kind"], "goal_review");
+    assert_eq!(closed[0]["session_id"], session);
+    assert_eq!(closed[0]["reason"], "job_finished");
+
+    let fx = fixture();
+    fs::write(
+        fx.repo.join("dagq.toml"),
+        "[roles.goal_review]\nmodel = \"claude-sonnet-5\"\neffort = \"high\"\n",
+    )
+    .unwrap();
+    git(&fx.repo, &["add", "dagq.toml"]);
+    git(&fx.repo, &["commit", "-m", "roles"]);
+    let (goal, _) = goal_done(&fx);
+    let reviewer = StubReviewer::new(&[achieved]);
+    supervise(&fx, &reviewer);
+    assert_eq!(
+        reviewer.models(),
+        [("claude-sonnet-5".to_owned(), "high".to_owned())]
+    );
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    assert_eq!(
+        goal_events(&mut queue, goal, "goal_review_started")[0]["launch"],
+        json!({"role": "goal_review", "provider": "claude", "model": "claude-sonnet-5",
+               "effort": "high", "source": "dagq.toml"})
+    );
 }
 
 #[test]

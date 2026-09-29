@@ -4,8 +4,8 @@ type: design
 title: "Headless job processes"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -25,7 +25,7 @@ task 443。supervisorが起動するheadlessのjob（runのreview、終わった
 
 ## 記録
 
-- jobのプロセスを起動した直後に、`Supervisor::headless_job`が`headless_jobs`（schema v43、[Persistence](../persistence.md)）に1行書く: `kind`（`review` / `recovery` / `plan_review` / `goal_review`）、`label`（復旧jobのalert）、`run_id` / `proposal_id` / `goal_id`、`attempt`、`pid`、`process_start`（`ProcessControl::start_identity`。`LC_ALL=C`の`ps -o lstart= -p <pid>`の秒までの起動時刻）、`supervisor_token`、`started_at`。書けなくてもjobはそのまま走る（logだけ）。
+- jobのプロセスを起動した直後に、`Supervisor::headless_job`が`headless_jobs`（schema v43、[Persistence](../persistence.md)）に1行書く: `kind`（`review` / `recovery` / `plan_review` / `goal_review`）、`label`（復旧jobのalert）、`run_id` / `proposal_id` / `goal_id`、`attempt`、`pid`、`process_start`（`ProcessControl::start_identity`。`LC_ALL=C`の`ps -o lstart= -p <pid>`の秒までの起動時刻）、`supervisor_token`、`started_at`、`provider`（jobを起動したprovider。schema v55、task 1062。今は全て`claude`（`domain::actor_model::ROLE_PROVIDER`）で、列の既定も`claude`なので、それより前の行と古いバイナリが書く行は`claude`と読める。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ）。書けなくてもjobはそのまま走る（logだけ）。
 - jobの終わりで`ended_at`と`outcome`を書く: 自分で終わったjob（exitを読んだ）は`ended`、自分のsupervisorが止めたjob（timeout、見るのをやめたslot、handoffの前）は`stopped`。jobが終わる場所はqueueを持たないので、終わりは`JobEnds`に積み、次のpassの先頭（と、ループを抜けた直後）に書く。終わりを読む前に捨てられたjob（途中のerror、失敗したループ）は`Drop`で止めて`stopped`にするので、走ったまま見られなくなるjobは無い。
 - timeoutの停止（`HeadlessJob::stop`）は、killの前に`ProcessControl::descendants`（`ps -U <uid> -o pid=,ppid=,…`の親子の連なり）でjobの子孫を集め、jobをSIGKILLしてwaitした後、子孫もSIGKILLする。`claude -p`のBashとその子がjobより長く残らない。
 

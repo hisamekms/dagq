@@ -160,6 +160,10 @@ fn an_idle_after_the_nudge_is_repaired_by_the_recovery_job_without_an_ask() {
     assert_eq!(requested[0]["reason"], "idle_without_receipt");
     assert_eq!(requested[0]["threshold"], "idle_without_receipt_secs");
     assert_eq!(requested[0]["background_tasks"][0]["command"], "cargo test");
+    // The live run's recovery job records the provider it runs on (task
+    // 1062).
+    assert_eq!(requested[0]["launch"]["role"], "recovery");
+    assert_eq!(requested[0]["launch"]["provider"], "claude");
     let nudged = detail
         .events
         .iter()

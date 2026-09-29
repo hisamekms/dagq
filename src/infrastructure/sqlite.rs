@@ -1614,7 +1614,14 @@ pub(super) fn goal_event(
          VALUES (?1,?2,?3,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![goal_id, kind.as_str(), serde_json::to_string(&payload)?],
     )?;
-    Ok(())
+    // The goal review's session span this event starts or ends (ADR-0048).
+    super::sessions::follow_goal(
+        conn,
+        EventId::new(conn.last_insert_rowid()),
+        goal_id,
+        kind,
+        &payload,
+    )
 }
 
 /// The claimable tasks, in ID order.

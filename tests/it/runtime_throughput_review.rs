@@ -205,6 +205,16 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     );
     // Only the weekly review proposes: the hourly one's block is left out.
     assert_eq!(summary["finding_id"], Value::Null);
+    // Its start records its session id and what it was launched with, the
+    // provider included (task 1062).
+    let started = queue_events(&db, "throughput_review_started");
+    assert_eq!(started.len(), 1);
+    assert!(started[0]["session_id"].is_string(), "{}", started[0]);
+    assert_eq!(
+        started[0]["launch"],
+        json!({"role": "throughput_review", "provider": "claude", "model": null,
+               "effort": null, "source": "default"})
+    );
     // Nothing changed state but the review's own record.
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_eq!(

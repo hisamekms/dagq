@@ -37,7 +37,7 @@ use std::{
 };
 use tempfile::TempDir;
 
-fn git(repo: &Path, args: &[&str]) {
+pub(crate) fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -180,7 +180,7 @@ impl StubReviewer {
     pub(crate) fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
     }
-    fn models(&self) -> Vec<(String, String)> {
+    pub(crate) fn models(&self) -> Vec<(String, String)> {
         self.models.lock().unwrap().clone()
     }
 }
@@ -755,7 +755,7 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     assert_eq!(sent["effort_raised"], true);
     assert_eq!(
         sent["launch"],
-        json!({"role": "runtime_planner", "model": "claude-opus-5-5", "effort": "high",
+        json!({"role": "runtime_planner", "provider": "claude", "model": "claude-opus-5-5", "effort": "high",
                "source": "revise_escalation", "escalated_from": "medium",
                "escalation_reason": "plan_review_revise"})
     );
@@ -823,7 +823,7 @@ fn role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them() {
     let started = &events(&mut queue, task, "plan_review_started")[0];
     assert_eq!(
         started["launch"],
-        json!({"role": "plan_review", "model": "claude-opus-5-5", "effort": "high",
+        json!({"role": "plan_review", "provider": "claude", "model": "claude-opus-5-5", "effort": "high",
                "source": "dagq.toml"})
     );
     let span = &events(&mut queue, task, "session_opened")[0];

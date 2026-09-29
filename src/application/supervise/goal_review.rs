@@ -15,6 +15,7 @@ use crate::{
     },
     domain::{
         GoalId, Receipt, RunStatus,
+        actor_model::{ActorLaunch, ModelRole},
         goal_review::{
             GOAL_OPTIONS, GOAL_REVIEW_ASKER, GoalReviewDecision, GoalReviewVerdict, decide,
         },
@@ -72,13 +73,18 @@ impl Supervisor<'_> {
         let Some(&goal) = self.queue.goal_review_candidates()?.first() else {
             return Ok(());
         };
-        let Some(job) =
-            self.queue
-                .begin_goal_review(goal, &self.token, &self.layout.goal_reviews_dir)?
+        let launch = self.actor_launch(ModelRole::GoalReview);
+        let Some(job) = self.queue.begin_goal_review(
+            goal,
+            &self.token,
+            &self.layout.goal_reviews_dir,
+            &self.layout.repo_root,
+            &launch,
+        )?
         else {
             return Ok(());
         };
-        match self.spawn_goal_review(&job) {
+        match self.spawn_goal_review(&job, &launch) {
             Ok(headless) => {
                 info!("goal {goal} goal review {} started", job.attempt);
                 self.goal_review = Some(GoalReviewWatch { job, headless });
@@ -93,7 +99,11 @@ impl Supervisor<'_> {
 
     /// Write the prompt into the job's directory and start the headless
     /// job in the repository's checkout, allowed to read only.
-    fn spawn_goal_review(&mut self, job: &GoalReviewJob) -> Result<HeadlessJob> {
+    fn spawn_goal_review(
+        &mut self,
+        job: &GoalReviewJob,
+        launch: &ActorLaunch,
+    ) -> Result<HeadlessJob> {
         self.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
@@ -113,8 +123,8 @@ impl Supervisor<'_> {
                         prompt: &prompt,
                         allowed_tools: PLAN_REVIEW_TOOLS,
                     },
-                    session_id: None,
-                    launch: None,
+                    session_id: Some(&job.session_id),
+                    launch: Some(launch),
                     without_mcp: false,
                     env: Vec::new(),
                     streams: Streams::Files {

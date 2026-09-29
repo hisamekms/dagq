@@ -183,7 +183,7 @@ fn plan_opens_a_new_planner_workspace_on_every_call_and_records_each() {
                     // (ADR-0079 decision 7).
                     (
                         "DAGQ_LAUNCH".into(),
-                        r#"{"effort":null,"model":null,"role":"planner","source":"default"}"#
+                        r#"{"effort":null,"model":null,"provider":"claude","role":"planner","source":"default"}"#
                             .into()
                     ),
                 ],
@@ -247,7 +247,7 @@ fn plan_gives_the_planner_the_model_and_effort_of_its_role() {
     )
     .unwrap();
     let report = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
-    let launch = json!({"role": "planner", "model": "claude-opus-5-5", "effort": "high",
+    let launch = json!({"role": "planner", "provider": "claude", "model": "claude-opus-5-5", "effort": "high",
                         "source": "dagq.toml"});
     assert_eq!(report["launch"], launch);
     let command = cmux.workspaces.lock().unwrap()[0].3.clone();
@@ -465,7 +465,7 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
         .unwrap();
     assert_eq!(
         recorded,
-        json!({"role": "runtime_planner", "model": "claude-opus-5-5", "effort": "high",
+        json!({"role": "runtime_planner", "provider": "claude", "model": "claude-opus-5-5", "effort": "high",
                "source": "revise_escalation", "escalated_from": "medium",
                "escalation_reason": "plan_review_revise"})
     );

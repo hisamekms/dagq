@@ -1,6 +1,7 @@
 //! The model and effort of the sessions other than the worker's (ADR-0079
 //! decision 7 (b)(c)): the plan review, the review, the recovery (triage)
-//! job, the observer, the runtime's planners and a person's planner. Each
+//! job, the goal review, the observer, the throughput review, the runtime's
+//! planners and a person's planner. Each
 //! role takes `[roles.<role>]` of `dagq.toml` when it has one, and is
 //! started as before (the provider's default, no model or effort given)
 //! when it has none. A planner the runtime opens again for a plan review's
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    DomainError,
+    DomainError, Provider,
     worker_model::{MEDIUM, OPUS},
 };
 
@@ -20,6 +21,7 @@ string_enum!(ModelRole {
     PlanReview => "plan_review",
     Review => "review",
     Recovery => "recovery",
+    GoalReview => "goal_review",
     Observer => "observer",
     ThroughputReview => "throughput_review",
     RuntimePlanner => "runtime_planner",
@@ -27,15 +29,26 @@ string_enum!(ModelRole {
 });
 
 impl ModelRole {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::PlanReview,
         Self::Review,
         Self::Recovery,
+        Self::GoalReview,
         Self::Observer,
         Self::ThroughputReview,
         Self::RuntimePlanner,
         Self::Planner,
     ];
+}
+
+/// The provider every session other than the worker's runs on
+/// (ADR-t813-2 decision 1): what its launch and its `headless_jobs` row
+/// record until a role may choose another.
+pub const ROLE_PROVIDER: Provider = Provider::Claude;
+
+/// The provider of a launch recorded before launches named one.
+fn claude() -> Provider {
+    Provider::Claude
 }
 
 /// The efforts a role may name, lowest first.
@@ -106,6 +119,7 @@ impl RoleModels {
         match self.get(role) {
             Some(table) => ActorLaunch {
                 role,
+                provider: ROLE_PROVIDER,
                 model: Some(table.model.clone().unwrap_or_else(|| OPUS.to_owned())),
                 effort: Some(table.effort.clone().unwrap_or_else(|| MEDIUM.to_owned())),
                 source: LaunchSource::Config,
@@ -123,12 +137,17 @@ string_enum!(LaunchSource {
     ReviseEscalation => "revise_escalation",
 });
 
-/// The model and effort a session was started with, and where they came
-/// from. `model` / `effort` are `None` when none was given (the provider's
-/// default, which the transcript names once the session closes).
+/// The provider, model and effort a session was started with, and where
+/// the model and effort came from. `model` / `effort` are `None` when none
+/// was given (the provider's default, which the transcript names once the
+/// session closes). `provider` has the values of a run's
+/// `requested_provider` / `actual_provider`; a launch recorded before it
+/// was reads as `claude`, the only provider those sessions ran on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorLaunch {
     pub role: ModelRole,
+    #[serde(default = "claude")]
+    pub provider: Provider,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub source: LaunchSource,
@@ -143,6 +162,7 @@ impl ActorLaunch {
     pub fn default_of(role: ModelRole) -> Self {
         Self {
             role,
+            provider: ROLE_PROVIDER,
             model: None,
             effort: None,
             source: LaunchSource::Default,
@@ -163,6 +183,7 @@ impl ActorLaunch {
         let from = self.effort.unwrap_or_else(|| MEDIUM.to_owned());
         Self {
             role: self.role,
+            provider: self.provider,
             model: Some(self.model.unwrap_or_else(|| OPUS.to_owned())),
             effort: Some(raise(&from).to_owned()),
             source: LaunchSource::ReviseEscalation,
@@ -267,6 +288,33 @@ mod tests {
         assert_eq!(
             ActorLaunch::recorded(&json!({"launch": 3}), ModelRole::Recovery),
             ActorLaunch::default_of(ModelRole::Recovery)
+        );
+    }
+
+    #[test]
+    fn every_launch_records_its_provider_and_an_older_one_reads_as_claude() {
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::GoalReview).effort = Some("high".into());
+        for role in ModelRole::ALL {
+            let launch = models.launch(role);
+            assert_eq!(launch.provider, Provider::Claude);
+            assert_eq!(launch.to_value()["provider"], "claude");
+            assert_eq!(launch.clone().escalated("why").provider, Provider::Claude);
+        }
+        assert_eq!(
+            models.launch(ModelRole::GoalReview).arguments(),
+            Some((OPUS, "high"))
+        );
+        assert_eq!(ModelRole::GoalReview.as_str(), "goal_review");
+        let older = json!({"launch": {"role": "review", "model": null, "effort": null, "source": "default"}});
+        assert_eq!(
+            ActorLaunch::recorded(&older, ModelRole::Review),
+            ActorLaunch::default_of(ModelRole::Review)
+        );
+        let codex = json!({"launch": {"role": "goal_review", "provider": "codex", "model": null, "effort": null, "source": "default"}});
+        assert_eq!(
+            ActorLaunch::recorded(&codex, ModelRole::GoalReview).provider,
+            Provider::Codex
         );
     }
 

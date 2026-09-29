@@ -12,6 +12,7 @@ use std::path::Path;
 
 use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
+    sessions,
     sqlite::{SqliteQueue, close_goal_in, enum_col, goal_event, insert_task},
 };
 use crate::{
@@ -283,8 +284,12 @@ impl GoalReviewStore for SqliteQueue {
         goal: GoalId,
         token: &LeaseToken,
         goal_reviews_dir: &Path,
+        cwd: &Path,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<GoalReviewJob>> {
         let now = self.generators.clock.now();
+        // The spans it closes read their transcripts first (task 543).
+        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -310,6 +315,7 @@ impl GoalReviewStore for SqliteQueue {
                 None,
                 Some("its supervisor is gone"),
             )?;
+            sessions::close_goal_review(&tx, id, true)?;
         }
         let Some(fingerprint) = candidate(&tx, goal)? else {
             // Keep the rows finished above.
@@ -336,11 +342,15 @@ impl GoalReviewStore for SqliteQueue {
             "UPDATE goal_reviews SET dir=?2 WHERE id=?1",
             params![id, dir_text],
         )?;
+        // The job's Claude session id, given to it by the runtime (ADR-0048
+        // decision 4).
+        let session_id = self.generators.ids.uuid();
+        let cwd = cwd.to_str().context("repository checkout is not UTF-8")?;
         goal_event(
             &tx,
             goal,
             EventKind::GoalReviewStarted,
-            json!({"goal_review_id": id, "attempt": attempt, "dir": dir_text, "tasks": fingerprint, "gaps_in_a_row": gaps}),
+            json!({"goal_review_id": id, "attempt": attempt, "dir": dir_text, "tasks": fingerprint, "gaps_in_a_row": gaps, "session_id": session_id, "cwd": cwd, "launch": launch.to_value()}),
         )?;
         tx.commit()?;
         Ok(Some(GoalReviewJob {
@@ -350,6 +360,7 @@ impl GoalReviewStore for SqliteQueue {
             anchor,
             dir,
             gaps_in_a_row: gaps,
+            session_id,
         }))
     }
 
@@ -382,6 +393,9 @@ impl GoalReviewStore for SqliteQueue {
     ) -> Result<GoalReviewApplied> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
+        // The spans it closes read their transcripts first (task 543).
+        let _read =
+            sessions::read_before(&self.conn, sessions::Closing::GoalReviews(Some(job.id)))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -414,6 +428,7 @@ impl GoalReviewStore for SqliteQueue {
                 Some(&verdict_json),
                 Some("the goal or its tasks changed during its review"),
             )?;
+            sessions::close_goal_review(&tx, job.id, false)?;
             tx.commit()?;
             return Ok(GoalReviewApplied {
                 stale: true,
@@ -495,6 +510,9 @@ impl GoalReviewStore for SqliteQueue {
         duration_secs: u64,
     ) -> Result<()> {
         let now = self.generators.clock.now();
+        // The span it closes reads its transcript first (task 543).
+        let _read =
+            sessions::read_before(&self.conn, sessions::Closing::GoalReviews(Some(job.id)))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

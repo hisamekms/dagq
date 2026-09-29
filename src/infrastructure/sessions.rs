@@ -23,11 +23,11 @@ use super::{
 use crate::{
     application::{TranscriptSource, Transcripts},
     domain::{
-        EventId, RunEvent, RunId, TaskId,
+        EventId, GoalId, RunEvent, RunId, TaskId,
         sessions::{
-            HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW, RUN_SESSION,
-            RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS, Scope, SessionHook,
-            SpanChange, SpanContext, changes, hook_changes, scope,
+            GOAL_REVIEW, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW, REVIEW,
+            RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS, Scope,
+            SessionHook, SpanChange, SpanContext, changes, hook_changes, scope,
         },
         stats::rfc3339_millis,
         tokens,
@@ -59,6 +59,8 @@ pub(super) enum Closing<'a> {
     Queue(&'a str, &'a Value),
     /// The plan review's of this id, or of every plan review when `None`.
     PlanReviews(Option<i64>),
+    /// The goal review's of this id, or of every goal review when `None`.
+    GoalReviews(Option<i64>),
     /// These spans.
     Spans(&'a [OpenSpan]),
 }
@@ -138,6 +140,7 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
             "c.run_id IS NULL",
             params![PLAN_REVIEW, plan_review_id],
         )?,
+        Closing::GoalReviews(goal_review_id) => open_goal_reviews(conn, goal_review_id)?,
         Closing::Spans(spans) => spans.to_vec(),
     };
     let mut read_spans = Vec::new();
@@ -213,7 +216,75 @@ pub(super) fn follow(
         ),
         _ => return Ok(()),
     };
-    let changes = changes(kind, payload, &open, &context);
+    write_changes(
+        conn,
+        event_id,
+        (task_id, run_id),
+        kind,
+        payload,
+        &open,
+        &context,
+    )
+}
+
+/// Write the spans the event `event_id` (of `kind`, with `payload`, just
+/// inserted on `goal_id`) opens and closes: a goal review's, recorded on
+/// the goal's first task (where its `approve_goal` ask belongs) with the
+/// goal in their payload.
+pub(super) fn follow_goal(
+    conn: &Connection,
+    event_id: EventId,
+    goal_id: GoalId,
+    kind: EventKind,
+    payload: &Value,
+) -> Result<()> {
+    let kind = kind.as_str();
+    if scope(kind) != Some(Scope::Goal) {
+        return Ok(());
+    }
+    let anchor: Option<TaskId> = conn.query_row(
+        "SELECT min(id) FROM tasks WHERE goal_id=?1",
+        [goal_id],
+        |r| r.get(0),
+    )?;
+    let Some(anchor) = anchor else {
+        return Ok(());
+    };
+    let open = open_spans(
+        conn,
+        "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1
+         AND json_extract(o.payload,'$.goal_id')=?2",
+        "c.run_id IS NULL",
+        params![GOAL_REVIEW, goal_id],
+    )?;
+    let context = SpanContext {
+        goal_ids: vec![goal_id.as_i64()],
+        ..SpanContext::default()
+    };
+    write_changes(
+        conn,
+        event_id,
+        (Some(anchor), None),
+        kind,
+        payload,
+        &open,
+        &context,
+    )
+}
+
+/// Write the `session_opened` / `session_closed` the event `event_id` of
+/// `kind` makes of the spans `open`, on `task_id` and `run_id`, at the
+/// event's time.
+fn write_changes(
+    conn: &Connection,
+    event_id: EventId,
+    (task_id, run_id): (Option<TaskId>, Option<&RunId>),
+    kind: &str,
+    payload: &Value,
+    open: &[OpenSpan],
+    context: &SpanContext,
+) -> Result<()> {
+    let changes = changes(kind, payload, open, context);
     if changes.is_empty() {
         return Ok(());
     }
@@ -806,6 +877,36 @@ pub(super) fn close_plan_review(
             [span.opened_event_id],
             |r| r.get(0),
         )?;
+        close(conn, &now(conn)?, task_id, None, &span, reason)?;
+    }
+    Ok(())
+}
+
+/// The open spans of the goal review `goal_review_id`, or of every goal
+/// review when `None`.
+fn open_goal_reviews(conn: &Connection, goal_review_id: Option<i64>) -> Result<Vec<OpenSpan>> {
+    open_spans(
+        conn,
+        "o.run_id IS NULL AND json_extract(o.payload,'$.kind')=?1
+         AND (?2 IS NULL OR json_extract(o.payload,'$.goal_review_id')=?2)",
+        "c.run_id IS NULL",
+        params![GOAL_REVIEW, goal_review_id],
+    )
+}
+
+/// Close the span of the goal review `goal_review_id` when it is still
+/// open: its row was finished as `interrupted` without a
+/// `goal_review_finished` / `goal_review_failed` (ADR-0048 decision 7).
+/// `inferred` says its supervisor was gone; otherwise the job ended when
+/// the goal or its tasks changed.
+pub(super) fn close_goal_review(
+    conn: &Connection,
+    goal_review_id: i64,
+    inferred: bool,
+) -> Result<()> {
+    let reason = if inferred { INFERRED } else { JOB_FINISHED };
+    for span in open_goal_reviews(conn, Some(goal_review_id))? {
+        let task_id = span_task(conn, &span)?;
         close(conn, &now(conn)?, task_id, None, &span, reason)?;
     }
     Ok(())
@@ -2125,6 +2226,110 @@ mod tests {
         assert_eq!(triage["active"], "unavailable");
         assert!(triage.get("model").is_none());
         assert!(triage.get("effort").is_none());
+    }
+
+    /// A goal review's span (task 1062) opens with its
+    /// `goal_review_started` on the goal's first task, with its session id,
+    /// cwd, goal, review and launch; closes with its finish taking the model
+    /// and effort its transcript names, as every job's span does; and one
+    /// whose row was finished as `interrupted` is closed as `inferred`,
+    /// its transcript read before the write transaction.
+    #[test]
+    fn a_goal_review_span_records_its_launch_and_the_model_of_its_transcript() {
+        use crate::application::TaskStore;
+        use crate::infrastructure::sqlite::goal_event;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut queue, task_id, _) = run_queue(dir.path());
+        let goal = queue
+            .add_goal(crate::domain::NewGoal {
+                title: "g".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                draft: false,
+            })
+            .unwrap()
+            .id();
+        queue.set_goal(task_id, Some(goal)).unwrap();
+        let later = task(&mut queue);
+        queue.set_goal(later, Some(goal)).unwrap();
+        let launch = crate::domain::actor_model::ActorLaunch::default_of(
+            crate::domain::actor_model::ModelRole::GoalReview,
+        )
+        .to_value();
+        let conn = &queue.conn;
+        goal_event(
+            conn,
+            goal,
+            EventKind::GoalReviewStarted,
+            json!({"goal_review_id": 7, "attempt": 1, "session_id": "s-goal",
+                   "cwd": "/repo", "launch": launch}),
+        )
+        .unwrap();
+        let start = retime(conn, 0, 100);
+        let project = dir.path().join("config/projects/-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let lines = [
+            json!({"type": "user", "timestamp": millis_text(start + 1000),
+                   "sessionId": "s-goal", "message": {"content": "go"}}),
+            json!({"type": "assistant", "timestamp": millis_text(start + 2000),
+                   "sessionId": "s-goal", "version": "2.1.283", "effort": "high",
+                   "message": {"id": "g1", "model": "claude-opus-5-5", "content": [],
+                               "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+        ]
+        .map(|line| line.to_string());
+        std::fs::write(project.join("s-goal.jsonl"), lines.join("\n")).unwrap();
+        goal_event(
+            conn,
+            goal,
+            EventKind::GoalReviewFinished,
+            json!({"goal_review_id": 7, "attempt": 1, "decision": "achieved"}),
+        )
+        .unwrap();
+        let opened = of_kind(&queue, SESSION_OPENED);
+        assert_eq!(opened.len(), 1);
+        // On the goal's first task, as its `approve_goal` ask is.
+        assert_eq!(opened[0].task_id, Some(task_id));
+        assert_eq!(opened[0].run_id, None);
+        assert_eq!(opened[0].payload["kind"], GOAL_REVIEW);
+        assert_eq!(opened[0].payload["session_id"], "s-goal");
+        assert_eq!(opened[0].payload["cwd"], "/repo");
+        assert_eq!(opened[0].payload["goal_id"], goal.as_i64());
+        assert_eq!(opened[0].payload["goal_review_id"], 7);
+        assert_eq!(opened[0].payload["launch"], launch);
+        assert_eq!(opened[0].payload["launch"]["provider"], "claude");
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].task_id, Some(task_id));
+        assert_eq!(closed[0].payload["reason"], JOB_FINISHED);
+        assert_eq!(closed[0].payload["model"], "claude-opus-5-5");
+        assert_eq!(closed[0].payload["effort"], "high");
+        assert_eq!(closed[0].payload["active"], "recorded");
+
+        // A review whose supervisor went away closes when its row does.
+        goal_event(
+            conn,
+            goal,
+            EventKind::GoalReviewStarted,
+            json!({"goal_review_id": 8, "attempt": 2, "session_id": "s-goal-2", "cwd": "/repo"}),
+        )
+        .unwrap();
+        {
+            let _read = read_before(conn, Closing::GoalReviews(None)).unwrap();
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
+            close_goal_review(&tx, 8, true).unwrap();
+            // Closed already: nothing more.
+            close_goal_review(&tx, 8, true).unwrap();
+            tx.commit().unwrap();
+        }
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 2);
+        assert_eq!(closed[1].payload["session_id"], "s-goal-2");
+        assert_eq!(closed[1].payload["reason"], INFERRED);
+        // Another goal event opens or closes nothing.
+        goal_event(conn, goal, EventKind::GoalReviewRearmed, json!({})).unwrap();
+        assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
     }
 
     /// Write the transcript of `session` of a span in `cwd`: two turns,

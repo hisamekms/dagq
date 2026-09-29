@@ -95,12 +95,12 @@ fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
         .into_iter()
         .map(|payload| payload["launch"].clone())
         .collect();
-    let configured = json!({"role": "observer", "model": "claude-sonnet-5", "effort": "low",
+    let configured = json!({"role": "observer", "provider": "claude", "model": "claude-sonnet-5", "effort": "low",
                             "source": "dagq.toml"});
     assert_eq!(
         started,
         [
-            json!({"role": "observer", "model": null, "effort": null, "source": "default"}),
+            json!({"role": "observer", "provider": "claude", "model": null, "effort": null, "source": "default"}),
             configured.clone(),
         ]
     );

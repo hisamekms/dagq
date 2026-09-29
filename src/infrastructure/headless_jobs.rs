@@ -19,8 +19,8 @@ impl HeadlessJobStore for SqliteQueue {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO headless_jobs(kind, label, run_id, proposal_id, goal_id, attempt, pid,
-                                       process_start, supervisor_token, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                       process_start, supervisor_token, started_at, provider)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 job.kind,
                 job.label,
@@ -31,7 +31,8 @@ impl HeadlessJobStore for SqliteQueue {
                 job.pid,
                 job.process_start,
                 job.supervisor_token,
-                now
+                now,
+                job.provider.as_str()
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -61,7 +62,8 @@ impl HeadlessJobStore for SqliteQueue {
             .conn
             .prepare(
                 "SELECT j.id, j.kind, j.label, j.run_id, j.proposal_id, j.goal_id, j.attempt,
-                        j.pid, j.process_start, j.supervisor_token, j.started_at, s.pid
+                        j.pid, j.process_start, j.supervisor_token, j.started_at, s.pid,
+                        j.provider
                  FROM headless_jobs j
                  LEFT JOIN supervisors s ON s.token = j.supervisor_token
                  WHERE j.ended_at IS NULL
@@ -83,6 +85,7 @@ impl HeadlessJobStore for SqliteQueue {
                     supervisor_token: r.get(9)?,
                     started_at: r.get(10)?,
                     supervisor_pid: r.get(11)?,
+                    provider: r.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -102,6 +105,7 @@ mod tests {
             proposal_id: None,
             goal_id: None,
             attempt: 2,
+            provider: crate::domain::Provider::Claude,
             pid,
             process_start: Some("Sun Sep 27 10:00:00 2026".into()),
             supervisor_token: token.clone(),
@@ -201,6 +205,42 @@ mod tests {
         assert_eq!(
             queue.orphaned_headless_jobs(&token, true).unwrap()[0].id,
             id
+        );
+    }
+
+    /// A job records its provider, and a row written without one (by an
+    /// older binary, or before migration 0055) reads as `claude`.
+    #[test]
+    fn a_job_records_its_provider_and_one_without_reads_as_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("me");
+        let codex = queue
+            .record_headless_job(&NewHeadlessJob {
+                provider: crate::domain::Provider::Codex,
+                ..job(&token, 10)
+            })
+            .unwrap();
+        queue
+            .conn
+            .execute(
+                "INSERT INTO headless_jobs(kind, attempt, pid, supervisor_token, started_at)
+                 VALUES ('goal_review', 1, 11, 'me', 0)",
+                [],
+            )
+            .unwrap();
+        let providers: Vec<(i64, String)> = queue
+            .orphaned_headless_jobs(&token, true)
+            .unwrap()
+            .into_iter()
+            .map(|j| (j.id, j.provider))
+            .collect();
+        assert_eq!(
+            providers,
+            vec![
+                (codex, "codex".to_owned()),
+                (codex + 1, "claude".to_owned())
+            ]
         );
     }
 }

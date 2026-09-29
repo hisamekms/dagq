@@ -63,11 +63,15 @@ fn jobs_without_a_role_table_start_as_before() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_eq!(
         launches(&mut queue, "triage_started"),
-        [json!({"role": "recovery", "model": null, "effort": null, "source": "default"})]
+        [
+            json!({"role": "recovery", "provider": "claude", "model": null, "effort": null, "source": "default"})
+        ]
     );
     assert_eq!(
         launches(&mut queue, "review_started"),
-        [json!({"role": "review", "model": null, "effort": null, "source": "default"})]
+        [
+            json!({"role": "review", "provider": "claude", "model": null, "effort": null, "source": "default"})
+        ]
     );
     assert_eq!(
         span_launches(&mut queue, "review"),
@@ -104,10 +108,10 @@ fn jobs_with_a_role_table_are_given_its_model_and_effort() {
     assert_eq!(
         launches(&mut queue, "triage_started"),
         [
-            json!({"role": "recovery", "model": "claude-sonnet-5", "effort": "medium", "source": "dagq.toml"})
+            json!({"role": "recovery", "provider": "claude", "model": "claude-sonnet-5", "effort": "medium", "source": "dagq.toml"})
         ]
     );
-    let review = json!({"role": "review", "model": "claude-opus-5-5", "effort": "high", "source": "dagq.toml"});
+    let review = json!({"role": "review", "provider": "claude", "model": "claude-opus-5-5", "effort": "high", "source": "dagq.toml"});
     assert_eq!(
         launches(&mut queue, "review_started"),
         std::slice::from_ref(&review)

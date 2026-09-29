@@ -2301,6 +2301,9 @@ pub struct GoalReviewJob {
     pub anchor: TaskId,
     pub dir: PathBuf,
     pub gaps_in_a_row: usize,
+    /// The job's session id, given to it by the runtime (ADR-0048
+    /// decision 4).
+    pub session_id: String,
 }
 
 /// A finished goal review of a goal, for the next one's prompt.
@@ -2366,14 +2369,17 @@ pub trait GoalReviewStore {
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>>;
     /// Record the start of a goal review of `goal` by `token`, in the
     /// directory named by its row's ID under `goal_reviews_dir`
-    /// (`goal_review_started`). Rows of gone supervisors are finished as
-    /// `interrupted` first. `None`: another supervisor's job runs, or the
-    /// goal is no longer a candidate.
+    /// (`goal_review_started`, with the session id it gives the job, the
+    /// checkout `cwd` it runs in and its `launch`). Rows of gone
+    /// supervisors are finished as `interrupted` first. `None`: another
+    /// supervisor's job runs, or the goal is no longer a candidate.
     fn begin_goal_review(
         &mut self,
         goal: GoalId,
         token: &LeaseToken,
         goal_reviews_dir: &Path,
+        cwd: &Path,
+        launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<GoalReviewJob>>;
     /// The finished reviews of `goal`, oldest first.
     fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>>;
@@ -2423,6 +2429,8 @@ pub struct NewHeadlessJob {
     pub proposal_id: Option<ProposalId>,
     pub goal_id: Option<GoalId>,
     pub attempt: usize,
+    /// The provider the job runs on (`headless_jobs.provider`).
+    pub provider: crate::domain::Provider,
     pub pid: u32,
     /// [`ProcessControl::start_identity`] of `pid` just after the start.
     pub process_start: Option<String>,
@@ -2439,6 +2447,9 @@ pub struct HeadlessJobRecord {
     pub proposal_id: Option<ProposalId>,
     pub goal_id: Option<GoalId>,
     pub attempt: usize,
+    /// The provider it ran on, as stored (`claude` for a row written
+    /// before the column was).
+    pub provider: String,
     pub pid: u32,
     pub process_start: Option<String>,
     pub supervisor_token: LeaseToken,

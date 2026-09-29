@@ -22,12 +22,13 @@ pub const REVIEW: &str = "review";
 pub const TRIAGE: &str = "triage";
 pub const OBSERVER: &str = "observer";
 pub const PLAN_REVIEW: &str = "plan_review";
+pub const GOAL_REVIEW: &str = "goal_review";
 pub const RUNTIME_PLANNER: &str = "runtime_planner";
 pub const INBOX: &str = "inbox";
 pub const PLANNER: &str = "planner";
 
 /// Every kind of span, in the order `stats` lists them.
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 11] = [
     WORKER,
     RESUME,
     REVISE,
@@ -35,6 +36,7 @@ pub const KINDS: [&str; 10] = [
     TRIAGE,
     OBSERVER,
     PLAN_REVIEW,
+    GOAL_REVIEW,
     RUNTIME_PLANNER,
     INBOX,
     PLANNER,
@@ -62,6 +64,9 @@ pub enum Scope {
     Proposal,
     /// An event of the queue itself: the observer's spans.
     Queue,
+    /// An event of a goal's goal review (on the goal): the spans of that
+    /// goal's reviews.
+    Goal,
 }
 
 /// The scope of an event of `kind`, when it may open or close a span.
@@ -75,6 +80,7 @@ pub fn scope(kind: &str) -> Option<Scope> {
             Some(Scope::Proposal)
         }
         "observe_started" | "observe_finished" => Some(Scope::Queue),
+        "goal_review_started" | "goal_review_finished" | "goal_review_failed" => Some(Scope::Goal),
         _ => None,
     }
 }
@@ -111,7 +117,8 @@ pub struct SpanContext {
     /// The `revise_requested` events the run has, this one's included, but
     /// those a `revise_unsent` withdrew.
     pub revises: i64,
-    /// The goals of the proposal's tasks (a plan review's), ascending.
+    /// The goals of the proposal's tasks (a plan review's), ascending, or
+    /// the goal a goal review is of.
     pub goal_ids: Vec<i64>,
     /// The run's worker route (`interactive` / `headless`) and provider,
     /// which its own sessions' spans carry as `route` and `provider`
@@ -284,6 +291,29 @@ pub fn changes(
             .filter(|span| {
                 span.kind() == PLAN_REVIEW
                     && span.payload["plan_review_id"] == payload["plan_review_id"]
+            })
+            .map(|span| SpanChange::Close {
+                span: span.clone(),
+                reason: JOB_FINISHED,
+            })
+            .collect(),
+        "goal_review_started" => {
+            let mut changes = close(&[GOAL_REVIEW], INFERRED);
+            let mut opened = job(GOAL_REVIEW, payload, text("cwd"));
+            if let SpanChange::Open(opened) = &mut opened {
+                // `goal_ids` as a plan review's has, for `stats --goal`.
+                opened["goal_id"] = json!(context.goal_ids.first());
+                opened["goal_ids"] = json!(context.goal_ids);
+                opened["goal_review_id"] = payload["goal_review_id"].clone();
+            }
+            changes.push(opened);
+            changes
+        }
+        "goal_review_finished" | "goal_review_failed" => open
+            .iter()
+            .filter(|span| {
+                span.kind() == GOAL_REVIEW
+                    && span.payload["goal_review_id"] == payload["goal_review_id"]
             })
             .map(|span| SpanChange::Close {
                 span: span.clone(),
@@ -537,7 +567,8 @@ mod tests {
         assert_eq!(scope("observe_finished"), Some(Scope::Queue));
         assert_eq!(scope("run_claimed"), None);
         assert_eq!(scope(SESSION_OPENED), None);
-        assert_eq!(KINDS.len(), 10);
+        assert_eq!(scope("goal_review_failed"), Some(Scope::Goal));
+        assert_eq!(KINDS.len(), 11);
     }
 
     /// The worker's session opens with the run's id, goes on as a revise,
@@ -758,6 +789,41 @@ mod tests {
         );
         assert_eq!(finished.len(), 1);
         assert_eq!(closed(&finished[0]), (9, JOB_FINISHED));
+
+        let goal_context = SpanContext {
+            goal_ids: vec![73],
+            ..SpanContext::default()
+        };
+        let launch = json!({"role": "goal_review", "provider": "claude", "model": null, "effort": null, "source": "default"});
+        let goal = changes(
+            "goal_review_started",
+            &json!({"goal_review_id": 5, "attempt": 2, "session_id": "s-goal", "cwd": "/repo", "launch": launch}),
+            &[span(11, json!({"kind": GOAL_REVIEW, "goal_review_id": 4}))],
+            &goal_context,
+        );
+        assert_eq!(closed(&goal[0]), (11, INFERRED));
+        let payload = opened(&goal[1]);
+        assert_eq!(payload["kind"], GOAL_REVIEW);
+        assert_eq!(payload["session_id"], "s-goal");
+        assert_eq!(payload["cwd"], "/repo");
+        assert_eq!(payload["attempt"], 2);
+        assert_eq!(payload["goal_id"], 73);
+        assert_eq!(payload["goal_ids"], json!([73]));
+        assert_eq!(payload["goal_review_id"], 5);
+        assert_eq!(payload["launch"], launch);
+        for kind in ["goal_review_finished", "goal_review_failed"] {
+            let other = span(12, json!({"kind": GOAL_REVIEW, "goal_review_id": 4}));
+            let changed = changes(
+                kind,
+                &json!({"goal_review_id": 5}),
+                &[other, span(13, payload.clone())],
+                &goal_context,
+            );
+            assert_eq!(changed.len(), 1, "{kind}");
+            assert_eq!(closed(&changed[0]), (13, JOB_FINISHED), "{kind}");
+        }
+        assert_eq!(scope("goal_review_started"), Some(Scope::Goal));
+        assert_eq!(scope("goal_review_rearmed"), None);
 
         let observe = changes(
             "observe_started",
