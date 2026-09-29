@@ -4,8 +4,8 @@ type: design
 title: Documentation frontmatter specification
 status: current
 created: 2026-09-21
-updated: 2026-09-26
-last_verified: 2026-09-26
+updated: 2026-09-30
+last_verified: 2026-09-30
 tags:
   - documentation
   - conventions
@@ -65,8 +65,8 @@ The rules follow [ADR-t598-1](adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs
 | `superseded_on` | `superseded` | The date the ADR became `superseded` |
 | `deprecated_on` | `deprecated` | The date the ADR became `deprecated` |
 | `supersedes` | The replacing ADR | A list of the ADR IDs it replaces |
-| `amends` | A new ADR that changes part of a frozen large ADR | A list of `<ADR ID> decision <N>` entries it changes, for example `adr-0047 decision 24` |
-| `amended_by` | A frozen large ADR changed in part | A list of the IDs of the ADRs that amend it |
+| `amends` | A new ADR that changes some decisions of an ADR with several numbered decisions | A list of `<ADR ID> decision <N>` entries it changes, for example `adr-0047 decision 24` |
+| `amended_by` | An ADR with several numbered decisions, changed in part | A list of the IDs of the ADRs that amend it |
 
 ```yaml
 status: superseded
@@ -88,8 +88,8 @@ deprecated_on: 2026-09-25
 A `deprecated` ADR has no `superseded_by` or `superseded_on`, and a `superseded` ADR has no `deprecated_on`.
 
 - **Small ADRs.** One ADR holds one decision (a few tightly bound ones at most), and its body stays within about 100 lines. It records what needs a person's judgement to change: the problem and context, policy, principles, boundaries and invariants, rejected alternatives, and consequences. Event kinds and payload fields, CLI flag spellings, JSON shapes, default and threshold values, function, module and file names, migration numbers, and test names go to `docs/design/`, which holds the current state; the ADR holds why.
-- **Whole replacement.** An ADR that changes even one decision of an existing ADR rewrites and carries over the old ADR's decisions that are still in force, and the old ADR becomes `superseded` as a whole. One ADR may replace several.
-- **Amending a frozen large ADR.** The existing ADRs with many decisions (such as ADR-0047, 0044 and 0073) are frozen. To change part of one, write a small new ADR that lists the changed decisions in `amends`, add its ID to the old ADR's `amended_by`, and bring the `docs/design/` documents to the current state in the same change. A small new-form ADR is never amended; it is replaced as a whole.
+- **Whole replacement.** An ADR that changes an ADR with a single decision, or most of the decisions of an ADR, rewrites and carries over the old ADR's decisions that are still in force, and the old ADR becomes `superseded` as a whole. One ADR may replace several.
+- **Amending an ADR with several decisions.** Whether to amend or replace depends on the number of decisions of the old ADR and how many of them change, not on the form of its ID ([ADR-t1091-1](adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md), amending ADR-t598-1 decision 5). To change some of the decisions of an ADR with several numbered decisions, four-digit or new-form (such as ADR-0047, ADR-0073 or ADR-t813-2), write a small new ADR that lists the changed decisions in `amends`, add its ID to the old ADR's `amended_by`, and bring the `docs/design/` documents to the current state in the same change. An ADR with a single decision, or a change to most of an ADR's decisions, is replaced as a whole. The planner of the task that writes the ADR states which in the task description, and plan review checks it.
 - **Replace when the successor is accepted.** The old ADR is set to `superseded` in the same change that sets its successor to `accepted`, and its `superseded_on` equals the successor's `accepted_on`. A `proposed` successor replaces nothing: it may list the planned IDs in `supersedes`, but the old ADR's status stays until the successor is accepted.
 - **Banner.** A `superseded` or `deprecated` ADR has a one-line note directly after its H1. The superseded banner is dated with `superseded_on`, and the deprecated banner with `deprecated_on`:
 
@@ -101,7 +101,7 @@ A `deprecated` ADR has no `superseded_by` or `superseded_on`, and a `superseded`
   > **廃止（YYYY-MM-DD）**: このADRの決定は現在有効ではない。理由: ...
   ```
 
-- **Append-only.** An ADR is append-only. Later, only `status`, `accepted_on`, `superseded_by`, `superseded_on`, `deprecated_on`, `amended_by`, and the banner line may change, and these changes need no new ADR. `supersedes` and `amends` are not among them: they are written together with the body (the reason for the replacement and the carried-over decisions) when the replacing or amending ADR is written. Any other change to the body (adding, changing, or removing a decision) is made by a new ADR that replaces the old one as a whole. `updated` stays the last content change and does not move when only these fields change.
+- **Append-only.** An ADR is append-only. Later, only `status`, `accepted_on`, `superseded_by`, `superseded_on`, `deprecated_on`, `amended_by`, and the banner line may change, and these changes need no new ADR. `supersedes` and `amends` are not among them: they are written together with the body (the reason for the replacement and the carried-over decisions) when the replacing or amending ADR is written. Any other change to the body (adding, changing, or removing a decision) is made by a new ADR that replaces the old one as a whole or, for some decisions of an ADR with several decisions, amends it. `updated` stays the last content change and does not move when only these fields change.
 - **Index.** A change that alters an ADR's status updates the tables in [adr/README.md](adr/README.md) in the same change. New-form rows follow the four-digit rows in `accepted_on` order.
 
 ## Validation

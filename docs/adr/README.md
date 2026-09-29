@@ -4,8 +4,8 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 tags:
   - architecture
   - documentation
@@ -18,7 +18,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 - IDは書くtaskのIDと枝番の`adr-t<task ID>-<N>`（1本でも`-1`）、ファイル名は`<YYYY-MM-DD>-t<task ID>-<N>-<slug>.md`で、日付は`accepted_on`。参照は`ADR-t<ID>-<N>`で日付を含めない。既存の4桁の番号（0001〜）と登録済みのtaskが予約した4桁の番号はそのまま使う。
 - 1 ADRに決定1つ（密に結びついた数個まで）、本文はおおむね100行以内。書くのは変えるのに人の判断が要るもの（問題と文脈、方針・原則・境界・不変条件、退けた案、結果）で、eventやflagの名前、既定値・閾値の数値、関数やファイルの名前は[docs/design/](../design/)に書く。今の姿はdesignが、なぜそうしたかはADRが持つ。
 - `accepted`のADRだけが現在の決定で、本文の決定はすべて有効（`amended_by`を持つものは、その決定だけ後のADRが変えている）。`superseded`のADRは`superseded_by`を辿り、`accepted`に着くまで読む。
-- 新しい形の小さなADRの決定を変えるときは、新しいADRで丸ごと置き換える。決定の多い既存のADR（0047・0044・0073など）は凍結し、一部を変えるときは小さな新しいADRの`amends`に変える決定を書き、元のADRに`amended_by`を足し、同じ変更でdesignを今の姿に直す。
+- amendsで直すか丸ごと置き換えるかは、IDの形（4桁か新しい形か）でなく、元のADRの決定の数と変える範囲で決める（[ADR-t1091-1](2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)）。番号付きの決定を複数持つADR（4桁でも新しい形でも。0047・0073・t813-2など）の一部の決定を変えるときは、小さな新しいADRの`amends`に変える決定を書き、元のADRに`amended_by`を足し、同じ変更でdesignを今の姿に直す。決定が1つのADRを変えるときと、決定の大半を変えるときは、新しいADRで丸ごと置き換える。どちらにするかはADRを書くtaskのplannerがdescriptionに書き、plan reviewが見る。
 - 置き換えは後継を`accepted`にする変更と同じ変更で行う。`proposed`の後継は何も置き換えない。
 - 本文はappend-onlyで、後から変えてよいのはstatus・`accepted_on`・`superseded_by`・`superseded_on`・`deprecated_on`・`amended_by`とH1直後の注記1行だけ（`supersedes`と`amends`は本文と一緒に書く）。`superseded_on`は`superseded`にした日（後継の`accepted_on`と同じ）、`deprecated_on`は`deprecated`にした日。欄と注記の書式は[frontmatter仕様](../frontmatter.md)と[template](0000-template.md)にある。
 - ADRのstatusを変える変更は、同じ変更でこの索引の2つの表も更新する。新しい形の行は4桁の行の後ろに`accepted_on`の順で並べる。
@@ -121,6 +121,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t996-1](2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md) | supervisorが毎時（runtimeの規則の判定に当たったときだけ）・日次・週次にスループットの見直しのheadlessのjobを起動し、状態を変えずに結果をreports/に残してinboxに知らせるだけのattentionで届け、週次の次の一手はsupervisorがproposalを求めるfindingにする（ADR-0047決定1・2・17をamends） | 2026-09-29 |
 | [ADR-t946-1](2026-09-29-t946-1-kill-only-resumes-have-their-own-limit.md) | 外からのkill（session_killed）で止まったsessionのresumeは試行3回の上限に数えず、killだけの試行の別の上限で止める（ADR-0047決定24をamends） | 2026-09-29 |
 | [ADR-t1063-1](2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md) | worker以外のheadlessのjobのproviderを役割ごとの設定で選び（既定claude）、権限を意図で渡してproviderの実装が訳し、最終の返答のtextを受け取る。使えないproviderからはworkerと同じ条件でもう一方に切り替え、控えはproviderごとのまま、どのprovider・modelで動いたかを全てのjobで記録する（ADR-t813-2決定6をamends） | 2026-09-29 |
+| [ADR-t1091-1](2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md) | ADRをamendsで直すか丸ごと置き換えるかを、IDの形でなく元のADRの決定の数と変える範囲で決め、決定を複数持つ新しい形のADRもamendsで直せるようにする（ADR-t598-1決定5をamends） | 2026-09-30 |
 
 ## 置き換え・廃止されたADR
 

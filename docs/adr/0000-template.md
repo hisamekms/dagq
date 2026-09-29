@@ -6,9 +6,9 @@ status: proposed
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 # accepted_on: YYYY-MM-DD      # accepted にする変更で足す。updated は変えない
-# supersedes: [adr-tTASK-N]    # 置き換える ADR があれば。置き換えは丸ごと（ADR-t598-1）。本文と一緒に書き、後から変えない
-# amends: [adr-0047 決定 24]    # 凍結した大きな ADR の一部を変えるとき。元の ADR に amended_by を足し、design を今の姿に直す
-# amended_by: [adr-tTASK-N]     # この ADR の一部を変えた ADR（凍結した大きな ADR だけ）
+# supersedes: [adr-tTASK-N]    # 置き換える ADR があれば。置き換えは丸ごと（ADR-t598-1。決定を複数持つ ADR の一部だけを変えるなら amends）。本文と一緒に書き、後から変えない
+# amends: [adr-0047 決定 24]    # 番号付きの決定を複数持つ ADR（4 桁でも新しい形でも）の一部の決定を変えるとき（ADR-t1091-1）。決定が 1 つか大半を変えるなら supersedes で丸ごと置き換える。元の ADR に amended_by を足し、design を今の姿に直す
+# amended_by: [adr-tTASK-N]     # この ADR の一部の決定を変えた ADR（決定を複数持つ ADR だけ）
 # superseded_by: adr-tTASK-N     # superseded にするとき、後継の ID を 1 つ
 # superseded_on: YYYY-MM-DD    # superseded にした日（後継の accepted_on と同じ）
 # deprecated_on: YYYY-MM-DD    # deprecated にした日

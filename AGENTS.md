@@ -71,7 +71,7 @@ worker の手元の test を `<module>::` で 1 つずつ名指しし、手元�
 
 - 人の判断は ADR・Goal の記述・`Task.context`・receipt の `summary` に残す（作業記録のジャーナルは [ADR-0036](docs/adr/0036-delete-frozen-work-records.md) で削除した）
 - 決定は `docs/adr/` に追加する。既存 ADR は書き換えない
-- ADR は `accepted` だけが現在の決定で、`superseded` なら `superseded_by` を辿り、`deprecated` は後継なしの廃止（日付は `superseded_on` ではなく `deprecated_on`）。決定を変えるときは古い ADR を丸ごと置き換える ADR を書く（決定の多い既存の ADR は下の amends で直す。[ADR-t598-1](docs/adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)、索引は [docs/adr/README.md](docs/adr/README.md)）
+- ADR は `accepted` だけが現在の決定で、`superseded` なら `superseded_by` を辿り、`deprecated` は後継なしの廃止（日付は `superseded_on` ではなく `deprecated_on`）。決定を変えるとき、変える ADR の決定が 1 つか、決定の大半を変えるなら古い ADR を丸ごと置き換える ADR を書き、番号付きの決定を複数持つ ADR（4 桁でも新しい形でも）の一部の決定を変えるなら下の amends で直す（ID の形でなく決定の数と変える範囲で決める。[ADR-t1091-1](docs/adr/2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md)、[ADR-t598-1](docs/adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)、索引は [docs/adr/README.md](docs/adr/README.md)）
 - 実装を変えたら `docs/design/` の該当文書と `updated` / `last_verified` を更新する
 - ステップの状態が変わったら `docs/plans/current.md` を更新する
 - frontmatter は [docs/frontmatter.md](docs/frontmatter.md) に従う
@@ -79,7 +79,7 @@ worker の手元の test を `<module>::` で 1 つずつ名指しし、手元�
   - ADR を書く task を登録するときは、planner が description に本数と各 ID の中身を書き（自分の ID は `add` が返すまで分からないので「この task の ID で ADR-t<ID>-1 を書く」と書くか、`add` の後に draft を直す）、`--verify 'sh scripts/check-adr-numbers.sh'` を付ける。ID は task の ID から決まるので、planner も plan review も番号の割り当ての棚卸しをしない
   - 後続 task は ADR を `ADR-t<ID>-<N>` で参照する（日付を含めないので着地前から書ける）。今どうなっているかを指すときは `docs/design/` の文書を、なぜそうしたかを指すときは ADR を指す（決定 4）
   - 既存の 4 桁の ADR（0001〜）と、登録済みの task が予約した 4 桁の番号はそのまま使い、振り直さない。新しく登録する ADR の task は新しい形にする。ただし例外として、予約した 4 桁の番号が main ですでに埋まっていたら（`integrate` の `check-adr-numbers.sh` が重複で落ちて resume されたときも同じ）、番号の衝突は人が要る理由（[ADR-0047](docs/adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md) 決定 41）に当たらないので、worker は `dagq ask` にせず、自分の task の ID の新しい形に書き直す（ファイル名を `docs/adr/<accepted_on>-t<task ID>-<N>-<slug>.md` に、frontmatter の `id` を `adr-t<task ID>-<N>` にする）。自分の変更の中の参照も合わせ、元の番号と新しい ID を receipt の `summary` に書く（衝突しない ID なので、main の次の空き番号は探さない）
-  - 1 ADR に決定 1 つ（密に結びついた数個まで）、本文はおおむね 100 行以内。ADR には変えるのに人の判断が要るものを書き、event の kind や欄名・flag の綴り・既定値や閾値の数値・関数やファイルの名前・migration の番号・test の名前は `docs/design/` に書く（決定 2・3）。決定の多い既存の ADR（0047・0044・0073 など）の一部を変えるときは、丸ごと置き換えずに小さな新しい ADR の `amends` に変える決定を書き、元の ADR に `amended_by` を足し、design を今の姿に直す（決定 5）。決定と実装が明らかなものは ADR と実装を 1 task にする（決定 12）
+  - 1 ADR に決定 1 つ（密に結びついた数個まで）、本文はおおむね 100 行以内。ADR には変えるのに人の判断が要るものを書き、event の kind や欄名・flag の綴り・既定値や閾値の数値・関数やファイルの名前・migration の番号・test の名前は `docs/design/` に書く（決定 2・3）。番号付きの決定を複数持つ ADR（4 桁でも新しい形でも。0047・0073・t813-2 など）の一部の決定を変えるときは、丸ごと置き換えずに小さな新しい ADR の `amends` に変える決定を書き、元の ADR に `amended_by` を足し、design を今の姿に直す。決定が 1 つの ADR と決定の大半を変えるときは丸ごと置き換える。どちらにするかは ADR を書く task の planner が description に書き、plan review が見る（決定 5 を amends した ADR-t1091-1）。決定と実装が明らかなものは ADR と実装を 1 task にする（決定 12）
   - `scripts/check-adr-numbers.sh`（名前は登録済みの task の verify が使うので変えない）は、4 桁の番号の重複と `id` が `adr-<ファイルの番号>` と食い違う ADR、新しい形のファイル名の形（枝番の欠け）・`id` が `adr-t<ID>-<N>` と食い違う ADR・`t<ID>-<N>` の重複・ファイル名の日付と `accepted_on` の食い違いを検出して exit 1 にする（CI も実行する）
 
 ## タスクを閉じるとき
