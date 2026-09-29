@@ -558,7 +558,8 @@ enum Command {
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
         /// Codex CLI the Codex workers start (ADR-t813-2); a bare name is resolved on PATH. When it
-        /// is not found, no task of the codex provider is claimed.
+        /// is not found, the supervisor goes on and starts Codex tasks with non-interactive Claude
+        /// (provider_switched, reason executable_missing).
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// Write this start's JSON Lines log (supervise-<UTC time>-<pid>.jsonl)
@@ -836,7 +837,8 @@ enum Command {
         claude: PathBuf,
         /// Codex CLI the supervisor's Codex workers start (ADR-t813-2); a bare name is resolved on
         /// PATH and fixed on the supervisor like --claude. When it is not found, `up` goes on and
-        /// the supervisor claims no task of the codex provider.
+        /// the supervisor starts Codex tasks with non-interactive Claude
+        /// (provider_switched, reason executable_missing).
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// Have the supervisor build and install the runtime of every landing on main that changes
