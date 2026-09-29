@@ -161,3 +161,35 @@ background のコマンドの summary は `Background command "<Bash tool の de
 ### 結果（2026-09-29、task 820 の run cdcc8000）
 
 行っていない。この手順は task 820（goal 57 の文書の task）の受け入れ条件の 1 つだが、task 820 は dagq の worker として動き、worker は使い捨ての queue を作れず操作もできない（[隔離](#隔離)。`init`・`add`・`supervise` は `authorization_denied` になる。task 983、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回しない。そのため手順だけを書き、実行は receipt の `follow_ups`（`ops`）として人か inbox に任せた。その時点の host の版は Claude Code 2.1.284（`~/.local/bin/claude` の link 先）と codex-cli 0.155.1（`~/.local/bin/codex` の link 先は `~/.codex/packages/standalone/releases/0.155.1-aarch64-apple-darwin/bin/codex`）。stub の provider での自動 test（上に挙げた `tests/it` の 3 本）は着地済みの task 815〜818 が持つ。人か inbox が流したら、この節に版・run ごとの確認点の結果・見つけた問題を足す。
+
+## Codex の goal review のスモーク
+
+`[roles.goal_review]` の `provider = "codex"` の goal review（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、[Goal review](supervisor-lifecycle/goal-review.md) の 3、[provider-lifecycle](provider-lifecycle.md#codexのheadless-job)）は、spike の JSONL と rollout を書く stub の `codex`（`tests/it/goal_review_codex.rs`）でだけ自動 test される。実 Codex の出力の形・read-only の sandbox の中の `dagq` の読み取り・rollout の model・認証の失敗の文言は stub では確かめられないので、codex-cli の版を上げたとき、Codex の job の起動（`Codex::headless_command`・`apply_launch`）か読み手（`last_message`・`job_session`・`job_failure`）を変えたときに、使い捨て repository で 1 回流す。人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。
+
+### 手順
+
+1. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の 1・2 と同じ用意（使い捨て repository `dagq-smoke`、bare の `origin`、scratch のバイナリの wrapper `tq`、`tq init`、`codex login status` がログイン済み）。`~/.codex/config.toml`・`~/.codex/auth.json`・`CODEX_HOME` は書き換えない。`~/.codex/config.toml` の更新時刻を控える。
+2. 使い捨て repository の `dagq.toml` に次を書いて commit する（main checkout の作業ファイルが読まれる）。
+
+   ```toml
+   [roles.goal_review]
+   provider = "codex"
+   effort = "low"
+   ```
+
+   `tq doctor` の `roles.goal_review` が `{"provider": "codex", "source": "dagq.toml", "model": null, "effort": "low"}` であることを見る。
+3. goal を 1 件（acceptance に「`seed.txt` がある」）と、その goal の task を 1 件（`--verify 'test -f seed.txt'`、description に「`smoke-goal.txt` に 1 行足して commit し、receipt を書く」）登録して `tq ready ID --bypass-review` する（add が返した ID だけに打つ）。
+4. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の 4 と同じ `tq supervise ... --codex ~/.local/bin/codex` を起動する。task が着地すると goal が候補になり、goal review が Codex で動く。
+5. 確かめる。
+   - `tq events --goal GOAL --full`: `goal_review_started` の `launch` が `{"role": "goal_review", "provider": "codex", "model": null, "effort": "low", "source": "dagq.toml"}` で `session_id` が null。`goal_review_finished` の `decision`（`achieved` のはず）、`session_id`（Codex の thread の id）、`model`（Codex が実際に使った model。読めなければ `model_unknown` の理由）。
+   - goal の `goal-reviews/<id>/review.out` が `codex exec --json` の JSONL（`thread.started` … `turn.completed`）で、`command_execution` に `dagq show` などの読み取りがあり、書き込みのコマンドがあれば sandbox に拒まれている。`review.err` に `--dangerously` の類の警告が無い。
+   - `ps` で見た job の process（`codex exec --json --sandbox read-only -C <checkout> -c model_reasoning_effort="low" -- ...`）に bypass の flag が無い（job が短ければ `review.out` の `thread.started` と `tq status` の時刻で代える）。
+   - `~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread>.jsonl` の `turn_context` の `model` が `goal_review_finished` の `model` と同じ。
+   - `tq stats --full` の `jobs.goal_review.by_provider.codex` と `by_model.<model>` に 1 件。
+   - `~/.codex/config.toml` の更新時刻が変わっていない。
+6. 余力があれば切り替えも見る: supervisor を止め、`--codex <scratch>/no-such-codex` で起動し直し、goal に task を足して着地させると、次の goal review が Claude で動き、`goal_review_started` の `launch` に `switched_from: codex`・`switch_reason: executable_missing` がある。
+7. [故障経路のスモーク](#シナリオ)の後始末と同じく supervisor を止め、workspace group を消す。
+
+### 結果
+
+まだ行っていない（task 1065 は worker として動き、使い捨ての queue を作れないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。本番の queue で Codex の goal review を動かすのは、固定バイナリがこの task を含むものに入れ替わった後の task 1067 が `dagq.toml` に `provider` を書いてから。流したら、この節に版と確認点の結果を足す。

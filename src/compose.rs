@@ -339,8 +339,12 @@ pub struct SuperviseOptions {
     pub release_current: Option<String>,
     /// The Codex CLI a Codex worker starts (`supervise --codex`, ADR-t813-2):
     /// resolved on PATH when found; a supervisor without it runs no Codex
-    /// worker.
+    /// worker and no Codex job.
     pub codex: PathBuf,
+    /// Codex's home, whose rollouts name the model of a Codex job
+    /// (ADR-t1063-1); `None` is Codex's own (`$CODEX_HOME`, else
+    /// `~/.codex`). Tests point it at a stub's; nothing there is written.
+    pub codex_home: Option<PathBuf>,
     /// Record the host's load under `<queue dir>/host/` (task 516): off
     /// unless asked for (`supervise --host-metrics-interval`, 30 seconds
     /// by default in the CLI).
@@ -469,6 +473,7 @@ impl SuperviseOptions {
             release_index: None,
             release_current: None,
             codex: PathBuf::from("codex"),
+            codex_home: None,
             host_metrics: None,
             broker: None,
             passes: Arc::new(AtomicU64::new(0)),
@@ -641,7 +646,11 @@ pub fn supervise_with_reviewer(
     let found_codex = crate::infrastructure::codex::executable(&options.codex).ok();
     let codex = found_codex.clone().unwrap_or_else(|| options.codex.clone());
     let codex_agent = found_codex
-        .map(Codex::new)
+        .map(|executable| Codex {
+            executable,
+            // Codex's own home unless the options name one (tests).
+            home: options.codex_home.clone(),
+        })
         .filter(|codex| match codex.preflight() {
             Ok(()) => true,
             Err(error) => {
@@ -880,6 +889,11 @@ pub fn supervise_with_reviewer(
         cmux,
         workers,
         reviewer,
+        // The Codex a role's jobs run on (ADR-t1063-1): the one the Codex
+        // workers run, found and running.
+        codex_jobs: codex_agent
+            .as_ref()
+            .map(|codex| codex as &dyn AgentProvider),
         spawner: &LocalSpawner,
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
@@ -1185,6 +1199,7 @@ impl OneShot {
                 if let Some(repository) = doctor_repository(&queue)? {
                     report["repository"] = repository;
                 }
+                report["roles"] = doctor_roles(&queue);
                 report["language"] = serde_json::to_value(self.language_report(&queue)?)?;
                 report
             }
@@ -2279,6 +2294,42 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
         verification_timeout: VERIFICATION_TIMEOUT,
     }
     .run_env_programs(None)
+}
+
+/// The provider, model and effort each role other than the worker's starts
+/// with, and where its provider comes from (`dagq.toml` or `default`), as
+/// the `[roles.*]` of the `dagq.toml` of the bound main checkout says
+/// (ADR-t1063-1 decisions 1 and 6), keyed by role. A file that cannot be
+/// read adds `error`, and every role starts as before meanwhile.
+fn doctor_roles(queue: &SqliteQueue) -> serde_json::Value {
+    use crate::domain::actor_model::{ModelRole, RoleModels};
+    let read = match bound_checkout(queue) {
+        Ok(Some(checkout)) => crate::infrastructure::run_env::load_role_models(&checkout),
+        Ok(None) => Ok(RoleModels::default()),
+        Err(error) => Err(error),
+    };
+    let (models, error) = match read {
+        Ok(models) => (models, None),
+        Err(error) => (RoleModels::default(), Some(format!("{error:#}"))),
+    };
+    let mut roles = serde_json::Map::new();
+    for role in ModelRole::ALL {
+        let (provider, source) = models.provider(role);
+        let launch = models.launch(role);
+        roles.insert(
+            role.as_str().to_owned(),
+            serde_json::json!({
+                "provider": provider,
+                "source": source,
+                "model": launch.model,
+                "effort": launch.effort,
+            }),
+        );
+    }
+    if let Some(error) = error {
+        roles.insert("error".to_owned(), error.into());
+    }
+    serde_json::Value::Object(roles)
 }
 
 /// The landing branch and push of the repository the queue is bound to,

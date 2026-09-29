@@ -17,8 +17,8 @@ use super::{
 };
 use crate::{
     application::{
-        GoalDecided, GoalReviewApplied, GoalReviewApply, GoalReviewHold, GoalReviewJob,
-        GoalReviewRecord, GoalReviewStore,
+        GoalDecided, GoalReviewApplied, GoalReviewApply, GoalReviewFailure, GoalReviewHold,
+        GoalReviewJob, GoalReviewRecord, GoalReviewStore,
     },
     domain::{
         Ask, AskId, AskKind, GoalId, GoalVerdict, HEARTBEAT_TIMEOUT_SECS, NewTask, TaskId,
@@ -342,8 +342,10 @@ impl GoalReviewStore for SqliteQueue {
             params![id, dir_text],
         )?;
         // The job's Claude session id, given to it by the runtime (ADR-0048
-        // decision 4).
-        let session_id = self.generators.ids.uuid();
+        // decision 4); Codex names its thread itself, which the job's end
+        // records (ADR-t1063-1 decision 6).
+        let session_id = (launch.provider == crate::domain::Provider::Claude)
+            .then(|| self.generators.ids.uuid());
         let cwd = cwd.to_str().context("repository checkout is not UTF-8")?;
         goal_event(
             &tx,
@@ -479,24 +481,23 @@ impl GoalReviewStore for SqliteQueue {
             Some(&verdict_json),
             None,
         )?;
-        goal_event(
-            &tx,
-            job.goal_id,
-            EventKind::GoalReviewFinished,
-            json!({
-                "goal_review_id": job.id,
-                "attempt": job.attempt,
-                "verdict": apply.verdict.verdict,
-                "decision": apply.decision,
-                "overridden": apply.overridden,
-                "criteria": apply.verdict.criteria,
-                "summary": apply.verdict.summary,
-                "gaps": apply.verdict.gaps,
-                "gap_tasks": applied.gap_tasks,
-                "ask_id": applied.ask.as_ref().map(|outcome| outcome.ask.id),
-                "duration_secs": apply.duration_secs,
-            }),
-        )?;
+        let mut finished = json!({
+            "goal_review_id": job.id,
+            "attempt": job.attempt,
+            "verdict": apply.verdict.verdict,
+            "decision": apply.decision,
+            "overridden": apply.overridden,
+            "criteria": apply.verdict.criteria,
+            "summary": apply.verdict.summary,
+            "gaps": apply.verdict.gaps,
+            "gap_tasks": applied.gap_tasks,
+            "ask_id": applied.ask.as_ref().map(|outcome| outcome.ask.id),
+            "duration_secs": apply.duration_secs,
+        });
+        if let Some(session) = &apply.session {
+            session.record(&mut finished);
+        }
+        goal_event(&tx, job.goal_id, EventKind::GoalReviewFinished, finished)?;
         tx.commit()?;
         Ok(applied)
     }
@@ -505,8 +506,7 @@ impl GoalReviewStore for SqliteQueue {
         &mut self,
         job: &GoalReviewJob,
         token: &LeaseToken,
-        error: &str,
-        duration_secs: u64,
+        failure: &GoalReviewFailure,
     ) -> Result<()> {
         let now = self.generators.clock.now();
         // The span it closes reads its transcript first (task 543).
@@ -518,20 +518,29 @@ impl GoalReviewStore for SqliteQueue {
         if !running(&tx, job, token)? {
             return Ok(());
         }
-        finish_row(&tx, job.id, now, "failed", None, Some(error))?;
-        goal_event(
-            &tx,
-            job.goal_id,
-            EventKind::GoalReviewFailed,
-            json!({
-                "code": crate::domain::ReasonCode::JobFailed,
-                "goal_review_id": job.id,
-                "attempt": job.attempt,
-                "error": error,
-                "duration_secs": duration_secs,
-                "reason_category": crate::domain::AskReason::RecoveryFailed,
-            }),
-        )?;
+        // A provider that could not be used leaves the goal to be reviewed
+        // again at once, on the other provider (ADR-t1063-1 decision 4).
+        let outcome = if failure.unusable.is_some() {
+            "interrupted"
+        } else {
+            "failed"
+        };
+        finish_row(&tx, job.id, now, outcome, None, Some(&failure.error))?;
+        let mut failed = json!({
+            "code": crate::domain::ReasonCode::JobFailed,
+            "goal_review_id": job.id,
+            "attempt": job.attempt,
+            "error": failure.error,
+            "duration_secs": failure.duration_secs,
+            "reason_category": crate::domain::AskReason::RecoveryFailed,
+        });
+        if let Some(session) = &failure.session {
+            session.record(&mut failed);
+        }
+        if let Some((provider, reason)) = failure.unusable {
+            failed["provider_unusable"] = json!({"provider": provider, "reason": reason});
+        }
+        goal_event(&tx, job.goal_id, EventKind::GoalReviewFailed, failed)?;
         tx.commit()?;
         Ok(())
     }

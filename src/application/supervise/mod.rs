@@ -322,6 +322,9 @@ pub struct Ports<'a> {
     pub workers: WorkerAdapters<'a>,
     /// Starts the headless review and triage (ADR-0027, ADR-0024).
     pub reviewer: &'a dyn AgentProvider,
+    /// Starts the headless jobs whose role `[roles.<role>]` puts on Codex
+    /// (ADR-t1063-1); `None` when this supervisor found no Codex that runs.
+    pub codex_jobs: Option<&'a dyn AgentProvider>,
     pub spawner: &'a dyn Spawner,
     pub files: Arc<dyn RunFiles>,
     pub processes: Arc<dyn ProcessControl + Send + Sync>,
@@ -562,6 +565,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         verifier: ports.verifier.clone(),
         cmux: &cmux,
         reviewer: ports.reviewer,
+        codex_jobs: ports.codex_jobs,
         signals: interactive.signals,
         workers: ports.workers.workers(),
         spawner: ports.spawner,
@@ -671,6 +675,8 @@ struct Supervisor<'a> {
     cmux: &'a dyn WorkspaceBackend,
     /// Starts the headless review of accepted runs (ADR-0027).
     reviewer: &'a dyn AgentProvider,
+    /// Starts the headless jobs a role puts on Codex (ADR-t1063-1).
+    codex_jobs: Option<&'a dyn AgentProvider>,
     /// Reads the screen and the idle marker of the run sessions.
     signals: &'a dyn AgentSignals,
     /// The workers this supervisor runs: a candidate whose worker is not
@@ -957,13 +963,19 @@ impl Supervisor<'_> {
         &self,
         role: crate::domain::actor_model::ModelRole,
     ) -> crate::domain::actor_model::ActorLaunch {
-        match self.verifier.role_models() {
-            Ok(models) => models.launch(role),
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "[roles.{}] could not be read; starting it as before: {error:#}", role.as_str());
-                crate::domain::actor_model::ActorLaunch::default_of(role)
-            }
-        }
+        self.role_models(role).launch(role)
+    }
+
+    /// `[roles.*]` of `dagq.toml` as read now, or none (every role started
+    /// as before) when it cannot be read, warned of for `role`.
+    pub(super) fn role_models(
+        &self,
+        role: crate::domain::actor_model::ModelRole,
+    ) -> crate::domain::actor_model::RoleModels {
+        self.verifier.role_models().unwrap_or_else(|error| {
+            warn!(error = %format_args!("{error:#}"), "[roles.{}] could not be read; starting it as before: {error:#}", role.as_str());
+            crate::domain::actor_model::RoleModels::default()
+        })
     }
 
     /// Drive the loop, then remove this process's registration: it is about
@@ -1163,7 +1175,10 @@ impl Supervisor<'_> {
             // (task 437); one in progress is followed.
             let starting = !stopping && self.claiming && self.queue_hold.is_none();
             let mut progressed = self.plan_review_pass(options, starting);
-            progressed |= self.goal_review_pass(starting);
+            // The goal review decides on the hold itself: one whose role
+            // names its provider may run on Codex while Claude is held
+            // (ADR-t1063-1 decision 5); one that names none waits as above.
+            progressed |= self.goal_review_pass(!stopping && self.claiming);
             if self.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space or one a triage or resume waits

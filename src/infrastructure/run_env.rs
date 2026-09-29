@@ -11,8 +11,9 @@
 //! `[resume]` holds the limit of a run's conflict-only attempts (ADR-0047
 //! decision 24). `[exit]` holds the retries of a `/exit` the session held
 //! back and the wait after each (ADR-0047 decision 25). `[worker.trial]` turns on the limited trial of the worker's model
-//! (ADR-0079 decision 4). `[roles.<role>]` holds the model and effort of a
-//! session other than the worker's (ADR-0079 decision 7). `[supervisor]`
+//! (ADR-0079 decision 4). `[roles.<role>]` holds the provider, model and effort
+//! of a session other than the worker's (ADR-0079 decision 7, ADR-t1063-1
+//! decision 1). `[supervisor]`
 //! holds `parallel`, `max_waiting` and `runtime_planners` of a supervisor
 //! started without the flags (task 698, task 941). `[areas]` maps the
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
@@ -75,8 +76,8 @@ const KPI_TABLE: &str = "kpi";
 /// `[worker.trial]`: the limited trial of the worker's model (ADR-0079
 /// decision 4).
 const WORKER_TRIAL_TABLE: &str = "worker.trial";
-/// `[roles.<role>]`: the model and effort of a role other than the
-/// worker (ADR-0079 decision 7), one table per role.
+/// `[roles.<role>]`: the provider, model and effort of a role other than
+/// the worker (ADR-0079 decision 7, ADR-t1063-1), one table per role.
 const ROLES_PREFIX: &str = "roles.";
 /// What [`parse_config`] calls the current table while in a `[roles.*]`.
 const ROLES_TABLE: &str = "roles";
@@ -446,7 +447,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     "{CONFIG_FILE_NAME}:{number}: {key} is blank"
                 );
                 let table = config.roles.entry(role);
-                if key == "model" {
+                if key == "provider" {
+                    let provider = value
+                        .parse::<crate::domain::Provider>()
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                        .with_context(with)?;
+                    table.provider = Some(provider);
+                } else if key == "model" {
                     table.model = Some(value);
                 } else {
                     check_effort(&value)
@@ -597,6 +604,13 @@ pub fn parse_config(text: &str) -> Result<Config> {
         }
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
+    // A provider is checked against its role once the table is read whole
+    // (ADR-t1063-1 decision 1).
+    config
+        .roles
+        .check()
+        .map_err(anyhow::Error::msg)
+        .with_context(|| CONFIG_FILE_NAME.to_owned())?;
     config
         .broker
         .check()
@@ -1452,6 +1466,7 @@ LITERAL = 'no \n escapes # here'
         assert_eq!(
             config.roles.get(ModelRole::PlanReview),
             Some(&RoleModel {
+                provider: None,
                 model: None,
                 effort: Some("high".into())
             })
@@ -1459,6 +1474,7 @@ LITERAL = 'no \n escapes # here'
         assert_eq!(
             config.roles.get(ModelRole::Observer),
             Some(&RoleModel {
+                provider: None,
                 model: Some("claude-sonnet-5".into()),
                 effort: None
             })
@@ -1479,10 +1495,36 @@ LITERAL = 'no \n escapes # here'
                 "is defined twice",
             ),
             ("[roles.review]\n[roles.review]", "is defined twice"),
+            ("[roles.review]\nprovider = 'gemini'", "provider"),
+            // Codex runs only the goal review (ADR-t1063-1 decision 1).
+            (
+                "[roles.review]\nprovider = 'codex'",
+                "[roles.review]: provider codex cannot run the review role",
+            ),
+            (
+                "[roles.goal_review]\nmodel = 'claude-opus-5-5'\nprovider = 'codex'",
+                "model claude-opus-5-5 is Claude's",
+            ),
         ] {
             let error = format!("{:#}", parse_config(text).unwrap_err());
             assert!(error.contains(expected), "{text:?}: {error}");
         }
+        let config = parse_config(
+            "[roles.goal_review]\nprovider = \"codex\"\nmodel = 'gpt-6-astra'\n[roles.observer]\nprovider = 'claude'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.roles.get(ModelRole::GoalReview),
+            Some(&RoleModel {
+                provider: Some(crate::domain::Provider::Codex),
+                model: Some("gpt-6-astra".into()),
+                effort: None
+            })
+        );
+        assert_eq!(
+            config.roles.provider(ModelRole::Observer).0,
+            crate::domain::Provider::Claude
+        );
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_role_models(dir.path()).unwrap(), RoleModels::default());
         fs::write(

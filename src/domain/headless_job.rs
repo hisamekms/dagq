@@ -103,6 +103,30 @@ impl JobFailure {
     }
 }
 
+/// What the output of a headless job that ended says of its session, for
+/// a provider that names the session itself and whose model the runtime
+/// cannot read from a transcript (Codex, ADR-t1063-1 decision 6): the id
+/// the provider named it by (Codex's thread), the model it ran on, and why
+/// none was read when it was not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobSession {
+    pub session_id: Option<String>,
+    pub model: Option<String>,
+    pub model_unknown: Option<String>,
+}
+
+impl JobSession {
+    /// Put the session into the payload of the event that ends the job:
+    /// `session_id`, `model` and `model_unknown` (only when set).
+    pub fn record(&self, payload: &mut serde_json::Value) {
+        payload["session_id"] = serde_json::json!(self.session_id);
+        payload["model"] = serde_json::json!(self.model);
+        if let Some(why) = &self.model_unknown {
+            payload["model_unknown"] = serde_json::json!(why);
+        }
+    }
+}
+
 /// What a supervisor that takes over does with the process of a job of a
 /// gone supervisor, from what `ps` says of the pid now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +236,29 @@ mod tests {
         ] {
             assert_eq!(access.as_str().parse::<JobAccess>().unwrap(), access);
         }
+    }
+
+    #[test]
+    fn a_job_session_is_recorded_in_the_end_of_the_job() {
+        let mut payload = serde_json::json!({"goal_review_id": 3});
+        JobSession {
+            session_id: Some("thread-1".into()),
+            model: Some("gpt-6-astra".into()),
+            model_unknown: None,
+        }
+        .record(&mut payload);
+        assert_eq!(payload["session_id"], "thread-1");
+        assert_eq!(payload["model"], "gpt-6-astra");
+        assert!(payload.get("model_unknown").is_none());
+        let mut payload = serde_json::json!({});
+        JobSession {
+            session_id: None,
+            model: None,
+            model_unknown: Some("no rollout".into()),
+        }
+        .record(&mut payload);
+        assert!(payload["session_id"].is_null());
+        assert_eq!(payload["model_unknown"], "no rollout");
     }
 
     #[test]

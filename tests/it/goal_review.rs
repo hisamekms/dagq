@@ -32,7 +32,7 @@ fn supervise(fx: &Fixture, reviewer: &StubReviewer) -> Value {
 }
 
 /// An open goal with two tasks, one completed and one canceled.
-fn goal_done(fx: &Fixture) -> (GoalId, TaskId) {
+pub(crate) fn goal_done(fx: &Fixture) -> (GoalId, TaskId) {
     let mut queue = SqliteQueue::open(&fx.db).unwrap();
     let goal = queue
         .add_goal(NewGoal {
@@ -65,7 +65,7 @@ fn set_status(fx: &Fixture, task: TaskId, status: TaskStatus) {
         .unwrap();
 }
 
-fn goal_events(queue: &mut SqliteQueue, goal: GoalId, kind: &str) -> Vec<Value> {
+pub(crate) fn goal_events(queue: &mut SqliteQueue, goal: GoalId, kind: &str) -> Vec<Value> {
     queue
         .show_goal(goal)
         .unwrap()

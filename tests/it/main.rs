@@ -32,6 +32,7 @@ mod cli_version;
 mod draft_bundles;
 mod finding_planner;
 mod goal_review;
+mod goal_review_codex;
 mod inbox_nudge;
 mod inbox_watcher;
 mod installed_plugin;

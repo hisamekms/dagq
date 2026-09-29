@@ -7,6 +7,11 @@
 //! `killall` in the worktree. Nothing of the person's (`~/.codex`,
 //! `CODEX_HOME`) is written or changed: the model a turn ran on is only
 //! read from the thread's rollout there.
+//!
+//! Codex also runs the headless jobs whose role `[roles.<role>]` puts on it
+//! (ADR-t1063-1, the goal review for now): one `codex exec --json` in the
+//! read-only sandbox, whose reply, thread and model are read from its JSONL
+//! and its rollout the way a turn's are.
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -16,7 +21,12 @@ use std::{
 };
 
 use crate::application::{AgentProvider, CommandSpec, TurnReader};
-use crate::domain::{TaskRun, headless_job::JobAccess, turn::TurnSession};
+use crate::domain::{
+    TaskRun,
+    actor_model::ActorLaunch,
+    headless_job::{JobAccess, JobFailure, JobSession},
+    turn::{TurnFailure, TurnSession},
+};
 
 use super::{adapters::output, codex_turns::CodexTurnReader};
 
@@ -184,6 +194,26 @@ pub fn writable_roots_config(roots: &[PathBuf]) -> Result<String> {
     ))
 }
 
+/// The sandbox of a headless job (ADR-t1063-1 decision 2): read-only,
+/// whatever its [`JobAccess`] says. Every intent a job names reads files
+/// and runs `dagq`'s reads at most; the read-only sandbox lets any command
+/// read and refuses every write, and `dagq` takes the role and queue from
+/// the job's environment, which the sandbox's shell inherits (spike 1. and
+/// 2.). No writable root, network, approval or bypass flag is given.
+pub const JOB_SANDBOX: &str = "read-only";
+
+/// The last `agent_message` of a `codex exec --json` output, in full: the
+/// reply of a headless job; empty when there is none.
+pub fn last_message(stdout: &str) -> String {
+    stdout
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "item.completed" && event["item"]["type"] == "agent_message")
+        .and_then(|event| event["item"]["text"].as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// Codex's reasoning effort for the effort a claim chose: Codex has no
 /// `max`, its highest is `xhigh`.
 pub fn reasoning_effort(effort: &str) -> &str {
@@ -303,9 +333,85 @@ impl AgentProvider for Codex {
     fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
         Ok(Box::new(CodexTurnReader::reading(self.sessions_dir())))
     }
+    /// `codex exec --json --sandbox read-only -C <cwd> -- <prompt>` in
+    /// `cwd` (ADR-t1063-1 decision 2, spike 1.): the job's intent is read
+    /// in [`JOB_SANDBOX`], its environment (role, queue) is the caller's,
+    /// and nothing of the person's Codex settings is changed. Codex names
+    /// its thread itself, so no session id is given.
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
+        let _ = access;
+        let mut command = CommandSpec::new(&self.executable);
+        command
+            .current_dir(cwd)
+            .arg("exec")
+            .arg("--json")
+            .arg("--sandbox")
+            .arg(JOB_SANDBOX)
+            .arg("-C")
+            .arg(cwd)
+            .arg("--")
+            .arg(prompt);
+        Ok(command)
+    }
+    /// A job's model only when it is Codex's (`-m`), and its effort as
+    /// `-c model_reasoning_effort` whenever the launch gives one: a Codex
+    /// launch may leave the model to Codex's default.
+    fn apply_launch(&self, command: &mut CommandSpec, launch: &ActorLaunch) {
+        if let Some(model) = launch
+            .model
+            .as_deref()
+            .filter(|model| !model.starts_with("claude"))
+        {
+            command.option_args(["-m", model]);
+        }
+        if let Some(effort) = launch.effort.as_deref() {
+            command.option_args([
+                "-c".to_owned(),
+                format!(r#"model_reasoning_effort="{}""#, reasoning_effort(effort)),
+            ]);
+        }
+    }
+    fn job_reply(&self, stdout: &str) -> String {
+        last_message(stdout)
+    }
+    /// The thread `thread.started` names, and the model of the rollout's
+    /// `turn_context` written since the job started.
+    fn job_session(&self, stdout: &str, since: Option<i64>) -> Option<JobSession> {
+        let result = read_job(self.sessions_dir(), stdout, "", since);
+        Some(JobSession {
+            session_id: result.session_id,
+            model: result.model,
+            model_unknown: result.model_unknown,
+        })
+    }
+    /// The failure of the turn the job was, as a worker's turn is read
+    /// ([`crate::infrastructure::codex_turns::classify`]).
+    fn job_failure(&self, stdout: &str, stderr: &str) -> JobFailure {
+        match read_job(None, stdout, stderr, None).failure {
+            Some(TurnFailure::Authentication) => JobFailure::Authentication,
+            Some(TurnFailure::UsageLimit) => JobFailure::UsageLimit,
+            Some(TurnFailure::Launch) => JobFailure::LaunchFailed,
+            _ => JobFailure::Other,
+        }
+    }
     fn turn_session_from_output(&self) -> bool {
         true
     }
+}
+
+/// A job's whole output read as one turn: its lines, then its end (read
+/// as a process that failed, which only a failure is asked of).
+fn read_job(
+    sessions: Option<PathBuf>,
+    stdout: &str,
+    stderr: &str,
+    since: Option<i64>,
+) -> crate::domain::turn::TurnResult {
+    let mut reader = CodexTurnReader::reading_since(sessions, since);
+    for line in stdout.lines() {
+        reader.line(line);
+    }
+    reader.finish(None, stderr)
 }
 
 #[cfg(test)]
@@ -419,6 +525,140 @@ mod tests {
                 "--",
                 "prompt"
             ]
+        );
+    }
+
+    /// A headless job (ADR-t1063-1): `codex exec --json` in the read-only
+    /// sandbox in its directory, no bypass flag, no session id, its model
+    /// only when Codex's and its effort as `-c`.
+    #[test]
+    fn a_job_runs_in_the_read_only_sandbox() {
+        use crate::domain::actor_model::{ModelRole, RoleModels};
+        let codex = Codex::new("/opt/codex".into());
+        let cwd = Path::new("/repo");
+        let mut command = codex
+            .headless_command(cwd, "review it", JobAccess::ReadFilesAndQueueCli)
+            .unwrap();
+        codex.assign_session_id(&mut command, "not-given");
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::GoalReview).provider = Some(crate::domain::Provider::Codex);
+        codex.apply_launch(&mut command, &models.launch(ModelRole::GoalReview));
+        models.entry(ModelRole::GoalReview).model = Some("gpt-6-astra".into());
+        models.entry(ModelRole::GoalReview).effort = Some("max".into());
+        let mut chosen = codex
+            .headless_command(cwd, "review it", JobAccess::ReadFiles)
+            .unwrap();
+        codex.apply_launch(&mut chosen, &models.launch(ModelRole::GoalReview));
+        let args = |command: &CommandSpec| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(command.get_program(), "/opt/codex");
+        assert_eq!(command.get_current_dir(), Some(cwd));
+        assert_eq!(
+            args(&command),
+            [
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "-C",
+                "/repo",
+                "-c",
+                r#"model_reasoning_effort="medium""#,
+                "--",
+                "review it"
+            ]
+        );
+        assert_eq!(
+            args(&chosen)[6..],
+            [
+                "-m",
+                "gpt-6-astra",
+                "-c",
+                r#"model_reasoning_effort="xhigh""#,
+                "--",
+                "review it"
+            ]
+        );
+        for args in [args(&command), args(&chosen)] {
+            assert!(
+                !args.iter().any(|arg| arg.contains("dangerously")
+                    || arg.contains("bypass")
+                    || arg.contains("writable_roots")),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// The reply, thread, model and failure of a job are read from its
+    /// JSONL and the thread's rollout (spike 3. and 4.).
+    #[test]
+    fn a_job_reads_its_reply_thread_model_and_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let verdict = r#"{"verdict":"achieved","criteria":[],"summary":"done"}"#;
+        let line = |value: serde_json::Value| format!("{value}\n");
+        let stdout = [
+            line(serde_json::json!({"type": "thread.started", "thread_id": "t-1"})),
+            line(serde_json::json!({"type": "turn.started"})),
+            line(serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": "Looking."}})),
+            line(serde_json::json!({"type": "item.completed", "item": {"type": "command_execution", "command": "dagq show 1", "exit_code": 0}})),
+            line(serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": verdict}})),
+            line(serde_json::json!({"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 1}})),
+        ]
+        .concat();
+        let codex = Codex {
+            executable: "codex".into(),
+            home: Some(dir.path().to_owned()),
+        };
+        assert_eq!(codex.job_reply(&stdout), verdict);
+        assert_eq!(codex.job_reply("not json\n"), "");
+        let unknown = codex.job_session(&stdout, None).unwrap();
+        assert_eq!(unknown.session_id.as_deref(), Some("t-1"));
+        assert_eq!(unknown.model, None);
+        assert!(
+            unknown.model_unknown.unwrap().contains("no rollout"),
+            "the rollout is not written yet"
+        );
+        let day = dir.path().join("sessions/2026/09/29");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(
+            day.join("rollout-2026-09-29T00-00-00-t-1.jsonl"),
+            line(serde_json::json!({"timestamp": "2026-09-29T00:00:01.000Z", "type": "turn_context", "payload": {"model": "gpt-6-astra"}})),
+        )
+        .unwrap();
+        let session = codex.job_session(&stdout, None).unwrap();
+        assert_eq!(session.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(session.model_unknown, None);
+        // A turn_context from before the job is an earlier thread's turn.
+        let later = crate::domain::stats::rfc3339_millis("2026-09-29T01:00:00.000Z");
+        assert_eq!(codex.job_session(&stdout, later).unwrap().model, None);
+        assert_eq!(codex.job_failure(&stdout, ""), JobFailure::Other);
+        let failed = |message: &str| {
+            line(serde_json::json!({"type": "thread.started", "thread_id": "t-2"}))
+                + &line(serde_json::json!({"type": "error", "message": message}))
+                + &line(serde_json::json!({"type": "turn.failed", "error": {"message": message}}))
+        };
+        assert_eq!(
+            codex.job_failure(
+                &failed("unexpected status 401 Unauthorized: Missing bearer"),
+                ""
+            ),
+            JobFailure::Authentication
+        );
+        assert_eq!(
+            codex.job_failure(&failed("You've hit your usage limit."), ""),
+            JobFailure::UsageLimit
+        );
+        assert_eq!(
+            codex.job_failure(&failed("the model broke"), ""),
+            JobFailure::Other
+        );
+        assert_eq!(
+            codex.job_failure("", "error: 401 Unauthorized\n"),
+            JobFailure::Authentication
         );
     }
 

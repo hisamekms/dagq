@@ -17,6 +17,7 @@ related:
   - design-supervisor-lifecycle-plan-planners
   - design-provider-lifecycle
   - adr-0079
+  - adr-t1063-1
 ---
 
 # Actor model
@@ -44,6 +45,23 @@ worker以外のアクターのsessionのmodelとeffortの設定と、provider・
 - 設定は読む時点ごとに読み直すので、supervisorの再起動なしに次のjobから効く
 - この repositoryの`dagq.toml`には役割の表を置かない（highに上げるのは基準値がたまってから人とplannerが決める。ADR-0079の決定7の(d)）。旧バイナリは`[roles.*]`を未知の表として拒むので、足すのはそれを知るバイナリに入れ替えた後にする
 
+## provider
+
+[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1・4・5（task 1065）。`[roles.<role>]`の`provider`（`claude` / `codex`）で役割のsessionを動かすproviderを選ぶ。
+
+```toml
+[roles.goal_review]
+provider = "codex"
+model = "gpt-6-astra"   # 省けばCodexの既定のmodel
+effort = "high"         # 省けばmedium
+```
+
+- **既定**: `provider`を書かない役割はClaude（`domain::actor_model::ROLE_PROVIDER`）で、起動も失敗のときの振る舞い（Claudeの控えのaskで待つ）も今までと同じ
+- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`（今は`goal_review`だけ。`runs_on(role, provider)`）。それ以外の役割に`codex`を書くと、`dagq.toml`を読むときの検査（`RoleModels::check`、`parse_config`の最後）がエラーにする（`dagq.toml: [roles.review]: provider codex cannot run the review role; Codex runs only goal_review`）。warnを出してClaudeで起動する形にしなかったのは、ADR-t1063-1の決定1が「起動せずに設定の誤りとして知らせる」と決めたため。エラーの間は他の`dagq.toml`の誤りと同じく、supervisorとobserverは全ての役割を今までと同じ起動にし（`Supervisor::role_models`のwarn）、`doctor`の`roles.error`に出る。`codex`の表にClaudeのmodel（`claude`で始まる名前）を書いてもエラーにする（modelはproviderごとの名前で、CodexにClaudeのmodelを渡さない）
+- **launch**（`RoleModels::launch`）: Claudeの表は今までどおり（省いたmodel / effortは`claude-opus-5-5` / `medium`を明示）。Codexの表はmodelを省けば`null`（Codexの既定。`-m`を渡さない）、effortを省けば`medium`（`-c model_reasoning_effort`に渡す）。どちらも`source`は`dagq.toml`
+- **切り替え**（`RoleModels::switchable`・`domain::actor_model::job_route`）: `provider`を書いた役割のjobは、そのproviderが使えない（supervisorにagentが無い＝`executable_missing`、または控えられている）とき、もう一方のproviderがその役割を動かせて使えれば、そのproviderの既定の起動（modelとeffortはproviderごとの名前なので渡さない。`ActorLaunch::switched`）で起動し、launchに`switched_from`（元のprovider）と`switch_reason`（`SwitchReason`の値）を残す。どちらも使えなければ起動せずに待つ。今これを使うのはgoal reviewだけ（[Goal review](goal-review.md)の3と6）で、他の役割は`provider = "claude"`を書いても今までどおりの起動と控え
+- **見え方**: `dagq doctor`の`roles`が役割ごとに`provider`・`source`（`dagq.toml` / `default`）・`model`・`effort`を出す（queueが束縛されたmain checkoutの`dagq.toml`。読めなければ`roles.error`に理由を足し、全ての役割は既定で出る。`compose::doctor_roles`）。jobごとに実際に動いたproviderは開始のeventの`launch.provider`と`headless_jobs.provider`
+
 ## 差し戻しで開き直すplannerの段上げ
 
 plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のplannerが居ないのでruntimeが新しくplannerを立てる（`open_runtime_planner`、[Plan review](plan-review.md)の9）と、そのplannerのeffortを`[roles.runtime_planner]`の値（無ければ`medium`）から1段上げる（`domain::actor_model::raise`: `low` → `medium` → `high` → `xhigh`、`xhigh`が上限で同じ段のまま。`max`は上げない）。modelは表の値（無ければ`claude-opus-5-5`を明示）のまま変えない。理由（`escalation_reason`）は`plan_review_revise`。
@@ -59,7 +77,8 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
  "source": "revise_escalation", "escalated_from": "medium", "escalation_reason": "plan_review_revise"}
 ```
 
-- `provider`: sessionを起動したprovider（task 1062、goal 73）。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ`domain::Provider`（`claude` / `codex`）。worker以外の役割は今は全てClaudeで動く（ADR-t813-2の決定1）ので、`ActorLaunch::default_of`と`RoleModels::launch`は常に`domain::actor_model::ROLE_PROVIDER`（`claude`）を入れ、段上げ（`escalated`）は元のproviderを引き継ぐ。役割ごとにproviderを選ぶ設定は後続のtaskが足す。`provider`の無い過去の`launch`（task 1062より前の記録）は`ActorLaunch::recorded`が`claude`として読む（それより前はClaudeでしか動かなかった）
+- `provider`: sessionを起動したprovider（task 1062、goal 73）。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ`domain::Provider`（`claude` / `codex`）。`ActorLaunch::default_of`は`domain::actor_model::ROLE_PROVIDER`（`claude`）を、`RoleModels::launch`は表の`provider`（無ければ`claude`。上の[provider](#provider)、task 1065）を入れ、段上げ（`escalated`）は元のproviderを引き継ぐ。`provider`の無い過去の`launch`（task 1062より前の記録）は`ActorLaunch::recorded`が`claude`として読む（それより前はClaudeでしか動かなかった）
+- `switched_from` / `switch_reason`: 使えないproviderから切り替えて起動したjobだけ（task 1065）。例: `{"role": "goal_review", "provider": "claude", "model": null, "effort": null, "source": "default", "switched_from": "codex", "switch_reason": "authentication"}`
 - `source`: `default`（渡していない。`model` / `effort`はnullで、実際の値はsessionが閉じたときの`session_closed`の`model` / `effort`が持つ）、`dagq.toml`、`revise_escalation`。`escalated_from` / `escalation_reason`は段上げのときだけ
 - **jobの開始のevent**: `review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`・`throughput_review_started`の`launch`、生きているrunの復旧のjobは`recovery_requested`の`launch`（生きているrunのjobのpromptのfactsにも、その後の終わったrunのjobのfactsにも含めない）。どれも`provider`を持つ。jobの区間の`session_opened`（`domain::sessions::changes`の`job`）は開始のeventの`launch`を写す（生きているrunの復旧のjobとスループットの見直しのjobは区間を持たない）。終わったrunの復旧のjobは`triage_started`の`launch`（`ActorLaunch::recorded`）で起動する
 - **planner**: 開く側（`open_person_planner` / `open_runtime_planner` / `open_draft_planner`）が決め、`dagq plan`の結果の`launch`、workspaceの`--env DAGQ_LAUNCH=<launchのJSON>`、wrapperのargvの`planner-session ... --model <model> --effort <effort>`（渡すときだけ）にする。wrapper（`run_planner_session`）は`planner_command`の後に`select_model`で渡す。pluginのhookが記録するplannerの区間の`session_opened`は`DAGQ_LAUNCH`を`launch`に写す（`SessionHook::launch`。JSONのobjectとして読めなければ写さない）。同じworkspaceで人が`claude`を打ち直したsessionも同じ`launch`を持つが、その起動には引数が無い
@@ -69,12 +88,15 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
 
 - **goal review**（task 1062）: `goal_review_started`に`launch`と、runtimeが起動前に決めてjobに渡す`session_id`（ADR-0048の決定4。Claude Codeには`--session-id`）と`cwd`（jobを起動したrepositoryのcheckout）を記録する。これで他のjobと同じく区間（`session_opened` / `session_closed`、kind `goal_review`）を持ち、`session_closed`にtranscriptから読んだ実際の`model` / `effort`が入る（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。それより前の`goal_review_started`には`launch`も`session_id`も無い
 - **実際のmodelをjobの終わりのeventに写さない**: 実際の`model` / `effort`は区間の`session_closed`だけが持ち、`review_finished`・`goal_review_finished`などjobの終わりのeventには写さない。`session_closed`はjobの終わりのeventと同じトランザクション・同じ時刻に書かれ、`opened_event_id`で開始のevent（`launch`）と、payloadの`plan_review_id` / `goal_review_id`・runでjobと結べるので、写すと同じ値を2か所に持つだけになる。`stats`の`sessions`（kindごと）と`kpi`の`model=` / `effort=`の層は既に`session_closed`を読む
-- **`headless_jobs.provider`**（schema v55、`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjob（review・復旧・plan review・goal review）のプロセスの行に、起動したprovider（今は`ROLE_PROVIDER`）を書く。`NOT NULL DEFAULT 'claude'`なので、migrationより前の行と、列を知らない古いバイナリが書く行は`claude`と読める（[Headless job processes](headless-job-processes.md)）
+- **Codexのjobの実際のmodelとthread**（task 1065）: Codexはsessionのidをrunを始める前に受け取らず（threadを自分で名付ける）、transcriptも無いので、Codexのgoal reviewは`goal_review_started`の`session_id`をnullにし、終わりのevent（`goal_review_finished` / `goal_review_failed`）に`session_id`（threadのid）・`model`（rolloutから読んだ実際のmodel）・`model_unknown`（読めなかった理由。読めたときは無い）を写す（`domain::headless_job::JobSession::record`）。区間の`session_closed`も同じ値を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。上の「写さない」はClaudeのjobの話で、Codexのjobは終わりのeventしか値の出どころが無いので写す。`stats`のjobの`by_model`は、開始の`session_id`の`session_closed`が無ければ終わりのeventの`model`を読む
+- **`headless_jobs.provider`**（schema v55、`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjob（review・復旧・plan review・goal review）のプロセスの行に、起動したprovider（`JobSubject::provider`。goal reviewは行き先のprovider、他は`ROLE_PROVIDER`）を書く。`NOT NULL DEFAULT 'claude'`なので、migrationより前の行と、列を知らない古いバイナリが書く行は`claude`と読める（[Headless job processes](headless-job-processes.md)）
 
 ## テスト
 
 - `domain::actor_model`の単体テスト（表が無い役割、表の値と既定、段上げと上限、記録の読み戻し、effortの検査、全ての役割の`launch`の`provider`と`provider`の無い過去の記録を`claude`と読むこと（`every_launch_records_its_provider_and_an_older_one_reads_as_claude`））
-- `infrastructure::run_env`の`parses_the_role_tables`
+- `infrastructure::run_env`の`parses_the_role_tables`（`provider`の値、goal review以外の`codex`とCodexの表のClaudeのmodelのエラー）
+- `domain::actor_model`の`a_role_table_names_its_provider`と`a_job_moves_to_the_other_provider_or_waits`（task 1065）
+- `tests/it/goal_review_codex.rs`（task 1065）: `provider = "codex"`でgoal reviewがstubの`codex exec --json --sandbox read-only`で動き、verdict・thread・modelを読んで適用し、`doctor`の`roles`とgoal review以外の`codex`のエラー、Codexの認証の失敗からClaudeへの切り替え、Codexが無いときのClaude、両方控えられたときの待ち
 - `domain::sessions`の`a_hook_input_names_its_session_and_the_environment_its_span`（`DAGQ_LAUNCH`の読み取りと`session_opened`の`launch`）
 - `tests/it/actor_model.rs`: 表が無いとき復旧のjobとreviewに何も渡さず`default`を記録し、`[roles.review]`・`[roles.recovery]`があれば渡して`dagq.toml`を記録する（区間の`launch`も）
 - `tests/it/plan_review.rs`: `a_revise_without_a_live_planner_opens_planners_within_the_limit`（既定のplan reviewと、開き直したplannerの`high`への段上げ）、`a_revise_goes_to_the_live_planner_...`（生きているplannerは上げない）、`role_tables_set_the_plan_review_and_raise_the_revise_planner_from_them`（`[roles.plan_review]`と、`[roles.runtime_planner]`の`high`から`xhigh`）

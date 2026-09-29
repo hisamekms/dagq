@@ -306,7 +306,9 @@ fn write_changes(
     for change in changes {
         match change {
             SpanChange::Close { span, reason } => {
-                if let Some(closed) = close(conn, &at, task_id, run_id, &span, reason)? {
+                if let Some(closed) =
+                    close_with(conn, &at, task_id, run_id, &span, reason, Some(payload))?
+                {
                     exited = closed;
                 }
             }
@@ -437,7 +439,38 @@ fn close(
     span: &OpenSpan,
     reason: &str,
 ) -> Result<Option<RunSessionClosed>> {
+    close_with(conn, now, task_id, run_id, span, reason, None)
+}
+
+/// [`close`], by the event whose payload is `ending` when an event closes
+/// it: the span of a job whose provider names its session itself (Codex,
+/// ADR-t1063-1 decision 6) takes the session id, model and why no model
+/// was read that the job's end records, since it has no transcript.
+fn close_with(
+    conn: &Connection,
+    now: &str,
+    task_id: Option<TaskId>,
+    run_id: Option<&RunId>,
+    span: &OpenSpan,
+    reason: &str,
+    ending: Option<&Value>,
+) -> Result<Option<RunSessionClosed>> {
     let mut payload = SpanChange::closed_payload(span, reason);
+    if !span.claude()
+        && !span.headless()
+        && let Some(ending) = ending
+    {
+        if span.session_id().is_none()
+            && let Some(session) = ending.get("session_id").filter(|id| id.is_string())
+        {
+            payload["session_id"] = session.clone();
+        }
+        for key in ["model", "model_unknown"] {
+            if let Some(value) = ending.get(key).filter(|value| value.is_string()) {
+                payload[key] = value.clone();
+            }
+        }
+    }
     let mut closed_at = now.to_owned();
     let mut closed = RunSessionClosed::default();
     if span.headless() {

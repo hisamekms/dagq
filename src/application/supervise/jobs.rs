@@ -48,9 +48,12 @@ pub(super) struct JobSubject {
     pub(super) proposal_id: Option<crate::domain::ProposalId>,
     pub(super) goal_id: Option<crate::domain::GoalId>,
     pub(super) attempt: usize,
+    /// The provider the job was started on (ADR-t1063-1).
+    pub(super) provider: Provider,
 }
 
 impl JobSubject {
+    /// A job of `run`, on Claude (a run's jobs run only there).
     pub(super) fn run(kind: &'static str, run: &RunId, attempt: usize) -> Self {
         Self {
             kind,
@@ -59,6 +62,7 @@ impl JobSubject {
             proposal_id: None,
             goal_id: None,
             attempt,
+            provider: crate::domain::actor_model::ROLE_PROVIDER,
         }
     }
 }
@@ -78,6 +82,11 @@ pub(super) struct HeadlessJob {
     /// Its `headless_jobs` row, until its end is handed to `ends`; `None`
     /// when the start could not be recorded.
     pub(super) record: Option<(JobEnds, i64)>,
+    /// The provider it runs on, whose implementation reads its reply,
+    /// session and failure (ADR-t1063-1).
+    pub(super) provider: Provider,
+    /// When it started (unix milliseconds), for the model of its session.
+    pub(super) started_at: Option<i64>,
 }
 
 impl HeadlessJob {
@@ -134,6 +143,18 @@ impl HeadlessJob {
     }
 }
 
+impl<'a> Supervisor<'a> {
+    /// The agent that starts and reads the headless jobs of `provider`:
+    /// the reviewer for Claude, the Codex this supervisor found for Codex
+    /// (`None` without one).
+    pub(super) fn job_agent(&self, provider: Provider) -> Option<&'a dyn AgentProvider> {
+        match provider {
+            Provider::Claude => Some(self.reviewer),
+            Provider::Codex => self.codex_jobs,
+        }
+    }
+}
+
 impl HeadlessJob {
     /// What the job wrote to its stdout and stderr, for the wall it may
     /// have stopped at (task 438).
@@ -174,9 +195,7 @@ impl Supervisor<'_> {
             proposal_id: subject.proposal_id,
             goal_id: subject.goal_id,
             attempt: subject.attempt,
-            // Every headless job runs on Claude until a role may choose
-            // another provider (goal 73).
-            provider: crate::domain::actor_model::ROLE_PROVIDER,
+            provider: subject.provider,
             pid,
             process_start: self.processes.start_identity(pid),
             supervisor_token: self.token.clone(),
@@ -197,14 +216,26 @@ impl Supervisor<'_> {
             stderr,
             processes: self.processes.clone(),
             record,
+            provider: subject.provider,
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|since| i64::try_from(since.as_millis()).ok()),
         }
     }
 
     /// Why a headless job failed, in the classes shared by every provider
     /// (ADR-t1063-1 decision 4), as its provider's adapter reads the job's
-    /// output.
+    /// output: Claude Code's by its signals (task 438), another's by its
+    /// agent.
     pub(super) fn job_failure(&self, job: &HeadlessJob) -> JobFailure {
-        self.signals.job_failure(&job.output(&*self.files))
+        match (job.provider, self.job_agent(job.provider)) {
+            (Provider::Codex, Some(agent)) => {
+                let read = |path: &Path| self.files.read_to_string(path).unwrap_or_default();
+                agent.job_failure(&read(&job.stdout), &read(&job.stderr))
+            }
+            _ => self.signals.job_failure(&job.output(&*self.files)),
+        }
     }
 
     /// The wall only a person moves (a login that ran out, the usage
@@ -600,6 +631,8 @@ mod tests {
             stderr: err,
             processes: Arc::new(NoProcesses),
             record: None,
+            provider: Provider::Claude,
+            started_at: None,
         }
     }
 

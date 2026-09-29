@@ -32,9 +32,14 @@ impl Supervisor<'_> {
     /// workspaces through cmux, its agents through the review provider and
     /// the spawner, on the queue's environment.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
+        self.actors_on(self.reviewer)
+    }
+    /// [`Self::actors`] with its agents made by `agent`: a headless job
+    /// whose role runs on another provider (ADR-t1063-1).
+    pub(super) fn actors_on<'s>(&'s self, agent: &'s dyn AgentProvider) -> HostActorExecutor<'s> {
         HostActorExecutor::new(&self.layout.db)
             .with_workspaces(self.cmux)
-            .with_provider(self.reviewer)
+            .with_provider(agent)
             .with_spawner(self.spawner)
     }
     /// Plan paths, create the run directory, worktree and workspace. Any

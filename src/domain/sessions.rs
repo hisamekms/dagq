@@ -141,9 +141,16 @@ impl OpenSpan {
     /// Whether its transcript is Claude Code's: every span but one of a
     /// session of another provider.
     pub fn claude(&self) -> bool {
+        self.provider().is_none_or(|provider| provider == "claude")
+    }
+
+    /// The provider of the session: a worker's span's `provider`, a job's
+    /// span's `launch.provider` (ADR-t1063-1); `None` when it names none
+    /// (Claude, before either was recorded).
+    pub fn provider(&self) -> Option<&str> {
         self.payload["provider"]
             .as_str()
-            .is_none_or(|provider| provider == "claude")
+            .or_else(|| self.payload["launch"]["provider"].as_str())
     }
 }
 

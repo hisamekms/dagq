@@ -1,5 +1,5 @@
-//! The model and effort of the sessions other than the worker's (ADR-0079
-//! decision 7 (b)(c)): the plan review, the review, the recovery (triage)
+//! The provider, model and effort of the sessions other than the worker's
+//! (ADR-0079 decision 7 (b)(c), ADR-t1063-1): the plan review, the review, the recovery (triage)
 //! job, the goal review, the observer, the throughput review, the runtime's
 //! planners and a person's planner. Each
 //! role takes `[roles.<role>]` of `dagq.toml` when it has one, and is
@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::{
     DomainError, Provider,
+    provider_switch::SwitchReason,
     worker_model::{MEDIUM, OPUS},
 };
 
@@ -41,10 +42,21 @@ impl ModelRole {
     ];
 }
 
-/// The provider every session other than the worker's runs on
-/// (ADR-t813-2 decision 1): what its launch and its `headless_jobs` row
-/// record until a role may choose another.
+/// The provider a session other than the worker's runs on when its role
+/// names none (ADR-t813-2 decision 1, ADR-t1063-1 decision 1).
 pub const ROLE_PROVIDER: Provider = Provider::Claude;
+
+/// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
+/// and 7): the goal review only, for now. Claude runs every role.
+pub const CODEX_ROLES: [ModelRole; 1] = [ModelRole::GoalReview];
+
+/// Whether `provider` can run a session of `role`.
+pub fn runs_on(role: ModelRole, provider: Provider) -> bool {
+    match provider {
+        Provider::Claude => true,
+        Provider::Codex => CODEX_ROLES.contains(&role),
+    }
+}
 
 /// The provider of a launch recorded before launches named one.
 fn claude() -> Provider {
@@ -74,16 +86,44 @@ pub fn raise(effort: &str) -> &str {
     }
 }
 
-/// `[roles.<role>]` of `dagq.toml`: a model and an effort, either of which
-/// may be left out (the default's then).
+/// `[roles.<role>]` of `dagq.toml`: a provider, a model and an effort, any
+/// of which may be left out (the default's then). The model is a name of
+/// the role's provider's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleModel {
+    pub provider: Option<Provider>,
     pub model: Option<String>,
     pub effort: Option<String>,
 }
 
 impl RoleModel {
-    pub const KEYS: [&'static str; 2] = ["model", "effort"];
+    pub const KEYS: [&'static str; 3] = ["provider", "model", "effort"];
+
+    /// Check the table of `role` as a whole (ADR-t1063-1 decision 1): a
+    /// provider with no implementation for the role is refused, and so is
+    /// a Claude model given to Codex (a model is the provider's own name).
+    pub fn check(&self, role: ModelRole) -> Result<(), String> {
+        let Some(provider) = self.provider else {
+            return Ok(());
+        };
+        if !runs_on(role, provider) {
+            let roles: Vec<&str> = CODEX_ROLES.iter().map(|role| role.as_str()).collect();
+            return Err(format!(
+                "provider {} cannot run the {} role; Codex runs only {}",
+                provider.as_str(),
+                role.as_str(),
+                roles.join(", ")
+            ));
+        }
+        if provider == Provider::Codex
+            && let Some(model) = self.model.as_deref().filter(|m| m.starts_with("claude"))
+        {
+            return Err(format!(
+                "model {model} is Claude's; with provider codex name a model of Codex's, or none for Codex's default"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Every `[roles.<role>]` of `dagq.toml`; none by default.
@@ -112,22 +152,100 @@ impl RoleModels {
             .map(|(_, model)| model)
     }
 
-    /// What a session of `role` starts with: its table's model and effort
-    /// (the default for the one it leaves out), or, without a table, the
-    /// provider's default with nothing given.
+    /// Check every table ([`RoleModel::check`]), naming the first that
+    /// fails.
+    pub fn check(&self) -> Result<(), String> {
+        for (role, table) in &self.roles {
+            table
+                .check(*role)
+                .map_err(|error| format!("[roles.{}]: {error}", role.as_str()))?;
+        }
+        Ok(())
+    }
+
+    /// The provider a session of `role` runs on and where it comes from:
+    /// its table's `provider` (`dagq.toml`), else Claude (`default`).
+    pub fn provider(&self, role: ModelRole) -> (Provider, LaunchSource) {
+        match self.get(role).and_then(|table| table.provider) {
+            Some(provider) => (provider, LaunchSource::Config),
+            None => (ROLE_PROVIDER, LaunchSource::Default),
+        }
+    }
+
+    /// Whether a job of `role` moves to the other provider when its own
+    /// cannot be used (ADR-t1063-1 decision 4): only a role whose table
+    /// names its provider; one that names none runs and waits as before,
+    /// on Claude only.
+    pub fn switchable(&self, role: ModelRole) -> bool {
+        self.get(role).is_some_and(|table| table.provider.is_some())
+    }
+
+    /// What a session of `role` starts with: its table's provider, model
+    /// and effort, or, without a table, Claude's default with nothing
+    /// given. On Claude a table gives the default (Opus 5.5, `medium`) for
+    /// the model or effort it leaves out; on Codex a model left out is
+    /// Codex's own default, and the effort `medium`.
     pub fn launch(&self, role: ModelRole) -> ActorLaunch {
         match self.get(role) {
-            Some(table) => ActorLaunch {
-                role,
-                provider: ROLE_PROVIDER,
-                model: Some(table.model.clone().unwrap_or_else(|| OPUS.to_owned())),
-                effort: Some(table.effort.clone().unwrap_or_else(|| MEDIUM.to_owned())),
-                source: LaunchSource::Config,
-                escalated_from: None,
-                escalation_reason: None,
-            },
+            Some(table) => {
+                let provider = table.provider.unwrap_or(ROLE_PROVIDER);
+                let model = match provider {
+                    Provider::Claude => {
+                        Some(table.model.clone().unwrap_or_else(|| OPUS.to_owned()))
+                    }
+                    Provider::Codex => table.model.clone(),
+                };
+                ActorLaunch {
+                    role,
+                    provider,
+                    model,
+                    effort: Some(table.effort.clone().unwrap_or_else(|| MEDIUM.to_owned())),
+                    source: LaunchSource::Config,
+                    escalated_from: None,
+                    escalation_reason: None,
+                    switched_from: None,
+                    switch_reason: None,
+                }
+            }
             None => ActorLaunch::default_of(role),
         }
+    }
+}
+
+/// Where a headless job of a role starts (ADR-t1063-1 decisions 4 and 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobRoute {
+    /// Start it with this launch (on its own provider, or moved to the
+    /// other one).
+    Start(ActorLaunch),
+    /// Start nothing for now: its provider cannot be used for `reason`, and
+    /// no other provider that runs the role can be either.
+    Wait {
+        provider: Provider,
+        reason: SwitchReason,
+    },
+}
+
+/// Where the job that `launch` starts goes, given why each provider cannot
+/// be used now (`unusable`, `None` when it can): on its own provider when
+/// it can be used; else, when the role moves (`switchable`), on the other
+/// provider when that one runs the role and can be used, its launch saying
+/// from which and why; else it waits.
+pub fn job_route(
+    launch: &ActorLaunch,
+    switchable: bool,
+    unusable: impl Fn(Provider) -> Option<SwitchReason>,
+) -> JobRoute {
+    let Some(reason) = unusable(launch.provider) else {
+        return JobRoute::Start(launch.clone());
+    };
+    let other = launch.provider.other();
+    if switchable && runs_on(launch.role, other) && unusable(other).is_none() {
+        return JobRoute::Start(launch.clone().switched(other, reason));
+    }
+    JobRoute::Wait {
+        provider: launch.provider,
+        reason,
     }
 }
 
@@ -142,7 +260,9 @@ string_enum!(LaunchSource {
 /// was given (the provider's default, which the transcript names once the
 /// session closes). `provider` has the values of a run's
 /// `requested_provider` / `actual_provider`; a launch recorded before it
-/// was reads as `claude`, the only provider those sessions ran on.
+/// was reads as `claude`, the only provider those sessions ran on. A job
+/// moved off the provider its role names (ADR-t1063-1 decision 4) says
+/// which (`switched_from`) and why (`switch_reason`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorLaunch {
     pub role: ModelRole,
@@ -155,6 +275,10 @@ pub struct ActorLaunch {
     pub escalated_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switched_from: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_reason: Option<SwitchReason>,
 }
 
 impl ActorLaunch {
@@ -168,6 +292,20 @@ impl ActorLaunch {
             source: LaunchSource::Default,
             escalated_from: None,
             escalation_reason: None,
+            switched_from: None,
+            switch_reason: None,
+        }
+    }
+
+    /// This launch moved to `to` because its provider cannot be used for
+    /// `reason`: started there with that provider's default, since a model
+    /// (and its effort) is the provider's own name.
+    pub fn switched(self, to: Provider, reason: SwitchReason) -> Self {
+        Self {
+            provider: to,
+            switched_from: Some(self.provider),
+            switch_reason: Some(reason),
+            ..Self::default_of(self.role)
         }
     }
 
@@ -189,6 +327,8 @@ impl ActorLaunch {
             source: LaunchSource::ReviseEscalation,
             escalated_from: Some(from),
             escalation_reason: Some(reason.to_owned()),
+            switched_from: self.switched_from,
+            switch_reason: self.switch_reason,
         }
     }
 
@@ -316,6 +456,130 @@ mod tests {
             ActorLaunch::recorded(&codex, ModelRole::GoalReview).provider,
             Provider::Codex
         );
+    }
+
+    /// `[roles.<role>]`'s `provider` (ADR-t1063-1 decision 1): Codex runs
+    /// only the goal review, with a model of its own or its default, and
+    /// the effort `medium` unless given; a role that names no provider
+    /// runs on Claude and does not move.
+    #[test]
+    fn a_role_table_names_its_provider() {
+        let mut models = RoleModels::default();
+        assert_eq!(
+            models.provider(ModelRole::GoalReview),
+            (Provider::Claude, LaunchSource::Default)
+        );
+        assert!(!models.switchable(ModelRole::GoalReview));
+        models.entry(ModelRole::GoalReview).provider = Some(Provider::Codex);
+        assert_eq!(
+            models.provider(ModelRole::GoalReview),
+            (Provider::Codex, LaunchSource::Config)
+        );
+        assert!(models.switchable(ModelRole::GoalReview));
+        let launch = models.launch(ModelRole::GoalReview);
+        assert_eq!(launch.provider, Provider::Codex);
+        assert_eq!(launch.model, None);
+        assert_eq!(launch.effort.as_deref(), Some(MEDIUM));
+        assert_eq!(launch.to_value()["provider"], "codex");
+        models.entry(ModelRole::GoalReview).model = Some("gpt-6-astra".into());
+        assert_eq!(
+            models.launch(ModelRole::GoalReview).model.as_deref(),
+            Some("gpt-6-astra")
+        );
+        assert!(models.check().is_ok());
+        // A Claude model given to Codex, and Codex for a role it cannot
+        // run, are refused.
+        models.entry(ModelRole::GoalReview).model = Some("claude-sonnet-5".into());
+        let error = models.check().unwrap_err();
+        assert!(error.contains("[roles.goal_review]"), "{error}");
+        assert!(error.contains("Claude's"), "{error}");
+        let mut review = RoleModels::default();
+        review.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let error = review.check().unwrap_err();
+        assert!(error.contains("cannot run the review role"), "{error}");
+        assert!(error.contains("goal_review"), "{error}");
+        for role in ModelRole::ALL {
+            assert!(runs_on(role, Provider::Claude));
+            assert_eq!(
+                runs_on(role, Provider::Codex),
+                role == ModelRole::GoalReview
+            );
+        }
+        // Claude named explicitly is valid for every role.
+        let mut claude = RoleModels::default();
+        claude.entry(ModelRole::Observer).provider = Some(Provider::Claude);
+        assert!(claude.check().is_ok());
+        assert_eq!(
+            claude.launch(ModelRole::Observer).arguments(),
+            Some((OPUS, MEDIUM))
+        );
+    }
+
+    /// A job starts on its provider when it can be used, moves to the
+    /// other one that runs its role when its table names the provider,
+    /// and waits otherwise (ADR-t1063-1 decisions 4 and 5).
+    #[test]
+    fn a_job_moves_to_the_other_provider_or_waits() {
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::GoalReview).provider = Some(Provider::Codex);
+        models.entry(ModelRole::GoalReview).model = Some("gpt-6-astra".into());
+        let codex = models.launch(ModelRole::GoalReview);
+        let usable = |_: Provider| None;
+        assert_eq!(
+            job_route(&codex, true, usable),
+            JobRoute::Start(codex.clone())
+        );
+        let no_codex = |provider: Provider| {
+            (provider == Provider::Codex).then_some(SwitchReason::ExecutableMissing)
+        };
+        let JobRoute::Start(moved) = job_route(&codex, true, no_codex) else {
+            panic!("moved to Claude");
+        };
+        assert_eq!(moved.provider, Provider::Claude);
+        assert_eq!(moved.switched_from, Some(Provider::Codex));
+        assert_eq!(moved.switch_reason, Some(SwitchReason::ExecutableMissing));
+        // Codex's model is not given to Claude.
+        assert_eq!(moved.arguments(), None);
+        assert_eq!(moved.to_value()["switched_from"], "codex");
+        assert_eq!(moved.to_value()["switch_reason"], "executable_missing");
+        assert_eq!(
+            ActorLaunch::recorded(&json!({"launch": moved.to_value()}), ModelRole::GoalReview),
+            moved
+        );
+        let neither = |provider: Provider| {
+            Some(match provider {
+                Provider::Codex => SwitchReason::UsageLimit,
+                Provider::Claude => SwitchReason::Authentication,
+            })
+        };
+        assert_eq!(
+            job_route(&codex, true, neither),
+            JobRoute::Wait {
+                provider: Provider::Codex,
+                reason: SwitchReason::UsageLimit
+            }
+        );
+        // A role that names no provider does not move.
+        let claude = ActorLaunch::default_of(ModelRole::GoalReview);
+        let no_claude =
+            |provider: Provider| (provider == Provider::Claude).then_some(SwitchReason::UsageLimit);
+        assert_eq!(
+            job_route(&claude, false, no_claude),
+            JobRoute::Wait {
+                provider: Provider::Claude,
+                reason: SwitchReason::UsageLimit
+            }
+        );
+        let JobRoute::Start(moved) = job_route(&claude, true, no_claude) else {
+            panic!("moved to Codex");
+        };
+        assert_eq!(moved.provider, Provider::Codex);
+        // Codex runs no review: that role waits.
+        let review = ActorLaunch::default_of(ModelRole::Review);
+        assert!(matches!(
+            job_route(&review, true, no_claude),
+            JobRoute::Wait { .. }
+        ));
     }
 
     #[test]

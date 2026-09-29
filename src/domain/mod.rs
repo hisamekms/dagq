@@ -1819,6 +1819,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // verdict (ADR-0041 decision 11); only a plan review that failed
         // and a planner that did not answer a revise are a person's.
         ("plan_review_failed", _) => Some(AttentionNext::PlanReviewByHand),
+        // A goal review whose provider could not be used starts again on
+        // the other one by itself (ADR-t1063-1 decision 4).
+        ("goal_review_failed", _) if payload.get("provider_unusable").is_some() => None,
         ("goal_review_failed", _) => Some(AttentionNext::GoalReviewByHand),
         ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
         ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
@@ -2512,6 +2515,17 @@ mod attention_tests {
             (
                 "review_failed",
                 json!({"status": "awaiting_integration", "error": "x", "attempt": 2, "ask_id": 7}),
+                None,
+            ),
+            (
+                "goal_review_failed",
+                json!({"error": "x"}),
+                Some(GoalReviewByHand),
+            ),
+            // Its provider could not be used: it starts again by itself.
+            (
+                "goal_review_failed",
+                json!({"error": "x", "provider_unusable": {"provider": "codex", "reason": "authentication"}}),
                 None,
             ),
             (

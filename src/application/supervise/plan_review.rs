@@ -193,6 +193,7 @@ impl Supervisor<'_> {
                 proposal_id: Some(job.proposal_id),
                 goal_id: None,
                 attempt: job.attempt,
+                provider: crate::domain::actor_model::ROLE_PROVIDER,
             },
         ))
     }

@@ -171,7 +171,7 @@ impl StubReviewer {
     }
     /// A first job that stops at Claude Code's usage limit (it prints the
     /// limit and exits non-zero), then jobs that print `verdict`.
-    fn limited_then(verdict: &Value) -> Self {
+    pub(crate) fn limited_then(verdict: &Value) -> Self {
         Self {
             verdicts: Mutex::new(vec![LIMIT.into(), verdict.to_string()]),
             ..Self::new(&[])

@@ -4,8 +4,9 @@
 //! verdicts they gave, and the same per provider the job was launched on
 //! (its start's `launch.provider`, `claude` for a launch recorded before it
 //! named one) and per model its session used (the `model` of the
-//! `session_closed` of the start's `session_id`, `unknown` without one), so
-//! that the providers' jobs can be read side by side.
+//! `session_closed` of the start's `session_id`; for a job whose provider
+//! names its session itself, Codex's, the `model` its end records; `unknown`
+//! without one), so that the providers' jobs can be read side by side.
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -213,6 +214,8 @@ pub fn jobs(
             .to_owned();
         let model = start
             .and_then(|start| models.get(start.payload.get("session_id")?.as_str()?))
+            .copied()
+            .or_else(|| event.payload.get("model")?.as_str())
             .map_or(UNKNOWN, |model| model)
             .to_owned();
         let secs = event
@@ -392,6 +395,43 @@ mod tests {
             event.goal_id == Some(GoalId::new(7))
         });
         assert_eq!(goal_seven["goal_review"].all.count, 2);
+    }
+
+    /// A Codex job names its thread itself: its start has no session id,
+    /// and its end records the model (ADR-t1063-1 decision 6).
+    #[test]
+    fn a_codex_job_takes_the_model_its_end_records() {
+        let events = [
+            goal_event(
+                1,
+                event_kind::GOAL_REVIEW_STARTED,
+                7,
+                json!({"goal_review_id": 1, "session_id": null, "launch": launch("codex")}),
+            ),
+            goal_event(
+                2,
+                event_kind::GOAL_REVIEW_FINISHED,
+                7,
+                json!({"goal_review_id": 1, "verdict": "achieved", "session_id": "t-1", "model": "gpt-6-astra"}),
+            ),
+            goal_event(
+                3,
+                event_kind::GOAL_REVIEW_STARTED,
+                7,
+                json!({"goal_review_id": 2, "session_id": null, "launch": launch("codex")}),
+            ),
+            goal_event(
+                4,
+                event_kind::GOAL_REVIEW_FAILED,
+                7,
+                json!({"goal_review_id": 2, "session_id": "t-2", "model": null, "model_unknown": "no rollout"}),
+            ),
+        ];
+        let stats = jobs(&events, EventId::new(0), EventId::new(4), |_| true);
+        let goal = &stats["goal_review"];
+        assert_eq!(goal.by_model["gpt-6-astra"].verdicts["achieved"], 1);
+        assert_eq!(goal.by_model[UNKNOWN].failed, 1);
+        assert_eq!(goal.by_provider["codex"].count, 2);
     }
 
     /// Each kind pairs its ends with its starts: the review per run, the

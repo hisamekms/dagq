@@ -181,6 +181,18 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             // No claim is deferred on a conflict hotspot (ADR-0069).
             expected["claim_deferrals"] = serde_json::json!([]);
         } else {
+            // Every role on Claude with nothing given (ADR-t1063-1).
+            expected["roles"] = dagq::domain::actor_model::ModelRole::ALL
+                .iter()
+                .map(|role| {
+                    (
+                        role.as_str().to_owned(),
+                        serde_json::json!({"provider": "claude", "source": "default",
+                                           "model": null, "effort": null}),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+                .into();
             expected["schema"] = serde_json::json!({
                 "schema_version": SqliteQueue::SCHEMA_VERSION,
                 "binary_schema_version": SqliteQueue::SCHEMA_VERSION,

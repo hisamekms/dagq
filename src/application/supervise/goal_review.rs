@@ -10,15 +10,17 @@ use crate::domain::ActorContext;
 use crate::domain::language::with_instruction;
 use crate::{
     application::{
-        GoalReviewApply, GoalReviewJob,
+        GoalReviewApply, GoalReviewFailure, GoalReviewJob, job_start_failure,
         prompt::{GOAL_REVIEW_ACCESS, GoalReviewMaterial, goal_review_prompt},
     },
     domain::{
         GoalId, Receipt, RunStatus,
-        actor_model::{ActorLaunch, ModelRole},
+        actor_model::{ActorLaunch, JobRoute, ModelRole, job_route},
         goal_review::{
             GOAL_OPTIONS, GOAL_REVIEW_ASKER, GoalReviewDecision, GoalReviewVerdict, decide,
         },
+        headless_job::{JobFailure, JobSession},
+        provider_switch::SwitchReason,
     },
 };
 use serde_json::{Value, json};
@@ -36,6 +38,9 @@ const GOAL_REVIEW_EVENTS: &[&str] = &[
 pub(super) struct GoalReviewWatch {
     pub(super) job: GoalReviewJob,
     pub(super) headless: HeadlessJob,
+    /// Whether its role names its provider, so that a provider that cannot
+    /// be used moves it (ADR-t1063-1 decision 4).
+    pub(super) switchable: bool,
 }
 
 impl Supervisor<'_> {
@@ -55,14 +60,46 @@ impl Supervisor<'_> {
             }
         }
         // A job reaped above may have hit a login or the usage limit and
-        // raised the hold in this pass (task 438).
-        if starting
-            && self.queue_hold.is_none()
-            && let Err(error) = self.start_goal_review()
-        {
+        // raised the hold in this pass (task 438): the route reads it.
+        if starting && let Err(error) = self.start_goal_review() {
             warn!(error = %format_args!("{error:#}"), "goal review: could not start a goal review: {error:#}");
         }
         progressed
+    }
+
+    /// Where the next goal review starts (ADR-t1063-1 decisions 1, 4 and
+    /// 5), or `None` while it waits. A role that names no provider runs on
+    /// Claude as before, waiting while the queue's hold ask holds Claude;
+    /// one that names its provider starts there when it can be used (this
+    /// supervisor has it and it is not held), else on the other provider
+    /// when that one runs the role and can be used, else waits.
+    fn goal_review_route(&self) -> Option<(ActorLaunch, bool)> {
+        let role = ModelRole::GoalReview;
+        let models = self.role_models(role);
+        let launch = models.launch(role);
+        if !models.switchable(role) {
+            return self.queue_hold.is_none().then_some((launch, false));
+        }
+        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
+            JobRoute::Start(launch) => Some((launch, true)),
+            JobRoute::Wait { provider, reason } => {
+                tracing::debug!(
+                    "the goal review waits: {} cannot be used ({}), nor can the other provider",
+                    provider.as_str(),
+                    reason.as_str()
+                );
+                None
+            }
+        }
+    }
+
+    /// Why a headless job cannot start on `provider` now: this supervisor
+    /// has no agent for it (no Codex found that runs), or it is held.
+    fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
+        if self.job_agent(provider).is_none() {
+            return Some(SwitchReason::ExecutableMissing);
+        }
+        self.provider_held(provider)
     }
 
     /// Start the goal review of the first candidate, when none runs.
@@ -70,10 +107,12 @@ impl Supervisor<'_> {
         if self.goal_review.is_some() {
             return Ok(());
         }
+        let Some((launch, switchable)) = self.goal_review_route() else {
+            return Ok(());
+        };
         let Some(&goal) = self.queue.goal_review_candidates()?.first() else {
             return Ok(());
         };
-        let launch = self.actor_launch(ModelRole::GoalReview);
         let Some(job) = self.queue.begin_goal_review(
             goal,
             &self.token,
@@ -85,25 +124,91 @@ impl Supervisor<'_> {
             return Ok(());
         };
         match self.spawn_goal_review(&job, &launch) {
-            Ok(headless) => {
-                info!("goal {goal} goal review {} started", job.attempt);
-                self.goal_review = Some(GoalReviewWatch { job, headless });
+            Ok(Ok(headless)) => {
+                info!(
+                    "goal {goal} goal review {} started on {}",
+                    job.attempt,
+                    launch.provider.as_str()
+                );
+                self.goal_review = Some(GoalReviewWatch {
+                    job,
+                    headless,
+                    switchable,
+                });
             }
-            Err(error) => {
-                let error = format!("the headless goal review could not start: {error:#}");
-                self.fail_goal_review(&job, &error, 0);
+            // Its own preparation failed: no provider was tried.
+            Err(failed) => {
+                let error = format!("the headless goal review could not start: {failed:#}");
+                self.fail_goal_review(
+                    &job,
+                    &GoalReviewFailure {
+                        error,
+                        ..GoalReviewFailure::default()
+                    },
+                );
+            }
+            Ok(Err(failed)) => {
+                let error = format!("the headless goal review could not start: {failed:#}");
+                let unusable = self.job_provider_failed(
+                    launch.provider,
+                    job_start_failure(&failed),
+                    (&error, &error),
+                    &HoldJob::GoalReview(goal),
+                    switchable,
+                );
+                self.fail_goal_review(
+                    &job,
+                    &GoalReviewFailure {
+                        error,
+                        unusable,
+                        ..GoalReviewFailure::default()
+                    },
+                );
             }
         }
         Ok(())
     }
 
+    /// A headless job of `provider` that failed with `failure` (its start
+    /// or its output): Claude's login or usage limit raises the queue's
+    /// hold ask as before (task 438), and, for a role that names its
+    /// provider (`switchable`), a provider that cannot be used for another
+    /// reason is held like a worker's (Codex's walls and any agent that
+    /// did not start, ADR-t1063-1 decision 5). The provider and why, when
+    /// the job moves to the other provider (ADR-t1063-1 decision 4).
+    /// `error` is the job's failure, `said` it with the job's output,
+    /// which may say when a usage limit resets.
+    fn job_provider_failed(
+        &mut self,
+        provider: Provider,
+        failure: JobFailure,
+        (error, said): (&str, &str),
+        job: &HoldJob,
+        switchable: bool,
+    ) -> Option<(Provider, SwitchReason)> {
+        let wall = failure.wall().filter(|_| provider == Provider::Claude);
+        if let Some(wall) = wall {
+            self.raise_job_wall(wall, job, error);
+        }
+        let reason = failure.switch_reason().filter(|_| switchable)?;
+        if wall.is_none()
+            && let Err(held) = self.hold_provider(provider, reason, None, said)
+        {
+            warn!(error = %format_args!("{held:#}"), "{} could not be held after the headless {} failed: {held:#}", provider.as_str(), job.entry());
+        }
+        Some((provider, reason))
+    }
+
     /// Write the prompt into the job's directory and start the headless
     /// job in the repository's checkout, allowed to read only.
+    /// The outer error is one of the job's own preparation (its directory,
+    /// its prompt), the inner one the start of its provider's process: only
+    /// the latter says whether the provider can be used.
     fn spawn_goal_review(
         &mut self,
         job: &GoalReviewJob,
         launch: &ActorLaunch,
-    ) -> Result<HeadlessJob> {
+    ) -> Result<Result<HeadlessJob>> {
         self.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
@@ -112,18 +217,33 @@ impl Supervisor<'_> {
             .write(&job.dir.join("prompt.txt"), prompt.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
+        Ok(self.start_goal_review_job(job, launch, &prompt, stdout, stderr))
+    }
+
+    /// Start the provider's process of the goal review.
+    fn start_goal_review_job(
+        &mut self,
+        job: &GoalReviewJob,
+        launch: &ActorLaunch,
+        prompt: &str,
+        stdout: PathBuf,
+        stderr: PathBuf,
+    ) -> Result<HeadlessJob> {
+        let agent = self
+            .job_agent(launch.provider)
+            .with_context(|| format!("no {} runs on this supervisor", launch.provider.as_str()))?;
         let child = self
-            .actors()
+            .actors_on(agent)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::goal_review_job(job.goal_id, job.attempt),
                 WorkspaceAccess::Read(self.layout.repo_root.clone()),
                 ActorProgram::Headless {
                     program: HeadlessProgram::Job {
                         cwd: &self.layout.repo_root,
-                        prompt: &prompt,
+                        prompt,
                         access: GOAL_REVIEW_ACCESS,
                     },
-                    session_id: Some(&job.session_id),
+                    session_id: job.session_id.as_deref(),
                     launch: Some(launch),
                     without_mcp: false,
                     env: Vec::new(),
@@ -147,6 +267,7 @@ impl Supervisor<'_> {
                 proposal_id: None,
                 goal_id: Some(job.goal_id),
                 attempt: job.attempt,
+                provider: launch.provider,
             },
         ))
     }
@@ -230,36 +351,60 @@ impl Supervisor<'_> {
     /// Reap the job once it ended and apply its verdict, or record its
     /// failure.
     fn poll_goal_review(&mut self) -> Result<bool> {
-        let Some(watch) = self.goal_review.as_mut() else {
+        let Some(provider) = self.goal_review.as_ref().map(|w| w.headless.provider) else {
             return Ok(false);
         };
-        let Some(outcome) = watch.headless.poll(&*self.files, self.reviewer)? else {
+        // The job's reply, session and failure are read by the provider
+        // it ran on (ADR-t1063-1 decisions 2, 4 and 6).
+        let agent = self.job_agent(provider).unwrap_or(self.reviewer);
+        let watch = self.goal_review.as_mut().expect("read above");
+        let Some(outcome) = watch.headless.poll(&*self.files, agent)? else {
             return Ok(false);
         };
         let watch = self.goal_review.take().expect("polled above");
         let duration_secs = watch.headless.started.elapsed().as_secs();
+        let stdout = self
+            .files
+            .read_to_string(&watch.headless.stdout)
+            .unwrap_or_default();
+        let session = agent.job_session(&stdout, watch.headless.started_at);
         let verdict = outcome.and_then(|stdout| GoalReviewVerdict::parse(&stdout));
         // Only a job that failed or printed no verdict is read for a wall:
         // a verdict's own text may quote anything (task 438).
-        let wall = verdict
-            .is_err()
-            .then(|| self.job_wall(&watch.headless))
-            .flatten();
+        let failure = verdict.is_err().then(|| self.job_failure(&watch.headless));
         let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
             let job = ActorContext::goal_review_job(watch.job.goal_id, watch.job.attempt);
             self.for_job(&job, |sv| {
-                sv.apply_goal_verdict(&watch.job, verdict, duration_secs)
+                sv.apply_goal_verdict(&watch.job, verdict, duration_secs, session.clone())
             })
         });
         if let Err(error) = applied {
             let error = format!("{error:#}");
             // Stopped at a wall only a person moves: it joins the hold ask,
             // whose `done` rearms the goal review, and its failure is no
-            // attention meanwhile (task 438).
-            if let Some(wall) = wall {
-                self.raise_job_wall(wall, &HoldJob::GoalReview(watch.job.goal_id), &error);
-            }
-            self.fail_goal_review(&watch.job, &error, duration_secs);
+            // attention meanwhile (task 438). A role that names its
+            // provider moves to the other one instead of waiting.
+            // The provider's own words (Codex's `turn.failed` is on its
+            // stdout) may say when a usage limit resets.
+            let said = format!("{error}\n{stdout}");
+            let unusable = failure.and_then(|failure| {
+                self.job_provider_failed(
+                    watch.headless.provider,
+                    failure,
+                    (&error, &said),
+                    &HoldJob::GoalReview(watch.job.goal_id),
+                    watch.switchable,
+                )
+            });
+            self.fail_goal_review(
+                &watch.job,
+                &GoalReviewFailure {
+                    error,
+                    duration_secs,
+                    session,
+                    unusable,
+                },
+            );
         }
         Ok(true)
     }
@@ -272,6 +417,7 @@ impl Supervisor<'_> {
         job: &GoalReviewJob,
         verdict: GoalReviewVerdict,
         duration_secs: u64,
+        session: Option<JobSession>,
     ) -> Result<()> {
         let goal = job.goal_id;
         let (decision, overridden) = decide(verdict.verdict, job.gaps_in_a_row);
@@ -298,6 +444,7 @@ impl Supervisor<'_> {
                 overridden,
                 ask,
                 duration_secs,
+                session,
             },
         )?;
         if applied.stale {
@@ -336,13 +483,19 @@ impl Supervisor<'_> {
 
     /// Record the job's failure; the goal waits for a person
     /// (`goal_review_failed`) and is not reviewed again by itself until its
-    /// tasks change.
-    fn fail_goal_review(&mut self, job: &GoalReviewJob, error: &str, duration_secs: u64) {
-        warn!(error = %error, "goal {} goal review {} failed: {error}; it waits for a person", job.goal_id, job.attempt);
-        if let Err(recorded) = self
-            .queue
-            .fail_goal_review(job, &self.token, error, duration_secs)
-        {
+    /// tasks change, unless its provider could not be used and it moves
+    /// (ADR-t1063-1 decision 4).
+    fn fail_goal_review(&mut self, job: &GoalReviewJob, failure: &GoalReviewFailure) {
+        let error = &failure.error;
+        match failure.unusable {
+            Some((provider, reason)) => {
+                warn!(error = %error, "goal {} goal review {} failed: {error}; {} cannot be used ({}), and the goal is reviewed again on the other provider", job.goal_id, job.attempt, provider.as_str(), reason.as_str());
+            }
+            None => {
+                warn!(error = %error, "goal {} goal review {} failed: {error}; it waits for a person", job.goal_id, job.attempt);
+            }
+        }
+        if let Err(recorded) = self.queue.fail_goal_review(job, &self.token, failure) {
             warn!(error = %format_args!("{recorded:#}"), "goal {}: the goal review failure could not be recorded: {recorded:#}", job.goal_id);
         }
     }

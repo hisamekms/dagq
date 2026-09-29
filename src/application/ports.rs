@@ -420,6 +420,29 @@ pub trait AgentProvider {
     fn job_reply(&self, stdout: &str) -> String {
         stdout.to_owned()
     }
+    /// What the output of a headless job that ended (its `stdout`, the job
+    /// started at `since`, unix milliseconds) says of its session
+    /// (ADR-t1063-1 decision 6): `None` for a provider whose session the
+    /// runtime names ahead and whose transcript gives the model (Claude
+    /// Code, ADR-0048 decision 4); Codex names its thread in its output and
+    /// the model in its rollout.
+    fn job_session(
+        &self,
+        stdout: &str,
+        since: Option<i64>,
+    ) -> Option<crate::domain::headless_job::JobSession> {
+        let _ = (stdout, since);
+        None
+    }
+    /// Why a headless job of this provider failed, from its `stdout` and
+    /// `stderr`, in the classes shared by every provider (ADR-t1063-1
+    /// decision 4). Claude Code's jobs are read by its
+    /// [`AgentSignals::job_failure`] (task 438); a provider that cannot
+    /// tell says `other`.
+    fn job_failure(&self, stdout: &str, stderr: &str) -> crate::domain::headless_job::JobFailure {
+        let _ = (stdout, stderr);
+        crate::domain::headless_job::JobFailure::Other
+    }
     /// The agent of a planner session (ADR-0041 decisions 1, 6): an
     /// interactive agent in `planner.cwd` with `planner.prompt` as its first
     /// message, whose `Stop` hook writes [`PlannerCommand::idle_marker`] the
@@ -2342,8 +2365,9 @@ pub struct GoalReviewJob {
     pub dir: PathBuf,
     pub gaps_in_a_row: usize,
     /// The job's session id, given to it by the runtime (ADR-0048
-    /// decision 4).
-    pub session_id: String,
+    /// decision 4); `None` for a provider that names its session itself
+    /// (Codex, whose thread its end records).
+    pub session_id: Option<String>,
 }
 
 /// A finished goal review of a goal, for the next one's prompt.
@@ -2367,6 +2391,26 @@ pub struct GoalReviewApply {
     pub overridden: Option<String>,
     pub ask: Option<NewAsk>,
     pub duration_secs: u64,
+    /// The session the job's output names (Codex's thread and model,
+    /// ADR-t1063-1 decision 6); `None` for a Claude job.
+    pub session: Option<crate::domain::headless_job::JobSession>,
+}
+
+/// Why a goal review job failed (`goal_review_failed`).
+#[derive(Debug, Clone, Default)]
+pub struct GoalReviewFailure {
+    pub error: String,
+    pub duration_secs: u64,
+    /// The session the job's output names, as in [`GoalReviewApply`].
+    pub session: Option<crate::domain::headless_job::JobSession>,
+    /// The job's provider could not be used, and why (ADR-t1063-1
+    /// decision 4): its row ends `interrupted` rather than `failed`, so
+    /// the goal is reviewed again at once, on the other provider unless
+    /// both are held.
+    pub unusable: Option<(
+        crate::domain::Provider,
+        crate::domain::provider_switch::SwitchReason,
+    )>,
 }
 
 /// What applying a goal review's verdict did. `stale`: nothing, because
@@ -2432,13 +2476,13 @@ pub trait GoalReviewStore {
     ) -> Result<GoalReviewApplied>;
     /// Record the job's failure (`goal_review_failed`, the inbox's); the
     /// goal is not reviewed again until its tasks change or a person
-    /// rearms it.
+    /// rearms it, unless its provider could not be used
+    /// ([`GoalReviewFailure::unusable`]).
     fn fail_goal_review(
         &mut self,
         job: &GoalReviewJob,
         token: &LeaseToken,
-        error: &str,
-        duration_secs: u64,
+        failure: &GoalReviewFailure,
     ) -> Result<()>;
     /// Answered `approve_goal` asks nobody closed whose answer the runtime
     /// took to apply when it was given (`runtime_delivers`), oldest first;

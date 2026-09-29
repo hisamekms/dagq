@@ -85,14 +85,15 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Hold `provider` for `reason`, which a turn of `run` hit (`message`,
-    /// the turn's, may say when a usage limit resets); a hold in place
-    /// stays as it is.
+    /// Hold `provider` for `reason`, which a turn of `run` (or a headless
+    /// job, with no run, ADR-t1063-1 decision 5) hit (`message`, the
+    /// turn's, may say when a usage limit resets); a hold in place stays as
+    /// it is.
     pub(super) fn hold_provider(
         &mut self,
         provider: Provider,
         reason: SwitchReason,
-        run: &RunId,
+        run: Option<&RunId>,
         message: &str,
     ) -> Result<()> {
         if self.provider_holds.iter().any(|h| h.provider == provider) {
@@ -103,12 +104,12 @@ impl Supervisor<'_> {
             .then(|| provider_switch::reset_at(message, now))
             .flatten();
         let hold = ProviderHold::new(provider, reason, now).until(reset);
-        let mut payload = hold.held_payload(Some(run));
+        let mut payload = hold.held_payload(run);
         payload["reset_read"] = json!(reset.is_some());
         payload["supervisor"] = json!(self.token);
         self.queue
             .record_queue_event(EventKind::ProviderHeld, payload)?;
-        warn!(run_id = %run, "{} is held ({}): its workers go to the other provider until {}", provider.as_str(), reason.as_str(), hold.retry_at);
+        warn!(run_id = %run.map_or_else(String::new, ToString::to_string), "{} is held ({}): its workers and jobs go to the other provider until {}", provider.as_str(), reason.as_str(), hold.retry_at);
         self.provider_holds.push(hold);
         Ok(())
     }
@@ -193,7 +194,7 @@ impl Supervisor<'_> {
         let claude_wall = from == Provider::Claude && reason != SwitchReason::LaunchFailed;
         let first_look = !provider_switch::waiting_on(&events, turn);
         if first_look && !claude_wall {
-            self.hold_provider(from, reason, run.id(), message)?;
+            self.hold_provider(from, reason, Some(run.id()), message)?;
         }
         let to = from.other();
         let started = events

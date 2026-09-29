@@ -10,6 +10,7 @@ scope: runtime
 related:
   - adr-0047
   - adr-t813-2
+  - adr-t1063-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-ask
   - design-supervisor-lifecycle-claim-hold
@@ -44,7 +45,8 @@ Claude Codeのログインが切れるか利用上限に達すると、新しい
 - **workerのclaimとturn**: 使えるproviderがあれば止めない。askが開いていても（Claudeが控えられていても）Codexのworkerが動かせれば、新しいclaimは控えず（`claim_held`を書かない）、taskは非対話のCodexで始まる。Codexが控えられていればCodexのtaskは非対話のClaudeで始まる。両方が使えない（Claudeのaskが開き、Codexが無いか控えられている）ときだけ、下の「控え」のとおりaskが新しいclaimを止め、候補は`claim_deferred`（`provider_unavailable`）で控える
 - **askを開くとき**: Claudeが止まったとき（workerのsessionの画面、headlessのjobの出力、Claudeの非対話のturn）は、Codexが使えても開く（Claudeだけの役割のreview・復旧・plan review・goal reviewのjobとobserverは人を待つ）。Claudeの非対話のturnからCodexへ移ったrunはaskの`affected`に入れず、runに`auth_required` / `usage_limited`（`switched_to: codex`）を書く。Codexだけが止まったときは開かない。止まったrunがもう一方へも移れないときはrunを失敗にせず待たせ（`provider_waiting`）、Claudeの認証と利用上限か、両方使えないときは、providerに関わらずrunが`raise_wall`でaskに入る（壁は開いている控えのaskの理由か、認証・利用上限の側の理由）。切り替えの上限でCodexから移れずClaudeが使えるときはaskを開かず、Codexの控えが解けた後に同じthreadへもう一度送る
 - **`done`**: 下の適用に加え、askを閉じるsupervisorがCodexの控えも解く（`provider_released`の`why: done`。どのsupervisorも毎passでqueueの控えを読み直す）。控えのaskに入って待つrunへの「続けて」は、runの今のproviderに行く
-- **Claudeだけの役割**: review・復旧・plan review・goal review・observerの控えは今までどおりaskに従う
+- **Claudeだけの役割**: review・復旧・plan review・observerと、`[roles.goal_review]`に`provider`を書かないgoal reviewの控えは今までどおりaskに従う
+- **providerを書いた役割のjob**（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定5がADR-t813-2の決定6をamends、task 1065。今はgoal reviewだけ）: jobを止めるのは、その役割のproviderと切り替え先（その役割を動かす実装を持つもう一方のprovider）の両方が控えられているか、supervisorに無いときだけ。Claudeの控えのaskが開いていても、Codexで動けるgoal reviewはCodexで起動し、Codexが控えられていればClaudeで起動する（[Goal review](goal-review.md)の3）。Codexのgoal reviewが認証・利用上限・起動の失敗で止まったときはaskを開かず`ProviderHold`で控え（`provider_held`の`run_id`はnull）、Claudeのgoal reviewが止まったときは今までどおりaskを開いてjobを`affected`に足す。どちらもgoal reviewの行は`interrupted`で閉じ、次のpassでもう一方のproviderで起動し直す（両方控えられていれば起動しない）。Claudeの控えでaskを開く条件（Claudeでしか動けない役割があること）は変えない。runtimeのplannerとreview・復旧・plan review・observerはClaudeでしか動けないので、Claudeの止まりは今までどおりaskを開く
 
 ## どのaskが控えるか
 
@@ -57,7 +59,7 @@ supervisorは毎pass（drainの途中も）、ディスクの確認（`check_dis
 - **claim**: `ClaimHold::judge`は`HoldInputs.queue_hold`（どのworkerにも経路が無いときだけ渡す。上の「providerごとの控え」）をディスクとloadより先に判定し、`claim_held`（`reason`が`authentication` / `usage_limit`、`value`がaskの`affected`の数、`threshold`が0、`ask_id`、`message`）を記録してclaimしない。askが閉じるか回答されると次のpassで`claim_resumed`になる（記録の規則と`status`の`claim_hold`・`stats`の`claim_holds.by_reason`は[claimを控える](claim-hold.md)と同じ）
 - **review**: 受理されたrunのreviewは`Phase::ReviewHeld`で待ち、sessionは開いたまま、`review_started`を書かない（`start_review` / `retry_review`が入口で判定する）。控えが解けたpassで`start_review`が始める。引き継ぎとadoptは`awaiting_integration`のreviewの無いrunを`start_review`で組み立て直すので、同じく待つ
 - **復旧job**: 終わったrunのtriage（`triage_runs`）を始めない。生きているsessionのalertの復旧job（`RecoveryWatch::start`）も始めず、alertは控えが解けた後のpassでまた拾う（長く走るbackgroundのalertは、`seen`を進める前に判定するので失われない）
-- **plan review・goal review・observer**: 起動しない（`plan_review_pass` / `goal_review_pass`に`starting: false`、`start_observer_when_due`を呼ばない）。走っているjobは最後まで追う
+- **plan review・goal review・observer**: 起動しない（`plan_review_pass`に`starting: false`、`start_observer_when_due`を呼ばない。goal reviewは`goal_review_pass`に控えによらず`starting`を渡し、`Supervisor::goal_review_route`が`provider`を書かない役割を控えの間は起動しない）。走っているjobは最後まで追う。`[roles.goal_review]`に`provider`を書いたgoal reviewは、上の「providerを書いた役割のjob」のとおり控えの間も使えるproviderで起動する
 - 走っているrunはleaseとsessionを持ったまま進む。着地（`integrate`）はClaudeを使わないので控えない
 
 `queue_hold`のaskに入った（`affected`に居る）runの促しとstalledのaskを止める扱い（`hold_of`）と、待ちから`queue_hold`で戻す扱い（[人の答えを待つrun](waiting.md)）はtask 361のまま。促しを止めるのはaskが閉じるまで（`hold_unclosed`。answerの後、supervisorが`done`を適用して続けてよいという文を打つまでの間も含む。task 729）で、その間に促しが先に打たれることはない。
