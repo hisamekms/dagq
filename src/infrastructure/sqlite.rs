@@ -1781,7 +1781,19 @@ pub(super) fn claim_task(
         None => position(&claim_order(tx)?).unwrap_or(0),
     };
     let task = task::claim(ready.swap_remove(preferred))?;
-    let choice = worker_model::choose(trial, task.id(), &trial_events(tx, trial)?);
+    let route = provider_switch::route_of(routes, task.worker())
+        .copied()
+        .context("the claimed task has no route")?;
+    // A run on Codex is in no group of the trial, which compares Claude's
+    // models (task 892): it neither takes a group nor a turn of it.
+    let choice = if route.actual.provider == crate::domain::Provider::Codex {
+        worker_model::TrialChoice {
+            session: worker_model::WorkerSession::default(),
+            percentile: None,
+        }
+    } else {
+        worker_model::choose(trial, task.id(), &trial_events(tx, trial)?)
+    };
     // A step the task was raised to stays with its later runs (ADR-0079
     // decision 5).
     let (session, inherited) = choice
@@ -1790,9 +1802,6 @@ pub(super) fn claim_task(
         .inheriting(&session_events(tx, task.id())?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
-    let route = provider_switch::route_of(routes, task.worker())
-        .copied()
-        .context("the claimed task has no route")?;
     let run = TaskRun::new(run_id, &task, base_commit, now.clone())?.running_on(route.actual);
     // `status='ready'` only detects a concurrent change; the domain decided the claim.
     ensure!(
@@ -1849,7 +1858,9 @@ pub(super) fn claim_task(
             payload.insert("provider_version".to_owned(), version);
         }
         if let Some(payload) = payload.as_object_mut() {
-            payload.extend(session.fields());
+            // Codex's model is not the step's Claude model: its turns
+            // record the one it used.
+            payload.extend(session.fields_on(route.actual.provider));
             if let Some(percentile) = choice.percentile {
                 payload.insert("trial_percentile".to_owned(), json!(percentile));
             }

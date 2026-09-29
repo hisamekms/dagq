@@ -129,6 +129,7 @@ fn codex_config() -> Option<Vec<u8>> {
 fn a_codex_run_answers_and_revises_through_resumes_of_its_thread_and_lands() {
     let config = codex_config();
     let (dir, repo, db, backend, codex) = codex_fixture();
+    set_codex_model(dir.path(), "gpt-test-codex");
     set_turns(
         dir.path(),
         &format!(
@@ -286,8 +287,27 @@ esac"#
             json!({"input": 7, "output": 5, "cache_read": 4, "cache_creation": 0, "messages": 1})
         );
     }
-    // The claim names the provider, the route and Codex's version.
+    // Each turn records the model Codex used, read from the thread's
+    // rollout (task 892).
+    for turn in &turns {
+        assert_eq!(turn["model"], "gpt-test-codex", "{turn}");
+        assert_eq!(turn["model_unknown"], Value::Null, "{turn}");
+    }
+    // The claim names the provider, the route and Codex's version, and no
+    // Claude model: its step is `ladder_model`, and why the model is not
+    // known yet is `model_unknown`; it is in no trial group.
     let claimed = payloads(&detail, "run_claimed")[0];
+    assert_eq!(claimed["model"], Value::Null, "{claimed}");
+    assert_eq!(claimed["ladder_model"], "claude-opus-5-5", "{claimed}");
+    assert_eq!(claimed["group"], Value::Null, "{claimed}");
+    assert_eq!(
+        claimed["model_unknown"],
+        dagq::domain::worker_model::CODEX_MODEL_UNKNOWN
+    );
+    // So does the revise's session.
+    let revise = payloads(&detail, "revise_requested")[0];
+    assert_eq!(revise["model"], Value::Null, "{revise}");
+    assert!(revise["ladder_model"].is_string(), "{revise}");
     assert_eq!(claimed["provider"], "codex", "{claimed}");
     assert_eq!(claimed["worker_mode"], "headless", "{claimed}");
     assert_eq!(claimed["codex_version"], "0.46.0", "{claimed}");
@@ -312,6 +332,9 @@ esac"#
     assert_eq!(row["provider"], "codex", "{row}");
     assert_eq!(row["route"], "headless", "{row}");
     assert_eq!(row["codex_version"], "0.46.0", "{row}");
+    assert_eq!(row["worker_model"], "gpt-test-codex", "{row}");
+    assert_eq!(row["claude_version"], Value::Null, "{row}");
+    assert_eq!(row["trial_group"], Value::Null, "{row}");
     assert_eq!(row["turns"]["count"], 3, "{row}");
     assert_eq!(row["tokens"]["input"], 21, "{row}");
     assert_eq!(row["tokens"]["cache_read"], 12, "{row}");
@@ -351,6 +374,16 @@ fn a_codex_turn_that_failed_is_classified_on_the_run() {
     assert_eq!(turns[0]["outcome"], "failed");
     assert_eq!(turns[0]["failure"], "model");
     assert_eq!(turns[0]["exit_code"], 1);
+    // No rollout named the model: it is not known, and why is said.
+    assert_eq!(turns[0]["model"], Value::Null);
+    assert!(
+        turns[0]["model_unknown"]
+            .as_str()
+            .unwrap()
+            .contains("no rollout of thread codex-thread-1"),
+        "{}",
+        turns[0]
+    );
     assert!(
         turns[0]["message"]
             .as_str()

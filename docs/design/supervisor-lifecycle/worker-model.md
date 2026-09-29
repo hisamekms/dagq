@@ -4,8 +4,8 @@ type: design
 title: "Worker model"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -38,6 +38,16 @@ sessionを開くeventのpayloadに`model`・`effort`・`group`（`control` / `tr
 | `run_claimed` | claim（retryで新しいrunをclaimしたときも）。試しの対象の判定で百分位を出したtaskは`trial_percentile`も持つ |
 | `resume_started` | `needs_session`のresume。値は直前のsessionのもので、taskに由来する失敗の後は1段上げたもの |
 | `revise_requested` | reviewの`revise`の差し戻し。値は直前のsessionを1段上げたもの（切り替えられなければ直前のまま） |
+
+### Codexのrun（task 892）
+
+Codexのworkerは段のClaudeのmodelを使わず（`-m`を渡さずCodexの既定のmodelで動く。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）、effortだけを使う。そこでCodexで動くrun（`actual_provider`が`codex`。claimで切り替わったrunも、途中でCodexへ移ったrunのその後のresume・reviseも）のsessionを開くeventは、`WorkerSession::fields_on(Provider::Codex)`で次のように書く。
+
+- `model`はnull、段のmodelは`ladder_model`、`group`はnull、`model_unknown`に理由（`worker_model::CODEX_MODEL_UNKNOWN`: Codexは自分のmodelで動き、各turnの`turn_finished`が使ったmodelを記録する）。`effort`は段のeffort
+- 段上げの`escalated_from`も`{model: null, ladder_model, effort}`、切り替えられなかったreviseの`escalation_skipped`も同じ形（`WorkerSession::named_on`）
+- 読み戻し（`WorkerSession::current` / `of_run`）は`model`が無ければ`ladder_model`を段として読むので、段上げとtaskへの引き継ぎはClaudeのrunと同じに働く（効くのはeffortだけ）
+- Codexが実際に使ったmodelは、turnごとに`turn_finished`の`model`（読めなければnullで、理由を`model_unknown`）に残る（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。`stats`・`kpi`のrunの`model`はCodexで始まったrunではこの最初のturnのmodel（[stats](stats.md)）
+- Codexで動くclaimは試しに入らない: `choose`を呼ばず、群も百分位も持たず、交互の順番も取らない（群を持ったtaskでもそのrunは群null）。Claudeでclaimして群を持ったrunが途中でCodexへ移ったとき（ADR-t813-2のフォールバック）は、claimの群は記録に残るが、`stats`・`kpi`はCodexで作業したrunとして試しの集計（`trial_groups`、`group=`）とClaudeの層から外す（[stats](stats.md)）。taskの群は変わらないので、そのtaskの後のClaudeのrunは同じ群で起動する
 
 段上げしたeventは`escalated_from`（前の`{model, effort}`）と`escalation_reason`（`verification_failed` / `sent_back` / `revise`）も持つ（`WorkerSession::fields_raised`）。切り替えられなかった`revise_requested`は`escalated_from`を持たず、`escalation_skipped`（`{model, effort, reason, why}`: 上げるはずだった値、`revise`、切り替えられなかった理由）を持つ。retryのclaimで段を引き継いだ`run_claimed`は`escalation_inherited: true`を持つ。
 
@@ -83,6 +93,7 @@ window = 60      # 既定 60（domain::prediction::PREDICTION_WINDOW）
 
 - `domain::worker_model`の単体テスト（既定、`of_run`、交互の割り当て、群の固定、対象外）
 - `infrastructure::run_env`の`parses_the_worker_trial_table`
-- `tests/it/worker_model.rs`: 既定の起動と記録、`[worker.trial]`を有効にした`supervise`での交互の割り当てとSonnetでの起動、claimのtransactionでの選択、`stats`の`trial_groups`
+- `tests/it/worker_model.rs`: 既定の起動と記録、`[worker.trial]`を有効にした`supervise`での交互の割り当てとSonnetでの起動、claimのtransactionでの選択、`stats`の`trial_groups`、Codexのrunが試しの外で`model`をnullにすること（`a_codex_run_is_outside_the_trial`）
+- Codexのrun: `domain::worker_model`の`a_codex_session_names_no_claude_model_and_keeps_its_step`、`tests/it/runtime_codex.rs`（claimと差し戻しの`model`がnullで、turnがrolloutのmodelを記録する）
 - `tests/it/runtime_session.rs`の`claude_stop_hook_settings_publish_the_idle_marker`（`--model` / `--effort`の位置）、`runtime_triage.rs`と`runtime_review.rs`（`resume_started`と`revise_requested`の記録、resumeの起動の値）
 - 段上げ: `domain::worker_model`の単体テスト（段、`current`、`for_resume`、`inheriting`、取り下げた差し戻し）、`infrastructure::claude`の`a_live_session_switches_with_model_and_effort_commands`、`tests/it/worker_escalation.rs`（検証の失敗と`sent_back`で上がり、衝突・kill・`evidence_missing`・`scope_violation`で上がらない、上げたresumeの起動の値と`stats`の`escalations`、retryの引き継ぎ、切り替えられなかったreviseが上げずに進むこと（`a_revise_whose_session_cannot_be_switched_goes_on_unraised`）と、入力が残ったreviseが差し戻しを打たずにaskになること（`a_switch_left_in_the_input_box_asks_a_person_without_typing_the_revise`））、`runtime_review.rs`の`a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again`（`/effort high`）・`a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it`（high→xhigh）

@@ -62,7 +62,15 @@ pub struct RunLoad {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct RunMeasures {
     pub dagq_version: Option<String>,
+    /// The host's Claude Code at the claim; null for a run that worked on
+    /// Codex, which is no Claude run (task 892).
     pub claude_version: Option<String>,
+    /// The run worked on Codex at some point: claimed there (a move at the
+    /// claim included), moved there by a `provider_switched`, or a turn ran
+    /// there. Such a run is a Codex run: its model is its Codex turns', it
+    /// counts under no Claude version and in no trial group (task 892).
+    #[serde(skip)]
+    pub on_codex: bool,
     /// The worker's provider the task requested (the claim's
     /// `requested_provider`, else its `provider`) and route (`interactive` /
     /// `headless`, the claim's `worker_mode`) the run was claimed with,
@@ -90,7 +98,11 @@ pub struct RunMeasures {
     pub claim_load_avg: Option<f64>,
     /// The model and effort its worker session was claimed with, and its
     /// group in the trial (ADR-0079 decisions 3 and 4); null when claimed
-    /// before they were recorded, or outside the trial for the group.
+    /// before they were recorded, or outside the trial for the group. A run
+    /// that worked on Codex (`on_codex`) takes the model its first Codex
+    /// turn that named one recorded, not the claim's (a Claude step, or a
+    /// Claude model it started on before moving), and no group (task 892);
+    /// null without one.
     pub worker_model: Option<String>,
     pub worker_effort: Option<String>,
     pub trial_group: Option<String>,
@@ -178,6 +190,8 @@ pub(super) struct MeasureTrack {
     /// first).
     claim_provider: Option<String>,
     switched_to: Option<String>,
+    /// The model the first Codex turn that named one read.
+    codex_model: Option<String>,
 }
 
 impl MeasureTrack {
@@ -188,6 +202,7 @@ impl MeasureTrack {
         match event.kind.as_str() {
             "run_claimed" if !self.claimed => {
                 self.claimed = true;
+                measures.on_codex |= payload["provider"] == "codex";
                 measures.dagq_version = text("dagq_version");
                 measures.claude_version = text("claude_version");
                 self.claim_provider = text("provider");
@@ -207,6 +222,7 @@ impl MeasureTrack {
             "provider_switched" => {
                 measures.provider_switches += 1;
                 self.switched_to = text("to");
+                measures.on_codex |= payload["to"] == "codex";
             }
             "turn_started" => self.turn_started = super::timestamp_millis(&event.created_at),
             "turn_finished" => {
@@ -216,6 +232,12 @@ impl MeasureTrack {
                     .or_else(|| self.switched_to.clone())
                     .or_else(|| self.claim_provider.clone())
                     .unwrap_or_else(|| super::asks::UNKNOWN.to_owned());
+                if provider == "codex" {
+                    measures.on_codex = true;
+                    if self.codex_model.is_none() {
+                        self.codex_model = text("model");
+                    }
+                }
                 let failed = payload["outcome"] != "succeeded";
                 let millis = match (
                     self.turn_started.take(),
@@ -277,6 +299,15 @@ impl MeasureTrack {
 
     pub(super) fn finish(mut self) -> RunMeasures {
         self.measures.actual_provider = self.switched_to.take().or(self.claim_provider.take());
+        // A run that worked on Codex is a Codex run: not a run of the host's
+        // Claude Code, not in the trial, and of the model Codex used rather
+        // than the claim's (the step's Claude model, the Claude model it
+        // started on, or what a Codex claim before task 892 wrote).
+        if self.measures.on_codex {
+            self.measures.claude_version = None;
+            self.measures.trial_group = None;
+            self.measures.worker_model = self.codex_model.take();
+        }
         let mean = (self.verify_weight > 0.0)
             .then(|| (self.verify_sum / self.verify_weight * 100.0).round() / 100.0);
         self.measures.load.verify = IntervalLoad::new(mean, self.verify_max);
@@ -788,6 +819,140 @@ mod tests {
         );
     }
 
+    /// Task 892: a run that worked on Codex (claimed there or moved there)
+    /// counts under no Claude version and in no trial group, and its model
+    /// is the first one its Codex turns read, not the claim's step (nor the
+    /// Claude model and group a claim recorded before, nor the Claude model
+    /// it started on); a Claude run keeps its claim's.
+    #[test]
+    fn a_codex_run_has_the_model_its_turns_read() {
+        let mut track = MeasureTrack::default();
+        for event in [
+            event(
+                1,
+                "run_claimed",
+                json!({"provider": "codex", "requested_provider": "claude", "worker_mode": "headless",
+                       "claude_version": "2.1.0", "model": null, "ladder_model": "claude-opus-5-5",
+                       "effort": "medium", "group": null}),
+            ),
+            event(
+                2,
+                "turn_finished",
+                json!({"turn": 1, "outcome": "succeeded", "model": null, "model_unknown": "no rollout"}),
+            ),
+            event(
+                3,
+                "turn_finished",
+                json!({"turn": 2, "outcome": "succeeded", "model": "gpt-6-astra"}),
+            ),
+            event(
+                4,
+                "turn_finished",
+                json!({"turn": 3, "outcome": "succeeded", "model": "gpt-6-nova"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert!(measures.on_codex);
+        assert_eq!(measures.provider.as_deref(), Some("claude"));
+        assert_eq!(measures.claude_version, None);
+        assert_eq!(measures.worker_model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(measures.worker_effort.as_deref(), Some("medium"));
+        assert_eq!(measures.trial_group, None);
+        // A Codex claim from before task 892 named the step's Claude model
+        // and a group: neither is read.
+        let mut track = MeasureTrack::default();
+        track.observe(&event(
+            1,
+            "run_claimed",
+            json!({"provider": "codex", "model": "claude-sonnet-5", "effort": "medium",
+                   "group": "treatment"}),
+        ));
+        let measures = track.finish();
+        assert_eq!(measures.worker_model, None);
+        assert_eq!(measures.trial_group, None);
+        // A Claude run keeps its claim's model and version.
+        let mut track = MeasureTrack::default();
+        for event in [
+            event(
+                1,
+                "run_claimed",
+                json!({"provider": "claude", "worker_mode": "headless", "claude_version": "2.1.0",
+                       "model": "claude-opus-5-5", "effort": "medium", "group": null}),
+            ),
+            event(
+                2,
+                "turn_finished",
+                json!({"turn": 1, "outcome": "succeeded", "model": "claude-sonnet-5"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert!(!measures.on_codex);
+        assert_eq!(measures.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(measures.worker_model.as_deref(), Some("claude-opus-5-5"));
+        // A trial run claimed on Claude that the fallback moved to Codex
+        // worked on Codex: it leaves the trial and the Claude strata, and
+        // its model is the first Codex turn's, not the Claude one it
+        // started on.
+        let mut track = MeasureTrack::default();
+        for event in [
+            event(
+                1,
+                "run_claimed",
+                json!({"provider": "claude", "requested_provider": "claude", "worker_mode": "headless",
+                       "claude_version": "2.1.0", "model": "claude-sonnet-5", "effort": "medium",
+                       "group": "treatment"}),
+            ),
+            event(
+                2,
+                "turn_finished",
+                json!({"turn": 1, "outcome": "failed", "provider": "claude", "model": "claude-sonnet-5"}),
+            ),
+            event(
+                3,
+                "provider_switched",
+                json!({"from": "claude", "to": "codex", "reason": "usage_limit", "phase": "start"}),
+            ),
+            event(
+                4,
+                "turn_finished",
+                json!({"turn": 2, "outcome": "succeeded", "provider": "codex", "model": "gpt-6-astra"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert!(measures.on_codex);
+        assert_eq!(measures.provider.as_deref(), Some("claude"));
+        assert_eq!(measures.actual_provider.as_deref(), Some("codex"));
+        assert_eq!(measures.claude_version, None);
+        assert_eq!(measures.trial_group, None);
+        assert_eq!(measures.worker_model.as_deref(), Some("gpt-6-astra"));
+        // Moved without a Codex turn that named its model: unknown, not
+        // the Claude model.
+        let mut track = MeasureTrack::default();
+        for event in [
+            event(
+                1,
+                "run_claimed",
+                json!({"provider": "claude", "model": "claude-opus-5-5", "effort": "medium", "group": "control"}),
+            ),
+            event(
+                2,
+                "provider_switched",
+                json!({"from": "claude", "to": "codex"}),
+            ),
+        ] {
+            track.observe(&event);
+        }
+        let measures = track.finish();
+        assert_eq!(measures.worker_model, None);
+        assert_eq!(measures.trial_group, None);
+    }
+
     /// The claim's provider, route and versions, and the run's headless
     /// turns: how many, the failed ones and their seconds (ADR-t813-2
     /// decision 7).
@@ -827,7 +992,8 @@ mod tests {
         let measures = track.finish();
         assert_eq!(measures.provider.as_deref(), Some("codex"));
         assert_eq!(measures.route.as_deref(), Some("headless"));
-        assert_eq!(measures.claude_version.as_deref(), Some("2.1.0"));
+        // A Codex run is no run of the host's Claude Code (task 892).
+        assert_eq!(measures.claude_version, None);
         assert_eq!(measures.codex_version.as_deref(), Some("0.46.0"));
         assert_eq!(measures.provider_version.as_deref(), Some("0.46.0"));
         assert_eq!(

@@ -1190,11 +1190,16 @@ fn headless_of(
 ) -> HeadlessProvider {
     {
         let agent: Box<dyn AgentProvider + Send> = match provider {
-            dagq::domain::Provider::Codex => Box::new(dagq::infrastructure::codex::Codex {
-                executable: codex
+            dagq::domain::Provider::Codex => {
+                let executable = codex
                     .unwrap_or(Path::new("/nonexistent/headless-codex"))
-                    .to_owned(),
-            }),
+                    .to_owned();
+                Box::new(dagq::infrastructure::codex::Codex {
+                    // The stub's rollouts, never the person's `~/.codex`.
+                    home: executable.parent().map(|dir| dir.join(CODEX_HOME)),
+                    executable,
+                })
+            }
             dagq::domain::Provider::Claude => {
                 Box::new(dagq::infrastructure::adapters::ClaudeCode {
                     executable: claude
@@ -1321,6 +1326,16 @@ printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","per
     stub
 }
 
+/// The home of the stub `codex` of [`headless_codex`], next to it: its
+/// rollouts are under `sessions`.
+pub const CODEX_HOME: &str = "codex-home";
+
+/// Have the stub `codex` in `dir` write each turn's `model` to its
+/// thread's rollout, as Codex does, from now on.
+pub fn set_codex_model(dir: &Path, model: &str) {
+    fs::write(dir.join("codex-model"), model).unwrap();
+}
+
 /// A stub `codex` for headless turns (ADR-t813-1, ADR-t813-3), in `dir`: it
 /// takes `codex exec --json -C <worktree> -c … -- <prompt>` and `codex exec
 /// resume --json -c … -- <thread> <prompt>`, finds the run directory among
@@ -1398,12 +1413,27 @@ echo "Reading additional input from stdin..." >&2
 printf '{{"type":"thread.started","thread_id":"%s"}}
 {{"type":"turn.started"}}
 ' "$THREAD"
+# The model goes to the thread's rollout only, as Codex writes it.
+if [ -f {model} ]; then
+  SESSIONS={home}/sessions
+  ROLLOUT=$(ls "$SESSIONS"/*/*/*/rollout-*-"$THREAD".jsonl 2>/dev/null | head -n 1)
+  if [ -z "$ROLLOUT" ]; then
+    mkdir -p "$SESSIONS/$(date +%Y/%m/%d)"
+    ROLLOUT="$SESSIONS/$(date +%Y/%m/%d)/rollout-2026-09-29T00-00-00-$THREAD.jsonl"
+    printf '{{"type":"session_meta","payload":{{"id":"%s"}}}}
+' "$THREAD" > "$ROLLOUT"
+  fi
+  printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"%s","effort":"medium"}}}}
+' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(cat {model})" >> "$ROLLOUT"
+fi
 . {turns}
 [ -n "$ENDED" ] || result
 "#,
         dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
         db = shell_join(&[db.display().to_string()]),
         turns = shell_join(&[turns.display().to_string()]),
+        model = shell_join(&[dir.join("codex-model").display().to_string()]),
+        home = shell_join(&[dir.join(CODEX_HOME).display().to_string()]),
     );
     fs::write(&stub, script).unwrap();
     use std::os::unix::fs::PermissionsExt;

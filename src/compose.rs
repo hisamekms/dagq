@@ -626,7 +626,7 @@ pub fn supervise_with_reviewer(
     let found_codex = crate::infrastructure::codex::executable(&options.codex).ok();
     let codex = found_codex.clone().unwrap_or_else(|| options.codex.clone());
     let codex_agent = found_codex
-        .map(|executable| Codex { executable })
+        .map(Codex::new)
         .filter(|codex| match codex.preflight() {
             Ok(()) => true,
             Err(error) => {
@@ -1191,9 +1191,7 @@ impl OneShot {
                 executable: PathBuf::from("claude"),
             },
             ClaudeTranscripts::from_env(),
-            Codex {
-                executable: PathBuf::from("codex"),
-            },
+            Codex::new(PathBuf::from("codex")),
         );
         report["providers"] = serde_json::to_value(provider_checks(
             Path::new("claude"),
@@ -2504,9 +2502,7 @@ pub fn session(
         executable: claude.into(),
     };
     let transcripts = ClaudeTranscripts::from_env();
-    let codex = Codex {
-        executable: codex.into(),
-    };
+    let codex = Codex::new(codex.into());
     let workers = worker_adapters(&provider, &transcripts, Some(&codex));
     // The run's worker picks the adapters (ADR-t813-2); the supervisor
     // claims no task whose worker this binary has none for.

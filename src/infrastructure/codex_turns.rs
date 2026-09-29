@@ -11,7 +11,17 @@
 //! failure are not structured: they are read from the messages. Nothing is
 //! written while a command runs, so a silence does not mean a stuck turn.
 //! A command the project's rules refuse is not in the JSONL at all, only a
-//! `Rejected(` line on stderr.
+//! `Rejected(` line on stderr. The JSONL does not name the model either:
+//! it is read from the thread's rollout, which Codex writes under its home
+//! (`sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`), whose
+//! `turn_context` records carry the `model` of each turn. The rollout is
+//! only read.
+
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 
@@ -25,9 +35,25 @@ const TEXT_KEPT: usize = 400;
 /// How long a refused command is kept in `permission_denials`.
 const COMMAND_KEPT: usize = 120;
 
+/// How many of the latest day directories of `sessions` a thread's rollout
+/// is looked for in: a resumed thread's rollout stays in the directory of
+/// the day it started.
+const ROLLOUT_DAYS: usize = 31;
+
+/// How much earlier than the reader was made a `turn_context` may be
+/// stamped and still be the turn's: the rollout's times are Codex's clock
+/// on the same host, at millisecond (a stub's at second) precision.
+const TURN_CONTEXT_SKEW_MILLIS: i64 = 2_000;
+
 /// Reads one turn's JSONL.
 #[derive(Debug, Default)]
 pub struct CodexTurnReader {
+    /// Codex's `sessions` directory, where the thread's rollout names the
+    /// model; `None` when Codex's home is not known.
+    sessions: Option<PathBuf>,
+    /// When the turn started (unix milliseconds): a `turn_context` stamped
+    /// before it is an earlier turn's. `None`: any is taken.
+    since: Option<i64>,
     thread_id: Option<String>,
     /// The `turn.completed` event.
     completed: Option<Value>,
@@ -116,7 +142,104 @@ fn refused_by_sandbox(item: &Value) -> bool {
             || output.contains("cannot get process list"))
 }
 
+/// The rollout of `thread` among the [`ROLLOUT_DAYS`] latest day
+/// directories of `sessions` (`YYYY/MM/DD`), the latest first.
+fn rollout(sessions: &Path, thread: &str) -> Option<PathBuf> {
+    let suffix = format!("-{thread}.jsonl");
+    let children = |dir: &Path| -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| path.is_dir())
+            .collect();
+        dirs.sort_unstable_by(|a, b| b.cmp(a));
+        dirs
+    };
+    children(sessions)
+        .iter()
+        .flat_map(|year| children(year))
+        .flat_map(|month| children(&month))
+        .take(ROLLOUT_DAYS)
+        .find_map(|day| {
+            fs::read_dir(&day)
+                .ok()?
+                .filter_map(|entry| Some(entry.ok()?.path()))
+                .find(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
+                })
+        })
+}
+
+/// The model the last turn of `thread` ran on: the `model` of the last
+/// `turn_context` of its rollout under `sessions`, among those stamped at
+/// `since` (unix milliseconds, less [`TURN_CONTEXT_SKEW_MILLIS`]) or later
+/// when it is given, so that a turn that failed before Codex wrote its own
+/// is not given an earlier turn's; else why none was read.
+pub fn rollout_model(sessions: &Path, thread: &str, since: Option<i64>) -> Result<String, String> {
+    let path = rollout(sessions, thread)
+        .ok_or_else(|| format!("no rollout of thread {thread} under {}", sessions.display()))?;
+    let file =
+        fs::File::open(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| line.contains("\"turn_context\""))
+        .filter_map(|line| {
+            let record: Value = serde_json::from_str(&line).ok()?;
+            let this_turn = since.is_none_or(|since| {
+                record["timestamp"]
+                    .as_str()
+                    .and_then(crate::domain::stats::rfc3339_millis)
+                    .is_some_and(|at| at >= since - TURN_CONTEXT_SKEW_MILLIS)
+            });
+            (record["type"] == "turn_context" && this_turn)
+                .then(|| record["payload"]["model"].as_str().map(str::to_owned))?
+        })
+        .last()
+        .ok_or_else(|| match since {
+            Some(_) => format!(
+                "the rollout {} names no model for this turn",
+                path.display()
+            ),
+            None => format!("the rollout {} names no model", path.display()),
+        })
+}
+
 impl CodexTurnReader {
+    /// A reader that looks for the model in the rollouts under `sessions`
+    /// (`None`: Codex's home is not known, and no model is read), in the
+    /// `turn_context` of the turn that starts now.
+    pub fn reading(sessions: Option<PathBuf>) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_millis()).ok());
+        Self::reading_since(sessions, now)
+    }
+
+    /// [`Self::reading`] for a turn that started at `since` (unix
+    /// milliseconds; `None`: any `turn_context`).
+    pub fn reading_since(sessions: Option<PathBuf>, since: Option<i64>) -> Self {
+        Self {
+            sessions,
+            since,
+            ..Self::default()
+        }
+    }
+
+    /// The model of the turn, or why none was read.
+    fn model(&self) -> Result<String, String> {
+        let thread = self.thread_id.as_deref().ok_or("Codex named no thread")?;
+        let sessions = self
+            .sessions
+            .as_deref()
+            .ok_or("Codex's home is not known (neither CODEX_HOME nor HOME is set)")?;
+        rollout_model(sessions, thread, self.since)
+    }
+
     fn text(value: &Value) -> Option<String> {
         value
             .as_str()
@@ -287,6 +410,8 @@ impl TurnReader for CodexTurnReader {
                     .unwrap_or(TurnFailure::Other)
             }
         });
+        // Codex's output does not name the model: its rollout does.
+        let model = self.model();
         TurnResult {
             result_seen: self.completed.is_some() || self.failed.is_some(),
             is_error,
@@ -310,6 +435,8 @@ impl TurnReader for CodexTurnReader {
             tokens_cumulative: true,
             permission_denials: std::mem::take(&mut self.denials),
             session_missing: stderr.contains("no rollout found"),
+            model: model.as_ref().ok().cloned(),
+            model_unknown: model.err(),
         }
     }
 }
@@ -551,5 +678,114 @@ mod tests {
         );
         assert_eq!(result.permission_denials[0], "sandbox: pkill -f cargo");
         assert!(result.permission_denials[2].starts_with("rules: "));
+    }
+
+    /// A rollout as Codex writes it: `session_meta`, then a `turn_context`
+    /// for each turn.
+    fn write_rollout(sessions: &Path, day: &str, thread: &str, models: &[&str]) {
+        let dir = sessions.join(day);
+        fs::create_dir_all(&dir).unwrap();
+        let mut text = json!({"type": "session_meta", "payload": {"id": thread}}).to_string();
+        // The turns a minute apart.
+        for (minute, model) in models.iter().enumerate() {
+            text.push('\n');
+            text.push_str(
+                &json!({"timestamp": format!("2026-09-28T01:{minute:02}:00.000Z"),
+                        "type": "turn_context", "payload": {"model": model, "effort": "medium"}})
+                .to_string(),
+            );
+            text.push('\n');
+            text.push_str(
+                &json!({"type": "event_msg", "payload": {"model": "not this"}}).to_string(),
+            );
+        }
+        fs::write(
+            dir.join(format!("rollout-2026-09-28T01-13-10-{thread}.jsonl")),
+            text,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_model_of_a_turn_is_read_from_its_thread_s_rollout() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        write_rollout(
+            &sessions,
+            "2026/09/27",
+            "th-1",
+            &["gpt-6-astra", "gpt-6-nova"],
+        );
+        write_rollout(&sessions, "2026/09/28", "th-2", &[]);
+        fs::create_dir_all(sessions.join("2026/09/29")).unwrap();
+        // The last turn's, from an earlier day's rollout (a resumed thread).
+        assert_eq!(
+            rollout_model(&sessions, "th-1", None).as_deref(),
+            Ok("gpt-6-nova")
+        );
+        let (mut reader, _) = {
+            let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), None);
+            let signals =
+                reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
+            (reader, signals)
+        };
+        let result = reader.finish(Some(&exit(0)), "");
+        assert_eq!(result.model.as_deref(), Some("gpt-6-nova"));
+        assert_eq!(result.model_unknown, None);
+        // Otherwise the result says why there is none.
+        assert!(
+            rollout_model(&sessions, "th-2", None)
+                .unwrap_err()
+                .contains("names no model")
+        );
+        assert!(
+            rollout_model(&sessions, "th-3", None)
+                .unwrap_err()
+                .contains("no rollout of thread th-3")
+        );
+        let mut reader = CodexTurnReader::reading_since(Some(sessions.clone()), None);
+        let result = reader.finish(None, "");
+        assert_eq!(result.model, None);
+        assert_eq!(
+            result.model_unknown.as_deref(),
+            Some("Codex named no thread")
+        );
+        // A turn reads only the `turn_context` written since it started:
+        // one that failed before Codex wrote its own gets no earlier turn's.
+        let at = |text: &str| crate::domain::stats::rfc3339_millis(text).unwrap();
+        assert_eq!(
+            rollout_model(&sessions, "th-1", Some(at("2026-09-28T01:01:00.500Z"))).as_deref(),
+            Ok("gpt-6-nova")
+        );
+        assert_eq!(
+            rollout_model(&sessions, "th-1", Some(at("2026-09-28T01:00:01Z"))).as_deref(),
+            Ok("gpt-6-nova")
+        );
+        assert!(
+            rollout_model(&sessions, "th-1", Some(at("2026-09-28T01:05:00Z")))
+                .unwrap_err()
+                .contains("no model for this turn")
+        );
+        // A reader made now takes none of these old ones.
+        let mut reader = CodexTurnReader::reading(Some(sessions.clone()));
+        reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
+        assert!(
+            reader
+                .finish(None, "")
+                .model_unknown
+                .unwrap()
+                .contains("for this turn")
+        );
+        let mut reader = CodexTurnReader::reading(None);
+        reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
+        assert!(
+            reader
+                .finish(None, "")
+                .model_unknown
+                .unwrap()
+                .contains("home is not known")
+        );
+        // A missing directory has no rollout.
+        assert!(rollout_model(&dir.path().join("none"), "th-1", None).is_err());
     }
 }

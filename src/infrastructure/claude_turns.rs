@@ -29,6 +29,8 @@ const TEXT_KEPT: usize = 400;
 #[derive(Debug, Default)]
 pub struct ClaudeTurnReader {
     session_id: Option<String>,
+    /// The model `system/init` named.
+    model: Option<String>,
     /// The result event, the last of the stream.
     result: Option<Value>,
     /// The stream said the login failed (a retried 401, or the agent's
@@ -54,9 +56,12 @@ impl ClaudeTurnReader {
                 if let Some(id) = event["session_id"].as_str() {
                     self.session_id = Some(id.to_owned());
                 }
+                if let Some(model) = event["model"].as_str() {
+                    self.model = Some(model.to_owned());
+                }
                 vec![TurnSignal::Started {
                     session_id: self.session_id.clone(),
-                    model: event["model"].as_str().map(str::to_owned),
+                    model: self.model.clone(),
                     permission_mode: event["permissionMode"].as_str().map(str::to_owned),
                 }]
             }
@@ -253,6 +258,11 @@ impl TurnReader for ClaudeTurnReader {
             // Claude's session is the run's: a missing one is started
             // by `turn_session_exists` instead.
             session_missing: false,
+            model: self.model.clone(),
+            model_unknown: self
+                .model
+                .is_none()
+                .then(|| "the stream named no model (no system/init)".to_owned()),
         }
     }
 }
@@ -337,6 +347,8 @@ mod tests {
         assert_eq!(result.failure, None);
         assert_eq!(result.message.as_deref(), Some("Done."));
         assert_eq!(result.session_id.as_deref(), Some("s1"));
+        assert_eq!(result.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(result.model_unknown, None);
         assert_eq!(
             (result.num_turns, result.duration_ms, result.cost_usd),
             (Some(3), Some(1200), Some(0.04))
@@ -381,6 +393,10 @@ mod tests {
         assert!(result.is_error && !result.result_seen);
         assert_eq!(result.failure, Some(TurnFailure::Authentication));
         assert!(result.message.unwrap().contains("401"));
+        // No init, no model: why is said.
+        let result = ClaudeTurnReader::default().finish(None, "");
+        assert_eq!(result.model, None);
+        assert!(result.model_unknown.unwrap().contains("no model"));
     }
 
     #[test]

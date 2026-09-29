@@ -5,7 +5,8 @@
 //! policy of ADR-t813-3 given as `-c` on every call (a resume does not
 //! keep the first call's), and the project rules that forbid `pkill` and
 //! `killall` in the worktree. Nothing of the person's (`~/.codex`,
-//! `CODEX_HOME`) is written or changed.
+//! `CODEX_HOME`) is written or changed: the model a turn ran on is only
+//! read from the thread's rollout there.
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -24,6 +25,36 @@ use super::{adapters::output, codex_turns::CodexTurnReader};
 #[derive(Debug, Clone)]
 pub struct Codex {
     pub executable: PathBuf,
+    /// Codex's home, whose `sessions` hold the rollouts the model of a turn
+    /// is read from; `None` for Codex's own (`$CODEX_HOME`, else
+    /// `~/.codex`).
+    pub home: Option<PathBuf>,
+}
+
+impl Codex {
+    /// Codex at `executable`, with its own home.
+    pub fn new(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            home: None,
+        }
+    }
+
+    /// The `sessions` directory of Codex's home; `None` when neither
+    /// `CODEX_HOME` nor `HOME` is set.
+    pub fn sessions_dir(&self) -> Option<PathBuf> {
+        let home = self.home.clone().or_else(|| {
+            std::env::var_os("CODEX_HOME")
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .filter(|home| !home.is_empty())
+                        .map(|home| PathBuf::from(home).join(".codex"))
+                })
+        })?;
+        Some(home.join("sessions"))
+    }
 }
 
 /// The directories of cmux's per-surface shims (`$TMPDIR/cmux-cli-shims/
@@ -268,7 +299,7 @@ impl AgentProvider for Codex {
         Ok(command)
     }
     fn turn_reader(&self) -> Result<Box<dyn TurnReader>> {
-        Ok(Box::new(CodexTurnReader::default()))
+        Ok(Box::new(CodexTurnReader::reading(self.sessions_dir())))
     }
     fn turn_session_from_output(&self) -> bool {
         true
@@ -363,9 +394,7 @@ mod tests {
 
     #[test]
     fn a_claude_model_is_left_to_codex_and_the_effort_is_given() {
-        let codex = Codex {
-            executable: "codex".into(),
-        };
+        let codex = Codex::new("codex".into());
         let mut command = CommandSpec::new("codex");
         command.args(["exec", "--json", "--", "prompt"]);
         codex.select_model(&mut command, "claude-opus-5-5", "max");
@@ -422,9 +451,7 @@ mod tests {
         let (common, worktree) = layout(dir.path());
         let run_dir = dir.path().join("run");
         let run = run(&worktree, &run_dir);
-        let codex = Codex {
-            executable: "/bin/codex".into(),
-        };
+        let codex = Codex::new("/bin/codex".into());
         let args = |command: &CommandSpec| -> Vec<String> {
             command
                 .get_args()
@@ -480,12 +507,12 @@ mod tests {
         );
         assert!(codex.turn_session_from_output());
         assert!(codex.turn_reader().is_ok());
-        assert!(
-            Codex {
-                executable: "/nonexistent/codex".into()
-            }
-            .preflight()
-            .is_err()
-        );
+        assert!(Codex::new("/nonexistent/codex".into()).preflight().is_err());
+        // Its rollouts are under its home's `sessions`.
+        let at = Codex {
+            home: Some("/h".into()),
+            ..codex
+        };
+        assert_eq!(at.sessions_dir(), Some(PathBuf::from("/h/sessions")));
     }
 }

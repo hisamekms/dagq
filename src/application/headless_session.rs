@@ -549,6 +549,7 @@ impl<'a> Turns<'a> {
             is_error: true,
             failure: Some(TurnFailure::Launch),
             message: Some(format!("the agent could not be started: {error:#}")),
+            model_unknown: Some("the agent did not start".to_owned()),
             ..TurnResult::default()
         };
         self.finished(
@@ -593,6 +594,11 @@ impl<'a> Turns<'a> {
                 "cost_usd": result.cost_usd,
                 "usage": result.usage,
                 "provider": provider,
+                // The model the agent ran the turn on, as it says (Codex's
+                // is not the claim's Claude model), else why it is not
+                // known.
+                "model": result.model,
+                "model_unknown": result.model_unknown,
                 // The runtime's kinds of token, which the span sums
                 // (ADR-t813-2 decision 7).
                 "tokens": tokens.as_ref().map(TokenUsage::payload),

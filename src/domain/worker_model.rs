@@ -11,12 +11,18 @@
 //! raised one step of [`LADDER`], up to Opus 5.5 at `xhigh`; a conflict, a
 //! kill or any other reason keeps the step. The raised step stays with the
 //! task's later runs.
+//!
+//! A Codex run takes only the effort of its step: Codex runs its own
+//! model, not the step's Claude model (task 892). Its session events name
+//! no `model` (the step's is `ladder_model`, and `model_unknown` says why),
+//! it is in no trial group, and each of its turns records the model Codex
+//! says it used.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::{
-    DomainError, ReasonCode, RunEvent, TaskId, event_kind,
+    DomainError, Provider, ReasonCode, RunEvent, TaskId, event_kind,
     prediction::{PREDICTION_WINDOW, TaskNature, percentile, window},
     reason::event_code,
     resume,
@@ -39,6 +45,9 @@ pub const LADDER: [(&str, &str); 4] = [
     (OPUS, HIGH),
     (OPUS, XHIGH),
 ];
+/// Why a Codex run's session events name no model.
+pub const CODEX_MODEL_UNKNOWN: &str = "codex runs its own model, not the claim's Claude model: each turn_finished records the model codex used";
+
 /// The reason of a raise for a review's `revise`: the other reasons are
 /// the codes that parked the run ([`raises`]).
 pub const REVISE: &str = "revise";
@@ -145,6 +154,33 @@ impl WorkerSession {
         fields
     }
 
+    /// [`Self::fields`] for a session on `provider`. Codex's names no
+    /// `model`: the step's Claude model is `ladder_model`, which the next
+    /// session is raised from, `model_unknown` says why, and it is in no
+    /// trial group.
+    pub fn fields_on(&self, provider: Provider) -> Map<String, Value> {
+        let mut fields = self.fields();
+        if provider == Provider::Codex {
+            fields.insert("model".to_owned(), Value::Null);
+            fields.insert("ladder_model".to_owned(), json!(self.model));
+            fields.insert("group".to_owned(), Value::Null);
+            fields.insert("model_unknown".to_owned(), json!(CODEX_MODEL_UNKNOWN));
+        }
+        fields
+    }
+
+    /// `model` and `effort` of the session on `provider`, as a raise names
+    /// the session before it: Codex's `model` is null and the step's model
+    /// is `ladder_model`.
+    pub fn named_on(&self, provider: Provider) -> Value {
+        match provider {
+            Provider::Codex => {
+                json!({"model": null, "ladder_model": self.model, "effort": self.effort})
+            }
+            Provider::Claude => json!({"model": self.model, "effort": self.effort}),
+        }
+    }
+
     /// The session a run was claimed with: `model`, `effort` and `group` of
     /// its first `run_claimed` among `events` (the run's). A run claimed
     /// before they were recorded, or one without its claim, gets the
@@ -156,15 +192,7 @@ impl WorkerSession {
         else {
             return Self::default();
         };
-        let payload = &claimed.payload;
-        match (payload["model"].as_str(), payload["effort"].as_str()) {
-            (Some(model), Some(effort)) => Self {
-                model: model.to_owned(),
-                effort: effort.to_owned(),
-                group: group_of(payload),
-            },
-            _ => Self::default(),
-        }
+        Self::recorded(&claimed.payload).unwrap_or_default()
     }
 }
 
@@ -207,9 +235,14 @@ impl WorkerSession {
             .find_map(|index| Self::recorded(&events[index].payload))
     }
 
+    /// The session a payload records: a Codex run's step is its
+    /// `ladder_model`.
     fn recorded(payload: &Value) -> Option<Self> {
         Some(Self {
-            model: payload["model"].as_str()?.to_owned(),
+            model: payload["model"]
+                .as_str()
+                .or_else(|| payload["ladder_model"].as_str())?
+                .to_owned(),
             effort: payload["effort"].as_str()?.to_owned(),
             group: group_of(payload),
         })
@@ -241,16 +274,17 @@ impl WorkerSession {
         }
     }
 
-    /// [`Self::fields`] with the raise that led to the session, if any:
-    /// `escalated_from` (the model and effort before) and
-    /// `escalation_reason`.
-    pub fn fields_raised(&self, raise: Option<&Escalation>) -> Map<String, Value> {
-        let mut fields = self.fields();
+    /// [`Self::fields_on`] with the raise that led to the session, if any:
+    /// `escalated_from` (the model and effort before, [`Self::named_on`])
+    /// and `escalation_reason`.
+    pub fn fields_raised(
+        &self,
+        provider: Provider,
+        raise: Option<&Escalation>,
+    ) -> Map<String, Value> {
+        let mut fields = self.fields_on(provider);
         if let Some(raise) = raise {
-            fields.insert(
-                "escalated_from".to_owned(),
-                json!({"model": raise.from.model, "effort": raise.from.effort}),
-            );
+            fields.insert("escalated_from".to_owned(), raise.from.named_on(provider));
             fields.insert("escalation_reason".to_owned(), json!(raise.reason));
         }
         fields
@@ -675,14 +709,59 @@ mod tests {
             reason: REVISE.to_owned(),
         };
         assert_eq!(
-            Value::Object(session(OPUS, HIGH).fields_raised(Some(&raise))),
+            Value::Object(session(OPUS, HIGH).fields_raised(Provider::Claude, Some(&raise))),
             json!({"model": OPUS, "effort": HIGH, "group": null,
                    "escalated_from": {"model": OPUS, "effort": MEDIUM},
                    "escalation_reason": "revise"})
         );
         assert_eq!(
-            session(OPUS, HIGH).fields_raised(None),
+            session(OPUS, HIGH).fields_raised(Provider::Claude, None),
             session(OPUS, HIGH).fields()
+        );
+    }
+
+    /// Task 892: a Codex run's session names no Claude model and no group;
+    /// its step is kept as `ladder_model`, which the next session is read
+    /// and raised from.
+    #[test]
+    fn a_codex_session_names_no_claude_model_and_keeps_its_step() {
+        let treatment = WorkerSession::of_group(TrialGroup::Treatment);
+        let fields = Value::Object(treatment.fields_on(Provider::Codex));
+        assert_eq!(
+            fields,
+            json!({"model": null, "ladder_model": SONNET, "effort": MEDIUM, "group": null,
+                   "model_unknown": CODEX_MODEL_UNKNOWN})
+        );
+        assert_eq!(
+            Value::Object(treatment.fields_on(Provider::Claude)),
+            Value::Object(treatment.fields())
+        );
+        let raise = Escalation {
+            from: session(OPUS, MEDIUM),
+            reason: REVISE.to_owned(),
+        };
+        let raised =
+            Value::Object(session(OPUS, HIGH).fields_raised(Provider::Codex, Some(&raise)));
+        assert_eq!(raised["model"], Value::Null);
+        assert_eq!(
+            raised["escalated_from"],
+            json!({"model": null, "ladder_model": OPUS, "effort": MEDIUM})
+        );
+        // Read back: the step, out of any group.
+        let mut claim = event(1, 1, "run_claimed", fields);
+        claim.run_id = Some(RunId::new(RUN).unwrap());
+        assert_eq!(
+            WorkerSession::of_run(std::slice::from_ref(&claim)),
+            session(SONNET, MEDIUM)
+        );
+        let revised = event(2, 1, "revise_requested", raised);
+        let events = [claim, revised];
+        assert_eq!(WorkerSession::current(&events), session(OPUS, HIGH));
+        assert_eq!(session(OPUS, HIGH).raised(), Some(session(OPUS, XHIGH)));
+        // A raise stays with the task's later runs, Codex's too.
+        assert_eq!(
+            WorkerSession::default().inheriting(&events),
+            (session(OPUS, HIGH), true)
         );
     }
 

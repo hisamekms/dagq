@@ -225,6 +225,7 @@ fn a_codex_task_without_codex_starts_on_claude_and_lands() {
 #[test]
 fn a_claude_turn_at_its_usage_limit_moves_to_codex_and_lands() {
     let (dir, repo, db, backend, codex) = switch_fixture(Provider::Claude, true);
+    set_codex_model(dir.path(), "gpt-test-codex");
     set_turns(
         dir.path(),
         &format!(
@@ -277,6 +278,10 @@ esac"#
     let turns = payloads(&detail, "turn_finished");
     assert_eq!(turns[0]["failure"], "usage_limit", "{turns:?}");
     assert_eq!(turns[1]["outcome"], "succeeded");
+    // The Codex turn after the switch records the model Codex used, not
+    // the claim's Claude model (task 892).
+    assert_eq!(turns[1]["provider"], "codex");
+    assert_eq!(turns[1]["model"], "gpt-test-codex", "{turns:?}");
     let calls = stub_calls(run);
     assert_eq!(calls.len(), 2, "{calls:?}");
     assert!(

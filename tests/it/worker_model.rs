@@ -2,6 +2,7 @@
 //! explicitly at every start, recorded at the claim, and with
 //! `[worker.trial]` on, alternated between the control and the treatment
 //! for the mechanical tasks of the lower third.
+use crate::common;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
@@ -263,4 +264,106 @@ fn stats_compare_the_groups() {
     assert_eq!(of(3)["worker_model"], "claude-opus-5-5");
     assert_eq!(of(3)["worker_effort"], "medium");
     assert_eq!(of(3)["trial_group"], Value::Null);
+}
+
+/// Task 892: a run on Codex takes no group and no turn of the trial, its
+/// claim names no Claude model (the step is `ladder_model`, and why no
+/// model is known is `model_unknown`), and `stats` leaves it out of the
+/// groups and of the host's Claude version.
+#[test]
+fn a_codex_run_is_outside_the_trial() {
+    let (_dir, _repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let codex = queue
+        .add(NewTask {
+            title: "b".into(),
+            description: "small change".into(),
+            acceptance: "works".into(),
+            verification_commands: vec!["true".into()],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            goal_id: None,
+            context: String::new(),
+            provider: Some(dagq::domain::Provider::Codex),
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
+        })
+        .unwrap();
+    queue
+        .transition(codex.id(), TaskAction::BypassReview)
+        .unwrap();
+    add_ready_task(&mut queue, "c", &[]);
+    add_ready_task(&mut queue, "d", &[]);
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    for (task, tokens) in [(1, 10), (2, 10), (3, 10), (4, 900)] {
+        predict(&db, task, "mechanical", tokens);
+    }
+    let on = WorkerTrial {
+        enabled: true,
+        window: 2,
+    };
+    for task in 1..=3 {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor_in_order(
+                &base,
+                &LeaseToken::new("t"),
+                &[TaskId::new(task)],
+                Some(&json!({"claude_version": "2.1.0", "codex_version": "0.46.0"})),
+                &on,
+                &dagq::domain::provider_switch::WorkerRoute::direct(
+                    &dagq::domain::worker::Worker::ALL,
+                ),
+            )
+            .unwrap()
+        else {
+            panic!("nothing to claim");
+        };
+        assert_eq!(run.task_id(), TaskId::new(task));
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::RunIntegrated,
+                json!({"status": "integrated"}),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        session_of(&claimed(&mut queue, 1)),
+        (json!("claude-opus-5-5"), json!("medium"), json!("control"))
+    );
+    let on_codex = claimed(&mut queue, 2);
+    assert_eq!(on_codex["provider"], "codex");
+    assert_eq!(
+        session_of(&on_codex),
+        (Value::Null, json!("medium"), Value::Null)
+    );
+    assert_eq!(on_codex["ladder_model"], "claude-opus-5-5");
+    assert_eq!(
+        on_codex["model_unknown"],
+        dagq::domain::worker_model::CODEX_MODEL_UNKNOWN
+    );
+    assert_eq!(on_codex.get("trial_percentile"), None);
+    // The Codex run took no turn: the next subject is the treatment.
+    assert_eq!(
+        session_of(&claimed(&mut queue, 3)),
+        (
+            json!("claude-sonnet-5"),
+            json!("medium"),
+            json!("treatment")
+        )
+    );
+    let stats = common::cli::ok(&db, &["stats", "--full"]);
+    let groups = stats["trial_groups"].as_array().unwrap();
+    let runs: Vec<Value> = groups.iter().map(|group| group["runs"].clone()).collect();
+    assert_eq!(runs, [json!(1), json!(1)], "{groups:?}");
+    let rows = stats["runs"].as_array().unwrap();
+    let of = |task: i64| rows.iter().find(|run| run["task_id"] == task).unwrap();
+    assert_eq!(of(2)["worker_model"], Value::Null);
+    assert_eq!(of(2)["trial_group"], Value::Null);
+    assert_eq!(of(2)["claude_version"], Value::Null);
+    assert_eq!(of(1)["claude_version"], "2.1.0");
+    assert_eq!(of(1)["worker_model"], "claude-opus-5-5");
 }

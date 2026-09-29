@@ -359,12 +359,13 @@ impl Supervisor<'_> {
                 // rather than sending the request a second time.
                 let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": unix_seconds(sent_at)});
                 if let Some(requested) = requested.as_object_mut() {
-                    requested.extend(worker.fields_raised(raise.as_ref()));
+                    let provider = run.actual_provider();
+                    requested.extend(worker.fields_raised(provider, raise.as_ref()));
                     if let Some((raised, why)) = skipped {
-                        requested.insert(
-                            "escalation_skipped".to_owned(),
-                            json!({"model": raised.model, "effort": raised.effort, "reason": worker_model::REVISE, "why": why}),
-                        );
+                        let mut named = raised.named_on(provider);
+                        named["reason"] = json!(worker_model::REVISE);
+                        named["why"] = json!(why);
+                        requested.insert("escalation_skipped".to_owned(), named);
                     }
                 }
                 self.queue

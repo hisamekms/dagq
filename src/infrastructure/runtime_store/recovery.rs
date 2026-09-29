@@ -289,7 +289,7 @@ impl SqliteQueue {
         let (session, raise) = worker_model::for_resume(&events);
         let mut started = json!({"attempt": attempt, "counted": counted, "reason": reason.or(run.last_error()), "main": main});
         if let Some(started) = started.as_object_mut() {
-            started.extend(session.fields_raised(raise.as_ref()));
+            started.extend(session.fields_raised(run.actual_provider(), raise.as_ref()));
         }
         run_event(&tx, id, EventKind::ResumeStarted, started)?;
         if let Some(basis) = basis {

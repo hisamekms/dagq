@@ -134,14 +134,30 @@ impl Queue {
                     claimed["codex_version"] = json!("0.46.0");
                 }
                 if let Some((model, effort, group)) = run.session {
+                    claimed["claude_version"] = json!("2.1.0");
                     claimed["model"] = json!(model);
                     claimed["effort"] = json!(effort);
                     claimed["group"] = json!(group);
+                    // Codex's claim keeps the step, not a model (task 892).
+                    if run.provider == "codex" {
+                        claimed["model"] = json!(null);
+                        claimed["ladder_model"] = json!(model);
+                        claimed["group"] = json!(null);
+                    }
                 }
                 claimed
             },
             run.claimed,
         );
+        if run.provider == "codex" && run.session.is_some() {
+            self.push(
+                task,
+                id,
+                "turn_finished",
+                json!({"turn": 1, "outcome": "succeeded", "provider": "codex", "model": "gpt-6-astra"}),
+                run.claimed + 30,
+            );
+        }
         self.push(task, id, "agent_started", json!({}), run.claimed + 10);
         self.push(
             task,
@@ -1081,6 +1097,48 @@ fn splits_the_runs_by_the_trial_group_model_effort_and_nature() {
     );
     assert!(compare.strata["landings"].contains_key("parallel=3"));
     assert!(!compare.strata["landings"].contains_key("model=claude-sonnet-5"));
+}
+
+/// Task 892: a run that worked on Codex (claimed or moved there) is counted
+/// under the model Codex used, in no trial group and under no Claude
+/// version; the Claude runs' strata stay.
+#[test]
+fn a_codex_run_is_not_counted_as_a_claude_model() {
+    let mut queue = Queue::default();
+    let mut claude = Run::new(1, None, MONDAY + HOUR, 100);
+    claude.session = Some(("claude-opus-5-5", "medium", None));
+    queue.run(&claude);
+    let mut codex = Run::new(2, None, MONDAY + 2 * HOUR, 100);
+    codex.provider = "codex";
+    codex.session = Some(("claude-opus-5-5", "medium", None));
+    queue.run(&codex);
+    // A treatment run claimed on Claude that the fallback moved to Codex
+    // worked on Codex too: it leaves the trial and the Claude strata, and
+    // no Codex turn named its model.
+    let mut moved = Run::new(3, None, MONDAY + 3 * HOUR, 100);
+    moved.session = Some(("claude-sonnet-5", "medium", Some("treatment")));
+    moved.switched_to = Some("codex");
+    queue.run(&moved);
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec![Axis::Model, Axis::Claude, Axis::Group, Axis::Provider],
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
+    let period = &result.periods[0];
+    let landings = |stratum: &str| measure(period, "landings", stratum).value;
+    assert_eq!(landings("model=claude-opus-5-5"), Some(1.0));
+    assert_eq!(landings("model=gpt-6-astra"), Some(1.0));
+    assert_eq!(landings("claude=2.1.0"), Some(1.0));
+    assert_eq!(landings("claude=none"), Some(2.0));
+    assert_eq!(landings("group=none"), Some(3.0));
+    assert_eq!(landings("model=unknown"), Some(1.0));
+    let strata = &period.window.kpis["landings"];
+    assert!(!strata.contains_key("group=treatment"), "{strata:?}");
+    assert!(!strata.contains_key("model=claude-sonnet-5"), "{strata:?}");
+    assert_eq!(landings("provider=claude"), Some(1.0));
+    assert_eq!(landings("provider=codex"), Some(2.0));
 }
 
 /// `--since` / `--until` give one window next to the one of the same

@@ -365,13 +365,17 @@ impl<'a> Context<'a> {
                 .to_owned(),
             Axis::Area => unreachable!("an area is one of a run's values (axis_values)"),
             Axis::Build => text(&measures.dagq_version),
+            // A run that worked on Codex is no run of the host's Claude
+            // Code (task 892).
+            Axis::Claude if measures.on_codex => NONE.to_owned(),
             Axis::Claude => text(&measures.claude_version),
             Axis::Provider => text(&measures.actual_provider),
             Axis::Route => text(&measures.route),
             Axis::Codex => text(&measures.codex_version),
             // A claim that recorded the worker's session always wrote its
-            // group, null outside the trial.
-            Axis::Group => match (&measures.trial_group, &measures.worker_model) {
+            // group (and effort), null outside the trial; a run on Codex is
+            // outside it.
+            Axis::Group => match (&measures.trial_group, &measures.worker_effort) {
                 (Some(group), _) => group.clone(),
                 (None, Some(_)) => NONE.to_owned(),
                 (None, None) => UNKNOWN.to_owned(),

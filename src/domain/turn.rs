@@ -331,6 +331,10 @@ pub struct TurnResult {
     /// The turn resumed a session the agent does not have (Codex's `no
     /// rollout found`): it did nothing, and a new session is started.
     pub session_missing: bool,
+    /// The model the agent says the turn ran on (Claude's `system/init`,
+    /// Codex's rollout), and why none was read when it was not.
+    pub model: Option<String>,
+    pub model_unknown: Option<String>,
 }
 
 /// The idle marker the wrapper writes when turn `turn` ended: a `Stop`

@@ -120,11 +120,14 @@ fn text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned)
 }
 
-/// `model/effort` of `value` (an object with both).
+/// `model/effort` of `value` (an object with both). A Codex run's session
+/// names its step by `ladder_model`, the rung the raise moved on (task 892).
 fn session_label(value: &Value) -> Option<String> {
     Some(format!(
         "{}/{}",
-        value["model"].as_str()?,
+        value["model"]
+            .as_str()
+            .or_else(|| value["ladder_model"].as_str())?,
         value["effort"].as_str()?
     ))
 }
@@ -620,6 +623,24 @@ mod tests {
                     switched: false,
                 },
             ]
+        );
+    }
+
+    /// Task 892: a Codex run's raise is named by its step.
+    #[test]
+    fn a_codex_raise_is_named_by_its_step() {
+        let payload = json!({"model": null, "ladder_model": "claude-opus-5-5", "effort": "high",
+                             "escalated_from": {"model": null, "ladder_model": "claude-opus-5-5", "effort": "medium"}});
+        assert_eq!(
+            escalation(&payload),
+            Some((
+                "claude-opus-5-5/medium".to_owned(),
+                "claude-opus-5-5/high".to_owned()
+            ))
+        );
+        assert_eq!(
+            session_label(&json!({"model": null, "effort": "high"})),
+            None
         );
     }
 }
