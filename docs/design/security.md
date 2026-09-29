@@ -51,7 +51,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ | ○ | ○ | ○ | — |
 | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ | ○ | ○ | ○ | — |
 | planner | ○ | △ draft・submitted・readyのtask、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | △ 自分のplannerだけ | ○ | — | — | — |
-| worker | ○（watchと`queue.export`は持たないが、下の注） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | △ 自分のrunだけ | — | — | — | — |
+| worker | 読み取り（`watch`と`queue.export`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | △ 自分のrunだけ | — | — | — | — |
 | review-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
 | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
 | plan-review-job・goal-review-job・throughput-review-job | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | — |
@@ -61,7 +61,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — | — | — | — | ○ |
 
 - review-jobとrecovery-jobの`review.submit` / `triage.submit`は自分のrunだけのcapabilityだが、CLIのコマンドは無く、verdictはsupervisorがデータとして読む。jobの環境には`DAGQ_RUN_ID`が無いので、今は持ち主が分からず拒まれる
-- observerの`queue.export`（`graph --out`・`report`）は—。4つのjobは`watch`も`queue.export`も持たない。状態を変えないコマンド（`watch`・`graph --out`・`report`）をCLIで判定するのはobserverと4つのjobだけなので（下の「判定の場所」）、worker・planner・wrapper・integratorのそれらは今は通る
+- observerの`queue.export`（`graph --out`・`report`）は—。4つのjob・worker・wrapper・integratorは`watch`も`queue.export`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
 - plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」とAGENTS.mdのplannerの項はこの行と一致させる）
 - 予約のcapability（`reserved.filesystem_read`・`reserved.filesystem_write`・`reserved.network`・`reserved.secret_read`）は誰にも与えない。sandboxのbackendが強制するときの名前
 
@@ -73,7 +73,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 
 - 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
-- 状態を変えないコマンドは、observerと4つのjobだけを`check_access`が`StaticPolicy`に通す
+- 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、eventには記録しない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job）の`permissions.deny`には、roleが持たないcommandの`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
 
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:

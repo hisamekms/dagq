@@ -312,3 +312,68 @@ fn a_refusal_does_not_depend_on_the_task_existing() {
     assert_eq!(error["error"], "observer may not change queue state");
     assert_eq!(denials(&db).len(), 1);
 }
+
+#[test]
+fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
+    let (dir, db) = queue();
+    ok(&db, &["goal", "add", "open goal"]);
+    ok(&db, &["add", "existing", "--goal", "1"]);
+    let graph = dir.path().join("graph.d2");
+    let graph = graph.to_str().unwrap();
+    let reports = dir.path().join("reports-out");
+    let reports = reports.to_str().unwrap();
+    let watch: &[&str] = &["watch", "--after", "0", "--timeout", "1"];
+    let export: [&[&str]; 3] = [
+        &["graph", "--format", "d2", "--out", graph],
+        &["report", "--out", reports],
+        &["report", "--print", "json"],
+    ];
+    let worker = vec![
+        ("DAGQ_ROLE", "worker".to_owned()),
+        ("DAGQ_ACTOR_ID", "worker:r1".to_owned()),
+        ("DAGQ_RUN_ID", "r1".to_owned()),
+        ("DAGQ_TASK_ID", "1".to_owned()),
+    ];
+    let wrapper = vec![("DAGQ_ROLE", "wrapper".to_owned())];
+    let integrator = vec![("DAGQ_ROLE", "integrator".to_owned())];
+    for (role, env) in [
+        ("worker", &worker),
+        ("wrapper", &wrapper),
+        ("integrator", &integrator),
+    ] {
+        for (args, capability) in std::iter::once((watch, "queue.watch"))
+            .chain(export.iter().map(|args| (*args, "queue.export")))
+        {
+            let error = denied_as(env, &db, args);
+            assert_eq!(error["denied"]["role"], role, "{args:?}: {error}");
+            assert_eq!(error["denied"]["capability"], capability, "{error}");
+            assert_eq!(error["denied"]["reason"], "not granted", "{error}");
+            assert!(
+                error["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{role} may not {capability}")),
+                "{error}"
+            );
+        }
+        // Reading stays open to every role.
+        for args in [&["status"][..], &["show", "1"], &["list"], &["graph"]] {
+            allowed_as(env, &db, args);
+        }
+    }
+    assert!(!Path::new(graph).exists());
+    assert!(!Path::new(reports).exists());
+    // The user, the inbox and a planner watch and export as before.
+    for env in [
+        vec![],
+        vec![("DAGQ_ROLE", "inbox".to_owned())],
+        planner("planner:1").to_vec(),
+    ] {
+        allowed_as(&env, &db, watch);
+        for args in export {
+            allowed_as(&env, &db, args);
+        }
+    }
+    assert!(Path::new(graph).is_file());
+    assert!(Path::new(reports).is_dir());
+}

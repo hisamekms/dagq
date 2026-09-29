@@ -192,7 +192,7 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 
 ### ほかのコマンド（CLIの入口）
 
-上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`）は状態を変えない。これらは今もobserverと4つのjob（と旧値`reviewer`）だけを`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す（記録はしない）。observerに許すもの（読み取り、`watch`）とjobに許すもの（読み取りだけ）は、以前の`observer_access` / `reviewer_access`の一覧と同じ。
+上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`）は状態を変えない。これらはroleを問わず（default deny、task 859）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す（記録はしない）。読み取り（`queue.read`）は全roleが持つ。`watch`（`queue.watch`）はuser・inbox・planner・supervisor・observer、`graph --out`と`report`（`queue.export`）はuser・inbox・planner・supervisorだけが持ち、worker・wrapper・integratorと4つのjob（と旧値`reviewer`）のそれらは拒まれる。observerとjobの拒否のerrorの文は以前の`observer_access` / `reviewer_access`のもの（`observer may not change queue state`など）のまま。
 
 ## Claudeのpermissions.deny（guardrail）
 

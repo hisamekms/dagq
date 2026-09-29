@@ -1836,17 +1836,15 @@ fn authorized_in_application(command: &Command) -> bool {
     }
 }
 
-/// The limits of the observer (ADR-0044 decision 4) and of the
+/// The commands the application does not authorize, which change no state
+/// (reads, `watch`, `graph --out`, `report`), by the [`StaticPolicy`] for
+/// every role (default deny, task 859): a worker, a wrapper or the
+/// integrator reads but does not watch or export, and the observer and the
 /// supervisor's headless jobs (ADR-0027, each job by its own role and the
-/// legacy `reviewer` as a review job), by the [`StaticPolicy`], on the
-/// commands the application does not authorize yet. The other roles are
-/// not checked here: later tasks of goal 55 move the rest of the commands
-/// to the application layer, where the owners are known.
+/// legacy `reviewer` as a review job) keep their limits (ADR-0044
+/// decision 4).
 fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
-    let role = actor.role();
-    if !(role == ActorRole::Observer || role.is_headless_job())
-        || authorized_in_application(command)
-    {
+    if authorized_in_application(command) {
         return Ok(());
     }
     for (capability, resource) in requests(command) {
