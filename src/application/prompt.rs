@@ -243,8 +243,24 @@ pub const BROKER_TOOLS: &str = "The resource broker's tools are available as the
 /// Claude's `nohup ... &`), and the signalling rule is the same.
 pub const HEADLESS_STOP: &str = "Before you end the turn, stop every process you started that still runs (a detached `nohup ... &` outlives the turn). Stop only what you started, by its pid; never signal by name or pattern (pkill, killall, kill $(pgrep ...)), which also hits other runs' sessions and checks on this host.";
 
+/// What a worker checks before a worker_question (task 978): the runtime
+/// holds none of the repository's rules, so it points at them; a rule
+/// there may make the question the worker's own or a failed receipt.
+macro_rules! ask_rules_first {
+    () => {
+        "Before you ask, check whether the repository's instructions (AGENTS.md or CLAUDE.md) say to decide that kind of question yourself or to write a failed receipt instead of asking; when they do, follow them and do not ask."
+    };
+}
+
+/// [`ask_rules_first`] as a value, for the prompts built with `format!`.
+pub const ASK_RULES_FIRST: &str = ask_rules_first!();
+
 /// The last step of a request to a headless session: the turn is its reply.
-const HEADLESS_DONE: &str = "Do not merge or push. Follow the repository's instructions for a worker (AGENTS.md or CLAUDE.md) as before. Do all of this in this turn. If you need a decision, run `dagq ask --run <run> --kind worker_question --because <scope|discard> --topic <code> --question '...'` and end the turn: the answer comes as the prompt of your next turn. When done, report briefly and end the turn.";
+const HEADLESS_DONE: &str = concat!(
+    "Do not merge or push. Follow the repository's instructions for a worker (AGENTS.md or CLAUDE.md) as before. Do all of this in this turn. ",
+    ask_rules_first!(),
+    " If you need a decision, run `dagq ask --run <run> --kind worker_question --because <scope|discard> --topic <code> --question '...'` and end the turn: the answer comes as the prompt of your next turn. When done, report briefly and end the turn."
+);
 
 /// The last step of a request to an interactive session.
 const INTERACTIVE_DONE: &str =
@@ -508,7 +524,7 @@ pub fn prompt(
         String::new()
     } else {
         format!(
-            "Paths you may change (globs from the repository root; `*` stays in one directory, `**` spans any depth): {}. A commit that changes any other path is not accepted: the run waits for a session to take it out. If the task needs another path, ask instead of changing it.\n",
+            "Paths you may change (globs from the repository root; `*` stays in one directory, `**` spans any depth): {}. A commit that changes any other path is not accepted: the run waits for a session to take it out. If the task needs another path, do not change it and do not run dagq ask: write the receipt with result failed and name in summary the paths it needs and what to change there (a running task's paths cannot change; the planner registers it again with wider paths).\n",
             task.paths().join(", ")
         )
     };
@@ -553,7 +569,7 @@ pub fn prompt(
          follow_ups is optional: an array of work you found outside this task, each with a title, a description and a category, for the planner to decide on; omit it when there is none. {categories}\n\
          You may write this receipt outside the worktree. Keep the worktree clean after committing.\n\
          The supervisor rejects the run unless the commit is the clean head of your branch on top of the base commit, and integrate runs the verification commands itself after rebasing onto main.\n\
-         When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --topic <code> --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {topics} {answer_arrives}\n\
+         {ask_rules_first} When you need a decision you cannot make from the task and the repository, do not {dont_wait}: run `dagq ask --run {run_id} --kind worker_question --because scope --topic <code> --question '...'` in the worktree (one ask at a time, with everything you need decided in its question), report briefly that you asked, and {stop_word}. `--because` says why a person is needed: `scope` (the acceptance or the scope changes) or `discard` (whether to throw work away); a question that fits neither is yours to decide and record in the receipt's summary, or, when it leads outside the task, a failed receipt saying why. {topics} {answer_arrives}\n\
          {stop_background}\n\
          {after_submitting}\n\
          {headless}",
@@ -569,6 +585,7 @@ pub fn prompt(
         local_checks = local_checks("above"),
         categories = follow_up_categories_line(),
         topics = worker_question_topics_line(),
+        ask_rules_first = ASK_RULES_FIRST,
     ))
 }
 
@@ -1416,7 +1433,7 @@ pub(crate) fn stall_nudge(
             "1. If the work is done, commit it and write the receipt at {receipt} (a temporary file in the same directory, then rename). If it is not, go on with it now and end the turn with the receipt."
         ));
         lines.push(format!(
-            "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'` (or `--because discard` for whether to throw work away) and end the turn.",
+            "2. {ASK_RULES_FIRST} Otherwise, if you need a decision, run `dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'` (or `--because discard` for whether to throw work away) and end the turn.",
             run.id()
         ));
         lines.push(
@@ -1448,7 +1465,7 @@ pub(crate) fn stall_nudge(
         "1. If the work is done, commit it and write the receipt at {receipt} (a temporary file in the same directory, then rename)."
     ));
     lines.push(format!(
-        "2. If you need a decision, run `dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'` (or `--because discard` for whether to throw work away) and stop.",
+        "2. {ASK_RULES_FIRST} Otherwise, if you need a decision, run `dagq ask --run {} --kind worker_question --because scope --topic <code> --question '...'` (or `--because discard` for whether to throw work away) and stop.",
         run.id()
     ));
     lines.push(
@@ -2991,6 +3008,76 @@ mod tests {
         let claude = session_texts(&task, &run_on(Provider::Claude, WorkerMode::Headless));
         assert!(claude[0].contains("and subagent review."));
         assert!(claude[0].contains("Required evidence: e2e, subagent_review (each"));
+    }
+
+    /// Task 978: a task that needs a path outside its declared paths ends
+    /// in a failed receipt naming them, not in an ask (ADR-0029 decision
+    /// 5); and before each worker_question the prompts, interactive and
+    /// headless, first send the worker to the repository's rules on what
+    /// is not asked.
+    #[test]
+    fn a_path_outside_the_scope_is_a_failed_receipt_and_asks_follow_the_repository_rules() {
+        let scoped = Task::restore(TaskRecord {
+            id: TaskId::new(7),
+            title: "work".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands: vec!["make gate".into()],
+            required_evidence: Vec::new(),
+            paths: vec!["docs/**".into()],
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::InProgress,
+            goal_id: None,
+            context: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::DEFAULT,
+        })
+        .unwrap();
+        for mode in [WorkerMode::Interactive, WorkerMode::Headless] {
+            let texts = session_texts(&scoped, &run_on(Provider::Claude, mode));
+            let first = &texts[0];
+            assert!(first.contains("Paths you may change"), "{first}");
+            assert!(!first.contains("ask instead of changing it"), "{first}");
+            assert!(first.contains(
+                "If the task needs another path, do not change it and do not run dagq ask: write the receipt with result failed and name in summary the paths it needs"
+            ), "{first}");
+            assert!(
+                first.contains(&format!(
+                    "{ASK_RULES_FIRST} When you need a decision you cannot make from the task and the repository, do not {}: run `dagq ask",
+                    if mode == WorkerMode::Headless {
+                        "end the turn with the question in your reply"
+                    } else {
+                        "write the question to the terminal and wait"
+                    }
+                )),
+                "{first}"
+            );
+            // The nudge, fourth from the end of `session_texts` (before the
+            // answer, the recovery instruction and the go-on), offers the ask
+            // behind the same check.
+            let nudge = texts.len() - 4;
+            assert!(
+                texts[nudge].contains(&format!(
+                    "2. {ASK_RULES_FIRST} Otherwise, if you need a decision, run `dagq ask"
+                )),
+                "{}",
+                texts[nudge]
+            );
+            if mode == WorkerMode::Headless {
+                for request in &texts[1..nudge] {
+                    assert!(
+                        request.contains(&format!(
+                            "{ASK_RULES_FIRST} If you need a decision, run `dagq ask"
+                        )),
+                        "{request}"
+                    );
+                }
+            }
+        }
+        assert!(ASK_RULES_FIRST.contains("AGENTS.md or CLAUDE.md"));
+        assert!(ASK_RULES_FIRST.contains("failed receipt"));
     }
 
     /// Acceptance (2): the interactive session's texts are the ones it has
