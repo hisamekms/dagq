@@ -22,7 +22,8 @@ use dagq_broker_protocol::{
     TOKEN_VERSION, TokenClaims, sign,
 };
 
-use crate::domain::{ActorContext, ActorRole};
+use crate::application::broker_run::{Grant, HeldToken, IssuedRun, RunTokens};
+use crate::domain::{ActorContext, ActorRole, RunId, TaskRun};
 
 /// The broker's dir under the queue dir.
 pub const BROKER_DIR: &str = "broker";
@@ -171,6 +172,192 @@ pub fn issue_run_token(
     };
     let token = sign(key, &claims).map_err(|error| anyhow::anyhow!("sign the token: {error}"))?;
     Ok(IssuedToken { claims, token })
+}
+
+/// The runs' token files under [`BROKER_DIR`], outside every mount.
+pub const TOKENS_DIR: &str = "tokens";
+/// The active marks under [`BROKER_DIR`] (`<jti>` holding the run's id),
+/// which the broker reads for every request.
+pub const ACTIVE_DIR: &str = "active";
+/// The mode of a token file and an active mark.
+pub const TOKEN_MODE: u32 = 0o600;
+
+/// `<queue dir>/broker/tokens/<run id>`.
+pub fn token_path(queue_dir: &Path, run: &str) -> PathBuf {
+    queue_dir.join(BROKER_DIR).join(TOKENS_DIR).join(run)
+}
+
+fn active_dir(queue_dir: &Path) -> PathBuf {
+    queue_dir.join(BROKER_DIR).join(ACTIVE_DIR)
+}
+
+/// Put `bytes` at `path` with mode 0600 through a new temporary file in
+/// the same dir and a rename, so a reader sees the old file or the new.
+fn put_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path
+        .parent()
+        .with_context(|| format!("{} has no dir", path.display()))?;
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temporary = dir.join(format!(".{name}.{}", uuid::Uuid::new_v4()));
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(TOKEN_MODE)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written.with_context(|| format!("write {}", path.display()))
+}
+
+fn remove_if_there(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+/// The identity a run's broker commits as: `user.name` and `user.email`
+/// of the repository at `dir` (the container has no `~/.gitconfig`).
+pub fn git_committer(dir: &Path) -> Result<Committer> {
+    let read = |key: &str| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "--get", key])
+            .output()
+            .with_context(|| format!("run git config {key}"))?;
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || value.is_empty() {
+            bail!(
+                "git config {key} is not set for {}: the broker commits as it",
+                dir.display()
+            );
+        }
+        Ok(value)
+    };
+    Ok(Committer {
+        name: read("user.name")?,
+        email: read("user.email")?,
+    })
+}
+
+/// The runs' tokens of the queue at `queue_dir` ([`RunTokens`]).
+pub struct QueueRunTokens {
+    pub queue_dir: PathBuf,
+}
+
+impl RunTokens for QueueRunTokens {
+    fn issue(&self, run: &TaskRun, grant: &Grant, now: u64) -> Result<IssuedRun> {
+        let workspace = Path::new(run.worktree_path().context("the run has no worktree")?);
+        let run_dir = Path::new(run.run_dir().context("the run has no run dir")?);
+        let key = ensure_key(&self.queue_dir)?;
+        let actor = ActorContext::worker(run.id(), run.task_id());
+        let issued = issue_run_token(&key, &actor, workspace, git_committer(workspace)?, now)?;
+        let jti = issued.claims.jti.clone();
+        // The mark first: a token file never names a token the broker
+        // would refuse as revoked.
+        put_private(
+            &active_dir(&self.queue_dir).join(&jti),
+            run.id().as_str().as_bytes(),
+        )?;
+        let token_file = token_path(&self.queue_dir, run.id().as_str());
+        put_private(
+            &token_file,
+            format!("{}\n", issued.token.expose()).as_bytes(),
+        )?;
+        let config =
+            crate::application::broker_run::mcp_config(&grant.client, grant.port, &token_file);
+        put_private(
+            &crate::application::broker_run::mcp_config_path(run_dir),
+            serde_json::to_string_pretty(&config)?.as_bytes(),
+        )?;
+        Ok(IssuedRun {
+            jti,
+            capabilities: issued
+                .claims
+                .capabilities
+                .iter()
+                .map(|capability| capability.as_str().to_owned())
+                .collect(),
+            exp: issued.claims.exp,
+        })
+    }
+
+    fn revoke(&self, run: &RunId, run_dir: Option<&Path>) -> Result<Vec<String>> {
+        let mut revoked = Vec::new();
+        for held in self.held()? {
+            if held.run_id == run.as_str() {
+                self.retire(&held.jti)?;
+                revoked.push(held.jti);
+            }
+        }
+        remove_if_there(&token_path(&self.queue_dir, run.as_str()))?;
+        if let Some(run_dir) = run_dir {
+            let dir = run_dir.join(crate::application::broker_run::RUN_BROKER_DIR);
+            match fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove {}", dir.display()));
+                }
+            }
+        }
+        Ok(revoked)
+    }
+
+    fn retire(&self, jti: &str) -> Result<()> {
+        remove_if_there(&active_dir(&self.queue_dir).join(jti))
+    }
+
+    fn held(&self) -> Result<Vec<HeldToken>> {
+        let dir = active_dir(&self.queue_dir);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+        };
+        let mut held = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read {}", dir.display()))?;
+            let Some(jti) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // A temporary file of a mark being put.
+            if jti.starts_with('.') {
+                continue;
+            }
+            let run_id = match fs::read_to_string(entry.path()) {
+                Ok(text) => text.trim().to_owned(),
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("read {}", entry.path().display()));
+                }
+            };
+            let exp = fs::read_to_string(token_path(&self.queue_dir, &run_id))
+                .ok()
+                .and_then(|text| {
+                    BrokerSessionToken::new(text.trim().to_owned())
+                        .unverified_claims()
+                        .ok()
+                })
+                .filter(|claims| claims.jti == jti)
+                .map(|claims| claims.exp);
+            held.push(HeldToken { jti, run_id, exp });
+        }
+        held.sort_by(|a, b| a.jti.cmp(&b.jti));
+        Ok(held)
+    }
 }
 
 #[cfg(test)]

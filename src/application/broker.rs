@@ -1231,6 +1231,13 @@ pub trait BrokerControl: Send + Sync {
     fn restart(&self) -> BrokerResult<()>;
     /// [`stop`].
     fn stop(&self) -> BrokerResult<StopReport>;
+    /// The port of a broker recorded as running dagq's build that answers
+    /// its health now with that build, without any podman command: what a
+    /// claim uses before this supervisor's own start of it came back (a
+    /// supervisor just started, or `dagq broker start` made it ready).
+    fn running_port(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// What [`stop`] did.

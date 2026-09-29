@@ -11,6 +11,8 @@
 //! no project runs the launchd mode now, and without a cmux socket password
 //! its preflight always stops `up`. It returns at once, printing why, unless
 //! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test always runs.
+#[path = "e2e/broker.rs"]
+mod broker;
 #[path = "e2e/cleanup.rs"]
 mod cleanup;
 mod common;
@@ -74,7 +76,7 @@ if [ "${1:-}" = plugin ] && [ "${2:-}" = list ]; then
   printf '[{"id":"claude-dagq@dagq","version":"0.0.0","scope":"user","enabled":true}]\n'
   exit 0
 fi
-session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir= model= effort= output= permission=
+session_id= debug_file= add_dir= settings= prompt= resume= headless= tools= denied= plugin_dir= model= effort= output= permission= mcp=
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) headless=1; shift ;;
@@ -89,6 +91,7 @@ while [ $# -gt 0 ]; do
     --add-dir) add_dir=$2; shift 2 ;;
     --settings) settings=$2; shift 2 ;;
     --plugin-dir) plugin_dir=$2; shift 2 ;;
+    --mcp-config) mcp=$2; shift 2 ;;
     --model) model=$2; shift 2 ;;
     --effort) effort=$2; shift 2 ;;
     --) shift; prompt=$1; shift; break ;;
@@ -257,9 +260,25 @@ case "$prompt" in
     while [ ! -f "$add_dir/go" ]; do sleep 0.2; done
     ;;
 esac
-printf 'written by the stub agent for %s\n' "$session_id" > e2e.txt
-git add e2e.txt
-git commit -q -m 'feat: e2e stub change'
+if [ -n "$mcp" ]; then
+  # The resource broker's tools (`[broker] mode = "preferred"`): the stub
+  # drives the client of its MCP configuration from the shell, with the URL
+  # and the token file the configuration names, as its MCP server would.
+  [ "$tools" = mcp__dagq-broker ] || { printf 'stub: the broker tools are not allowed\n' >&2; exit 64; }
+  client=$(sed -n 's/^ *"command": "\(.*\)",$/\1/p' "$mcp")
+  DAGQ_BROKER_URL=$(sed -n 's/^ *"DAGQ_BROKER_URL": "\(.*\)",*$/\1/p' "$mcp")
+  DAGQ_BROKER_TOKEN_FILE=$(sed -n 's/^ *"DAGQ_BROKER_TOKEN_FILE": "\(.*\)",*$/\1/p' "$mcp")
+  export DAGQ_BROKER_URL DAGQ_BROKER_TOKEN_FILE
+  "$client" fs write e2e.txt --content "written through the broker for $session_id" > "$add_dir/broker-fs.json" 2>> "$add_dir/broker.err"
+  "$client" exec -- sh -c 'printf "run by the broker\n" > exec.txt' > "$add_dir/broker-exec.json" 2>> "$add_dir/broker.err"
+  grep -q '"exit_code":0' "$add_dir/broker-exec.json" || { printf 'stub: the broker exec failed\n' >&2; exit 66; }
+  "$client" git add e2e.txt exec.txt > "$add_dir/broker-add.json" 2>> "$add_dir/broker.err"
+  "$client" git commit --message 'feat: e2e stub change through the broker' > "$add_dir/broker-commit.json" 2>> "$add_dir/broker.err"
+else
+  printf 'written by the stub agent for %s\n' "$session_id" > e2e.txt
+  git add e2e.txt
+  git commit -q -m 'feat: e2e stub change'
+fi
 sh -c 'test -f seed.txt'
 commit=$(git rev-parse HEAD)
 printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt exited 0"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"added e2e.txt"}\n' \

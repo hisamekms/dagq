@@ -1314,7 +1314,10 @@ impl AgentProvider for HeadlessProvider {
 /// `resume`, `$SESSION` the session id. The turn's helpers: `say TEXT`,
 /// `result [TEXT]` (with `$DENIALS` as its `permission_denials`),
 /// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
-/// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`.
+/// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`
+/// (its notification goes to `true`, not the host's cmux: a real `cmux
+/// notify` that is slow under load would be a quiet process of the turn
+/// for the `idle_process` watch).
 pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
     let stub = dir.join("claude-headless");
     let turns = dir.join("turn.sh");
@@ -1356,7 +1359,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
+ask() {{ "$DAGQ" --db "$DB" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
 printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 . {turns}
 [ -n "$RESULTED" ] || result
@@ -1454,7 +1457,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" --db "$DB" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
+ask() {{ "$DAGQ" --db "$DB" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
 echo "Reading additional input from stdin..." >&2
 printf '{{"type":"thread.started","thread_id":"%s"}}
 {{"type":"turn.started"}}

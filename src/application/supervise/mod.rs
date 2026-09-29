@@ -1009,6 +1009,9 @@ impl Supervisor<'_> {
             self.stop_throughput_review("with the supervisor");
         }
         if self.exec.is_none() && self.heartbeat.check().is_ok() {
+            // The tokens of the runs that ended in the last pass are revoked
+            // before the supervisor goes.
+            self.broker_sweep();
             // The mark of the stop (ADR-0051 decision 10); an exec leaves it
             // to the next process's handoff mark.
             let stopped = json!({
@@ -1129,6 +1132,7 @@ impl Supervisor<'_> {
                     // A broker job in progress is reaped, none started: an
                     // exec would orphan its podman command.
                     self.broker_pass(false);
+                    self.broker_sweep();
                     self.poll_observer();
                     self.throughput_review_pass(options, false);
                     self.report_pass(false);
@@ -1144,6 +1148,9 @@ impl Supervisor<'_> {
             // health looked at (ADR-t827-3 decision 2). No claim waits for
             // it.
             self.broker_pass(!stopping && self.claiming);
+            // The tokens of the runs that ended are revoked, before a claim
+            // can issue one.
+            self.broker_sweep();
             if self.claiming && !stopping {
                 self.fill_slots(self.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.parallel);

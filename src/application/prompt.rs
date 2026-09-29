@@ -232,6 +232,12 @@ pub const STOP_BACKGROUND: &str = "Before writing the receipt, stop every backgr
 /// no terminal: the process ends with the turn, and nobody types into it.
 pub const HEADLESS_WORKER: &str = "This session is headless: each of your turns is one non-interactive call, and the turn ends when you stop. Do the whole task in this turn and end it by writing the receipt, or by an ask when you need a decision. Nobody types into this session: the answer to your ask, a review's request to revise, or a request to go on arrives as the prompt of your next turn, in the same session. Do not rely on background work: what still runs when the turn ends is stopped, so run builds, tests and waits in the foreground and wait for them to finish before you go on.\n";
 
+/// What a worker the supervisor gave the resource broker's tools is told
+/// (`preferred`, ADR-t827-4 decision 1): prefer them, and fall back to the
+/// built-in tools when the broker refuses or cannot be reached. It names
+/// no token: the client reads its file.
+pub const BROKER_TOOLS: &str = "The resource broker's tools are available as the MCP server `dagq-broker` (`mcp__dagq-broker__read_file`, `list_dir`, `write_file`, `edit_file`, `exec`, `git_status`, `git_diff`, `git_log`, `git_show`, `git_add`, `git_commit`, `git_restore`). Prefer them for reading, writing and editing files, for the commands the broker allows, and for Git on your run branch; paths are relative to the worktree. The broker refuses paths outside the worktree, `.git`, pushes and commands it does not allow; when it refuses or cannot be reached, use the built-in tools instead.\n";
+
 /// [`STOP_BACKGROUND`] for a headless session: nothing waits for an `/exit`,
 /// but a process the agent detached outlives its turn (the spike measured
 /// Claude's `nohup ... &`), and the signalling rule is the same.

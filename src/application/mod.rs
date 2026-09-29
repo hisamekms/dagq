@@ -11,6 +11,7 @@ pub mod areas;
 pub mod ask;
 pub mod broker;
 pub mod broker_admin;
+pub mod broker_run;
 pub mod commands;
 pub mod diagram;
 pub mod execution;

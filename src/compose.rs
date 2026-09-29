@@ -373,6 +373,9 @@ pub struct BrokerOptions {
     pub health_interval: Duration,
     /// How long a start or a restart waits for the health.
     pub health_timeout: Duration,
+    /// The broker's client a worker is given instead of the one next to
+    /// this dagq; `None` resolves that one.
+    pub client: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for BrokerOptions {
@@ -861,8 +864,35 @@ pub fn supervise_with_reviewer(
                     control.health_timeout = settings.health_timeout;
                     control.health_interval = settings.health_interval.min(control.health_interval);
                 }
+                // The client next to this dagq, of its build (ADR-t827-1
+                // decisions 5 and 7), unless the options name one.
+                let client = match settings
+                    .as_ref()
+                    .and_then(|settings| settings.client.clone())
+                {
+                    Some(client) => Ok(client),
+                    None => {
+                        let dagq =
+                            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq"));
+                        crate::application::actor_executor::HostActorExecutor::new(&db)
+                            .broker_client(
+                                &dagq,
+                                &crate::infrastructure::broker_podman::client_version,
+                            )
+                    }
+                };
+                if let Err(failure) = &client {
+                    tracing::warn!(
+                        code = failure.code.as_str(),
+                        "workers get no broker tools: {failure}"
+                    );
+                }
                 Some(crate::application::supervise::BrokerPort {
                     mode,
+                    tokens: Arc::new(crate::infrastructure::broker_token::QueueRunTokens {
+                        queue_dir: queue_dir.clone(),
+                    }),
+                    client,
                     control: Arc::new(control),
                     health_interval: settings.map_or(
                         crate::application::supervise::BROKER_HEALTH_INTERVAL,
@@ -1146,7 +1176,7 @@ impl OneShot {
         }
         if matches!(role, None | Some(SessionRole::Inbox)) {
             status["inbox_watcher"] = self.inbox_watcher(db);
-            status["broker"] = status_broker(db);
+            status["broker"] = status_broker(db, queue);
         }
         Ok(status)
     }
@@ -1185,6 +1215,8 @@ impl OneShot {
     /// queue must be bound to, checked either way.
     pub fn doctor(&self, db: &Path, full: bool, common_dir: Option<&str>) -> Result<Value> {
         let (schema, queue) = SqliteQueue::inspect_read_only(db)?;
+        // The broker's mode and health, from a queue that can be read.
+        let mut broker_view = None;
         let mut report = match queue {
             ReadOnlyQueue::Refused { binding, error } => {
                 if let Some(common_dir) = common_dir {
@@ -1200,6 +1232,7 @@ impl OneShot {
                 if let Some(common_dir) = common_dir {
                     queue.assert_repository(common_dir)?;
                 }
+                broker_view = Some(broker_queue_view(db, &queue));
                 let run_env = doctor_run_env(&queue, db).map_err(|error| format!("{error:#}"));
                 let mut report = health::doctor(
                     &queue,
@@ -1221,7 +1254,7 @@ impl OneShot {
         // The inbox's watcher (ADR-t906-1).
         report["inbox_watcher"] = self.inbox_watcher(db);
         // The resource broker's podman and last recorded state (ADR-t827-3).
-        report["broker"] = doctor_broker(db);
+        report["broker"] = doctor_broker(db, broker_view.as_ref());
         // The host's `[update]`, with what was taken as its default
         // (ADR-t618-1 decision 3).
         report["release_update"] = serde_json::to_value(host_update(db))?;
@@ -3128,14 +3161,55 @@ pub fn broker_audit(
     Ok(serde_json::to_value(report)?)
 }
 
-/// The `broker` of `doctor`: the podman executable (or why there is none)
-/// and what `dagq broker` last recorded. It runs no podman command.
-fn doctor_broker(db: &Path) -> Value {
+/// The broker's `mode` (`[broker]` of the bound checkout's `dagq.toml`
+/// lowered by `host.toml`, or the `error` reading them), its `health`
+/// from the supervisor's latest broker event, and the `active_tokens`
+/// the runs hold, for `status` and `doctor`. It runs no podman command.
+fn broker_queue_view(db: &Path, queue: &SqliteQueue) -> Value {
+    let queue_dir = db.parent().unwrap_or(Path::new("."));
+    let mode = bound_checkout(queue).and_then(|checkout| {
+        load_broker_setup(
+            checkout.as_deref(),
+            queue_dir,
+            crate::infrastructure::kpi_config::host_wide_file().as_deref(),
+        )
+    });
+    let mode = match mode {
+        Ok(setup) => json!(setup.mode),
+        Err(error) => json!({"error": format!("{error:#}")}),
+    };
+    let health = match queue.latest_queue_event(&crate::domain::broker::BROKER_ATTENTION_KINDS) {
+        Ok(latest) => crate::domain::broker::health_report(latest.as_ref().map(|event| {
+            (
+                event.kind.as_str(),
+                &event.payload,
+                event.created_at.as_str(),
+            )
+        })),
+        Err(error) => json!({"error": format!("{error:#}")}),
+    };
+    let tokens = crate::infrastructure::broker_token::QueueRunTokens {
+        queue_dir: queue_dir.to_path_buf(),
+    };
+    let active_tokens = match crate::application::broker_run::RunTokens::held(&tokens) {
+        Ok(held) => json!(held.len()),
+        Err(error) => json!({"error": format!("{error:#}")}),
+    };
+    json!({"mode": mode, "health": health, "active_tokens": active_tokens})
+}
+
+/// The `broker` of `doctor`: the mode and health ([`broker_queue_view`],
+/// `null` for a queue that cannot be read), the podman executable (or why
+/// there is none) and what `dagq broker` last recorded. It runs no podman
+/// command.
+fn doctor_broker(db: &Path, view: Option<&Value>) -> Value {
     use crate::infrastructure::broker_podman::{BrokerState, PodmanCli};
     let queue_dir = db.parent().unwrap_or(Path::new("."));
     let podman = PodmanCli::resolve(None);
     json!({
-        "mode": "disabled",
+        "mode": view.map_or(Value::Null, |view| view["mode"].clone()),
+        "health": view.map_or(Value::Null, |view| view["health"].clone()),
+        "active_tokens": view.map_or(Value::Null, |view| view["active_tokens"].clone()),
         "podman": podman.as_ref().ok().map(|podman| &podman.executable),
         "error": podman.as_ref().err().map(|failure| failure.to_json()),
         "machine": crate::application::broker::MACHINE,
@@ -3149,12 +3223,15 @@ fn doctor_broker(db: &Path) -> Value {
 /// The `broker` of `status`: the build the client and the broker's image
 /// must name, the image of that build and the one `dagq broker` last ran,
 /// and the client next to this dagq. It runs no podman command.
-fn status_broker(db: &Path) -> Value {
+fn status_broker(db: &Path, queue: &SqliteQueue) -> Value {
     use crate::infrastructure::broker_podman::BrokerState;
     let recorded = BrokerState::read(db.parent().unwrap_or(Path::new(".")));
     let image = crate::infrastructure::broker_image::image();
+    let view = broker_queue_view(db, queue);
     json!({
-        "mode": "disabled",
+        "mode": view["mode"],
+        "health": view["health"],
+        "active_tokens": view["active_tokens"],
         "state": recorded.state,
         "port": recorded.port,
         "build": crate::VERSION,

@@ -396,6 +396,8 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(run, &run_dir)?;
+        // The resumed worker's broker token is issued again (`preferred`).
+        self.broker_grant(run);
         let command = shell_join(&[
             path_text(&run_dir.join(RUN_RUNNER_FILE))?,
             "--db".into(),

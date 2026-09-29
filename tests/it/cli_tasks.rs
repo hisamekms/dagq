@@ -97,6 +97,15 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
                 && broker["client"]["matches"].is_boolean(),
             "{command} {broker}"
         );
+        // A fresh queue's broker is disabled, and no supervisor recorded
+        // its health nor issued a token (task 837).
+        assert_eq!(broker["mode"], "disabled", "{command} {broker}");
+        assert_eq!(
+            broker["health"],
+            serde_json::json!({"state": "unknown", "reason": null, "at": null}),
+            "{command} {broker}"
+        );
+        assert_eq!(broker["active_tokens"], 0, "{command} {broker}");
         if command == "status" {
             let broker = report.as_object_mut().unwrap().remove("broker").unwrap();
             assert_eq!(broker["mode"], "disabled", "{broker}");

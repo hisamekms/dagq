@@ -596,9 +596,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
             ActorProgram::SessionAgent { agent, model } => {
                 let provider = self.provider()?;
                 let mut streams = Streams::Inherit;
-                let mut command = match agent {
-                    SessionAgent::Worker { run, prompt } => provider.command(run, prompt)?,
-                    SessionAgent::Resume { run } => provider.resume_command(run)?,
+                let (mut command, worker) = match agent {
+                    SessionAgent::Worker { run, prompt } => {
+                        (provider.command(run, prompt)?, Some(run))
+                    }
+                    SessionAgent::Resume { run } => (provider.resume_command(run)?, Some(run)),
                     SessionAgent::Turn {
                         run,
                         prompt,
@@ -607,10 +609,16 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         stderr,
                     } => {
                         streams = Streams::Files { stdout, stderr };
-                        provider.turn_command(run, prompt, session)?
+                        (provider.turn_command(run, prompt, session)?, Some(run))
                     }
-                    SessionAgent::Planner(planner) => provider.planner_command(&planner)?,
+                    SessionAgent::Planner(planner) => (provider.planner_command(&planner)?, None),
                 };
+                // The resource broker's tools, when the supervisor issued
+                // the run's token (`preferred`, ADR-t827-4 decision 1); a
+                // run without them starts as before.
+                if let Some(config) = worker.and_then(super::broker_run::worker_mcp_config) {
+                    provider.broker_tools(&mut command, &config);
+                }
                 if let Some((model, effort)) = model {
                     provider.select_model(&mut command, model, effort);
                 }
@@ -796,6 +804,10 @@ mod tests {
         }
         fn without_mcp(&self, command: &mut CommandSpec) {
             command.option_args(["--strict-mcp-config"]);
+        }
+        fn broker_tools(&self, command: &mut CommandSpec, config: &Path) -> bool {
+            command.option_args([std::ffi::OsStr::new("--mcp-config"), config.as_os_str()]);
+            true
         }
     }
 
@@ -1410,6 +1422,79 @@ mod tests {
                 ])
             );
         }
+    }
+
+    /// The broker's tools (`preferred`) reach a worker, its resume and its
+    /// turns only through the MCP configuration the supervisor wrote in the
+    /// run's dir; without it (`disabled`) the command and the environment
+    /// are the provider's own, as before.
+    #[test]
+    fn a_worker_gets_the_brokers_tools_only_with_its_mcp_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, run) = claimed_run("r1");
+        let run_dir = dir.path().join("r1");
+        let text = |name: &str| run_dir.join(name).to_string_lossy().into_owned();
+        let run = crate::domain::run::start_provisioning(
+            run,
+            &crate::domain::RunPlan {
+                repo_path: "/repo".into(),
+                run_dir: text(""),
+                branch: "dagq/r1".into(),
+                worktree_path: text("worktree"),
+                receipt_path: text("receipt.json"),
+                log_path: text("log"),
+            },
+        )
+        .unwrap();
+        let spawn = || {
+            let fake = Fake::default();
+            let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+                .with_provider(&fake)
+                .with_spawner(&fake);
+            for agent in [
+                SessionAgent::Worker {
+                    run: &run,
+                    prompt: "work",
+                },
+                SessionAgent::Resume { run: &run },
+            ] {
+                executor
+                    .spawn(ActorExecutionSpec::new(
+                        ActorContext::worker(run.id(), run.task_id()),
+                        WorkspaceAccess::Write("/w".into()),
+                        ActorProgram::SessionAgent { agent, model: None },
+                    ))
+                    .unwrap();
+            }
+            fake.spawned
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|command| {
+                    let args: Vec<String> = command
+                        .get_args()
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect();
+                    (args, env_of(command))
+                })
+                .collect::<Vec<_>>()
+        };
+        let without = spawn();
+        assert_eq!(without[0].0, ["r1", "work"]);
+        assert_eq!(without[1].0, ["--resume", "r1"]);
+        let config = super::super::broker_run::mcp_config_path(&run_dir);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{}").unwrap();
+        let with = spawn();
+        let config = config.to_string_lossy().into_owned();
+        assert_eq!(with[0].0, ["r1", "work", "--mcp-config", config.as_str()]);
+        assert_eq!(
+            with[1].0,
+            ["--resume", "r1", "--mcp-config", config.as_str()]
+        );
+        // The environment is the same either way: no token, no URL.
+        assert_eq!(with[0].1, without[0].1);
+        assert_eq!(with[1].1, without[1].1);
     }
 
     #[test]

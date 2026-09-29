@@ -115,22 +115,28 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
         };
         let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
         let inherited = self.inheritance(run)?;
+        let mut text = prompt(
+            task,
+            run,
+            goal.as_ref(),
+            &predecessors,
+            &goal_predecessors,
+            &siblings,
+            inherited.as_ref(),
+            &self.e2e_paths(),
+        )?;
+        // A Claude worker the supervisor gave the broker's tools is told of
+        // them (ADR-t827-4 decision 1).
+        if run.actual_provider() == Provider::Claude
+            && self
+                .files
+                .exists(&crate::application::broker_run::mcp_config_path(run_dir))
+        {
+            text.push_str(crate::application::prompt::BROKER_TOOLS);
+        }
         self.files.write(
             &run_dir.join("prompt.txt"),
-            with_instruction(
-                prompt(
-                    task,
-                    run,
-                    goal.as_ref(),
-                    &predecessors,
-                    &goal_predecessors,
-                    &siblings,
-                    inherited.as_ref(),
-                    &self.e2e_paths(),
-                )?,
-                self.verifier.language().as_ref(),
-            )
-            .as_bytes(),
+            with_instruction(text, self.verifier.language().as_ref()).as_bytes(),
         )?;
         Ok(inherited)
     }
@@ -177,6 +183,11 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             EventKind::WorktreeCreated,
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
+        // The broker's tools (`preferred`): the worker is told of them in
+        // its prompt, written again with them.
+        if self.broker_grant(&run) {
+            self.write_prompt(&task, &run, &run_dir)?;
+        }
         let command = shell_join(&[
             path_text(&run_dir.join(RUN_RUNNER_FILE))?,
             "--db".into(),

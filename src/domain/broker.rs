@@ -235,9 +235,63 @@ pub fn attention_stands(latest: Option<&str>) -> bool {
     latest == Some(BROKER_UNHEALTHY)
 }
 
+/// The broker's health as `status` and `doctor` show it, from the latest
+/// of [`BROKER_ATTENTION_KINDS`] (`kind` and `payload`, recorded at `at`):
+/// `healthy` after a start or a health that answered again, `unhealthy`
+/// with the `reason`, `stopped`, or `unknown` when no supervisor recorded
+/// any. It reads the records only: no podman, no request to the broker.
+pub fn health_report(latest: Option<(&str, &serde_json::Value, &str)>) -> serde_json::Value {
+    let Some((kind, payload, at)) = latest else {
+        return serde_json::json!({"state": "unknown", "reason": null, "at": null});
+    };
+    let state = match kind {
+        BROKER_STARTED | BROKER_HEALTHY => "healthy",
+        BROKER_UNHEALTHY => "unhealthy",
+        BROKER_STOPPED => "stopped",
+        _ => "unknown",
+    };
+    serde_json::json!({
+        "state": state,
+        "reason": (kind == BROKER_UNHEALTHY).then(|| payload["reason"].clone()),
+        "at": at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_health_reads_the_latest_broker_event() {
+        use serde_json::json;
+        assert_eq!(health_report(None)["state"], "unknown");
+        let started = health_report(Some((BROKER_STARTED, &json!({"port": 1}), "t")));
+        assert_eq!(
+            started,
+            json!({"state": "healthy", "reason": null, "at": "t"})
+        );
+        assert_eq!(
+            health_report(Some((BROKER_HEALTHY, &json!({}), "t")))["state"],
+            "healthy"
+        );
+        let unhealthy = health_report(Some((
+            BROKER_UNHEALTHY,
+            &json!({"reason": "machine_busy"}),
+            "t",
+        )));
+        assert_eq!(
+            unhealthy,
+            json!({"state": "unhealthy", "reason": "machine_busy", "at": "t"})
+        );
+        assert_eq!(
+            health_report(Some((BROKER_STOPPED, &json!({}), "t")))["state"],
+            "stopped"
+        );
+        assert_eq!(
+            health_report(Some(("other", &json!({}), "t")))["state"],
+            "unknown"
+        );
+    }
 
     #[test]
     fn the_host_lowers_the_mode_and_never_raises_it() {

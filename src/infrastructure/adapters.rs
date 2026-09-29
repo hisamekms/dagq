@@ -2727,6 +2727,15 @@ impl AgentProvider for ClaudeCode {
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["--strict-mcp-config"]);
     }
+    /// `--mcp-config <config>` with the broker client's server, and
+    /// `--allowedTools mcp__dagq-broker` so its tools need no prompt. The
+    /// built-in tools stay (`preferred`, ADR-t827-4 decision 1).
+    fn broker_tools(&self, command: &mut CommandSpec, config: &Path) -> bool {
+        command
+            .option_args([std::ffi::OsStr::new("--mcp-config"), config.as_os_str()])
+            .option_args(["--allowedTools", crate::application::broker_run::MCP_TOOLS]);
+        true
+    }
     /// `claude -p --output-format stream-json --verbose` in the worktree,
     /// `--session-id <run-id>` for the first turn and `--resume <run-id>`
     /// after it, in [`HEADLESS_PERMISSION_MODE`] with
@@ -3054,6 +3063,53 @@ mod tests {
         PlannerId, PlannerOrigin, ProposalId, Provider, RunId, RunStatus, SessionRole,
     };
 
+    /// Claude Code gets the broker client's server and the permission to
+    /// use its tools among its options, before the prompt; nothing else of
+    /// the command changes.
+    #[test]
+    fn claude_gets_the_brokers_mcp_configuration_before_the_prompt() {
+        let claude = ClaudeCode {
+            executable: PathBuf::from("claude"),
+        };
+        let mut command = CommandSpec::new("claude");
+        command.args(["--settings", "s.json", "--", "the prompt"]);
+        assert!(claude.broker_tools(&mut command, Path::new("/r/broker/mcp.json")));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--settings",
+                "s.json",
+                "--mcp-config",
+                "/r/broker/mcp.json",
+                "--allowedTools",
+                "mcp__dagq-broker",
+                "--",
+                "the prompt"
+            ]
+        );
+        let mut resume = CommandSpec::new("claude");
+        resume.args(["--resume", "r1"]);
+        claude.broker_tools(&mut resume, Path::new("/m.json"));
+        let args: Vec<String> = resume
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--resume",
+                "r1",
+                "--mcp-config",
+                "/m.json",
+                "--allowedTools",
+                "mcp__dagq-broker"
+            ]
+        );
+    }
     #[test]
     fn ps_and_lsof_listings_are_read() {
         assert_eq!(parse_etime("05"), Some(5));

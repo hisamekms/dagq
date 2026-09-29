@@ -527,6 +527,16 @@ pub trait AgentProvider {
     fn without_mcp(&self, command: &mut CommandSpec) {
         let _ = command;
     }
+    /// Give a worker's agent (`command`, from [`AgentProvider::command`],
+    /// [`AgentProvider::resume_command`] or [`AgentProvider::turn_command`])
+    /// the resource broker's tools: the MCP configuration at `config`
+    /// (`<run dir>/broker/mcp.json`) and the permission to use its server
+    /// (ADR-t827-4 decision 1). Whether it did: a provider whose MCP the
+    /// runtime does not pass yet (Codex) leaves the command as it is.
+    fn broker_tools(&self, command: &mut CommandSpec, config: &std::path::Path) -> bool {
+        let _ = (command, config);
+        false
+    }
     /// How long the headless review may take before it counts as failed.
     fn review_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(600)

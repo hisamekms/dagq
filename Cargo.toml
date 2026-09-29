@@ -52,6 +52,11 @@ dagq-broker-protocol = { version = "=0.4.0-dev", path = "crates/dagq-broker-prot
 
 [dev-dependencies]
 tempfile = "3.25"
+# The broker's server and client, in process, for the tests of a run's
+# token only: dagq itself depends on the protocol alone (ADR-t827-1). Path
+# only, with no version, so `cargo publish` drops them.
+dagq-broker = { path = "crates/dagq-broker" }
+dagq-broker-client = { path = "crates/dagq-broker-client" }
 
 # One test binary for the integration tests (tests/it), so tests/common is
 # compiled and the binary linked once; e2e and plugin stay separate because

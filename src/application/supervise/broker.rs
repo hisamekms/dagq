@@ -30,6 +30,7 @@
 
 use super::*;
 use crate::application::broker::{BrokerControl, BrokerFailure, StartReport};
+use crate::application::broker_run::{Grant, RENEW_BEFORE_SECS, RunTokens};
 use crate::domain::broker::{
     BROKER_ATTENTION_KINDS, BROKER_RESTART, BROKER_STOP_REQUESTED, BROKER_UNHEALTHY, BrokerMode,
 };
@@ -47,6 +48,12 @@ pub struct BrokerPort {
     pub mode: BrokerMode,
     pub control: Arc<dyn BrokerControl>,
     pub health_interval: Duration,
+    /// Issues and revokes the runs' tokens.
+    pub tokens: Arc<dyn RunTokens>,
+    /// The client a worker runs (`dagq-broker-client` next to dagq, of
+    /// dagq's build), or why there is none: its worker gets no tools
+    /// (ADR-t827-1 decision 7).
+    pub client: std::result::Result<PathBuf, BrokerFailure>,
 }
 
 /// What a broker job did.
@@ -75,6 +82,10 @@ pub(super) struct BrokerWatch {
     failures: u32,
     /// The container was restarted in this run of failures.
     restarted: bool,
+    /// The port of the last start.
+    port: Option<u16>,
+    /// Whether the last start's health named dagq's build.
+    build_matches: bool,
 }
 
 impl Supervisor<'_> {
@@ -131,6 +142,8 @@ impl Supervisor<'_> {
                 self.broker.ready = true;
                 self.broker.failures = 0;
                 self.broker.restarted = false;
+                self.broker.port = Some(report.port);
+                self.broker.build_matches = report.build_matches;
                 info!(
                     port = report.port,
                     "the queue's broker runs on 127.0.0.1:{}", report.port
@@ -290,6 +303,229 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Why `run`'s worker cannot be given the broker's tools now, as the
+    /// `reason` and `message` of `broker_unavailable`; else the grant.
+    fn broker_offer(
+        &self,
+        port: &BrokerPort,
+        run: &TaskRun,
+    ) -> std::result::Result<Grant, (String, String)> {
+        if run.actual_provider() != Provider::Claude {
+            return Err((
+                "provider".to_owned(),
+                format!(
+                    "a {} worker is given no broker tools yet",
+                    run.actual_provider().as_str()
+                ),
+            ));
+        }
+        let port_number = match self.broker.port {
+            Some(number) if self.broker.ready && self.broker.failures == 0 => number,
+            Some(_) if self.broker.ready => {
+                return Err((
+                    "unhealthy".to_owned(),
+                    format!(
+                        "the queue's broker did not answer its last {} look(s) at its health",
+                        self.broker.failures
+                    ),
+                ));
+            }
+            // Not ready as far as this supervisor knows: a broker recorded
+            // as running dagq's build that answers now is used.
+            _ => match port.control.running_port() {
+                Some(number) => {
+                    return match &port.client {
+                        Ok(client) => Ok(Grant {
+                            client: client.clone(),
+                            port: number,
+                        }),
+                        Err(failure) => {
+                            Err((failure.code.as_str().to_owned(), failure.message.clone()))
+                        }
+                    };
+                }
+                None => {
+                    return Err((
+                        "not_ready".to_owned(),
+                        "the queue's broker is not ready yet".to_owned(),
+                    ));
+                }
+            },
+        };
+        if !self.broker.build_matches {
+            return Err((
+                "version_mismatch".to_owned(),
+                "the broker's health names another build than dagq's".to_owned(),
+            ));
+        }
+        match &port.client {
+            Ok(client) => Ok(Grant {
+                client: client.clone(),
+                port: port_number,
+            }),
+            Err(failure) => Err((failure.code.as_str().to_owned(), failure.message.clone())),
+        }
+    }
+
+    /// Give `run`'s worker (or its resume) the broker's tools with the
+    /// mode `preferred` (ADR-t827-4 decisions 1 and 3): revoke any token
+    /// the run held, issue one, put its file and the run's MCP
+    /// configuration in place, and record `broker_token_issued`. A broker
+    /// that cannot be used is `broker_unavailable` with its `reason`, and
+    /// the worker starts without the tools; nothing stops the run. With
+    /// `disabled` nothing happens. Whether the tools were given.
+    pub(super) fn broker_grant(&mut self, run: &TaskRun) -> bool {
+        let Some(port) = self.broker_port.clone() else {
+            return false;
+        };
+        self.broker_revoke(&port, run, "reissued");
+        let grant = match self.broker_offer(&port, run) {
+            Ok(grant) => grant,
+            Err((reason, message)) => {
+                info!(run_id = %run.id(), reason, "run {} starts without the broker's tools: {message}", run.id());
+                self.record_run_broker(
+                    run.id(),
+                    EventKind::BrokerUnavailable,
+                    json!({"reason": reason, "message": message}),
+                );
+                return false;
+            }
+        };
+        let now = u64::try_from(self.generators.clock.now()).unwrap_or(0);
+        match port.tokens.issue(run, &grant, now) {
+            Ok(issued) => {
+                info!(run_id = %run.id(), jti = issued.jti, "run {}'s worker gets the broker's tools on 127.0.0.1:{}", run.id(), grant.port);
+                self.record_run_broker(run.id(), EventKind::BrokerTokenIssued, issued.payload());
+                true
+            }
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s broker token could not be issued: {error:#}", run.id());
+                // Whatever part of it was put in place goes.
+                if let Err(error) = port.tokens.revoke(run.id(), run.run_dir().map(Path::new)) {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s broker token could not be cleaned up: {error:#}", run.id());
+                }
+                self.record_run_broker(
+                    run.id(),
+                    EventKind::BrokerUnavailable,
+                    json!({"reason": "token_failed", "message": format!("{error:#}")}),
+                );
+                false
+            }
+        }
+    }
+
+    /// Revoke every token of `run` (`reason` in `broker_token_revoked`).
+    fn broker_revoke(&mut self, port: &BrokerPort, run: &TaskRun, reason: &str) {
+        match port.tokens.revoke(run.id(), run.run_dir().map(Path::new)) {
+            Ok(revoked) => {
+                for jti in revoked {
+                    info!(run_id = %run.id(), jti, reason, "run {}'s broker token is revoked ({reason})", run.id());
+                    self.record_run_broker(
+                        run.id(),
+                        EventKind::BrokerTokenRevoked,
+                        json!({"jti": jti, "reason": reason}),
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s broker token could not be revoked: {error:#}", run.id());
+            }
+        }
+    }
+
+    /// Every pass: revoke the tokens of the runs that ended (the reason is
+    /// the run's status: `integrated`, `failed`, `interrupted`, ...), and
+    /// of runs the queue does not know, and issue again the token of a
+    /// live run with less than [`RENEW_BEFORE_SECS`] left. A run that
+    /// ended while no supervisor ran is revoked by the next one's first
+    /// pass.
+    pub(super) fn broker_sweep(&mut self) {
+        let Some(port) = self.broker_port.clone() else {
+            return;
+        };
+        let held = match port.tokens.held() {
+            Ok(held) => held,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the broker's active tokens could not be read: {error:#}");
+                return;
+            }
+        };
+        let now = u64::try_from(self.generators.clock.now()).unwrap_or(0);
+        for token in held {
+            let run = RunId::new(&token.run_id)
+                .ok()
+                .and_then(|id| self.queue.run(&id).ok());
+            let Some(run) = run else {
+                warn!(
+                    jti = token.jti,
+                    run = token.run_id,
+                    "a broker token names no run of the queue: retired"
+                );
+                // Its token file goes too: nothing holds it.
+                let removed = match RunId::new(&token.run_id) {
+                    Ok(id) => port.tokens.revoke(&id, None).map(|_| ()),
+                    Err(_) => port.tokens.retire(&token.jti),
+                };
+                if let Err(error) = removed {
+                    warn!(error = %format_args!("{error:#}"), "a broker token could not be retired: {error:#}");
+                }
+                continue;
+            };
+            if broker_run_ended(run.status()) {
+                self.broker_revoke(&port, &run, run.status().as_str());
+                continue;
+            }
+            // A mark the run's token file does not hold (an older token
+            // left by a renewal whose retire failed, or a file that is
+            // gone) is retired, never renewed: one token per run.
+            let Some(exp) = token.exp else {
+                match port.tokens.retire(&token.jti) {
+                    Ok(()) => self.record_run_broker(
+                        run.id(),
+                        EventKind::BrokerTokenRevoked,
+                        json!({"jti": token.jti, "reason": "stale"}),
+                    ),
+                    Err(error) => {
+                        warn!(error = %format_args!("{error:#}"), "a stale broker token could not be retired: {error:#}");
+                    }
+                }
+                continue;
+            };
+            if exp.saturating_sub(now) >= RENEW_BEFORE_SECS {
+                continue;
+            }
+            let Ok(grant) = self.broker_offer(&port, &run) else {
+                continue;
+            };
+            match port.tokens.issue(&run, &grant, now) {
+                Ok(issued) => {
+                    let mut payload = issued.payload();
+                    payload["renews"] = json!(token.jti);
+                    self.record_run_broker(run.id(), EventKind::BrokerTokenIssued, payload);
+                    match port.tokens.retire(&token.jti) {
+                        Ok(()) => self.record_run_broker(
+                            run.id(),
+                            EventKind::BrokerTokenRevoked,
+                            json!({"jti": token.jti, "reason": "renewed"}),
+                        ),
+                        Err(error) => {
+                            warn!(error = %format_args!("{error:#}"), "the older broker token could not be retired: {error:#}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}'s broker token could not be issued again: {error:#}", run.id());
+                }
+            }
+        }
+    }
+
+    fn record_run_broker(&mut self, run: &RunId, kind: EventKind, payload: Value) {
+        if let Err(error) = self.queue.record_runtime_event(run, kind, payload) {
+            warn!(run_id = %run, error = %format_args!("{error:#}"), "the broker's {kind} of run {run} could not be recorded: {error:#}");
+        }
+    }
+
     /// Whether the latest broker event is `broker_unhealthy`.
     fn broker_attention_stands(&self) -> bool {
         match self.queue.latest_queue_event(&BROKER_ATTENTION_KINDS) {
@@ -331,4 +567,12 @@ impl Supervisor<'_> {
             warn!(error = %format_args!("{error:#}"), "the broker's {kind} could not be recorded: {error:#}");
         }
     }
+}
+
+/// A run whose token is revoked: it ended.
+fn broker_run_ended(status: RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Integrated | RunStatus::Succeeded | RunStatus::Failed | RunStatus::Interrupted
+    )
 }

@@ -65,6 +65,12 @@ pub struct QueueBroker {
     pub ports: BrokerPorts,
 }
 
+/// `path` with its links resolved, or as it is when it cannot be (a dir
+/// not made yet).
+fn real_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,9 +135,12 @@ impl QueueBroker {
             name: self.container(),
             image: self.image.clone(),
             host_port: port,
-            queue_dir: self.queue_dir.clone(),
-            runs_dir: self.runs_dir.clone(),
-            git_common_dir,
+            // Real paths: a run's token names its canonical workspace, and
+            // the broker compares it with the roots it mounts (macOS's
+            // `/var` is a link to `/private/var`).
+            queue_dir: real_path(&self.queue_dir),
+            runs_dir: real_path(&self.runs_dir),
+            git_common_dir: real_path(&git_common_dir),
             limits: self.limits.clone(),
             serve_limits: self.serve_limits.clone(),
         })
@@ -163,6 +172,14 @@ impl QueueBroker {
                 )
             })?,
         };
+        // The runs' dir first, so the container's paths are its real ones.
+        std::fs::create_dir_all(&self.runs_dir).map_err(|error| {
+            local(
+                FailureCode::ContainerFailed,
+                &format!("create {}", self.runs_dir.display()),
+                error,
+            )
+        })?;
         let container = self.spec(port)?;
         // What the container mounts must exist before podman mounts it.
         crate::infrastructure::broker_token::ensure_key(&self.queue_dir)
@@ -303,6 +320,18 @@ impl BrokerControl for QueueBroker {
     fn stop(&self) -> BrokerResult<StopReport> {
         QueueBroker::stop(self)
     }
+
+    fn running_port(&self) -> Option<u16> {
+        let state = BrokerState::read(&self.queue_dir);
+        let port = state.port?;
+        if state.state.as_deref() != Some("running") || state.build.as_deref() != Some(&self.build)
+        {
+            return None;
+        }
+        let health = self.ports.health.probe(port).ok()?;
+        (health.status == "ok" && health.protocol == PROTOCOL_VERSION && health.build == self.build)
+            .then_some(port)
+    }
 }
 
 /// The real ports: `podman` (`None` is `podman` on `PATH`), the host-wide
@@ -432,6 +461,13 @@ mod tests {
         assert_eq!(state.build.as_deref(), Some(crate::VERSION));
         assert!(state.started_at.is_some());
         assert!(broker.health().is_ok());
+        // Recorded as running this build and answering it: its port.
+        assert_eq!(broker.running_port(), Some(40000));
+        let other = QueueBroker {
+            build: "0.0.0-other".into(),
+            ..queue_broker(dir.path(), Arc::new(Fake::default()))
+        };
+        assert_eq!(other.running_port(), None);
         assert!(broker.restart().is_ok());
         // The restart made the container again.
         let runs = podman
@@ -445,6 +481,7 @@ mod tests {
         broker.stop().unwrap();
         let state = BrokerState::read(&broker.queue_dir);
         assert_eq!(state.state.as_deref(), Some("stopped"));
+        assert_eq!(broker.running_port(), None);
 
         // Without a repository there is no container to make.
         let unknown = QueueBroker {

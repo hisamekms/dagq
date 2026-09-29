@@ -143,6 +143,7 @@ fn broker_options(podman: &Arc<FakePodman>) -> BrokerOptions {
         },
         health_interval: Duration::from_millis(20),
         health_timeout: Duration::ZERO,
+        client: None,
     }
 }
 
@@ -217,6 +218,25 @@ fn a_disabled_broker_calls_no_podman() {
         .clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     assert!(podman.calls().is_empty(), "{:?}", podman.calls());
+    // The worker started as before: no MCP configuration, no token, no
+    // broker variable, no word of the tools in its prompt.
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    assert!(!run_dir.join("broker").exists());
+    assert!(!queue_dir(&db).join("broker").exists());
+    assert!(
+        !fs::read_to_string(run_dir.join("prompt.txt"))
+            .unwrap()
+            .contains("dagq-broker")
+    );
+    for tags in backend.tags.lock().unwrap().iter() {
+        assert!(
+            tags.env
+                .iter()
+                .all(|(name, _)| !name.starts_with("DAGQ_BROKER")),
+            "{:?}",
+            tags.env
+        );
+    }
 
     broker_mode(&repo, "preferred");
     fs::write(
@@ -441,6 +461,22 @@ fn a_busy_machine_tells_the_inbox_and_claims_go_on() {
         BrokerState::read(&queue_dir(&db)).state.as_deref(),
         Some("machine_busy")
     );
+    // The worker was claimed without the tools, and the run says why.
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    let unavailable = events_of(&db, run.id(), "broker_unavailable");
+    assert_eq!(unavailable.len(), 1, "{unavailable:?}");
+    assert_eq!(unavailable[0]["reason"], "not_ready", "{unavailable:?}");
+    assert!(events_of(&db, run.id(), "broker_token_issued").is_empty());
+    assert!(
+        !PathBuf::from(run.run_dir().unwrap())
+            .join("broker")
+            .exists()
+    );
 }
 
 /// An exec (the handoff of `install` and the automatic update) leaves the
@@ -617,4 +653,392 @@ fn the_default_down_has_the_supervisor_stop_the_broker_after_its_drain() {
         BrokerState::read(&queue_dir(&db)).state.as_deref(),
         Some("stopped")
     );
+}
+
+/// Every file under `dir` whose bytes hold `needle`, but those under
+/// `except`.
+fn files_holding(dir: &Path, needle: &str, except: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if except.iter().any(|skip| path.starts_with(skip)) {
+                continue;
+            }
+            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file()
+                && fs::read(&path)
+                    .unwrap()
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// The queue's key and active marks served by the broker in process (no
+/// podman), over the runs' dir.
+fn serve_broker(queue: &Path, runs: &Path, audit: &Path) -> String {
+    use dagq_broker::{
+        backend::Backends,
+        backends::{fs::FsBackend, git::GitBackend, process::ProcessBackend},
+        config::Config,
+        server::Server,
+    };
+    let text = |path: &Path| path.to_string_lossy().into_owned();
+    let args = [
+        "--listen".to_owned(),
+        "127.0.0.1:0".to_owned(),
+        "--key".to_owned(),
+        text(&queue.join("broker/key")),
+        "--active".to_owned(),
+        text(&queue.join("broker/active")),
+        "--audit".to_owned(),
+        text(audit),
+        "--root".to_owned(),
+        text(&runs.canonicalize().unwrap()),
+    ];
+    let config = Config::parse(&args).unwrap();
+    let backends = Backends {
+        fs: Arc::new(FsBackend::new(config.roots.clone())),
+        process: Arc::new(ProcessBackend::new(config.roots.clone())),
+        git: Arc::new(GitBackend::new(config.roots.clone())),
+    };
+    let server = Server::bind(&config, backends).unwrap();
+    let addr = server.local_addr().unwrap();
+    thread::spawn(move || server.serve());
+    format!("http://{addr}")
+}
+
+fn list_workspace(url: &str, token_file: &Path) -> Result<Vec<String>, String> {
+    use dagq_broker_client::{BrokerClient, Endpoint};
+    let client = BrokerClient::new(Endpoint::parse(url).unwrap(), Some(token_file.to_owned()))
+        .with_read_timeout(Duration::from_secs(30));
+    client
+        .fs_list(&dagq_broker_protocol::fs::ListRequest { path: ".".into() })
+        .map(|listed| listed.entries.into_iter().map(|entry| entry.name).collect())
+        .map_err(|error| match error.broker_error() {
+            Some(refused) => refused.code.as_str().to_owned(),
+            None => format!("{error}"),
+        })
+}
+
+/// With `preferred` and a broker that runs, the claim issues the run's
+/// token: its file in `<queue dir>/broker/tokens` (mode 0600), the MCP
+/// configuration naming that file in the run's dir, the tools in the
+/// worker's prompt, `broker_token_issued` with the `jti`. The token opens
+/// the worker's workspace on the broker, and its value is nowhere else:
+/// not in the prompt, an event, a log, the configuration or the
+/// workspace's environment. When the run ends (integrated here), the next
+/// pass revokes it (`broker_token_revoked`, `reason: integrated`): its
+/// file, its mark and the configuration go, and the broker refuses it.
+#[test]
+fn a_preferred_worker_gets_its_token_and_the_end_of_its_run_revokes_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let (fixture, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    broker_mode(&repo, "preferred");
+    let podman = FakePodman::new(RUNNING);
+    podman.image.store(true, Ordering::SeqCst);
+    let client = fixture.dir.path().join("dagq-broker-client");
+    fs::write(&client, "").unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        broker: Some(BrokerOptions {
+            client: Some(client.clone()),
+            ..broker_options(&podman)
+        }),
+        ..options_with(&podman, &repo, false)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |_| {
+        has_kind(&db, "broker_started")
+    });
+    let task = add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "brokered", &[]);
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue
+            .show(task)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::AwaitingIntegration)
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let run = SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
+    let queue = queue_dir(&db);
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let issued = events_of(&db, run.id(), "broker_token_issued");
+    assert_eq!(issued.len(), 1, "{issued:?}");
+    let jti = issued[0]["jti"].as_str().unwrap().to_owned();
+    assert_eq!(
+        issued[0]["capabilities"],
+        json!([
+            "fs.read",
+            "fs.write",
+            "process.exec",
+            "git.read",
+            "git.write"
+        ])
+    );
+    assert!(issued[0]["exp"].as_u64().unwrap() > 0);
+    let token_file = queue.join("broker/tokens").join(run.id().as_str());
+    assert_eq!(
+        fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let token = fs::read_to_string(&token_file).unwrap().trim().to_owned();
+    assert!(
+        token.starts_with("dagq1."),
+        "the token file holds the token"
+    );
+    assert_eq!(
+        fs::read_to_string(queue.join("broker/active").join(&jti)).unwrap(),
+        run.id().as_str()
+    );
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("broker/mcp.json")).unwrap())
+            .unwrap();
+    let server = &config["mcpServers"]["dagq-broker"];
+    assert_eq!(server["command"], json!(client));
+    assert_eq!(server["args"], json!(["mcp"]));
+    assert_eq!(server["env"]["DAGQ_BROKER_TOKEN_FILE"], json!(token_file));
+    assert!(
+        server["env"]["DAGQ_BROKER_URL"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:")
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("prompt.txt"))
+            .unwrap()
+            .contains("mcp__dagq-broker__read_file")
+    );
+    // The value is in its file only (the key signs it): not in the queue
+    // DB, a prompt, a log, the configuration or the workspace's env.
+    let leaks = files_holding(
+        &fixture.dir.path().canonicalize().unwrap(),
+        &token,
+        &[queue.join("broker/tokens"), queue.join("broker/key")],
+    );
+    assert!(leaks.is_empty(), "the token leaked into {leaks:?}");
+    for tags in backend.tags.lock().unwrap().iter() {
+        assert!(tags.env.iter().all(|(_, value)| !value.contains(&token)));
+    }
+
+    // `status` and `doctor` show the mode, the health the supervisor last
+    // recorded and the token held; the actors stay advisory hosts.
+    for report in [
+        runtime::status(&db).unwrap(),
+        runtime::doctor(&db, false).unwrap(),
+    ] {
+        let broker = &report["broker"];
+        assert_eq!(broker["mode"], "preferred", "{broker}");
+        assert_eq!(broker["health"]["state"], "healthy", "{broker}");
+        assert_eq!(broker["active_tokens"], 1, "{broker}");
+    }
+
+    // The broker takes the token for the run's workspace.
+    let audit = tempfile::tempdir().unwrap();
+    let url = serve_broker(&queue, run_dir.parent().unwrap(), audit.path());
+    let kept = fixture.dir.path().join("kept-token");
+    fs::write(&kept, format!("{token}\n")).unwrap();
+    let listed = list_workspace(&url, &kept).unwrap();
+    assert!(listed.contains(&"seed.txt".to_owned()), "{listed:?}");
+
+    // A token with less than 4 hours left is issued again: a new jti, the
+    // older one retired. The token file is rewritten to expire soon.
+    let key =
+        dagq_broker_protocol::SigningKey::from_bytes(&fs::read(queue.join("broker/key")).unwrap())
+            .unwrap();
+    let mut claims = dagq_broker_protocol::BrokerSessionToken::new(token.clone())
+        .unverified_claims()
+        .unwrap();
+    claims.exp = claims.iat + 60;
+    let soon = dagq_broker_protocol::sign(&key, &claims).unwrap();
+    fs::write(&token_file, format!("{}\n", soon.expose())).unwrap();
+    // A new supervisor's first pass issues it: before its own start of the
+    // broker came back, it uses the broker recorded as running dagq's
+    // build that answers now.
+    let options = SuperviseOptions {
+        broker: Some(BrokerOptions {
+            client: Some(client.clone()),
+            ..broker_options(&podman)
+        }),
+        ..options_with(&podman, &repo, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let issued = events_of(&db, run.id(), "broker_token_issued");
+    assert_eq!(issued.len(), 2, "{issued:?}");
+    assert_eq!(issued[1]["renews"], json!(jti));
+    let jti = issued[1]["jti"].as_str().unwrap().to_owned();
+    assert_eq!(
+        events_of(&db, run.id(), "broker_token_revoked"),
+        [json!({"jti": claims.jti, "reason": "renewed"})]
+    );
+    assert!(!queue.join("broker/active").join(&claims.jti).exists());
+    assert!(queue.join("broker/active").join(&jti).exists());
+    assert_eq!(list_workspace(&url, &kept), Err("unauthorized".to_owned()));
+    let token = fs::read_to_string(&token_file).unwrap().trim().to_owned();
+    fs::write(&kept, format!("{token}\n")).unwrap();
+    assert!(list_workspace(&url, &kept).is_ok());
+
+    // The run ends; the next pass revokes the token.
+    integrate(&db, task.as_i64(), &repo).unwrap();
+    assert_eq!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .run(run.id())
+            .unwrap()
+            .status(),
+        RunStatus::Integrated
+    );
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let revoked = events_of(&db, run.id(), "broker_token_revoked");
+    assert_eq!(revoked[1], json!({"jti": jti, "reason": "integrated"}));
+    assert!(!token_file.exists());
+    assert!(!queue.join("broker/active").join(&jti).exists());
+    assert!(!run_dir.join("broker").exists());
+    assert_eq!(list_workspace(&url, &kept), Err("unauthorized".to_owned()));
+    assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 0);
+}
+
+/// Whatever way a run ends, its token is revoked with the run's status as
+/// the reason: `failed` (the session died without a receipt; the running
+/// supervisor's next pass), and `interrupted` and `succeeded` (the other
+/// ended statuses, set here as `recover` and an older landing leave them;
+/// the next supervisor's first pass). The token file, the mark and the
+/// run's MCP configuration go each time, and no token is left held.
+#[test]
+fn a_run_that_fails_or_is_interrupted_loses_its_token() {
+    let (fixture, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    broker_mode(&repo, "preferred");
+    let podman = FakePodman::new(RUNNING);
+    podman.image.store(true, Ordering::SeqCst);
+    let client = fixture.dir.path().join("dagq-broker-client");
+    fs::write(&client, "").unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let broker = || {
+        Some(BrokerOptions {
+            client: Some(client.clone()),
+            ..broker_options(&podman)
+        })
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        broker: broker(),
+        ..options_with(&podman, &repo, false)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |_| {
+        has_kind(&db, "broker_started")
+    });
+    let (failing, interrupted, succeeded) = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let failing = add_ready_task(&mut queue, "dies", &[]);
+        backend
+            .scripts
+            .lock()
+            .unwrap()
+            .insert(failing, "exit 7".to_owned());
+        (
+            failing,
+            add_ready_task(&mut queue, "interrupted later", &[]),
+            add_ready_task(&mut queue, "succeeded later", &[]),
+        )
+    };
+    let run_of = |task: TaskId| SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0].clone();
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        let failed = queue
+            .show(failing)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| !events_of(&db, run.id(), "broker_token_revoked").is_empty());
+        failed
+            && [interrupted, succeeded].iter().all(|task| {
+                queue
+                    .show(*task)
+                    .unwrap()
+                    .runs
+                    .first()
+                    .is_some_and(|run| run.status() == RunStatus::AwaitingIntegration)
+            })
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to stop").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let queue = queue_dir(&db);
+    let assert_revoked = |task: TaskId, reason: &str| {
+        let run = run_of(task);
+        let issued = events_of(&db, run.id(), "broker_token_issued");
+        assert_eq!(issued.len(), 1, "{task} {issued:?}");
+        let jti = issued[0]["jti"].as_str().unwrap();
+        assert_eq!(
+            events_of(&db, run.id(), "broker_token_revoked"),
+            [json!({"jti": jti, "reason": reason})],
+            "{task}"
+        );
+        assert!(!queue.join("broker/active").join(jti).exists(), "{task}");
+        assert!(
+            !queue.join("broker/tokens").join(run.id().as_str()).exists(),
+            "{task}"
+        );
+        assert!(
+            !PathBuf::from(run.run_dir().unwrap())
+                .join("broker")
+                .exists(),
+            "{task}"
+        );
+    };
+    let failed = run_of(failing);
+    assert_eq!(failed.status(), RunStatus::Failed);
+    assert_revoked(failing, "failed");
+    // The two others still hold theirs until they end.
+    assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 2);
+    let raw = Connection::open(&db).unwrap();
+    for (task, status) in [(interrupted, "interrupted"), (succeeded, "succeeded")] {
+        raw.execute(
+            "UPDATE task_runs SET status=?2 WHERE id=?1",
+            rusqlite::params![run_of(task).id().as_str(), status],
+        )
+        .unwrap();
+    }
+    let options = SuperviseOptions {
+        broker: broker(),
+        ..options_with(&podman, &repo, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_revoked(interrupted, "interrupted");
+    assert_revoked(succeeded, "succeeded");
+    assert_eq!(runtime::status(&db).unwrap()["broker"]["active_tokens"], 0);
 }
