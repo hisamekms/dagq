@@ -469,9 +469,15 @@ impl Supervisor<'_> {
         }
         let after = |kind: &str| events.iter().any(|e| e.id > anchor.id && e.kind == kind);
         let mut watch = ExitWatch::new(session, then);
-        // Never a second /exit; its timeout restarts now.
+        // Never a second /exit; its timeout runs from the request recorded
+        // after the anchor (or a restart of it since), not from the
+        // takeover (task 959).
         if after(event_kind::EXIT_REQUESTED) {
-            watch.requested = Some(Instant::now());
+            let now = Instant::now();
+            watch.requested = Some(
+                self.exit_requested_at(&events, |e| e.id > anchor.id, now)
+                    .unwrap_or(now),
+            );
         }
         watch.timed_out =
             after(event_kind::EXIT_REQUEST_TIMED_OUT) && history.latest_exit_timed_out();
@@ -545,9 +551,14 @@ impl Supervisor<'_> {
         info!(run_id = %run.id(), ask_id = %ask.id, "run {} waits for a person in ask {} about its failed review, opened before the supervisor stopped; it is not reviewed again", run.id(), ask.id);
         let mut watch = ExitWatch::new(session.clone(), AfterExit::Rest { close: true });
         // The failed review's /exit was requested before the ask: never a
-        // second one.
+        // second one, and its timeout runs from the recorded request (or a
+        // restart of it since), not from the takeover (task 959).
         if after(event_kind::EXIT_REQUESTED) {
-            watch.requested = Some(Instant::now());
+            let now = Instant::now();
+            watch.requested = Some(
+                self.exit_requested_at(events, |e| e.id > started.id, now)
+                    .unwrap_or(now),
+            );
         }
         let history = RunHistory::from_events(events);
         watch.timed_out =
@@ -604,7 +615,7 @@ impl Supervisor<'_> {
     /// dialog answered by rule (ADR-0047 decision 29), or a `stuck_exit`
     /// recovery job that answered the dialog or stopped the processes
     /// holding the `/exit` back. `None` when no such request was recorded.
-    /// A takeover keeps the time already waited (tasks 879 and 894).
+    /// A takeover keeps the time already waited (tasks 879, 894 and 959).
     pub(super) fn exit_requested_at(
         &self,
         events: &[RunEvent],

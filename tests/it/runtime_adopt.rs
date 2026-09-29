@@ -988,7 +988,7 @@ pub(crate) fn backdate_event(db: &Path, run: &TaskRun, kind: &str, seconds: i64)
 }
 
 /// The time between the first `from` and the first `to` event of task 1.
-fn between(queue: &mut SqliteQueue, from: &str, to: &str) -> Duration {
+pub(crate) fn between(queue: &mut SqliteQueue, from: &str, to: &str) -> Duration {
     let detail = queue.show(TaskId::new(1)).unwrap();
     let at = |kind: &str| {
         let event = detail.events.iter().find(|e| e.kind == kind).unwrap();

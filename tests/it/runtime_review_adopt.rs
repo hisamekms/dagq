@@ -609,3 +609,126 @@ fn an_adopter_keeps_an_unreviewed_head_from_landing_when_the_workspace_is_gone()
     fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
     joined(supervisor, "the supervisor thread to return");
 }
+
+/// A reviewed run whose `/exit` its supervisor requested 120 seconds ago
+/// before it died, with its session still up and a stale lease: past a
+/// passed review, or, when `failed_ask`, past a review that failed and the
+/// `approve_landing` ask the supervisor opened for it. Returns the run.
+fn reviewed_run_asked_to_exit(
+    repo: &Path,
+    db: &Path,
+    backend: &TestWorkspace,
+    failed_ask: bool,
+) -> TaskRun {
+    let run = start_run_under_dead_supervisor(repo, db, backend, "dead-supervisor");
+    let idle = run.idle_marker_path().unwrap();
+    wait_until(db, Duration::from_secs(20), |_| idle.is_file());
+    let head = git_out(
+        Path::new(run.worktree_path().unwrap()),
+        &["rev-parse", "HEAD"],
+    );
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='awaiting_integration', result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), head],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ValidationFinished,
+            json!({"status": "awaiting_integration"}),
+        )
+        .unwrap();
+    queue
+        .record_runtime_event(run.id(), EventKind::ReviewStarted, json!({"attempt": 1}))
+        .unwrap();
+    if !failed_ask {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::ReviewFinished,
+                json!({"verdict": "pass", "reasons": [], "summary": "meets the acceptance", "attempt": 1}),
+            )
+            .unwrap();
+    }
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::ExitRequested,
+            json!({"workspace_id": WORKSPACE_ID, "timeout_secs": 60}),
+        )
+        .unwrap();
+    if failed_ask {
+        queue
+            .ask(NewAsk {
+                topics: Vec::new(),
+                kind: AskKind::ApproveLanding,
+                task_id: None,
+                run_id: Some(run.id().clone()),
+                question: "The supervisor's headless review of run r (task 1) failed and gave no verdict (review 1): exit status 3".into(),
+                options: vec!["land".into(), "send_back".into(), "cancel".into()],
+                asked_by: "supervisor".into(),
+                reason_category: AskReason::Scope,
+                finding_id: None,
+            })
+            .unwrap();
+    }
+    crate::runtime_adopt::backdate_event(db, &run, "exit_requested", 120);
+    age_lease(db, &run, 31);
+    run
+}
+
+/// The `/exit` a passed run's supervisor requested after its review, before
+/// it died, keeps the time already waited (task 959): requested twice the
+/// exit timeout ago, its adopter records `exit_request_timed_out` without
+/// waiting the timeout again and types no second `/exit`.
+#[test]
+fn an_adopted_exit_after_a_passed_review_times_out_from_its_recorded_request() {
+    adopted_exit_after_review_times_out(false);
+}
+
+/// The same for the `/exit` of a review that failed and whose
+/// `approve_landing` ask was opened before the supervisor died (task 959).
+#[test]
+fn an_adopted_exit_after_a_failed_review_ask_times_out_from_its_recorded_request() {
+    adopted_exit_after_review_times_out(true);
+}
+
+fn adopted_exit_after_review_times_out(failed_ask: bool) {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let exit_timeout = Duration::from_secs(60);
+    backend.exit_timeout = exit_timeout;
+    let backend = Arc::new(backend);
+    let run = reviewed_run_asked_to_exit(&repo, &db, &backend, failed_ask);
+    let supervisor = supervise_adopter(&db, &repo, &backend);
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"exit_request_timed_out")
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let waited = crate::runtime_adopt::between(&mut queue, "run_adopted", "exit_request_timed_out");
+    assert!(
+        waited < exit_timeout,
+        "timed out {waited:?} after the adoption"
+    );
+    // Let the fake session out, the way a person answering it would.
+    fs::write(exit_request_path(run.run_dir().unwrap()), "").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert_eq!(
+        outcome["runs"][0]["status"],
+        if failed_ask {
+            "awaiting_integration"
+        } else {
+            "integrated"
+        },
+        "{outcome} {kinds:?}"
+    );
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
+    assert_eq!(kinds.iter().filter(|k| **k == "exit_requested").count(), 1);
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+}
