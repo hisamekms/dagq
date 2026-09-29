@@ -220,6 +220,59 @@ fn status_diff_add_commit_and_log_on_the_run_branch() {
 }
 
 #[test]
+fn add_leaves_out_the_temporary_files_a_stopped_broker_left() {
+    let fx = Fixture::new();
+    let workspace = fx.workspace();
+    // What fs.write leaves when the broker stops between writing and
+    // renaming: a `.dagq-broker-<uuid>.tmp` next to the target.
+    let top = format!(".dagq-broker-{}.tmp", uuid::Uuid::new_v4());
+    let nested = format!("src/.dagq-broker-{}.tmp", uuid::Uuid::new_v4());
+    std::fs::create_dir(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join(&top), "half\n").unwrap();
+    std::fs::write(workspace.join(&nested), "half\n").unwrap();
+    std::fs::write(workspace.join("src/lib.rs"), "\n").unwrap();
+    std::fs::write(workspace.join("README"), "changed\n").unwrap();
+    // A name that only looks alike is an ordinary file.
+    std::fs::write(workspace.join("src/.dagq-broker-.tmp"), "\n").unwrap();
+
+    let staged = |fx: &Fixture| -> Vec<String> {
+        let names = host_git(&fx.workspace(), &["diff", "--cached", "--name-only"]);
+        names.lines().map(str::to_owned).collect()
+    };
+    fx.add(&["src"]).unwrap();
+    assert_eq!(staged(&fx), ["src/.dagq-broker-.tmp", "src/lib.rs"]);
+    fx.add(&["."]).unwrap();
+    assert_eq!(
+        staged(&fx),
+        ["README", "src/.dagq-broker-.tmp", "src/lib.rs"]
+    );
+    let untracked = host_git(&workspace, &["status", "--porcelain"]);
+    assert!(untracked.contains(&format!("?? {top}")), "{untracked}");
+    assert!(untracked.contains(&format!("?? {nested}")), "{untracked}");
+
+    // Named alone, or with other paths, the request is refused and nothing
+    // of it is staged.
+    std::fs::write(workspace.join("README"), "changed again\n").unwrap();
+    for paths in [vec![top.as_str()], vec!["README", nested.as_str()]] {
+        let failure = fx.add(&paths).unwrap_err();
+        assert_eq!(failure.code, ErrorCode::InvalidRequest, "{failure:?}");
+        assert!(failure.message.contains("temporary"), "{failure:?}");
+    }
+    assert_eq!(
+        staged(&fx),
+        ["README", "src/.dagq-broker-.tmp", "src/lib.rs"]
+    );
+    assert_eq!(
+        host_git(&workspace, &["diff", "--name-only"]),
+        "README",
+        "the refused request staged nothing"
+    );
+    let commit = fx.commit("feat: files").unwrap().commit;
+    let tree = host_git(&workspace, &["ls-tree", "-r", "--name-only", &commit]);
+    assert!(!tree.contains(&top) && !tree.contains(&nested), "{tree}");
+}
+
+#[test]
 fn show_shows_the_run_branchs_history_only() {
     let fx = Fixture::new();
     std::fs::write(fx.workspace().join("README"), "hello\nshown-line\n").unwrap();

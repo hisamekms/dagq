@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use dagq_broker_protocol::{ErrorCode, encode, git};
 
 use crate::backend::{Backend, BackendRequest, Call, Done, Failure};
-use crate::backends::fs::{lstat_at, open_regular, open_workspace};
+use crate::backends::fs::{self, lstat_at, open_regular, open_workspace};
 
 /// The default and the most commits `git.log` answers.
 pub const LOG_DEFAULT: u32 = 20;
@@ -657,8 +657,26 @@ fn add(repo: &Repo, confined: &[PathBuf]) -> Result<Vec<u8>, Failure> {
     if confined.is_empty() {
         return Err(invalid("git.add names at least one path"));
     }
+    // A temporary file the fs backend left when the broker stopped between
+    // writing and renaming it: named alone it is refused, and inside a named
+    // directory it is excluded, so it never gets into a commit.
+    if confined.iter().any(|path| {
+        path.file_name()
+            .is_some_and(|name| fs::is_temporary(name.as_bytes()))
+    }) {
+        return Err(invalid(format!(
+            "{}*{} is the fs backend's temporary file, never staged",
+            fs::TEMPORARY_PREFIX,
+            fs::TEMPORARY_SUFFIX
+        )));
+    }
     let mut args: Vec<OsString> = vec!["add".into(), "--".into()];
     args.extend(pathspecs(&repo.workspace, confined)?);
+    args.push(OsString::from(format!(
+        ":(top,exclude,glob)**/{}?*{}",
+        fs::TEMPORARY_PREFIX,
+        fs::TEMPORARY_SUFFIX
+    )));
     repo.ok("add", &args, None)?;
     answer(&git::AddResponse {})
 }

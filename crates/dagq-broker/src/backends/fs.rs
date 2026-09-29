@@ -343,6 +343,19 @@ fn edit(
     })
 }
 
+/// The name of `replace`'s temporary file is `TEMPORARY_PREFIX<uuid>TEMPORARY_SUFFIX`.
+/// A broker that stops between creating and renaming it leaves it behind;
+/// `git.add` never stages such a file.
+pub(crate) const TEMPORARY_PREFIX: &str = ".dagq-broker-";
+pub(crate) const TEMPORARY_SUFFIX: &str = ".tmp";
+
+/// Whether `name` (one path component) is a temporary file of `replace`.
+pub(crate) fn is_temporary(name: &[u8]) -> bool {
+    name.len() > TEMPORARY_PREFIX.len() + TEMPORARY_SUFFIX.len()
+        && name.starts_with(TEMPORARY_PREFIX.as_bytes())
+        && name.ends_with(TEMPORARY_SUFFIX.as_bytes())
+}
+
 /// Put `content` at `name` in `dir` atomically: a new temporary file in the
 /// same directory, synced, then renamed over the target. `mode` is the
 /// replaced file's permission bits, kept; a new file gets `0666` less the
@@ -354,7 +367,10 @@ fn replace(
     mode: Option<libc::mode_t>,
     shown: &str,
 ) -> Result<(), Failure> {
-    let temporary = OsString::from(format!(".dagq-broker-{}.tmp", uuid::Uuid::new_v4()));
+    let temporary = OsString::from(format!(
+        "{TEMPORARY_PREFIX}{}{TEMPORARY_SUFFIX}",
+        uuid::Uuid::new_v4()
+    ));
     let failed = |error: io::Error| backend(format!("write {shown}: {error}"));
     let fd = open_at(
         dir,
