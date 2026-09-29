@@ -9,14 +9,20 @@
 //! never started on the host instead. The configuration is the shape of a
 //! later `[security] backend` and `[actors.<role>] backend`; nothing reads
 //! it from a file yet, so every actor runs on the host.
+//!
+//! The worker's row also names each provider its supervisors run it on,
+//! once a Codex worker can run (ADR-t813-3 decision 7): the Claude worker
+//! is advisory like the rest, the Codex worker `confined`, held by the
+//! OS's sandbox for writes and signals but not isolated.
 
 use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::domain::{
-    ActorRole, TrustLevel,
+    ActorRole, Provider, TrustLevel,
     actor::{ACTOR_ID_ENV, ROLE_ENV, RUN_ID_ENV, TASK_ID_ENV},
     authorization::{Capability, grants},
+    worker::{ProviderCheck, WorkerMode},
 };
 
 /// Where an executor runs its actors.
@@ -76,6 +82,11 @@ pub enum EnforcementLevel {
     /// Recorded and checked by the runtime's own code, not isolated: the
     /// process can do whatever this user can (ADR-t728-1 decision 6).
     Advisory,
+    /// The OS stops the process's writes outside the places it may write
+    /// and its signals to other processes (the Codex worker's
+    /// workspace-write sandbox, ADR-t813-3 decision 7), but it runs as this
+    /// user, reads broadly and reaches the network: not isolated.
+    Confined,
     /// Held by an isolation the process cannot leave (a later backend).
     Sandbox,
 }
@@ -84,12 +95,24 @@ impl EnforcementLevel {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Advisory => "advisory",
+            Self::Confined => "confined",
             Self::Sandbox => "sandbox",
         }
     }
 
+    /// Whether it isolates the actor; [`Self::Confined`] does not.
     pub const fn is_sandbox(self) -> bool {
         matches!(self, Self::Sandbox)
+    }
+
+    /// How far a worker of `provider` on `backend` is held: on the host,
+    /// Claude is advisory and Codex confined by its OS sandbox; a backend
+    /// that isolates holds both.
+    pub const fn of_worker(backend: ExecutorBackend, provider: Provider) -> Self {
+        match (backend, provider) {
+            (ExecutorBackend::Host, Provider::Codex) => Self::Confined,
+            (backend, _) => backend.enforcement(),
+        }
     }
 }
 
@@ -113,21 +136,72 @@ impl ExecutionConfig {
 
     /// Each AI actor with its backend and enforcement, as `status` and
     /// `doctor` show them. A backend that is not implemented is refused.
-    pub fn profiles(&self) -> Result<Vec<ActorExecution>> {
+    /// `checks` are the providers the registered supervisors resolved:
+    /// when one of them can run a Codex worker, the worker's row lists
+    /// each usable provider with its own enforcement (`providers`);
+    /// otherwise the row is as before, with no `providers`.
+    pub fn profiles(&self, checks: &[ProviderCheck]) -> Result<Vec<ActorExecution>> {
+        let workers = worker_providers(checks);
         ai_actor_roles()
             .map(|role| {
                 let backend = self.backend_of(role);
                 backend.ensure_implemented()?;
                 let enforcement = backend.enforcement();
+                let providers = if role == ActorRole::Worker {
+                    workers
+                        .iter()
+                        .map(|(provider, modes)| {
+                            let enforcement = EnforcementLevel::of_worker(backend, *provider);
+                            ProviderExecution {
+                                provider: *provider,
+                                modes: modes.clone(),
+                                enforcement,
+                                sandboxed: enforcement.is_sandbox(),
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 Ok(ActorExecution {
                     role,
                     backend,
                     enforcement,
                     sandboxed: enforcement.is_sandbox(),
+                    providers,
                 })
             })
             .collect()
     }
+}
+
+/// The providers a worker can run on across `checks`, each with the modes
+/// any supervisor runs it in, in [`Provider`] order; empty unless one of
+/// them can run a Codex worker, as the worker is then only Claude.
+fn worker_providers(checks: &[ProviderCheck]) -> Vec<(Provider, Vec<WorkerMode>)> {
+    let usable = |provider: Provider| {
+        checks
+            .iter()
+            .any(|check| check.provider == provider && check.usable())
+    };
+    if !usable(Provider::Codex) {
+        return Vec::new();
+    }
+    [Provider::Claude, Provider::Codex]
+        .into_iter()
+        .filter(|provider| usable(*provider))
+        .map(|provider| {
+            let modes = [WorkerMode::Interactive, WorkerMode::Headless]
+                .into_iter()
+                .filter(|mode| {
+                    checks.iter().any(|check| {
+                        check.provider == provider && check.found && check.modes.contains(mode)
+                    })
+                })
+                .collect();
+            (provider, modes)
+        })
+        .collect()
 }
 
 /// The roles the runtime starts as AI actors.
@@ -137,19 +211,34 @@ pub fn ai_actor_roles() -> impl Iterator<Item = ActorRole> {
         .filter(|role| role.trust() == TrustLevel::UntrustedAgent)
 }
 
-/// How one actor runs.
+/// How one actor runs. `enforcement` is the weakest hold on it; a worker
+/// that some supervisor can run on Codex also has `providers`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActorExecution {
     pub role: ActorRole,
     pub backend: ExecutorBackend,
     pub enforcement: EnforcementLevel,
     pub sandboxed: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderExecution>,
+}
+
+/// How the worker runs on one provider (ADR-t813-3 decision 7): the modes
+/// the supervisors run it in and how far that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderExecution {
+    pub provider: Provider,
+    pub modes: Vec<WorkerMode>,
+    pub enforcement: EnforcementLevel,
+    pub sandboxed: bool,
 }
 
 /// The actors of the default configuration, as `status` and `doctor`
-/// show them: every AI actor on the host, advisory.
-pub fn actor_executions() -> Result<Vec<ActorExecution>> {
-    ExecutionConfig::default().profiles()
+/// show them: every AI actor on the host, advisory; with `checks` (the
+/// supervisors' providers) naming a usable Codex, the worker's Codex
+/// provider confined.
+pub fn actor_executions(checks: &[ProviderCheck]) -> Result<Vec<ActorExecution>> {
+    ExecutionConfig::default().profiles(checks)
 }
 
 use Capability as C;
@@ -243,7 +332,7 @@ mod tests {
 
     #[test]
     fn every_ai_actor_runs_on_the_host_advisory_by_default() {
-        let profiles = actor_executions().unwrap();
+        let profiles = actor_executions(&[]).unwrap();
         let roles: Vec<_> = profiles.iter().map(|p| p.role).collect();
         assert_eq!(roles, ai_actor_roles().collect::<Vec<_>>());
         assert!(roles.contains(&ActorRole::Worker));
@@ -263,6 +352,101 @@ mod tests {
                 "sandboxed": false,
             })
         );
+    }
+
+    fn check(provider: Provider, found: bool, modes: &[WorkerMode]) -> ProviderCheck {
+        ProviderCheck {
+            provider,
+            executable: provider.as_str().to_owned(),
+            found,
+            error: None,
+            modes: modes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_codex_worker_is_confined_and_claude_stays_advisory() {
+        use WorkerMode::{Headless, Interactive};
+        let both = [
+            check(Provider::Claude, true, &[Interactive, Headless]),
+            check(Provider::Codex, true, &[Headless]),
+        ];
+        let profiles = actor_executions(&both).unwrap();
+        for profile in &profiles {
+            assert_eq!(profile.enforcement, EnforcementLevel::Advisory);
+            assert!(!profile.sandboxed);
+            assert_eq!(
+                profile.providers.is_empty(),
+                profile.role != ActorRole::Worker,
+                "{:?}",
+                profile.role
+            );
+        }
+        let worker = profiles
+            .iter()
+            .find(|p| p.role == ActorRole::Worker)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(worker).unwrap(),
+            serde_json::json!({
+                "role": "worker",
+                "backend": "host",
+                "enforcement": "advisory",
+                "sandboxed": false,
+                "providers": [
+                    {"provider": "claude", "modes": ["interactive", "headless"],
+                     "enforcement": "advisory", "sandboxed": false},
+                    {"provider": "codex", "modes": ["headless"],
+                     "enforcement": "confined", "sandboxed": false},
+                ],
+            })
+        );
+        // Neither advisory nor the isolation, and not isolated.
+        assert_ne!(EnforcementLevel::Confined, EnforcementLevel::Advisory);
+        assert_ne!(EnforcementLevel::Confined, EnforcementLevel::Sandbox);
+        assert!(!EnforcementLevel::Confined.is_sandbox());
+        // An isolating backend holds both providers.
+        assert_eq!(
+            EnforcementLevel::of_worker(ExecutorBackend::Podman, Provider::Codex),
+            EnforcementLevel::Sandbox
+        );
+        assert_eq!(
+            EnforcementLevel::of_worker(ExecutorBackend::Host, Provider::Claude),
+            EnforcementLevel::Advisory
+        );
+        // A Codex that is missing, or has no mode, leaves the rows as they
+        // were without any supervisor.
+        let without = actor_executions(&[]).unwrap();
+        for unusable in [
+            [
+                check(Provider::Claude, true, &[Interactive, Headless]),
+                check(Provider::Codex, false, &[Headless]),
+            ],
+            [
+                check(Provider::Claude, true, &[Interactive]),
+                check(Provider::Codex, true, &[]),
+            ],
+        ] {
+            assert_eq!(actor_executions(&unusable).unwrap(), without);
+        }
+        // Across supervisors: the modes are the union, and a Claude that
+        // none found is not listed.
+        let merged = actor_executions(&[
+            check(Provider::Claude, false, &[Interactive]),
+            check(Provider::Codex, true, &[Headless]),
+        ])
+        .unwrap();
+        let worker = merged.iter().find(|p| p.role == ActorRole::Worker).unwrap();
+        assert_eq!(worker.providers.len(), 1);
+        assert_eq!(worker.providers[0].provider, Provider::Codex);
+        let merged = actor_executions(&[
+            check(Provider::Claude, true, &[Interactive]),
+            check(Provider::Claude, true, &[Headless]),
+            check(Provider::Codex, true, &[Headless]),
+        ])
+        .unwrap();
+        let worker = merged.iter().find(|p| p.role == ActorRole::Worker).unwrap();
+        assert_eq!(worker.providers[0].modes, [Interactive, Headless]);
     }
 
     #[test]
@@ -291,14 +475,14 @@ mod tests {
             backend: ExecutorBackend::Podman,
             actors: Vec::new(),
         };
-        assert!(all.profiles().is_err());
+        assert!(all.profiles(&[]).is_err());
         let one = ExecutionConfig {
             backend: ExecutorBackend::Host,
             actors: vec![(ActorRole::Worker, ExecutorBackend::Podman)],
         };
         assert_eq!(one.backend_of(ActorRole::Worker), ExecutorBackend::Podman);
         assert_eq!(one.backend_of(ActorRole::Planner), ExecutorBackend::Host);
-        assert!(one.profiles().is_err());
+        assert!(one.profiles(&[]).is_err());
         assert_eq!(
             EnforcementLevel::Sandbox.as_str(),
             "sandbox",

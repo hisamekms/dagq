@@ -96,7 +96,12 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）
 - 古いバイナリへの戻し: 判定は呼ばれたバイナリのpolicyで決まるので、固定バイナリを戻すと、未知の`DAGQ_ROLE`を拒まない（task 729より前の）バイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
 
-`status`と`doctor`は`actors`に、AI actorごとの`backend: host`・`enforcement: advisory`・`sandboxed: false`を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。ActorExecutorのspec（workspace・capability・timeout）もhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
+`status`と`doctor`は`actors`に、AI actorごとの`backend: host`・`enforcement: advisory`・`sandboxed: false`を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。Codexのworkerを動かせるsupervisorが居るときは、workerの行の`providers`がCodexを`enforcement: confined`・`sandboxed: false`で出す（下の「Codexのworkerのsandbox」）。ActorExecutorのspec（workspace・capability・timeout）もhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
+
+
+### Codexのworkerのsandbox
+
+Codexの非対話のworkerはworkspace-writeのsandbox（macOSはseatbelt）で動き、書いてよい場所（runのworktree・Gitのrun branchのrefとobjects・run dir・cargoのregistry）の外への書き込みと、sandboxの外のプロセスの一覧とsignalをOSが止める（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、設定は[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。ADR-t728-1決定6の言う「同じcapabilityの模型の上に足す強制」の最初のものだが、隔離ではない: 同じユーザーとして動き、読むことは広く（他のrunのworktreeや人の設定も）でき、networkは開いている。そこで`actors`はこれを`advisory`とも隔離の`sandbox`とも別の`confined`とし、`sandboxed`は`false`にする（決定7）。Claudeのworker（対話・非対話）は`advisory`のままで、permissionの仕組みとsettingsのdenyに頼る。
 
 ## reviewのpassとIntegrator
 

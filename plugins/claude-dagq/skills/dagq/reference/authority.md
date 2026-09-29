@@ -27,4 +27,4 @@ A `!` command typed in the inbox's terminal inherits `DAGQ_ROLE=inbox` and is re
 
 ## Advisory, not a sandbox
 
-Everything runs as one user on the host (`status` and `doctor` show `actors` with `backend: host`, `enforcement: advisory`, `sandboxed: false`). The check stops mistakes and records who did what; a process that fakes the environment or opens the database gets past it. That is why working around a refusal is never allowed: it is not isolated, only trusted to hold.
+Everything runs as one user on the host (`status` and `doctor` show `actors` with `backend: host`, `enforcement: advisory`, `sandboxed: false`; once a supervisor can run Codex, the worker row's `providers` shows the Codex worker `confined`: its OS sandbox stops writes and signals, but it is not isolated). The check stops mistakes and records who did what; a process that fakes the environment or opens the database gets past it. That is why working around a refusal is never allowed: it is not isolated, only trusted to hold.

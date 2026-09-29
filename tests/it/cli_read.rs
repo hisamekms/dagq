@@ -766,3 +766,92 @@ fn status_and_doctor_show_every_actor_on_the_host_advisory() {
         }
     }
 }
+
+/// With a supervisor that can run a Codex worker, the worker's row lists
+/// each provider: Claude advisory, Codex `confined` by its OS sandbox and
+/// not isolated (ADR-t813-3 decision 7); the row itself and the other
+/// roles stay advisory. A supervisor whose `codex` is missing leaves the
+/// rows without `providers`, as with none, and so does a supervisor that
+/// is not alive.
+#[test]
+fn status_and_doctor_show_the_codex_worker_confined() {
+    use dagq::domain::{
+        Provider,
+        worker::{ProviderCheck, WorkerMode},
+    };
+    let (_dir, db) = queue();
+    let check = |provider, found, modes: &[WorkerMode]| ProviderCheck {
+        provider,
+        executable: format!("/bin/{}", Provider::as_str(provider)),
+        found,
+        error: None,
+        modes: modes.to_vec(),
+    };
+    let token = LeaseToken::new("t");
+    let mut store = SqliteQueue::open(&db).unwrap();
+    store
+        .register_supervisor(&token, std::process::id(), 1, "v")
+        .unwrap();
+    let before = ok(&db, &["status"])["actors"].clone();
+    // A registration a dead supervisor left behind does not count.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let stale = LeaseToken::new("stale");
+    store.register_supervisor(&stale, dead, 1, "v").unwrap();
+    store
+        .set_supervisor_providers(
+            &stale,
+            &[check(Provider::Codex, true, &[WorkerMode::Headless])],
+        )
+        .unwrap();
+    assert_eq!(ok(&db, &["status"])["actors"], before, "dead supervisor");
+    store
+        .set_supervisor_providers(
+            &token,
+            &[
+                check(
+                    Provider::Claude,
+                    true,
+                    &[WorkerMode::Interactive, WorkerMode::Headless],
+                ),
+                check(Provider::Codex, false, &[WorkerMode::Headless]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(ok(&db, &["status"])["actors"], before, "codex missing");
+    store
+        .set_supervisor_providers(
+            &token,
+            &[
+                check(
+                    Provider::Claude,
+                    true,
+                    &[WorkerMode::Interactive, WorkerMode::Headless],
+                ),
+                check(Provider::Codex, true, &[WorkerMode::Headless]),
+            ],
+        )
+        .unwrap();
+    for args in [&["status"][..], &["doctor"], &["doctor", "--full"]] {
+        let report = ok(&db, args);
+        for actor in report["actors"].as_array().unwrap() {
+            assert_eq!(actor["enforcement"], "advisory", "{args:?} {actor}");
+            assert_eq!(actor["sandboxed"], false, "{args:?} {actor}");
+            if actor["role"] != "worker" {
+                assert!(actor.get("providers").is_none(), "{args:?} {actor}");
+                continue;
+            }
+            assert_eq!(
+                actor["providers"],
+                serde_json::json!([
+                    {"provider": "claude", "modes": ["interactive", "headless"],
+                     "enforcement": "advisory", "sandboxed": false},
+                    {"provider": "codex", "modes": ["headless"],
+                     "enforcement": "confined", "sandboxed": false},
+                ]),
+                "{args:?}"
+            );
+        }
+    }
+}

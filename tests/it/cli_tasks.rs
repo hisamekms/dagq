@@ -165,7 +165,7 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
         // Every AI actor on the host, advisory (goal 55); `cli_read` checks
         // the values.
         expected["actors"] =
-            serde_json::to_value(dagq::application::execution::actor_executions().unwrap())
+            serde_json::to_value(dagq::application::execution::actor_executions(&[]).unwrap())
                 .unwrap();
         // No inbox watch ever ran (ADR-t906-1).
         expected["inbox_watcher"] = serde_json::json!({

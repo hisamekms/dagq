@@ -226,6 +226,21 @@ fn the_providers_are_recorded_on_the_registration() {
     // Found, it runs the headless Codex worker (ADR-t813-3).
     assert_eq!(providers[1]["modes"], json!(["headless"]));
     assert_eq!(doctor["supervisors"][0]["providers"], providers);
+    // With Codex found, the worker's Codex provider is confined by its OS
+    // sandbox, not isolated (ADR-t813-3 decision 7).
+    for report in [&status, &doctor] {
+        let worker = report["actors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|actor| actor["role"] == "worker")
+            .unwrap();
+        assert_eq!(worker["enforcement"], "advisory", "{worker}");
+        assert_eq!(worker["providers"][0]["enforcement"], "advisory");
+        assert_eq!(worker["providers"][1]["provider"], "codex");
+        assert_eq!(worker["providers"][1]["enforcement"], "confined");
+        assert_eq!(worker["providers"][1]["sandboxed"], false);
+    }
 }
 
 /// A `codex` that is not found does not stop the supervisor: it is

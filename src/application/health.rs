@@ -13,6 +13,7 @@ use std::{collections::HashMap, path::Path};
 
 use super::execution::{ActorExecution, actor_executions};
 use super::{AskQuery, Clock, PlannerAnswerRoute, ProcessControl, Queue, RunFiles, TRIAGE_ASKER};
+use crate::domain::worker::ProviderCheck;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AskId, AskKind, Attention, AttentionNext, HEARTBEAT_TIMEOUT_SECS,
     LANDING_OPTIONS, ReasonCode, RunEvent, RunHistory, RunId, RunLease, RunProcess, RunStatus,
@@ -253,7 +254,8 @@ const REASON_CHARS: usize = 300;
 /// question cut to 200 characters, the proposals waiting for plan review
 /// or being revised (ADR-0041 decision 7) in plan review's order, and the
 /// newest event id (`cursor`) to `watch` from (ADR-0016), with `actors`,
-/// each AI actor's backend and enforcement ([`actor_executions`]).
+/// each AI actor's backend and enforcement ([`actor_executions`]), the
+/// worker's per provider once a supervisor can run Codex.
 pub fn status(
     queue: &dyn Queue,
     control: &dyn ProcessControl,
@@ -355,8 +357,9 @@ pub fn status(
         // supervisor's own build is its `binary_version`.
         "version": crate::VERSION,
         // Where each AI actor runs and how far that holds it (goal 55): on
-        // the host, advisory, not a sandbox (ADR-t728-1 decision 6).
-        "actors": actor_executions()?,
+        // the host, advisory, not a sandbox (ADR-t728-1 decision 6); a
+        // Codex worker confined (ADR-t813-3 decision 7).
+        "actors": actor_executions(&provider_checks(&registrations, control))?,
         "auto_update": super::update::status(
             &registrations,
             &queue.update_events(20)?,
@@ -365,6 +368,22 @@ pub fn status(
         ),
         "cursor": cursor,
     }))
+}
+
+/// The providers every registered supervisor that is alive resolved, for
+/// the worker's row of `actors`: a registration a dead supervisor left
+/// behind does not show its Codex.
+fn provider_checks(
+    registrations: &[SupervisorRegistration],
+    control: &dyn ProcessControl,
+) -> Vec<ProviderCheck> {
+    registrations
+        .iter()
+        .filter(|registration| control.alive(registration.pid))
+        .filter_map(|registration| registration.providers.as_ref())
+        .flatten()
+        .cloned()
+        .collect()
 }
 
 /// Each registered supervisor's `slots` (`used` of `parallel`) and
@@ -479,7 +498,8 @@ fn slots_and_waits(
 /// or why they could not be checked), and the supervisor's latest
 /// `run_env_program_missing` / `run_env_program_found` (ADR-0049 decision
 /// 9). Both show `actors`, each AI actor's backend and enforcement
-/// ([`actor_executions`]: the host, advisory, not sandboxed). Reads only.
+/// ([`actor_executions`]: the host, advisory, not sandboxed; a Codex
+/// worker confined). Reads only.
 pub fn doctor(
     queue: &dyn Queue,
     control: &dyn ProcessControl,
@@ -525,7 +545,7 @@ pub fn doctor(
             "checked_at": now,
             "supervisors": supervisors.iter().map(SupervisorHealth::summary).collect::<Vec<_>>(),
             "runs": runs.iter().map(RunHealth::summary).collect::<Vec<_>>(),
-            "actors": actor_executions()?,
+            "actors": actor_executions(&provider_checks(&registrations, control))?,
         });
         if let Some(run_env) = run_env {
             summary["run_env"] = run_env;
@@ -537,7 +557,7 @@ pub fn doctor(
         supervisors,
         runs,
         run_env,
-        actors: actor_executions()?,
+        actors: actor_executions(&provider_checks(&registrations, control))?,
     })?)
 }
 

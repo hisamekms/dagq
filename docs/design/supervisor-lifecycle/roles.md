@@ -70,7 +70,7 @@ runtimeが起動するAI actorは全て`ActorExecutor::spawn(ActorExecutionSpec)
 actorをどこで動かし、specをどこまで守らせるかは`src/application/execution.rs`の型が持つ（task 738）。
 
 - `ExecutorBackend`: `host`（このユーザーのhost上のプロセス）と`podman`（goal 38のための予約の名前）。`podman`は未実装で、`ensure_implemented`がerrorにする。選ばれたactorは起動せず、hostに黙って戻さない（fail closed）。知らない名前も`ExecutorBackend::parse`がerrorにする。
-- `EnforcementLevel`: `advisory`（runtimeのコードが記録と検査をするだけで隔離ではない。hostの値）と`sandbox`（プロセスが抜けられない隔離。`podman`が実装されたときの値）。
+- `EnforcementLevel`: `advisory`（runtimeのコードが記録と検査をするだけで隔離ではない。hostの値）、`confined`（OSのsandboxが書き込みと他のプロセスへのsignalを止めるが、同じユーザーで動き、読み取りとnetworkは開いていて隔離ではない。hostで動くCodexのworkerの値。[ADR-t813-3](../../adr/2026-09-28-t813-3-codex-worker-permissions.md)の決定7）、`sandbox`（プロセスが抜けられない隔離。`podman`が実装されたときの値）。`is_sandbox`（`sandboxed`の欄）は`sandbox`だけがtrueで、`confined`はfalse。workerのproviderごとの値は`EnforcementLevel::of_worker`が決める（hostではClaudeが`advisory`、Codexが`confined`。隔離するbackendでは両方がそのbackendの値）。
 - `ExecutionConfig`: 全actorの既定の`backend`と、roleごとの上書き`actors`（`(ActorRole, ExecutorBackend)`の並び）。将来の設定ファイルの次の形と対応させる。この段では設定ファイルを読まず、既定（全actorが`host`）だけを使う。
 
   ```toml
@@ -82,7 +82,9 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
   ```
 
 - `HostActorExecutor`は`ExecutionConfig`を持ち（`with_config`、既定は全actorが`host`）、`spawn`でactorのroleの`backend`が`host`でなければ起動を拒む。
-- `status`と`doctor`（要約と`--full`）は`actors`に、AI actor（`TrustLevel`が`untrusted_agent`のrole: inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・observer）ごとの`role`・`backend`・`enforcement`・`sandboxed`を出す（`actor_executions`）。今は全て`host`・`advisory`・`false`で、host実行がsandboxではないことをここでも明示する。
+- `status`と`doctor`（要約と`--full`）は`actors`に、AI actor（`TrustLevel`が`untrusted_agent`のrole: inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・observer）ごとの`role`・`backend`・`enforcement`・`sandboxed`を出す（`actor_executions`）。今は全て`host`・`advisory`・`false`で、host実行がsandboxではないことをここでも明示する。roleの行の`enforcement`はそのactorへの最も弱い強制で、workerの行も`advisory`のまま（Claudeのworkerがいつでも動きうるため）。
+  - 生きている（pidが生きている）登録されたsupervisorのどれかの`providers`（`supervisors[].providers`）でCodexが使える（`found`で、動かすmodeがある）ときだけ、workerの行に`providers`の配列を足す: 使えるproviderごとの`provider`・`modes`（supervisorをまたいだmodeの和）・`enforcement`・`sandboxed`で、Claudeは`advisory`、Codexは`confined`、`sandboxed`はどちらも`false`（ADR-t813-3の決定7）。例: `{"role": "worker", "backend": "host", "enforcement": "advisory", "sandboxed": false, "providers": [{"provider": "claude", "modes": ["interactive", "headless"], "enforcement": "advisory", "sandboxed": false}, {"provider": "codex", "modes": ["headless"], "enforcement": "confined", "sandboxed": false}]}`。
+  - Codexが使えない（生きているsupervisorが無い、`codex`が見つからない、動かすmodeが無い）ときは`providers`の欄ごと省き、行は前と同じ形になる。roleの行を分けずに欄を足す形にしたのは、`role`の並びと各行の`enforcement`を読む既存の読み手（testとpluginのskill）を変えないため。
 
 ### CLIでの解釈
 
