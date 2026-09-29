@@ -6,6 +6,7 @@ use super::*;
 use crate::application::prompt::REVIEW_ACCESS;
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
+use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
 use crate::domain::review_reason;
@@ -801,7 +802,9 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Start the landing of the oldest run queued by a `land` answer
-    /// ([`RunHistory::queued_approval`]): awaiting integration, nobody
+    /// ([`RunHistory::queued_approval`]) or by the recovery of a landing
+    /// it may land again (task 1118, [`RunHistory::recovered_landing`]):
+    /// awaiting integration, nobody
     /// leasing it, once a slot is free, no run integrates, and the landing
     /// would not fail on a missing program (ADR-0049 decision 9), an
     /// unresolved landing branch (ADR-t615-1) or short free disk space
@@ -829,7 +832,7 @@ impl Supervisor<'_> {
                 continue;
             }
             if let Some(approval) =
-                RunHistory::from_events(&self.queue.run_events(run.id())?).queued_approval()
+                RunHistory::from_events(&self.queue.run_events(run.id())?).queued_to_land()
             {
                 queued.push((approval, run));
             }
@@ -840,10 +843,51 @@ impl Supervisor<'_> {
         };
         let main = self.repository.main_head()?;
         let landing = self.queue.begin_integration(run.id(), &self.token, &main)?;
-        info!(run_id = %run.id(), "run {} lands onto main {main} as approved", run.id());
+        info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
         let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
         self.slots
             .push(Slot::new(landing, Phase::Landing(Some(handle))));
+        Ok(())
+    }
+    /// Review the runs recovered from a landing they may not land again
+    /// ([`RunHistory::recovered_landing`]'s `Review`, task 1118) as a run
+    /// just validated: awaiting integration, nobody leasing it, no
+    /// `approve_landing` ask of it open, while slots are free. The run is
+    /// leased to this supervisor and its review started; what follows is
+    /// that of any review (ADR-0027).
+    pub(super) fn review_recovered_runs(&mut self, parallel: usize) -> Result<()> {
+        for run in self
+            .queue
+            .runs_with_status(RunStatus::AwaitingIntegration)?
+        {
+            if self.used_slots() >= parallel {
+                break;
+            }
+            if self.queue.run_lease(run.id())?.is_some()
+                || !matches!(
+                    RunHistory::from_events(&self.queue.run_events(run.id())?).recovered_landing(),
+                    Some(RecoveredLanding::Review(_))
+                )
+                || self
+                    .queue
+                    .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?
+            {
+                continue;
+            }
+            let Some(run) = self.queue.lease_for_review(run.id(), &self.token)? else {
+                continue;
+            };
+            info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} is reviewed again: its landing was given up before it was approved or passed", run.id(), run.task_id());
+            let session = self.session_of(&run)?;
+            match self.start_review(&run, session) {
+                Ok(phase) => self.slots.push(Slot::new(run, phase)),
+                Err(error) => {
+                    let message = format!("run {} could not be reviewed: {error:#}", run.id());
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
+                    self.abandon(&run, message, &reason_of_error(&error, ReasonCode::Other));
+                }
+            }
+        }
         Ok(())
     }
     pub(super) fn apply_landing_answer(

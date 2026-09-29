@@ -17,8 +17,8 @@ mod history;
 mod recorded;
 
 pub use history::{
-    AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
-    after_validation, decide_conflict, decide_revise, run_attention_of,
+    AfterValidation, ConflictDecision, Park, ParkCause, RecoveredLanding, ResumedSession,
+    ReviseDecision, RunHistory, after_validation, decide_conflict, decide_revise, run_attention_of,
 };
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_exhausted_resumes,

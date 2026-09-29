@@ -149,6 +149,54 @@ impl SqliteQueue {
         Ok(Some(result))
     }
 
+    /// Lease an `awaiting_integration` run nobody holds (no lease row, or
+    /// a stale one, which is replaced) to `token` for its review: the run
+    /// recovered from a landing it may not land again (task 1118).
+    /// `token` becomes its supervisor and `lease_acquired` (`reason:
+    /// review`) is recorded. `Ok(None)` means another process took it or it
+    /// changed meanwhile.
+    pub fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let Some(run) = stored_run(&tx, id)?
+            .filter(|run| run.status() == crate::domain::RunStatus::AwaitingIntegration)
+        else {
+            return Ok(None);
+        };
+        let lease = tx
+            .query_row(
+                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+                [id],
+                lease_row,
+            )
+            .optional()?;
+        if let Some(lease) = &lease {
+            if !lease_is_stale(lease, now) {
+                return Ok(None);
+            }
+            tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        }
+        tx.execute(
+            "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
+            params![id, token, std::process::id(), now],
+        )?;
+        tx.execute(
+            "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
+            params![id, token],
+        )?;
+        run_event(
+            &tx,
+            id,
+            EventKind::LeaseAcquired,
+            json!({"pid": std::process::id(), "reason": "review", "previous_token": lease.map(|l| l.token)}),
+        )?;
+        let run = stored_run(&tx, id)?.unwrap_or(run);
+        tx.commit()?;
+        Ok(Some(run.relocated(&self.runs_dir)))
+    }
+
     /// Recovery of an orphaned run (the supervisor's, or `recover` by hand). The caller has checked that the
     /// registered processes are dead; `checked_processes` guards against a
     /// registration that happened in between, and a fresh lease is refused here
@@ -908,6 +956,9 @@ impl RunRecovery for SqliteQueue {
         report: serde_json::Value,
     ) -> Result<TaskRun> {
         SqliteQueue::recover_run(self, id, checked_processes, report)
+    }
+    fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        SqliteQueue::lease_for_review(self, id, token)
     }
     fn runs_to_triage(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::runs_to_triage(self)

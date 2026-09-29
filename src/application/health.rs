@@ -839,25 +839,34 @@ pub fn attention(
             continue;
         }
         let events = queue.run_events(run.id())?;
-        // A run a `land` answer approved waits for the supervisor to land
-        // it (task 949), not for a person's `integrate`.
-        if run.status() == RunStatus::AwaitingIntegration
-            && !leased
-            && RunHistory::from_events(&events).queued_approval().is_some()
-        {
-            attention.push(Attention {
-                run_id: Some(run.id().clone()),
-                task_id: Some(run.task_id()),
-                pid: None,
-                ask_id: None,
-                reason_category: None,
-                status: run.status().as_str().into(),
-                kind: event_kind::LANDING_QUEUED.to_owned(),
-                last_error: None,
-                last_error_code: None,
-                next: AttentionNext::QueuedToLand,
-            });
-            continue;
+        // A run a `land` answer approved, or one recovered from a landing
+        // it may land again, waits for the supervisor to land it (tasks 949
+        // and 1118), not for a person's `integrate`; one recovered from a
+        // landing it may not land again waits for the supervisor's review.
+        if run.status() == RunStatus::AwaitingIntegration && !leased {
+            let history = RunHistory::from_events(&events);
+            let waits = if history.queued_to_land().is_some() {
+                Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
+            } else if history.recovered_landing().is_some() {
+                Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
+            } else {
+                None
+            };
+            if let Some((kind, next)) = waits {
+                attention.push(Attention {
+                    run_id: Some(run.id().clone()),
+                    task_id: Some(run.task_id()),
+                    pid: None,
+                    ask_id: None,
+                    reason_category: None,
+                    status: run.status().as_str().into(),
+                    kind: kind.to_owned(),
+                    last_error: None,
+                    last_error_code: None,
+                    next,
+                });
+                continue;
+            }
         }
         // A live session whose recovery job failed under a runtime from
         // before ADR-t609-1 waits for a person to recover it by hand

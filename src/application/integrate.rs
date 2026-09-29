@@ -379,11 +379,7 @@ pub fn landing_refusal(
             run.status().as_str()
         ));
     }
-    let history = RunHistory::from_events(events);
-    let passed = history
-        .last(event_kind::REVIEW_FINISHED)
-        .is_some_and(|review| review.payload["verdict"] == "pass");
-    if !history.approved() && !passed {
+    if !RunHistory::from_events(events).landable() {
         return Some("the run was neither approved to land nor passed its latest review".into());
     }
     None
@@ -1051,6 +1047,15 @@ fn land(
             detail: code.on(detail),
         })
     };
+    // A landing that moved main before whoever landed it stopped (task
+    // 1118) is not landed a second time: its commit is recorded as landed.
+    if let Some((commit, parent)) = repository.landed_run_commit(
+        run.base_commit().as_str(),
+        main.as_str(),
+        run.id().as_str(),
+    )? {
+        return landed_before(queue, repository, files, task, run, main, commit, parent);
+    }
     let worktree = Path::new(run.worktree_path().context("missing worktree")?);
     ensure!(
         files.is_dir(worktree),
@@ -1149,7 +1154,12 @@ fn land(
             "receipt": serde_json::to_value(&receipt)?,
         }),
     )?;
-    if !receipt.names_commit(head.as_str()) {
+    // A landing that stopped after its rebase left the rebased head: the
+    // receipt still describes it (task 1118).
+    if !receipt.names_commit(head.as_str())
+        && !RunHistory::from_events(&queue.run_events(run.id())?)
+            .landing_rewrote(receipt.commit(), head.as_str())
+    {
         return defer(
             ReasonCode::CommitMismatch.into(),
             format!(
@@ -1414,6 +1424,60 @@ fn land(
             verification_skipped: false,
         },
         receipt.into_follow_ups(),
+    ))
+}
+
+/// The landing of `run` a landing before this one put on `main` as
+/// `commit` (on `parent`), and stopped before it recorded it (task 1118):
+/// recorded as `auto_repaired` (`repair: landing_found_on_main`) and
+/// returned as landed without a rebase, a verification or a new commit,
+/// so the run is integrated, `main` pushed and the receipt's follow-ups
+/// registered as after any landing.
+#[allow(clippy::too_many_arguments)]
+fn landed_before(
+    queue: &mut dyn Queue,
+    repository: &dyn Repository,
+    files: &dyn RunFiles,
+    task: &Task,
+    run: &TaskRun,
+    main: &CommitSha,
+    commit: CommitSha,
+    parent: CommitSha,
+) -> Result<Verdict> {
+    warn!(op = "integrate", commit = %commit, "run {} already landed on main as {commit}; it is recorded as landed, not landed again", run.id());
+    queue.record_runtime_event(
+        run.id(),
+        EventKind::AutoRepaired,
+        json!({
+            "layer": "runtime",
+            "repair": "landing_found_on_main",
+            "conditions": {"commit": commit, "main": main},
+            "detail": {"main_before": parent},
+        }),
+    )?;
+    let receipt = run
+        .receipt_path()
+        .and_then(|path| files.read_to_string(Path::new(path)).ok())
+        .and_then(|text| Receipt::parse(&text).ok());
+    let source_commit = run
+        .worktree_path()
+        .map(Path::new)
+        .filter(|worktree| files.is_dir(worktree))
+        .and_then(|worktree| repository.head(worktree).ok())
+        .unwrap_or_else(|| commit.clone());
+    Ok(Verdict::Landed(
+        Landing {
+            message: receipt
+                .as_ref()
+                .map(|receipt| commit_message(task, run, receipt).join("\n\n"))
+                .unwrap_or_default(),
+            commit,
+            source_commit,
+            main_before: parent,
+            history_ref: format!("refs/dagq/runs/{}", run.id()),
+            verification_skipped: false,
+        },
+        receipt.and_then(Receipt::into_follow_ups),
     ))
 }
 

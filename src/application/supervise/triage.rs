@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
@@ -24,11 +25,13 @@ impl Supervisor<'_> {
     /// dead supervisor left behind with its session). They become
     /// `interrupted` with `run_recovered` (`by: supervisor`) and go to the
     /// triage, never straight to `ready`. A run that changed meanwhile is
-    /// left for a later pass.
+    /// left for a later pass. An `integrating` run whose landing nobody
+    /// carries on is released instead ([`Self::release_dead_landing`]).
     pub(super) fn recover_dead_runs(&mut self) -> Result<()> {
         let now = self.generators.clock.now();
         for run in self.queue.active_runs()? {
             if run.status() == RunStatus::Integrating {
+                self.release_dead_landing(&run, now)?;
                 continue;
             }
             let processes = self.queue.processes(run.id())?;
@@ -62,6 +65,120 @@ impl Supervisor<'_> {
                 }
             }
         }
+        Ok(())
+    }
+    /// [`Self::release_dead_landing`] of every `integrating` run, for a
+    /// supervisor that drains and recovers nothing else.
+    pub(super) fn release_dead_landings(&mut self) -> Result<()> {
+        let now = self.generators.clock.now();
+        for run in self.queue.runs_with_status(RunStatus::Integrating)? {
+            self.release_dead_landing(&run, now)?;
+        }
+        Ok(())
+    }
+    /// Give back the integration slot an `integrating` run holds while
+    /// nobody lands it (task 1118): its lease row is missing, or its lease
+    /// is stale (as [`Self::adopt_stale_runs`] judges it) with its pid dead,
+    /// and `recover`'s own check passes (no registered process of the run
+    /// alive, the lease's heartbeat older than the limit), and no process
+    /// works in its worktree (a verification command the dead landing left
+    /// running). The run goes back to `awaiting_integration` unleased with
+    /// `run_recovered` (`by: supervisor`), and `auto_repaired` (`repair:
+    /// landing_released`) says what follows from its history
+    /// ([`RunHistory::recovered_landing`]): an approved or passed run waits
+    /// to land again (`landing_queued`, `via: recover`,
+    /// [`Self::start_approved_landings`]), any other is reviewed
+    /// ([`Self::review_recovered_runs`]). Whether its landing reached
+    /// `main` already is the Integrator's to find when it lands it again.
+    fn release_dead_landing(&mut self, run: &TaskRun, now: i64) -> Result<()> {
+        let processes = self.queue.processes(run.id())?;
+        let lease = match self.queue.run_lease(run.id())? {
+            None => None,
+            Some(lease) => {
+                if !self.lease_stale(&lease, now) || self.processes.alive(lease.pid) {
+                    return Ok(());
+                }
+                Some(lease_health(&lease, now, &*self.processes))
+            }
+        };
+        let leased = lease.as_ref().map(|lease| lease.pid);
+        let health = run_health(run, &processes, lease, now, &*self.processes, &*self.files);
+        if !health.recoverable {
+            return Ok(());
+        }
+        // Children of the dead landing (its verification) outlive it.
+        let Some(worktree) = run.worktree_path().map(Path::new) else {
+            return Ok(());
+        };
+        let working = match self.processes.list() {
+            Ok(all) => run_processes(&all, worktree, None, None, std::process::id())
+                .into_iter()
+                .map(|p| p.pid)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {} is integrating under a dead supervisor, but the processes in its worktree could not be listed: {error:#}; it is left integrating for a later pass", run.id());
+                return Ok(());
+            }
+        };
+        if !working.is_empty() {
+            info!(run_id = %run.id(), "run {} is integrating under a dead supervisor, but processes {working:?} still work in its worktree; it is released once they end", run.id());
+            return Ok(());
+        }
+        let report = json!({"run": health, "by": "supervisor"});
+        let recovered = match self.queue.recover_run(run.id(), processes.len(), report) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {} could not be recovered: {error:#}", run.id());
+                return Ok(());
+            }
+        };
+        let events = self.queue.run_events(run.id())?;
+        let history = RunHistory::from_events(&events);
+        // Another supervisor released it first: its records stand.
+        if history
+            .last(event_kind::RUN_RECOVERED)
+            .is_none_or(|e| e.payload["previous_status"] != RunStatus::Integrating.as_str())
+        {
+            return Ok(());
+        }
+        let then = match history.recovered_landing() {
+            Some(RecoveredLanding::Land(_)) => "land",
+            _ => "review",
+        };
+        let noted = self
+            .queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::AutoRepaired,
+                json!({
+                    "layer": "runtime",
+                    "repair": "landing_released",
+                    "conditions": {
+                        "lease": if leased.is_some() { "stale" } else { "none" },
+                        "supervisor_pid": leased,
+                        "worktree_processes": 0,
+                        "review_passed": history
+                            .last(event_kind::REVIEW_FINISHED)
+                            .is_some_and(|review| review.payload["verdict"] == "pass"),
+                        "approved": history.approved(),
+                    },
+                    "detail": {"then": then, "status": recovered.status().as_str()},
+                }),
+            )
+            .and_then(|_| {
+                if then == "land" {
+                    self.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::LandingQueued,
+                        json!({"via": "recover"}),
+                    )?;
+                }
+                Ok(())
+            });
+        if let Err(error) = noted {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its release could not be recorded: {error:#}", run.id());
+        }
+        info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} gave back the integration slot: its landing's supervisor is gone; it goes to {then} again", run.id(), run.task_id());
         Ok(())
     }
     /// Apply the answered `decide` asks of the recovery job (an option the

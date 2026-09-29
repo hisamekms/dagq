@@ -78,6 +78,16 @@ pub struct Park<'a> {
     pub reason: Option<&'a str>,
 }
 
+/// What becomes of a run recovered from `integrating`
+/// ([`RunHistory::recovered_landing`]), with its `run_recovered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveredLanding {
+    /// Approved or passed: it waits to land again, without a person.
+    Land(EventId),
+    /// Neither: the supervisor reviews it, as a run just validated.
+    Review(EventId),
+}
+
 /// The session an accepted run keeps open after its last resume (ADR-0027).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumedSession<'a> {
@@ -152,8 +162,15 @@ impl<'a> RunHistory<'a> {
             e.kind == event_kind::INTEGRATION_APPROVED
                 && e.payload.get("ask_id").is_some_and(|id| !id.is_null())
         })?;
-        let moved_on = self.events.iter().any(|e| {
-            e.id > approved.id
+        (!self.moved_on_after(approved.id)).then_some(approved.id)
+    }
+
+    /// Whether something after event `id` started a landing, a review or a
+    /// resume, decided the landing, or opened an `approve_landing` ask: a
+    /// run queued by that event is not queued any more.
+    fn moved_on_after(&self, id: EventId) -> bool {
+        self.events.iter().any(|e| {
+            e.id > id
                 && (matches!(
                     e.kind.as_str(),
                     event_kind::INTEGRATION_STARTED
@@ -162,8 +179,73 @@ impl<'a> RunHistory<'a> {
                         | event_kind::LANDING_DECIDED
                 ) || e.kind == event_kind::ASK_OPENED
                     && e.payload.get("kind").and_then(Value::as_str) == Some("approve_landing"))
-        });
-        (!moved_on).then_some(approved.id)
+        })
+    }
+
+    /// What the supervisor does with a run whose landing was given up
+    /// while it was `integrating` (task 1118): the latest `run_recovered`
+    /// with `previous_status: integrating` (the supervisor's, or a
+    /// person's `recover`) when nothing moved on from it
+    /// ([`Self::moved_on_after`]). The run lands again when the Integrator
+    /// would land it ([`Self::landable`]), and is reviewed
+    /// otherwise. `None` when the run was not recovered so.
+    pub fn recovered_landing(&self) -> Option<RecoveredLanding> {
+        let recovered = self.events.iter().rev().find(|e| {
+            e.kind == event_kind::RUN_RECOVERED
+                && e.payload.get("previous_status").and_then(Value::as_str)
+                    == Some(RunStatus::Integrating.as_str())
+        })?;
+        if self.moved_on_after(recovered.id) {
+            return None;
+        }
+        Some(if self.landable() {
+            RecoveredLanding::Land(recovered.id)
+        } else {
+            RecoveredLanding::Review(recovered.id)
+        })
+    }
+
+    /// The event that queues the run to land without a person, the oldest
+    /// first: a `land` answer ([`Self::queued_approval`]) or the recovery
+    /// of a landing it may land again ([`Self::recovered_landing`]).
+    pub fn queued_to_land(&self) -> Option<EventId> {
+        self.queued_approval()
+            .or_else(|| match self.recovered_landing() {
+                Some(RecoveredLanding::Land(id)) => Some(id),
+                _ => None,
+            })
+    }
+
+    /// Whether `head` is what earlier landings of the run made of the
+    /// receipt's `commit` (task 1118): the chain of their rebases
+    /// (`integration_rebased`) and migration renumberings
+    /// (`migration_renumbered`), oldest first, each from the head the
+    /// previous one left, leads from `commit` to `head`. A landing that
+    /// stopped after its rebase left the worktree there.
+    pub fn landing_rewrote(&self, commit: &str, head: &str) -> bool {
+        let mut current = commit.to_ascii_lowercase();
+        for event in self.events.iter().filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                event_kind::INTEGRATION_REBASED | event_kind::MIGRATION_RENUMBERED
+            )
+        }) {
+            if event.payload["head_before"].as_str() == Some(current.as_str())
+                && let Some(after) = event.payload["head_after"].as_str()
+            {
+                current = after.to_owned();
+            }
+        }
+        current != commit.to_ascii_lowercase() && current == head
+    }
+
+    /// Whether the Integrator lands the run at a request (ADR-t728-2
+    /// decision 3): it was approved to land, or passed its latest review.
+    pub fn landable(&self) -> bool {
+        self.approved()
+            || self
+                .last(event_kind::REVIEW_FINISHED)
+                .is_some_and(|review| review.payload["verdict"] == "pass")
     }
 
     /// Whether `integration_approved` was recorded for the answer of ask
@@ -726,6 +808,80 @@ mod tests {
         assert!(!history.landing_pushes());
         let events = vec![event(1, "integration_approved", json!({"push": true}))];
         assert!(RunHistory::from_events(&events).landing_pushes());
+    }
+
+    #[test]
+    fn a_run_recovered_from_integrating_lands_again_when_landable_else_is_reviewed() {
+        let recovered =
+            |id: i64, from: &str| event(id, "run_recovered", json!({"previous_status": from}));
+        let passed =
+            |id: i64, verdict: &str| event(id, "review_finished", json!({"verdict": verdict}));
+        let of = |events: &[RunEvent]| {
+            let history = RunHistory::from_events(events);
+            (history.recovered_landing(), history.queued_to_land())
+        };
+        assert_eq!(of(&[passed(1, "pass")]), (None, None));
+        // Only a landing given up counts, not a review a dead supervisor left.
+        assert_eq!(
+            of(&[passed(1, "pass"), recovered(2, "awaiting_integration")]),
+            (None, None)
+        );
+        let events = [
+            passed(1, "pass"),
+            event(2, "integration_started", json!({})),
+            recovered(3, "integrating"),
+        ];
+        let land = Some(RecoveredLanding::Land(EventId::new(3)));
+        assert_eq!(of(&events), (land, Some(EventId::new(3))));
+        // An approval lands it whatever the review said.
+        let events = [
+            passed(1, "concern"),
+            event(2, "integration_approved", json!({})),
+            recovered(3, "integrating"),
+        ];
+        assert_eq!(of(&events), (land, Some(EventId::new(3))));
+        // A run neither approved nor passed is reviewed, and not queued.
+        let events = [passed(1, "concern"), recovered(2, "integrating")];
+        assert_eq!(
+            of(&events),
+            (Some(RecoveredLanding::Review(EventId::new(2))), None)
+        );
+        // Once something moved on from it, the recovery queues nothing.
+        for kind in ["integration_started", "review_started", "resume_started"] {
+            let events = [
+                passed(1, "pass"),
+                recovered(2, "integrating"),
+                event(3, kind, json!({})),
+            ];
+            assert_eq!(of(&events), (None, None), "{kind}");
+        }
+    }
+
+    #[test]
+    fn landing_rewrote_follows_the_landings_rebases_from_the_receipt_commit() {
+        let rebased = |id: i64, before: &str, after: &str| {
+            event(
+                id,
+                "integration_rebased",
+                json!({"head_before": before, "head_after": after}),
+            )
+        };
+        let events = [
+            rebased(1, "aaa", "bbb"),
+            event(
+                2,
+                "migration_renumbered",
+                json!({"head_before": "bbb", "head_after": "ccc"}),
+            ),
+            rebased(3, "zzz", "yyy"),
+            rebased(4, "ccc", "ddd"),
+        ];
+        let history = RunHistory::from_events(&events);
+        assert!(history.landing_rewrote("AAA", "ddd"));
+        assert!(!history.landing_rewrote("aaa", "ccc"));
+        assert!(!history.landing_rewrote("aaa", "yyy"));
+        assert!(!history.landing_rewrote("ddd", "ddd"));
+        assert!(!RunHistory::from_events(&[]).landing_rewrote("aaa", "aaa"));
     }
 
     #[test]

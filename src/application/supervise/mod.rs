@@ -1154,6 +1154,11 @@ impl Supervisor<'_> {
             if self.claiming && !stopping {
                 self.fill_slots(self.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.parallel);
+            } else {
+                // A draining supervisor still frees the integration slot a
+                // dead landing holds: its own runs waiting to land, and so
+                // the drain, would wait for it forever (task 1118).
+                self.release_dead_landings()?;
             }
             self.poll_observer();
             self.record_session_turns(false);
@@ -1267,6 +1272,11 @@ impl Supervisor<'_> {
         // resolve) is noted, and the run stays queued for a later pass.
         if let Err(error) = self.start_approved_landings(parallel) {
             warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
+        }
+        // A run recovered from a landing it may not land again is reviewed
+        // as one just validated (task 1118).
+        if let Err(error) = self.review_recovered_runs(parallel) {
+            warn!(error = %format_args!("{error:#}"), "a run recovered from its landing could not start its review: {error:#}");
         }
         self.apply_triage_answers()?;
         // Resumes and triage read the landing branch: they wait with the

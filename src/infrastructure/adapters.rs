@@ -1215,6 +1215,40 @@ impl GitRepository {
         Ok(ids)
     }
 
+    /// The commit of `<base>..<head>`'s first-parent history whose
+    /// `Dagq-Run` trailer names `run`, with its first parent: where
+    /// `integrate` put that run on `main` (task 1118). `None` when no
+    /// landing of it is there.
+    pub fn landed_run_commit(
+        &self,
+        base: &str,
+        head: &str,
+        run: &str,
+    ) -> Result<Option<(CommitSha, CommitSha)>> {
+        let text = review_output(Command::new(&self.git).arg("-C").arg(&self.root).args([
+            "log",
+            "--first-parent",
+            "--format=%H%x1f%P%x1f%(trailers:key=Dagq-Run,valueonly)%x1e",
+            &format!("{base}..{head}"),
+        ]))?;
+        for record in text.split('\x1e') {
+            let mut fields = record.trim_start_matches('\n').split('\x1f');
+            let (Some(commit), Some(parents), Some(trailers)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if trailers.lines().any(|value| value.trim() == run) {
+                let parent = parents.split_whitespace().next().unwrap_or_default();
+                return Ok(Some((
+                    object_id(commit, "landed commit")?,
+                    object_id(parent, "landed commit's parent")?,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     /// `git diff <args> <base>...<head>`: the change since the merge base,
     /// without color, external diff drivers or textconv filters.
     fn diff_since(&self, base: &str, head: &str, args: &[&str]) -> Command {
@@ -1851,6 +1885,14 @@ impl Repository for GitRepository {
     }
     fn landed_task_ids(&self, base: &str, head: &str) -> Result<Vec<TaskId>> {
         GitRepository::landed_task_ids(self, base, head)
+    }
+    fn landed_run_commit(
+        &self,
+        base: &str,
+        head: &str,
+        run: &str,
+    ) -> Result<Option<(CommitSha, CommitSha)>> {
+        GitRepository::landed_run_commit(self, base, head, run)
     }
 }
 

@@ -1501,6 +1501,10 @@ pub trait RunRecovery {
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>>;
+    /// Lease an `awaiting_integration` run nobody holds (or whose lease
+    /// is stale) to `token` for its review; `None` when another process
+    /// took it or it changed meanwhile.
+    fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
     /// Recover an orphaned run whose `checked_processes` registered
     /// processes the caller found dead.
     fn recover_run(
@@ -2720,6 +2724,18 @@ pub trait Repository {
     /// The tasks landed between two commits, oldest first, from their
     /// `Dagq-Task` trailers.
     fn landed_task_ids(&self, base: &str, head: &str) -> Result<Vec<TaskId>>;
+    /// The commit of `<base>..<head>`'s first-parent history that landed
+    /// run `run` (its `Dagq-Run` trailer), with its first parent; `None`
+    /// when none did. A repository that cannot tell finds none.
+    fn landed_run_commit(
+        &self,
+        base: &str,
+        head: &str,
+        run: &str,
+    ) -> Result<Option<(CommitSha, CommitSha)>> {
+        let _ = (base, head, run);
+        Ok(None)
+    }
     /// `git log --oneline <base>..<head>`.
     fn log_oneline(&self, base: &str, head: &str) -> Result<String>;
     /// `git diff --stat <base>...<head>`.

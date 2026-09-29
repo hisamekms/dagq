@@ -783,8 +783,9 @@ pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
 pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason, required_of};
 pub use run::{
-    AfterValidation, ConflictDecision, Park, ParkCause, ResumedSession, ReviseDecision, RunHistory,
-    TaskRun, after_validation, decide_conflict, decide_revise, run_attention_of,
+    AfterValidation, ConflictDecision, Park, ParkCause, RecoveredLanding, ResumedSession,
+    ReviseDecision, RunHistory, TaskRun, after_validation, decide_conflict, decide_revise,
+    run_attention_of,
 };
 pub use task::{Task, TaskAction};
 pub use views::{

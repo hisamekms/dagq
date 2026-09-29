@@ -675,7 +675,9 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
 }
 
 /// An `integrating` run is never adopted, however stale its lease: a
-/// crashed landing is `recover`'s case and goes back to the merge queue.
+/// crashed landing gives the integration slot back instead (task 1118),
+/// and the run, whose failed review waits in its `approve_landing` ask,
+/// is left awaiting integration for that ask.
 #[test]
 fn integrating_run_with_a_stale_lease_is_not_adopted() {
     let (_dir, repo, db, run) = awaiting_run();
@@ -695,14 +697,19 @@ fn integrating_run_with_a_stale_lease_is_not_adopted() {
     assert_eq!(outcome["errors"], json!([]));
     assert_eq!(
         queue.run(run.id()).unwrap().status(),
-        RunStatus::Integrating
+        RunStatus::AwaitingIntegration
     );
-    assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, "crashed");
-    assert!(adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty());
-    assert_eq!(
-        runtime::recover(&db, run.id()).unwrap()["run"]["status"],
-        "awaiting_integration"
-    );
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(adoption_events(&detail).is_empty());
+    let recovered = payloads(&detail, "run_recovered");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0]["previous_status"], "integrating");
+    assert_eq!(recovered[0]["by"], "supervisor");
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].kind, AskKind::ApproveLanding);
+    assert_eq!(payloads(&detail, "review_started").len(), 2);
 }
 
 /// The previous supervisor already asked the session to exit: the adopter
