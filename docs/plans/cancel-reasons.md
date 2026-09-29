@@ -4,7 +4,7 @@ type: plan
 title: task の cancel の理由の分類と、ラベルの定義案
 status: completed
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-09-30
 owners:
   - hisamekms
 tags:
@@ -33,7 +33,7 @@ task 952（goal 64）。canceled の task を 1 件ずつ読み、cancel の理�
 - **全期間の分類は、作り直し 58、重複 62、実装済み 21、取り込み 40、方針の変更で不要 26、費用に見合わない 49、判断の依頼が不要 11、repository の作業でない 13、放置で古くなった 2**。runtime の planner の後は、重複（54）と費用に見合わない（43）が大きく、合わせて 58%。
 - **作り直し（58 件）は 2026-09-25 より前だけに起きた**。draft に verify・evidence・paths を後から付けるコマンドが無く、同じ中身を新しい ID で登録し直していた（09-24 22:07〜22:11 の draft 棚卸しで cancel された 42 件のうち 27 件）ほか、ADR の 4 桁の番号の衝突（212・213・215・261）で作り直した。`task_edited`（最初は 09-25 11:22 UTC）と `set-paths`、[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md) の ADR の ID の後は 0 件。
 - **run を使ってから cancel したのは 2 件（44 分）だけ**。58（e2e の失敗で validating が受理せず、75 として登録し直し、13 分）と 74（`/exit` の時間切れから recover し、101 として登録し直し、31 分）で、どちらも 2026-09-23。無駄の中心は run ではなく計画の側にある: runtime の planner を 160 回（canceled の draft に対する `draft_planner_opened`）、plan review を 10 回、submit を 20 回使い、29 件は ready の状態で（ほかに 2 件は in_progress で）cancel された。
-- **plan review は cancel しない**。plan review の verdict の `actions` は `add_dependency` と `lower_priority` だけで、cancel はすべて planner（人が開いたものか runtime が立てたもの）か、actor の記録が入る前（2026-09-27 09:13 UTC より前の 205 件）の人と planner の対話による。plan review の判断は、revise の理由として planner の cancel に効いた（456・457 など）。
+- **期間中に plan review が cancel した記録は無い**。plan review の verdict の `actions` には `add_dependency`・`lower_priority` のほかに、pass のときに `cancel --duplicate-of` と同じ記録で明らかな重複を cancel する `cancel_duplicate` もある（[Plan review](../design/supervisor-lifecycle/plan-review.md) の 5）が、期間中の `plan_review_finished` の `actions` は `add_dependency` と `lower_priority` だけで `cancel_duplicate` は 0 件だった（task 998 が 2026-09-30 に `dagq events --full --all --kind plan_review_finished` で確かめた。この時点までの全 436 件でも 0 件）。cancel はすべて planner（人が開いたものか runtime が立てたもの。actor の記録のある 77 件はどれも `planner`）か、actor の記録が入る前（2026-09-27 09:13 UTC より前の 205 件）の人と planner の対話による。plan review の判断は、revise の理由として planner の cancel に効いた（456・457 など）。
 
 ## 方法
 
