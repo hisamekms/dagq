@@ -399,7 +399,17 @@ fn resume_taken_over_after_a_retry(handoff: bool, answered: bool) {
         &backend,
         &SuperviseOptions {
             handoff_token: handoff.then(|| LeaseToken::new(token)),
-            ..retrying(2, Duration::from_millis(300))
+            // The second retry is due at the takeover (the first was 30
+            // seconds ago). The wait after it is long: the retries are used
+            // up at its end, and the session, released just before the
+            // takeover, has to resolve, write its receipt and exit on that
+            // retry's `/exit` before then for it to count as `exit_retry`.
+            // Under load that took longer than a short wait (task 1043).
+            exit: Some(ExitConfig {
+                retries: 2,
+                intervals: vec![Duration::from_millis(300), Duration::from_secs(60)],
+            }),
+            ..supervise_options(4, true)
         },
     );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
