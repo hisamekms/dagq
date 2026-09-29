@@ -62,8 +62,9 @@ enum Command {
     /// rename that keeps the old one as <name>.previous, and ask the supervisor to exec it. A
     /// failed handoff puts the old binary back.
     Install {
-        /// A checkout to build (`cargo build --release --locked -p dagq`), or a built binary. Default:
-        /// build the main checkout of the repository of the working directory.
+        /// A checkout to build (`cargo build --release --locked -p dagq -p dagq-broker-client`), or a
+        /// built binary; the dagq-broker-client beside it goes in place beside dagq. Default: build
+        /// the main checkout of the repository of the working directory.
         #[arg(long, conflicts_with_all = ["rollback", "release"])]
         from: Option<PathBuf>,
         /// Install a release of crates.io instead (ADR-t618-1): `cargo install --locked
@@ -632,8 +633,9 @@ enum Command {
         /// Seconds between two looks at main for the automatic update.
         #[arg(long, default_value_t = 30)]
         update_interval: u64,
-        /// A shell command the automatic update runs in place of `cargo build --release --locked -p dagq`
-        /// (tests); it must leave the binary at $CARGO_TARGET_DIR/release/dagq.
+        /// A shell command the automatic update runs in place of `cargo build --release --locked -p
+        /// dagq -p dagq-broker-client` (tests); it must leave the binary at
+        /// $CARGO_TARGET_DIR/release/dagq (and the client beside it, when there is one).
         #[arg(long, hide = true)]
         update_build_command: Option<String>,
         /// A shell command the automatic update runs in place of its e2e gate (`cargo test --locked

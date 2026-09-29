@@ -3,13 +3,18 @@
 # (src/infrastructure/broker_podman.rs `stage_context`): this file, the
 # sources of dagq-broker-protocol and dagq-broker, Cargo.lock, and a
 # workspace manifest narrowed to those two crates. It builds in dagq's own
-# Podman machine with `--build-arg RUST_VERSION` (from rust-toolchain.toml)
-# and `--build-arg CARGO_BUILD_JOBS=1` (the machine is small).
+# Podman machine with `--build-arg RUST_VERSION` (from rust-toolchain.toml),
+# `--build-arg CARGO_BUILD_JOBS=1` (the machine is small) and
+# `--build-arg DAGQ_BROKER_IMAGE_BUILD=<dagq's build identifier>`.
 
 ARG RUST_VERSION=1.98.1
 
 FROM docker.io/library/rust:${RUST_VERSION}-alpine AS build
 ARG CARGO_BUILD_JOBS=1
+# dagq's build identifier (`--build-arg DAGQ_BROKER_IMAGE_BUILD`): the build
+# stage has no Git, so the server embeds this one and its health names the
+# build of the dagq that built the image (ADR-t827-1 decision 7).
+ARG DAGQ_BROKER_IMAGE_BUILD=
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY . .

@@ -46,6 +46,88 @@ pub const CONTAINER_LISTEN: &str = "0.0.0.0";
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// The build's parallelism in the image's build stage.
 pub const BUILD_JOBS: u32 = 1;
+/// The build argument that gives the image's build stage dagq's build
+/// identifier, which the server embeds in place of its own (the build stage
+/// has no Git), so its health names dagq's build.
+pub const IMAGE_BUILD_ARG: &str = dagq_broker_protocol::build_id::GIVEN_ENV;
+/// The file name of the worker's client, next to `dagq` (ADR-t827-1
+/// decision 5).
+pub const CLIENT_BINARY: &str = "dagq-broker-client";
+
+/// The client that goes with the `dagq` at `dagq`: `dagq-broker-client` in
+/// the same directory.
+pub fn client_path(dagq: &Path) -> PathBuf {
+    dagq.with_file_name(CLIENT_BINARY)
+}
+
+/// The client dagq hands a worker (ADR-t827-1 decisions 5 and 7): the one
+/// next to the `dagq` at `dagq`, and only when its build identifier
+/// (`version`, its `--version`) is `build`, dagq's own. A missing client or
+/// one of another build is a [`BrokerFailure`], never a fallback to it.
+pub fn resolve_client(
+    dagq: &Path,
+    build: &str,
+    version: &dyn Fn(&Path) -> Result<String, String>,
+) -> BrokerResult<PathBuf> {
+    let client = client_path(dagq);
+    if !client.is_file() {
+        return Err(BrokerFailure::new(
+            FailureCode::ClientMissing,
+            format!(
+                "no {CLIENT_BINARY} at {}: install puts it next to dagq",
+                client.display()
+            ),
+        ));
+    }
+    match version(&client) {
+        Ok(found) if found == build => Ok(client),
+        Ok(found) => Err(BrokerFailure::new(
+            FailureCode::VersionMismatch,
+            format!(
+                "{} is build {found}, not dagq's {build}: run `dagq install` to put both in place",
+                client.display()
+            ),
+        )),
+        Err(error) => Err(BrokerFailure::new(
+            FailureCode::VersionMismatch,
+            format!("{} does not report its build: {error}", client.display()),
+        )),
+    }
+}
+
+/// The client as `status` and `doctor` report it: where it is looked for,
+/// the build it names, and whether dagq would use it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClientReport {
+    pub path: PathBuf,
+    pub build: Option<String>,
+    pub matches: bool,
+    pub error: Option<Value>,
+}
+
+/// [`resolve_client`] as a [`ClientReport`].
+pub fn client_report(
+    dagq: &Path,
+    build: &str,
+    version: &dyn Fn(&Path) -> Result<String, String>,
+) -> ClientReport {
+    let path = client_path(dagq);
+    let found = path.is_file().then(|| version(&path).ok()).flatten();
+    match resolve_client(dagq, build, version) {
+        Ok(path) => ClientReport {
+            path,
+            build: found,
+            matches: true,
+            error: None,
+        },
+        Err(failure) => ClientReport {
+            path,
+            build: found,
+            matches: false,
+            error: Some(failure.to_json()),
+        },
+    }
+}
 
 /// Why a broker step failed, as `dagq broker` and a later status report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +153,11 @@ pub enum FailureCode {
     /// The queue belongs to no repository dagq knows, so the Git common
     /// dir to mount is unknown.
     RepositoryUnknown,
+    /// No `dagq-broker-client` next to dagq (ADR-t827-1 decision 5).
+    ClientMissing,
+    /// The client, or the broker's health, names another build than
+    /// dagq's: dagq does not use it (fail closed, ADR-t827-1 decision 7).
+    VersionMismatch,
 }
 
 impl FailureCode {
@@ -85,6 +172,8 @@ impl FailureCode {
             Self::ContainerFailed => "container_failed",
             Self::Unhealthy => "unhealthy",
             Self::RepositoryUnknown => "repository_unknown",
+            Self::ClientMissing => "client_missing",
+            Self::VersionMismatch => "version_mismatch",
         }
     }
 }
@@ -463,14 +552,23 @@ pub trait ImageSource {
     fn stage(&self, dir: &Path) -> BrokerResult<String>;
 }
 
-/// `podman build` of `image` from the context in `context`.
-pub fn build_args(machine: &str, image: &str, rust_version: &str, context: &Path) -> Vec<String> {
+/// `podman build` of `image` for dagq's build `build` from the context in
+/// `context`.
+pub fn build_args(
+    machine: &str,
+    image: &str,
+    build: &str,
+    rust_version: &str,
+    context: &Path,
+) -> Vec<String> {
     let mut all = on_machine(machine, &["build"]);
     all.extend([
         "--build-arg".to_owned(),
         format!("RUST_VERSION={rust_version}"),
         "--build-arg".to_owned(),
         format!("CARGO_BUILD_JOBS={BUILD_JOBS}"),
+        "--build-arg".to_owned(),
+        format!("{IMAGE_BUILD_ARG}={build}"),
         "--tag".to_owned(),
         image.to_owned(),
         "--file".to_owned(),
@@ -489,11 +587,13 @@ pub fn image_exists(podman: &dyn Podman, machine: &str, image: &str) -> BrokerRe
     )
 }
 
-/// Build `image` unless the machine has it; `true` when it built.
+/// Build `image` of dagq's build `build` unless the machine has it; `true`
+/// when it built.
 pub fn ensure_image(
     podman: &dyn Podman,
     machine: &str,
     image: &str,
+    build: &str,
     source: &dyn ImageSource,
     scratch: &Path,
 ) -> BrokerResult<bool> {
@@ -503,7 +603,7 @@ pub fn ensure_image(
     let rust_version = source.stage(scratch)?;
     checked(
         podman,
-        &build_args(machine, image, &rust_version, scratch),
+        &build_args(machine, image, build, &rust_version, scratch),
         FailureCode::ImageBuildFailed,
         &format!("podman build {image}"),
     )?;
@@ -885,6 +985,9 @@ pub struct Ports<'a> {
 pub struct StartRequest<'a> {
     pub machine: &'a MachineSpec,
     pub container: &'a ContainerSpec,
+    /// dagq's build identifier: the image is built as it, and a broker
+    /// whose health names another is not used (ADR-t827-1 decision 7).
+    pub build: &'a str,
     pub source: &'a dyn ImageSource,
     /// A dir the image's build context is staged in.
     pub scratch: &'a Path,
@@ -905,11 +1008,22 @@ pub struct StartReport {
     pub container_outcome: ContainerOutcome,
     pub port: u16,
     pub health: dagq_broker_protocol::HealthResponse,
+    /// dagq's build identifier.
+    pub build: String,
+    /// Whether the broker's health names dagq's build. Only a container kept
+    /// for the runs that hold tokens for it may not.
+    pub build_matches: bool,
+    /// The image under this build's tag answered another build, so it was
+    /// removed with its container and built again.
+    pub rebuilt: bool,
 }
 
 /// Make the queue's broker run and answer health: the machine, the image,
 /// the container, the health, in order. Each step does nothing when its
-/// part is already there, so a second call changes nothing.
+/// part is already there, so a second call changes nothing. A broker that
+/// answers another build than dagq's, while no run holds a token for it,
+/// has its image built again once; a second mismatch
+/// is a [`FailureCode::VersionMismatch`] (ADR-t827-1 decision 7).
 pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport> {
     let spec = request.container;
     // The host lock is held throughout, so a `stop` or a test's
@@ -917,20 +1031,61 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
     // (ADR-t827-3 decision 5).
     let _held = ports.host_lock.hold()?;
     let machine = ensure_machine_held(ports.podman, request.machine)?;
-    let image_built = ensure_image(
-        ports.podman,
-        &spec.machine,
-        &spec.image,
-        request.source,
-        request.scratch,
-    )?;
-    let container_outcome = ensure_container(ports.podman, spec, request.in_use)?;
-    let health = wait_healthy(
-        ports.health,
-        spec.host_port,
-        request.health_timeout,
-        request.health_interval,
-    )?;
+    let image = |podman: &dyn Podman| {
+        ensure_image(
+            podman,
+            &spec.machine,
+            &spec.image,
+            request.build,
+            request.source,
+            request.scratch,
+        )
+    };
+    let healthy = || {
+        wait_healthy(
+            ports.health,
+            spec.host_port,
+            request.health_timeout,
+            request.health_interval,
+        )
+    };
+    let mut image_built = image(ports.podman)?;
+    let mut container_outcome = ensure_container(ports.podman, spec, request.in_use)?;
+    let mut health = healthy()?;
+    let mut rebuilt = false;
+    if health.build != request.build && !container_outcome.kept_stale && !request.in_use {
+        // The image under this build's tag was built as another build (by
+        // a dagq that did not pass its build to the image, or from a
+        // checkout that had moved on): it goes with its container, and is
+        // built again from this dagq's material.
+        checked(
+            ports.podman,
+            &on_machine(&spec.machine, &["rm", "--force", &spec.name]),
+            FailureCode::ContainerFailed,
+            &format!("podman rm {}", spec.name),
+        )?;
+        checked(
+            ports.podman,
+            &on_machine(&spec.machine, &["image", "rm", "--force", &spec.image]),
+            FailureCode::PodmanFailed,
+            &format!("podman image rm {}", spec.image),
+        )?;
+        image_built = image(ports.podman)?;
+        container_outcome = ensure_container(ports.podman, spec, false)?;
+        container_outcome.replaced = true;
+        health = healthy()?;
+        rebuilt = true;
+        if health.build != request.build {
+            return Err(BrokerFailure::new(
+                FailureCode::VersionMismatch,
+                format!(
+                    "the broker built as {} answers build {}, not dagq's {}: dagq does not use it",
+                    spec.image, health.build, request.build
+                ),
+            ));
+        }
+    }
+    let build_matches = health.build == request.build;
     Ok(StartReport {
         machine,
         image: spec.image.clone(),
@@ -939,6 +1094,9 @@ pub fn start(ports: &Ports, request: &StartRequest) -> BrokerResult<StartReport>
         container_outcome,
         port: spec.host_port,
         health,
+        build: request.build.to_owned(),
+        build_matches,
+        rebuilt,
     })
 }
 
@@ -976,13 +1134,21 @@ pub struct StatusReport {
     pub container_status: Option<ContainerStatus>,
     pub port: Option<u16>,
     pub health: Option<dagq_broker_protocol::HealthResponse>,
+    /// dagq's build identifier, which the image's tag and the health's
+    /// `build` must name.
+    pub build: String,
+    /// Whether the health named dagq's build; `None` without a health.
+    pub build_matches: Option<bool>,
     pub error: Option<Value>,
 }
 
 /// Read the broker's state; changes nothing. A failure (no podman, say) is
-/// reported in `state` and `error` rather than returned.
-pub fn status(ports: &Ports, spec: &ContainerSpec, port: Option<u16>) -> StatusReport {
+/// reported in `state` and `error` rather than returned. `build` is dagq's
+/// build identifier.
+pub fn status(ports: &Ports, spec: &ContainerSpec, port: Option<u16>, build: &str) -> StatusReport {
     let mut report = StatusReport {
+        build: build.to_owned(),
+        build_matches: None,
         state: String::new(),
         machine: None,
         image: spec.image.clone(),
@@ -1036,6 +1202,7 @@ fn fill_status(
     }
     report.state = match port.map(|port| ports.health.probe(port)) {
         Some(Ok(health)) => {
+            report.build_matches = Some(health.build == report.build);
             report.health = Some(health);
             "running"
         }
@@ -1354,7 +1521,7 @@ mod tests {
             "localhost/dagq-broker:0.4.0-dev-abc"
         );
         assert_eq!(container_name("h"), "dagq-broker-h");
-        let build = build_args("dagq", "img", "1.98.1", Path::new("/ctx"));
+        let build = build_args("dagq", "img", "0.4.0-dev+abc", "1.98.1", Path::new("/ctx"));
         assert_eq!(
             build,
             [
@@ -1365,6 +1532,8 @@ mod tests {
                 "RUST_VERSION=1.98.1",
                 "--build-arg",
                 "CARGO_BUILD_JOBS=1",
+                "--build-arg",
+                "DAGQ_BROKER_IMAGE_BUILD=0.4.0-dev+abc",
                 "--tag",
                 "img",
                 "--file",
@@ -1391,7 +1560,7 @@ mod tests {
             host_lock: &lock,
             health: &health,
         };
-        let report = status(&ports, &spec(), None);
+        let report = status(&ports, &spec(), None, "b");
         assert_eq!(report.state, "podman_missing");
         assert_eq!(report.error.unwrap()["code"], "podman_missing");
         assert_eq!(
@@ -1656,25 +1825,25 @@ mod tests {
         let dir = Path::new("/scratch");
         let podman =
             Script::default().on(&["--connection", "dagq", "image", "exists"], vec![ok("")]);
-        assert!(!ensure_image(&podman, MACHINE, "img", &source, dir).unwrap());
+        assert!(!ensure_image(&podman, MACHINE, "img", "b", &source, dir).unwrap());
         assert_eq!(source.0.get(), 0);
         assert_eq!(podman.called("--connection dagq build"), 0);
 
         let podman =
             Script::default().on(&["--connection", "dagq", "image", "exists"], vec![fail("")]);
-        assert!(ensure_image(&podman, MACHINE, "img", &source, dir).unwrap());
+        assert!(ensure_image(&podman, MACHINE, "img", "b", &source, dir).unwrap());
         assert_eq!(source.0.get(), 1);
         assert!(
             podman
                 .calls()
-                .contains(&build_args(MACHINE, "img", "1.98.1", dir).join(" "))
+                .contains(&build_args(MACHINE, "img", "b", "1.98.1", dir).join(" "))
         );
 
         let podman = Script::default()
             .on(&["--connection", "dagq", "image", "exists"], vec![fail("")])
             .on(&["--connection", "dagq", "build"], vec![fail("oom")]);
         assert_eq!(
-            ensure_image(&podman, MACHINE, "img", &source, dir)
+            ensure_image(&podman, MACHINE, "img", "b", &source, dir)
                 .unwrap_err()
                 .code,
             FailureCode::ImageBuildFailed
@@ -1726,6 +1895,7 @@ mod tests {
         let request = StartRequest {
             machine: &machine,
             container: &spec,
+            build: "b",
             source: &source,
             scratch: Path::new("/scratch"),
             in_use: false,
@@ -1793,6 +1963,146 @@ mod tests {
             start(&ports, &request).unwrap_err().code,
             FailureCode::Unhealthy
         );
+    }
+
+    /// A health that answers these builds in turn (the last one again).
+    struct Builds(RefCell<VecDeque<&'static str>>);
+
+    impl HealthProbe for Builds {
+        fn probe(&self, _port: u16) -> Result<dagq_broker_protocol::HealthResponse, String> {
+            let mut builds = self.0.borrow_mut();
+            let build = if builds.len() > 1 {
+                builds.pop_front().unwrap()
+            } else {
+                builds[0]
+            };
+            Ok(dagq_broker_protocol::HealthResponse::ok(build))
+        }
+    }
+
+    #[test]
+    fn a_broker_of_another_build_is_built_again_unless_runs_hold_it() {
+        let spec = spec();
+        let machine = MachineSpec::default();
+        let lock = CountingLock::default();
+        let source = Source(Cell::new(0));
+        let request = |in_use| StartRequest {
+            machine: &machine,
+            container: &spec,
+            build: "b",
+            source: &source,
+            scratch: Path::new("/scratch"),
+            in_use,
+            health_timeout: Duration::ZERO,
+            health_interval: Duration::ZERO,
+        };
+        let rebuilding = || {
+            Script::default()
+                .on(&list(), vec![ok(RUNNING)])
+                .on(
+                    &["--connection", "dagq", "image", "exists"],
+                    vec![ok(""), fail("")],
+                )
+                .on(
+                    &["--connection", "dagq", "container", "exists"],
+                    vec![ok(""), fail("")],
+                )
+                .on(
+                    &["--connection", "dagq", "container", "inspect"],
+                    vec![inspect(true, &spec.image)],
+                )
+        };
+        // The image under this build's tag answers another build: it goes
+        // with its container and is built again, once.
+        let podman = rebuilding();
+        let health = Builds(RefCell::new(["old", "b"].into()));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request(false)).unwrap();
+        assert!(report.rebuilt && report.build_matches, "{report:?}");
+        assert!(report.image_built && report.container_outcome.created);
+        assert_eq!(report.build, "b");
+        assert_eq!(
+            podman.called(&format!(
+                "--connection dagq image rm --force {}",
+                spec.image
+            )),
+            1
+        );
+        assert_eq!(
+            podman.called("--connection dagq rm --force dagq-broker-abc123"),
+            1
+        );
+        assert_eq!(podman.called("--connection dagq build"), 1);
+        assert_eq!(source.0.get(), 1);
+
+        // Another build again after that: not used.
+        let podman = rebuilding();
+        let health = Builds(RefCell::new(["old"].into()));
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let error = start(&ports, &request(false)).unwrap_err();
+        assert_eq!(error.code, FailureCode::VersionMismatch);
+        assert!(
+            error.message.contains("answers build old, not dagq's b"),
+            "{error}"
+        );
+
+        // A container of another image kept for the runs that hold tokens
+        // for it answers its own build, and stays as it is.
+        let podman = start_script(
+            vec![ok(RUNNING)],
+            true,
+            inspect(true, "localhost/dagq-broker:old"),
+        );
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request(true)).unwrap();
+        assert!(report.container_outcome.kept_stale);
+        assert!(!report.build_matches && !report.rebuilt);
+        assert_eq!(podman.called("--connection dagq image rm"), 0);
+        assert_eq!(podman.called("--connection dagq rm"), 0);
+
+        // So does one of this build's tag that answers another build while
+        // runs hold tokens for it.
+        let podman = rebuilding();
+        let ports = Ports {
+            podman: &podman,
+            host_lock: &lock,
+            health: &health,
+        };
+        let report = start(&ports, &request(true)).unwrap();
+        assert!(!report.build_matches && !report.rebuilt);
+        assert_eq!(podman.called("--connection dagq image rm"), 0);
+        assert_eq!(podman.called("--connection dagq rm"), 0);
+    }
+
+    #[test]
+    fn the_client_is_reported_with_its_build_and_whether_dagq_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let dagq = dir.path().join("dagq");
+        let ours = |_: &Path| Ok::<_, String>("b".to_owned());
+        let report = client_report(&dagq, "b", &ours);
+        assert_eq!(report.path, dir.path().join(CLIENT_BINARY));
+        assert!(!report.matches && report.build.is_none());
+        assert_eq!(report.error.unwrap()["code"], "client_missing");
+        std::fs::write(dir.path().join(CLIENT_BINARY), "").unwrap();
+        let report = client_report(&dagq, "b", &ours);
+        assert!(report.matches && report.error.is_none());
+        assert_eq!(report.build.as_deref(), Some("b"));
+        let report = client_report(&dagq, "c", &ours);
+        assert!(!report.matches);
+        assert_eq!(report.build.as_deref(), Some("b"));
+        assert_eq!(report.error.unwrap()["code"], "version_mismatch");
     }
 
     #[test]
@@ -1894,8 +2204,14 @@ mod tests {
                 host_lock: &lock,
                 health,
             };
-            let report = status(&ports, &spec, port);
+            let report = status(&ports, &spec, port, "b");
             assert_eq!(report.state, expected);
+            assert_eq!(report.build, "b");
+            assert_eq!(
+                report.build_matches,
+                (expected == "running").then_some(true),
+                "{expected}"
+            );
             for write in ["machine init", "machine start", "machine stop"] {
                 assert_eq!(podman.called(write), 0, "{expected} {write}");
             }

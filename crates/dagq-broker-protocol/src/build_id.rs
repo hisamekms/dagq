@@ -19,6 +19,31 @@ pub const UNKNOWN_COMMIT: &str = "unknown";
 /// The environment variable [`emit`] sets for the crate's compilation.
 pub const ENV: &str = "DAGQ_BUILD_ID";
 
+/// The environment variable that gives a build without Git the identifier
+/// of the dagq it goes with: the broker's image is built in a container
+/// that has no checkout, and dagq passes its own build here (a build
+/// argument of the image), so the server's health names dagq's build
+/// (ADR-t827-1 decisions 6 and 7).
+pub const GIVEN_ENV: &str = "DAGQ_BROKER_IMAGE_BUILD";
+
+/// The identifier `given` ([`GIVEN_ENV`]) names for a package at
+/// `version`: only one of that version (`version` itself or
+/// `version+<metadata>`), so a mistaken value cannot name another release.
+pub fn given_identifier(version: &str, given: Option<&str>) -> Option<String> {
+    let given = given?.trim();
+    let of_version = given == version
+        || given
+            .strip_prefix(version)
+            .and_then(|rest| rest.strip_prefix('+'))
+            .is_some_and(|metadata| {
+                !metadata.is_empty()
+                    && metadata
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            });
+    of_version.then(|| given.to_owned())
+}
+
 /// What the build of a package under the repository root depends on: a
 /// change to any of them reruns the build script, relative to the root.
 /// crates/ is part of what a build of dagq ships (ADR-t827-1), and every
@@ -74,7 +99,13 @@ pub fn emit(root: &str) {
             }
         }
     };
-    let build = compute(&package, &var("CARGO_PKG_VERSION"), &root);
+    let version = var("CARGO_PKG_VERSION");
+    println!("cargo:rerun-if-env-changed={GIVEN_ENV}");
+    if let Some(given) = given_identifier(&version, std::env::var(GIVEN_ENV).ok().as_deref()) {
+        println!("cargo:rustc-env={ENV}={given}");
+        return;
+    }
+    let build = compute(&package, &version, &root);
     for directive in build.directives {
         println!("{directive}");
     }
@@ -191,6 +222,22 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_given_identifier_is_taken_only_for_its_own_version() {
+        assert_eq!(
+            given_identifier("0.4.0-dev", Some("0.4.0-dev+abc.dirty")).as_deref(),
+            Some("0.4.0-dev+abc.dirty")
+        );
+        assert_eq!(
+            given_identifier("0.4.0", Some("0.4.0")).as_deref(),
+            Some("0.4.0")
+        );
+        for other in ["", "0.3.0", "0.4.0", "0.4.0-dev+", "0.4.0-dev+a b"] {
+            assert_eq!(given_identifier("0.4.0-dev", Some(other)), None, "{other}");
+        }
+        assert_eq!(given_identifier("0.4.0", None), None);
+    }
 
     #[test]
     fn a_release_names_its_version_alone() {

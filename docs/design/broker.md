@@ -68,6 +68,7 @@ rootの`Cargo.toml`のpackageは`dagq`のまま（ADR-t827-1決定1）。workspa
 - task 832: serverにprocessのbackend（`crates/dagq-broker/src/backends/process.rs`の`ProcessBackend`。下の「process.exec」のargvの実行、workspaceのcwd、envの消毒、timeoutと出力とstdinの上限、process groupの停止）
 - task 833: serverにgitのbackend（`crates/dagq-broker/src/backends/git.rs`の`GitBackend`。下の「git」）。`git.status`・`git.diff`・`git.log`・`git.show`・`git.add`・`git.commit`・`git.restore`をtokenのworktreeだけで行う（show・restoreはtask 833の受け入れ条件が求め、2026-09-28に人がreviewの差し戻しで決めた。ADR-t827-2決定7の「status・diff・add・commit・logの類」に入るrun branchの読み書きとして足す）
 - task 834: clientに`BrokerClient`（`crates/dagq-broker-client/src/client.rs`。fs・process・gitのopごとのtypedな呼び出しで、brokerの拒否は`ClientError::Broker { status, error }`にbrokerの`BrokerError`をそのまま入れて返す）と診断のCLI（`src/cli.rs`。下の「workerの道具（MCP）」の人の診断のCLI）。HTTPは`src/http.rs`の1接続1要求（`Connection: close`、`Content-Length`で読む、応答は64 MiBまで、接続と送信は10秒・応答の待ちは既定330秒）。clientはdagqにもserverにも依存しない（`crates/dagq-broker-client/tests/client.rs`が`cargo tree`で確かめる）。protocolに`BrokerSessionToken::unverified_claims`（鍵なしでclaimsを読む。`token inspect`のためだけで、判定には使わない）を足した。`mcp`はtask 835
+- task 843: 配布と版（下の「配布と版」）。`install`とauto-updateがdagqとclientを同じbuildから確認して一緒に置き・戻し、`HostActorExecutor::broker_client`（`application::broker::resolve_client`）が版の一致するclientだけを返し、imageのbuildにdagqのbuild識別子を渡してhealthの`build`を比べ、`status`・`doctor`・`broker status`にclientとimageの版を出す
 - task 835: clientにsubcommand `mcp`（`crates/dagq-broker-client/src/mcp.rs`。stdioのMCP server。下の「workerの道具（MCP）」の道具・入力のschema・errorと切り詰め）。testは`crates/dagq-broker-client/tests/mcp.rs`が、testの中で起こしたbrokerに対してバイナリの`mcp`をstdioで動かし、initialize・tools/list・tools/callと各道具の写し・拒否のtool error・切り詰めを確かめる（fixtureは`tests/common/mod.rs`でclientのtestと共有）
 
 ### protocolの型
@@ -102,7 +103,7 @@ resolver = "3"
 - CI（`ci.yml`）のcoverageの関門は上の`--workspace`の形で、他のコマンドはそのまま。CIはmacOSだけなので、serverのLinux（musl）の経路とContainerfileはCIではbuildもtestもされない。serverのコードはOSに依らない部分（tokenの検証・閉じ込め・exec・audit）をmacOSのtestで覆い、Linuxだけの部分（`openat2`など）は`cfg`で分けてpodmanを要る`#[ignore]`のtestとスモークで確かめる
 - dagqのpodmanを呼ぶ部分（`broker::ensure`）はpodmanのコマンドをportの後ろに置き、判定（machine・image・containerの状態からの次の一手、lock、版の比較）をstubのportでunit testする。実物のpodmanを呼ぶadapterだけが`#[ignore]`のtestになる
 - releaseの`cargo build --release --locked --target`は全default membersを作るので、`-p dagq -p dagq-broker-client`に絞る。`cargo publish --locked`は`-p`で4つのcrateを順に打ち、crates.ioに同じ版があるcrateは飛ばす（`release.yml`）。Trusted Publisherは既にあるcrateにしか登録できないので、brokerの3つのcrateの最初のpublishは人がAPI tokenで手で行い、それぞれにTrusted Publisherを登録する（`.claude/skills/release`）
-- `install`とauto-updateのbuildは今`cargo build --release --locked -p dagq`（dagqだけ。`src/infrastructure/binaries.rs`）で、clientを一緒にbuildして置くのは下の「配布と版」のtask
+- `install`とauto-updateのbuildは`cargo build --release --locked -p dagq -p dagq-broker-client`（`src/infrastructure/binaries.rs`の`BUILD_ARGS`。serverはimageの中でbuildするので含めない。task 843）
 
 ### runtimeのパス
 
@@ -117,17 +118,19 @@ resolver = "3"
 | brokerのimage | dagq専用のmachineの中、`localhost/dagq-broker:<build tag>` | brokerの起動のとき、tagが無ければ | tag（build識別子）とhealthの`build` |
 
 - build識別子（task 910）: `dagq`・`dagq-broker`・`dagq-broker-client`は同じ規則でbuild識別子を埋め、`--version`とserverのhealth・`serve`のlisteningの`build`・`X-Dagq-Broker-Build`はそれを出す。規則は`crates/dagq-broker-protocol/src/build_id.rs`の1か所（`build_identifier`・`is_prerelease`・Gitのcommitとdirtyの判定・rerun-if-changedの対象（repository rootの`src`・`crates`・`migrations`・`build.rs`・`Cargo.toml`・`Cargo.lock`とGitの`HEAD`・index・`packed-refs`・branchのref。3つとも同じ集合を見るので、どれかの編集で3つそろって`.dirty`になる）。`dagq::build_id`はその再export）で、3つのcrateの`build.rs`はprotocolをbuild-dependencyにして`build_id::emit`を呼び、`DAGQ_BUILD_ID`を埋める（dagqはroot`.`、`crates/`のcrateは`../..`をrepository rootとして見る。crateはrootの`crates/<crate名>`に居るときだけそのrootを見て、別の場所に展開されたもの（他のrepositoryにvendorされたなど）は自分のdirを見るので`unknown`になる）。releaseの版（prereleaseでない`X.Y.Z`）では3つとも`X.Y.Z`。rootがGitのworktreeのrootでないとき（crates.ioのsource、`cargo package`の検証のcopy、brokerのimageのbuild）は`X.Y.Z-dev+unknown`。imageのbuild contextには`crates/dagq-broker/build.rs`も入れる（`stage_context`）
-- `install`とauto-updateは`<queue dir>/update/staged/`に`dagq`と`dagq-broker-client`を置き、両方を同じ確認（`--version`）とrenameで差し替え、それぞれ`.previous`を残す。先にclient、次にdagqの順で置き、dagqの確認か引き継ぎが失敗したら両方を`.previous`に戻す。`install --rollback`も両方を戻す（`src/application/install.rs`・`src/application/update.rs`・`src/infrastructure/binaries.rs`）
-- `HostActorExecutor`が使うclientは`std::env::current_exe()`の隣の`dagq-broker-client`だけで、その`--version`がdagqのbuild識別子と一致するときだけ使う（結果はバイナリのmtimeごとにcacheする）
-- imageの材料（ADR-t827-1決定6）:
+- `install`とauto-updateは、置くdagqの隣（buildなら`target/release/`、`--rollback`なら`.previous`）の`dagq-broker-client`を、dagqの確認（`--version`と使い捨てのqueueでの起動）に続けて`--version`がdagqのbuild識別子と同じことで確かめ、dagqがclientと一緒に作ったbuild（checkout・自動更新・release）ではどちらかが通らなければどちらも置き換えない（人が渡したbinaryと`--rollback`では版の違うclientを置かず、置き場のclientを退ける）。置くのは先にclient、次にdagqで、同じrenameでそれぞれ`.previous`を残す。dagqを置けなければclientを戻す。全員の引き継ぎの失敗（`install`）と見張りの失敗（auto-update）ではdagqと一緒にclientを戻す（前のclientが無ければ、または`.previous`が前のbuildでなければ新しいclientを消す）。`install --rollback`も両方を入れ替える。元の隣にclientが無いdagq（clientより前のbuild、clientの無いリリース）を置くときは、置き場のclientを`.previous`へ退け、別のbuildのclientをdagqの隣に残さない。非互換のmigrationのbuildは`<queue dir>/update/staged/`に`dagq`と隣の`dagq-broker-client`を置き、人の`install --from <staged>/dagq`が両方を置く（`src/application/install.rs`の`Client`・`src/application/update.rs`の`stage`と`restore_client`・`src/infrastructure/binaries.rs`の`set_aside`。詳細は[`install`](supervisor-lifecycle/install.md#install)と[Auto-update](supervisor-lifecycle/auto-update.md#auto-update)）
+- `HostActorExecutor`が使うclientは`std::env::current_exe()`の隣の`dagq-broker-client`だけで、その`--version`がdagqのbuild識別子と一致するときだけ使う（`HostActorExecutor::broker_client`が`application::broker::resolve_client`を呼ぶ。無ければ`client_missing`、版が違うか読めなければ`version_mismatch`の`BrokerFailure`で、clientを渡さない。`--version`は`infrastructure::broker_podman::client_version`が読み、結果はバイナリのmtimeごとにprocessの中でcacheする。workerにMCPを渡す配線はtask 837）
+- imageの材料（ADR-t827-1決定6。まだ埋めていない: 今は下の「用意の手順」のとおり`--source`か、このバイナリをbuildしたcheckoutから取る。埋めるのは後のtask）:
   - dev build（checkoutからのbuild。`build.rs`が`crates/dagq-broker`を見つけたとき）: `Containerfile`、`crates/dagq-broker-protocol`と`crates/dagq-broker`のsource、workspaceのmanifestをこの2つに絞ったもの、`Cargo.lock`を`build.rs`がtarにして`include_bytes!`で埋める。buildのstageは`--locked`を付けずに作る（`Cargo.lock`は全workspaceのもので、使わないpackageの行が消えるだけで、使うpackageの版はlockのまま）
   - release（crates.ioのdagqのpackage。`crates/`を含まない）: `Containerfile`だけを埋め（dagqのpackageの中に置く）、buildのstageは`cargo install --locked dagq-broker@<version>`で同じ版のserverを作る
   - brokerを起動するdagqは材料を一時のdirに展開して`podman build`する。どちらもmachineからcrates.ioとdocker.ioへのnetworkを要る
 - build tagはbuild識別子の`+`を`-`に置き換えたもの（`0.5.0-dev-<commit>`、`.dirty`は`-dirty`）
+- imageのbuildには`--build-arg DAGQ_BROKER_IMAGE_BUILD=<dagqのbuild識別子>`を渡す。buildのstageはGitを持たないので、`build_id::emit`はこのenv（`build_id::GIVEN_ENV`）があって同じ版（`X.Y.Z`そのものか`X.Y.Z+<metadata>`）を名指すときだけそれを埋める（`given_identifier`）。これでimageの中のserverの`--version`とhealthの`build`がimageを作ったdagqのbuild識別子になる
+- `broker start`はhealthの`build`をdagqのbuild識別子と比べる。違えば（このbuildのtagのimageが、識別子を渡す前のdagqか、先へ進んだcheckoutの材料で作られていた）containerとimageを消して1回だけbuildし直し、それでも違えば`version_mismatch`のerrorにする。`active/`に印がある（runがtokenを持つ）間は、古いimageのcontainerを残したとき（`kept_stale`）も同じtagのcontainerでも消さず、違ったまま（`build_matches: false`）にする（そのrunのworkerは古いclientで話す）。結果の`build`・`build_matches`・`rebuilt`に出す
 - 版の食い違い（clientが無い・clientの版が違う・healthの`build`がdagqと違う・`X-Dagq-Broker-Protocol`が違う）では、dagqはtokenを発行せずworkerに道具を渡さない（fail closed、ADR-t827-1決定7）。`preferred`ではrunのevent `broker_unavailable`（`reason: version_mismatch`）を残してworkerは道具なしで動く
 - auto-updateの後（healthの`build`がdagqと違う）: 古いcontainerは`active/`に印が残る間、そのrunのために動かし続ける（そのrunのworkerのMCPのprocessは古いclientで、同じ版どうしで話す）。その間の新しいclaimには`version_mismatch`でtokenを出さない。印が無くなったら`broker::ensure`が新しいimageで起動し直す（ADR-t827-3決定2）。古いcontainerが要る間も、そのrunのtokenの期限の前の発行し直しは同じ鍵で続ける
 - 古いimageは現在と1つ前のtagだけを残し、`broker::ensure`がそれ以外を`podman image rm`する
-- release: crates.ioには`dagq-broker-protocol` → `dagq` → `dagq-broker-client` → `dagq-broker`の順でpublishする（serverはreleaseのimageのbuildの材料。ADR-t827-1決定6・8）。GitHub Releaseにはdagqと同じ形の`dagq-broker-client-v<version>-<target>.tar.gz`を足し、`SHA256SUMS`に含める。imageはregistryに出さない。releaseのupdate（[Release update](supervisor-lifecycle/release-update.md)）は`cargo install --locked dagq@<version>`と`dagq-broker-client@<version>`を同じ`--root`に入れて両方を差し替える
+- release: crates.ioには`dagq-broker-protocol` → `dagq` → `dagq-broker-client` → `dagq-broker`の順でpublishする（serverはreleaseのimageのbuildの材料。ADR-t827-1決定6・8）。GitHub Releaseにはdagqと同じ形の`dagq-broker-client-v<version>-<target>.tar.gz`を足し、`SHA256SUMS`に含める。imageはregistryに出さない。releaseのupdate（[Release update](supervisor-lifecycle/release-update.md)）は`cargo install --locked dagq@<version>`と`dagq-broker-client@<version>`を同じ`--root`に入れて両方を差し替える（`CargoInstaller`。clientのinstallが失敗すればclientを置かず、`install`が置き場のclientを退けるので、brokerは両方がそろうまで使われない）
 
 ## transport
 
@@ -343,16 +346,16 @@ Podman machineは既定でhostの`$HOME`をVMにmountするので、containerか
    ```
 
    `-e`・`--env`・`--env-host`・`--env-file`は付けず、hostのenv（upstreamの資格情報を含む）はcontainerに入らない。containerの中のbindは`0.0.0.0:8750`（containerのnetwork namespaceの自分のinterfaceで、LANではない）で、hostへのpublishは`127.0.0.1`だけ。unit test（`the_container_publishes_on_loopback_only_and_mounts_only_what_it_needs`）がpublishとmountの一覧とenvの無いことを固定する
-4. **health**（`wait_healthy`）: `GET http://127.0.0.1:<port>/v1/health`が`status: ok`とprotocol 1を返すまで最大30秒待つ（0.5秒ごと）。答えなければ`unhealthy`のerror。dagqはHTTPのcrateを持たないので、healthは`src/infrastructure/broker_podman.rs`の手書きのHTTP/1.1のGETで見る（clientに`health`が入ったら`dagq-broker-client health --json`に替えるかは配布のtaskが決める）。buildの一致はまだ見ない（serverの`--version`とhealthの`build`はtask 910からdagqのbuild識別子だが、imageの中のbuildはGitのworktreeを持たないので、dev buildでは`X.Y.Z-dev+unknown`になる。imageのbuildに識別子を渡して一致を見るのは配布のtask）
+4. **health**（`wait_healthy`）: `GET http://127.0.0.1:<port>/v1/health`が`status: ok`とprotocol 1を返すまで最大30秒待つ（0.5秒ごと）。答えなければ`unhealthy`のerror。dagqはHTTPのcrateを持たないので、healthは`src/infrastructure/broker_podman.rs`の手書きのHTTP/1.1のGETで見る（clientに`health`が入ったら`dagq-broker-client health --json`に替えるかは配布のtaskが決める）。healthの`build`とdagqのbuild識別子の比較とbuildし直しは`start`が行う（上の「配布と版」。task 843）
 
 - host全体のlockは`start`の間（machine・build・container・health）ずっと持つので、別のqueueの`stop`や`release_machine`がbuildやrunの途中でmachineを止めない。そのかわりbuildの間は他のqueueの`start`と`stop`が待つ
 - `image exists`・`container exists`はexit 0を有る、1を無いとし、それ以外（machineが答えないなど）は`podman_failed`にする（無いと取り違えてbuildやrunに進まない）
 - portは`--port`、無ければ`state.json`の前のport、無ければ`127.0.0.1`の空いているport
-- 既知の制限: imageのtagはbuild識別子から作るので、同じcommitの`.dirty`のbuildどうしは同じtagで、後の編集ではbuildし直さない。また、このバイナリをbuildしたcheckoutがその後のcommitに進んでいると、そのsourceからbuildしたimageにこのbuildのtagが付く。材料をバイナリに埋める配布のtaskで解く
+- 既知の制限: imageのtagはbuild識別子から作るので、同じcommitの`.dirty`のbuildどうしは同じtagで、後の編集ではbuildし直さない。また、このバイナリをbuildしたcheckoutがその後のcommitに進んでいると、そのsourceからbuildしたimageにこのbuildのtagが付く（imageのbuildにはdagqのbuild識別子を渡すのでhealthの`build`は一致し、この食い違いは検出されない）。材料をバイナリに埋める（下の「配布と版」の「imageの材料」）のは後のtask
 - imageの材料は今はdagqのcheckout（`--source`、無ければこのバイナリをbuildしたcheckout（`CARGO_MANIFEST_DIR`）、無ければ作業dirのmain checkout）から取る。`build.rs`で材料をバイナリに埋めるのは配布のtask。どれも無ければ`image_source_missing`
 - `dagq broker stop`: machineが動いていればcontainerを`podman --connection dagq rm --force --time 10`で止めて消し（状態は全てmountにあり、`start`は止まったcontainerを作り直すので残さない）、host全体のlockの中でmachineに動いているcontainerが無ければ`podman machine stop dagq`（`release_machine`）。2回目は何もしない
-- `dagq broker status`: 状態を変えない。`state`は`running`・`stopped`（containerが無いか止まっている）・`unhealthy`・`machine_missing`・`machine_stopped`・`machine_busy`か、errorのcode（`podman_missing`など）。`machine`・`image_present`・`container_status`・`health`・`recorded`（`state.json`）を添える
-- errorは構造化する: `BrokerFailure {code, message}`。codeは`podman_missing`・`podman_failed`・`machine_busy`・`machine_failed`・`image_source_missing`・`image_build_failed`・`container_failed`・`unhealthy`・`repository_unknown`。CLIのerrorのJSONは`{"error": "...", "broker": {"code", "message"}}`で、`start`は失敗のcodeを`state.json`の`state`に残す。黙って続けない
+- `dagq broker status`: 状態を変えない。`state`は`running`・`stopped`（containerが無いか止まっている）・`unhealthy`・`machine_missing`・`machine_stopped`・`machine_busy`か、errorのcode（`podman_missing`など）。`machine`・`image`（このdagqのbuildのimage）・`image_present`・`container_status`・`health`・`build`（dagqのbuild識別子）・`build_matches`（healthの`build`が一致するか。healthが無ければ`null`）・`client`（下の「status と doctor」）・`recorded`（`state.json`）を添える
+- errorは構造化する: `BrokerFailure {code, message}`。codeは`podman_missing`・`podman_failed`・`machine_busy`・`machine_failed`・`image_source_missing`・`image_build_failed`・`container_failed`・`unhealthy`・`repository_unknown`・`client_missing`・`version_mismatch`。CLIのerrorのJSONは`{"error": "...", "broker": {"code", "message"}}`で、`start`は失敗のcodeを`state.json`の`state`に残す。黙って続けない
 - 権限: `broker start`・`broker stop`は`up`・`down`と同じ`service.lifecycle`（`Operation::Broker`）、`broker status`は`queue.read`。以前の案の新しいcapability `broker.manage`は足さなかった（同じroleの組（user・inbox・planner・supervisor）で足り、`service.lifecycle`がサービスの起動と停止を名指すため）
 - podmanを要るtestは`tests/it/broker_podman.rs`（`#[ignore]`、`cargo test --locked --test it broker_podman:: -- --ignored`）。machineを用意の処理で用意し、終わりに`release_machine`で止める。unit testは`src/application/broker.rs`のstubの`Podman`で、machineが無い・止まっている・動いている・他のmachineが動いているの各状態からの手順と冪等性、podmanが無いときのerrorを見る
 
@@ -474,8 +477,8 @@ port = 0                      # 0 は空いている port
 ## status と doctor
 
 - `actors`（task 738）の`backend: host`・`enforcement: advisory`・`sandboxed: false`は変えない（brokerを使うworkerも隔離されていない。ADR-t827-4決定5）
-- 別の欄`broker`: `mode`・`state`・`port`・`build`・`image`・`machine`（`name`・`state`）・`client`（`path`・`build`・`matches`）・`active_tokens`（数）
-- `doctor`の`broker`（task 836）: `mode`（今は`disabled`だけ）・`podman`（解決したpath、無ければ`null`と`error`の`podman_missing`）・`machine`（`dagq`）・`recorded`（`state.json`）。podmanのコマンドは打たない（machine・image・healthは`dagq broker status`が見る）。clientの版の検査はsupervisorの統合のtaskが足す
+- `status`（roleなしと`--role inbox`）の別の欄`broker`（task 843）: `mode`・`state`と`port`（`state.json`）・`build`（dagqのbuild識別子）・`image`（そのbuildのimage）・`running_image`（`state.json`の、最後に動かしたimage）・`image_matches`・`client`（`path`・`build`・`matches`・`error`。`application::broker::client_report`）。podmanのコマンドは打たない。`machine`と`active_tokens`はsupervisorの統合のtaskが足す
+- `doctor`の`broker`（task 836、843）: `mode`（今は`disabled`だけ）・`podman`（解決したpath、無ければ`null`と`error`の`podman_missing`）・`machine`（`dagq`）・`build`・`image`・`client`（`status`と同じ）・`recorded`（`state.json`）。podmanのコマンドは打たない（machine・image・healthは`dagq broker status`が見る）
 
 ## capabilityの関係
 

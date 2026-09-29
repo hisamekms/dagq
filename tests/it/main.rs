@@ -41,6 +41,7 @@ mod lifecycle_cmux;
 mod lifecycle_down;
 mod lifecycle_in_cmux;
 mod lifecycle_install;
+mod lifecycle_install_client;
 mod lifecycle_plan;
 mod lifecycle_replace;
 mod lifecycle_up;

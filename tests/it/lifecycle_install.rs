@@ -524,6 +524,8 @@ struct UpdateBinaries {
     /// How the build's e2e goes: passes unless set; an `Err` could not
     /// start.
     e2e: Mutex<Option<Result<E2eOutcome, String>>>,
+    /// The version the client built beside dagq reports: dagq's unless set.
+    client_version: Option<String>,
 }
 
 impl UpdateBinaries {
@@ -539,6 +541,7 @@ impl UpdateBinaries {
             pending: pending.to_vec(),
             calls: Mutex::default(),
             e2e: Mutex::default(),
+            client_version: None,
         }
     }
     fn with_e2e(self, e2e: Result<E2eOutcome, String>) -> Self {
@@ -560,6 +563,8 @@ impl dagq::application::install::Binaries for UpdateBinaries {
     fn version(&self, binary: &Path) -> Result<String> {
         Ok(if binary.starts_with(&self.old) {
             "0.0.1".into()
+        } else if binary.ends_with("dagq-broker-client") {
+            self.client_version.clone().unwrap_or(VERSION.into())
         } else {
             VERSION.into()
         })
@@ -869,6 +874,97 @@ fn the_update_job_installs_watches_restores_and_asks() {
         status["auto_update"]["state"], "awaiting_approval",
         "{status}"
     );
+}
+
+/// The job puts the worker's client built beside dagq in place with it
+/// (ADR-t827-1 decision 5): a client of another build replaces nothing; one
+/// of dagq's build goes in place first; a watch that fails puts both back;
+/// a breaking build is staged with its client.
+#[test]
+fn the_update_job_puts_the_client_built_beside_dagq_in_place_with_it() {
+    let fixture = fixture();
+    let _queue = auto_supervisor(&fixture);
+    let processes = FakeProcesses::default();
+    let restarted = Mutex::new(Vec::new());
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    let client = dir.join("bin").join("dagq-broker-client");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    fs::write(&client, "old client").unwrap();
+    let replaces = |binaries: &UpdateBinaries| {
+        binaries
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("replace"))
+            .collect::<Vec<_>>()
+    };
+
+    // A client of another build than the dagq beside it: nothing is
+    // replaced.
+    let mut binaries = UpdateBinaries::new(dir, false, &[]);
+    fs::write(dir.join("built/dagq-broker-client"), "new client").unwrap();
+    binaries.client_version = Some("0.0.9".into());
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["outcome"], "failed", "{report}");
+    assert_eq!(report["stage"], "install", "{report}");
+    assert!(
+        report["error"].as_str().unwrap().contains("0.0.9"),
+        "{report}"
+    );
+    assert!(replaces(&binaries).is_empty());
+
+    // The client of dagq's build goes in place first, then dagq.
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    let report = thread::scope(|scope| {
+        scope.spawn(|| take_and_heartbeat(&fixture, &processes, true));
+        run_update_job(&fixture, &binaries, &processes, &restarted)
+    });
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(
+        replaces(&binaries),
+        [
+            format!("replace {}", client.display()),
+            format!("replace {}", target.display())
+        ]
+    );
+
+    // The new binary dies after it took the handoff: both go back.
+    fs::write(dir.join("bin/dagq.previous"), "old build").unwrap();
+    fs::write(dir.join("bin/dagq-broker-client.previous"), "old client").unwrap();
+    let binaries = UpdateBinaries::new(dir, false, &[]);
+    let report = thread::scope(|scope| {
+        scope.spawn(|| take_and_heartbeat(&fixture, &processes, false));
+        run_update_job(&fixture, &binaries, &processes, &restarted)
+    });
+    assert_eq!(report["stage"], "watch", "{report}");
+    assert_eq!(report["restored"]["restored"], true, "{report}");
+    assert_eq!(report["restored"]["client"]["restored"], true, "{report}");
+    let calls = binaries.calls();
+    for restored in [&target, &client] {
+        assert!(
+            calls.contains(&format!("restore {}", restored.display())),
+            "{calls:?}"
+        );
+    }
+
+    // A breaking build waits for a person with its client beside it, for
+    // the `install --from` of the staged dagq.
+    processes.dead.lock().unwrap().clear();
+    let binaries = UpdateBinaries::new(dir, false, &[(41, false)]);
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["outcome"], "awaiting_approval", "{report}");
+    let staged = dir.join("queue-dir/update/staged");
+    assert_eq!(
+        fs::read_to_string(staged.join("dagq-broker-client")).unwrap(),
+        "new client"
+    );
+    // A later breaking build without a client leaves none staged.
+    fs::remove_file(dir.join("built/dagq-broker-client")).unwrap();
+    let binaries = UpdateBinaries::new(dir, false, &[(41, false)]);
+    let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+    assert_eq!(report["outcome"], "awaiting_approval", "{report}");
+    assert!(!staged.join("dagq-broker-client").exists());
 }
 
 /// The e2e gate of the job (ADR-t963-1 decision 1): a build whose e2e

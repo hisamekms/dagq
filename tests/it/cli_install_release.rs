@@ -9,8 +9,9 @@ use common::cli::*;
 
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
-/// A stub `cargo` that notes its arguments in `<stub>.args` and, unless
-/// `fails`, leaves the test's dagq binary at `<--root>/bin/dagq`.
+/// A stub `cargo` that appends its arguments to `<stub>.args` and, unless
+/// `fails`, leaves the test's dagq binary at `<--root>/bin/dagq` (and no
+/// client, as a release without the client on crates.io).
 fn stub_cargo(dir: &Path, fails: bool) -> std::path::PathBuf {
     let cargo = dir.join(if fails { "cargo-fails" } else { "cargo" });
     let install = if fails {
@@ -23,7 +24,7 @@ fn stub_cargo(dir: &Path, fails: bool) -> std::path::PathBuf {
     };
     fs::write(
         &cargo,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n{install}\n"),
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n{install}\n"),
     )
     .unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
@@ -79,16 +80,21 @@ fn install_release_installs_with_cargo_and_puts_the_binary_in_place() {
     assert_eq!(report["previous"], previous.to_str().unwrap());
     assert!(previous.is_file());
     let queue_dir = db.parent().unwrap().to_path_buf();
+    // dagq, then the worker's client of the same release beside it
+    // (ADR-t827-1 decision 8).
     let args = fs::read_to_string(dir.path().join("cargo.args")).unwrap();
-    assert_eq!(
-        args,
+    let call = |package: &str| {
         format!(
-            "install\n--locked\ndagq@9.9.9\n--root\n{}\n--target-dir\n{}\n",
+            "install\n--locked\n{package}@9.9.9\n--root\n{}\n--target-dir\n{}\n",
             queue_dir.join("update/release").display(),
             queue_dir.join("update/target").display()
         )
-    );
+    };
+    assert_eq!(args, call("dagq") + &call("dagq-broker-client"));
     assert!(queue_dir.join("update/release/bin/dagq").is_file());
+    // The release left no client, so none stays beside the fixed dagq.
+    assert_eq!(report["client"]["outcome"], "absent", "{report}");
+    assert!(!dir.path().join("fixed/dagq-broker-client").exists());
 
     // A version that is not a release is refused before cargo runs.
     let output = invoke(

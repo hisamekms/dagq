@@ -1007,6 +1007,7 @@ impl OneShot {
         }
         if matches!(role, None | Some(SessionRole::Inbox)) {
             status["inbox_watcher"] = self.inbox_watcher(db);
+            status["broker"] = status_broker(db);
         }
         Ok(status)
     }
@@ -1681,7 +1682,7 @@ same in one step",
             cmux,
             launchd,
             &InstallOptions {
-                source: installation::Source::Binary(binary),
+                source: installation::Source::Built(binary),
                 ..options.clone()
             },
         )?;
@@ -2732,6 +2733,7 @@ pub fn broker_start(location: &QueueLocation, options: &BrokerStartOptions) -> R
         &broker::StartRequest {
             machine: &machine,
             container: &container,
+            build: crate::VERSION,
             source: &source,
             scratch: &scratch,
             in_use: tokens_active(queue_dir),
@@ -2819,8 +2821,9 @@ pub fn broker_status(location: &QueueLocation, podman: Option<&Path>) -> Result<
         host_lock: &host_lock,
         health: &health,
     };
-    let report = broker::status(&ports, &container, state.port);
+    let report = broker::status(&ports, &container, state.port, crate::VERSION);
     let mut value = serde_json::to_value(report)?;
+    value["client"] = broker_client_report();
     value["podman"] = json!(podman.executable);
     value["recorded"] = serde_json::to_value(state)?;
     Ok(value)
@@ -2837,6 +2840,40 @@ fn doctor_broker(db: &Path) -> Value {
         "podman": podman.as_ref().ok().map(|podman| &podman.executable),
         "error": podman.as_ref().err().map(|failure| failure.to_json()),
         "machine": crate::application::broker::MACHINE,
+        "build": crate::VERSION,
+        "image": crate::application::broker::image_name(crate::VERSION),
+        "client": broker_client_report(),
         "recorded": BrokerState::read(queue_dir),
     })
+}
+
+/// The `broker` of `status`: the build the client and the broker's image
+/// must name, the image of that build and the one `dagq broker` last ran,
+/// and the client next to this dagq. It runs no podman command.
+fn status_broker(db: &Path) -> Value {
+    use crate::infrastructure::broker_podman::BrokerState;
+    let recorded = BrokerState::read(db.parent().unwrap_or(Path::new(".")));
+    let image = crate::application::broker::image_name(crate::VERSION);
+    json!({
+        "mode": "disabled",
+        "state": recorded.state,
+        "port": recorded.port,
+        "build": crate::VERSION,
+        "image": image,
+        "running_image": recorded.image,
+        "image_matches": recorded.image.as_ref().map(|running| *running == image),
+        "client": broker_client_report(),
+    })
+}
+
+/// The worker's client next to this dagq, its build and whether dagq uses
+/// it (ADR-t827-1 decisions 5 and 7), for `doctor` and `broker status`.
+fn broker_client_report() -> Value {
+    let dagq = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq"));
+    serde_json::to_value(crate::application::broker::client_report(
+        &dagq,
+        crate::VERSION,
+        &crate::infrastructure::broker_podman::client_version,
+    ))
+    .unwrap_or(Value::Null)
 }

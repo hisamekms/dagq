@@ -468,6 +468,20 @@ impl<'a> HostActorExecutor<'a> {
         self
     }
 
+    /// The broker's client a worker is given (ADR-t827-1 decisions 5 and
+    /// 7): the `dagq-broker-client` next to `dagq` (this process's own
+    /// binary), and only when `version` reads dagq's build from it. A
+    /// missing client or one of another build is a structured
+    /// [`super::broker::BrokerFailure`] (`client_missing`,
+    /// `version_mismatch`), and the worker gets no broker tools.
+    pub fn broker_client(
+        &self,
+        dagq: &Path,
+        version: &dyn Fn(&Path) -> std::result::Result<String, String>,
+    ) -> super::broker::BrokerResult<std::path::PathBuf> {
+        super::broker::resolve_client(dagq, crate::VERSION, version)
+    }
+
     fn workspaces(&self) -> Result<&'a dyn WorkspaceBackend> {
         self.workspaces.context("this executor opens no workspace")
     }
@@ -1465,5 +1479,35 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(fake.spawned.lock().unwrap().len(), 1);
+    }
+
+    /// A worker is given only the client next to dagq that names dagq's
+    /// build: a missing one or one of another build is refused with its
+    /// code, never handed over (ADR-t827-1 decision 7).
+    #[test]
+    fn a_worker_gets_only_the_client_of_dagqs_build() {
+        use crate::application::broker::FailureCode;
+        let dir = tempfile::tempdir().unwrap();
+        let dagq = dir.path().join("dagq");
+        std::fs::write(&dagq, "").unwrap();
+        let executor = HostActorExecutor::new(dir.path());
+        let ours = |_: &Path| Ok::<_, String>(crate::VERSION.to_owned());
+        let error = executor.broker_client(&dagq, &ours).unwrap_err();
+        assert_eq!(error.code, FailureCode::ClientMissing);
+
+        let client = dir.path().join("dagq-broker-client");
+        std::fs::write(&client, "").unwrap();
+        assert_eq!(executor.broker_client(&dagq, &ours).unwrap(), client);
+
+        let other = |_: &Path| Ok::<_, String>("0.0.1-dev+other".to_owned());
+        let error = executor.broker_client(&dagq, &other).unwrap_err();
+        assert_eq!(error.code, FailureCode::VersionMismatch);
+        assert!(
+            error.message.contains("0.0.1-dev+other") && error.message.contains(crate::VERSION),
+            "{error}"
+        );
+        let silent = |_: &Path| Err::<String, _>("exited with 1".to_owned());
+        let error = executor.broker_client(&dagq, &silent).unwrap_err();
+        assert_eq!(error.code, FailureCode::VersionMismatch);
     }
 }

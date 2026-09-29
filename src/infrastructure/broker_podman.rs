@@ -336,6 +336,47 @@ impl BrokerState {
     }
 }
 
+/// The build identifier `client --version` reports (its last word), read
+/// again only when the file's modification time changes (a process asks
+/// for it on every claim).
+pub fn client_version(client: &Path) -> Result<String, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::SystemTime;
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, String)>>> = OnceLock::new();
+    let modified = fs::metadata(client)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| format!("{}: {error}", client.display()))?;
+    let seen = SEEN.get_or_init(Mutex::default);
+    if let Some((at, version)) = seen.lock().ok().and_then(|seen| seen.get(client).cloned())
+        && at == modified
+    {
+        return Ok(version);
+    }
+    let output = Command::new(client)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| format!("run {}: {error}", client.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} --version exited with {}",
+            client.display(),
+            output.status
+        ));
+    }
+    let version = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .last()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} --version printed no version", client.display()))?;
+    if let Ok(mut seen) = seen.lock() {
+        seen.insert(client.to_path_buf(), (modified, version.clone()));
+    }
+    Ok(version)
+}
+
 /// Whether any run holds a token now: an entry in `<queue dir>/broker/active`.
 pub fn tokens_active(queue_dir: &Path) -> bool {
     fs::read_dir(broker_dir(queue_dir).join("active"))
@@ -547,5 +588,31 @@ mod tests {
                 .is_file()
         );
         assert!(!context.join("crates/dagq-broker/tests").exists());
+    }
+
+    #[test]
+    fn the_client_s_version_is_its_last_word_and_read_again_when_it_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let client = dir.path().join("dagq-broker-client");
+        let write = |version: &str| {
+            let temporary = dir.path().join("next");
+            fs::write(
+                &temporary,
+                format!("#!/bin/sh\necho dagq-broker-client {version}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::rename(&temporary, &client).unwrap();
+        };
+        write("0.4.0-dev+abc");
+        assert_eq!(client_version(&client).unwrap(), "0.4.0-dev+abc");
+        // Replaced by a rename (as install does): a new modification time.
+        std::thread::sleep(Duration::from_millis(20));
+        write("0.4.0-dev+def");
+        assert_eq!(client_version(&client).unwrap(), "0.4.0-dev+def");
+        fs::write(&client, "#!/bin/sh\nexit 3\n").unwrap();
+        assert!(client_version(&client).unwrap_err().contains("exited"));
+        assert!(client_version(&dir.path().join("missing")).is_err());
     }
 }
