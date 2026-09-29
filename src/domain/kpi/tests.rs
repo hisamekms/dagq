@@ -2371,21 +2371,25 @@ fn cpu_per_landing_and_load_per_core_read_the_host_records() {
 
 /// The review verdicts that sent runs back per primary code (ADR-t947-1
 /// decision 5): `review.sendback_rate` over the runs reviewed, all of
-/// them, per `code=` and per `kind=`.
+/// them, per `code=`, per `kind=` and per `change=` (`unknown` without
+/// one).
 #[test]
 fn review_sendback_rate_is_split_by_code_and_kind() {
     let mut queue = Queue::default();
     let tuesday = MONDAY + DAY + 10 * HOUR;
     let runtime = Some("runtime".parse::<TaskKind>().unwrap());
     let docs = Some("docs".parse::<TaskKind>().unwrap());
+    let fix = Some("fix".parse::<TaskChange>().unwrap());
     let runs = [
-        (1, runtime.clone(), Some("adr_conflict")),
-        (2, runtime, None),
-        (3, docs, Some("test_gap")),
+        (1, runtime.clone(), fix.clone(), Some("adr_conflict")),
+        (2, runtime, fix, None),
+        (3, docs, None, Some("test_gap")),
     ];
-    for (task, kind, code) in runs {
+    for (task, kind, change, code) in runs {
         let claimed = tuesday + task * HOUR;
-        queue.run(&Run::new(task, kind, claimed, 600));
+        let mut run = Run::new(task, kind, claimed, 600);
+        run.change = change;
+        queue.run(&run);
         let id = format!("{task:08x}-0000-4000-8000-{claimed:012x}");
         let payload = match code {
             Some(code) => json!({"verdict": "concern", "reasons": ["x"],
@@ -2418,11 +2422,14 @@ fn review_sendback_rate_is_split_by_code_and_kind() {
     assert_eq!(value("code=test_gap"), (3, Some(0.333)));
     assert_eq!(value("kind=runtime"), (2, Some(0.5)));
     assert_eq!(value("kind=docs"), (1, Some(1.0)));
+    assert_eq!(value("change=fix"), (2, Some(0.5)));
+    assert_eq!(value("change=unknown"), (1, Some(1.0)));
     assert_eq!(direction("review.sendback_rate"), Some(Direction::Lower));
-    assert_eq!(
-        day.window.details["review_reasons"]["review"]["sent_back"],
-        2
-    );
+    let review = &day.window.details["review_reasons"]["review"];
+    assert_eq!(review["sent_back"], 2);
+    assert_eq!(review["by_change"][0]["change"], "fix");
+    assert_eq!(review["by_change"][0]["by_code"]["adr_conflict"], 1);
+    assert_eq!(review["by_change"][1]["change"], Value::Null);
 }
 
 /// The runs split by their task's change (ADR-t980-1): `change=<change>`

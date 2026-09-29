@@ -3,7 +3,7 @@
 //! runs or proposals and at what rate, the time they cost (the revise's
 //! fix, the concern's wait for a person, the work after a `send_back`) and
 //! what a person's answer made of them; per code of any item how many
-//! verdicts carry it; and per kind of task the rate. A verdict recorded
+//! verdicts carry it; and per kind and per change of task the rate. A verdict recorded
 //! before the codes is `unlabeled`, and nothing recorded is rewritten.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::{Summary, summary, timestamp_millis};
 use crate::domain::{
-    EventId, RunEvent, TaskId, TaskKind, event_kind,
+    EventId, RunEvent, TaskChange, TaskId, TaskKind, event_kind,
     review_reason::{DEVIATION_REJECTED, OUTCOMES, UNLABELED},
 };
 
@@ -41,6 +41,10 @@ pub struct ReasonTable {
     /// Per kind of the task (of a proposal: the task its events are on),
     /// set by [`super::with_kinds`]; tasks without a kind last.
     pub by_kind: Vec<KindReasons>,
+    /// Per change of the task (ADR-t980-1; of a proposal: the task its
+    /// events are on), set by [`super::with_changes`]; tasks without a
+    /// change last.
+    pub by_change: Vec<ChangeReasons>,
     /// Each reviewed run or proposal: its task and the primary codes of
     /// its verdicts that sent it back.
     #[serde(skip)]
@@ -77,6 +81,17 @@ pub struct CodeStats {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct KindReasons {
     pub kind: Option<TaskKind>,
+    pub reviewed: i64,
+    pub sent_back: i64,
+    pub rate: Option<f64>,
+    /// The runs or proposals sent back per primary code.
+    pub by_code: BTreeMap<String, i64>,
+}
+
+/// The rate of one change of task (ADR-t980-1).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChangeReasons {
+    pub change: Option<TaskChange>,
     pub reviewed: i64,
     pub sent_back: i64,
     pub rate: Option<f64>,
@@ -457,21 +472,28 @@ pub fn per_run(run_events: &[RunEvent]) -> Vec<RunReviewReason> {
         .collect()
 }
 
+/// One group's tally of the reviewed runs or proposals.
+#[derive(Default)]
+struct Tally {
+    reviewed: i64,
+    sent_back: i64,
+    by_code: BTreeMap<String, i64>,
+}
+
 impl ReasonTable {
-    /// Group the reviewed runs or proposals by the kind of their task.
-    pub(super) fn with_kinds(&mut self, kinds: &HashMap<TaskId, Option<TaskKind>>) {
-        let mut groups: BTreeMap<(bool, Option<String>), KindReasons> = BTreeMap::new();
+    /// The reviewed runs or proposals grouped by `key` of their task
+    /// (`None` last), in the order of the key's text.
+    fn grouped<K: Clone>(
+        &self,
+        key: impl Fn(Option<TaskId>) -> Option<K>,
+        text: impl Fn(&K) -> &str,
+    ) -> Vec<(Option<K>, Tally, Option<f64>)> {
+        let mut groups: BTreeMap<(bool, Option<String>), (Option<K>, Tally)> = BTreeMap::new();
         for (task_id, codes) in &self.subjects {
-            let kind = task_id.and_then(|task| kinds.get(&task).cloned().flatten());
-            let group = groups
-                .entry((kind.is_none(), kind.as_ref().map(|k| k.as_str().to_owned())))
-                .or_insert_with(|| KindReasons {
-                    kind: kind.clone(),
-                    reviewed: 0,
-                    sent_back: 0,
-                    rate: None,
-                    by_code: BTreeMap::new(),
-                });
+            let value = key(*task_id);
+            let (_, group) = groups
+                .entry((value.is_none(), value.as_ref().map(|v| text(v).to_owned())))
+                .or_insert_with(|| (value.clone(), Tally::default()));
             group.reviewed += 1;
             if !codes.is_empty() {
                 group.sent_back += 1;
@@ -480,11 +502,48 @@ impl ReasonTable {
                 *group.by_code.entry(code.clone()).or_default() += 1;
             }
         }
-        self.by_kind = groups
+        groups
             .into_values()
-            .map(|mut group| {
-                group.rate = rate(group.sent_back, group.reviewed);
-                group
+            .map(|(value, tally)| {
+                let rate = rate(tally.sent_back, tally.reviewed);
+                (value, tally, rate)
+            })
+            .collect()
+    }
+
+    /// Group the reviewed runs or proposals by the kind of their task.
+    pub(super) fn with_kinds(&mut self, kinds: &HashMap<TaskId, Option<TaskKind>>) {
+        self.by_kind = self
+            .grouped(
+                |task| task.and_then(|task| kinds.get(&task).cloned().flatten()),
+                TaskKind::as_str,
+            )
+            .into_iter()
+            .map(|(kind, tally, rate)| KindReasons {
+                kind,
+                reviewed: tally.reviewed,
+                sent_back: tally.sent_back,
+                rate,
+                by_code: tally.by_code,
+            })
+            .collect();
+    }
+
+    /// Group the reviewed runs or proposals by the change of their task
+    /// (ADR-t980-1).
+    pub(super) fn with_changes(&mut self, changes: &HashMap<TaskId, Option<TaskChange>>) {
+        self.by_change = self
+            .grouped(
+                |task| task.and_then(|task| changes.get(&task).cloned().flatten()),
+                TaskChange::as_str,
+            )
+            .into_iter()
+            .map(|(change, tally, rate)| ChangeReasons {
+                change,
+                reviewed: tally.reviewed,
+                sent_back: tally.sent_back,
+                rate,
+                by_code: tally.by_code,
             })
             .collect();
     }
@@ -641,6 +700,29 @@ mod tests {
         assert_eq!(review.by_kind[0].by_code["adr_conflict"], 1);
         assert_eq!(review.by_kind[1].kind, None);
         assert_eq!(review.by_kind[1].rate, Some(1.0));
+
+        let changes = HashMap::from([
+            (TaskId::new(1), Some("fix".parse::<TaskChange>().unwrap())),
+            (TaskId::new(2), Some("docs".parse::<TaskChange>().unwrap())),
+            (TaskId::new(3), None),
+        ]);
+        review.with_changes(&changes);
+        let names: Vec<Option<&str>> = review
+            .by_change
+            .iter()
+            .map(|group| group.change.as_ref().map(TaskChange::as_str))
+            .collect();
+        assert_eq!(names, [Some("docs"), Some("fix"), None]);
+        let fix = &review.by_change[1];
+        assert_eq!((fix.reviewed, fix.sent_back, fix.rate), (1, 1, Some(1.0)));
+        assert_eq!(fix.by_code["adr_conflict"], 1);
+        assert_eq!(fix.by_code["test_gap"], 1);
+        assert_eq!(review.by_change[0].by_code[UNLABELED], 1);
+        let unknown = &review.by_change[2];
+        assert_eq!(
+            (unknown.reviewed, unknown.sent_back, unknown.rate),
+            (1, 0, Some(0.0))
+        );
 
         let run: Vec<RunEvent> = events
             .iter()

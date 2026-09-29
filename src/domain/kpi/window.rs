@@ -820,8 +820,9 @@ impl<'a> Context<'a> {
         }
         // The verdicts that sent the work back per primary code
         // (ADR-t947-1 decision 5): the runs reviewed, all of them, per code
-        // and per kind of task; the plan reviews' revises per code over the
-        // same reviews as `plan.revise_rate`'s `all`.
+        // and per kind and per change (ADR-t980-1) of task; the plan
+        // reviews' revises per code over the same reviews as
+        // `plan.revise_rate`'s `all`.
         let reasons = &stats.review_reasons;
         let reviewed = usize::try_from(reasons.review.reviewed).unwrap_or(0);
         put(
@@ -847,6 +848,21 @@ impl<'a> Context<'a> {
                     Measure::ratio(
                         float(kind.sent_back),
                         usize::try_from(kind.reviewed).unwrap_or(0),
+                    ),
+                );
+            }
+        }
+        if axes.contains(&Axis::Change) {
+            for change in &reasons.review.by_change {
+                put(
+                    "review.sendback_rate",
+                    &format!(
+                        "change={}",
+                        change.change.as_ref().map_or(UNKNOWN, TaskChange::as_str)
+                    ),
+                    Measure::ratio(
+                        float(change.sent_back),
+                        usize::try_from(change.reviewed).unwrap_or(0),
                     ),
                 );
             }

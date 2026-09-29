@@ -106,7 +106,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
 | `forecast.p50_error` / `forecast.p50_abs_error` / `forecast.p50_error_ratio` / `forecast.p90_hit_rate` / `forecast.late_rate` / `forecast.early_rate` | 完了見込みの答え合わせ（下の[完了見込みの答え合わせ](#完了見込みの答え合わせ)） | 答え合わせの層 |
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` / `plan.follow_up_duplicate_rate` / `plan.follow_up_draft_secs` | 計画の品質（下の[計画の品質](#計画の品質)）。`plan.revise_rate`は`code=`の層も持つ（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | 計画の層と`code=` |
-| `review.sendback_rate` | reviewにかかったrunのうちreviseかconcernを受けたものの割合（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | `all`・`code=`・`kind=` |
+| `review.sendback_rate` | reviewにかかったrunのうちreviseかconcernを受けたものの割合（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | `all`・`code=`・`kind=`・`change=` |
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`kind=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
 - `landing_utilization`・`landing_utilization.peak`・`landing_attempt`・`landing_queue_depth`は、期間の`(start, end]`（今を超えない）で[stats](stats.md#着地の直列処理の使用率)の`landing_utilization`を呼んで読み（task 991）、同じ値の全体（`busy_secs`・`window_secs`・`attempts`・`landed`・`peak_hour`・`attempt_secs`・`queue`）を`details.landing_utilization`に出す。runに属さないので`all`だけで、`--goal`はそのgoalのtaskの試行と待ちだけを数える。
@@ -157,9 +157,9 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 
 [ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定5（task 948で実装）。期間の窓の`stats`の`review_reasons`（[差し戻しの分類コードごとの集計](stats.md#差し戻しの分類コードごとの集計)）をそのまま読み、主のコードを`code=<コード>`の層にする。良い向きはどちらも低い方（`direction`の既定）。
 
-- `review.sendback_rate`: `all`は`review.sent_back ÷ review.reviewed`、`code=<コード>`はそのコードの`subjects ÷ review.reviewed`（分母は`all`と同じ）、`kind=<kind>`（`--by`に関わらず、kindの層を出すとき）は`by_kind`の`sent_back ÷ reviewed`。reviewにかかったrunが無い期間は`n` 0でvalueがnull
+- `review.sendback_rate`: `all`は`review.sent_back ÷ review.reviewed`、`code=<コード>`はそのコードの`subjects ÷ review.reviewed`（分母は`all`と同じ）、`kind=<kind>`（`--by`に関わらず、kindの層を出すとき）は`by_kind`の`sent_back ÷ reviewed`。`change=<change>`（他のKPIの`change=`の層と同じく常に出す。changeの無いtaskは`change=unknown`）は`by_change`の`sent_back ÷ reviewed`（task 1013）。reviewにかかったrunが無い期間は`n` 0でvalueがnull
 - `plan.revise_rate`の`code=<コード>`: そのコードを主とする`decision: revise`のplan reviewの数 ÷ 期間の全てのplan review（`plan_review.verdicts`。`all`の分母と同じ`plan_review_finished`の数）
-- `details.review_reasons`: 期間の窓の`review_reasons`（`by_kind`を含む）をそのまま置く。時間・答えの内訳・コードの集合はここで読む
+- `details.review_reasons`: 期間の窓の`review_reasons`（`by_kind`と`by_change`を含む）をそのまま置く。時間・答えの内訳・コードの集合はここで読む
 
 ## 分類コードごとの系列（未実装）
 

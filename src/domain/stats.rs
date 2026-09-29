@@ -1717,6 +1717,8 @@ pub fn with_changes(stats: &mut Stats, changes: &HashMap<TaskId, Option<TaskChan
             intervals: intervals(runs),
         })
         .collect();
+    stats.review_reasons.review.with_changes(changes);
+    stats.review_reasons.plan_review.with_changes(changes);
 }
 
 /// Give each run of `stats` its areas from `areas` (none for a run it
