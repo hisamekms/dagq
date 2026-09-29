@@ -267,12 +267,15 @@ impl Supervisor<'_> {
     }
     /// Move on from a verdict: `pass` exits the session and lands; `revise`
     /// goes to the live session while revises are left (ADR-0027 decision
-    /// 2); anything else exits the session and asks a person.
+    /// 2); anything else exits the session and asks a person. The ask
+    /// records `job`, the review job that returned `verdict`, as its
+    /// `requested_by` (task 798).
     pub(super) fn act_on_verdict(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
         verdict: ReviewVerdict,
+        job: &ActorContext,
     ) -> Result<Phase> {
         let ask = |why: Option<String>, verdict: ReviewVerdict, session| {
             Phase::Exiting(ExitWatch::new(
@@ -282,11 +285,12 @@ impl Supervisor<'_> {
                     reasons: verdict.reasons,
                     summary: verdict.summary,
                     why,
+                    requested_by: Some(job.clone()),
                 },
             ))
         };
         match verdict.verdict {
-            ReviewDecision::Pass => self.precheck(run, session, verdict),
+            ReviewDecision::Pass => self.precheck(run, session, verdict, Some(job.clone())),
             ReviewDecision::Concern => Ok(ask(None, verdict, session)),
             ReviewDecision::Revise => {
                 let events = self.queue.run_events(run.id())?;
@@ -462,11 +466,14 @@ impl Supervisor<'_> {
     /// its counted resumes are used up, the session exits and a person is
     /// asked. Without a live session to ask (or when Git cannot judge), the
     /// run lands as before, and a conflicting landing parks it for a resume.
+    /// `job` is the review job that passed the run, recorded as the
+    /// `requested_by` of the ask (task 798).
     pub(super) fn precheck(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
         verdict: ReviewVerdict,
+        job: Option<ActorContext>,
     ) -> Result<Phase> {
         let land = |session| Phase::Exiting(ExitWatch::new(session, AfterExit::Land));
         let head = run
@@ -562,7 +569,7 @@ impl Supervisor<'_> {
                 info!(run_id = %run.id(), "run {}: {why}; asking a person", run.id());
                 return Ok(Phase::Exiting(ExitWatch::new(
                     session,
-                    Fix::Conflict(verdict).ask(String::new(), why),
+                    Fix::Conflict(verdict).ask(String::new(), why, job),
                 )));
             }
         }

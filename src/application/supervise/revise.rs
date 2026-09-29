@@ -50,19 +50,28 @@ impl Fix {
 
     /// The `approve_landing` ask when the session cannot fix it: a revise
     /// asks with `summary`; a conflict asks with its passed verdict.
-    pub(super) fn ask(&self, summary: String, why: String) -> AfterExit {
+    /// `requested_by` is the review job the ask acts on, if any
+    /// ([`AfterExit::Ask`]).
+    pub(super) fn ask(
+        &self,
+        summary: String,
+        why: String,
+        requested_by: Option<ActorContext>,
+    ) -> AfterExit {
         match self {
             Fix::Revise(reasons) => AfterExit::Ask {
                 decision: ReviewDecision::Revise,
                 reasons: reasons.clone(),
                 summary,
                 why: Some(why),
+                requested_by,
             },
             Fix::Conflict(verdict) => AfterExit::Ask {
                 decision: verdict.verdict,
                 reasons: verdict.reasons.clone(),
                 summary: verdict.summary.clone(),
                 why: Some(why),
+                requested_by,
             },
         }
     }

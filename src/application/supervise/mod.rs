@@ -958,6 +958,14 @@ enum AfterExit {
         summary: String,
         /// Why a `revise` verdict became a question for a person.
         why: Option<String>,
+        /// The review job whose verdict this ask acts on (a `concern`, a
+        /// `revise` that cannot be sent back, the conflict a `pass` ran
+        /// into): the ask's events record it as `requested_by` (task 798).
+        /// `None` when the ask follows what the live session did after
+        /// the verdict was acted on (a revise or a conflict request it
+        /// did not carry out), which is the supervisor's own step, or when
+        /// an adopter cannot read the job's attempt from the history.
+        requested_by: Option<ActorContext>,
     },
     /// Record `review_failed` and give the lease back.
     ReviewFailed {
@@ -2309,7 +2317,7 @@ impl Supervisor<'_> {
                                 }),
                             )?;
                             info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
-                            sv.act_on_verdict(&run, session, verdict)
+                            sv.act_on_verdict(&run, session, verdict, &job)
                         })?
                     }
                     ReviewEnd::Unreadable(error) if !watch.retried => {
@@ -2396,7 +2404,7 @@ impl Supervisor<'_> {
                                     "{why}, and the request to fix it could not be sent: {error:#}"
                                 );
                                 warn!(run_id = %slot.run.id(), "run {}: {why}", slot.run.id());
-                                let then = watch.fix.ask(why.clone(), why);
+                                let then = watch.fix.ask(why.clone(), why, None);
                                 slot.phase = Phase::Exiting(ExitWatch::new(Some(session), then));
                             }
                         }
@@ -2406,6 +2414,7 @@ impl Supervisor<'_> {
                         let then = watch.fix.ask(
                             format!("the session {why}"),
                             format!("the session {why} after {label}"),
+                            None,
                         );
                         let mut exit = ExitWatch::new(Some(session), then);
                         // A silence the revise's wait recorded is not
@@ -2439,14 +2448,17 @@ impl Supervisor<'_> {
                         reasons,
                         summary,
                         why,
+                        requested_by,
                     } => {
-                        let ask = self.open_landing_ask(
-                            &run,
-                            decision,
-                            &reasons,
-                            &summary,
-                            why.as_deref(),
-                        )?;
+                        let open = |sv: &mut Self| {
+                            sv.open_landing_ask(&run, decision, &reasons, &summary, why.as_deref())
+                        };
+                        // Only the ask's own events carry the job: the
+                        // lease given back after it is the supervisor's.
+                        let ask = match &requested_by {
+                            Some(job) => self.for_job(job, open)?,
+                            None => open(self)?,
+                        };
                         info!(run_id = %run.id(), "run {} waits for a person in ask {ask}", run.id());
                         self.queue.release_lease(run.id(), &self.token)?;
                         Ok(Step::Done(Box::new(self.queue.run(run.id())?)))

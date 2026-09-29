@@ -748,7 +748,7 @@ fn a_dead_run_whose_dead_supervisor_still_leases_it_is_recovered_and_retried() {
 /// receipt and move it to `awaiting_integration` the way validation does,
 /// leaving its lease and wrapper registration as they are: a run whose
 /// supervisor died during its review.
-fn validated_orphan(db: &Path, run: &TaskRun) -> String {
+pub(crate) fn validated_orphan(db: &Path, run: &TaskRun) -> String {
     let worktree = Path::new(run.worktree_path().unwrap());
     fs::write(
         worktree.join("change.txt"),
@@ -780,7 +780,7 @@ fn validated_orphan(db: &Path, run: &TaskRun) -> String {
 /// Make the wrapper of `run` one that died without recording its exit (a
 /// dead pid and a heartbeat past the TTL) and the lease one a dead
 /// supervisor left behind.
-fn kill_supervisor_and_wrapper(db: &Path, run: &TaskRun) {
+pub(crate) fn kill_supervisor_and_wrapper(db: &Path, run: &TaskRun) {
     let raw = Connection::open(db).unwrap();
     raw.execute(
         "UPDATE run_processes SET pid=?2, heartbeat_at=unixepoch()-31 WHERE run_id=?1",

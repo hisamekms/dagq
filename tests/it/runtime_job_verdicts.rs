@@ -6,6 +6,7 @@
 //! runtime cannot read fails closed: nothing lands or is retried, and a
 //! person is told.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -123,6 +124,109 @@ fn a_review_verdict_with_an_unknown_field_asks_a_person_and_lands_nothing() {
     assert_eq!(asks.len(), 1, "{asks:?}");
     assert_eq!(asks[0].kind, AskKind::ApproveLanding);
     assert_eq!(asks[0].run_id.as_ref(), Some(run.id()));
+    // No job asked for it: the ask of a failed review is the supervisor's
+    // own (task 735), and stays so (task 798).
+    assert_eq!(
+        actor_of(&detail, run, "ask_opened"),
+        (
+            "supervisor".to_owned(),
+            format!("supervisor:{}", std::process::id()),
+            None
+        )
+    );
+}
+
+/// The `approve_landing` ask a review's verdict leads to is opened after
+/// the session's `/exit`, at the request of the review job that returned
+/// the verdict (task 798): its `ask_opened` records the supervisor as the
+/// actor and the job as `requested_by`, and nothing written after it (the
+/// lease given back) carries the job. The ask is still asked by the
+/// supervisor.
+fn assert_asked_at_the_jobs_request(db: &Path, attempt: usize, supervisor: &str) {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = &detail.runs[0];
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].kind, AskKind::ApproveLanding);
+    assert_eq!(asks[0].asked_by, "supervisor");
+    assert_eq!(
+        actor_of(&detail, run, "ask_opened"),
+        (
+            "supervisor".to_owned(),
+            supervisor.to_owned(),
+            Some(format!("review-job:{}:{attempt}", run.id()))
+        )
+    );
+    let opened = detail
+        .events
+        .iter()
+        .position(|e| e.kind == "ask_opened")
+        .unwrap();
+    let after: Vec<_> = detail.events[opened + 1..]
+        .iter()
+        .filter(|e| e.actor.as_ref().is_some_and(|a| a.requested_by.is_some()))
+        .map(|e| e.kind.as_str())
+        .collect();
+    assert!(after.is_empty(), "{after:?}");
+    assert!(queue.run_leases().unwrap().is_empty());
+}
+
+/// A `concern` asks a person at the review job's request.
+#[test]
+fn a_concern_is_asked_at_the_review_jobs_request() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("concern", &["out of scope"], "unsure")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_asked_at_the_jobs_request(&db, 1, &format!("supervisor:{}", std::process::id()));
+}
+
+/// A `revise` past the revises left cannot be sent back: the third review's
+/// job asks for the person.
+#[test]
+fn a_revise_past_its_limit_is_asked_at_the_review_jobs_request() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(2));
+    let reviewer = TestReviewer::new(&[verdict("revise", &["still short"], "not yet")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_asked_at_the_jobs_request(&db, 3, &format!("supervisor:{}", std::process::id()));
+}
+
+/// A supervisor that takes over a run whose review returned a `concern`
+/// before its ask was opened opens it at the same job's request, read
+/// from the `attempt` of the `review_finished` it adopts.
+#[test]
+fn an_adopted_concern_is_asked_at_the_review_jobs_request() {
+    let (_dir, repo, db) = fixture();
+    let run = orphan_run(&repo, &db, "dead-supervisor", dead_pid(), dead_pid());
+    crate::runtime_triage::validated_orphan(&db, &run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for (kind, payload) in [
+        (
+            EventKind::ReviewStarted,
+            json!({"attempt": 2, "workspace_id": null, "session_live": false, "session_id": "s"}),
+        ),
+        (
+            EventKind::ReviewFinished,
+            json!({"verdict": "concern", "reasons": ["out of scope"], "summary": "unsure", "attempt": 2}),
+        ),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    crate::runtime_triage::kill_supervisor_and_wrapper(&db, &run);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.prompts().is_empty());
+    assert_eq!(
+        adoption_events(&queue.show(TaskId::new(1)).unwrap()).len(),
+        1
+    );
+    assert_asked_at_the_jobs_request(&db, 2, &format!("supervisor:{}", std::process::id()));
 }
 
 /// A recovery job's output the runtime cannot read, or one with a field or

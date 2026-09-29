@@ -395,6 +395,7 @@ impl Supervisor<'_> {
                     decision: verdict.verdict,
                     reasons: verdict.reasons,
                     summary: verdict.summary,
+                    requested_by: review_job_before(run, &history, anchor.id),
                 })
             }
             event_kind::REVIEW_FINISHED => {
@@ -409,7 +410,12 @@ impl Supervisor<'_> {
                         if verdict.verdict == ReviewDecision::Pass
                             && !history.has_after(anchor.id, event_kind::EXIT_REQUESTED) =>
                     {
-                        return self.precheck(run, session, verdict);
+                        return self.adopted_precheck(
+                            run,
+                            session,
+                            verdict,
+                            review_job(run, anchor),
+                        );
                     }
                     Ok(verdict) if verdict.verdict == ReviewDecision::Pass => Some(AfterExit::Land),
                     Ok(verdict) => Some(AfterExit::Ask {
@@ -419,6 +425,7 @@ impl Supervisor<'_> {
                         decision: verdict.verdict,
                         reasons: verdict.reasons,
                         summary: verdict.summary,
+                        requested_by: review_job(run, anchor),
                     }),
                     Err(_) => None,
                 }
@@ -428,10 +435,15 @@ impl Supervisor<'_> {
             // is prechecked again, as main may have moved.
             event_kind::CONFLICT_PRECHECK => match passed_before(&history, anchor.id) {
                 Some(verdict) if !history.has_after(anchor.id, event_kind::EXIT_REQUESTED) => {
-                    return self.precheck(run, session, verdict);
+                    let job = review_job_before(run, &history, anchor.id);
+                    return self.adopted_precheck(run, session, verdict, job);
                 }
                 Some(verdict) => Some(match anchor.payload["asked"].as_str() {
-                    Some(why) => Fix::Conflict(verdict).ask(String::new(), why.to_owned()),
+                    Some(why) => Fix::Conflict(verdict).ask(
+                        String::new(),
+                        why.to_owned(),
+                        review_job_before(run, &history, anchor.id),
+                    ),
                     None => AfterExit::Land,
                 }),
                 None => None,
@@ -689,6 +701,50 @@ impl Supervisor<'_> {
             }
         }
     }
+}
+
+impl Supervisor<'_> {
+    /// [`Supervisor::precheck`] of a passed run an adopter takes over, at
+    /// the request of the review job that passed it (`job`) as the
+    /// supervisor it replaced ran it; without a job, as the supervisor's
+    /// own step.
+    fn adopted_precheck(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        verdict: ReviewVerdict,
+        job: Option<ActorContext>,
+    ) -> Result<Phase> {
+        match job.clone() {
+            Some(requester) => {
+                self.for_job(&requester, |sv| sv.precheck(run, session, verdict, job))
+            }
+            None => self.precheck(run, session, verdict, None),
+        }
+    }
+}
+
+/// The review job that recorded `review_finished` (`event`), from the
+/// `attempt` of its payload: what an adopter records as the
+/// `requested_by` of the `approve_landing` ask it opens for the job's
+/// verdict, as the supervisor it replaced would have (task 798). `None`
+/// when the payload has no attempt, so no job is named rather than a
+/// wrong one.
+fn review_job(run: &TaskRun, event: &RunEvent) -> Option<ActorContext> {
+    event.payload["attempt"]
+        .as_u64()
+        .map(|attempt| ActorContext::review_job(run.id(), attempt))
+}
+
+/// [`review_job`] of the last `review_finished` before `before`.
+fn review_job_before(
+    run: &TaskRun,
+    history: &RunHistory<'_>,
+    before: EventId,
+) -> Option<ActorContext> {
+    history
+        .last_before(before, event_kind::REVIEW_FINISHED)
+        .and_then(|event| review_job(run, event))
 }
 
 /// The verdict of the last `review_finished` before event `before`: the
