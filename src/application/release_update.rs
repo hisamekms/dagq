@@ -12,7 +12,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::update::{
-    UPDATE_ANSWERED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RETRY, UPDATE_STARTED, step_release,
+    UPDATE_ANSWERED, UPDATE_DROPPED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RETRY, UPDATE_STARTED,
+    step_release,
 };
 use super::{InstalledPlugin, Queue};
 use crate::domain::release_update::{
@@ -168,14 +169,99 @@ fn is_request(update: &RunEvent) -> bool {
             && update.payload["answer"].as_str().map(str::trim) == Some("install"))
 }
 
+/// What an answer (or a request) of the release update is about, as the
+/// supervisor recorded it: `Some(true)` the plugin alone, `Some(false)`
+/// the binary, `None` for an answer an older runtime wrote without saying
+/// (it wrote `plugin_only` only when true).
+fn plugin_only(update: &RunEvent) -> Option<bool> {
+    update.payload["plugin_only"].as_bool()
+}
+
+/// Whether the request `updates[at]` was followed: a job of its release
+/// (or of a newer one) started after it, or the release update dropped it
+/// ([`dropped_requests`]).
+fn followed(updates: &[RunEvent], at: usize) -> bool {
+    let request = &updates[at];
+    let Some(version) = step_release(request) else {
+        return true;
+    };
+    updates[..at].iter().any(|later| match later.kind.as_str() {
+        UPDATE_STARTED => step_release(later)
+            .is_some_and(|started| started == version || is_newer(started, version)),
+        UPDATE_DROPPED => {
+            later.payload.get("ask_id").is_some()
+                && later.payload.get("ask_id") == request.payload.get("ask_id")
+                && step_release(later) == Some(version)
+        }
+        _ => false,
+    })
+}
+
+/// Whether an answer to the ask `ask_id` about `release` is about the
+/// plugin alone: as the ask was opened for (`recorded`, the `plugin_only`
+/// its `ask_opened` or its failure wrote), else, for an ask opened before
+/// that was recorded, whether `release` is the build `current` of the
+/// supervisor applying it (the binary is already that release, so the
+/// answer can only be about the plugin).
+pub fn answer_plugin_only(recorded: Option<bool>, release: &str, current: &str) -> bool {
+    recorded.unwrap_or(release == current)
+}
+
+/// Why a plugin-only request is dropped: a newer release is out, and the
+/// job that installs it brings the plugin to it too.
+pub const DROPPED_NEWER_RELEASE: &str = "newer_release";
+
+/// The requests about the plugin alone (an `install` answer or a `retry`
+/// with `plugin_only: true`) that no job followed and that
+/// [`next_plugin_action`] never will: a release newer than theirs is the
+/// supervisor's build `current` or the `latest` found, and the plugin's job
+/// only runs for the latest release (the binary's job of the newer release
+/// updates the plugin after it). Each is left with an `update_dropped`
+/// (`reason: newer_release`) instead of silently: the payloads of those
+/// to record. `updates` is newest first.
+pub fn dropped_requests(current: &str, latest: Option<&str>, updates: &[RunEvent]) -> Vec<Value> {
+    if !is_release_build(current) {
+        return Vec::new();
+    }
+    updates
+        .iter()
+        .enumerate()
+        .filter(|(at, update)| {
+            is_request(update) && plugin_only(update) == Some(true) && !followed(updates, *at)
+        })
+        .filter_map(|(_, update)| {
+            let version = step_release(update)?;
+            let newer = [Some(current), latest]
+                .into_iter()
+                .flatten()
+                .filter(|newer| is_newer(newer, version))
+                .reduce(|best, newer| if is_newer(newer, best) { newer } else { best })?;
+            Some(json!({
+                "source": update.payload["source"],
+                "release": version,
+                "ask_id": update.payload["ask_id"],
+                "answer": update.payload["answer"],
+                "request": update.kind,
+                "plugin_only": true,
+                "reason": DROPPED_NEWER_RELEASE,
+                "newer": newer,
+                "current": current,
+            }))
+        })
+        .collect()
+}
+
 /// The next step of the release update: `mode` is the host's `release`,
 /// `current` the supervisor's build, `latest` the release the last look
 /// found, `updates` the queue's `update_*` newest first and `open` the
 /// releases of the `approve_release` asks nobody closed. A request (an
-/// `install` answer or a `retry`) that no job of its release followed
-/// starts its release (the newest, when several wait); otherwise a release newer than `current` that no job
-/// tried and no answer skipped is installed (`auto`) or asked about (`ask`,
-/// unless its ask is open).
+/// `install` answer or a `retry`) about the binary that no job of its
+/// release followed starts its release (the newest, when several wait);
+/// otherwise a release newer than `current` that no job tried and no answer
+/// about the binary skipped is installed (`auto`) or asked about (`ask`,
+/// unless its ask is open). Whether an answer is about the binary or the
+/// plugin alone is its `plugin_only`, recorded from the ask it answered,
+/// never `current`.
 pub fn next_action(
     mode: ReleaseMode,
     current: &str,
@@ -189,19 +275,16 @@ pub fn next_action(
     // Each request no job of its release (or a newer one) started after;
     // of those, the newest release, so an answer about another release in the same pass
     // does not hide it.
+    // A request about the plugin alone is never the binary's, whatever
+    // build applies it.
     let pending = updates
         .iter()
         .enumerate()
-        .filter(|(_, update)| is_request(update))
+        .filter(|(_, update)| is_request(update) && plugin_only(update) != Some(true))
         .filter_map(|(at, update)| {
             let version = step_release(update)?;
             // A job of it, or of a newer release, answered it.
-            let started = updates[..at].iter().any(|later| {
-                later.kind == UPDATE_STARTED
-                    && step_release(later)
-                        .is_some_and(|started| started == version || is_newer(started, version))
-            });
-            (!started && is_newer(version, current)).then_some(version)
+            (!followed(updates, at) && is_newer(version, current)).then_some(version)
         })
         .reduce(|best, version| {
             if is_newer(version, best) {
@@ -216,10 +299,15 @@ pub fn next_action(
     let Some(latest) = latest.filter(|latest| is_newer(latest, current)) else {
         return ReleaseAction::Nothing;
     };
-    // A job tried it (its failure asks on its own), or an answer decided.
+    // A job tried it (its failure asks on its own), or an answer about the
+    // binary decided.
     let decided = updates.iter().any(|update| {
         step_release(update) == Some(latest)
-            && matches!(update.kind.as_str(), UPDATE_STARTED | UPDATE_ANSWERED)
+            && match update.kind.as_str() {
+                UPDATE_STARTED => true,
+                UPDATE_ANSWERED => plugin_only(update) != Some(true),
+                _ => false,
+            }
     });
     if decided {
         return ReleaseAction::Nothing;
@@ -236,8 +324,10 @@ pub fn next_action(
 /// the supervisor does not load the plugin from `--plugin-dir`: only while
 /// the binary is the latest release (the marketplace hands out the latest,
 /// and a plugin newer than the binary could name what it lacks). A request
-/// (an `install` answer or a `retry`) about the release the binary is
-/// already that no job followed starts the plugin's job; otherwise an
+/// (an `install` answer or a `retry`) about the plugin of the release the
+/// binary is already that no job followed starts the plugin's job; a
+/// request about the plugin of an older release is left to
+/// [`dropped_requests`]; otherwise an
 /// installed `plugin` older than the release is brought to it (`auto`) or
 /// asked about (`ask`), unless a job already tried it (the binary's job
 /// updates the plugin after it, and its failure asks on its own) or an
@@ -253,14 +343,14 @@ pub fn next_plugin_action(
     if mode == ReleaseMode::Off || !is_release_build(current) || latest != Some(current) {
         return ReleaseAction::Nothing;
     }
+    // A request about the binary is not the plugin's, whatever build
+    // applies it; one an older runtime wrote without saying is taken as
+    // before.
     let requested = updates.iter().enumerate().any(|(at, update)| {
         is_request(update)
+            && plugin_only(update) != Some(false)
             && step_release(update) == Some(current)
-            && !updates[..at].iter().any(|later| {
-                later.kind == UPDATE_STARTED
-                    && step_release(later)
-                        .is_some_and(|started| started == current || is_newer(started, current))
-            })
+            && !followed(updates, at)
     });
     if requested {
         return ReleaseAction::StartPlugin(current.to_owned());
@@ -581,6 +671,145 @@ mod tests {
             assert_eq!(
                 plugin(ask, "0.4.0", Some("0.4.0"), Some("0.4.0"), &started, &[]),
                 Nothing
+            );
+        }
+    }
+
+    /// Whether an answer is about the plugin alone is what its ask was
+    /// opened for, whatever build applies it; an ask opened before that
+    /// was recorded is about the plugin when its release is the build.
+    #[test]
+    fn an_answer_is_about_what_its_ask_was_opened_for() {
+        assert!(answer_plugin_only(Some(true), "0.4.0", "0.3.0"));
+        assert!(!answer_plugin_only(Some(false), "0.4.0", "0.4.0"));
+        assert!(answer_plugin_only(None, "0.4.0", "0.4.0"));
+        assert!(!answer_plugin_only(None, "0.4.0", "0.3.0"));
+    }
+
+    /// A request about the plugin alone never starts the binary's job nor
+    /// decides the binary's release, and one about the binary never starts
+    /// the plugin's job, whatever build applies it.
+    #[test]
+    fn a_request_starts_only_the_job_it_was_about() {
+        use ReleaseAction::*;
+        let ask = ReleaseMode::Ask;
+        let plugin = [plugin_step(
+            UPDATE_ANSWERED,
+            "0.4.0",
+            json!({"plugin_only": true, "answer": "install", "ask_id": 1}),
+        )];
+        assert_eq!(
+            next_action(ask, "0.3.0", Some("0.4.0"), &plugin, &[]),
+            Ask("0.4.0".into())
+        );
+        let skipped = [plugin_step(
+            UPDATE_ANSWERED,
+            "0.4.0",
+            json!({"plugin_only": true, "answer": "skip", "ask_id": 1}),
+        )];
+        assert_eq!(
+            next_action(ReleaseMode::Auto, "0.3.0", Some("0.4.0"), &skipped, &[]),
+            Start("0.4.0".into())
+        );
+        for kind in [UPDATE_ANSWERED, UPDATE_RETRY] {
+            let binary = [plugin_step(
+                kind,
+                "0.4.0",
+                json!({"plugin_only": false, "answer": "install", "ask_id": 1}),
+            )];
+            assert_eq!(
+                next_plugin_action(ask, "0.4.0", Some("0.4.0"), None, &binary, &[]),
+                Nothing
+            );
+            // Still the binary's, on a build older than its release.
+            assert_eq!(
+                next_action(ask, "0.3.0", Some("0.4.0"), &binary, &[]),
+                Start("0.4.0".into())
+            );
+        }
+    }
+
+    /// A request about the plugin of a release older than the build or the
+    /// latest found is dropped once, with its reason; one about the binary,
+    /// one of the latest release, one a job followed and one of a
+    /// development build are not.
+    #[test]
+    fn a_plugin_request_behind_a_newer_release_is_dropped_once() {
+        let request = |kind, plugin_only| {
+            plugin_step(
+                kind,
+                "0.4.0",
+                json!({"plugin_only": plugin_only, "answer": "install", "ask_id": 7}),
+            )
+        };
+        let plugin = [request(UPDATE_ANSWERED, true)];
+        let dropped = dropped_requests("0.4.0", Some("0.5.0"), &plugin);
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert_eq!(dropped[0]["release"], "0.4.0");
+        assert_eq!(dropped[0]["ask_id"], 7);
+        assert_eq!(dropped[0]["answer"], "install");
+        assert_eq!(dropped[0]["request"], UPDATE_ANSWERED);
+        assert_eq!(dropped[0]["plugin_only"], true);
+        assert_eq!(dropped[0]["reason"], DROPPED_NEWER_RELEASE);
+        assert_eq!(dropped[0]["newer"], "0.5.0");
+        assert_eq!(dropped[0]["source"], "release");
+        // The newest of the build and the latest.
+        let retry = [request(UPDATE_RETRY, true)];
+        let dropped = dropped_requests("0.6.0", Some("0.5.0"), &retry);
+        assert_eq!(dropped[0]["newer"], "0.6.0");
+        assert_eq!(dropped[0]["request"], UPDATE_RETRY);
+        assert_eq!(dropped_requests("0.5.0", None, &retry).len(), 1);
+        // Dropped already: not again, and no plugin job either.
+        let mut after = vec![plugin_step(UPDATE_DROPPED, "0.4.0", dropped[0].clone())];
+        after.extend(retry.iter().cloned());
+        assert!(dropped_requests("0.6.0", Some("0.6.0"), &after).is_empty());
+        assert_eq!(
+            next_plugin_action(ReleaseMode::Ask, "0.4.0", Some("0.4.0"), None, &after, &[]),
+            ReleaseAction::Nothing
+        );
+        // A drop of another ask does not follow this one.
+        let mut other = vec![plugin_step(UPDATE_DROPPED, "0.4.0", json!({"ask_id": 8}))];
+        other.extend(plugin.iter().cloned());
+        assert_eq!(dropped_requests("0.4.0", Some("0.5.0"), &other).len(), 1);
+        for (current, latest, updates) in [
+            ("0.4.0", Some("0.4.0"), plugin.to_vec()),
+            ("0.3.0", Some("0.4.0"), plugin.to_vec()),
+            (
+                "0.4.0",
+                Some("0.5.0"),
+                vec![request(UPDATE_ANSWERED, false)],
+            ),
+            (
+                "0.4.0",
+                Some("0.5.0"),
+                vec![plugin_step(
+                    UPDATE_ANSWERED,
+                    "0.4.0",
+                    json!({"answer": "install", "ask_id": 7}),
+                )],
+            ),
+            (
+                "0.4.0",
+                Some("0.5.0"),
+                vec![
+                    plugin_step(UPDATE_STARTED, "0.4.0", json!({"plugin_only": true})),
+                    request(UPDATE_ANSWERED, true),
+                ],
+            ),
+            (
+                "0.4.0",
+                Some("0.5.0"),
+                vec![plugin_step(
+                    UPDATE_ANSWERED,
+                    "0.4.0",
+                    json!({"plugin_only": true, "answer": "skip", "ask_id": 7}),
+                )],
+            ),
+            ("0.5.0-dev+a", Some("0.5.0"), plugin.to_vec()),
+        ] {
+            assert!(
+                dropped_requests(current, latest, &updates).is_empty(),
+                "{current} {latest:?} {updates:?}"
             );
         }
     }

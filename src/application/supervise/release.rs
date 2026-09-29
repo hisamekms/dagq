@@ -18,8 +18,8 @@ use super::*;
 use crate::application::lifecycle;
 use crate::application::release_update::{self, ReleaseAction, ReleaseIndex};
 use crate::application::update::{
-    JOB_STEPS, RELEASE_SOURCE, UPDATE_ASKER, UPDATE_HISTORY, failed_release, in_progress, job_pid,
-    latest_job_step, latest_job_step_of, record, step_release,
+    JOB_STEPS, RELEASE_SOURCE, UPDATE_ASKER, UPDATE_HISTORY, failed_step, failure_plugin_only,
+    in_progress, job_pid, latest_job_step, latest_job_step_of, record, step_release,
 };
 use crate::domain::EventKind;
 use crate::domain::release_update::{
@@ -200,6 +200,18 @@ impl Supervisor<'_> {
         // exec reads it again before the plugin is asked about.
         let plugin = read("plugin").filter(|_| read("current").as_deref() == Some(&port.current));
         let latest = read("latest");
+        // A request about the plugin of a release older than one out now is
+        // left with its reason, not silently.
+        for dropped in release_update::dropped_requests(&port.current, latest.as_deref(), &updates)
+        {
+            info!(
+                "release update: the plugin-only {} for {} is not run: {} is out, and its install brings the plugin up too",
+                dropped["request"], dropped["release"], dropped["newer"]
+            );
+            let mut payload = dropped;
+            payload["supervisor"] = json!(self.token);
+            record(&*self.queue, EventKind::UpdateDropped, None, payload)?;
+        }
         let open: Vec<String> = self
             .queue
             .asks(AskQuery::default())?
@@ -243,8 +255,11 @@ impl Supervisor<'_> {
     /// look to start the job, `skip` leaves the release) and the answered
     /// `update_failed` asks of a release's job (`retry` starts it again,
     /// `skip` leaves the release). Any other answer is left for the inbox.
-    /// An answer about the release the binary is already is about the
-    /// plugin (ADR-t618-2 decision 4), and says so with `plugin_only`.
+    /// Each says with `plugin_only` whether it is about the plugin alone
+    /// (ADR-t618-2 decision 4): as the ask was opened for (the
+    /// `plugin_only` of its `ask_opened`, or of the `update_failed` that
+    /// opened it), whatever build applies it; for an ask opened before that
+    /// was recorded, whether its release is the build `current`.
     fn apply_release_answers(&mut self, current: &str) -> Result<()> {
         for ask in self.queue.update_answers(&AskKind::ApproveRelease)? {
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
@@ -254,17 +269,22 @@ impl Supervisor<'_> {
             if !APPROVE_RELEASE_OPTIONS.contains(&answer) {
                 continue;
             }
+            let recorded = self.queue.ask_opened_payload(ask.id)?["plugin_only"].as_bool();
+            let plugin_only = release_update::answer_plugin_only(recorded, &version, current);
             self.record_release_answer(
                 EventKind::UpdateAnswered,
                 ask.id,
                 answer,
                 &version,
-                current,
+                plugin_only,
             )?;
         }
         let updates = self.queue.update_events(UPDATE_HISTORY)?;
         for ask in self.queue.update_answers(&AskKind::UpdateFailed)? {
-            let Some(version) = failed_release(&updates, ask.id) else {
+            let Some(step) = failed_step(&updates, ask.id) else {
+                continue;
+            };
+            let Some(version) = step_release(step) else {
                 continue;
             };
             let answer = ask.answer.as_deref().map(str::trim).unwrap_or_default();
@@ -273,7 +293,11 @@ impl Supervisor<'_> {
                 "skip" => EventKind::UpdateAnswered,
                 _ => continue,
             };
-            self.record_release_answer(kind, ask.id, answer, version, current)?;
+            let recorded = self.queue.ask_opened_payload(ask.id)?["plugin_only"]
+                .as_bool()
+                .or_else(|| failure_plugin_only(step));
+            let plugin_only = release_update::answer_plugin_only(recorded, version, current);
+            self.record_release_answer(kind, ask.id, answer, version, plugin_only)?;
         }
         Ok(())
     }
@@ -284,18 +308,16 @@ impl Supervisor<'_> {
         ask: crate::domain::AskId,
         answer: &str,
         version: &str,
-        current: &str,
+        plugin_only: bool,
     ) -> Result<()> {
-        let mut payload = json!({
+        let payload = json!({
             "ask_id": ask,
             "answer": answer,
             "source": RELEASE_SOURCE,
             "release": version,
+            "plugin_only": plugin_only,
             "supervisor": self.token,
         });
-        if version == current {
-            payload["plugin_only"] = json!(true);
-        }
         record(&*self.queue, kind, None, payload)?;
         self.queue.close_ask(ask)?;
         info!(ask_id = %ask, "release update: ask {ask} answered {answer} for release {version}");
@@ -322,6 +344,7 @@ next release asks again.",
             APPROVE_RELEASE_OPTIONS,
             UPDATE_ASKER,
             Some(version),
+            json!({"plugin_only": false}),
         )?;
         info!(ask_id = %ask.id, "release update: {version} is out; ask {} opened", ask.id);
         Ok(())
@@ -347,6 +370,7 @@ sessions open now keep the plugin they started with, so reopen them afterwards t
             APPROVE_RELEASE_OPTIONS,
             UPDATE_ASKER,
             Some(version),
+            json!({"plugin_only": true}),
         )?;
         info!(ask_id = %ask.id, "release update: the plugin {plugin} is older than {version}; ask {} opened", ask.id);
         Ok(())
@@ -382,6 +406,7 @@ leave it (the next release asks again).",
             UPDATE_FAILED_OPTIONS,
             UPDATE_ASKER,
             None,
+            json!({"plugin_only": plugin_only}),
         )?;
         record(
             &*self.queue,

@@ -244,6 +244,7 @@ event_kinds! {
     UpdateAnswered => "update_answered",
     UpdateAwaitingApproval => "update_awaiting_approval",
     UpdateBuilt => "update_built",
+    UpdateDropped => "update_dropped",
     UpdateE2ePassed => "update_e2e_passed",
     UpdateFailed => "update_failed",
     UpdateInstalled => "update_installed",
@@ -384,6 +385,7 @@ impl EventKind {
                 | UpdateAwaitingApproval
                 | UpdateAnswered
                 | UpdateRetry
+                | UpdateDropped
                 // A supervisor's look for a new release (ADR-t618-1
                 // decision 2).
                 | ReleaseChecked
@@ -911,6 +913,7 @@ mod tests {
                 "update_awaiting_approval",
             ),
             (EventKind::UpdateBuilt, "update_built"),
+            (EventKind::UpdateDropped, "update_dropped"),
             (EventKind::UpdateE2ePassed, "update_e2e_passed"),
             (EventKind::UpdateFailed, "update_failed"),
             (EventKind::UpdateInstalled, "update_installed"),

@@ -1910,7 +1910,9 @@ pub trait AskStore {
     /// Open the ask of the automatic update of `kind` (`update_failed`,
     /// `approve_update` or `approve_release`), closing an older open one of
     /// it (ADR-0073 decision 17); `subject` is the release an
-    /// `approve_release` is about.
+    /// `approve_release` is about, and the keys of `details` (an object, or
+    /// null) are written into its `ask_opened` (the release update's
+    /// `plugin_only`).
     fn open_update_ask(
         &mut self,
         kind: crate::domain::AskKind,
@@ -1918,7 +1920,11 @@ pub trait AskStore {
         options: &[&str],
         asked_by: &str,
         subject: Option<&str>,
+        details: serde_json::Value,
     ) -> Result<crate::domain::Ask>;
+    /// The payload of the `ask_opened` of the ask `id`; null when there is
+    /// none.
+    fn ask_opened_payload(&self, id: crate::domain::AskId) -> Result<serde_json::Value>;
     /// Whether the host's `[update]` of this queue looks for releases
     /// (`release` other than `off`, ADR-t618-1): whether a supervisor of a
     /// release build applies the release update's answers.

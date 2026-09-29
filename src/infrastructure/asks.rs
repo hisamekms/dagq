@@ -447,7 +447,7 @@ impl SqliteQueue {
     /// of the same kind still open is about an older build, so it is
     /// answered `superseded` and closed first (by the runtime, which writes
     /// `ask_answered` with `runtime_closed`). Writes `ask_opened` like any
-    /// ask.
+    /// ask, with the keys of `details` (an object, or null) besides.
     pub fn open_update_ask(
         &mut self,
         kind: AskKind,
@@ -455,6 +455,7 @@ impl SqliteQueue {
         options: &[&str],
         asked_by: &str,
         subject: Option<&str>,
+        details: serde_json::Value,
     ) -> Result<Ask> {
         ensure!(!question.trim().is_empty(), "question must not be blank");
         ensure!(
@@ -503,21 +504,41 @@ impl SqliteQueue {
             ],
         )?;
         let id = AskId::new(tx.last_insert_rowid());
-        ask_event(
-            &tx,
-            None,
-            None,
-            EventKind::AskOpened,
-            json!({
-                "ask_id": id,
-                "kind": kind,
-                "asked_by": asked_by,
-                "reason_category": reason,
-            }),
-        )?;
+        let mut payload = json!({
+            "ask_id": id,
+            "kind": kind,
+            "asked_by": asked_by,
+            "reason_category": reason,
+        });
+        if let (Some(payload), serde_json::Value::Object(details)) =
+            (payload.as_object_mut(), details)
+        {
+            for (key, value) in details {
+                payload.entry(key).or_insert(value);
+            }
+        }
+        ask_event(&tx, None, None, EventKind::AskOpened, payload)?;
         let opened = read_ask(&tx, id)?;
         tx.commit()?;
         Ok(opened)
+    }
+
+    /// The payload of the `ask_opened` of the ask `id`; null when there is
+    /// none.
+    pub fn ask_opened_payload(&self, id: AskId) -> Result<serde_json::Value> {
+        let payload: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM run_events WHERE kind=?1
+                 AND json_extract(payload,'$.ask_id')=?2 ORDER BY id DESC LIMIT 1",
+                params![EventKind::AskOpened.as_str(), id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match payload {
+            Some(payload) => serde_json::from_str(&payload)?,
+            None => serde_json::Value::Null,
+        })
     }
 
     /// The asks of the automatic update of `kind` that were answered and
@@ -1116,7 +1137,14 @@ mod tests {
         source: Option<&str>,
     ) -> (bool, bool) {
         let ask = queue
-            .open_update_ask(kind, "retry?", options, "runtime", Some("0.4.0"))
+            .open_update_ask(
+                kind,
+                "retry?",
+                options,
+                "runtime",
+                Some("0.4.0"),
+                serde_json::Value::Null,
+            )
             .unwrap();
         if let Some(source) = source {
             queue
@@ -1274,6 +1302,46 @@ mod tests {
         assert_eq!(release_failed(&mut queue, "retry"), (false, false));
     }
 
+    /// The details an update ask is opened with are written into its
+    /// `ask_opened` besides its own keys, and read back by its id; an ask
+    /// with none, or no ask, reads what there is.
+    #[test]
+    fn an_update_asks_details_are_kept_in_its_ask_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let plugin = queue
+            .open_update_ask(
+                AskKind::ApproveRelease,
+                "plugin?",
+                APPROVE_RELEASE_OPTIONS,
+                "supervisor",
+                Some("0.4.0"),
+                json!({"plugin_only": true, "kind": "not this"}),
+            )
+            .unwrap();
+        let plain = queue
+            .open_update_ask(
+                AskKind::UpdateFailed,
+                "retry?",
+                UPDATE_FAILED_OPTIONS,
+                "supervisor",
+                None,
+                serde_json::Value::Null,
+            )
+            .unwrap();
+        let opened = queue.ask_opened_payload(plugin.id).unwrap();
+        assert_eq!(opened["plugin_only"], true, "{opened}");
+        assert_eq!(opened["kind"], "approve_release", "{opened}");
+        assert_eq!(opened["ask_id"], json!(plugin.id));
+        let opened = queue.ask_opened_payload(plain.id).unwrap();
+        assert_eq!(opened["kind"], "update_failed");
+        assert!(opened.get("plugin_only").is_none(), "{opened}");
+        assert_eq!(
+            queue.ask_opened_payload(AskId::new(99)).unwrap(),
+            serde_json::Value::Null
+        );
+    }
+
     /// An update ask with a blank question is refused before the write
     /// (ADR-t876-1: the rule the `asks.question` CHECK held).
     #[test]
@@ -1287,6 +1355,7 @@ mod tests {
                 UPDATE_FAILED_OPTIONS,
                 "runtime",
                 None,
+                serde_json::Value::Null,
             )
             .unwrap_err();
         assert_eq!(error.to_string(), "question must not be blank");

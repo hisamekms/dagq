@@ -1696,6 +1696,10 @@ pub const UPDATE_AWAITING_APPROVAL: &str =
 pub const UPDATE_ANSWERED: &str = crate::domain::event_kind::EventKind::UpdateAnswered.as_str();
 /// A `retry` answer: the next check builds main's head again.
 pub const UPDATE_RETRY: &str = crate::domain::event_kind::EventKind::UpdateRetry.as_str();
+/// The release update did not act on a request (an `install` answer or a
+/// `retry`) that no job followed, and will not (`ask_id`, `answer`,
+/// `release`, `plugin_only`, `reason`).
+pub const UPDATE_DROPPED: &str = crate::domain::event_kind::EventKind::UpdateDropped.as_str();
 
 /// Every step of the automatic update, each with `commit` (the main commit
 /// it is about) in its payload but for the answers.
@@ -1709,6 +1713,7 @@ pub const UPDATE_EVENT_KINDS: &[&str] = &[
     UPDATE_AWAITING_APPROVAL,
     UPDATE_ANSWERED,
     UPDATE_RETRY,
+    UPDATE_DROPPED,
 ];
 
 /// Whether an event of `kind` may be written with its task, goal and run

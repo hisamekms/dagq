@@ -223,6 +223,7 @@ to wait for the next landing that changes the runtime.",
             UPDATE_FAILED_OPTIONS,
             UPDATE_ASKER,
             None,
+            Value::Null,
         )?;
         record(
             &*self.queue,

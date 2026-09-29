@@ -33,8 +33,8 @@ use crate::domain::{
 };
 use crate::domain::{EventKind, LeaseToken};
 pub use crate::domain::{
-    UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_E2E_PASSED, UPDATE_FAILED,
-    UPDATE_INSTALLED, UPDATE_RESTORED, UPDATE_RETRY, UPDATE_STARTED,
+    UPDATE_ANSWERED, UPDATE_AWAITING_APPROVAL, UPDATE_BUILT, UPDATE_DROPPED, UPDATE_E2E_PASSED,
+    UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RESTORED, UPDATE_RETRY, UPDATE_STARTED,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -155,26 +155,51 @@ pub fn in_progress(update: &RunEvent, processes: &dyn ProcessControl) -> bool {
         && job_pid(update).is_some_and(|pid| processes.alive(pid))
 }
 
+/// Whether `update` is the supervisor's word about an answer (an
+/// `update_answered`, an `update_retry`, or an `update_dropped`), not a
+/// step a job wrote.
+fn is_answer_step(update: &RunEvent) -> bool {
+    matches!(
+        update.kind.as_str(),
+        UPDATE_ANSWERED | UPDATE_RETRY | UPDATE_DROPPED
+    )
+}
+
 /// The newest step a job wrote (`updates` newest first): the answers of
-/// the asks (`update_answered`, `update_retry`) are skipped, so an answer
-/// written while a job still works does not hide it.
+/// the asks (`update_answered`, `update_retry`, `update_dropped`) are
+/// skipped, so an answer written while a job still works does not hide it.
 pub fn latest_job_step(updates: &[RunEvent]) -> Option<&RunEvent> {
-    updates
-        .iter()
-        .find(|update| !matches!(update.kind.as_str(), UPDATE_ANSWERED | UPDATE_RETRY))
+    updates.iter().find(|update| !is_answer_step(update))
+}
+
+/// The `update_failed` that opened the ask `ask_id`, if it is among
+/// `updates`.
+pub fn failed_step(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Option<&RunEvent> {
+    updates.iter().find(|update| {
+        update.kind == UPDATE_FAILED
+            && update.payload.get("ask_id").and_then(Value::as_i64) == Some(ask_id.as_i64())
+    })
 }
 
 /// The release of the release update's job whose failure opened the
 /// `update_failed` ask `ask_id`; `None` when a build of the automatic
 /// update failed (or the step is not among `updates`).
 pub fn failed_release(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Option<&str> {
-    updates
-        .iter()
-        .find(|update| {
-            update.kind == UPDATE_FAILED
-                && update.payload.get("ask_id").and_then(Value::as_i64) == Some(ask_id.as_i64())
-        })
-        .and_then(step_release)
+    failed_step(updates, ask_id).and_then(step_release)
+}
+
+/// Whether the release update's `update_failed` `step` is about the plugin
+/// alone: a job that only brought the plugin (`plugin_only`), or the
+/// binary's job whose plugin update failed after the binary was replaced
+/// (`stage: plugin`). `None` when the step says neither way (an older
+/// runtime's `update_failed` without `plugin_only`, or one not about a
+/// release).
+pub fn failure_plugin_only(step: &RunEvent) -> Option<bool> {
+    step_release(step)?;
+    if step.payload["stage"] == "plugin" {
+        return Some(true);
+    }
+    step.payload["plugin_only"].as_bool()
 }
 
 /// The newest step of the jobs of the release update (`release`) or of the
@@ -182,10 +207,9 @@ pub fn failed_release(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Opt
 /// one that tells whether a job of that kind was interrupted, even when a
 /// job of the other kind ran after it.
 pub fn latest_job_step_of(updates: &[RunEvent], release: bool) -> Option<&RunEvent> {
-    updates.iter().find(|update| {
-        step_release(update).is_some() == release
-            && !matches!(update.kind.as_str(), UPDATE_ANSWERED | UPDATE_RETRY)
-    })
+    updates
+        .iter()
+        .find(|update| step_release(update).is_some() == release && !is_answer_step(update))
 }
 
 /// The pid of the job that wrote `update`, if it recorded one.
@@ -203,7 +227,8 @@ pub fn job_pid(update: &RunEvent) -> Option<u32> {
 /// `interrupted` when its job died, `installed`,
 /// `plugin_installed` when a plugin-only job brought the plugin to a
 /// release without replacing the binary, `failed`, `awaiting_approval`,
-/// `retry_requested`, `skipped`; `idle` when none ran), with its commit,
+/// `retry_requested`, `skipped`, `dropped` when the release update left a
+/// request it no longer needed; `idle` when none ran), with its commit,
 /// time and details. `updates` is newest first.
 pub fn status(
     registrations: &[SupervisorRegistration],
@@ -241,6 +266,7 @@ pub fn status(
         UPDATE_AWAITING_APPROVAL => "awaiting_approval",
         UPDATE_RETRY => "retry_requested",
         UPDATE_ANSWERED => "skipped",
+        UPDATE_DROPPED => "dropped",
         _ => "unknown",
     };
     // The commit is the one the latest job worked on; an answer's row
@@ -1309,6 +1335,13 @@ now, `up` starts one.",
             job.log.display()
         ),
     };
+    // What a `retry` of a release's job asks for: after a plugin failure
+    // (the binary's job had replaced the binary, or the job was the
+    // plugin's alone), only the plugin again.
+    let purpose = match job.subject {
+        Subject::Release(_) => json!({"plugin_only": stage == "plugin"}),
+        Subject::Commit(_) => Value::Null,
+    };
     let ask = queue
         .open_update_ask(
             AskKind::UpdateFailed,
@@ -1316,6 +1349,7 @@ now, `up` starts one.",
             UPDATE_FAILED_OPTIONS,
             UPDATE_ASKER,
             None,
+            purpose,
         )?
         .id;
     let mut payload = json!({
@@ -1379,6 +1413,7 @@ migrate and start it again with the new binary; or `skip` to leave it. The build
             APPROVE_UPDATE_OPTIONS,
             UPDATE_ASKER,
             None,
+            Value::Null,
         )?
         .id;
     let payload = json!({
@@ -1519,5 +1554,67 @@ mod tests {
         let status = status(&[], &[plugin], &NoneAlive, 0);
         assert_eq!(status["last"]["plugin_only"], true);
         assert_eq!(status["enabled"], false);
+    }
+
+    /// A dropped request shows as `dropped`, and is no job's step: the
+    /// job that ran before it is still the latest one.
+    #[test]
+    fn a_dropped_request_is_shown_and_is_no_jobs_step() {
+        let started = update(
+            1,
+            UPDATE_STARTED,
+            json!({"pid": 7, "source": "release", "release": "0.5.0"}),
+        );
+        let dropped = update(
+            2,
+            UPDATE_DROPPED,
+            json!({"source": "release", "release": "0.4.0", "ask_id": 3, "plugin_only": true}),
+        );
+        let updates = [dropped, started];
+        assert_eq!(status(&[], &updates, &NoneAlive, 0)["state"], "dropped");
+        assert_eq!(latest_job_step(&updates).unwrap().kind, UPDATE_STARTED);
+        assert_eq!(
+            latest_job_step_of(&updates, true).unwrap().kind,
+            UPDATE_STARTED
+        );
+    }
+
+    /// A release's failure says whether a `retry` is about the plugin
+    /// alone: a plugin stage or `plugin_only`; the build's failure of an
+    /// older runtime says neither, and the automatic update's is none.
+    #[test]
+    fn a_release_failure_tells_whether_it_was_about_the_plugin() {
+        let failed = |payload: Value| update(1, UPDATE_FAILED, payload);
+        let release = |extra: Value| {
+            let mut payload = json!({"source": "release", "release": "0.4.0", "ask_id": 3});
+            if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+                payload.extend(extra);
+            }
+            failed(payload)
+        };
+        assert_eq!(
+            failure_plugin_only(&release(json!({"stage": "plugin"}))),
+            Some(true)
+        );
+        assert_eq!(
+            failure_plugin_only(&release(
+                json!({"stage": "interrupted", "plugin_only": false})
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            failure_plugin_only(&release(json!({"stage": "build"}))),
+            None
+        );
+        assert_eq!(
+            failure_plugin_only(&failed(json!({"stage": "plugin", "commit": "abc"}))),
+            None
+        );
+        let updates = [release(json!({"stage": "build"}))];
+        assert_eq!(
+            failed_step(&updates, crate::domain::AskId::new(3)).map(|step| step.id),
+            Some(updates[0].id)
+        );
+        assert!(failed_step(&updates, crate::domain::AskId::new(4)).is_none());
     }
 }

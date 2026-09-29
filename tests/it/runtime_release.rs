@@ -544,6 +544,7 @@ fn a_development_build_applies_no_release_answer() {
             &["install", "skip"],
             "supervisor",
             Some("0.5.0"),
+            Value::Null,
         )
         .unwrap();
     queue.answer(ask.id, "install").unwrap();
@@ -678,4 +679,105 @@ fn a_plugin_dir_supervisor_leaves_the_installed_plugin() {
     assert!(s.release_asks().is_empty());
     let calls = fs::read_to_string(claude.with_extension("calls")).unwrap_or_default();
     assert!(!calls.contains("plugin"), "{calls}");
+}
+
+/// Record the look of a supervisor of build `current` that found `latest`.
+fn record_look(s: &Setup, current: &str, latest: &str) {
+    s.record(
+        EventKind::ReleaseChecked,
+        json!({"latest": latest, "current": current, "checked_at": now_secs(), "etag": "\"e2\"", "supervisor": "another"}),
+    );
+}
+
+/// Open an `approve_release` about `release` as a supervisor opens it for
+/// the plugin alone (`Some(true)`) or the binary (`Some(false)`), or as an
+/// older runtime did, without saying (`None`), and answer it `answer`.
+fn answered_release_ask(s: &Setup, release: &str, plugin_only: Option<bool>, answer: &str) {
+    let mut queue = SqliteQueue::open(&s.db).unwrap();
+    let details = plugin_only.map_or(
+        Value::Null,
+        |plugin_only| json!({"plugin_only": plugin_only}),
+    );
+    let ask = queue
+        .open_update_ask(
+            AskKind::ApproveRelease,
+            &format!("about {release}"),
+            &["install", "skip"],
+            "supervisor",
+            Some(release),
+            details,
+        )
+        .unwrap();
+    queue.answer(ask.id, answer).unwrap();
+}
+
+/// A plugin-only answer stays about the plugin when a supervisor of an
+/// older build applies it: it is recorded `plugin_only` and starts no job
+/// of the binary, nor is it dropped (its release is the latest).
+#[test]
+fn a_plugin_answer_applied_by_another_build_stays_about_the_plugin() {
+    let s = setup("", "0.3.0", false);
+    record_look(&s, "0.3.0", "0.4.0");
+    answered_release_ask(&s, "0.4.0", Some(true), "install");
+    s.supervise();
+    let answered = s.steps("update_answered", "0.4.0");
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert_eq!(answered[0]["plugin_only"], true, "{answered:?}");
+    assert!(events_of(&s.db, "update_started").is_empty());
+    assert!(events_of(&s.db, "update_dropped").is_empty());
+}
+
+/// An answer about the binary stays about the binary when a supervisor
+/// already of its release applies it: not `plugin_only`, and no plugin job.
+#[test]
+fn a_binary_answer_applied_by_its_own_build_is_not_about_the_plugin() {
+    let s = setup("", "0.4.0", false);
+    record_look(&s, "0.4.0", "0.4.0");
+    answered_release_ask(&s, "0.4.0", Some(false), "install");
+    s.supervise();
+    let answered = s.steps("update_answered", "0.4.0");
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert_eq!(answered[0]["plugin_only"], false, "{answered:?}");
+    assert!(events_of(&s.db, "update_started").is_empty());
+}
+
+/// An ask opened before its purpose was recorded is about the plugin when
+/// its release is the build that applies the answer, else the binary's.
+#[test]
+fn an_ask_without_its_purpose_is_about_the_plugin_only_on_its_own_build() {
+    for (current, plugin_only) in [("0.4.0", true), ("0.3.0", false)] {
+        let s = setup("", current, false);
+        record_look(&s, current, "0.4.0");
+        answered_release_ask(&s, "0.4.0", None, "skip");
+        s.supervise();
+        let answered = s.steps("update_answered", "0.4.0");
+        assert_eq!(answered.len(), 1, "{answered:?}");
+        assert_eq!(answered[0]["plugin_only"], plugin_only, "{current}");
+    }
+}
+
+/// A plugin-only `install` applied after a newer release is out is not
+/// run: `update_dropped` says so once, with the release that supersedes
+/// it, and the newer release is asked about.
+#[test]
+fn a_plugin_install_behind_a_newer_release_is_dropped_with_its_reason() {
+    let s = setup("", "0.4.0", false);
+    record_look(&s, "0.4.0", "0.5.0");
+    answered_release_ask(&s, "0.4.0", Some(true), "install");
+    s.supervise();
+    let answered = s.steps("update_answered", "0.4.0");
+    assert_eq!(answered[0]["plugin_only"], true, "{answered:?}");
+    let dropped = s.steps("update_dropped", "0.4.0");
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(dropped[0]["ask_id"], answered[0]["ask_id"]);
+    assert_eq!(dropped[0]["answer"], "install");
+    assert_eq!(dropped[0]["plugin_only"], true);
+    assert_eq!(dropped[0]["reason"], "newer_release");
+    assert_eq!(dropped[0]["newer"], "0.5.0");
+    assert!(dropped[0]["supervisor"].is_string(), "{dropped:?}");
+    assert!(events_of(&s.db, "update_started").is_empty());
+    assert_eq!(s.release_asks()[0].subject.as_deref(), Some("0.5.0"));
+    s.supervise();
+    assert_eq!(s.steps("update_dropped", "0.4.0").len(), 1);
+    assert!(events_of(&s.db, "update_started").is_empty());
 }
