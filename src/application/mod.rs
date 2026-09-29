@@ -48,7 +48,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
     EvidenceCheck, GoalId, GoalStatus, GoalVerdict, Priority, RunId, RunStatus, Task, TaskChange,
-    TaskId, TaskKind, TaskStatus,
+    TaskId, TaskStatus,
 };
 
 /// Which task statuses `list` returns.
@@ -111,8 +111,6 @@ pub struct TaskListItem {
     pub id: TaskId,
     pub status: TaskStatus,
     pub priority: Priority,
-    /// What the task changes; null when it was registered without a kind.
-    pub kind: Option<TaskKind>,
     /// The kind of change it declares (ADR-t980-1); null without one.
     pub change: Option<TaskChange>,
     /// The provider and mode of its worker (ADR-t813-2), shown as
@@ -175,7 +173,6 @@ impl TaskListItem {
             id: task.id(),
             status: task.status(),
             priority: task.priority(),
-            kind: task.kind().cloned(),
             change: task.change().cloned(),
             worker: task.worker(),
             title: task.title().to_owned(),
@@ -742,7 +739,6 @@ mod tests {
                 required_evidence: Vec::new(),
                 paths: Vec::new(),
                 priority: Priority::Low,
-                kind: None,
                 change: None,
                 status: TaskStatus::Ready,
                 goal_id: None,

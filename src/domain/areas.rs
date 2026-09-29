@@ -14,7 +14,7 @@ use super::{RunEvent, RunId, scope};
 /// The area of a landed file no area of the map matches.
 pub const OTHER: &str = "other";
 /// The value of a run without areas (not landed, or its commit unreadable)
-/// in `kpi`'s strata, as a task without a kind.
+/// in `kpi`'s strata, as a task without a change.
 pub const UNKNOWN: &str = "unknown";
 /// The name of every run together.
 const ALL: &str = "all";

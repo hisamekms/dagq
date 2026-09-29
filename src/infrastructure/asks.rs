@@ -1337,7 +1337,6 @@ mod tests {
                 priority: Default::default(),
                 goal_id: None,
                 context: String::new(),
-                kind: None,
                 change: None,
                 provider: None,
                 worker_mode: None,

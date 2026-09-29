@@ -79,7 +79,7 @@ config = ["dagq.toml"]
 # KPI の目標（ADR-0051 の決定 17・19。書式は docs/design/supervisor-lifecycle/kpi.md の「目標」）。
 # ここには host に依らない repository の方針だけを書く。phase.* や max_load_avg のように host の性能で
 # 決まる目標は host.toml に書く。[kpi] の min_samples・breach_periods・breach_weeks・
-# max_improvement_proposals は既定のまま書かない。層はどれも all（kind・change・area を省く）、stat は率・値の既定（value）。
+# max_improvement_proposals は既定のまま書かない。層はどれも all（change・area を省く）、stat は率・値の既定（value）。
 # 目標は 2026-09-26 に人と planner が ask 112 で決めた（planner の推奨を人が adopt し、inbox 経由の補足で
 # first_pass_rate と asks_per_landing を緩めた）。「実績」は決めたときの 2026-W39 途中、all、n≈240 の値。
 # [kpi] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 430 を含んでから足した。

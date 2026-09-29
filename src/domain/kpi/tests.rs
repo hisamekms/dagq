@@ -16,7 +16,6 @@ const JST: i64 = 9 * HOUR;
 #[derive(Default)]
 struct Queue {
     events: Vec<RunEvent>,
-    kinds: HashMap<TaskId, Option<TaskKind>>,
     changes: HashMap<TaskId, Option<TaskChange>>,
     goals: HashMap<TaskId, Option<GoalId>>,
     /// The registered supervisors' last heartbeats.
@@ -30,7 +29,6 @@ struct Queue {
 #[derive(Clone)]
 struct Run {
     task: i64,
-    kind: Option<TaskKind>,
     /// The change its task declares (ADR-t980-1).
     change: Option<TaskChange>,
     /// Unix seconds of the claim.
@@ -54,11 +52,10 @@ struct Run {
 }
 
 impl Run {
-    fn new(task: i64, kind: Option<TaskKind>, claimed: i64, work: i64) -> Self {
+    fn new(task: i64, change: Option<TaskChange>, claimed: i64, work: i64) -> Self {
         Self {
             task,
-            kind,
-            change: None,
+            change,
             claimed,
             work,
             parallel: 3,
@@ -105,7 +102,6 @@ impl Queue {
     fn run(&mut self, run: &Run) -> i64 {
         let id = format!("{:08x}-0000-4000-8000-{:012x}", run.task, run.claimed);
         let (task, id) = (Some(run.task), Some(id.as_str()));
-        self.kinds.insert(TaskId::new(run.task), run.kind.clone());
         self.changes
             .insert(TaskId::new(run.task), run.change.clone());
         self.goals.insert(TaskId::new(run.task), None);
@@ -243,7 +239,6 @@ impl Queue {
             &KpiInput {
                 events: &self.events,
                 goals: &self.goals,
-                kinds: &self.kinds,
                 changes: &self.changes,
                 areas: self.areas.as_ref(),
                 heartbeats: &self.heartbeats,
@@ -331,17 +326,17 @@ fn measures_keep_null_apart_from_zero() {
 }
 
 /// Each run falls in the day it finished; its KPIs are split by the task's
-/// kind (a task without one is `unknown`) and the claim's attributes, and
+/// change (a task without one is `unknown`) and the claim's attributes, and
 /// each day sits next to the previous one.
 #[test]
-fn splits_the_runs_by_kind_and_attributes_per_day() {
+fn splits_the_runs_by_change_and_attributes_per_day() {
     let mut queue = Queue::default();
     let tuesday = MONDAY + DAY;
     let mut runs = Vec::new();
-    for (index, kind) in [
-        Some("runtime".parse::<TaskKind>().unwrap()),
-        Some("runtime".parse::<TaskKind>().unwrap()),
-        Some("docs".parse::<TaskKind>().unwrap()),
+    for (index, change) in [
+        Some("runtime".parse::<TaskChange>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
+        Some("docs".parse::<TaskChange>().unwrap()),
         None,
     ]
     .into_iter()
@@ -350,7 +345,7 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
         let index = index as i64;
         let mut run = Run::new(
             10 + index,
-            kind,
+            change,
             tuesday + HOUR * (index + 1),
             600 * (index + 1),
         );
@@ -372,13 +367,13 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     // Monday: one runtime run, and one that failed.
     queue.run(&Run::new(
         1,
-        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
         MONDAY + HOUR,
         300,
     ));
     let mut failed = Run::new(
         2,
-        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
         MONDAY + 2 * HOUR,
         300,
     );
@@ -408,15 +403,15 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     assert_eq!(tuesday.window.runs, 4);
     assert_eq!(measure(tuesday, "landings", ALL).value, Some(4.0));
     assert_eq!(
-        measure(tuesday, "landings", "kind=runtime").value,
+        measure(tuesday, "landings", "change=runtime").value,
         Some(2.0)
     );
-    assert_eq!(measure(tuesday, "landings", "kind=docs").value, Some(1.0));
+    assert_eq!(measure(tuesday, "landings", "change=docs").value, Some(1.0));
     assert_eq!(
-        measure(tuesday, "landings", "kind=unknown").value,
+        measure(tuesday, "landings", "change=unknown").value,
         Some(1.0)
     );
-    let work = measure(tuesday, "phase.work", "kind=runtime");
+    let work = measure(tuesday, "phase.work", "change=runtime");
     assert_eq!(
         (work.n, work.median, work.max),
         (2, Some(900.0), Some(1200.0))
@@ -424,11 +419,11 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     assert_eq!(measure(tuesday, "phase.startup", ALL).median, Some(50.0));
     // Ready an hour before the claim, landed 120 s after the receipt.
     assert_eq!(
-        measure(tuesday, "lead_time", "kind=docs").median,
+        measure(tuesday, "lead_time", "change=docs").median,
         Some(3600.0 + 1800.0 + 100.0)
     );
     assert_eq!(
-        measure(tuesday, "revise_rate", "kind=runtime").value,
+        measure(tuesday, "revise_rate", "change=runtime").value,
         Some(0.5)
     );
     assert_eq!(measure(tuesday, "first_pass_rate", ALL).value, Some(0.75));
@@ -486,7 +481,7 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
     let work = &tuesday.comparison["phase.work"][ALL];
     assert_eq!((work.judged, work.reason), (false, Some("small_sample")));
     assert_eq!(
-        tuesday.comparison["landings"]["kind=docs"].reason,
+        tuesday.comparison["landings"]["change=docs"].reason,
         Some("no_value")
     );
     // The 7 days before Tuesday: six empty days and Monday.
@@ -496,13 +491,13 @@ fn splits_the_runs_by_kind_and_attributes_per_day() {
         tuesday.end_ms() / 1000 + HOUR,
         &config,
         &KpiQuery {
-            kinds: vec!["docs".into()],
+            changes: vec!["docs".into()],
             ..query.clone()
         },
     );
     let strata: Vec<&String> = docs.periods[1].window.kpis["landings"].keys().collect();
-    assert!(strata.contains(&&"kind=docs".to_owned()) && strata.contains(&&ALL.to_owned()));
-    assert!(!strata.contains(&&"kind=runtime".to_owned()));
+    assert!(strata.contains(&&"change=docs".to_owned()) && strata.contains(&&ALL.to_owned()));
+    assert!(!strata.contains(&&"change=runtime".to_owned()));
 }
 
 impl PeriodKpis {
@@ -520,7 +515,6 @@ fn the_period_not_over_yet_is_partial() {
         Some(&KpiSettings {
             targets: vec![Target {
                 kpi: "landings".into(),
-                kind: None,
                 change: None,
                 area: None,
                 stat: None,
@@ -555,7 +549,7 @@ fn window_kpis(value: Option<f64>, n: usize) -> Kpis<Measure> {
     let mut kpis = Kpis::new();
     kpis.entry("phase.work".into())
         .or_default()
-        .insert("kind=runtime".into(), measure);
+        .insert("change=runtime".into(), measure);
     kpis
 }
 
@@ -570,8 +564,7 @@ fn a_breach_needs_consecutive_judged_periods_off_target() {
             min_samples: Some(3),
             targets: vec![Target {
                 kpi: "phase.work".into(),
-                kind: Some("runtime".into()),
-                change: None,
+                change: Some("runtime".into()),
                 area: None,
                 stat: Some(Stat::Median),
                 min: None,
@@ -608,7 +601,7 @@ fn a_breach_needs_consecutive_judged_periods_off_target() {
     assert_eq!(breach.state, "breach");
     assert_eq!(breach.streak, 3);
     assert_eq!(breach.breach_since.as_deref(), Some("d1"));
-    assert_eq!(breach.stratum, "kind=runtime");
+    assert_eq!(breach.stratum, "change=runtime");
     assert_eq!(breach.source, "repository");
     let reasons: Vec<Option<&str>> = breach.periods.iter().map(|p| p.reason).collect();
     assert_eq!(
@@ -652,10 +645,9 @@ fn a_breach_needs_consecutive_judged_periods_off_target() {
 /// the host's, and no target is built in.
 #[test]
 fn the_host_settings_win_over_the_repository() {
-    let target = |kpi: &str, kind: Option<&str>, max: f64| Target {
+    let target = |kpi: &str, change: Option<&str>, max: f64| Target {
         kpi: kpi.into(),
-        kind: kind.map(Into::into),
-        change: None,
+        change: change.map(Into::into),
         area: None,
         stat: None,
         min: None,
@@ -713,7 +705,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     for index in 0..6 {
         let mut run = Run::new(
             100 + index,
-            Some("runtime".parse::<TaskKind>().unwrap()),
+            Some("runtime".parse::<TaskChange>().unwrap()),
             MONDAY + index * HOUR,
             1000,
         );
@@ -736,7 +728,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     for index in 0..6 {
         let mut run = Run::new(
             200 + index,
-            Some("runtime".parse::<TaskKind>().unwrap()),
+            Some("runtime".parse::<TaskChange>().unwrap()),
             MONDAY + (10 + index) * HOUR,
             600,
         );
@@ -749,7 +741,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     }
     let mut docs = Run::new(
         300,
-        Some("docs".parse::<TaskKind>().unwrap()),
+        Some("docs".parse::<TaskChange>().unwrap()),
         MONDAY + 17 * HOUR,
         100,
     );
@@ -836,7 +828,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
         (true, Some("improved"))
     );
     for stratum in [
-        "kind=runtime",
+        "change=runtime",
         "parallel=4",
         "parallel=3",
         "load=low",
@@ -857,7 +849,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     );
     assert_eq!(work["parallel=3"].change.reason, Some("no_value"));
     assert_eq!(work["build=b2"].after.n, 2);
-    let docs = &work["kind=docs"];
+    let docs = &work["change=docs"];
     assert_eq!((docs.before.n, docs.after.n), (0, 1));
     // A derived mark is named by its claim: the new build's change is one
     // with the later person's mark, and none of them is its own confounder.
@@ -877,7 +869,7 @@ fn compares_across_a_mark_with_its_confounders_and_strata() {
     assert_eq!((split.marks.len(), split.separable), (3, false));
     assert!(derived.confounders.iter().all(|c| c.position == "before"));
     // The summary is the runtime runs' times only.
-    let summary = &compare.summary["runtime"];
+    let summary = &compare.change_summary["runtime"];
     assert_eq!(summary["phase.work"].after.median, Some(600.0));
     assert!(!summary.contains_key("landings"));
 }
@@ -949,7 +941,7 @@ fn compares_two_explicit_windows() {
         &KpiInput {
             events: &queue.events,
             goals: &queue.goals,
-            kinds: &queue.kinds,
+
             changes: &queue.changes,
             areas: None,
             heartbeats: &queue.heartbeats,
@@ -1052,7 +1044,7 @@ fn splits_the_runs_by_the_trial_group_model_effort_and_nature() {
     let control = &tuesday_kpis.comparison["landings"]["group=control"];
     assert_eq!((control.previous, control.delta), (Some(1.0), Some(0.0)));
     assert!(control.judged);
-    // Without `--by`, only the kinds.
+    // Without `--by`, only the changes and the areas.
     let plain = queue.kpi(
         tuesday + DAY + HOUR,
         &KpiConfig::default(),
@@ -1114,7 +1106,7 @@ fn one_window_of_any_length() {
         &KpiInput {
             events: &queue.events,
             goals: &queue.goals,
-            kinds: &queue.kinds,
+
             changes: &queue.changes,
             areas: None,
             heartbeats: &queue.heartbeats,
@@ -1150,7 +1142,7 @@ fn derives_the_queue_kpis_of_a_window() {
     // Two hours of one run in four hours of two slots.
     queue.run(&Run::new(
         1,
-        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
         MONDAY + HOUR,
         2 * HOUR - 100,
     ));
@@ -1218,7 +1210,7 @@ fn derives_the_queue_kpis_of_a_window() {
     );
     assert_eq!(measure(day, "asks_per_landing", ALL).value, Some(2.0));
     assert_eq!(
-        measure(day, "asks_per_landing", "kind=runtime").value,
+        measure(day, "asks_per_landing", "change=runtime").value,
         Some(2.0)
     );
     // The runtime's own close is no person's wait.
@@ -1251,7 +1243,7 @@ fn monday_slot_usage(alive: impl FnOnce(&mut Queue)) -> Option<f64> {
     start(&mut queue, 2, MONDAY);
     queue.run(&Run::new(
         1,
-        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
         MONDAY + HOUR,
         2 * HOUR - 100,
     ));
@@ -1463,7 +1455,7 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
     );
     let mut revised = Run::new(
         11,
-        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
         tuesday + 3 * HOUR,
         600,
     );
@@ -1471,7 +1463,7 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
     queue.run(&revised);
     queue.run(&Run::new(
         10,
-        Some("runtime".parse::<TaskKind>().unwrap()),
+        Some("runtime".parse::<TaskChange>().unwrap()),
         tuesday + 3 * HOUR,
         300,
     ));
@@ -1595,7 +1587,6 @@ fn the_drafts_per_landing_and_the_backlog_are_stats_draft_flow() {
             targets: ["draft_backlog", "drafts_per_landing"]
                 .map(|kpi| Target {
                     kpi: kpi.into(),
-                    kind: None,
                     change: None,
                     area: None,
                     stat: None,
@@ -1768,15 +1759,15 @@ fn the_follow_up_rates_are_split_by_category() {
 
 /// The forecast's errors (ADR-0070 decision 4): every snapshot of a target
 /// that finished in the period is a sample in the period it finished,
-/// split by target, kind, band, method and whether a change mark came
+/// split by target, change, band, method and whether a change mark came
 /// between; a canceled task is only counted.
 #[test]
 fn scores_the_forecast_snapshots_in_the_period_they_finished() {
     let mut queue = Queue::default();
-    let runtime = Some("runtime".parse::<TaskKind>().unwrap());
-    let docs = Some("docs".parse::<TaskKind>().unwrap());
-    queue.kinds.insert(TaskId::new(1), runtime);
-    queue.kinds.insert(TaskId::new(2), docs);
+    let runtime = Some("runtime".parse::<TaskChange>().unwrap());
+    let docs = Some("docs".parse::<TaskChange>().unwrap());
+    queue.changes.insert(TaskId::new(1), runtime);
+    queue.changes.insert(TaskId::new(2), docs);
     let snapshot = |queue: &mut Queue, secs: i64, tasks: Value, goals: Value| {
         queue.queue_event(
             "forecast_recorded",
@@ -1844,7 +1835,7 @@ fn scores_the_forecast_snapshots_in_the_period_they_finished() {
     assert_eq!(measure(monday, "forecast.late_rate", ALL).value, Some(1.0));
     assert_eq!(measure(monday, "forecast.early_rate", ALL).value, Some(0.0));
     assert_eq!(measure(monday, "forecast.p50_error", "target=goal").n, 1);
-    assert_eq!(measure(monday, "forecast.p50_error", "kind=runtime").n, 2);
+    assert_eq!(measure(monday, "forecast.p50_error", "change=runtime").n, 2);
     assert_eq!(measure(monday, "forecast.p50_error", "band=0-1h").n, 1);
     assert_eq!(measure(monday, "forecast.p50_error", "method=1").n, 3);
     // Only the second snapshot of task 1 had no mark before the finish.
@@ -1858,7 +1849,7 @@ fn scores_the_forecast_snapshots_in_the_period_they_finished() {
     assert_eq!(details["marks_between"]["max"], 1.0);
     // Task 2 finished the next day, a day late.
     let tuesday = &result.periods[1];
-    let error = measure(tuesday, "forecast.p50_abs_error", "kind=docs");
+    let error = measure(tuesday, "forecast.p50_abs_error", "change=docs");
     assert_eq!((error.n, error.median), (1, Some(24.0 * 3600.0)));
     assert_eq!(
         measure(tuesday, "forecast.p90_hit_rate", ALL).value,
@@ -1949,7 +1940,6 @@ fn periods_windows_and_comparisons_carry_the_host_load_of_their_span() {
         Some(&KpiSettings {
             targets: vec![Target {
                 kpi: "landings".into(),
-                kind: None,
                 change: None,
                 area: None,
                 stat: None,
@@ -2067,7 +2057,7 @@ fn landing_utilization_counts_every_attempt_within_the_day() {
     let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, 30 * 60));
     let id = format!("{:08x}-0000-4000-8000-{:012x}", 2, MONDAY + HOUR);
     let (task, id) = (Some(2), Some(id.as_str()));
-    queue.kinds.insert(TaskId::new(2), None);
+    queue.changes.insert(TaskId::new(2), None);
     queue.goals.insert(TaskId::new(2), None);
     queue.push(task, id, "run_claimed", json!({}), MONDAY + HOUR);
     queue.push(
@@ -2155,7 +2145,7 @@ fn run_id(run: &Run) -> RunId {
 #[test]
 fn splits_the_landed_runs_by_their_areas() {
     let mut queue = Queue::default();
-    let runtime: TaskKind = "runtime".parse().unwrap();
+    let runtime: TaskChange = "runtime".parse().unwrap();
     let runs = [
         Run::new(1, Some(runtime.clone()), MONDAY + HOUR, 100),
         Run::new(2, Some(runtime), MONDAY + 2 * HOUR, 300),
@@ -2181,7 +2171,6 @@ fn splits_the_landed_runs_by_their_areas() {
             min_samples: Some(1),
             targets: vec![Target {
                 kpi: "phase.work".into(),
-                kind: None,
                 change: None,
                 area: Some("src".into()),
                 stat: None,
@@ -2219,7 +2208,7 @@ fn splits_the_landed_runs_by_their_areas() {
         .keys()
         .collect();
     assert!(strata.contains(&&"area=docs".to_owned()));
-    assert!(strata.contains(&&"kind=runtime".to_owned()));
+    assert!(strata.contains(&&"change=runtime".to_owned()));
     assert!(!strata.contains(&&"area=src".to_owned()));
 
     let spec: CompareSpec = format!(
@@ -2389,25 +2378,20 @@ fn cpu_per_landing_and_load_per_core_read_the_host_records() {
 
 /// The review verdicts that sent runs back per primary code (ADR-t947-1
 /// decision 5): `review.sendback_rate` over the runs reviewed, all of
-/// them, per `code=`, per `kind=` and per `change=` (`unknown` without
-/// one).
+/// them, per `code=` and per `change=` (`unknown` without one).
 #[test]
-fn review_sendback_rate_is_split_by_code_and_kind() {
+fn review_sendback_rate_is_split_by_code_and_change() {
     let mut queue = Queue::default();
     let tuesday = MONDAY + DAY + 10 * HOUR;
-    let runtime = Some("runtime".parse::<TaskKind>().unwrap());
-    let docs = Some("docs".parse::<TaskKind>().unwrap());
     let fix = Some("fix".parse::<TaskChange>().unwrap());
     let runs = [
-        (1, runtime.clone(), fix.clone(), Some("adr_conflict")),
-        (2, runtime, fix, None),
-        (3, docs, None, Some("test_gap")),
+        (1, fix.clone(), Some("adr_conflict")),
+        (2, fix, None),
+        (3, None, Some("test_gap")),
     ];
-    for (task, kind, change, code) in runs {
+    for (task, change, code) in runs {
         let claimed = tuesday + task * HOUR;
-        let mut run = Run::new(task, kind, claimed, 600);
-        run.change = change;
-        queue.run(&run);
+        queue.run(&Run::new(task, change, claimed, 600));
         let id = format!("{task:08x}-0000-4000-8000-{claimed:012x}");
         let payload = match code {
             Some(code) => json!({"verdict": "concern", "reasons": ["x"],
@@ -2438,8 +2422,6 @@ fn review_sendback_rate_is_split_by_code_and_kind() {
     assert_eq!(value(ALL), (3, Some(0.667)));
     assert_eq!(value("code=adr_conflict"), (3, Some(0.333)));
     assert_eq!(value("code=test_gap"), (3, Some(0.333)));
-    assert_eq!(value("kind=runtime"), (2, Some(0.5)));
-    assert_eq!(value("kind=docs"), (1, Some(1.0)));
     assert_eq!(value("change=fix"), (2, Some(0.5)));
     assert_eq!(value("change=unknown"), (1, Some(1.0)));
     assert_eq!(direction("review.sendback_rate"), Some(Direction::Lower));
@@ -2484,7 +2466,6 @@ fn splits_the_runs_by_their_change() {
             min_samples: Some(1),
             targets: vec![Target {
                 kpi: "phase.work".into(),
-                kind: None,
                 change: Some("fix".into()),
                 area: None,
                 stat: None,
@@ -2526,7 +2507,7 @@ fn splits_the_runs_by_their_change() {
         .keys()
         .collect();
     assert!(strata.contains(&&"change=feature".to_owned()));
-    assert!(strata.contains(&&"kind=unknown".to_owned()));
+    assert!(strata.contains(&&ALL.to_owned()));
     assert!(!strata.contains(&&"change=fix".to_owned()));
 
     let spec: CompareSpec = format!(

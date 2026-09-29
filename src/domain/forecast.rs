@@ -26,7 +26,7 @@ pub use history::{History, Sample, history, running};
 
 /// The version of the method (ADR-0070 decision 1): raised whenever the
 /// calculation changes, so the scoring can be read per method: 2 draws
-/// from the task's change instead of its kind (ADR-t980-1).
+/// from the runs of the task's change (ADR-t980-1).
 pub const METHOD: u32 = 2;
 /// Simulation trials (ADR-0070's first value).
 pub const DEFAULT_TRIALS: usize = 1000;

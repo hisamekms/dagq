@@ -80,67 +80,6 @@ string_enum!(TaskStatus {
     Canceled => "canceled",
 });
 
-// What a task changes, as the repository that registers it names it
-// (ADR-t624-1): a free label, a lowercase slug of letters, digits, '-' and
-// '_' (at most 64 bytes), which `stats` and `kpi` group the runs by.
-// `unknown` is the name of the group of tasks without a kind and `all` the
-// name of every task together (`kpi`'s stratum, `forecast`'s whole
-// distribution), so neither is a label. A task registered before the kind existed has none.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct TaskKind(String);
-
-impl TaskKind {
-    /// The name `stats` and `kpi` give the tasks without a kind.
-    pub const NONE: &'static str = "unknown";
-    /// The name of every task together.
-    pub const ALL: &'static str = "all";
-    /// The longest label, in bytes.
-    pub const MAX_LEN: usize = 64;
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::str::FromStr for TaskKind {
-    type Err = DomainError;
-    fn from_str(value: &str) -> Result<Self, DomainError> {
-        require(
-            !value.is_empty()
-                && value.len() <= Self::MAX_LEN
-                && value != Self::NONE
-                && value != Self::ALL
-                && value.bytes().all(|b| {
-                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
-                }),
-            || DomainError::InvalidTaskKind {
-                kind: value.to_owned(),
-            },
-        )?;
-        Ok(Self(value.to_owned()))
-    }
-}
-
-impl TryFrom<String> for TaskKind {
-    type Error = DomainError;
-    fn try_from(value: String) -> Result<Self, DomainError> {
-        value.parse()
-    }
-}
-
-impl From<TaskKind> for String {
-    fn from(kind: TaskKind) -> Self {
-        kind.0
-    }
-}
-
-impl fmt::Display for TaskKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 string_enum!(RunStatus {
     Claimed => "claimed",
     Starting => "starting",
@@ -1386,28 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn a_task_kind_is_any_slug_but_unknown() {
-        for label in ["docs", "runtime", "front-end_2", &"k".repeat(64)] {
-            let kind: TaskKind = label.parse().unwrap();
-            assert_eq!(kind.as_str(), label);
-            assert_eq!(kind.to_string(), label);
-            assert_eq!(serde_json::to_value(&kind).unwrap(), label);
-            let read: TaskKind = serde_json::from_value(serde_json::json!(label)).unwrap();
-            assert_eq!(read, kind);
-        }
-        for bad in ["", "unknown", "all", "Upper", "a b", "a=b", &"k".repeat(65)] {
-            assert!(
-                matches!(
-                    bad.parse::<TaskKind>(),
-                    Err(DomainError::InvalidTaskKind { .. })
-                ),
-                "{bad}"
-            );
-        }
-        assert!(serde_json::from_value::<TaskKind>(serde_json::json!("Upper")).is_err());
-    }
-
-    #[test]
     fn a_note_needs_text_and_a_slug_kind() {
         let note = |text: &str, kind: Option<&str>| NewNote {
             target: NoteTarget::Goal(GoalId::new(1)),
@@ -1478,7 +1395,6 @@ mod tests {
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: vec![TaskId::new(0)],
             goal_dependencies: Vec::new(),
@@ -1515,7 +1431,6 @@ mod tests {
             required_evidence: vec![EvidenceCheck::E2e, EvidenceCheck::Tests, EvidenceCheck::E2e],
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

@@ -13,22 +13,17 @@
 //! max_improvement_proposals = 2   # dagq.toml only
 //!
 //! [kpi.targets."phase.work"]      # one target per KPI and stratum
-//! kind = "runtime"                # every run without it
+//! change = "fix"                  # a change (ADR-t980-1); every run without it
 //! stat = "median"                 # median, p90 or value
-//! max = 3600                      # and/or min
+//! max = 1800                      # and/or min
 //!
-//! [kpi.targets."phase.work".docs] # a second stratum of the same KPI
-//! kind = "docs"
-//! max = 600
-//!
-//! [kpi.targets."phase.work".src]  # an area of `[areas]` (ADR-t980-1)
-//! area = "src"                    # instead of kind
+//! [kpi.targets."phase.work".src]  # a second stratum of the same KPI
+//! area = "src"                    # an area of `[areas]`, instead of a change
 //! max = 5400
-//!
-//! [kpi.targets."phase.work".fix]  # a change (ADR-t980-1)
-//! change = "fix"                  # instead of kind or area
-//! max = 1800
 //! ```
+//!
+//! A target's `kind` was removed with the task's kind (ADR-t980-1) and is
+//! refused with a pointer to `change` and `area`.
 //!
 //! `host.toml`'s other tables (`[push]`, `[report]`) are read elsewhere
 //! and skipped here.
@@ -37,8 +32,8 @@ use std::{env, fs, path::Path};
 
 use super::run_env::{parse_positive, parse_string, strip_comment};
 use crate::domain::{
-    TaskChange, TaskKind, areas,
-    kpi::{KpiSettings, Stat, Target, UNKNOWN},
+    TaskChange, areas,
+    kpi::{KpiSettings, Stat, Target},
 };
 
 pub const HOST_FILE_NAME: &str = "host.toml";
@@ -84,7 +79,6 @@ impl KpiTables {
         self.keys.clear();
         self.target = target.map(|kpi| Target {
             kpi,
-            kind: None,
             change: None,
             area: None,
             stat: None,
@@ -124,26 +118,15 @@ impl KpiTables {
                 *slot = Some(count().with_context(|| format!("value of {key}"))?);
             }
             Some(target) => match key {
-                "kind" => {
-                    let kind = parse_string(rest).context("value of kind")?;
-                    if kind != UNKNOWN {
-                        kind.parse::<TaskKind>().map_err(anyhow::Error::msg)?;
-                    }
-                    ensure!(
-                        target.change.is_none() && target.area.is_none(),
-                        "a target has one of kind, change and area"
-                    );
-                    target.kind = Some(kind);
-                }
+                "kind" => bail!(
+                    "the key kind of a target was removed with the task's kind (ADR-t980-1); bound the target by change or area instead"
+                ),
                 "change" => {
                     let change = parse_string(rest).context("value of change")?;
                     if change != TaskChange::NONE {
                         change.parse::<TaskChange>().map_err(anyhow::Error::msg)?;
                     }
-                    ensure!(
-                        target.kind.is_none() && target.area.is_none(),
-                        "a target has one of kind, change and area"
-                    );
+                    ensure!(target.area.is_none(), "a target has one of change and area");
                     target.change = Some(change);
                 }
                 "area" => {
@@ -152,8 +135,8 @@ impl KpiTables {
                         areas::check_name(&area).map_err(anyhow::Error::msg)?;
                     }
                     ensure!(
-                        target.kind.is_none() && target.change.is_none(),
-                        "a target has one of kind, change and area"
+                        target.change.is_none(),
+                        "a target has one of change and area"
                     );
                     target.area = Some(area);
                 }
@@ -165,7 +148,7 @@ impl KpiTables {
                 "max" => target.max = Some(number(rest).context("value of max")?),
                 _ => {
                     bail!(
-                        "unknown key {key} in a target; the keys are kind, change, area, stat, min, max"
+                        "unknown key {key} in a target; the keys are change, area, stat, min, max"
                     )
                 }
             },
@@ -319,17 +302,17 @@ mod tests {
 
     #[test]
     fn parses_settings_and_targets_and_skips_other_tables() {
-        let text = "\u{feff}# host\n[push]\ncommand = [\"x\"]\n\n[kpi]\nmin_samples = 3 # few\nbreach_weeks = 1\n\n[kpi.targets.\"phase.work\"]\nkind = \"runtime\"\nstat = \"p90\"\nmax = 3_600\n\n[kpi.targets.\"phase.work\".docs]\nkind = \"docs\"\nmax = 60\n\n[kpi.targets.first_pass_rate]\nmin = 0.6\n[report]\nkeep_daily_days = 90\n";
+        let text = "\u{feff}# host\n[push]\ncommand = [\"x\"]\n\n[kpi]\nmin_samples = 3 # few\nbreach_weeks = 1\n\n[kpi.targets.\"phase.work\"]\nchange = \"fix\"\nstat = \"p90\"\nmax = 3_600\n\n[kpi.targets.\"phase.work\".docs]\nchange = \"docs\"\nmax = 60\n\n[kpi.targets.first_pass_rate]\nmin = 0.6\n[report]\nkeep_daily_days = 90\n";
         let settings = parse_host_kpi(text, "host.toml").unwrap().unwrap();
         assert_eq!(settings.min_samples, Some(3));
         assert_eq!(settings.breach_weeks, Some(1));
         assert_eq!(settings.breach_periods, None);
         assert_eq!(settings.targets.len(), 3);
         assert_eq!(settings.targets[0].kpi, "phase.work");
-        assert_eq!(settings.targets[0].stratum(), "kind=runtime");
+        assert_eq!(settings.targets[0].stratum(), "change=fix");
         assert_eq!(settings.targets[0].stat, Some(Stat::P90));
         assert_eq!(settings.targets[0].max, Some(3600.0));
-        assert_eq!(settings.targets[1].stratum(), "kind=docs");
+        assert_eq!(settings.targets[1].stratum(), "change=docs");
         assert_eq!(settings.targets[2].kpi, "first_pass_rate");
         assert_eq!(settings.targets[2].min, Some(0.6));
         assert_eq!(parse_host_kpi("[push]\na = 1\n", "h").unwrap(), None);
@@ -358,23 +341,19 @@ mod tests {
         assert!(error("[kpi]\nmin_samples = 0\n").contains("positive"));
         assert!(error("[kpi]\nmin_samples = 1\nmin_samples = 2\n").contains("twice"));
         assert!(error("[kpi]\n[kpi]\n").contains("defined twice"));
-        assert!(error("[kpi.targets.x]\nkind = \"docs\"\n").contains("neither min nor max"));
-        assert!(error("[kpi.targets.x]\nmax = 1\nkind = \"Web\"\n").contains("must be a slug"));
+        assert!(error("[kpi.targets.x]\nchange = \"docs\"\n").contains("neither min nor max"));
+        assert!(error("[kpi.targets.x]\nmax = 1\nchange = \"Web\"\n").contains("must be a slug"));
+        // The task's kind is gone (ADR-t980-1): the key says what to use.
+        let kind = error("[kpi.targets.x]\nmax = 1\nkind = \"docs\"\n");
+        assert!(kind.contains("kind of a target was removed"), "{kind}");
+        assert!(kind.contains("change or area"), "{kind}");
         assert!(error("[kpi.targets.x]\nmax = 1\nstat = \"mean\"\n").contains("not a stat"));
         assert!(error("[kpi.targets.x]\nmax = 1\narea = \"all\"\n").contains("runtime gives"));
-        assert!(
-            error("[kpi.targets.x]\nmax = 1\narea = \"a\"\nkind = \"b\"\n").contains("one of kind")
-        );
-        assert!(
-            error("[kpi.targets.x]\nmax = 1\nkind = \"b\"\narea = \"a\"\n").contains("one of kind")
-        );
         for text in [
-            "[kpi.targets.x]\nmax = 1\nchange = \"a\"\nkind = \"b\"\n",
-            "[kpi.targets.x]\nmax = 1\nkind = \"b\"\nchange = \"a\"\n",
             "[kpi.targets.x]\nmax = 1\narea = \"b\"\nchange = \"a\"\n",
             "[kpi.targets.x]\nmax = 1\nchange = \"b\"\narea = \"a\"\n",
         ] {
-            assert!(error(text).contains("one of kind"), "{text}");
+            assert!(error(text).contains("one of change and area"), "{text}");
         }
         assert!(error("[kpi.targets.x]\nmax = 1\nchange = \"Fix\"\n").contains("task change"));
         assert!(error("[kpi.targets.x]\nmax = one\n").contains("expected a number"));

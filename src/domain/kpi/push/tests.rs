@@ -12,7 +12,7 @@ use crate::domain::kpi::{
 fn target(state: &'static str, periods: &[(&str, Option<f64>, bool)]) -> TargetReport {
     TargetReport {
         kpi: "phase.work".into(),
-        stratum: "kind=runtime".into(),
+        stratum: "change=fix".into(),
         stat: "median",
         min: None,
         max: Some(3600.0),
@@ -47,14 +47,14 @@ fn a_breach_starts_with_its_latest_judged_value_and_ends_when_met() {
     assert_eq!(
         started,
         json!({
-            "period": "day", "kpi": "phase.work", "stratum": "kind=runtime",
+            "period": "day", "kpi": "phase.work", "stratum": "change=fix",
             "stat": "median", "min": null, "max": 3600.0, "source": "host",
             "since": "2026-09-22", "streak": 3, "label": "2026-09-24", "value": 4000.0,
         })
     );
     assert_eq!(
         breach_key(&started),
-        ("day".into(), "phase.work".into(), "kind=runtime".into())
+        ("day".into(), "phase.work".into(), "change=fix".into())
     );
     assert_eq!(breach_started("day", &target("missed", &[])), None);
 
@@ -70,7 +70,7 @@ fn a_breach_starts_with_its_latest_judged_value_and_ends_when_met() {
     let met = target("ok", &[("2026-09-25", Some(100.0), true)]);
     assert_eq!(
         breach_resolved(&started, &[met]).unwrap(),
-        json!({"period": "day", "kpi": "phase.work", "stratum": "kind=runtime",
+        json!({"period": "day", "kpi": "phase.work", "stratum": "change=fix",
                "label": "2026-09-25", "reason": "met"})
     );
     assert_eq!(
@@ -96,13 +96,10 @@ fn a_breach_message_carries_its_kpi_value_and_target() {
     let body = &message.body;
     assert_eq!(body["kind"], "breach");
     assert_eq!(body["queue"], "/q/queue.db");
-    assert_eq!(
-        body["title"],
-        "dagq target breach: phase.work (kind=runtime)"
-    );
+    assert_eq!(body["title"], "dagq target breach: phase.work (change=fix)");
     assert_eq!(
         body["text"],
-        "phase.work (kind=runtime): 1h 06m (median, target ≤ 1h 00m), missed 3 period(s) in a row (since 2026-09-22)"
+        "phase.work (change=fix): 1h 06m (median, target ≤ 1h 00m), missed 3 period(s) in a row (since 2026-09-22)"
     );
     assert_eq!(body["breaches"][0]["periods"], 3);
     assert_eq!(body["breaches"][0]["value"], 4000.0);

@@ -25,7 +25,6 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: vec![],
             goal_dependencies: Vec::new(),

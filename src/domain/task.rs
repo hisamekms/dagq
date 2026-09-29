@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, EvidenceCheck, GoalId, NewTask, Priority, TaskChange, TaskEdit, TaskId, TaskKind,
+    DomainError, EvidenceCheck, GoalId, NewTask, Priority, TaskChange, TaskEdit, TaskId,
     TaskRecord, TaskStatus, require,
     scope::{dedup_globs, validate_path_globs},
     worker::Worker,
@@ -101,9 +101,6 @@ pub struct Task {
     paths: Vec<String>,
     /// How urgently a person wants it claimed (ADR-0040 decision 4).
     priority: Priority,
-    /// What the task changes (goal 21); null for a task registered without
-    /// one, before the kind existed among them.
-    kind: Option<TaskKind>,
     /// The kind of change it makes, as the registrant declared it
     /// (ADR-t980-1); null for a task registered without one.
     change: Option<TaskChange>,
@@ -133,7 +130,6 @@ impl Task {
             required_evidence: new.required_evidence(),
             paths: dedup_globs(&new.paths),
             priority: new.priority,
-            kind: new.kind,
             change: new.change,
             title: new.title,
             description: new.description,
@@ -167,7 +163,6 @@ impl Task {
             required_evidence: record.required_evidence,
             paths: record.paths,
             priority: record.priority,
-            kind: record.kind,
             change: record.change,
             worker: record.worker,
             status: record.status,
@@ -208,10 +203,6 @@ impl Task {
 
     pub fn priority(&self) -> Priority {
         self.priority
-    }
-
-    pub fn kind(&self) -> Option<&TaskKind> {
-        self.kind.as_ref()
     }
 
     pub fn change(&self) -> Option<&TaskChange> {
@@ -354,9 +345,6 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     if let Some(context) = edit.context {
         task.context = context;
     }
-    if let Some(kind) = edit.kind {
-        task.kind = Some(kind);
-    }
     if let Some(change) = edit.change {
         task.change = Some(change);
     }
@@ -443,7 +431,6 @@ mod tests {
             required_evidence: vec![EvidenceCheck::E2e, EvidenceCheck::E2e],
             paths: vec!["docs/**".into(), "docs/**".into()],
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: vec![TaskId::new(1)],
             goal_dependencies: Vec::new(),
@@ -464,7 +451,6 @@ mod tests {
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             status,
             goal_id: None,
@@ -736,8 +722,7 @@ mod tests {
         let edited = edit(
             draft,
             TaskEdit {
-                kind: Some("runtime".parse::<TaskKind>().unwrap()),
-                change: None,
+                change: Some("feature".parse::<TaskChange>().unwrap()),
                 title: Some("t2".into()),
                 description: Some("d2".into()),
                 acceptance: Some("a2".into()),
@@ -765,7 +750,7 @@ mod tests {
         );
         assert_eq!(edited.paths(), ["src/**"]);
         assert_eq!(edited.context(), "c2");
-        assert_eq!(edited.kind().map(TaskKind::as_str), Some("runtime"));
+        assert_eq!(edited.change().map(TaskChange::as_str), Some("feature"));
         assert_eq!(edited.status(), TaskStatus::Draft);
 
         let invalid = [

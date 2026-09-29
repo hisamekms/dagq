@@ -657,7 +657,7 @@ mod tests {
             assert!(prompt.contains("\"total\": 3"));
             assert!(prompt.contains("`dagq timeline RUN`"));
             // The strata of the procedure's step 5 (ADR-t980-1), not the
-            // kind that is going away.
+            // removed `--kind`.
             assert!(prompt.contains("[--area A] [--change C]"));
             assert!(!prompt.contains("--kind runtime"));
         }

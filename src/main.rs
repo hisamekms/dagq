@@ -23,7 +23,7 @@ use dagq::{
         Capability, EventId, FindingId, FindingQuery, FindingTarget, GoalEdit, GoalId, GoalVerdict,
         LeaseToken, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget,
         PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole,
-        StaticPolicy, Submission, TaskChange, TaskEdit, TaskId, TaskKind, TaskStatus,
+        StaticPolicy, Submission, TaskChange, TaskEdit, TaskId, TaskStatus,
         search::{self, SearchQuery},
         worker::WorkerMode,
     },
@@ -151,11 +151,6 @@ enum Command {
         /// soon), normal, or low (later). A ready task it waits for inherits it.
         #[arg(long, default_value = "normal", value_parser = PRIORITIES)]
         priority: String,
-        /// What the task changes, as a label of the repository's own (a lowercase slug of
-        /// letters, digits, '-' and '_', not `unknown` or `all`); `stats` and `kpi` group the runs by
-        /// it. Omitted: none.
-        #[arg(long)]
-        kind: Option<String>,
         /// The kind of change the task makes (ADR-t980-1), as a label of the repository's own (a
         /// lowercase slug of letters, digits, '-' and '_', not `unknown` or `all`); `stats`, `kpi`
         /// and `forecast` group the runs by it. When dagq.toml has `[tasks] changes`, one of them,
@@ -340,9 +335,6 @@ enum Command {
         /// Declare no paths: runs may change anything.
         #[arg(long, group = "field")]
         no_paths: bool,
-        /// What the task changes (`add --kind`): a lowercase label.
-        #[arg(long, group = "field")]
-        kind: Option<String>,
         /// The kind of change the task makes (`add --change`): a lowercase label, one of
         /// `[tasks] changes` of dagq.toml when it names them.
         #[arg(long, group = "field")]
@@ -1073,8 +1065,8 @@ enum Command {
         cmux: PathBuf,
     },
     /// KPIs of the flow, rework, people's load, infrastructure, improvements and sessions per day
-    /// or ISO week (ADR-0051), split by the task's kind and its change (ADR-t980-1; `unknown`
-    /// without one), by the areas of
+    /// or ISO week (ADR-0051), split by the task's change (ADR-t980-1; `unknown` without one),
+    /// by the areas of
     /// what the run landed when dagq.toml has `[areas]` (ADR-t980-1), and --by the claim's
     /// attributes, each next to the previous period (and a day's 7-day median), judged
     /// against the `[kpi.targets]` of dagq.toml and host.toml. --compare splits at a mark (its
@@ -1096,10 +1088,6 @@ enum Command {
         /// One window up to this cursor instead of the periods.
         #[arg(long)]
         until: Option<dagq::domain::stats::Cursor>,
-        /// List only these kinds' strata (`unknown`: the tasks without a kind); a comparison's
-        /// summary is made for them (every kind it saw without).
-        #[arg(long = "kind", value_parser = parse_kpi_kind)]
-        kinds: Vec<String>,
         /// List only these changes' strata (`unknown`: the tasks without a change); a comparison's
         /// change summary is made for them (every change it saw without).
         #[arg(long = "change", value_parser = parse_kpi_change)]
@@ -1110,7 +1098,7 @@ enum Command {
         #[arg(long = "area", value_parser = parse_kpi_area)]
         areas: Vec<String>,
         /// Also split the runs by these attributes of the claim.
-        #[arg(long, value_parser = ["kind", "change", "area", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
+        #[arg(long, value_parser = ["change", "area", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
         by: Vec<String>,
         /// A mark's event id or a time to compare before and after, or two windows A..B,C..D.
         #[arg(long)]
@@ -1124,8 +1112,8 @@ enum Command {
     },
     /// When the open tasks (ready and in progress, outside a draft goal) and the open goals are
     /// likely to finish if the plan flows as it is now (ADR-0070): the p50 and p90 of a seeded
-    /// simulation over the dependencies, the claim order, the slots and each kind's landed runs
-    /// (the whole distribution for a kind with fewer than `[kpi]` `min_samples`), with what it
+    /// simulation over the dependencies, the claim order, the slots and each change's landed runs
+    /// (the whole distribution for a change with fewer than `[kpi]` `min_samples`), with what it
     /// assumed. New tasks are not added. Reads only and records nothing; JSON.
     Forecast {
         /// Only this task, and its goal.
@@ -1249,17 +1237,6 @@ const PRIORITIES: [&str; 5] = ["interrupt", "urgent", "high", "normal", "low"];
 
 /// The providers a task's worker may run on (ADR-t813-2 decision 1).
 const PROVIDERS: [&str; 2] = ["claude", "codex"];
-
-/// A `kpi --kind`: a task kind, or `unknown` for the tasks without one.
-fn parse_kpi_kind(value: &str) -> Result<String, String> {
-    if value == TaskKind::NONE {
-        return Ok(value.to_owned());
-    }
-    value
-        .parse::<TaskKind>()
-        .map(String::from)
-        .map_err(|error| error.to_string())
-}
 
 /// A `kpi --change`: a task change, or `unknown` for the tasks without one.
 fn parse_kpi_change(value: &str) -> Result<String, String> {
@@ -2218,7 +2195,6 @@ fn execute(cli: Cli) -> Result<Value> {
             required_evidence,
             paths,
             priority,
-            kind,
             change,
             provider,
             headless,
@@ -2238,7 +2214,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     .collect::<Result<_, _>>()?,
                 paths,
                 priority: priority.parse()?,
-                kind: kind.map(|kind| kind.parse()).transpose()?,
                 change: change.map(|change| change.parse()).transpose()?,
                 provider: provider.map(|provider| provider.parse()).transpose()?,
                 worker_mode: headless.then_some(WorkerMode::Headless),
@@ -2427,7 +2402,6 @@ fn execute(cli: Cli) -> Result<Value> {
             no_evidence,
             paths,
             no_paths,
-            kind,
             change,
             provider,
             headless,
@@ -2449,7 +2423,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     required_evidence,
                     paths: replaced(paths, no_paths),
                     context,
-                    kind: kind.map(|kind| kind.parse()).transpose()?,
                     change: change.map(|change| change.parse()).transpose()?,
                     provider: provider.map(|provider| provider.parse()).transpose()?,
                     worker_mode: match (headless, interactive) {
@@ -3072,7 +3045,6 @@ fn execute(cli: Cli) -> Result<Value> {
             at,
             since,
             until,
-            kinds,
             changes,
             areas,
             by,
@@ -3088,7 +3060,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 at,
                 since,
                 until,
-                kinds,
                 changes,
                 areas,
                 by: by

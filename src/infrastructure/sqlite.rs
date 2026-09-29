@@ -24,8 +24,8 @@ use crate::{
         GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
         LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
         Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, RunRecord, Submission, Task,
-        TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskKind, TaskRecord, TaskRun,
-        TaskStatus, TaskStatusCounts,
+        TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId, TaskRecord, TaskRun, TaskStatus,
+        TaskStatusCounts,
         actor::ActorContext,
         goal,
         provider_switch::{self, SwitchPhase, WorkerRoute},
@@ -1318,8 +1318,8 @@ impl TaskStore for SqliteQueue {
             tx.execute(
                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
                  verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
-                 kind=?8, worker_provider=?11, worker_mode=?12, change=?13, updated_at=?9
-                 WHERE id=?10",
+                 worker_provider=?10, worker_mode=?11, change=?12, updated_at=?8
+                 WHERE id=?9",
                 params![
                     new.title(),
                     new.description(),
@@ -1328,7 +1328,6 @@ impl TaskStore for SqliteQueue {
                     serde_json::to_string(new.required_evidence())?,
                     serde_json::to_string(new.paths())?,
                     new.context(),
-                    new.kind().map(TaskKind::as_str),
                     self.generators.clock.timestamp(),
                     task_id,
                     new.worker().provider.as_str(),
@@ -1381,7 +1380,7 @@ impl TaskStore for SqliteQueue {
 
 /// The fields `dagq edit` replaces, as the task JSON names them; `task_edited`
 /// records the ones that changed.
-const EDITABLE_TASK_FIELDS: [&str; 11] = [
+const EDITABLE_TASK_FIELDS: [&str; 10] = [
     "title",
     "description",
     "acceptance",
@@ -1389,7 +1388,6 @@ const EDITABLE_TASK_FIELDS: [&str; 11] = [
     "required_evidence",
     "paths",
     "context",
-    "kind",
     "change",
     "provider",
     "worker_mode",
@@ -1408,14 +1406,14 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
     let id = task.id();
     tx.execute(
             "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
-                               context, required_evidence, paths, priority, kind, created_at,
+                               context, required_evidence, paths, priority, created_at,
                                updated_at, worker_provider, worker_mode, change)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![id, task.title(), task.description(), task.acceptance(),
                 serde_json::to_string(task.verification_commands())?, task.status().as_str(),
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
                 serde_json::to_string(task.paths())?, task.priority().as_i64(),
-                task.kind().map(TaskKind::as_str), task.created_at(), task.updated_at(),
+                task.created_at(), task.updated_at(),
                 task.worker().provider.as_str(), task.worker().mode.as_str(),
                 task.change().map(TaskChange::as_str)],
         )?;
@@ -2215,13 +2213,9 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         required_evidence: json_col(row, "required_evidence")?,
         paths: json_col(row, "paths")?,
         priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
-        // Any label reads as written (ADR-t624-1); a value that is not a
-        // label reads as none, so the task still restores and the queue
-        // keeps claiming.
-        kind: row
-            .get::<_, Option<String>>("kind")?
-            .and_then(|kind| kind.parse().ok()),
-        // Likewise any label (ADR-t980-1), whatever set dagq.toml names now.
+        // Any label reads as written (ADR-t980-1), whatever set dagq.toml
+        // names now; a value that is not a label reads as none, so the task
+        // still restores and the queue keeps claiming.
         change: row
             .get::<_, Option<String>>("change")?
             .and_then(|change| change.parse().ok()),

@@ -94,7 +94,6 @@ pub(crate) fn add(
 ) -> TaskId {
     queue
         .add(NewTask {
-            kind: None,
             change: None,
             title: title.into(),
             description: format!("{title}: change the type of Foo"),
@@ -1502,7 +1501,6 @@ pub(crate) fn runtime_draft(
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Priority::Normal,
-            kind: None,
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
@@ -2120,7 +2118,6 @@ fn a_job_failing_after_edits_before_it_or_to_another_proposal_is_held() {
 fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance: &str) -> TaskId {
     queue
         .add(NewTask {
-            kind: None,
             change: None,
             title: title.into(),
             description: description.into(),
@@ -2302,7 +2299,6 @@ fn the_search_candidates_of_a_japanese_title_include_similar_japanese_tasks() {
 fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
     queue
         .add(NewTask {
-            kind: None,
             change: None,
             title: title.into(),
             description: format!("{title}: the long description"),
@@ -2415,7 +2411,6 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
     // The one task without the draft blocker, so the only one claimed.
     let running = queue
         .add(NewTask {
-            kind: None,
             change: None,
             title: "poiuytrewq running".into(),
             description: "d".into(),

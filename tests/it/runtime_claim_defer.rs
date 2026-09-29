@@ -24,7 +24,6 @@ fn add_task(queue: &mut SqliteQueue, title: &str, paths: &[&str], priority: Prio
                 .chain(["change.txt".to_owned()])
                 .collect(),
             priority,
-            kind: None,
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),
@@ -89,7 +88,6 @@ fn hot_fixture() -> (Fixture, PathBuf, PathBuf) {
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Priority::Normal,
-            kind: None,
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

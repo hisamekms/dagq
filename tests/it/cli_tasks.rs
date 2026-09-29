@@ -379,77 +379,33 @@ fn add_paths_is_stored_shown_and_replaced() {
     }
 }
 
-/// `add --kind` and `edit --kind` (goal 21): the kind is stored, shown and
-/// listed, a task without one has null, and only a draft or submitted task
-/// changes it.
+/// The task's kind is gone (ADR-t980-1 decision 1): `add --kind` and
+/// `edit --kind` are refused, and `show` and `list` have no kind.
 #[test]
-fn kind_is_added_shown_listed_and_edited_before_ready() {
+fn the_task_kind_is_gone_from_add_edit_show_and_list() {
     let (_dir, db) = queue();
-    let added = ok(&db, &["add", "docs change", "--kind", "docs"]);
-    assert_eq!(added["kind"], "docs");
+    assert!(
+        !invoke(&db, &["add", "old", "--kind", "docs"])
+            .status
+            .success()
+    );
+    let added = ok(&db, &["add", "docs change", "--change", "docs"]);
+    assert!(added.get("kind").is_none(), "{added}");
     let id = added["id"].to_string();
-    assert_eq!(ok(&db, &["show", &id])["task"]["kind"], "docs");
-    assert_eq!(ok(&db, &["show", &id, "--full"])["task"]["kind"], "docs");
-    assert_eq!(ok(&db, &["list"])["tasks"][0]["kind"], "docs");
-    let plain = ok(&db, &["add", "unsaid"]);
-    assert_eq!(plain["kind"], Value::Null);
-    assert_eq!(ok(&db, &["list"])["tasks"][0]["kind"], Value::Null);
-    let edited = ok(&db, &["edit", &id, "--kind", "plugin"]);
-    assert_eq!(edited["kind"], "plugin");
-    let event = ok(&db, &["show", &id, "--full"])["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rfind(|e| e["kind"] == "task_edited")
-        .unwrap()
-        .clone();
-    assert_eq!(event["payload"]["from"]["kind"], "docs");
-    assert_eq!(event["payload"]["to"]["kind"], "plugin");
-    // The same kind again changes nothing and records no event.
-    ok(&db, &["edit", &id, "--kind", "plugin"]);
-    let edits = ok(&db, &["show", &id, "--full"])["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|e| e["kind"] == "task_edited")
-        .count();
-    assert_eq!(edits, 1);
-    // Any lowercase label is a kind (ADR-t624-1); `unknown` names the
-    // tasks without one, so it is not a label.
-    let labeled = ok(&db, &["add", "web change", "--kind", "front-end_2"]);
-    assert_eq!(labeled["kind"], "front-end_2");
-    let labeled_id = labeled["id"].to_string();
-    assert_eq!(
-        ok(&db, &["edit", &labeled_id, "--kind", "src"])["kind"],
-        "src"
+    assert!(
+        !invoke(&db, &["edit", &id, "--kind", "plugin"])
+            .status
+            .success()
     );
-    let long = "k".repeat(65);
-    for args in [
-        &["add", "bad", "--kind", "Src"][..],
-        &["add", "bad", "--kind", "unknown"][..],
-        &["add", "bad", "--kind", ""][..],
-        &["add", "bad", "--kind", &long][..],
-        &["edit", &id, "--kind", "two words"][..],
-    ] {
-        let output = invoke(&db, args);
-        assert!(!output.status.success(), "{args:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("must be a slug"),
-            "{args:?}"
-        );
-    }
-    ok(&db, &["ready", &id, "--bypass-review"]);
-    assert_eq!(
-        refused(&db, &["edit", &id, "--kind", "runtime"]),
-        format!("task {id} is ready; only a draft or submitted task can be edited")
-    );
-    assert_eq!(ok(&db, &["show", &id])["task"]["kind"], "plugin");
-    // The help names no repository's kinds.
-    let help = invoke(&db, &["add", "--help"]);
-    let help = String::from_utf8_lossy(&help.stdout);
-    assert!(help.contains("--kind"), "{help}");
-    for dagq_layout in ["migrations/", "plugin's skills", "docs, plugin, runtime"] {
-        assert!(!help.contains(dagq_layout), "{dagq_layout}: {help}");
+    let shown = ok(&db, &["show", &id, "--full"]);
+    assert!(shown["task"].get("kind").is_none(), "{shown}");
+    assert_eq!(shown["task"]["change"], "docs");
+    let listed = ok(&db, &["list"]);
+    assert!(listed["tasks"][0].get("kind").is_none(), "{listed}");
+    for command in ["add", "edit"] {
+        let help = invoke(&db, &[command, "--help"]);
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(!help.contains("--kind"), "{command}: {help}");
     }
 }
 

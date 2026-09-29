@@ -3,7 +3,7 @@
 //! runs or proposals and at what rate, the time they cost (the revise's
 //! fix, the concern's wait for a person, the work after a `send_back`) and
 //! what a person's answer made of them; per code of any item how many
-//! verdicts carry it; and per kind and per change of task the rate. A verdict recorded
+//! verdicts carry it; and per change of task the rate. A verdict recorded
 //! before the codes is `unlabeled`, and nothing recorded is rewritten.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::{Summary, summary, timestamp_millis};
 use crate::domain::{
-    EventId, RunEvent, TaskChange, TaskId, TaskKind, event_kind,
+    EventId, RunEvent, TaskChange, TaskId, event_kind,
     review_reason::{DEVIATION_REJECTED, OUTCOMES, UNLABELED},
 };
 
@@ -38,9 +38,6 @@ pub struct ReasonTable {
     pub by_code: BTreeMap<String, CodeStats>,
     /// Per code of any item of those verdicts: how many verdicts carry it.
     pub codes: BTreeMap<String, i64>,
-    /// Per kind of the task (of a proposal: the task its events are on),
-    /// set by [`super::with_kinds`]; tasks without a kind last.
-    pub by_kind: Vec<KindReasons>,
     /// Per change of the task (ADR-t980-1; of a proposal: the task its
     /// events are on), set by [`super::with_changes`]; tasks without a
     /// change last.
@@ -75,17 +72,6 @@ pub struct CodeStats {
     /// What the answers made of its concerns (`review_outcome` /
     /// `plan_review_outcome`).
     pub outcomes: BTreeMap<&'static str, i64>,
-}
-
-/// The rate of one kind of task.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct KindReasons {
-    pub kind: Option<TaskKind>,
-    pub reviewed: i64,
-    pub sent_back: i64,
-    pub rate: Option<f64>,
-    /// The runs or proposals sent back per primary code.
-    pub by_code: BTreeMap<String, i64>,
 }
 
 /// The rate of one change of task (ADR-t980-1).
@@ -511,24 +497,6 @@ impl ReasonTable {
             .collect()
     }
 
-    /// Group the reviewed runs or proposals by the kind of their task.
-    pub(super) fn with_kinds(&mut self, kinds: &HashMap<TaskId, Option<TaskKind>>) {
-        self.by_kind = self
-            .grouped(
-                |task| task.and_then(|task| kinds.get(&task).cloned().flatten()),
-                TaskKind::as_str,
-            )
-            .into_iter()
-            .map(|(kind, tally, rate)| KindReasons {
-                kind,
-                reviewed: tally.reviewed,
-                sent_back: tally.sent_back,
-                rate,
-                by_code: tally.by_code,
-            })
-            .collect();
-    }
-
     /// Group the reviewed runs or proposals by the change of their task
     /// (ADR-t980-1).
     pub(super) fn with_changes(&mut self, changes: &HashMap<TaskId, Option<TaskChange>>) {
@@ -685,22 +653,6 @@ mod tests {
         assert_eq!(reasons.plan_review, ReasonTable::default());
 
         let mut review = review.clone();
-        let kinds = HashMap::from([
-            (TaskId::new(1), Some("runtime".parse::<TaskKind>().unwrap())),
-            (TaskId::new(3), Some("runtime".parse::<TaskKind>().unwrap())),
-        ]);
-        review.with_kinds(&kinds);
-        assert_eq!(review.by_kind.len(), 2);
-        assert_eq!(review.by_kind[0].kind.as_ref().unwrap().as_str(), "runtime");
-        assert_eq!(
-            (review.by_kind[0].reviewed, review.by_kind[0].sent_back),
-            (2, 1)
-        );
-        assert_eq!(review.by_kind[0].rate, Some(0.5));
-        assert_eq!(review.by_kind[0].by_code["adr_conflict"], 1);
-        assert_eq!(review.by_kind[1].kind, None);
-        assert_eq!(review.by_kind[1].rate, Some(1.0));
-
         let changes = HashMap::from([
             (TaskId::new(1), Some("fix".parse::<TaskChange>().unwrap())),
             (TaskId::new(2), Some("docs".parse::<TaskChange>().unwrap())),

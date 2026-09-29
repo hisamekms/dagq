@@ -1,10 +1,11 @@
 //! `kpi` (ADR-0051 decisions 1–9 and 14–19): the KPIs of the flow, the
 //! rework, the people's load, the infrastructure, the improvements and the
 //! Claude sessions, derived by fixed rules from `run_events` for each day
-//! or ISO week, split by the kind of task and by the attributes a run was
+//! or ISO week, split by the change of the task, the areas of what the run
+//! landed and by the attributes a run was
 //! claimed with, next to the previous period, compared across a change
 //! mark, and judged against the targets. A pure function of the events,
-//! the task → goal and task → kind maps, the time zone, the host's cores
+//! the task → goal and task → change maps, the runs' areas, the time zone, the host's cores
 //! and the `[kpi]` settings, like [`super::stats`]: each window's runs,
 //! intervals, `land_phases`, asks and sessions are what
 //! [`super::stats::stats`] derives for it, and no rule is written twice.
@@ -14,7 +15,7 @@ use serde::Serialize;
 use serde::ser::SerializeMap;
 
 use super::{
-    DraftOrigin, GoalId, RunEvent, TaskChange, TaskId, TaskKind,
+    DraftOrigin, GoalId, RunEvent, TaskChange, TaskId,
     areas::RunAreas,
     host_metrics::HostSummary,
     marks::{self, Mark},
@@ -56,8 +57,8 @@ pub const DEFAULT_LAST: usize = 7;
 pub const DEFAULT_WINDOW_DAYS: i64 = 7;
 /// The stratum of every run.
 pub const ALL: &str = "all";
-/// The value of an axis a run did not record, and the kind of a task
-/// registered without one (decision 5).
+/// The value of an axis a run did not record, and the change of a task
+/// registered without one (ADR-t980-1).
 pub const UNKNOWN: &str = "unknown";
 /// The days before a day's period its `baseline_7d` is the median of.
 const BASELINE_DAYS: usize = 7;
@@ -143,8 +144,6 @@ fn date(days: i64) -> String {
 /// What a run's KPIs can be split by besides `all` (decision 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Axis {
-    /// The task's kind; `unknown` without one.
-    Kind,
     /// The change the task declares (ADR-t980-1); `unknown` without one.
     Change,
     /// The areas of what the run landed (ADR-t980-1): a run is in every
@@ -188,8 +187,7 @@ pub enum Axis {
 }
 
 impl Axis {
-    pub const ALL: [Self; 16] = [
-        Self::Kind,
+    pub const ALL: [Self; 15] = [
         Self::Change,
         Self::Area,
         Self::Build,
@@ -209,7 +207,6 @@ impl Axis {
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Kind => "kind",
             Self::Change => "change",
             Self::Area => "area",
             Self::Build => "build",
@@ -247,8 +244,7 @@ impl std::str::FromStr for Axis {
 
 /// The axes a comparison across a mark is split by (decision 15), besides
 /// those `--by` names.
-pub const COMPARE_AXES: [Axis; 6] = [
-    Axis::Kind,
+pub const COMPARE_AXES: [Axis; 5] = [
     Axis::Change,
     Axis::Area,
     Axis::Parallel,
@@ -296,10 +292,6 @@ pub struct KpiQuery {
     /// `--until`, the cursors of `stats`).
     pub since: Option<Cursor>,
     pub until: Option<Cursor>,
-    /// The kinds whose strata are listed (every kind when empty), and the
-    /// kinds a comparison's summary is made for (every kind seen when
-    /// empty).
-    pub kinds: Vec<String>,
     /// The changes whose strata are listed (every change when empty), and
     /// the changes a comparison's change summary is made for (every change
     /// seen when empty) (ADR-t980-1).
@@ -308,7 +300,7 @@ pub struct KpiQuery {
     /// areas a comparison's area summary is made for (every area seen when
     /// empty) (ADR-t980-1).
     pub areas: Vec<String>,
-    /// The axes the periods are split by besides the kind and the area.
+    /// The axes the periods are split by besides the change and the area.
     pub by: Vec<Axis>,
     pub compare: Option<CompareSpec>,
     /// Each side of a comparison across a mark, in days.
@@ -325,7 +317,6 @@ impl Default for KpiQuery {
             at: None,
             since: None,
             until: None,
-            kinds: Vec::new(),
             changes: Vec::new(),
             areas: Vec::new(),
             by: Vec::new(),
@@ -362,7 +353,6 @@ pub struct KpiInput<'a> {
     /// Every `run_events` row, ascending id.
     pub events: &'a [RunEvent],
     pub goals: &'a HashMap<TaskId, Option<GoalId>>,
-    pub kinds: &'a HashMap<TaskId, Option<TaskKind>>,
     /// The change of every task (ADR-t980-1).
     pub changes: &'a HashMap<TaskId, Option<TaskChange>>,
     /// The landed runs' areas (ADR-t980-1); `None` without `[areas]`.
@@ -725,7 +715,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
     let context = Context::new(input, query.goal_id);
     let now_ms = input.now * 1000;
     let offset_ms = input.utc_offset_secs * 1000;
-    let mut axes = vec![Axis::Kind, Axis::Change, Axis::Area];
+    let mut axes = vec![Axis::Change, Axis::Area];
     for axis in &query.by {
         if !axes.contains(axis) {
             axes.push(*axis);
@@ -869,7 +859,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
         targets,
         compare,
     };
-    if !query.kinds.is_empty() || !query.changes.is_empty() || !query.areas.is_empty() {
+    if !query.changes.is_empty() || !query.areas.is_empty() {
         let wanted = |stratum: &str, axis: &str, values: &[String]| {
             values.is_empty()
                 || stratum
@@ -878,9 +868,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
                     .is_none_or(|value| values.iter().any(|wanted| wanted == value))
         };
         let keep = |stratum: &String| {
-            wanted(stratum, "kind", &query.kinds)
-                && wanted(stratum, "change", &query.changes)
-                && wanted(stratum, "area", &query.areas)
+            wanted(stratum, "change", &query.changes) && wanted(stratum, "area", &query.areas)
         };
         for period in &mut kpi.periods {
             for strata in period.window.kpis.values_mut() {

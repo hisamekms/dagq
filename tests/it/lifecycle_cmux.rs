@@ -165,7 +165,6 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
                 required_evidence: Vec::new(),
                 paths: Vec::new(),
                 priority: Default::default(),
-                kind: None,
                 change: None,
                 status: dagq::domain::TaskStatus::InProgress,
                 goal_id: None,

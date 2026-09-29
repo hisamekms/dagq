@@ -441,7 +441,6 @@ fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf) 
                 required_evidence: Vec::new(),
                 paths: fixture.paths.iter().map(|p| (*p).to_owned()).collect(),
                 priority: Default::default(),
-                kind: None,
                 change: None,
                 provider: None,
                 worker_mode: None,

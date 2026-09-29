@@ -2070,22 +2070,31 @@ LITERAL = 'no \n escapes # here'
     /// them is its own again.
     #[test]
     fn parses_and_loads_the_kpi_tables() {
-        let text = "[run.env]\nA = 'x'\n[kpi]\nmin_samples = 4\nmax_improvement_proposals = 1\n[kpi.targets.\"phase.work\"]\nkind = \"runtime\"\nmax = 3600\n[stall]\nsend_confirm_secs = 30\n";
+        let text = "[run.env]\nA = 'x'\n[kpi]\nmin_samples = 4\nmax_improvement_proposals = 1\n[kpi.targets.\"phase.work\"]\nchange = \"fix\"\nmax = 3600\n[stall]\nsend_confirm_secs = 30\n";
         let config = parse_config(text).unwrap();
         assert_eq!(config.run_env, pairs(&[("A", "x")]));
         assert_eq!(config.stall.send_confirm_secs, 30);
         let kpi = config.kpi.unwrap();
         assert_eq!(kpi.min_samples, Some(4));
         assert_eq!(kpi.max_improvement_proposals, Some(1));
-        assert_eq!(kpi.targets[0].stratum(), "kind=runtime");
+        assert_eq!(kpi.targets[0].stratum(), "change=fix");
         assert_eq!(parse_config("[stall]\n").unwrap().kpi, None);
         let error = format!("{:#}", parse_config("[kpi]\nx = 1\n").unwrap_err());
         assert!(error.starts_with("dagq.toml:2: unknown key x"), "{error}");
         let error = format!(
             "{:#}",
-            parse_config("[kpi.targets.a]\nkind = \"docs\"\n").unwrap_err()
+            parse_config("[kpi.targets.a]\nchange = \"docs\"\n").unwrap_err()
         );
         assert!(error.contains("neither min nor max"), "{error}");
+        // The task's kind is gone (ADR-t980-1), in dagq.toml as in host.toml.
+        let error = format!(
+            "{:#}",
+            parse_config("[kpi.targets.a]\nkind = \"docs\"\nmax = 1\n").unwrap_err()
+        );
+        assert!(
+            error.contains("kind of a target was removed") && error.contains("change or area"),
+            "{error}"
+        );
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_kpi_settings(dir.path()).unwrap(), None);
         fs::write(dir.path().join(CONFIG_FILE_NAME), text).unwrap();

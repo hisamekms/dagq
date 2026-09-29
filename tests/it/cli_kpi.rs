@@ -1,5 +1,5 @@
 //! `dagq kpi` (ADR-0051 decisions 1–9 and 14–19) on a real queue: the
-//! periods, the kinds, the host's `[kpi]` settings and targets, and a
+//! periods, the changes, the host's `[kpi]` settings and targets, and a
 //! comparison across a mark.
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
@@ -41,7 +41,7 @@ fn kpi_ok(db: &Path, config: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// A runtime task and a task without a kind land today; the host's
+/// A fix task and a task without a change land today; the host's
 /// `host.toml` sets `min_samples` and a target; a mark splits a comparison.
 #[test]
 fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
@@ -58,7 +58,7 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
         "[kpi.targets.landings]\nmin = 5\n",
     )
     .unwrap();
-    ok(&db, &["add", "first", "--kind", "runtime"]);
+    ok(&db, &["add", "first", "--change", "fix"]);
     ok(&db, &["add", "second"]);
     ok(&db, &["ready", "1", "--bypass-review"]);
     ok(&db, &["ready", "2", "--bypass-review"]);
@@ -97,8 +97,8 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     assert_eq!(today["runs"], 2);
     let landings = &today["kpis"]["landings"];
     assert_eq!(landings["all"], json!({"n": 2, "value": 2.0}));
-    assert_eq!(landings["kind=runtime"]["value"], 1.0);
-    assert_eq!(landings["kind=unknown"]["value"], 1.0);
+    assert_eq!(landings["change=fix"]["value"], 1.0);
+    assert_eq!(landings["change=unknown"]["value"], 1.0);
     // Claimed by hand: no parallel recorded.
     assert_eq!(landings["parallel=unknown"]["value"], 2.0);
     assert_eq!(today["kpis"]["phase.work"]["all"]["n"], 2);
@@ -126,11 +126,11 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     let week = kpi_ok(
         &db,
         &config,
-        &["--period", "week", "--last", "1", "--kind", "docs"],
+        &["--period", "week", "--last", "1", "--change", "docs"],
     );
     assert_eq!(week["period"], "week");
     let strata = week["periods"][0]["kpis"]["landings"].as_object().unwrap();
-    assert!(strata.contains_key("all") && !strata.contains_key("kind=runtime"));
+    assert!(strata.contains_key("all") && !strata.contains_key("change=fix"));
     assert!(week["periods"][0]["label"].as_str().unwrap().contains("-W"));
 
     let compared = kpi_ok(
@@ -144,7 +144,10 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     assert_eq!(compare["after"]["runs"], 2);
     assert_eq!(compare["before"]["runs"], 0);
     assert_eq!(compare["strata"]["landings"]["all"]["after"]["value"], 2.0);
-    assert_eq!(compare["summary"]["runtime"]["phase.work"]["after"]["n"], 1);
+    assert_eq!(
+        compare["change_summary"]["fix"]["phase.work"]["after"]["n"],
+        1
+    );
 
     let window = kpi_ok(
         &db,
@@ -257,7 +260,7 @@ fn report_writes_the_html_and_json_and_returns_their_paths() {
     let (dir, db) = queue();
     let config = dir.path().join("config");
     std::fs::create_dir_all(&config).unwrap();
-    ok(&db, &["add", "first", "--kind", "runtime"]);
+    ok(&db, &["add", "first", "--change", "fix"]);
     let run = |args: &[&str]| -> Value {
         let output = report(None, &db, &config, args);
         assert!(
@@ -328,10 +331,11 @@ fn report_writes_the_html_and_json_and_returns_their_paths() {
     assert!(!report(None, &db, &config, &[]).status.success());
 }
 
-/// Any label is a kind (ADR-t624-1): `stats` and `kpi` group the runs by
-/// the label as written, `--kind` and a target's `kind` take it, and a
-/// comparison without `--kind` summarises every kind it saw, a kind of
-/// the four this repository uses included.
+/// Any label is a change when dagq.toml names no set (ADR-t980-1):
+/// `stats` and `kpi` group the runs by the label as written, `--change` and
+/// a target's `change` take it, and a comparison without `--change`
+/// summarises every change it saw. The task's kind is gone: `add --kind`,
+/// `kpi --kind`, `--by kind` and a target's `kind` are refused.
 #[test]
 fn kpi_and_stats_group_the_runs_by_any_label() {
     let (dir, db) = queue();
@@ -339,11 +343,16 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         dir.path().join("host.toml"),
-        "[kpi]\nmin_samples = 1\n[kpi.targets.landings]\nkind = \"frontend\"\nmin = 1\n",
+        "[kpi]\nmin_samples = 1\n[kpi.targets.landings]\nchange = \"frontend\"\nmin = 1\n",
     )
     .unwrap();
-    ok(&db, &["add", "web", "--kind", "frontend"]);
-    ok(&db, &["add", "crate", "--kind", "runtime"]);
+    assert!(
+        !invoke(&db, &["add", "old", "--kind", "runtime"])
+            .status
+            .success()
+    );
+    ok(&db, &["add", "web", "--change", "frontend"]);
+    ok(&db, &["add", "crate", "--change", "runtime"]);
     ok(&db, &["add", "plain"]);
     for id in ["1", "2", "3"] {
         ok(&db, &["ready", id, "--bypass-review"]);
@@ -371,35 +380,47 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
     }
 
     let stats = ok(&db, &["stats"]);
-    let kinds: Vec<&str> = stats["kinds"]
+    assert!(stats.get("kinds").is_none(), "{stats}");
+    let changes: Vec<&str> = stats["changes"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|kind| kind["kind"].as_str().unwrap_or("none"))
+        .map(|change| change["change"].as_str().unwrap_or("none"))
         .collect();
-    assert_eq!(kinds, ["frontend", "runtime", "none"]);
+    assert_eq!(changes, ["frontend", "runtime", "none"]);
 
     let report = kpi_ok(&db, &config, &["--last", "1"]);
     let landings = &report["periods"][0]["kpis"]["landings"];
     assert_eq!(landings["all"]["value"], 3.0);
-    for stratum in ["kind=frontend", "kind=runtime", "kind=unknown"] {
+    for stratum in ["change=frontend", "change=runtime", "change=unknown"] {
         assert_eq!(landings[stratum]["value"], 1.0, "{stratum}");
     }
     let target = &report["targets"][0];
-    assert_eq!(target["stratum"], "kind=frontend");
+    assert_eq!(target["stratum"], "change=frontend");
+    assert!(
+        landings
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|stratum| !stratum.starts_with("kind="))
+    );
 
-    let only = kpi_ok(&db, &config, &["--last", "1", "--kind", "frontend"]);
+    let only = kpi_ok(&db, &config, &["--last", "1", "--change", "frontend"]);
     let strata = only["periods"][0]["kpis"]["landings"].as_object().unwrap();
-    assert!(strata.contains_key("kind=frontend") && !strata.contains_key("kind=runtime"));
-    let refused = kpi(None, &db, &config, &["--kind", "Front End"]);
+    assert!(strata.contains_key("change=frontend") && !strata.contains_key("change=runtime"));
+    let refused = kpi(None, &db, &config, &["--change", "Front End"]);
     assert!(!refused.status.success());
+    for gone in [&["--kind", "frontend"][..], &["--by", "kind"][..]] {
+        assert!(!kpi(None, &db, &config, gone).status.success(), "{gone:?}");
+    }
 
     let compared = kpi_ok(
         &db,
         &config,
         &["--last", "1", "--compare", &mark.to_string()],
     );
-    let summary = compared["compare"]["summary"].as_object().unwrap();
+    assert!(compared["compare"].get("summary").is_none());
+    let summary = compared["compare"]["change_summary"].as_object().unwrap();
     let summarised: Vec<&String> = summary.keys().collect();
     assert_eq!(summarised, ["frontend", "runtime", "unknown"]);
     assert_eq!(summary["frontend"]["phase.work"]["after"]["n"], 1);
@@ -411,11 +432,11 @@ fn kpi_and_stats_group_the_runs_by_any_label() {
             "1",
             "--compare",
             &mark.to_string(),
-            "--kind",
+            "--change",
             "frontend",
         ],
     );
-    let summary = asked["compare"]["summary"].as_object().unwrap();
+    let summary = asked["compare"]["change_summary"].as_object().unwrap();
     assert_eq!(summary.keys().collect::<Vec<_>>(), ["frontend"]);
 }
 
@@ -595,5 +616,27 @@ fn the_worker_question_topics_reach_stats_and_kpi() {
     assert_eq!(
         today["details"]["worker_question_topics"]["asks"], 1,
         "{today}"
+    );
+}
+
+/// A target's `kind` is refused with a pointer to `change` and `area`
+/// (ADR-t980-1), in the host's `host.toml` as in the repository's
+/// `dagq.toml`.
+#[test]
+fn a_target_bound_by_kind_is_refused_with_its_replacement() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        dir.path().join("host.toml"),
+        "[kpi.targets.landings]\nkind = \"runtime\"\nmin = 1\n",
+    )
+    .unwrap();
+    let refused = kpi(None, &db, &config, &["--last", "1"]);
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        error.contains("kind of a target was removed") && error.contains("change or area"),
+        "{error}"
     );
 }

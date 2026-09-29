@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    EventId, GoalId, RunEvent, RunId, RunStatus, TaskChange, TaskId, TaskKind,
+    EventId, GoalId, RunEvent, RunId, RunStatus, TaskChange, TaskId,
     reason::{REPEATED_CODE_KINDS, event_code},
     stall::{BackgroundTask, StallConfig},
 };
@@ -213,8 +213,6 @@ pub struct RunStats {
     pub land_phases: Option<LandPhases>,
     /// The task's title (task 466).
     pub title: Option<String>,
-    /// The task's kind (goal 21); null for a task without one.
-    pub kind: Option<TaskKind>,
     /// The change its task declares (ADR-t980-1); null for a task without
     /// one.
     pub change: Option<TaskChange>,
@@ -304,17 +302,8 @@ pub struct GoalStats {
     pub intervals: Intervals,
 }
 
-/// The runs of one kind of task (goal 21), as [`GoalStats`] groups them by
-/// goal: `kind` is null for the runs of tasks registered without one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct KindStats {
-    pub kind: Option<TaskKind>,
-    #[serde(flatten)]
-    pub intervals: Intervals,
-}
-
-/// The runs of one change (ADR-t980-1), as [`KindStats`] groups them by
-/// kind: `change` is null for the runs of tasks without one.
+/// The runs of one change (ADR-t980-1), as [`GoalStats`] groups them by
+/// goal: `change` is null for the runs of tasks without one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChangeStats {
     pub change: Option<TaskChange>,
@@ -323,7 +312,7 @@ pub struct ChangeStats {
 }
 
 /// The runs by whether validation required `e2e` of them and why
-/// (ADR-t963-1 decision 2), as [`KindStats`] groups them by kind: `e2e` is
+/// (ADR-t963-1 decision 2), as [`ChangeStats`] groups them by change: `e2e` is
 /// `task`, `paths` or `not_required`, and null for the runs validated
 /// before validation recorded it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -333,8 +322,8 @@ pub struct E2eStats {
     pub intervals: Intervals,
 }
 
-/// The runs of one area (ADR-t980-1), as [`KindStats`] groups them by
-/// kind; a run counts in every area it has, and `area` is null for the runs
+/// The runs of one area (ADR-t980-1), as [`ChangeStats`] groups them by
+/// change; a run counts in every area it has, and `area` is null for the runs
 /// without one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AreaStats {
@@ -452,9 +441,6 @@ pub struct Stats {
     pub runs: Vec<RunStats>,
     /// One entry per goal of those runs, ascending; runs of no goal last.
     pub goals: Vec<GoalStats>,
-    /// One entry per kind of those runs' tasks, by name; runs of tasks
-    /// without a kind last ([`with_kinds`]).
-    pub kinds: Vec<KindStats>,
     /// One entry per change of those runs' tasks, by name; runs of tasks
     /// without a change last ([`with_changes`]).
     pub changes: Vec<ChangeStats>,
@@ -1178,7 +1164,6 @@ pub fn stats(
     Stats {
         runs: finished.into_iter().map(|track| track.stats).collect(),
         goals: goal_stats,
-        kinds: Vec::new(),
         changes: Vec::new(),
         areas: Vec::new(),
         e2e,
@@ -1686,32 +1671,9 @@ fn summary(values: impl Iterator<Item = Option<i64>>) -> Summary {
     }
 }
 
-/// Give each run of `stats` the kind of its task from `kinds`, and group
-/// the runs by it into `stats.kinds` (goal 21): which kind of change takes
-/// how long, and where the landings wait.
-pub fn with_kinds(stats: &mut Stats, kinds: &HashMap<TaskId, Option<TaskKind>>) {
-    for run in &mut stats.runs {
-        run.kind = kinds.get(&run.task_id).cloned().flatten();
-    }
-    let mut by_kind: BTreeMap<(bool, Option<&str>), Vec<&RunStats>> = BTreeMap::new();
-    for run in &stats.runs {
-        let kind = run.kind.as_ref().map(TaskKind::as_str);
-        by_kind.entry((kind.is_none(), kind)).or_default().push(run);
-    }
-    stats.kinds = by_kind
-        .values()
-        .map(|runs| KindStats {
-            kind: runs[0].kind.clone(),
-            intervals: intervals(runs),
-        })
-        .collect();
-    stats.review_reasons.review.with_kinds(kinds);
-    stats.review_reasons.plan_review.with_kinds(kinds);
-}
-
 /// Give each run of `stats` the change of its task from `changes`, and
-/// group the runs by it into `stats.changes` (ADR-t980-1), as
-/// [`with_kinds`] does by kind.
+/// group the runs by it into `stats.changes` (ADR-t980-1): which change
+/// takes how long, and where the landings wait.
 pub fn with_changes(stats: &mut Stats, changes: &HashMap<TaskId, Option<TaskChange>>) {
     for run in &mut stats.runs {
         run.change = changes.get(&run.task_id).cloned().flatten();
@@ -1865,7 +1827,6 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     failed: 0,
                     land_phases: None,
                     title: None,
-                    kind: None,
                     change: None,
                     areas: None,
                     e2e: None,

@@ -14,8 +14,7 @@ use super::{DomainError, TaskId, require};
 
 /// A task's change: a lowercase slug of letters, digits, '-' and '_' (at
 /// most 64 bytes), neither `unknown` (the name of the tasks without one)
-/// nor `all` (every task together), like a task's kind (ADR-t980-1
-/// decision 6 (a)).
+/// nor `all` (every task together) (ADR-t980-1 decision 6 (a)).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct TaskChange(String);

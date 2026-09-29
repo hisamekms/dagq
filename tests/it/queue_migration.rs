@@ -11,7 +11,7 @@ use dagq::{
     domain::search::{SearchKind, SearchQuery},
     domain::{
         EventId, EvidenceCheck, GoalId, GoalStatus, Priority, RunId, RunStatus, SupervisorMode,
-        TaskAction, TaskChange, TaskId, TaskKind, TaskStatus,
+        TaskAction, TaskChange, TaskId, TaskStatus,
     },
     infrastructure::{
         schema::{MIGRATIONS, floor_for},
@@ -893,18 +893,18 @@ fn migration_to_v29_gives_every_ask_the_reason_of_its_kind() {
     );
 }
 
-/// Goal 21: the task kind is an addition. The tasks of an older queue have
-/// none after the migration, which raises no floor, and an older binary's
-/// insert that does not name the column leaves it null too.
+/// ADR-t980-1 decision 1: the task's kind is gone. The migration that
+/// drops `tasks.kind` is breaking (a copy is taken and the floor rises to
+/// it); the tasks of an older queue keep their change, and the migrated
+/// queue reads and writes tasks and derives `stats`, `kpi` and `forecast`.
 #[test]
-fn migration_adding_the_task_kind_keeps_older_tasks_without_one() {
+fn migration_dropping_the_task_kind_keeps_tasks_and_their_change() {
     // Found by its statement, not its number, which a landing may change.
     let at = MIGRATIONS
         .iter()
-        .position(|migration| migration.contains("ALTER TABLE tasks ADD COLUMN kind"))
+        .position(|migration| migration.contains("ALTER TABLE tasks DROP COLUMN kind"))
         .unwrap();
     let before = i64::try_from(at).unwrap();
-    assert_eq!(floor_for(before + 1), floor_for(before));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("queue.db");
     let raw = Connection::open(&path).unwrap();
@@ -914,50 +914,102 @@ fn migration_adding_the_task_kind_keeps_older_tasks_without_one() {
     raw.execute_batch(&format!(
         "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
          INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});
-         INSERT INTO tasks(title,description,acceptance,verification_commands,status)
-         VALUES ('runtime: older','','','[]','draft');",
+         INSERT INTO tasks(title,description,acceptance,verification_commands,status,kind,change,
+                           updated_at)
+         VALUES ('landed','','','[]','completed','runtime','fix','2026-09-28T00:00:00.000Z'),
+                ('open','','','[]','draft','docs',NULL,'2026-09-28T00:00:00.000Z');
+         INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,
+                               result_commit)
+         VALUES ('run-1',1,'integrated','claude','claude','{BASE}','{BASE}');
+         INSERT INTO run_events(task_id,run_id,kind,payload,created_at) VALUES
+           (1,'run-1','run_claimed','{{}}','2026-09-28T01:00:00.000Z'),
+           (1,'run-1','run_integrated','{{\"result_commit\":\"aaaa\"}}',
+            '2026-09-28T02:00:00.000Z');",
         floor = floor_for(before),
     ))
     .unwrap();
     drop(raw);
-    // A compatible step: `migrated` expects the backup of a breaking one.
-    SqliteQueue::migrate(&path, None, 0).unwrap();
-    let mut queue = SqliteQueue::open(&path).unwrap();
-    assert_eq!(queue.show(TaskId::new(1)).unwrap().task.kind(), None);
-    let mut kinded = new_task("docs");
-    kinded.kind = Some("docs".parse::<TaskKind>().unwrap());
-    let added = queue.add(kinded).unwrap();
-    assert_eq!(added.kind().map(TaskKind::as_str), Some("docs"));
-    Connection::open(&path)
-        .unwrap()
-        .execute(
-            "INSERT INTO tasks(title,description,acceptance,verification_commands,status)
-             VALUES ('older binary','','','[]','draft')",
-            [],
-        )
-        .unwrap();
-    assert_eq!(queue.show(TaskId::new(3)).unwrap().task.kind(), None);
-    // Any label reads back as written (ADR-t624-1); a value that is not a
-    // label reads as none, and the task still restores.
-    Connection::open(&path)
-        .unwrap()
-        .execute("UPDATE tasks SET kind='later' WHERE id=3", [])
-        .unwrap();
-    assert_eq!(
-        queue
-            .show(TaskId::new(3))
-            .unwrap()
-            .task
-            .kind()
-            .map(TaskKind::as_str),
-        Some("later")
+    let report = SqliteQueue::migrate(&path, None, 0).unwrap();
+    assert!(
+        report
+            .applied
+            .iter()
+            .any(|m| m.version == before + 1 && !m.compatible)
     );
-    Connection::open(&path)
+    assert!(report.backup.is_some());
+    assert!(report.floor > before);
+    let raw = Connection::open(&path).unwrap();
+    let columns: Vec<String> = raw
+        .prepare("SELECT name FROM pragma_table_info('tasks')")
         .unwrap()
-        .execute("UPDATE tasks SET kind='Not a label' WHERE id=3", [])
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(queue.show(TaskId::new(3)).unwrap().task.kind(), None);
-    assert_eq!(queue.list(&Default::default()).unwrap().total, 3);
+    assert!(!columns.iter().any(|name| name == "kind"), "{columns:?}");
+    assert!(columns.iter().any(|name| name == "change"), "{columns:?}");
+    drop(raw);
+
+    let mut queue = SqliteQueue::open(&path).unwrap();
+    let landed = queue.show(TaskId::new(1)).unwrap().task;
+    assert_eq!(landed.change().map(TaskChange::as_str), Some("fix"));
+    assert_eq!(queue.show(TaskId::new(2)).unwrap().task.change(), None);
+    let mut declared = new_task("added");
+    declared.change = Some("docs".parse::<TaskChange>().unwrap());
+    let added = queue.add(declared).unwrap();
+    assert_eq!(added.change().map(TaskChange::as_str), Some("docs"));
+    drop(queue);
+
+    // The CLI on the migrated queue: no kind anywhere, the change kept.
+    let config = dir.path().join("config");
+    let run = |args: &[&str]| {
+        let output = common::cli::invoke_with(
+            &[("XDG_CONFIG_HOME", config.to_str().unwrap()), ("TZ", "UTC")],
+            &path,
+            args,
+        );
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let edited = run(&["edit", "2", "--change", "fix"]);
+    assert_eq!(edited["change"], "fix");
+    assert!(edited.get("kind").is_none(), "{edited}");
+    let listed = run(&["list", "--all"]);
+    assert_eq!(listed["total"], 3);
+    assert!(
+        listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|task| task.get("kind").is_none())
+    );
+    let stats = run(&["stats", "--full"]);
+    assert_eq!(stats["runs"][0]["change"], "fix");
+    assert!(stats.get("kinds").is_none(), "{stats}");
+    assert_eq!(stats["changes"][0]["change"], "fix");
+    let kpi = run(&[
+        "kpi",
+        "--since",
+        "2026-09-27T00:00:00Z",
+        "--until",
+        "2026-09-29T00:00:00Z",
+    ]);
+    let landings = &kpi["periods"][0]["kpis"]["landings"];
+    assert_eq!(landings["change=fix"]["value"], 1.0, "{landings}");
+    assert!(
+        landings
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|stratum| !stratum.starts_with("kind=")),
+        "{landings}"
+    );
+    let forecast = run(&["forecast"]);
+    assert!(forecast.get("tasks").is_some(), "{forecast}");
 }
 
 /// ADR-t980-1: the task change is an addition. The tasks of an older queue

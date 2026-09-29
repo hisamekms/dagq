@@ -43,7 +43,6 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: vec![],
             goal_dependencies: Vec::new(),
@@ -1122,7 +1121,6 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP TABLE headless_jobs;
              DROP TABLE draft_bundles;
              DROP TABLE draft_bundle_members;
-             ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE tasks DROP COLUMN change;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;
@@ -1173,7 +1171,9 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
     assert_eq!(report["migrated"], Value::Null, "{report}");
 
     // The compatible automatic-update migration (0033) pending, with the
-    // task kind's (0034): `up` applies them and goes on when no breaking one
+    // ones after it (0034 adds the task kind's column, which a later
+    // breaking migration drops again, so the latest queue has none to
+    // drop here): `up` applies them and goes on when no breaking one
     // follows; otherwise it names only the breaking ones (ADR-0048 added
     // 0035). Versions are
     // looked up rather than written, so a later migration does not rewrite
@@ -1203,7 +1203,6 @@ fn up_applies_compatible_migrations_and_refuses_breaking_ones() {
              DROP TABLE headless_jobs;
              DROP TABLE draft_bundles;
              DROP TABLE draft_bundle_members;
-             ALTER TABLE tasks DROP COLUMN kind;
              ALTER TABLE tasks DROP COLUMN change;
              ALTER TABLE asks DROP COLUMN answered_by;
              ALTER TABLE asks DROP COLUMN option_index;

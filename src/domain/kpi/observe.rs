@@ -178,13 +178,13 @@ fn breach_entry(
 }
 
 /// A period of the trend: its runs, its marks, and the KPIs of the whole
-/// queue and of each kind of task judged worse than the period before.
+/// queue and of each change of task judged worse than the period before.
 fn trend_entry(period: &PeriodKpis) -> Value {
     let worsened: Vec<Value> = period
         .comparison
         .iter()
         .flat_map(|(kpi, strata)| strata.iter().map(move |(stratum, c)| (kpi, stratum, c)))
-        .filter(|(_, stratum, _)| stratum.as_str() == ALL || stratum.starts_with("kind="))
+        .filter(|(_, stratum, _)| stratum.as_str() == ALL || stratum.starts_with("change="))
         .filter(|(_, _, change)| change.verdict == Some("worsened"))
         .map(|(kpi, stratum, change)| {
             json!({
@@ -262,10 +262,10 @@ mod tests {
                 kpi.to_owned(),
                 BTreeMap::from([
                     (stratum.to_owned(), change("worsened")),
-                    // Other axes than the kinds are left out, and so is
+                    // Other axes than the changes are left out, and so is
                     // what did not worsen.
                     ("parallel=3".to_owned(), change("worsened")),
-                    ("kind=docs".to_owned(), change("improved")),
+                    ("change=docs".to_owned(), change("improved")),
                 ]),
             );
         }
@@ -320,20 +320,20 @@ mod tests {
         let day = kpi(
             "day",
             vec![
-                target("phase.work", "kind=runtime", "breach", Some("2026-09-24")),
+                target("phase.work", "change=runtime", "breach", Some("2026-09-24")),
                 target("lead_time", "all", "missed", None),
             ],
             vec![
                 period("2026-09-23", &["before the breach"], None),
                 period("2026-09-24", &["parallel 4→3"], None),
-                period("2026-09-25", &[], Some(("phase.work", "kind=runtime"))),
+                period("2026-09-25", &[], Some(("phase.work", "change=runtime"))),
             ],
         );
         let week = kpi(
             "week",
             vec![target(
                 "phase.work",
-                "kind=runtime",
+                "change=runtime",
                 "breach",
                 Some("2026-W38"),
             )],
@@ -342,11 +342,11 @@ mod tests {
         let open = vec![
             (
                 EventId::new(41),
-                json!({"period": "week", "kpi": "phase.work", "stratum": "kind=runtime"}),
+                json!({"period": "week", "kpi": "phase.work", "stratum": "change=runtime"}),
             ),
             (
                 EventId::new(40),
-                json!({"period": "day", "kpi": "phase.work", "stratum": "kind=runtime"}),
+                json!({"period": "day", "kpi": "phase.work", "stratum": "change=runtime"}),
             ),
         ];
         let input = observer_input(&day, &week, &open);
@@ -356,7 +356,7 @@ mod tests {
         // One KPI and stratum is one subject in the days and the weeks.
         for breach in breaches {
             assert_eq!(breach["finding_kind"], "kpi");
-            assert_eq!(breach["subject"], "phase.work/kind=runtime");
+            assert_eq!(breach["subject"], "phase.work/change=runtime");
         }
         assert_eq!(breaches[0]["period"], "day");
         assert_eq!(breaches[0]["evidence_event_id"], 40);
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(trend[2]["runs"], 7);
         assert_eq!(
             trend[2]["worsened"],
-            json!([{"kpi": "phase.work", "stratum": "kind=runtime", "previous": 100.0, "delta": 50.0, "ratio": 1.5}])
+            json!([{"kpi": "phase.work", "stratum": "change=runtime", "previous": 100.0, "delta": 50.0, "ratio": 1.5}])
         );
         assert_eq!(trend[0]["marks"][0]["label"], "before the breach");
         assert_eq!(input["config"]["breach_periods"], 3);
@@ -416,7 +416,7 @@ mod tests {
             crate::domain::kpi::Measure::spread([0.5, 0.75]),
         );
         ratio.insert(
-            "kind=docs".to_owned(),
+            "change=docs".to_owned(),
             crate::domain::kpi::Measure::spread(std::iter::empty()),
         );
         scored
@@ -440,7 +440,7 @@ mod tests {
             "day",
             vec![target(
                 "forecast.p50_error_ratio",
-                "kind=runtime",
+                "change=runtime",
                 "breach",
                 Some("2026-09-25"),
             )],
@@ -451,7 +451,7 @@ mod tests {
 
         let breach = &input["breaches"][0];
         assert_eq!(breach["finding_kind"], "forecast");
-        assert_eq!(breach["subject"], "p50_error_ratio/kind=runtime");
+        assert_eq!(breach["subject"], "p50_error_ratio/change=runtime");
         assert_eq!(breach["kpi"], "forecast.p50_error_ratio");
 
         // Only the period with samples, only the forecast's KPIs, and only

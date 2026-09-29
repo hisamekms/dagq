@@ -28,7 +28,6 @@ fn headless_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf, T
             required_evidence: evidence.to_vec(),
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

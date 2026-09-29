@@ -114,9 +114,8 @@ fn a_concern_sent_back_records_its_codes_and_outcome_and_stats_tally_them() {
         review["codes"],
         json!({"adr_conflict": 1, "docs_drift": 1, "unlabeled": 1})
     );
-    // The fixture's task has no kind and no change.
-    assert_eq!(review["by_kind"][0]["kind"], Value::Null);
-    assert_eq!(review["by_kind"][0]["by_code"], json!({"adr_conflict": 1}));
+    // The fixture's task has no change.
+    assert!(review.get("by_kind").is_none());
     assert_eq!(
         review["by_change"],
         json!([{"change": null, "reviewed": 1, "sent_back": 1, "rate": 1.0,

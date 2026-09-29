@@ -107,19 +107,6 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The kind of every task, for `stats`; a value that is not a label
-    /// is read as none, as `task_row` reads it.
-    pub fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>> {
-        Ok(self
-            .conn
-            .prepare("SELECT id, kind FROM tasks")?
-            .query_map([], |row| {
-                let kind: Option<String> = row.get(1)?;
-                Ok((row.get(0)?, kind.and_then(|kind| kind.parse().ok())))
-            })?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-
     /// The change of every task (ADR-t980-1), for `stats`, `kpi` and
     /// `forecast`; a value that is not a label is read as none.
     pub fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>> {
@@ -174,9 +161,6 @@ impl QueueRecords for SqliteQueue {
     }
     fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>> {
         SqliteQueue::task_goals(self)
-    }
-    fn task_kinds(&self) -> Result<HashMap<TaskId, Option<TaskKind>>> {
-        SqliteQueue::task_kinds(self)
     }
     fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>> {
         SqliteQueue::task_changes(self)

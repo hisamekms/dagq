@@ -214,7 +214,6 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
                 required_evidence: Vec::new(),
                 paths: Vec::new(),
                 priority: priority.parse().unwrap(),
-                kind: None,
                 change: None,
                 dependencies,
                 goal_dependencies: Vec::new(),

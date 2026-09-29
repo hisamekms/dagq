@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::domain::{
-    EventId, FindingId, FindingStatus, GoalId, Impact, RunEvent, RunId, TaskId, TaskKind,
+    EventId, FindingId, FindingStatus, GoalId, Impact, RunEvent, RunId, TaskId,
     kpi::{KpiConfig, KpiInput, KpiQuery, KpiSettings, Target, kpi},
     stats::Cursor,
 };
@@ -52,27 +52,18 @@ fn event(
     }
 }
 
-/// A queue's events with the kind and the goal of each task.
-type Events = (
-    Vec<RunEvent>,
-    HashMap<TaskId, Option<TaskKind>>,
-    HashMap<TaskId, Option<GoalId>>,
-);
+/// A queue's events with the goal of each task.
+type Events = (Vec<RunEvent>, HashMap<TaskId, Option<GoalId>>);
 
 /// One landing a day on Monday to Thursday, and a mark on Tuesday whose
 /// label needs escaping.
 fn events() -> Events {
     let mut events = Vec::new();
-    let mut kinds = HashMap::new();
     let mut goals = HashMap::new();
     for day in 0..4 {
         let task = day + 1;
         let claimed = MONDAY + day * DAY + 10 * HOUR;
         let run = format!("{task:08x}-0000-4000-8000-{claimed:012x}");
-        kinds.insert(
-            TaskId::new(task),
-            Some("runtime".parse::<TaskKind>().unwrap()),
-        );
         goals.insert(TaskId::new(task), None);
         for (offset, kind, payload) in [
             (
@@ -131,7 +122,7 @@ fn events() -> Events {
     for (index, event) in events.iter_mut().enumerate() {
         event.id = EventId::new(i64::try_from(index).unwrap() + 1);
     }
-    (events, kinds, goals)
+    (events, goals)
 }
 
 fn finding(id: i64, summary: &str) -> Finding {
@@ -173,12 +164,11 @@ fn report_with_host(
     period: Period,
     host: Option<crate::domain::kpi::HostReader<'_>>,
 ) -> Report {
-    let (events, kinds, goals) = events();
+    let (events, goals) = events();
     let settings = KpiSettings {
         targets: vec![
             Target {
                 kpi: "landings".into(),
-                kind: None,
                 change: None,
                 area: None,
                 stat: None,
@@ -187,7 +177,6 @@ fn report_with_host(
             },
             Target {
                 kpi: "forecast.p90_hit_rate".into(),
-                kind: None,
                 change: None,
                 area: None,
                 stat: None,
@@ -202,7 +191,6 @@ fn report_with_host(
         &KpiInput {
             events: &events,
             goals: &goals,
-            kinds: &kinds,
             changes: &(1..=4)
                 .map(|task| (TaskId::new(task), Some("fix".parse().unwrap())))
                 .collect(),
@@ -369,10 +357,9 @@ fn a_report_shows_the_forecast_error() {
     let section = &html[html.find("<h2>Forecast error</h2>").unwrap()..];
     let section = &section[..section.find("</table>").unwrap()];
     assert!(section.contains("1 sample(s)"), "{section}");
-    assert!(section.contains("<td>kind=runtime</td>"), "{section}");
     assert!(section.contains("<td>change=fix</td>"), "{section}");
     // The strata table has the change's too (ADR-t980-1).
-    let strata = &html[html.find("By stratum (kind, change, area").unwrap()..];
+    let strata = &html[html.find("By stratum (change, area").unwrap()..];
     assert!(strata.contains("<td>change=fix</td>"), "{strata}");
     assert!(section.contains("<td>marks=0</td>"), "{section}");
     // 2 hours 11 minutes late, a tenth of the 20 hours given.

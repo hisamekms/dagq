@@ -530,7 +530,7 @@ fn kpis(page: &mut String, period: &PeriodKpis) {
     page.push_str("</table></div>");
     let _ = write!(
         page,
-        "<details><summary>By stratum (kind, change, area and the claim's attributes)</summary><div class=\"scroll\"><table><tr><th>KPI</th><th>stratum</th>{columns}"
+        "<details><summary>By stratum (change, area and the claim's attributes)</summary><div class=\"scroll\"><table><tr><th>KPI</th><th>stratum</th>{columns}"
     );
     for (name, strata) in &period.window.kpis {
         for (stratum, measure) in strata.iter().filter(|(s, _)| s.as_str() != ALL) {
@@ -570,12 +570,10 @@ fn forecast(page: &mut String, period: &PeriodKpis, targets: &[TargetReport]) {
         return;
     }
     let order = |stratum: &str| {
-        [
-            "all", "target=", "kind=", "change=", "band=", "marks=", "method=",
-        ]
-        .iter()
-        .position(|prefix| stratum.starts_with(prefix))
-        .unwrap_or(7)
+        ["all", "target=", "change=", "band=", "marks=", "method="]
+            .iter()
+            .position(|prefix| stratum.starts_with(prefix))
+            .unwrap_or(7)
     };
     let mut strata: Vec<&String> = errors.keys().collect();
     strata.sort_by_key(|stratum| (order(stratum), stratum.as_str()));

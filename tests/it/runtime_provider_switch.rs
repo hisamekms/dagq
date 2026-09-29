@@ -38,7 +38,6 @@ fn add_task(db: &Path, provider: Provider, dependencies: &[TaskId]) -> TaskId {
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Default::default(),
-            kind: None,
             change: None,
             dependencies: dependencies.to_vec(),
             goal_dependencies: Vec::new(),

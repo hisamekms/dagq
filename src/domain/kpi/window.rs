@@ -1,5 +1,5 @@
 //! One window's KPIs (ADR-0051 decisions 1–7): the runs that finished in
-//! it as [`stats`] derives them, split into strata by the task's kind, its
+//! it as [`stats`] derives them, split into strata by the task's
 //! change, the run's areas and the attributes of the claim, and the KPIs no run carries (asks,
 //! attentions, backend failures, load, verification commands, slots,
 //! findings, sessions of the other kinds) over the whole window.
@@ -11,7 +11,6 @@ use serde_json::Value;
 use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float, round3};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskChange, TaskId,
-    TaskKind,
     areas::RunAreas,
     event_attention,
     forecast::score::{self, Scoring, Target},
@@ -46,7 +45,7 @@ const NO_LANDINGS: &str = "no_landings";
 pub struct WindowKpis {
     /// The runs that finished in the window.
     pub runs: usize,
-    /// Per KPI, per stratum (`all`, `kind=runtime`, `parallel=3`, ...).
+    /// Per KPI, per stratum (`all`, `change=fix`, `parallel=3`, ...).
     pub kpis: Kpis<Measure>,
     /// The breakdowns next to the KPIs: resumes per reason, asks per reason
     /// category, backend failures per op, repairs per layer, the phases'
@@ -68,7 +67,6 @@ struct Occupancy {
 pub(super) struct Context<'a> {
     pub events: &'a [RunEvent],
     goals: &'a HashMap<TaskId, Option<GoalId>>,
-    kinds: &'a HashMap<TaskId, Option<TaskKind>>,
     changes: &'a HashMap<TaskId, Option<TaskChange>>,
     /// The landed runs' areas; `None` without `[areas]`.
     areas: Option<&'a RunAreas>,
@@ -270,7 +268,6 @@ impl<'a> Context<'a> {
         let mut context = Self {
             events,
             goals: input.goals,
-            kinds: input.kinds,
             changes: input.changes,
             areas: input.areas,
             goal_id,
@@ -315,13 +312,6 @@ impl<'a> Context<'a> {
         })
     }
 
-    fn kind_of(&self, task_id: Option<TaskId>) -> &'a str {
-        let kinds: &'a HashMap<TaskId, Option<TaskKind>> = self.kinds;
-        task_id
-            .and_then(|task| kinds.get(&task)?.as_ref())
-            .map_or(UNKNOWN, TaskKind::as_str)
-    }
-
     fn change_of(&self, task_id: Option<TaskId>) -> &'a str {
         let changes: &'a HashMap<TaskId, Option<TaskChange>> = self.changes;
         task_id
@@ -345,7 +335,6 @@ impl<'a> Context<'a> {
             },
             &self.live,
         );
-        stats::with_kinds(&mut stats, self.kinds);
         stats::with_changes(&mut stats, self.changes);
         stats::with_areas(&mut stats, self.areas);
         stats
@@ -369,11 +358,6 @@ impl<'a> Context<'a> {
         let measures = &run.measures;
         let text = |value: &Option<String>| value.clone().unwrap_or_else(|| UNKNOWN.to_owned());
         match axis {
-            Axis::Kind => run
-                .kind
-                .as_ref()
-                .map_or(UNKNOWN, TaskKind::as_str)
-                .to_owned(),
             Axis::Change => run
                 .change
                 .as_ref()
@@ -549,8 +533,8 @@ impl<'a> Context<'a> {
         }
         let landed = |stratum: &str| landings.get(stratum).copied().unwrap_or(0);
 
-        // Asks: all of them, and those of a task per its kind (decision 7)
-        // and its change (ADR-t980-1).
+        // Asks: all of them, and those of a task per its change
+        // (decision 7, ADR-t980-1).
         let mut asks: BTreeMap<String, usize> = BTreeMap::new();
         for event in events
             .iter()
@@ -558,11 +542,6 @@ impl<'a> Context<'a> {
             .filter(|e| e.kind == "ask_opened")
         {
             *asks.entry(ALL.to_owned()).or_default() += 1;
-            if event.task_id.is_some() && axes.contains(&Axis::Kind) {
-                *asks
-                    .entry(format!("kind={}", self.kind_of(event.task_id)))
-                    .or_default() += 1;
-            }
             if event.task_id.is_some() && axes.contains(&Axis::Change) {
                 *asks
                     .entry(format!("change={}", self.change_of(event.task_id)))
@@ -571,7 +550,7 @@ impl<'a> Context<'a> {
         }
         for stratum in groups
             .keys()
-            .filter(|s| *s == ALL || s.starts_with("kind=") || s.starts_with("change="))
+            .filter(|s| *s == ALL || s.starts_with("change="))
         {
             let opened = asks.get(stratum).copied().unwrap_or(0);
             put(
@@ -865,7 +844,7 @@ impl<'a> Context<'a> {
         }
         // The verdicts that sent the work back per primary code
         // (ADR-t947-1 decision 5): the runs reviewed, all of them, per code
-        // and per kind and per change (ADR-t980-1) of task; the plan
+        // and per change (ADR-t980-1) of task; the plan
         // reviews' revises per code over the same reviews as
         // `plan.revise_rate`'s `all`.
         let reasons = &stats.review_reasons;
@@ -881,21 +860,6 @@ impl<'a> Context<'a> {
                 &format!("code={code}"),
                 Measure::ratio(float(sent_back.subjects), reviewed),
             );
-        }
-        if axes.contains(&Axis::Kind) {
-            for kind in &reasons.review.by_kind {
-                put(
-                    "review.sendback_rate",
-                    &format!(
-                        "kind={}",
-                        kind.kind.as_ref().map_or(UNKNOWN, TaskKind::as_str)
-                    ),
-                    Measure::ratio(
-                        float(kind.sent_back),
-                        usize::try_from(kind.reviewed).unwrap_or(0),
-                    ),
-                );
-            }
         }
         if axes.contains(&Axis::Change) {
             for change in &reasons.review.by_change {
@@ -1039,7 +1003,7 @@ impl<'a> Context<'a> {
 
     /// The forecast's errors (ADR-0070 decision 4) over the snapshots of
     /// the targets that finished in the window, into `put`: `all`, by
-    /// `target`, by the task's `kind`, by the `band` of the remaining time
+    /// `target`, by the task's `change`, by the `band` of the remaining time
     /// the p50 gave, by `method`, and by the change marks between the
     /// snapshot and the finish (`marks=0` is the method's own error). The
     /// counts of the rows left out and of the marks go to the details.
@@ -1070,7 +1034,6 @@ impl<'a> Context<'a> {
                 format!("marks={}", if sample.marks == 0 { "0" } else { "1+" }),
             ];
             if let Target::Task(task) = sample.target {
-                keys.push(format!("kind={}", self.kind_of(Some(task))));
                 keys.push(format!("change={}", self.change_of(Some(task))));
             }
             for key in keys {

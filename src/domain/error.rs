@@ -168,10 +168,6 @@ pub enum DomainError {
     InvalidFindingKind {
         kind: String,
     },
-    /// A task's kind is not a lowercase slug, or is `unknown` or `all`.
-    InvalidTaskKind {
-        kind: String,
-    },
     /// A task's change is not a lowercase slug, or is `unknown` or `all`
     /// (ADR-t980-1).
     InvalidTaskChange {
@@ -484,10 +480,6 @@ impl fmt::Display for DomainError {
             Self::InvalidFindingKind { kind } => write!(
                 f,
                 "finding kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_'"
-            ),
-            Self::InvalidTaskKind { kind } => write!(
-                f,
-                "task kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_' of at most 64 bytes, other than \"unknown\" and \"all\""
             ),
             Self::InvalidTaskChange { change } => write!(
                 f,

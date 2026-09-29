@@ -284,7 +284,6 @@ mod tests {
     fn add(queue: &mut SqliteQueue, title: &str, description: &str) -> TaskId {
         queue
             .add(NewTask {
-                kind: None,
                 change: None,
                 title: title.into(),
                 description: description.into(),

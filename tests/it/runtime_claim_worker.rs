@@ -28,7 +28,6 @@ fn add_task(
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Priority::Normal,
-            kind: None,
             change: None,
             dependencies: Vec::new(),
             goal_dependencies: Vec::new(),

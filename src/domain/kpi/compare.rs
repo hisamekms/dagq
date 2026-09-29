@@ -1,6 +1,6 @@
 //! The comparison across a change (ADR-0051 decisions 14–16): a window
 //! before the mark and one after it, every other mark in and between them
-//! listed next to the numbers (`confounders`), both split by the kind,
+//! listed next to the numbers (`confounders`), both split by the change,
 //! the area, `parallel`, the load band, the build and the axes of `--by`,
 //! and marks too close to split
 //! (fewer finished runs between them than `min_samples`) taken as one
@@ -73,14 +73,12 @@ pub struct Comparison {
     pub confounders: Vec<Confounder>,
     /// The groups of overlapping marks in the range, each taken as one change.
     pub overlapping: Vec<Vec<Mark>>,
-    /// Per KPI, per stratum (`all`, `kind=`, `change=`, `area=`, `parallel=`,
+    /// Per KPI, per stratum (`all`, `change=`, `area=`, `parallel=`,
     /// `load=`, `build=`).
     pub strata: Kpis<Side>,
     /// The times of the work (`lead_time`, `phase.*`, `land_phase.*`) for
-    /// each kind the summary is made for, by kind.
-    pub summary: BTreeMap<String, BTreeMap<String, Side>>,
-    /// The same for each change (ADR-t980-1), by change; not listed when
-    /// no run of the comparison has a stratum of one.
+    /// each change the summary is made for (ADR-t980-1), by change; not
+    /// listed when no run of the comparison has a stratum of one.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub change_summary: BTreeMap<String, BTreeMap<String, Side>>,
     /// The same for each area (ADR-t980-1), by area; not listed without
@@ -261,11 +259,10 @@ pub(super) fn compare(
             );
         }
     }
-    // Work differs by an order of magnitude between kinds (decision 15), so
-    // the summary is made per kind: the ones asked for, or every kind the
-    // comparison saw (ADR-t624-1: no kind is built in); and the same per
-    // change and per area (ADR-t980-1 decision 6(b)).
-    let summary = summarize(&strata, "kind", &query.kinds);
+    // Work differs by an order of magnitude between changes (decision 15),
+    // so the summary is made per change and per area: the ones asked for,
+    // or every value the comparison saw (ADR-t980-1 decision 6(b): no value
+    // is built in).
     let change_summary = summarize(&strata, "change", &query.changes);
     let area_summary = summarize(&strata, "area", &query.areas);
     Ok(Comparison {
@@ -275,7 +272,6 @@ pub(super) fn compare(
         confounders,
         overlapping,
         strata,
-        summary,
         change_summary,
         area_summary,
     })

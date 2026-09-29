@@ -354,7 +354,6 @@ mod tests {
             required_evidence: Vec::new(),
             paths: Vec::new(),
             priority: Priority::default(),
-            kind: None,
             change: None,
             provider: None,
             worker_mode: None,
