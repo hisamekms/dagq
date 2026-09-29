@@ -16,6 +16,7 @@ use super::{
 
 pub mod asks;
 pub mod auto_repairs;
+pub mod cargo;
 pub mod conflicts;
 pub mod drafts;
 pub mod escalations;
@@ -41,6 +42,7 @@ pub use asks::{
     AnsweredAsks, AskStats, AskTimes, AskWaits, Choices, OpenedAsks, ReasonAsks, Spread,
 };
 pub use auto_repairs::{AlertJobs, AutoRepairStats, DayCounts, LayerRepairs, RecoveryJobs};
+pub use cargo::CargoOnly;
 pub use conflicts::{ConflictConfig, ConflictConfigReport, ConflictHotspots, History};
 pub use landing::{
     CommandSecs, CommandSummary, LandBreakdown, LandClock, LandPhases, PhaseSummary,
@@ -1728,6 +1730,48 @@ pub fn with_areas(stats: &mut Stats, areas: Option<&crate::domain::areas::RunAre
             intervals: intervals(runs),
         })
         .collect();
+}
+
+/// Leave the cargo-only measures out of `stats` (ADR-t614-1), for a
+/// repository that is not dagq's source: each run's and each group's
+/// counts of what `integrate` repeats, the runs' `rustc` and the runs per
+/// `rustc`. Called last, after [`with_changes`] and [`with_areas`].
+pub fn without_cargo_measures(stats: &mut Stats) {
+    for run in &mut stats.runs {
+        run.measures.hide_cargo();
+        if let Some(work) = &mut run.work_breakdown {
+            work.hide_cargo();
+        }
+    }
+    let versions = &mut stats.versions;
+    versions.rustc.hide();
+    let groups = stats
+        .goals
+        .iter_mut()
+        .map(|group| &mut group.intervals)
+        .chain(stats.changes.iter_mut().map(|group| &mut group.intervals))
+        .chain(stats.areas.iter_mut().map(|group| &mut group.intervals))
+        .chain(stats.e2e.iter_mut().map(|group| &mut group.intervals))
+        .chain(
+            versions
+                .dagq
+                .iter_mut()
+                .chain(&mut versions.claude)
+                .chain(&mut versions.provider)
+                .chain(&mut versions.route)
+                .chain(&mut versions.codex)
+                .map(|group| &mut group.intervals),
+        )
+        .chain(
+            stats
+                .load_bands
+                .iter_mut()
+                .map(|group| &mut group.intervals),
+        )
+        .chain([&mut stats.overall]);
+    for intervals in groups {
+        intervals.work_breakdown.hide_cargo();
+    }
 }
 
 /// `runs` grouped by [`RunStats::e2e`]: the known ones by name, then

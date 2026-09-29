@@ -653,18 +653,9 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     assert_eq!(claimed["worker_mode"], "interactive", "{claimed}");
     assert!(claimed["provider_version"].is_null(), "{claimed}");
     assert!(claimed.get("codex_version").is_none(), "{claimed}");
-    assert!(
-        claimed["rustc_release"]
-            .as_str()
-            .is_some_and(|release| release.split('.').count() == 3),
-        "{claimed}"
-    );
-    assert!(
-        claimed["rustc_host"]
-            .as_str()
-            .is_some_and(|host| host.contains('-')),
-        "{claimed}"
-    );
+    // The fixture is not dagq's source: no toolchain (ADR-t614-1).
+    assert!(claimed.get("rustc_release").is_none(), "{claimed}");
+    assert!(claimed.get("rustc_host").is_none(), "{claimed}");
     assert!(claimed.get("path").is_none(), "{claimed}");
     assert_load(event("receipt_observed"));
     assert_load(event("validation_finished"));
@@ -2334,6 +2325,25 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     assert!(renumbered_at < verified_at, "{kinds:?}");
     let landed = queue.show(second).unwrap().runs[0].clone();
     assert_landed(&repo, &landed, "add asks", &main);
+    // dagq's source records the host's toolchain at the claim (ADR-t614-1).
+    let claimed = &detail
+        .events
+        .iter()
+        .find(|e| e.kind == "run_claimed")
+        .unwrap()
+        .payload;
+    assert!(
+        claimed["rustc_release"]
+            .as_str()
+            .is_some_and(|release| release.split('.').count() == 3),
+        "{claimed}"
+    );
+    assert!(
+        claimed["rustc_host"]
+            .as_str()
+            .is_some_and(|host| host.contains('-')),
+        "{claimed}"
+    );
 }
 
 /// Outside dagq's source repository (ADR-t614-1) integrate leaves the
@@ -2366,6 +2376,14 @@ fn integrate_does_not_renumber_migrations_outside_dagqs_source() {
         assert_eq!(outcome["outcome"], "integrated", "{outcome}");
         let detail = queue.show(task).unwrap();
         assert!(!event_kinds(&detail).contains(&"migration_renumbered"));
+        // Nor is the host's toolchain recorded at the claim.
+        let claimed = &detail
+            .events
+            .iter()
+            .find(|e| e.kind == "run_claimed")
+            .unwrap()
+            .payload;
+        assert!(claimed.get("rustc_release").is_none(), "{claimed}");
     }
     assert!(
         !queue

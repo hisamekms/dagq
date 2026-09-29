@@ -4,8 +4,8 @@ type: design
 title: "Source repository"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -22,7 +22,7 @@ related:
 
 dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース」かの判定1つで有効にする（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。設定・flag・環境変数で判定を上書きする手段は無い。
 
-**実装状況**: 判定と表の上の3行（migrationの振り直し・`--from`なしの`install`・`up --auto-update`）は実装済み。cargo専用の計測（表の4行目）はまだで、それが入るまではどのrepositoryのqueueでも記録して出す。
+**実装状況**: 判定と表の4行はどれも実装済み。
 
 ## 判定
 
@@ -41,15 +41,16 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 | `integrate`のmigrationの番号の振り直し（[integrate](integrate.md)の5） | ADR-0067決定3 | 今までどおり（`migration_renumbered`、振り直せなければ`migration_number_taken`の`needs_session`） | 番号を見ない。振り直さず、`migration_number_taken`にもしない。`migrations/`の変更は他のファイルと同じに扱う |
 | `--from`なしの`dagq install`（main checkoutからの`cargo build --release --locked`。[install](install.md)の1） | ADR-0073決定14 | 今までどおり | buildせずにerror。`cargo install dagq`で入れ替えるか、`--from`でバイナリかcheckoutを指すよう案内する。`--from`付きと`--rollback`は判定に関係なく動く |
 | `up --auto-update`のsource build（[Auto-update](auto-update.md)） | ADR-0073決定17 | 今までどおり | `up`はerrorで止め、supervisorを起動も引き継ぎもしない。自動更新の設定を持つsupervisorもbuildに進まない。外部のprojectの更新は[Release update](release-update.md)（ADR-t618-1） |
-| `stats`・KPI・worktimeのcargo専用の計測（[stats](stats.md)） | — | 今までどおり | 記録も出力もしない（下の一覧） |
+| `stats`・KPI・worktimeのcargo専用の計測（[stats](stats.md#cargo専用の計測)） | — | 今までどおり | 記録も出力もしない（下の一覧）。汎用の計測には作り直さない（projectの構成に合わせた計測は別のgoal） |
 
 ### cargo専用の計測
 
 ソースでないrepositoryのqueueで記録も出力もしないもの。
 
-- worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`。filterの無い`--test it`も含む）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。
-- `stats`の`work_breakdown`の`test_with_llvm_cov`（`src/domain/stats/work.rs`）。
-- claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）と、`stats`の`versions.rustc`、[`kpi`](kpi.md)の`toolchain=`の層。
+- worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`。filterの無い`--test it`も含む）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。ソースでなければ、区間を閉じるときにこの3つの分類を付けず（そのコマンドは他の規則に落ちる）、3つの数を`work`に書かない（落ちたtestの名前も、testを流す分類のコマンドが無いので読まない）。判定は区間を閉じるたびに`infrastructure::sessions::dagq_source`が、queueの束縛（`queue_repository`）からmain checkoutを求めて行う（書き込みトランザクションの中で閉じる区間は、transcriptと同じく`read_before`がトランザクションの前に判定しておく）。束縛の無いqueueはソースでない。
+- `stats`の`work_breakdown`の`verification_repeats`・`runs_with_repeats`・`test_with_llvm_cov`（`src/domain/stats/work.rs`）: ソースでなければ`runs`と全ての群で欄ごと出さない（`domain::stats::without_cargo_measures`）。
+- claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）: ソースでなければsupervisorは`rustc -vV`を実行せず、欄ごと書かない（`Ports::host_versions`のcheckoutを`None`にする）。`stats`の`runs`の`rustc_release`・`rustc_host`と`versions.rustc`はソースでなければ欄ごと出さない。[`kpi`](kpi.md)の`toolchain=`の層はソースでなければ`--by toolchain`でも出さない。
+- 出力の判定は`stats`・`kpi`・日次のレポート・observerの入力を出すたびに`compose`がmain checkoutの`Cargo.toml`で行う（`stats`は`StatsSources::dagq_source`、KPIは`application::kpi::Host::dagq_source`）。
 
 ## テスト
 
@@ -57,6 +58,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 - `tests/it/runtime_integrate.rs`の`integrate_does_not_renumber_migrations_outside_dagqs_source`: `Cargo.toml`が別のpackageのrepositoryでは、mainが取った番号のmigrationを足したrunがそのまま着地する（振り直しの既存のtestは`[package] name = "dagq"`のfixtureで動く）。
 - `tests/it/source_repository.rs`: `--from`なしの`install`が`Cargo.toml`の無いrepositoryと`migrations/`を持つ別のpackageのrepositoryでbuildの前にerrorになり、dagqのソースでは判定を通ってbuildに進むこと。`up --auto-update`がソースでないrepositoryでsupervisorを起動せず、ソースでは起動すること。
 - `tests/it/cli_version.rs`の`auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back`: `Cargo.toml`の名前を変えるとruntimeの着地でjobが起動せず、戻すとまたbuildして入れ替える。
+- cargo専用の計測: `src/domain/worktime.rs`の`without_the_cargo_rules_no_cargo_only_kind_or_count_is_kept`（分類と数）、`src/infrastructure/sessions.rs`の`outside_dagqs_source_the_work_breakdown_keeps_no_cargo_measure`（別のpackageと束縛の無いqueueで区間の`work`に残らない。`a_run_session_records_its_work_breakdown_at_its_close`はdagqのソースに束縛して今までどおり記録する）、`src/infrastructure/adapters.rs`の`host_versions_come_from_the_claude_path_and_rustc`（checkoutが無ければ`rustc`を読まない）、`src/domain/kpi/tests.rs`の`the_toolchain_axis_splits_only_dagqs_source`、`src/domain/stats/cargo.rs`と`src/domain/stats/work.rs`の単体test。`tests/it/cli_read.rs`の`timeline_and_stats_show_the_work_breakdown`はdagqのソースに束縛したqueueの`stats`と`kpi --by toolchain`に出て、別のpackageに束縛し直すと出ないこと。`tests/it/runtime_integrate.rs`の`integrate_renumbers_a_migration_whose_number_main_took`（ソース）と`integrate_does_not_renumber_migrations_outside_dagqs_source`（ソースでない）はclaimの`rustc_release`の有無を見る。
 
 ## リリース済みのmigration
 

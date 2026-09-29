@@ -54,8 +54,8 @@ use crate::{
     infrastructure::{
         adapters::{
             ClaudeCode, ClaudePlugin, Cmux, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT,
-            claude_trusts_repository, executable, free_disk_bytes, host_versions, load_average,
-            main_checkout_of, path_text,
+            claude_trusts_repository, executable, free_disk_bytes, host_versions, is_dagq_source,
+            load_average, main_checkout_of, path_text,
         },
         binaries::LocalBinaries,
         clock,
@@ -1366,6 +1366,7 @@ impl OneShot {
             host_metrics: Some(&host_metrics),
             areas: &area_reader(checkout.as_deref())?,
             utc_offset_secs: clock::local_utc_offset(now),
+            dagq_source: checkout.as_deref().is_some_and(is_dagq_source),
         };
         Ok(serde_json::to_value(statistics::stats(
             queue,
@@ -2440,6 +2441,7 @@ fn report_setup(
         host: crate::application::kpi::Host {
             utc_offset_secs: clock::local_utc_offset(now),
             cores: clock::logical_cores(),
+            dagq_source: checkout.is_some_and(is_dagq_source),
         },
         config: crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref()),
         keep: load_host_report(queue_dir, host_wide)?,

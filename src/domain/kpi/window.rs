@@ -76,6 +76,8 @@ pub(super) struct Context<'a> {
     /// Unix seconds.
     now: i64,
     cores: Option<usize>,
+    /// Whether the queue's repository is dagq's source (ADR-t614-1).
+    dagq_source: bool,
     /// When each task first became `ready`.
     first_ready: HashMap<TaskId, i64>,
     runs_per_task: HashMap<TaskId, HashSet<RunId>>,
@@ -278,6 +280,7 @@ impl<'a> Context<'a> {
             },
             now: input.now,
             cores: input.cores,
+            dagq_source: input.dagq_source,
             first_ready,
             runs_per_task,
             revises,
@@ -341,8 +344,13 @@ impl<'a> Context<'a> {
     }
 
     /// The values of `axis` for `run`: one, but for the area, the run's
-    /// every area (`unknown` without one), and none without `[areas]`.
+    /// every area (`unknown` without one), and none without `[areas]`; and
+    /// none for the cargo-only toolchain outside dagq's source
+    /// (ADR-t614-1).
     fn axis_values(&self, run: &RunStats, axis: Axis) -> Vec<String> {
+        if axis == Axis::Toolchain && !self.dagq_source {
+            return Vec::new();
+        }
         if axis != Axis::Area {
             return vec![self.axis_value(run, axis)];
         }
@@ -421,7 +429,7 @@ impl<'a> Context<'a> {
                 _ => UNKNOWN,
             }
             .to_owned(),
-            Axis::Toolchain => match (&measures.rustc_release, &measures.rustc_host) {
+            Axis::Toolchain => match measures.rustc() {
                 (Some(release), Some(host)) => format!("{release} {host}"),
                 _ => UNKNOWN.to_owned(),
             },

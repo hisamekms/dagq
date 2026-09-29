@@ -4,8 +4,8 @@ type: design
 title: "変更の印（`mark` / `marks`）"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -45,7 +45,7 @@ eventを書かず、`marks`がclaimの順（`run_claimed`のevent IDの順）に
 | `claude_version` | `run_claimed.claude_version` |
 | `codex_version` | `run_claimed.codex_version`（Codexのworkerを動かすsupervisorのclaimだけが持つ。ADR-t813-2の決定7） |
 | `parallel` | `run_claimed.parallel` |
-| `toolchain` | `run_claimed.rustc_release`と`rustc_host`の組（`1.90.0 aarch64-apple-darwin`）。どちらかがnullのclaimは記録の無いclaimとして飛ばす |
+| `toolchain` | `run_claimed.rustc_release`と`rustc_host`の組（`1.90.0 aarch64-apple-darwin`）。どちらかがnull（か欄が無い）のclaimは記録の無いclaimとして飛ばす。dagqのソースでないrepositoryのclaimはこれを記録しない（[Source repository](source-repository.md)）ので、この印は出ない |
 
 - 属性の記録の無いclaim（手での`claim`、task 197より前のrun）は飛ばすので、最初の値やnullから値への変化は印にならない。
 - toolchainはdagqを通らずに変わる（hostの`mise`の更新など）ので、変わった時刻はclaimのときにしか分からない。記録する印にはしない。

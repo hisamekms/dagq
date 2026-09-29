@@ -12,14 +12,17 @@ use serde::Serialize;
 /// version), Codex's (of `codex --version` of `--codex`, when the
 /// supervisor runs Codex workers; left out otherwise, ADR-t813-2 decision
 /// 7) and the host's `rustc` (`release` and `host` of `rustc -vV`, run in
-/// the main checkout so its toolchain file applies; null when it cannot be
-/// run).
+/// the main checkout so its toolchain file applies; asked only in dagq's
+/// source repository (ADR-t614-1), and left out when not asked or it
+/// cannot be run).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct HostVersions {
     pub claude_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rustc_release: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rustc_host: Option<String>,
 }
 
@@ -194,6 +197,12 @@ mod tests {
         assert_eq!(versions.rustc_host.as_deref(), Some("aarch64-apple-darwin"));
         let none = HostVersions::default().with_rustc_verbose("error: no toolchain\nhost:\n");
         assert_eq!(none, HostVersions::default());
+        // Without one (or outside dagq's source, ADR-t614-1) the claim
+        // records no toolchain.
+        assert_eq!(
+            serde_json::to_value(&none).unwrap(),
+            json!({"claude_version": null})
+        );
     }
 
     /// Codex's version is the last word of `codex --version`; it goes on

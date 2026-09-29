@@ -160,7 +160,8 @@ pub enum Axis {
     /// The load average at the claim over the host's cores: `low` (< 1),
     /// `mid` (< 2), `high` (< 4) or `extreme`.
     Load,
-    /// `rustc`'s release and host.
+    /// `rustc`'s release and host: cargo-only (ADR-t614-1), no stratum
+    /// outside dagq's source.
     Toolchain,
     /// Claude Code's version.
     Claude,
@@ -369,6 +370,9 @@ pub struct KpiInput<'a> {
     pub utc_offset_secs: i64,
     /// The host's logical cores, for the `load` axis.
     pub cores: Option<usize>,
+    /// Whether the queue's repository is dagq's source (ADR-t614-1): the
+    /// `toolchain` axis has strata only then.
+    pub dagq_source: bool,
     pub config: &'a KpiConfig,
     /// The host's load, a reference next to each window's KPIs (task 872):
     /// never a KPI, judged or pushed; `None` reads none.

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Intervals, RunStats, intervals, median_f64, tokens::TokenTotals};
+use super::{Intervals, RunStats, cargo::CargoOnly, intervals, median_f64, tokens::TokenTotals};
 use crate::domain::{
     EventId, RunEvent, TaskId,
     measure::{load_band, load_band_order},
@@ -91,8 +91,11 @@ pub struct RunMeasures {
     /// their seconds from `turn_started` to `turn_finished`; null for a run
     /// without one.
     pub turns: Option<RunTurns>,
-    pub rustc_release: Option<String>,
-    pub rustc_host: Option<String>,
+    /// The host's `rustc` at the claim: cargo-only (ADR-t614-1).
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub rustc_release: CargoOnly<Option<String>>,
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub rustc_host: CargoOnly<Option<String>>,
     pub claim_parallel: Option<i64>,
     pub claim_slots: Option<i64>,
     pub claim_load_avg: Option<f64>,
@@ -112,6 +115,23 @@ pub struct RunMeasures {
     /// with the class of the failure (task 467), in order; those recorded
     /// before the class was are left out.
     pub verify_failures: Vec<RunVerifyFailure>,
+}
+
+impl RunMeasures {
+    /// `rustc`'s release and host at the claim; none when not recorded or
+    /// hidden.
+    pub fn rustc(&self) -> (Option<&str>, Option<&str>) {
+        fn text(value: &CargoOnly<Option<String>>) -> Option<&str> {
+            value.shown()?.as_deref()
+        }
+        (text(&self.rustc_release), text(&self.rustc_host))
+    }
+
+    /// Leave its cargo-only measures out (ADR-t614-1).
+    pub fn hide_cargo(&mut self) {
+        self.rustc_release.hide();
+        self.rustc_host.hide();
+    }
 }
 
 /// The headless turns of a run (ADR-t813-2 decision 7), and the same per
@@ -210,8 +230,8 @@ impl MeasureTrack {
                 measures.route = text("worker_mode");
                 measures.codex_version = text("codex_version");
                 measures.provider_version = text("provider_version");
-                measures.rustc_release = text("rustc_release");
-                measures.rustc_host = text("rustc_host");
+                measures.rustc_release = CargoOnly::Shown(text("rustc_release"));
+                measures.rustc_host = CargoOnly::Shown(text("rustc_host"));
                 measures.claim_parallel = payload.get("parallel").and_then(Value::as_i64);
                 measures.claim_slots = payload.get("slots").and_then(Value::as_i64);
                 measures.claim_load_avg = payload.get("load_avg").and_then(Value::as_f64);
@@ -338,7 +358,9 @@ pub struct VersionStats {
 pub struct Versions {
     pub dagq: Vec<VersionStats>,
     pub claude: Vec<VersionStats>,
-    pub rustc: Vec<VersionStats>,
+    /// Cargo-only (ADR-t614-1).
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub rustc: CargoOnly<Vec<VersionStats>>,
     /// By the provider that did the run's work in the end
     /// (`actual_provider`), the route it was claimed with and Codex's
     /// version (ADR-t813-2 decision 7).
@@ -379,17 +401,14 @@ pub(super) fn versions(runs: &[&RunStats]) -> Versions {
     Versions {
         dagq: by(|run| run.measures.dagq_version.clone()),
         claude: by(|run| run.measures.claude_version.clone()),
-        rustc: by(|run| {
-            let measures = &run.measures;
-            match (&measures.rustc_release, &measures.rustc_host) {
-                (None, None) => None,
-                (release, host) => Some(format!(
-                    "{} {}",
-                    release.as_deref().unwrap_or("unknown"),
-                    host.as_deref().unwrap_or("unknown")
-                )),
-            }
-        }),
+        rustc: CargoOnly::Shown(by(|run| match run.measures.rustc() {
+            (None, None) => None,
+            (release, host) => Some(format!(
+                "{} {}",
+                release.unwrap_or("unknown"),
+                host.unwrap_or("unknown")
+            )),
+        })),
         provider: by(|run| run.measures.actual_provider.clone()),
         route: by(|run| run.measures.route.clone()),
         codex: by(|run| run.measures.codex_version.clone()),

@@ -23,6 +23,8 @@ struct Queue {
     draft_origins: HashMap<TaskId, DraftOrigin>,
     /// The landed runs' areas; `None` without `[areas]`.
     areas: Option<crate::domain::areas::RunAreas>,
+    /// The repository is not dagq's source (ADR-t614-1).
+    not_source: bool,
 }
 
 /// How one run went.
@@ -47,6 +49,8 @@ struct Run {
     session: Option<(&'static str, &'static str, Option<&'static str>)>,
     /// The `nature` of the task's weight prediction before the claim.
     nature: Option<&'static str>,
+    /// `rustc`'s release the claim recorded, on aarch64-apple-darwin.
+    rustc: Option<&'static str>,
     revise: bool,
     failed: bool,
 }
@@ -66,6 +70,7 @@ impl Run {
             switched_to: None,
             session: None,
             nature: None,
+            rustc: None,
             revise: false,
             failed: false,
         }
@@ -132,6 +137,10 @@ impl Queue {
                 if run.provider == "codex" {
                     claimed["worker_mode"] = json!("headless");
                     claimed["codex_version"] = json!("0.46.0");
+                }
+                if let Some(release) = run.rustc {
+                    claimed["rustc_release"] = json!(release);
+                    claimed["rustc_host"] = json!("aarch64-apple-darwin");
                 }
                 if let Some((model, effort, group)) = run.session {
                     claimed["claude_version"] = json!("2.1.0");
@@ -262,6 +271,7 @@ impl Queue {
                 now,
                 utc_offset_secs: JST,
                 cores: Some(4),
+                dagq_source: !self.not_source,
                 config,
                 host,
             },
@@ -965,6 +975,7 @@ fn compares_two_explicit_windows() {
             now: MONDAY + 2 * DAY,
             utc_offset_secs: 0,
             cores: None,
+            dagq_source: true,
             config: &KpiConfig::default(),
             host: None,
         },
@@ -1141,6 +1152,51 @@ fn a_codex_run_is_not_counted_as_a_claude_model() {
     assert_eq!(landings("provider=codex"), Some(2.0));
 }
 
+/// The runs split by `rustc` (`--by toolchain`) in dagq's source; outside
+/// it the cargo-only axis has no stratum (ADR-t614-1).
+#[test]
+fn the_toolchain_axis_splits_only_dagqs_source() {
+    let mut queue = Queue::default();
+    let mut old = Run::new(1, None, MONDAY + HOUR, 100);
+    old.rustc = Some("1.90.0");
+    queue.run(&old);
+    let mut new = Run::new(2, None, MONDAY + 2 * HOUR, 100);
+    new.rustc = Some("1.91.0");
+    queue.run(&new);
+    queue.run(&Run::new(3, None, MONDAY + 3 * HOUR, 100));
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec![Axis::Toolchain],
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
+    let landings = |result: &Kpi, stratum: &str| {
+        result.periods[0].window.kpis["landings"]
+            .get(stratum)
+            .and_then(|measure| measure.value)
+    };
+    assert_eq!(
+        landings(&result, "toolchain=1.90.0 aarch64-apple-darwin"),
+        Some(1.0)
+    );
+    assert_eq!(
+        landings(&result, "toolchain=1.91.0 aarch64-apple-darwin"),
+        Some(1.0)
+    );
+    assert_eq!(landings(&result, "toolchain=unknown"), Some(1.0));
+    queue.not_source = true;
+    let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
+    let strata = &result.periods[0].window.kpis["landings"];
+    assert!(
+        strata
+            .keys()
+            .all(|stratum| !stratum.starts_with("toolchain=")),
+        "{strata:?}"
+    );
+    assert_eq!(landings(&result, "all"), Some(3.0));
+}
+
 /// `--since` / `--until` give one window next to the one of the same
 /// length before it.
 #[test]
@@ -1172,6 +1228,7 @@ fn one_window_of_any_length() {
             now: MONDAY + DAY,
             utc_offset_secs: 0,
             cores: None,
+            dagq_source: true,
             config: &KpiConfig::default(),
             host: None,
         },

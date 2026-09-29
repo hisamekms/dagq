@@ -344,8 +344,9 @@ pub struct Ports<'a> {
     /// read at each cleanup (task 1100).
     pub scratchpad_roots: ScratchpadRoots,
     /// The versions of Claude Code (given `--claude`) and of the host's
-    /// `rustc` (run in the given checkout) a claim records (task 197).
-    pub host_versions: fn(&Path, Option<&Path>, &Path) -> HostVersions,
+    /// `rustc` (run in the given checkout; none without one) a claim
+    /// records (task 197).
+    pub host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
     /// Writes the daily KPI reports (ADR-0051 decision 20); `None` writes
     /// none.
     pub reports: Option<ReportPort>,
@@ -833,7 +834,7 @@ struct Supervisor<'a> {
     max_load: Option<f64>,
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
-    host_versions: fn(&Path, Option<&Path>, &Path) -> HostVersions,
+    host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
     /// Writes the daily KPI reports; `None` writes none.
     reports: Option<ReportPort>,
     /// Records the host's load; `None` records none (task 516).
@@ -1366,7 +1367,12 @@ impl Supervisor<'_> {
                     .iter()
                     .any(|worker| worker.provider == crate::domain::Provider::Codex)
                     .then_some(self.layout.codex.as_path());
-                (self.host_versions)(&self.layout.claude, codex, &self.layout.repo_root)
+                // The toolchain only for dagq's source (ADR-t614-1).
+                let rustc_in = self
+                    .repository
+                    .is_dagq_source()
+                    .then_some(self.layout.repo_root.as_path());
+                (self.host_versions)(&self.layout.claude, codex, rustc_in)
             });
             let attributes = self.claim_attributes(parallel, host.clone());
             let run = match self.queue.claim_for_supervisor_in_order(

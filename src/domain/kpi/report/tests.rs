@@ -200,6 +200,7 @@ fn report_with_host(
             now,
             utc_offset_secs: JST,
             cores: Some(4),
+            dagq_source: true,
             config: &config,
             host,
         },

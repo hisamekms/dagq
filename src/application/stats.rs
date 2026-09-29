@@ -17,7 +17,7 @@ use crate::domain::{
         ConflictConfig, ConflictConfigReport, History, ListedWorkspace, LiveRun, LiveSnapshot,
         SlotSnapshot, StallConfigReport, Stats, StatsQuery, Workspaces,
         conflicts::{MainHistory, earliest_conflict},
-        stats as aggregate, timestamp_millis, with_areas, with_changes,
+        stats as aggregate, timestamp_millis, with_areas, with_changes, without_cargo_measures,
     },
 };
 
@@ -54,6 +54,9 @@ pub struct StatsSources<'a> {
     /// The host's offset from UTC in seconds, east positive: when an ask
     /// counts as opened at night.
     pub utc_offset_secs: i64,
+    /// Whether the queue's repository is dagq's source (ADR-t614-1): only
+    /// then are the cargo-only measures shown.
+    pub dagq_source: bool,
 }
 
 /// Main's history since the earliest event of `events` (a second before
@@ -233,6 +236,9 @@ pub fn stats(
         .collect();
     let areas = sources.areas.run_areas(&landings);
     with_areas(&mut stats, areas.as_ref());
+    if !sources.dagq_source {
+        without_cargo_measures(&mut stats);
+    }
     if let Some(read) = sources.host_metrics {
         let (from, until) = stats.window_ms;
         stats.host = Some(read(from.div_euclid(1000), until.div_euclid(1000)));

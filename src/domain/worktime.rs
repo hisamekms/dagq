@@ -68,9 +68,15 @@ pub const MAX_SPAN_FAILED_TESTS: usize = 50;
 const WAIT_TOOLS: [&str; 4] = ["ScheduleWakeup", "Monitor", "TaskOutput", "BashOutput"];
 
 /// The category of a shell `command`: the heaviest of its parts, or
-/// [`CHAIN`] when two or more parts are heavy of different kinds.
-pub fn classify(command: &str) -> &'static str {
-    let mut kinds: Vec<&'static str> = parts(command).iter().map(|part| rank(part)).collect();
+/// [`CHAIN`] when two or more parts are heavy of different kinds. Only the
+/// `cargo` rules (`cargo`, for dagq's source repository; ADR-t614-1) tell
+/// [`E2E`], [`LLVM_COV`] and [`TEST`]; without them such a command is
+/// labelled as any other.
+pub fn classify(command: &str, cargo: bool) -> &'static str {
+    let mut kinds: Vec<&'static str> = parts(command)
+        .iter()
+        .map(|part| rank(part, cargo))
+        .collect();
     kinds.sort_unstable_by_key(|kind| RANKS.iter().position(|k| k == kind));
     kinds.dedup();
     if kinds.iter().filter(|kind| HEAVY.contains(kind)).count() >= 2 {
@@ -484,9 +490,10 @@ fn cargo(part: &Part) -> Option<(&str, &[Word])> {
 }
 
 /// The first rule a part matches: e2e > llvm-cov > test > build/clippy >
-/// fmt > wait > dagq > git > other. Only the words in command position
-/// count as what it runs.
-fn rank(part: &Part) -> &'static str {
+/// fmt > wait > dagq > git > other; without the `cargo` rules, the first
+/// three are skipped. Only the words in command position count as what it
+/// runs.
+fn rank(part: &Part, cargo_rules: bool) -> &'static str {
     let cargo = cargo(part);
     let sub = cargo.map(|(sub, _)| sub);
     let e2e = cargo.is_some_and(|(_, args)| {
@@ -496,11 +503,11 @@ fn rank(part: &Part) -> &'static str {
     });
     let runs: Vec<Run> = part.iter().filter_map(|simple| run(simple)).collect();
     let runs_named = |name: &str| runs.iter().any(|run| run.name == name);
-    if e2e {
+    if cargo_rules && e2e {
         E2E
-    } else if sub == Some("llvm-cov") {
+    } else if cargo_rules && sub == Some("llvm-cov") {
         LLVM_COV
-    } else if matches!(sub, Some("test" | "nextest")) {
+    } else if cargo_rules && matches!(sub, Some("test" | "nextest")) {
         TEST
     } else if matches!(sub, Some("build" | "clippy" | "check" | "run")) {
         BUILD
@@ -592,7 +599,7 @@ fn runs_full_test(part: &Part) -> bool {
 fn verification_classes(command: &str) -> Vec<&'static str> {
     let mut classes: Vec<&'static str> = parts(command)
         .iter()
-        .filter_map(|part| match rank(part) {
+        .filter_map(|part| match rank(part, true) {
             LLVM_COV => Some(LLVM_COV),
             E2E => Some(E2E),
             TEST if runs_full_test(part) => Some("full_test"),
@@ -678,8 +685,9 @@ fn secs(millis: i64) -> i64 {
 
 /// The tool calls that start in the span `from`..`to` (unix
 /// milliseconds), in the order they started. A call whose end was not
-/// seen is cut at `to`.
-pub fn commands(records: &[TranscriptRecord], from: i64, to: i64) -> Vec<Command> {
+/// seen is cut at `to`. `cargo` gives the shell commands the cargo rules
+/// of [`classify`].
+pub fn commands(records: &[TranscriptRecord], from: i64, to: i64, cargo: bool) -> Vec<Command> {
     let mut results = BTreeMap::new();
     let mut notices = BTreeMap::new();
     for record in records {
@@ -713,13 +721,13 @@ pub fn commands(records: &[TranscriptRecord], from: i64, to: i64) -> Vec<Command
                 // Run in the background from the start, or moved there
                 // while it ran: it ends at its notice.
                 (
-                    classify(tool_use.command.as_deref().unwrap_or_default()),
+                    classify(tool_use.command.as_deref().unwrap_or_default(), cargo),
                     true,
                     notice.map(|(at, _)| at),
                 )
             } else if shell {
                 (
-                    classify(tool_use.command.as_deref().unwrap_or_default()),
+                    classify(tool_use.command.as_deref().unwrap_or_default(), cargo),
                     false,
                     result.map(|(at, _)| at),
                 )
@@ -793,24 +801,29 @@ pub struct Breakdown {
     pub commands: Vec<Command>,
     /// Commands that ran a check `integrate` runs too (one of the task's
     /// verification commands: the llvm-cov gate, the whole `cargo test`,
-    /// the e2e test).
-    pub verification_repeats: usize,
+    /// the e2e test). This and the next two are counted only by the cargo
+    /// rules (dagq's source repository, ADR-t614-1), `None` without them.
+    pub verification_repeats: Option<usize>,
     /// Commands that ran the whole `cargo test`.
-    pub full_tests: usize,
+    pub full_tests: Option<usize>,
     /// Commands that ran llvm-cov.
-    pub llvm_cov_runs: usize,
+    pub llvm_cov_runs: Option<usize>,
 }
 
 /// The breakdown of the span `from`..`to` (unix milliseconds) of
-/// `records`, whose task verifies with `verification`.
+/// `records`, whose task verifies with `verification`. `cargo` (the queue's
+/// repository is dagq's source, ADR-t614-1) labels the commands by the
+/// cargo rules of [`classify`] and counts what they repeat of
+/// `integrate`'s checks; without it, neither.
 pub fn breakdown(
     records: &[TranscriptRecord],
     from: i64,
     to: i64,
     verification: &[String],
+    cargo: bool,
 ) -> Breakdown {
     let to = to.max(from);
-    let commands = commands(records, from, to);
+    let commands = commands(records, from, to, cargo);
     let order = |category: &str| {
         CATEGORIES
             .iter()
@@ -855,17 +868,21 @@ pub fn breakdown(
     Breakdown {
         total_millis: to - from,
         millis,
-        verification_repeats: shell()
-            .filter(|command| {
-                verification_classes(command)
-                    .iter()
-                    .any(|class| wanted.contains(class))
-            })
-            .count(),
-        full_tests: shell().filter(|command| full_test(command)).count(),
-        llvm_cov_runs: shell()
-            .filter(|command| parts(command).iter().any(|p| rank(p) == LLVM_COV))
-            .count(),
+        verification_repeats: cargo.then(|| {
+            shell()
+                .filter(|command| {
+                    verification_classes(command)
+                        .iter()
+                        .any(|class| wanted.contains(class))
+                })
+                .count()
+        }),
+        full_tests: cargo.then(|| shell().filter(|command| full_test(command)).count()),
+        llvm_cov_runs: cargo.then(|| {
+            shell()
+                .filter(|command| parts(command).iter().any(|p| rank(p, true) == LLVM_COV))
+                .count()
+        }),
         commands,
     }
 }
@@ -898,9 +915,6 @@ impl Breakdown {
                 .into_iter()
                 .map(|(category, (runs, failed))| (category, json!({"runs": runs, "failed": failed})))
                 .collect::<BTreeMap<_, _>>(),
-            "verification_repeats": self.verification_repeats,
-            "full_tests": self.full_tests,
-            "llvm_cov_runs": self.llvm_cov_runs,
             "heavy": heavy
                 .iter()
                 .map(|c| json!({
@@ -914,6 +928,17 @@ impl Breakdown {
                 }))
                 .collect::<Vec<_>>(),
         });
+        // The cargo-only counts, left out without the cargo rules
+        // (ADR-t614-1).
+        for (key, count) in [
+            ("verification_repeats", self.verification_repeats),
+            ("full_tests", self.full_tests),
+            ("llvm_cov_runs", self.llvm_cov_runs),
+        ] {
+            if let Some(count) = count {
+                payload[key] = json!(count);
+            }
+        }
         // The tests its commands named as failed, each once in the order
         // first named (task 515); left out when none, as before.
         let mut failed_tests: Vec<&String> = Vec::new();
@@ -933,6 +958,11 @@ impl Breakdown {
 mod tests {
     use super::*;
     use crate::domain::transcript::Transcript;
+
+    /// The category by the cargo rules of dagq's source repository.
+    fn classify(command: &str) -> &'static str {
+        super::classify(command, true)
+    }
 
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
     const BASE: i64 = 1_790_000_000_000;
@@ -1215,7 +1245,7 @@ mod tests {
                 "Background command \"cargo build\" completed (exit code 0)",
             ),
         ];
-        let moved = breakdown(&records(&moved), ms(0), ms(50), &[]);
+        let moved = breakdown(&records(&moved), ms(0), ms(50), &[], true);
         assert!(moved.commands[0].background);
         assert_eq!(moved.commands[0].end, ms(40));
         assert_eq!(moved.commands[0].failed, Some(false));
@@ -1224,7 +1254,7 @@ mod tests {
             "cargo fmt --all --check".to_owned(),
             "cargo llvm-cov --locked --fail-under-lines 80".to_owned(),
         ];
-        let work = breakdown(&records, ms(0), ms(600), &verification);
+        let work = breakdown(&records, ms(0), ms(600), &verification, true);
         let secs_of = |category: &str| work.millis.get(category).copied().unwrap_or(0) / 1000;
         assert_eq!(work.total_millis, 600_000);
         assert_eq!(work.millis.values().sum::<i64>(), 600_000);
@@ -1256,9 +1286,9 @@ mod tests {
         assert_eq!(command("t7").failed, None);
         // llvm-cov repeats integrate's gate; the full test suite is not in
         // this task's verification.
-        assert_eq!(work.verification_repeats, 1);
-        assert_eq!(work.full_tests, 2);
-        assert_eq!(work.llvm_cov_runs, 1);
+        assert_eq!(work.verification_repeats, Some(1));
+        assert_eq!(work.full_tests, Some(2));
+        assert_eq!(work.llvm_cov_runs, Some(1));
 
         let payload = work.payload();
         assert_eq!(payload["total_secs"], 600);
@@ -1316,18 +1346,24 @@ mod tests {
             ),
         ];
         let records = records(&lines);
-        let resume = breakdown(&records, ms(990), ms(1100), &[]);
+        let resume = breakdown(&records, ms(990), ms(1100), &[], true);
         assert_eq!(resume.commands.len(), 1);
         assert_eq!(resume.commands[0].category, GIT);
-        assert_eq!(resume.full_tests, 0);
+        assert_eq!(resume.full_tests, Some(0));
         assert_eq!(resume.millis[&GIT], 1000);
         assert_eq!(resume.millis[&MODEL], 10_000 + 9000);
         assert_eq!(resume.millis[&IDLE], 10_000 + 80_000);
-        let worker = breakdown(&records, ms(0), ms(100), &["cargo test --locked".into()]);
-        assert_eq!(worker.verification_repeats, 1);
+        let worker = breakdown(
+            &records,
+            ms(0),
+            ms(100),
+            &["cargo test --locked".into()],
+            true,
+        );
+        assert_eq!(worker.verification_repeats, Some(1));
         assert_eq!(worker.millis[&TEST], 45_000);
         // An empty span.
-        let empty = breakdown(&records, ms(5000), ms(4000), &[]);
+        let empty = breakdown(&records, ms(5000), ms(4000), &[], true);
         assert_eq!(empty.total_millis, 0);
         assert!(empty.millis.is_empty());
     }
@@ -1386,7 +1422,7 @@ mod tests {
             result(26, "t5", "test z::quoted ... FAILED", false),
         ];
         let records = records(&lines);
-        let work = breakdown(&records, ms(0), ms(30), &[]);
+        let work = breakdown(&records, ms(0), ms(30), &[], true);
         let names: Vec<&[String]> = work
             .commands
             .iter()
@@ -1412,7 +1448,58 @@ mod tests {
             work.commands[0].line(&span)["failed_tests"],
             json!(["a::breaks", "b::too"])
         );
-        let quiet = breakdown(&records, ms(6), ms(21), &[]);
+        let quiet = breakdown(&records, ms(6), ms(21), &[], true);
         assert!(quiet.payload().get("failed_tests").is_none());
+    }
+
+    /// Outside dagq's source repository (ADR-t614-1) no command is labelled
+    /// e2e, llvm-cov or test, none of their failed tests is read, and the
+    /// counts of what `integrate` repeats are neither kept nor written.
+    #[test]
+    fn without_the_cargo_rules_no_cargo_only_kind_or_count_is_kept() {
+        let lines = [
+            input(0, "go"),
+            bash(1, "a", "cargo llvm-cov --locked", false),
+            result(10, "a", "Exit code 1", true),
+            bash(11, "b", "cargo test --locked", false),
+            result(20, "b", "test a::breaks ... FAILED", true),
+            bash(21, "c", "cargo test --test e2e -- --ignored", false),
+            result(30, "c", "ok", false),
+            bash(31, "d", "cargo build && cargo test", false),
+            result(40, "d", "ok", false),
+        ];
+        let records = records(&lines);
+        let verification = ["cargo llvm-cov --locked".to_owned()];
+        let work = breakdown(&records, ms(0), ms(50), &verification, false);
+        let categories: Vec<&str> = work.commands.iter().map(|c| c.category).collect();
+        assert_eq!(
+            categories,
+            [OTHER_COMMAND, OTHER_COMMAND, OTHER_COMMAND, BUILD]
+        );
+        assert!(work.commands.iter().all(|c| c.failed_tests.is_empty()));
+        assert_eq!(work.verification_repeats, None);
+        assert_eq!(work.full_tests, None);
+        assert_eq!(work.llvm_cov_runs, None);
+        let payload = work.payload();
+        for key in [
+            "verification_repeats",
+            "full_tests",
+            "llvm_cov_runs",
+            "failed_tests",
+        ] {
+            assert!(payload.get(key).is_none(), "{key}: {payload}");
+        }
+        assert_eq!(payload["secs"]["other_command"], 27);
+        assert_eq!(
+            payload["commands"],
+            json!({"build": {"runs": 1, "failed": 0}})
+        );
+        // The same commands by the cargo rules.
+        let cargo = breakdown(&records, ms(0), ms(50), &verification, true);
+        let categories: Vec<&str> = cargo.commands.iter().map(|c| c.category).collect();
+        assert_eq!(categories, [LLVM_COV, TEST, E2E, CHAIN]);
+        assert_eq!(cargo.verification_repeats, Some(1));
+        assert_eq!(cargo.full_tests, Some(2));
+        assert_eq!(cargo.llvm_cov_runs, Some(1));
     }
 }

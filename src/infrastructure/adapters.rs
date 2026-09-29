@@ -366,9 +366,10 @@ const RUSTC_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 /// keeps each version; null for any other path), Codex's from `codex
 /// --version` when `codex` is given (null when it cannot be run;
 /// ADR-t813-2 decision 7), and `release` and `host` of `rustc -vV` run in
-/// `checkout`, so that its toolchain file applies (null when it cannot be
-/// run).
-pub fn host_versions(claude: &Path, codex: Option<&Path>, checkout: &Path) -> HostVersions {
+/// `rustc_in`, so that its toolchain file applies (null when it cannot be
+/// run, and none asked without a checkout: only dagq's source records the
+/// toolchain, ADR-t614-1).
+pub fn host_versions(claude: &Path, codex: Option<&Path>, rustc_in: Option<&Path>) -> HostVersions {
     let mut versions = HostVersions {
         claude_version: claude_version(claude),
         ..HostVersions::default()
@@ -382,6 +383,9 @@ pub fn host_versions(claude: &Path, codex: Option<&Path>, checkout: &Path) -> Ho
             _ => versions,
         };
     }
+    let Some(checkout) = rustc_in else {
+        return versions;
+    };
     match capture(
         Command::new("rustc").arg("-vV").current_dir(checkout),
         RUSTC_VERSION_TIMEOUT,
@@ -4217,19 +4221,23 @@ esac
         let other = dir.path().join("claude-stub");
         fs::write(&other, "").unwrap();
         assert_eq!(claude_version(&other), None);
-        let host = host_versions(&link, None, dir.path());
+        let host = host_versions(&link, None, Some(dir.path()));
         assert_eq!(host.claude_version.as_deref(), Some("2.1.3"));
         assert_eq!(host.codex_version, None);
         assert!(host.rustc_release.is_some(), "{host:?}");
-        let missing = host_versions(&other, None, &dir.path().join("missing"));
+        // No checkout to run it in (not dagq's source): no toolchain.
+        let none = host_versions(&link, None, None);
+        assert_eq!(none.claude_version.as_deref(), Some("2.1.3"));
+        assert_eq!((none.rustc_release, none.rustc_host), (None, None));
+        let missing = host_versions(&other, None, Some(&dir.path().join("missing")));
         assert_eq!(missing, HostVersions::default());
         // Codex's is what `codex --version` prints; none when it fails.
         let codex = dir.path().join("codex");
         fs::write(&codex, "#!/bin/sh\necho 'codex-cli 0.46.0'\n").unwrap();
         fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let host = host_versions(&other, Some(&codex), &dir.path().join("missing"));
+        let host = host_versions(&other, Some(&codex), Some(&dir.path().join("missing")));
         assert_eq!(host.codex_version.as_deref(), Some("0.46.0"));
-        let gone = host_versions(&other, Some(&dir.path().join("gone")), dir.path());
+        let gone = host_versions(&other, Some(&dir.path().join("gone")), Some(dir.path()));
         assert_eq!(gone.codex_version, None);
     }
 }

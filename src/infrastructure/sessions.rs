@@ -48,6 +48,11 @@ thread_local! {
     /// this thread may close, read before it began ([`read_before`]).
     static READ_BEFORE: RefCell<Vec<(OpenSpan, Result<Transcript, Unreadable>)>> =
         const { RefCell::new(Vec::new()) };
+    /// Whether the queue's repository is dagq's source, judged before the
+    /// same transaction began for the run sessions' spans it may close
+    /// ([`dagq_source`]): the judgement runs Git, never under the write
+    /// lock.
+    static SOURCE_BEFORE: RefCell<Vec<(EventId, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The spans a write about to begin may close.
@@ -76,6 +81,9 @@ impl Drop for ReadBefore {
     fn drop(&mut self) {
         READ_BEFORE.with_borrow_mut(|read| {
             read.retain(|(span, _)| !self.spans.contains(&span.opened_event_id));
+        });
+        SOURCE_BEFORE.with_borrow_mut(|read| {
+            read.retain(|(span, _)| !self.spans.contains(span));
         });
     }
 }
@@ -142,12 +150,22 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
         Closing::Spans(spans) => spans.to_vec(),
     };
     let mut read_spans = Vec::new();
+    let mut source = None;
     for span in spans {
         if read_spans.contains(&span.opened_event_id) {
             continue;
         }
         read_spans.push(span.opened_event_id);
         let transcript = read(conn, &span);
+        // A run session's close with its transcript records its work
+        // breakdown, whose rules depend on the repository (ADR-t614-1).
+        if transcript.is_ok() && RUN_SESSION.contains(&span.kind()) {
+            let source = match source {
+                Some(source) => source,
+                None => *source.insert(judge_dagq_source(conn)?),
+            };
+            SOURCE_BEFORE.with_borrow_mut(|read| read.push((span.opened_event_id, source)));
+        }
         READ_BEFORE.with_borrow_mut(|read| read.push((span, transcript)));
     }
     Ok(ReadBefore { spans: read_spans })
@@ -691,7 +709,13 @@ fn work_breakdown(
     let verification: Vec<String> = verification
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let breakdown = worktime::breakdown(&transcript.records, start, end, &verification);
+    let breakdown = worktime::breakdown(
+        &transcript.records,
+        start,
+        end,
+        &verification,
+        dagq_source(conn, span)?,
+    );
     if let Some(run_dir) = run_dir {
         let mut span_payload = span.payload.clone();
         span_payload["opened_event_id"] = json!(span.opened_event_id);
@@ -716,6 +740,49 @@ fn work_breakdown(
         }
     }
     Ok(breakdown.payload())
+}
+
+/// Whether the repository the queue is bound to is dagq's source
+/// (ADR-t614-1), for the close of `span`: the work breakdown's cargo-only
+/// kinds and counts are kept only for it. Judged by [`read_before`] before
+/// the write transaction began, else, outside one, now; inside one without
+/// that judgement (never with a transcript read before), not.
+fn dagq_source(conn: &Connection, span: &OpenSpan) -> Result<bool> {
+    let judged = SOURCE_BEFORE.with_borrow(|read| {
+        read.iter()
+            .find(|(opened, _)| *opened == span.opened_event_id)
+            .map(|(_, source)| *source)
+    });
+    match judged {
+        Some(source) => Ok(source),
+        None if conn.is_autocommit() => judge_dagq_source(conn),
+        None => Ok(false),
+    }
+}
+
+/// Whether the repository the queue is bound to is dagq's source
+/// (ADR-t614-1), judged now from its main checkout's `Cargo.toml`. A queue
+/// bound to no repository, or whose main checkout cannot be found, is not.
+fn judge_dagq_source(conn: &Connection) -> Result<bool> {
+    let bound: Option<String> = conn
+        .query_row(
+            "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(dir) = bound else {
+        return Ok(false);
+    };
+    match super::adapters::main_checkout_of(std::path::Path::new(&dir)) {
+        Ok(checkout) => Ok(super::adapters::is_dagq_source(&checkout)),
+        Err(error) => {
+            info!(
+                "work breakdown without the cargo-only measures: no main checkout of {dir}: {error:#}"
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// The transcript of `span`, never read while `conn` holds a write
@@ -1744,6 +1811,99 @@ mod tests {
         assert_eq!(record_open_turns(conn).unwrap(), 0);
     }
 
+    /// Bind the queue on `conn` to a new Git repository under `dir` whose
+    /// `Cargo.toml` names the package `package`.
+    fn bind(conn: &Connection, dir: &std::path::Path, package: &str) {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\n"),
+        )
+        .unwrap();
+        let common_dir = crate::infrastructure::adapters::git_common_dir(&repo).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO queue_repository(singleton,git_common_dir) VALUES (1,?1)",
+            [common_dir.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+
+    /// Outside dagq's source (ADR-t614-1), and for a queue bound to no
+    /// repository, a run's session closes with a work breakdown that labels
+    /// no command e2e, llvm-cov or test and counts none of what `integrate`
+    /// repeats.
+    #[test]
+    fn outside_dagqs_source_the_work_breakdown_keeps_no_cargo_measure() {
+        for package in [Some("other"), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let (queue, task_id, run) = run_queue(dir.path());
+            let conn = &queue.conn;
+            if let Some(package) = package {
+                bind(conn, dir.path(), package);
+            }
+            conn.execute(
+                "UPDATE tasks SET verification_commands=?1",
+                [r#"["cargo llvm-cov --locked --fail-under-lines 80"]"#],
+            )
+            .unwrap();
+            event(
+                conn,
+                task_id,
+                Some(&run),
+                EventKind::AgentStarted,
+                json!({"session_id": RUN}),
+            )
+            .unwrap();
+            let start = retime(conn, 0, 100);
+            let project = dir.path().join("config/projects/-wt");
+            std::fs::create_dir_all(&project).unwrap();
+            let line = |kind: &str, secs: i64, content: Value| {
+                json!({"type": kind, "timestamp": millis_text(start + secs * 1000),
+                       "sessionId": RUN, "version": "2.1.283", "message": {"content": content}})
+                .to_string()
+            };
+            let lines = [
+                line("user", 1, json!("go")),
+                line(
+                    "assistant",
+                    5,
+                    json!([{"type": "tool_use", "id": "a", "name": "Bash",
+                            "input": {"command": "cargo llvm-cov --locked"}}]),
+                ),
+                line(
+                    "user",
+                    45,
+                    json!([{"type": "tool_result", "tool_use_id": "a", "is_error": true,
+                            "content": "Exit code 1"}]),
+                ),
+                line("assistant", 50, json!([{"type": "text"}])),
+            ];
+            std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
+            event(
+                conn,
+                task_id,
+                Some(&run),
+                EventKind::SessionExited,
+                json!({"exit_code": 0}),
+            )
+            .unwrap();
+            let work = &of_kind(&queue, SESSION_CLOSED)[0].payload["work"];
+            assert_eq!(work["secs"]["other_command"], 40, "{package:?}: {work}");
+            assert!(work["secs"].get("llvm_cov").is_none(), "{work}");
+            assert_eq!(work["commands"], json!({}), "{work}");
+            for key in ["verification_repeats", "full_tests", "llvm_cov_runs"] {
+                assert!(work.get(key).is_none(), "{key}: {work}");
+            }
+        }
+    }
+
     /// A run's session closes with its work breakdown: the aggregate on its
     /// `session_closed` and its `session_exited`, each command in the run
     /// directory's `worktime.jsonl`; a resume's is found for its
@@ -1755,6 +1915,8 @@ mod tests {
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let conn = &queue.conn;
+        // dagq's source keeps the cargo-only kinds and counts (ADR-t614-1).
+        bind(conn, dir.path(), "dagq");
         conn.execute(
             "UPDATE task_runs SET run_dir=?1",
             [run_dir.to_str().unwrap()],
@@ -2534,6 +2696,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
         let conn = &queue.conn;
+        // Whether it is dagq's source is judged before the transaction too
+        // (ADR-t614-1): the worker's work keeps the cargo-only counts.
+        bind(conn, dir.path(), "dagq");
         event(
             conn,
             task_id,
@@ -2618,8 +2783,10 @@ mod tests {
             ]
         );
         assert_eq!(of_kind(&queue, SESSION_TURNS).len(), 4);
+        assert_eq!(closed[0].payload["work"]["verification_repeats"], 0);
         // Nothing is left for a later write to take.
         assert!(READ_BEFORE.with_borrow(Vec::is_empty));
+        assert!(SOURCE_BEFORE.with_borrow(Vec::is_empty));
 
         // A span closed in a transaction nothing read before: its
         // transcript is not read, and the event is written.

@@ -217,8 +217,37 @@ fn events_full_and_filters_narrow_what_they_read() {
     }
 }
 
+/// Bind the queue at `db` to a new Git repository under `dir` whose
+/// `Cargo.toml` names the package `package` (ADR-t614-1), as a repository
+/// queue's `init` binds it.
+fn bind(db: &Path, dir: &Path, package: &str) {
+    let repo = dir.join(format!("repo-{package}"));
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        format!("[package]\nname = \"{package}\"\n"),
+    )
+    .unwrap();
+    let common_dir = dagq::infrastructure::adapters::git_common_dir(&repo).unwrap();
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO queue_repository(singleton,git_common_dir) VALUES (1,?1)",
+            [common_dir.to_str().unwrap()],
+        )
+        .unwrap();
+}
+
 /// Task 514: the work breakdown a run's session closed with is in
-/// `timeline`'s heavy commands and in `stats --full`.
+/// `timeline`'s heavy commands and in `stats --full`. Its cargo-only
+/// counts, the claim's `rustc` and the `toolchain` axis of `kpi` are shown
+/// for dagq's source only (ADR-t614-1).
 #[test]
 fn timeline_and_stats_show_the_work_breakdown() {
     use serde_json::json;
@@ -247,6 +276,13 @@ fn timeline_and_stats_show_the_work_breakdown() {
         [work.to_string()],
     )
     .unwrap();
+    conn.execute(
+        "UPDATE run_events SET payload=json_set(payload,'$.rustc_release','1.93.0',
+           '$.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
+        [],
+    )
+    .unwrap();
+    bind(&db, dir.path(), "dagq");
     let timeline = ok(&db, &["timeline", &run]);
     let commands = timeline["commands"].as_array().unwrap();
     assert_eq!(commands.len(), 1);
@@ -263,6 +299,73 @@ fn timeline_and_stats_show_the_work_breakdown() {
     assert_eq!(overall["categories"]["llvm_cov"]["share"], json!(0.501));
     assert_eq!(overall["verification_repeats"], 1);
     assert_eq!(stats["goals"][0]["work_breakdown"]["runs"], 1);
+    assert_eq!(stats["runs"][0]["rustc_release"], "1.93.0");
+    assert_eq!(
+        stats["versions"]["rustc"][0]["version"],
+        "1.93.0 aarch64-apple-darwin"
+    );
+    let kpi = |db: &Path| {
+        ok(
+            db,
+            &[
+                "kpi",
+                "--since",
+                "2026-09-24T00:00:00Z",
+                "--until",
+                "2026-09-24T01:00:00Z",
+                "--by",
+                "toolchain",
+            ],
+        )
+    };
+    let landings = |kpi: &Value| kpi["periods"][0]["kpis"]["landings"].clone();
+    assert_eq!(
+        landings(&kpi(&db))["toolchain=1.93.0 aarch64-apple-darwin"]["value"],
+        1.0
+    );
+
+    // Outside dagq's source none of them is shown; the rest is as before.
+    bind(&db, dir.path(), "other");
+    let stats = ok(&db, &["stats", "--full"]);
+    let breakdown = &stats["runs"][0]["work_breakdown"];
+    assert_eq!(breakdown["secs"]["model"], 600);
+    let run_stats = &stats["runs"][0];
+    let groups = [
+        breakdown,
+        &stats["overall"]["work_breakdown"],
+        &stats["goals"][0]["work_breakdown"],
+        &stats["versions"]["dagq"][0]["work_breakdown"],
+    ];
+    for group in groups {
+        assert!(group.is_object(), "{group}");
+        for key in [
+            "verification_repeats",
+            "runs_with_repeats",
+            "test_with_llvm_cov",
+        ] {
+            assert!(group.get(key).is_none(), "{key}: {group}");
+        }
+    }
+    assert_eq!(stats["overall"]["work_breakdown"]["runs"], 1);
+    for key in ["rustc_release", "rustc_host"] {
+        assert!(run_stats.get(key).is_none(), "{key}: {run_stats}");
+    }
+    assert!(
+        stats["versions"].get("rustc").is_none(),
+        "{}",
+        stats["versions"]
+    );
+    assert_eq!(stats["versions"]["dagq"][0]["runs"], 1);
+    let landings = landings(&kpi(&db));
+    assert!(
+        landings
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|stratum| !stratum.starts_with("toolchain=")),
+        "{landings}"
+    );
+    assert_eq!(landings["all"]["value"], 1.0);
 }
 
 #[test]

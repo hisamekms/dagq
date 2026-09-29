@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{median, sessions::Ratio};
+use super::{cargo::CargoOnly, median, sessions::Ratio};
 
 /// Runs and failures of one kind of heavy command.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -28,18 +28,29 @@ pub struct RunWork {
     /// The heavy commands per kind.
     pub commands: BTreeMap<String, CommandCount>,
     /// Commands that ran a check `integrate` runs again (the task's
-    /// llvm-cov gate, whole `cargo test` or e2e test).
-    pub verification_repeats: i64,
+    /// llvm-cov gate, whole `cargo test` or e2e test). This and the next
+    /// are cargo-only (ADR-t614-1).
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub verification_repeats: CargoOnly<i64>,
     /// Whole `cargo test` runs in a run that also ran llvm-cov: the tests
     /// run twice over.
-    pub test_with_llvm_cov: i64,
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub test_with_llvm_cov: CargoOnly<i64>,
+}
+
+impl RunWork {
+    /// Leave its cargo-only counts out (ADR-t614-1).
+    pub fn hide_cargo(&mut self) {
+        self.verification_repeats.hide();
+        self.test_with_llvm_cov.hide();
+    }
 }
 
 /// The work breakdown of a run from the `work` of its spans; `None` when
 /// none recorded one.
 pub fn per_run<'a>(works: impl IntoIterator<Item = &'a Value>) -> Option<RunWork> {
     let mut run = RunWork::default();
-    let (mut full_tests, mut llvm_cov) = (0, 0);
+    let (mut repeats, mut full_tests, mut llvm_cov) = (0, 0, 0);
     for work in works {
         run.sessions += 1;
         run.total_secs += work["total_secs"].as_i64().unwrap_or(0);
@@ -51,11 +62,12 @@ pub fn per_run<'a>(works: impl IntoIterator<Item = &'a Value>) -> Option<RunWork
             entry.runs += count["runs"].as_i64().unwrap_or(0);
             entry.failed += count["failed"].as_i64().unwrap_or(0);
         }
-        run.verification_repeats += work["verification_repeats"].as_i64().unwrap_or(0);
+        repeats += work["verification_repeats"].as_i64().unwrap_or(0);
         full_tests += work["full_tests"].as_i64().unwrap_or(0);
         llvm_cov += work["llvm_cov_runs"].as_i64().unwrap_or(0);
     }
-    run.test_with_llvm_cov = if llvm_cov > 0 { full_tests } else { 0 };
+    run.verification_repeats = CargoOnly::Shown(repeats);
+    run.test_with_llvm_cov = CargoOnly::Shown(if llvm_cov > 0 { full_tests } else { 0 });
     (run.sessions > 0).then_some(run)
 }
 
@@ -75,10 +87,28 @@ pub struct WorkShares {
     pub total_secs: i64,
     pub categories: BTreeMap<String, CategoryShare>,
     pub commands: BTreeMap<String, CommandCount>,
-    pub verification_repeats: i64,
+    /// This and the next two are cargo-only (ADR-t614-1).
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub verification_repeats: CargoOnly<i64>,
     /// Runs with at least one verification repeat.
-    pub runs_with_repeats: usize,
-    pub test_with_llvm_cov: i64,
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub runs_with_repeats: CargoOnly<usize>,
+    #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
+    pub test_with_llvm_cov: CargoOnly<i64>,
+}
+
+impl WorkShares {
+    /// Leave its cargo-only counts out (ADR-t614-1).
+    pub fn hide_cargo(&mut self) {
+        self.verification_repeats.hide();
+        self.runs_with_repeats.hide();
+        self.test_with_llvm_cov.hide();
+    }
+}
+
+/// A run's cargo-only count, 0 when hidden.
+fn count(value: &CargoOnly<i64>) -> i64 {
+    value.shown().copied().unwrap_or(0)
 }
 
 /// The work breakdown of `runs`.
@@ -87,9 +117,17 @@ pub fn shares<'a>(runs: impl IntoIterator<Item = &'a RunWork>) -> WorkShares {
     let mut shares = WorkShares {
         runs: runs.len(),
         total_secs: runs.iter().map(|r| r.total_secs).sum(),
-        verification_repeats: runs.iter().map(|r| r.verification_repeats).sum(),
-        runs_with_repeats: runs.iter().filter(|r| r.verification_repeats > 0).count(),
-        test_with_llvm_cov: runs.iter().map(|r| r.test_with_llvm_cov).sum(),
+        verification_repeats: CargoOnly::Shown(
+            runs.iter().map(|r| count(&r.verification_repeats)).sum(),
+        ),
+        runs_with_repeats: CargoOnly::Shown(
+            runs.iter()
+                .filter(|r| count(&r.verification_repeats) > 0)
+                .count(),
+        ),
+        test_with_llvm_cov: CargoOnly::Shown(
+            runs.iter().map(|r| count(&r.test_with_llvm_cov)).sum(),
+        ),
         ..WorkShares::default()
     };
     let categories: std::collections::BTreeSet<&String> =
@@ -147,10 +185,13 @@ mod tests {
         assert_eq!(run.total_secs, 150);
         assert_eq!(run.secs["model"], 50);
         assert_eq!(run.commands["test"], CommandCount { runs: 2, failed: 1 });
-        assert_eq!(run.verification_repeats, 2);
+        assert_eq!(run.verification_repeats, CargoOnly::Shown(2));
         // A whole cargo test in a run that also ran llvm-cov.
-        assert_eq!(run.test_with_llvm_cov, 1);
-        assert_eq!(per_run([&worker]).unwrap().test_with_llvm_cov, 0);
+        assert_eq!(run.test_with_llvm_cov, CargoOnly::Shown(1));
+        assert_eq!(
+            per_run([&worker]).unwrap().test_with_llvm_cov,
+            CargoOnly::Shown(0)
+        );
         assert_eq!(per_run([]), None);
 
         let other = per_run([&json!({"total_secs": 50, "secs": {"model": 50}})]).unwrap();
@@ -162,11 +203,27 @@ mod tests {
         // The run without a test counts 0 in the median.
         assert_eq!(shares.categories["test"].median, Some(30));
         assert_eq!(shares.commands["llvm_cov"].runs, 1);
-        assert_eq!(shares.verification_repeats, 2);
-        assert_eq!(shares.runs_with_repeats, 1);
-        assert_eq!(shares.test_with_llvm_cov, 1);
-        let json = serde_json::to_value(&shares).unwrap();
+        assert_eq!(shares.verification_repeats, CargoOnly::Shown(2));
+        assert_eq!(shares.runs_with_repeats, CargoOnly::Shown(1));
+        assert_eq!(shares.test_with_llvm_cov, CargoOnly::Shown(1));
+        let mut json = serde_json::to_value(&shares).unwrap();
         assert_eq!(json["categories"]["model"]["share"], json!(0.5));
+        assert_eq!(json["verification_repeats"], 2);
         assert_eq!(super::shares([]), WorkShares::default());
+        // Hidden outside dagq's source (ADR-t614-1): left out of the output.
+        let (mut hidden_run, mut hidden) = (run.clone(), shares.clone());
+        hidden_run.hide_cargo();
+        hidden.hide_cargo();
+        let run_json = serde_json::to_value(&hidden_run).unwrap();
+        assert!(run_json.get("verification_repeats").is_none(), "{run_json}");
+        assert!(run_json.get("test_with_llvm_cov").is_none(), "{run_json}");
+        for key in [
+            "verification_repeats",
+            "runs_with_repeats",
+            "test_with_llvm_cov",
+        ] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(serde_json::to_value(&hidden).unwrap(), json);
     }
 }
