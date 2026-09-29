@@ -164,6 +164,41 @@ background のコマンドの summary は `Background command "<Bash tool の de
 
 行っていない。この手順は task 820（goal 57 の文書の task）の受け入れ条件の 1 つだが、task 820 は dagq の worker として動き、worker は使い捨ての queue を作れず操作もできない（[隔離](#隔離)。`init`・`add`・`supervise` は `authorization_denied` になる。task 983、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回しない。そのため手順だけを書き、実行は receipt の `follow_ups`（`ops`）として人か inbox に任せた。その時点の host の版は Claude Code 2.1.284（`~/.local/bin/claude` の link 先）と codex-cli 0.155.1（`~/.local/bin/codex` の link 先は `~/.codex/packages/standalone/releases/0.155.1-aarch64-apple-darwin/bin/codex`）。stub の provider での自動 test（上に挙げた `tests/it` の 3 本）は着地済みの task 815〜818 が持つ。人か inbox が流したら、この節に版・run ごとの確認点の結果・見つけた問題を足す。
 
+### 結果（2026-09-30、本番の queue の記録から、task 1102）
+
+使い捨ての queue の手作業（手順 1〜5・7・8）の代わりに、本番の queue に着地した実物の非対話の worker の run の記録を読んで、手順 6 の確認点を当てた（ask 214 で人が決めた。worker は使い捨ての queue を操作できない）。読んだのは固定バイナリ `~/.local/bin/dagq`（`0.4.0-dev+088c8ec`）の状態を変えないコマンド（`show 1103 --full`・`events --run <RUN> --full --all`・`timeline <RUN>`・`stats --full`・`kpi --since 2026-09-29T00:00:00Z --until 2026-09-30T00:00:00Z --by provider` と `--by route`）と、run dir の `turns/` と `idle.json`、着地した commit（`git show --stat`・`git ls-tree`）、`~/.codex/config.toml` の更新時刻。queue の状態は変えていない。
+
+- **Codex**: task 1103（`--provider codex`、非対話）の run `0a8042c2-349e-40f6-afa5-2e5a8f06f0fb`。2026-09-29T18:24:51Z に claim、18:44:08Z に着地（commit `b9643d5`）。codex-cli 0.155.1（`run_claimed` の `codex_version`・`provider_version`）、supervisor の Claude Code は 2.1.283（`claude_version`）、supervisor の dagq は `0.4.0-dev+4f87a20`。
+- **Claude**: 非対話の Claude の run は **無かった**。task 821 は本番の queue に非対話の Claude の run を 1 本も挙げておらず（[headless-worker-measurement](../plans/headless-worker-measurement.md)。planner が `--headless` を付けた task が無い）、この task の時点の `stats --full` の 661 本も provider・actual_provider・route の組は `claude`/`claude`/`null`（460 本、task 819 の前）・`claude`/`claude`/`interactive`（200 本）・`codex`/`codex`/`headless`（上の 1 本）だけだった。Claude の分の確認点は全て確かめていない。確かめる続け方は receipt の `follow_ups` に出した。この時点の host の Claude Code は 2.1.285、codex-cli は 0.155.1。
+
+Codex の run の確認点ごとの観察と結論:
+
+| 確認点 | 観察（読んだコマンドと値） | 結論 |
+| --- | --- | --- |
+| task と run の状態 | `show 1103 --full`: task `status: completed`、run `status: integrated`、`task_status_changed` in_progress→completed（event 45475）、`run_integrated`（45473、commit `b9643d5`）、`push_finished`（45482） | 着地した |
+| provider と切り替え | `show`: task `provider: codex`、run `requested_provider: codex`・`actual_provider: codex`。`events --full --all` に `provider_switched` は無く、`timeline` の `provider_switches: []`、`stats` の `runs[].provider_switches: 0` と全体の `provider_switches.count: 0` | 切り替えは無い |
+| 経路 | task・run の `worker_mode: headless`、`session_opened`（45425）の `provider: codex`・`route: headless`、`timeline` の `worker_mode: headless` | 非対話の経路で動いた |
+| `run_claimed` | `provider: codex`・`requested_provider: codex`・`worker_mode: headless`・`provider_version: 0.155.1`・`codex_version: 0.155.1`・`claude_version: 2.1.283`。`model: null`・`ladder_model: claude-opus-5-5`・`model_unknown`（codex は自分の model で動く旨） | 設計どおり（[provider-lifecycle](provider-lifecycle.md) の model の記録） |
+| turn の列 | turn は 1 つだけ。`turn_started`（45426、`turn: 1`・`resume: false`・`session_id: null`・`request: null`・`silence_secs: 900`・`limit_secs: 14400`）→ `turn_session_identified`（45427、2 秒後、thread `01a0ee69-a210-7613-8db8-d5125e407d9c`）→ `turn_finished`（45432、`outcome: succeeded`・`failure: null`・`exit_code: 0`・`permission_denials: 0`・`denied_tools: []`・`session_created: true`・`model: gpt-6-astra`、`usage` は `input_tokens` 1,283,330・`cached_input_tokens` 1,227,136・`output_tokens` 2,881・`reasoning_output_tokens` 241、`tokens` と `tokens_total` は input 56,194・cache_read 1,227,136・output 2,881）。最初の turn は task の prompt なので `turn_requested` は無い（依頼の file が無い）。`cost_usd`・`duration_ms`・`num_turns` は null（Codex の出力が持たない） | 設計どおり。`tokens.input` は `input_tokens` から cache の分を引いた値 |
+| resume の turn | answer・revise・needs_session の resume は無かった（`stats` の `resumes: 0`、`review_verdict: pass`、`ask` 0）。integrate の 1 回目の検証が `verification_flaky`（`runtime_adopt::a_supervisor_that_lost_its_lease_stops_touching_the_run`）で、resume せずに着地をやり直した（`integration_retried`） | 同じ thread の resume は確かめていない |
+| `turns/` の出力 | `turn-000001.jsonl` は `codex exec --json` の JSONL の 28 行（`thread.started` 1・`turn.started` 1・`item.started`/`item.completed` の `command_execution` 各 9・`file_change` 各 1、`item.completed` の `agent_message` 5、`turn.completed` 1。最後の `turn.completed` の `usage` が `turn_finished` の `usage` と一致）。`turn-000001.err` は `Reading additional input from stdin...` の 1 行、`limits.json` は `{"silence_secs":900,"limit_secs":14400}`、`exit`（終了の依頼）は空の file。`request-*.json` は無い。`idle.json` は `dagq_turn`（`turn: 1`・`outcome: succeeded`）を持つ | 設計どおり（[非対話のworker](supervisor-lifecycle/headless-worker.md#run-dirのturns)） |
+| sandbox の中の作業 | `command_execution` 9 件は全て `exit_code: 0`: `cargo fmt --all --check && cargo clippy ... && cargo test --locked --bin dagq`、`cargo run --locked --bin dagq -- supervise --help`、`git commit`、receipt の書き込み（一時 file と rename） | cargo の build と test・run branch への commit・receipt が通った。`dagq ask` と `pkill` / `killall` の拒否はこの run では試されていない |
+| `.codex/rules/dagq-deny.rules` | 着地した commit `b9643d5` の差分は `src/main.rs` だけ（`git show --stat`）で、`git ls-tree -r` の tree に `.codex/` は無い | commit に入っていない |
+| `~/.codex/config.toml` | 更新時刻が 2026-09-30 03:24:53 JST（= 18:24:53Z、`turn_started` と同じ秒）。中身の末尾に `[tui.model_availability_nux]` の `gpt-6-astra = 4` があり、run の worktree の `[projects."…"]` の行は無い。dagq は書かない（design）ので、起動された Codex CLI が自分で書いたとみられる | 手順 6 の「更新時刻が変わっていない」は満たさない。設計の前提（人の設定を変えない）と違う観察として receipt の `follow_ups` に出した |
+| `origin/main` の commit | `git log --oneline --grep 'Dagq-Task: 1103' main` は `b9643d5` の 1 行だけ。`push_finished`（45482）は `remote: origin`・`branch: main`・commit `b9643d5` | task に 1 commit が push された |
+| stats の層 | `stats --full` の `runs[]` は `provider: codex`・`actual_provider: codex`・`route: headless`・`provider_version: 0.155.1`・`codex_version: 0.155.1`・`claude_version: null`・`worker_model: gpt-6-astra`・`turns.by_provider.codex`（`count` 1・`failed` 0・`secs` 216・`tokens.total` 1,286,211）・`work` 214 秒・`startup` 185 秒 | provider・経路・turn が見える |
+| kpi の層 | 2026-09-29 の 1 日の窓で `--by provider` に `provider=codex`（`landings` 1、`phase.work` 214、`phase.startup` 185、`session_active.worker` 216、`resumes_per_run` 0）と `provider=claude`（landings 69）、`--by route` に `route=headless`（1）と `route=interactive`（69）が分かれて出た。goal review の Codex の job も `job.count.goal_review` の `provider=codex` に出た | 分かれて出る |
+| `timeline` | `requested_provider`・`actual_provider`・`worker_mode` を持ち、`commands` は空。`session span 45425 (worker): no model or work breakdown, transcript_not_claude` と注記 | Codex の session は作業の内訳を持たない（設計どおり） |
+
+本番の記録からは確かめていないもの:
+
+- 非対話の Claude の run の全ての確認点（run が無い。Claude の answer の turn が同じ session の resume になること、`turn_started` の `session_id` が run の id であること、stream-json の `turns/` を含む）。
+- Codex の同じ thread の resume（answer・revise・needs_session の resume が無かった）。Codex の worker の `dagq ask` は run の dir への要求にする途中（task 890）で、まだ queue に届かない。
+- Codex の sandbox が `pkill` / `killall` を拒むこと（run が打たなかった）。
+- 手順 7 の `executable_missing` による切り替え（本番では `--codex` を壊せない）と、手順 8 の後始末（使い捨ての queue を作っていない）。
+- 手順 4 の `status` の `supervisors[].providers`（run の当時の値は記録に残らない）。
+- run の当時の `~/.codex/config.toml` の中身（前後を比べていない。更新時刻と今の中身だけ）。
+
 ## 非対話の Claude の前提の確認
 
 非対話の Claude の経路（[非対話の worker](supervisor-lifecycle/headless-worker.md)）が前提にしていて、stub では確かめられない 3 点を、実 `claude -p` で確かめた（task 864、2026-09-30）。queue も supervisor も使わず、scratch の使い捨て repository `dagq-worker-t864-1e1fe057`（`git init -b main` と `seed.txt` の 1 commit）で `claude` を直接起動した。Claude Code は 2.1.285（`~/.local/bin/claude` の link 先 `~/.local/share/claude/versions/2.1.285`）。本番の queue・`~/.local/bin/dagq`・`~/.claude` の設定は変えていない（2. で `~/.claude/projects` に置いた transcript と、1. の turn が書いた transcript は、終わってから消した）。Claude Code の版を上げたとき、または読み手（`src/infrastructure/claude_turns.rs`）・turn の止め方（`headless_session.rs` の `stop_turn`）・`turn_session_exists` を変えたときに、同じ手順で確かめ直す。
