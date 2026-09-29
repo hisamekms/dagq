@@ -2300,8 +2300,17 @@ pub fn start_run_under_dead_supervisor(
     queue
         .bind_repository(&path_text(&repository.common_dir).unwrap())
         .unwrap();
+    // Any worker, as a supervisor with every adapter claims (a headless
+    // task's too).
     let ClaimOutcome::Claimed { run } = queue
-        .claim_for_supervisor(&repository.main_head().unwrap(), &LeaseToken::new(token))
+        .claim_for_supervisor_in_order(
+            &repository.main_head().unwrap(),
+            &LeaseToken::new(token),
+            &[],
+            None,
+            &Default::default(),
+            &dagq::domain::provider_switch::WorkerRoute::direct(&dagq::domain::worker::Worker::ALL),
+        )
         .unwrap()
     else {
         panic!("no candidate to claim")

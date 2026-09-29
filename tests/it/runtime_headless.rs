@@ -6,7 +6,7 @@
 use crate::common;
 use crate::runtime_support;
 
-use dagq::domain::{AskReason, Provider, worker::WorkerMode};
+use dagq::domain::{AskReason, EventKind, Provider, worker::WorkerMode};
 use runtime_support::*;
 
 /// The fixture's task, canceled, and in its place task 2 (`test task`) for
@@ -922,4 +922,131 @@ fn a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group() {
     let inside = Reaped(written_pid(run, "inside.pid"));
     assert!(!still_running(inside.0), "the turn's group outlived it");
     assert!(running(outside.0));
+}
+
+/// The headless run's supervisor died with its first turn ended and its
+/// `stalled` ask answered with an instruction: after writing the answer's
+/// request when `written` (and before closing the ask), before writing it
+/// otherwise (task 863). The supervisor that adopts the run closes the ask
+/// and sends the answer as a turn exactly once: never again when the dead
+/// supervisor had written it, and itself when it had not. The turn of the
+/// answer waits for the test's `go` file, so the adopter's watch meets the
+/// ask while it runs.
+fn adopted_stalled_answer(written: bool) {
+    use dagq::domain::turn::{TurnRequest, next_seq, request_path, turns_dir};
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$PROMPT" in
+"answer to ask "*) while [ ! -f "$RUN_DIR/go" ]; do sleep 0.05; done; {FINISH} ;;
+*) say working ;;
+esac"#
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !payloads(&queue.show(TASK).unwrap(), "turn_finished").is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = queue
+        .ask(NewAsk {
+            topics: Vec::new(),
+            kind: AskKind::Stalled,
+            task_id: None,
+            run_id: Some(run.id().clone()),
+            question: "the headless session ended its turns without a receipt".into(),
+            options: vec!["wait".into(), "intervene".into()],
+            asked_by: "supervisor".into(),
+            reason_category: AskReason::RecoveryFailed,
+            finding_id: None,
+        })
+        .unwrap()
+        .ask;
+    queue.answer(ask.id, "go on").unwrap();
+    let what = format!("answer of the stalled ask {}", ask.id);
+    if written {
+        // What the dead supervisor wrote and recorded before it stopped.
+        let turns = turns_dir(&run_dir);
+        fs::create_dir_all(&turns).unwrap();
+        let names: Vec<String> = fs::read_dir(&turns)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let seq = next_seq(names.iter().map(String::as_str));
+        let request = TurnRequest {
+            seq,
+            what: what.clone(),
+            prompt: format!("answer to ask {}: go on", ask.id),
+        };
+        let path = request_path(&run_dir, seq);
+        fs::write(
+            path.with_extension("json.tmp"),
+            serde_json::to_string(&request).unwrap(),
+        )
+        .unwrap();
+        fs::rename(path.with_extension("json.tmp"), &path).unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::TurnRequested,
+                json!({"seq": seq, "what": what, "workspace_id": run.workspace_id()}),
+            )
+            .unwrap();
+        // The session took it.
+        wait_until(&db, common::STEP_LIMIT, |_| stub_calls(&run).len() == 2);
+    }
+    age_lease(&db, &run, 31);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue.read_ask(ask.id).unwrap().closed_at.is_some()
+    });
+    fs::write(run_dir.join("go"), "").unwrap();
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    let run = &detail.runs[0];
+    let calls = stub_calls(run);
+    let answers: Vec<&String> = calls
+        .iter()
+        .filter(|call| call.contains(&format!("answer to ask {}", ask.id)))
+        .collect();
+    assert_eq!(answers.len(), 1, "{calls:?}");
+    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .filter(|p| p["what"] == what.as_str())
+        .collect();
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    let requests = fs::read_dir(turns_dir(&run_dir))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap_or_default())
+        .filter(|content| content.contains(&what))
+        .count();
+    assert_eq!(requests, 1);
+    let resolved = payloads(&detail, "stall_resolved");
+    let of_ask: Vec<&Value> = resolved
+        .iter()
+        .copied()
+        .filter(|p| p["detection"] == "ask" && p["ask_id"] == json!(ask.id))
+        .collect();
+    assert_eq!(of_ask.len(), 1, "{resolved:?}");
+    assert_eq!(of_ask[0]["outcome"], "answered_instruction");
+    let closed = SqliteQueue::open(&db).unwrap().read_ask(ask.id).unwrap();
+    assert_eq!(closed.answer.as_deref(), Some("go on"));
+}
+
+/// Task 863 (1): the dead supervisor wrote the answer's request; the
+/// adopter does not write another.
+#[test]
+fn an_adopter_does_not_send_a_stalled_answer_already_requested() {
+    adopted_stalled_answer(true);
+}
+
+/// Task 863 (2): the dead supervisor stopped before writing the answer's
+/// request; the adopter sends it once.
+#[test]
+fn an_adopter_sends_a_stalled_answer_not_yet_requested() {
+    adopted_stalled_answer(false);
 }

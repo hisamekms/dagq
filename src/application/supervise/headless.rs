@@ -73,6 +73,50 @@ pub(super) fn request_turn(
     Ok(Submission::Queued)
 }
 
+/// What the request carrying the answer of the `stalled` ask `ask` is: it
+/// names the ask, so the request itself records that the answer was sent.
+pub(super) fn stalled_answer_what(ask: AskId) -> String {
+    format!("answer of the stalled ask {ask}")
+}
+
+/// The request `what` written for the headless session of `run`, waiting
+/// or taken, if there is one: a supervisor that stopped after writing it
+/// left it for its adopter to find, so the request is not written twice.
+/// A request dropped with an earlier session was never run and does not
+/// count.
+pub(super) fn requested(sv: &Supervisor<'_>, run: &TaskRun, what: &str) -> Result<Option<u64>> {
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+    let paths = match sv.files.read_dir(&turns_dir(run_dir)) {
+        Ok(paths) => paths,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read the requests of the headless session"),
+    };
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some((seq, _)) = turn::request_seq(name).filter(|_| name.ends_with(".json")) else {
+            continue;
+        };
+        // A request taken between the listing and the read is read under
+        // its taken name.
+        let content = match sv.files.read(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                sv.files.read(&turn::taken_path(run_dir, seq))
+            }
+            read => read,
+        }
+        .context("read a request of the headless session")?;
+        let Ok(request) = serde_json::from_slice::<TurnRequest>(&content) else {
+            continue;
+        };
+        if request.what == what {
+            return Ok(Some(request.seq));
+        }
+    }
+    Ok(None)
+}
+
 impl Supervisor<'_> {
     /// Before a headless session of `run` starts in its run directory: its
     /// turn limits from the `[stall]` settings, and neither the exit request

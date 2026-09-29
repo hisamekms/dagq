@@ -1500,17 +1500,20 @@ impl StallWatch {
                 if !send {
                     return Ok(());
                 }
-                let text = answer_text(run, ask.id, answer);
-                let workspace = run.workspace_id().unwrap_or_default().to_owned();
-                let sent_at = sv.files.now();
-                submit(
-                    sv,
-                    run,
-                    &workspace,
-                    Input::Text(&text),
-                    "answer of the stalled ask",
-                )?;
-                self.input_sent(sent_at, Some(&text));
+                // The request names the ask and is written before the ask
+                // is closed: a supervisor that stopped in between left it,
+                // and its adopter closes the ask without writing another
+                // (task 863).
+                let what = stalled_answer_what(ask.id);
+                if let Some(seq) = requested(sv, run, &what)? {
+                    info!(ask_id = %ask.id, run_id = %run.id(), "the answer of stalled ask {} of {} was already requested (request {seq}); not sent again", ask.id, run.id());
+                } else {
+                    let text = answer_text(run, ask.id, answer);
+                    let workspace = run.workspace_id().unwrap_or_default().to_owned();
+                    let sent_at = sv.files.now();
+                    submit(sv, run, &workspace, Input::Text(&text), &what)?;
+                    self.input_sent(sent_at, Some(&text));
+                }
                 sv.queue.close_ask(ask.id)?;
                 Self::resolved(
                     sv,
