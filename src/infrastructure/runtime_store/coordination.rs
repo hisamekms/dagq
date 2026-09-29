@@ -516,6 +516,31 @@ impl SqliteQueue {
         Ok(())
     }
 
+    /// Make `agent_pid`, the process of a later turn of a headless session
+    /// (ADR-t813-1), the run's agent: the one agent row takes its pid, so
+    /// every reader of the agent sees the turn running now and never the
+    /// earlier turn's process. The run's status and `agent_started` stay
+    /// the first turn's.
+    pub fn register_turn_agent(
+        &mut self,
+        id: &RunId,
+        wrapper_pid: u32,
+        agent_pid: u32,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert_wrapper(&tx, id, wrapper_pid)?;
+        let changed = tx.execute(
+            "UPDATE run_processes SET pid=?2,heartbeat_at=?3
+             WHERE run_id=?1 AND role='agent' AND exited_at IS NULL",
+            params![id, agent_pid, self.generators.clock.now()],
+        )?;
+        ensure!(changed == 1, "the session's first agent is not registered");
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
         // Registration is immutable and a run ID is never reused.
         assert_wrapper(&self.conn, id, pid)?;
@@ -673,6 +698,9 @@ impl RunCoordination for SqliteQueue {
         agent_pid: u32,
     ) -> Result<()> {
         SqliteQueue::register_resume_agent(self, id, wrapper_pid, agent_pid)
+    }
+    fn register_turn_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
+        SqliteQueue::register_turn_agent(self, id, wrapper_pid, agent_pid)
     }
     fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
         SqliteQueue::heartbeat_wrapper(self, id, pid)

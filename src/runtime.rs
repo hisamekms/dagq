@@ -17,8 +17,8 @@ pub use crate::application::{
     supervise::{RunError, SUPERVISOR_HANDED_OFF},
 };
 pub use crate::compose::{
-    OneShot, ReleaseIndexPort, RunFilesPort, SuperviseOptions, ask, doctor, ended_run_material,
-    integrate, rebind, recover, resume_session_with_provider, review, session,
+    OneShot, ProcessesPort, ReleaseIndexPort, RunFilesPort, SuperviseOptions, ask, doctor,
+    ended_run_material, integrate, rebind, recover, resume_session_with_provider, review, session,
     session_with_provider, session_with_providers, stats, status, status_for, supervise,
     supervise_with_reviewer,
 };

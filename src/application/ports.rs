@@ -1636,6 +1636,9 @@ pub trait RunCoordination {
     fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
     fn register_resume_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32)
     -> Result<()>;
+    /// Make the process of a later turn of a headless session the run's
+    /// agent, in place of the earlier turn's.
+    fn register_turn_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
     fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()>;
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()>;
     /// The leases `token` holds (every lease with `None`) and the

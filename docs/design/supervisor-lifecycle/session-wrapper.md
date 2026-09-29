@@ -4,8 +4,8 @@ type: design
 title: "`session` wrapper"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-09-29
+last_verified: 2026-09-29
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -20,4 +20,4 @@ cmux workspaceが起動する隠しコマンド。TTYが必要で、パイプか
 3. 1秒ごとにheartbeatを更新しながら子プロセスをwaitする。DB障害中も子プロセスの所有を手放さない。
 4. 終了コードを`session_exited`として記録する。agent起動後のエラーでは子プロセスが生きている可能性を考慮し、終了を記録しない。
 
-runの`worker_mode`が`headless`なら、2と3の代わりに`src/application/headless_session.rs`の`Turns`が1 turnごとに非対話の呼び出しを起動し、run dirの`turns/`の依頼を待ってsessionをresumeし、turnを記録してidle markerを書き、終了の依頼で終わる（[非対話のworker](headless-worker.md)）。最初のturnのprocessを`agent`として登録する。
+runの`worker_mode`が`headless`なら、2と3の代わりに`src/application/headless_session.rs`の`Turns`が1 turnごとに非対話の呼び出しを起動し、run dirの`turns/`の依頼を待ってsessionをresumeし、turnを記録してidle markerを書き、終了の依頼で終わる（[非対話のworker](headless-worker.md)）。最初のturnのprocessを`agent`として登録し（`agent_started`、runが`running`になる）、後のturnは起動のたびに同じ`agent`の行の`pid`をそのturnのprocessに差し替える（`register_turn_agent`。eventも状態遷移も無い。task 862）。

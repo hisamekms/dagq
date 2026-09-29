@@ -446,6 +446,12 @@ impl<'a> Turns<'a> {
             };
             registration?;
             *registered = true;
+        } else {
+            // Every later turn is a process of its own: it is the run's
+            // agent while it runs, so the supervisor's process watches see
+            // it and its helpers, not the turn that ended.
+            self.queue
+                .register_turn_agent(run.id(), self.pid, child.id())?;
         }
         self.started(turn, resume, on, request, Some(child.id()), limits)?;
         let (exit, stop, mut tail) =

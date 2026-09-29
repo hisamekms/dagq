@@ -327,6 +327,10 @@ pub struct SuperviseOptions {
     /// The run files the supervisor works with; `None` is the local file
     /// system. Tests set it (a slow removal, task 405).
     pub files: Option<RunFilesPort>,
+    /// The host's processes the supervisor lists and signals; `None` is
+    /// the system's. Tests set it (their sessions run inside the test
+    /// process, which a supervisor never counts as a run's).
+    pub processes: Option<ProcessesPort>,
     /// Reads crates.io's sparse index for the release check (ADR-t618-1);
     /// `None` is `curl`. Tests set it.
     pub release_index: Option<ReleaseIndexPort>,
@@ -402,6 +406,16 @@ impl std::fmt::Debug for ReleaseIndexPort {
     }
 }
 
+/// The processes [`SuperviseOptions::processes`] gives the supervisor.
+#[derive(Clone)]
+pub struct ProcessesPort(pub Arc<dyn ProcessControl + Send + Sync>);
+
+impl std::fmt::Debug for ProcessesPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProcessesPort")
+    }
+}
+
 /// The run files [`SuperviseOptions::files`] gives the supervisor.
 #[derive(Clone)]
 pub struct RunFilesPort(pub Arc<dyn RunFiles>);
@@ -451,6 +465,7 @@ impl SuperviseOptions {
             user_config: None,
             push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
+            processes: None,
             release_index: None,
             release_current: None,
             codex: PathBuf::from("codex"),
@@ -870,7 +885,10 @@ pub fn supervise_with_reviewer(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
             |port| port.0.clone(),
         ),
-        processes: Arc::new(SystemProcesses),
+        processes: options.processes.as_ref().map_or_else(
+            || Arc::new(SystemProcesses) as Arc<dyn ProcessControl + Send + Sync>,
+            |port| port.0.clone(),
+        ),
         generators,
         review_material: &review_material,
         load_average: options.load_average,

@@ -33,6 +33,7 @@ pub use dagq::{
     },
     runtime::{self, IntegrateTarget, SuperviseOptions},
 };
+use dagq::{application::ProcessControl, infrastructure::adapters::SystemProcesses};
 pub use rusqlite::Connection;
 pub use serde_json::{Value, json};
 pub use std::{
@@ -157,6 +158,51 @@ impl Spawner for StubSpawner {
         let child = command.spawn()?;
         groups.push(child.id());
         Ok(Box::new(Stub(child)))
+    }
+}
+
+/// The host's processes as a supervisor in production sees them: a test's
+/// sessions run inside the test process, which is also the supervisor, so
+/// its stub agents (those [`StubSpawner`] started for `db`) are listed as
+/// no child of it, like an agent under a wrapper in a terminal of its own.
+pub struct DetachedStubs {
+    pub db: PathBuf,
+}
+
+impl ProcessControl for DetachedStubs {
+    fn alive(&self, pid: u32) -> bool {
+        SystemProcesses.alive(pid)
+    }
+    fn terminate(&self, pid: u32) -> Result<()> {
+        SystemProcesses.terminate(pid)
+    }
+    fn interrupt(&self, pid: u32) -> Result<()> {
+        SystemProcesses.interrupt(pid)
+    }
+    fn kill(&self, pid: u32) -> Result<()> {
+        SystemProcesses.kill(pid)
+    }
+    fn reap(&self, pid: u32) {
+        SystemProcesses.reap(pid)
+    }
+    fn list(&self) -> Result<Vec<dagq::domain::recovery::ProcessInfo>> {
+        let agents = stubs().get(&self.db).cloned().flatten().unwrap_or_default();
+        let mut all = SystemProcesses.list()?;
+        for process in &mut all {
+            if agents.contains(&process.pid) {
+                process.ppid = 1;
+            }
+        }
+        Ok(all)
+    }
+    fn start_identity(&self, pid: u32) -> Option<String> {
+        SystemProcesses.start_identity(pid)
+    }
+    fn started_at(&self, pid: u32) -> Option<i64> {
+        SystemProcesses.started_at(pid)
+    }
+    fn descendants(&self, pid: u32) -> Vec<u32> {
+        SystemProcesses.descendants(pid)
     }
 }
 

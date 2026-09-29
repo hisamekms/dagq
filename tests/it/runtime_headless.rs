@@ -668,3 +668,127 @@ esac"#
     // The failed turn never answered: the session is started again.
     assert!(calls[1].starts_with("start "), "{calls:?}");
 }
+
+/// Task 862: each turn is a process of its own, and the one running is the
+/// run's agent. The second turn (the answer to a question) starts a quiet
+/// helper as its child, like an MCP server; while it runs the queue's agent
+/// is that turn's process, not the first turn's, so the `idle_process`
+/// watch takes the helper for the session's own and raises no alert. The
+/// run's status and `agent_started` are the first turn's.
+#[test]
+fn a_later_turn_is_the_runs_agent_and_its_helper_no_idle_process() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"echo $$ > "$RUN_DIR/agent-$TURN.pid"
+case "$TURN" in
+1) ask "which file"; say asked ;;
+*) sleep 300 >/dev/null 2>&1 &
+   echo $! > "$RUN_DIR/helper.pid.tmp"; mv "$RUN_DIR/helper.pid.tmp" "$RUN_DIR/helper.pid"
+   i=0; while [ ! -e "$RUN_DIR/go" ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i + 1)); done
+   kill $(cat "$RUN_DIR/helper.pid"); {FINISH} ;;
+esac"#
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let stall = dagq::domain::stall::StallConfig::default().with_millis("idle_process_secs", 1000);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    let options = SuperviseOptions {
+        stall: Some(stall),
+        processes: Some(runtime::ProcessesPort(Arc::new(DetachedStubs {
+            db: db.clone(),
+        }))),
+        ..supervise_options(4, true)
+    };
+    let supervisor = {
+        let (db, repo, backend, reviewer) = (
+            db.to_owned(),
+            repo.to_owned(),
+            backend.clone(),
+            reviewer.clone(),
+        );
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+        })
+    };
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .show(TASK)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == "run_waiting_started")
+    });
+    let ask = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::WorkerQuestion)
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(ask.id, "change.txt")
+        .unwrap();
+    let run = detail(&db).runs[0].clone();
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    wait_until(&db, common::STEP_LIMIT, |_| {
+        run_dir.join("helper.pid").exists()
+    });
+    let pid = |name: &str| -> u32 {
+        fs::read_to_string(run_dir.join(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let (first, second) = (pid("agent-1.pid"), pid("agent-2.pid"));
+    let agents: Vec<_> = SqliteQueue::open(&db)
+        .unwrap()
+        .processes(run.id())
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.role == "agent" && p.exited_at.is_none())
+        .collect();
+    assert_eq!(agents.len(), 1, "{agents:?}");
+    assert_eq!(agents[0].pid, second, "turn 1 was {first}");
+    assert_ne!(first, second);
+    // The helper is the turn's child, as an MCP server is Claude's.
+    let parent = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid("helper.pid").to_string()])
+        .bounded_output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&parent.stdout).trim(),
+        second.to_string()
+    );
+    // Several samples (one a second) past the threshold with the quiet
+    // helper alive. The threshold is a second, well past the moment
+    // between a turn's start and its registration as the agent.
+    thread::sleep(Duration::from_millis(3500));
+    fs::write(run_dir.join("go"), "").unwrap();
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    assert!(
+        payloads(&detail, "recovery_requested").is_empty(),
+        "{:?}",
+        payloads(&detail, "recovery_requested")
+    );
+    assert!(!pid_alive(pid("helper.pid")));
+    let started = payloads(&detail, "agent_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["pid"], first);
+    assert_eq!(
+        turns(&detail).0,
+        [(json!(1), json!(false)), (json!(2), json!(true))]
+    );
+}
