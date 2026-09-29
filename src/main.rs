@@ -2887,6 +2887,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 socket_password: env::var(SOCKET_PASSWORD_ENV)
                     .ok()
                     .filter(|password| !password.is_empty()),
+                config_home: env::var(dagq::application::CONFIG_HOME_ENV)
+                    .ok()
+                    .filter(|home| !home.is_empty()),
                 current_exe: env::current_exe()?,
                 claude_config: claude_global_config(
                     env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),

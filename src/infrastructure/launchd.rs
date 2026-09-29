@@ -184,6 +184,7 @@ mod tests {
             environment: SupervisorEnvironment {
                 path: "/usr/bin:/home/u/.local/bin".into(),
                 socket_password: None,
+                config_home: None,
             },
             log: "/data/q/logs/launchd.log".into(),
         };
@@ -217,6 +218,7 @@ mod tests {
             environment: SupervisorEnvironment {
                 path: "/usr/bin".into(),
                 socket_password: Some("s3cret&<>".into()),
+                config_home: None,
             },
             ..spec
         }

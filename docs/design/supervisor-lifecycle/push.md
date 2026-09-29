@@ -4,8 +4,8 @@ type: design
 title: "KPIのpush（目標割れの記録とホストのコマンドへの通知）"
 status: current
 created: 2026-09-27
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -23,7 +23,7 @@ related:
 
 ## 設定（host.tomlの`[push]`）
 
-- 置き場所は`<queue dir>/host.toml`と、hostの全queueに効く`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。どちらもrepositoryの外で、commitされる`dagq.toml`には置かない。両方に`[push]`があれば、queueのファイルの`[push]`が表ごと優先する（キーごとには混ぜない）。queueのファイルの`command = []`は、host全体の`[push]`をそのqueueだけ切る。
+- 置き場所は`<queue dir>/host.toml`と、hostの全queueに効く`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）。どちらもrepositoryの外で、commitされる`dagq.toml`には置かない。supervisorは自分のprocessの`XDG_CONFIG_HOME`で読み、launchd modeでは`up`を打ったshellの`XDG_CONFIG_HOME`がplistから渡る（[up / down](up-down.md)のplist）。両方に`[push]`があれば、queueのファイルの`[push]`が表ごと優先する（キーごとには混ぜない）。queueのファイルの`command = []`は、host全体の`[push]`をそのqueueだけ切る。
 - 書式（`infrastructure::push::parse_host_push`。1行の文字列の配列と、下のキーだけを受け付け、知らないキーは拒む）:
 
   ```toml

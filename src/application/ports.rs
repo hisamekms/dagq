@@ -917,15 +917,24 @@ pub trait MainRemote {
 /// reads its socket password from it.
 pub const SOCKET_PASSWORD_ENV: &str = "CMUX_SOCKET_PASSWORD";
 
+/// The variable that moves the user's `config.toml` and the host-wide
+/// `host.toml` away from `~/.config/dagq/`.
+pub const CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+
 /// The environment variables the LaunchAgent gives the supervisor, which
 /// is all a launchd-started process keeps of the shell that ran `up`: its
-/// PATH and, only when that shell exported it, the cmux socket password.
+/// PATH and, only when that shell exported them, the cmux socket password
+/// and `XDG_CONFIG_HOME`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SupervisorEnvironment {
     pub path: String,
     /// `CMUX_SOCKET_PASSWORD` as exported by the invoking shell; a password
     /// saved in cmux's Settings is never read or stored here.
     pub socket_password: Option<String>,
+    /// `XDG_CONFIG_HOME` as exported (non-empty) by the invoking shell, so
+    /// the supervisor reads the same `config.toml` and `host.toml` as the
+    /// `up` that checked them; unset, both are under `~/.config/dagq/`.
+    pub config_home: Option<String>,
 }
 
 /// cmux answered the detached ping and did not admit it (its message is

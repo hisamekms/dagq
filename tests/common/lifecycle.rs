@@ -96,6 +96,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             queue: None,
             path: "/usr/bin:/bin:/home/u/.local/bin".into(),
             socket_password: None,
+            config_home: None,
             current_exe: "/opt/bin/dagq".into(),
             claude_config: Some(claude_config),
             user_config: None,

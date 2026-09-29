@@ -29,6 +29,7 @@ fn detached_command_drops_every_inherited_cmux_variable_but_the_password() {
     let environment = SupervisorEnvironment {
         path: "/agent/bin".into(),
         socket_password: None,
+        config_home: None,
     };
     let mut command = Command::new("cmux");
     detach(&mut command, inherited.clone(), &environment);
@@ -60,6 +61,7 @@ fn detached_command_drops_every_inherited_cmux_variable_but_the_password() {
         &SupervisorEnvironment {
             path: "/agent/bin".into(),
             socket_password: Some("pw".into()),
+            config_home: None,
         },
     );
     let password = command
@@ -223,6 +225,7 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
     cmux.preflight_detached(&SupervisorEnvironment {
         path: "/usr/bin:/bin".into(),
         socket_password: Some("pw".into()),
+        config_home: None,
     })
     .unwrap();
     let seen: Vec<(String, String)> = fs::read_to_string(&dump)
@@ -250,6 +253,7 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
     cmux.preflight_detached(&SupervisorEnvironment {
         path: "/usr/bin:/bin".into(),
         socket_password: None,
+        config_home: None,
     })
     .unwrap();
     assert!(
@@ -263,6 +267,7 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
     let environment = SupervisorEnvironment {
         path: "/usr/bin:/bin".into(),
         socket_password: None,
+        config_home: None,
     };
     fs::write(
         &stub,

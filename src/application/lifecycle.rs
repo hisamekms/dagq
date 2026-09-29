@@ -27,8 +27,9 @@
 //! the files through [`Ports`]; the entry points in [`crate::compose`]
 //! build the adapters.
 use super::{
-    AgentProvider, Clock, DetachedRefusal, LaunchAgent, ProcessControl, Queue, QueueOpener,
-    RunFiles, SOCKET_PASSWORD_ENV, SupervisorEnvironment, WorkspaceBackend, WorkspaceTags,
+    AgentProvider, CONFIG_HOME_ENV, Clock, DetachedRefusal, LaunchAgent, ProcessControl, Queue,
+    QueueOpener, RunFiles, SOCKET_PASSWORD_ENV, SupervisorEnvironment, WorkspaceBackend,
+    WorkspaceTags,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
         WorkspaceCommand, actor_env,
@@ -131,6 +132,10 @@ pub struct UpEnvironment {
     /// `CMUX_SOCKET_PASSWORD`, if this shell exported it (non-empty); it is
     /// then copied into the agent too.
     pub socket_password: Option<String>,
+    /// `XDG_CONFIG_HOME`, if this shell exported it (non-empty); it is then
+    /// copied into the agent too, so the launchd-run supervisor reads the
+    /// `config.toml` and `host.toml` this `up` read.
+    pub config_home: Option<String>,
     /// The binary launchd runs: this one, by absolute path.
     pub current_exe: PathBuf,
     /// Claude Code's global config, which records the folder trust of each
@@ -1890,6 +1895,7 @@ pub fn launch_agent_spec(
         environment: SupervisorEnvironment {
             path: environment.path.clone(),
             socket_password: environment.socket_password.clone(),
+            config_home: environment.config_home.clone(),
         },
         log: path_text(&location.log_dir.join(LAUNCHD_LOG_NAME))?,
     })
@@ -2247,6 +2253,12 @@ impl LaunchAgentSpec {
             xml.push_str(&format!(
                 "\t\t<key>{SOCKET_PASSWORD_ENV}</key>\n\t\t<string>{}</string>\n",
                 escape(password)
+            ));
+        }
+        if let Some(config_home) = &self.environment.config_home {
+            xml.push_str(&format!(
+                "\t\t<key>{CONFIG_HOME_ENV}</key>\n\t\t<string>{}</string>\n",
+                escape(config_home)
             ));
         }
         xml.push_str("\t</dict>\n");

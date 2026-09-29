@@ -327,6 +327,7 @@ fn up_starts_the_agent_and_the_sessions_once_and_reuses_them_after() {
         vec![SupervisorEnvironment {
             path: "/usr/bin:/bin:/home/u/.local/bin".into(),
             socket_password: None,
+            config_home: None,
         }]
     );
     assert!(contents.contains("<key>KeepAlive</key>\n\t<true/>"));
@@ -637,6 +638,7 @@ fn up_proves_the_connection_with_the_exported_password_and_stores_it_in_the_plis
         vec![SupervisorEnvironment {
             path: "/usr/bin:/bin:/home/u/.local/bin".into(),
             socket_password: Some("hunter2 & <co>".into()),
+            config_home: None,
         }]
     );
     let installs = launchd.installs.lock().unwrap();
@@ -652,6 +654,40 @@ fn up_proves_the_connection_with_the_exported_password_and_stores_it_in_the_plis
     // cmux terminal's child and needs none.
     let workspaces = cmux.workspaces.lock().unwrap();
     assert!(workspaces.iter().all(|w| !w.3.contains("hunter2")));
+}
+
+/// An `XDG_CONFIG_HOME` exported by the invoking shell goes into the agent,
+/// so the launchd-run supervisor reads the `config.toml` and `host.toml`
+/// under it like the `up` that checked them (task 749); unset, the plist
+/// carries PATH only
+/// (`up_starts_the_agent_and_the_sessions_once_and_reuses_them_after`).
+#[test]
+fn up_stores_the_exported_config_home_in_the_plist() {
+    let mut fixture = fixture();
+    fixture.environment.config_home = Some("/home/u/my config & <co>".into());
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let report = up(&fixture, &cmux, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    assert_eq!(
+        *cmux.detached_preflights.lock().unwrap(),
+        vec![SupervisorEnvironment {
+            path: "/usr/bin:/bin:/home/u/.local/bin".into(),
+            socket_password: None,
+            config_home: Some("/home/u/my config & <co>".into()),
+        }]
+    );
+    let installs = launchd.installs.lock().unwrap();
+    assert_eq!(installs.len(), 1);
+    let contents = &installs[0].2;
+    assert!(
+        contents.contains(
+            "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin:/bin:/home/u/.local/bin</string>\n\t\t<key>XDG_CONFIG_HOME</key>\n\t\t<string>/home/u/my config &amp; &lt;co&gt;</string>\n\t</dict>"
+        ),
+        "{contents}"
+    );
+    assert!(!contents.contains(SOCKET_PASSWORD_ENV));
 }
 
 /// Two registrations whose processes are gone, one whose process lives and
