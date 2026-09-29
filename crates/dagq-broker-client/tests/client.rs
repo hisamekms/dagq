@@ -381,7 +381,7 @@ fn the_cli_exits_2_on_a_bad_command_line_and_3_when_it_cannot_ask() {
     assert_eq!(output.code, Some(0));
     assert_eq!(
         output.stdout,
-        format!("dagq-broker-client {}\n", env!("CARGO_PKG_VERSION"))
+        format!("dagq-broker-client {}\n", dagq_broker_client::BUILD)
     );
     let output = cli(&["git", "push"], &[], "");
     assert_eq!(output.code, Some(2));
@@ -474,4 +474,38 @@ fn the_client_crate_depends_on_no_dagq() {
     let all = dependencies("all");
     assert!(all.iter().any(|name| name == "dagq-broker"), "{all:?}");
     assert!(!all.iter().any(|name| name == "dagq"), "{all:?}");
+}
+
+/// The client and the server of one checkout name the same build, dagq's
+/// (ADR-t827-1 decisions 5 and 7), so dagq's check of the client's
+/// `--version` and the health's `build` holds.
+#[test]
+fn the_client_and_the_server_name_this_checkouts_build() {
+    assert_eq!(dagq_broker_client::BUILD, dagq_broker::BUILD);
+    assert_is_this_checkouts_build(dagq_broker_client::BUILD);
+    assert_eq!(dagq_broker::health().build, dagq_broker_client::BUILD);
+}
+
+/// Assert that `build` is the build identifier of this checkout, by dagq's
+/// rule over the repository root (ADR-t827-1 decisions 5 and 7), so it is
+/// the one `dagq --version` of the same checkout prints. `.dirty` is not
+/// compared: an edit after the build marks the tree dirty without a rebuild.
+fn assert_is_this_checkouts_build(build: &str) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = dagq_broker_protocol::build_id::compute(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        &root,
+    )
+    .identifier;
+    let clean = |id: &str| id.strip_suffix(".dirty").unwrap_or(id).to_owned();
+    assert_eq!(clean(build), clean(&expected), "{build} is not {expected}");
+    if dagq_broker_protocol::build_id::is_prerelease(env!("CARGO_PKG_VERSION")) {
+        assert!(
+            build.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")),
+            "{build}"
+        );
+    } else {
+        assert_eq!(build, env!("CARGO_PKG_VERSION"));
+    }
 }

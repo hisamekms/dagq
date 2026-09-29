@@ -10,6 +10,7 @@
 //!
 //! [Broker]: https://github.com/hisamekms/dagq/blob/main/docs/design/broker.md
 
+pub mod build_id;
 mod capability;
 mod claims;
 mod error;

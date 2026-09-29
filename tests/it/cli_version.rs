@@ -50,6 +50,19 @@ fn version_is_the_build_identifier() {
     } else {
         assert_eq!(dagq::VERSION, package);
     }
+    // The rule the broker's binaries embed too, over the same root, so the
+    // three of one checkout name the same build (ADR-t827-1 decisions 5
+    // and 7; their crates' tests hold them to it). `.dirty` is not
+    // compared: an edit after the build marks the tree dirty without a
+    // rebuild.
+    let expected = dagq::build_id::compute(
+        env!("CARGO_PKG_NAME"),
+        package,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+    .identifier;
+    let clean = |id: &str| id.strip_suffix(".dirty").unwrap_or(id).to_owned();
+    assert_eq!(clean(dagq::VERSION), clean(&expected));
 }
 
 /// Runs `binary` (a copy of this one, as `claim` leaves a run's wrapper in

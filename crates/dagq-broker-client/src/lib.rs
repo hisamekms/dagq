@@ -20,7 +20,10 @@ pub const NAME: &str = "dagq-broker-client";
 
 /// The build this client names itself by in `--version`; dagq uses the
 /// client only when it is its own build.
-pub const BUILD: &str = env!("CARGO_PKG_VERSION");
+///
+/// dagq's build identifier (`X.Y.Z`, or `X.Y.Z-dev+<commit>[.dirty]` built
+/// from a checkout), which `build.rs` embeds.
+pub const BUILD: &str = env!("DAGQ_BUILD_ID");
 
 /// The protocol version this client speaks.
 pub const PROTOCOL_VERSION: u32 = dagq_broker_protocol::PROTOCOL_VERSION;

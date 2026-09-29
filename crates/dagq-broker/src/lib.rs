@@ -33,7 +33,10 @@ pub const NAME: &str = "dagq-broker";
 
 /// The build this server names itself by, in `--version` and the health
 /// answer.
-pub const BUILD: &str = env!("CARGO_PKG_VERSION");
+///
+/// dagq's build identifier (`X.Y.Z`, or `X.Y.Z-dev+<commit>[.dirty]` built
+/// from a checkout), which `build.rs` embeds.
+pub const BUILD: &str = env!("DAGQ_BUILD_ID");
 
 /// What a healthy server answers on `GET /v1/health`.
 pub fn health() -> HealthResponse {

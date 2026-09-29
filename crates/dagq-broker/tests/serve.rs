@@ -84,7 +84,7 @@ impl Broker {
         let addr: SocketAddr = listening["listening"].as_str().unwrap().parse().unwrap();
         assert!(addr.ip().is_loopback(), "{addr}");
         assert_ne!(addr.port(), 0);
-        assert_eq!(listening["build"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(listening["build"], dagq_broker::BUILD);
         Self { child, addr, dir }
     }
 
@@ -234,16 +234,17 @@ fn health_needs_no_token_and_is_audited() {
     let answer = broker.exchange(b"GET /v1/health HTTP/1.1\r\nHost: b\r\n\r\n");
     assert_eq!(answer.status, 200);
     let health: HealthResponse = serde_json::from_str(&answer.body).unwrap();
-    assert_eq!(health, HealthResponse::ok(env!("CARGO_PKG_VERSION")));
+    assert_eq!(health, HealthResponse::ok(dagq_broker::BUILD));
     assert!(
         answer
             .headers
             .contains(&"x-dagq-broker-protocol: 1".to_owned())
     );
-    assert!(answer.headers.contains(&format!(
-        "x-dagq-broker-build: {}",
-        env!("CARGO_PKG_VERSION")
-    )));
+    assert!(
+        answer
+            .headers
+            .contains(&format!("x-dagq-broker-build: {}", dagq_broker::BUILD))
+    );
     let audit = broker.audit();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0]["op"], "health");

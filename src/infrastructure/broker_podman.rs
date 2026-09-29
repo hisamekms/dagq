@@ -237,7 +237,7 @@ pub fn narrowed_manifest() -> String {
 }
 
 /// Put the image's build context in `dir` (emptied first): the
-/// Containerfile, `Cargo.lock`, the sources and manifests of
+/// Containerfile, `Cargo.lock`, the sources, manifests and build scripts of
 /// [`IMAGE_CRATES`] (without their tests) and [`narrowed_manifest`].
 /// Returns the Rust version of `rust-toolchain.toml` for the build stage.
 pub fn stage_context(checkout: &Path, dir: &Path) -> Result<String> {
@@ -262,6 +262,13 @@ pub fn stage_context(checkout: &Path, dir: &Path) -> Result<String> {
             .with_context(|| format!("copy {name}/Cargo.toml"))?;
         copy_tree(&from.join("src"), &to.join("src"))
             .with_context(|| format!("copy {name}/src"))?;
+        // The server embeds its build identifier (without a Git
+        // worktree in the image, `+unknown` for a development version).
+        let script = from.join("build.rs");
+        if script.is_file() {
+            fs::copy(&script, to.join("build.rs"))
+                .with_context(|| format!("copy {name}/build.rs"))?;
+        }
     }
     rust_version(checkout)
 }
@@ -522,5 +529,23 @@ mod tests {
         assert!(!tokens_active(dir.path()));
         fs::write(active.join("jti"), "run").unwrap();
         assert!(tokens_active(dir.path()));
+    }
+
+    #[test]
+    fn the_context_has_the_server_s_build_script() {
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if !CheckoutSource::is_source(checkout) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let context = dir.path().join("context");
+        stage_context(checkout, &context).unwrap();
+        assert!(context.join("crates/dagq-broker/build.rs").is_file());
+        assert!(
+            context
+                .join("crates/dagq-broker-protocol/src/build_id.rs")
+                .is_file()
+        );
+        assert!(!context.join("crates/dagq-broker/tests").exists());
     }
 }
