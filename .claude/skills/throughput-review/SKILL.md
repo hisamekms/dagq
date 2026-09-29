@@ -72,17 +72,17 @@ since=$(date -u -v-30H +%Y-%m-%dT%H:%M:%SZ)   # GNU date なら: date -u -d '30 
 ```sh
 FROM=2026-09-28T13:00:00Z; TO=2026-09-28T14:00:00Z
 ~/.local/bin/dagq stats --since "$FROM" --until "$TO" --full | jq -r '
-  "task\tkind\tareas\tclaim→着地(分)\t人待ち除く\t作業\t検証\t着地待ち\tverify\t人の答え待ち\tresume\ttitle",
+  "task\tchange\tareas\tclaim→着地(分)\t人待ち除く\t作業\t検証\t着地待ち\tverify\t人の答え待ち\tresume\ttitle",
   (.runs[] | select(.status == "integrated")
    | def m: ./60 | floor;
      def t: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
-     [.task_id, .kind, ((.areas // []) | join(",") | if . == "" then "-" else . end),
+     [.task_id, (.change // "-"), ((.areas // []) | join(",") | if . == "" then "-" else . end),
       ((.landed_at|t) - (.claimed_at|t) | m), ((.landed_at|t) - (.claimed_at|t) - .land_phases.ask | m), (.work|m), (.validate|m),
       (.wait_to_land|m), (.land_phases.verify|m), (.land_phases.ask|m), .resumes, .title[0:40]] | @tsv)'
 ```
 
 - 時間はどれも分。「人の答え待ち」は着地待ちの中の ask で、作業中の答え待ちが疑わしい run は `~/.local/bin/dagq timeline RUN` の `waiting_ask` の区間を足し、除いた値も並べる
-- 種類の層: 今は `kind`（`docs`・`plugin`・`runtime`・`ci`）と、`dagq.toml` の `[areas]` から求める `areas`（着地 commit の差分から。`[areas]` が無い間と古いバイナリの記録では `-`）。goal 69 の後は task の `change` と `area` で分ける
+- 種類の層: task が宣言した `change`（`dagq.toml` の `[tasks] changes` の値。change の無い task と古いバイナリの記録では `-`）と、`dagq.toml` の `[areas]` から求める `areas`（着地 commit の差分から。`[areas]` が無い間と古いバイナリの記録では `-`）で分ける
 
 (b) claim の保留と resume と ask（同じ `FROM`・`TO`）:
 
@@ -146,10 +146,11 @@ plugin の [reference/kpi.md](../../../plugins/claude-dagq/skills/dagq/reference
 ## 5. 印の効果を見る（「mark N の効果を見て」）
 
 ```sh
-~/.local/bin/dagq kpi --compare N --kind runtime            # --window 7（日）が既定
-~/.local/bin/dagq kpi --compare N --kind runtime --area <名前>   # area で絞るとき
+~/.local/bin/dagq kpi --compare N --area runtime            # --window 7（日）が既定
+~/.local/bin/dagq kpi --compare N --change <値>             # change で絞るとき
+~/.local/bin/dagq kpi --compare N --area <名前>              # 別の area で読むとき
 ```
 
-- 前後比較は `--kind runtime`（か `--area`）の層で読み、`all` では読まない（task の種類の混ざり方で動く）
+- 前後比較は `--area runtime`（か `--change`）の層で読み、`all` では読まない（task の種類の混ざり方で動く）
 - `confounders`（間の他の印）を名指し、`split.separable` が `false` なら結論を出さない。`[kpi] min_samples` に満たない、または `partial` の区間は判定しない
 - 見る KPI は印の目的のもの（例: `[run.env]` の変更なら `cpu_per_landing`・`load_per_core`・`phase.work`・`land_phase.verify`）と、着地数/時・`slot_usage`
