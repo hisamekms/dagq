@@ -1370,6 +1370,38 @@ enum BrokerCommand {
         #[arg(long)]
         podman: Option<PathBuf>,
     },
+    /// Print the tail of the queue's broker container's podman logs as {"container", "tail",
+    /// "stdout", "stderr"}. Reads only: starts no machine and makes no container, and fails
+    /// with podman_missing, machine_missing, machine_stopped or container_missing instead.
+    Logs {
+        /// Lines from the end.
+        #[arg(long, default_value_t = dagq::application::broker_admin::DEFAULT_LOG_TAIL)]
+        tail: u32,
+        /// podman executable; defaults to podman on PATH.
+        #[arg(long)]
+        podman: Option<PathBuf>,
+    },
+    /// Print the broker's audit lines (<queue dir>/broker/audit/<YYYY-MM-DD>.jsonl, UTC) oldest
+    /// first as {"entries", "skipped", "dropped"}: each entry is the line as the broker wrote
+    /// it, skipped counts broken or cut lines, dropped the older matches past --limit. Reads the
+    /// files only; the queue DB is not touched.
+    Audit {
+        /// Only this run's lines.
+        #[arg(long)]
+        run: Option<String>,
+        /// Only this task's lines.
+        #[arg(long)]
+        task: Option<u64>,
+        /// Only lines at or after this UTC time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS[.fff]Z).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only lines before this UTC time.
+        #[arg(long)]
+        until: Option<String>,
+        /// The latest lines kept.
+        #[arg(long, default_value_t = dagq::application::broker_admin::DEFAULT_AUDIT_LIMIT)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1509,7 +1541,8 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Forecast { .. }
         | Command::Doctor { .. }
         | Command::Broker {
-            command: BrokerCommand::Status { .. },
+            command:
+                BrokerCommand::Status { .. } | BrokerCommand::Logs { .. } | BrokerCommand::Audit { .. },
         }
         | Command::Notes { .. }
         | Command::Marks { .. }
@@ -2083,6 +2116,35 @@ fn execute(cli: Cli) -> Result<Value> {
             ),
             BrokerCommand::Stop { podman } => {
                 dagq::compose::broker_stop(&location, podman.as_deref())
+            }
+            BrokerCommand::Logs { tail, podman } => {
+                dagq::compose::broker_logs(&location, podman.as_deref(), tail)
+            }
+            BrokerCommand::Audit {
+                run,
+                task,
+                since,
+                until,
+                limit,
+            } => {
+                let millis = |text: Option<String>| -> Result<Option<i64>> {
+                    text.map(|text| {
+                        let time = dagq::watch::event_time(&text)?;
+                        dagq::domain::stats::rfc3339_millis(&time)
+                            .with_context(|| format!("not a UTC time: {text}"))
+                    })
+                    .transpose()
+                };
+                dagq::compose::broker_audit(
+                    &location,
+                    &dagq::application::broker_admin::AuditQuery {
+                        run,
+                        task,
+                        since: millis(since)?,
+                        until: millis(until)?,
+                        limit: Some(limit),
+                    },
+                )
             }
         };
     }
@@ -3647,6 +3709,8 @@ mod tests {
         "forecast",
         "doctor",
         "broker status",
+        "broker logs",
+        "broker audit",
         // Follow the queue's events (`queue.watch`).
         "watch",
         // Write a file out of the queue (`queue.export`), not the queue.

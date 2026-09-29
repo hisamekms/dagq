@@ -143,11 +143,19 @@ pub enum FailureCode {
     MachineBusy,
     /// `podman machine init` or `start` failed.
     MachineFailed,
+    /// dagq's machine does not exist, for a command that only reads
+    /// (`dagq broker logs`) and so does not make it.
+    MachineMissing,
+    /// dagq's machine is stopped, for a command that only reads.
+    MachineStopped,
     /// The image's material (a dagq checkout with the broker's crates) is
     /// not there.
     ImageSourceMissing,
     ImageBuildFailed,
     ContainerFailed,
+    /// The queue's container does not exist, for a command that only
+    /// reads (`dagq broker logs`) and so does not make it.
+    ContainerMissing,
     /// The container runs but its health did not answer in time.
     Unhealthy,
     /// The queue belongs to no repository dagq knows, so the Git common
@@ -167,9 +175,12 @@ impl FailureCode {
             Self::PodmanFailed => "podman_failed",
             Self::MachineBusy => "machine_busy",
             Self::MachineFailed => "machine_failed",
+            Self::MachineMissing => "machine_missing",
+            Self::MachineStopped => "machine_stopped",
             Self::ImageSourceMissing => "image_source_missing",
             Self::ImageBuildFailed => "image_build_failed",
             Self::ContainerFailed => "container_failed",
+            Self::ContainerMissing => "container_missing",
             Self::Unhealthy => "unhealthy",
             Self::RepositoryUnknown => "repository_unknown",
             Self::ClientMissing => "client_missing",

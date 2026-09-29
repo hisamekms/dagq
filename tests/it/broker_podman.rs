@@ -10,11 +10,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use dagq::application::broker::BrokerFailure;
 use dagq::application::broker::{
     MACHINE, MachineSpec, MachineState, Podman, container_name, ensure_machine, machine_status,
     release_machine,
 };
-use dagq::compose::{BrokerStartOptions, broker_start, broker_status, broker_stop};
+use dagq::application::broker_admin::AuditQuery;
+use dagq::compose::{
+    BrokerStartOptions, broker_audit, broker_logs, broker_start, broker_status, broker_stop,
+};
 use dagq::infrastructure::broker_podman::{FileLock, PodmanCli, free_port, get_health};
 use dagq::infrastructure::location::{QueueLocation, data_home};
 
@@ -216,6 +220,17 @@ fn the_broker_runs_in_its_container_and_answers_on_loopback_only() {
 
     let status = broker_status(&location, None).unwrap();
     assert_eq!(status["state"], "running", "{status:#}");
+    // The logs and the audit read what the running broker wrote.
+    let logs = broker_logs(&location, None, 50).unwrap();
+    assert_eq!(logs["container"], container.as_str(), "{logs:#}");
+    assert_eq!(logs["tail"], 50);
+    let audit = broker_audit(&location, &AuditQuery::default()).unwrap();
+    let entries = audit["entries"].as_array().unwrap();
+    assert!(
+        entries.iter().any(|entry| entry["op"] == "health"),
+        "{audit:#}"
+    );
+    assert_eq!(audit["skipped"], 0, "{audit:#}");
 
     // Stopped: the container, then the machine (nothing else runs on it).
     let stopped = broker_stop(&location, None).unwrap();
@@ -231,5 +246,12 @@ fn the_broker_runs_in_its_container_and_answers_on_loopback_only() {
     assert_eq!(again["stop"]["container_stopped"], false);
     let status = broker_status(&location, None).unwrap();
     assert_ne!(status["state"], "running", "{status:#}");
+    // The logs start nothing: the container is gone and the machine stopped.
+    let error = broker_logs(&location, None, 50).unwrap_err();
+    let code = error.downcast_ref::<BrokerFailure>().unwrap().code.as_str();
+    assert!(
+        ["machine_stopped", "container_missing"].contains(&code),
+        "{error:#}"
+    );
     drop(cleanup);
 }

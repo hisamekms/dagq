@@ -2829,6 +2829,36 @@ pub fn broker_status(location: &QueueLocation, podman: Option<&Path>) -> Result<
     Ok(value)
 }
 
+/// `dagq broker logs`: the last `tail` lines of the queue's container's
+/// `podman logs` ([`crate::application::broker_admin::logs`]). It only
+/// reads: no podman, a missing or stopped machine and a missing container
+/// are returned as the [`crate::application::broker::BrokerFailure`].
+pub fn broker_logs(location: &QueueLocation, podman: Option<&Path>, tail: u32) -> Result<Value> {
+    use crate::application::broker::{MACHINE, container_name};
+    use crate::infrastructure::broker_podman::PodmanCli;
+    let podman = PodmanCli::resolve(podman)?;
+    let report = crate::application::broker_admin::logs(
+        &podman,
+        MACHINE,
+        &container_name(&location.hash()),
+        tail,
+    )?;
+    Ok(serde_json::to_value(report)?)
+}
+
+/// `dagq broker audit`: the lines of `<queue dir>/broker/audit` that
+/// `query` keeps ([`crate::application::broker_admin::audit`]), read from
+/// the files without taking them into the queue DB.
+pub fn broker_audit(
+    location: &QueueLocation,
+    query: &crate::application::broker_admin::AuditQuery,
+) -> Result<Value> {
+    let dir = crate::application::broker::broker_dir(&location.queue_dir).join("audit");
+    let report = crate::application::broker_admin::audit(&dir, query)
+        .with_context(|| format!("read the broker's audit in {}", dir.display()))?;
+    Ok(serde_json::to_value(report)?)
+}
+
 /// The `broker` of `doctor`: the podman executable (or why there is none)
 /// and what `dagq broker` last recorded. It runs no podman command.
 fn doctor_broker(db: &Path) -> Value {

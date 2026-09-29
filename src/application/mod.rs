@@ -10,6 +10,7 @@ pub mod actor_executor;
 pub mod areas;
 pub mod ask;
 pub mod broker;
+pub mod broker_admin;
 pub mod commands;
 pub mod diagram;
 pub mod execution;
