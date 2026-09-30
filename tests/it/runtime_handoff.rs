@@ -25,7 +25,9 @@ pub(crate) fn hand_off_when(
         let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
         thread::spawn(move || supervise(&db, &repo, &backend))
     };
-    wait_until(db, Duration::from_secs(30), condition);
+    // The first supervisor may be slow to reach the condition under load;
+    // it moves on as soon as the condition holds.
+    wait_until(db, crate::common::STEP_LIMIT, condition);
     let registration = only_registration(db);
     assert!(registration.handoff_accepted, "{registration:?}");
     assert_eq!(registration.handoff_binary, None);
