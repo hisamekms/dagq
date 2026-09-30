@@ -4,7 +4,7 @@ type: plan
 title: NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方
 status: active
 created: 2026-09-27
-updated: 2026-09-29
+updated: 2026-09-30
 owners:
   - hisamekms
 tags:
@@ -132,7 +132,7 @@ goal 36の発端（並列4、target分離前の設定）では、load averageが
 
 566の着地（event 14148）の後、llvm-covを流して着地したrunが10件以上そろったら、1〜5章と同じ指標を同じ方法で取る。
 
-- 範囲: `dagq stats --since 14148 --until <10件目以降の着地のevent> --full`。KPIの前後は`dagq kpi --compare 14148 --kind runtime`でも読む。
+- 範囲: `dagq stats --since 14148 --until <10件目以降の着地のevent> --full`。KPIの前後は`dagq kpi --compare 14148 --area runtime`でも読む。
 - llvm-covの段・build・test段・test段の後: `verification_command` eventの時刻の差と`integrate-<試行>-verify-<N>.log`（2章の方法）。**旧コマンドとnextestを分けて比べる**（ADR-0076決定4で旧コマンドのtaskが残るため。旧コマンドは`RUST_TEST_THREADS`、nextestは`NEXTEST_TEST_THREADS`が効く）。nextestでは「合計÷8」とSummaryの一致も確かめる。
 - `backend_call_failed`: opごとの件数とload帯、`exhausted`。
 - `verification_failed`のresume: 件数とllvm-covを流したrun数に対する割合、失敗したtestの名前と原因（時間の上限・timeoutによる失敗か）。
@@ -227,7 +227,7 @@ task 930が`dagq.toml`の`[run.env]`の`RUST_TEST_THREADS`と`NEXTEST_TEST_THREA
 ### 8.2 6の期間の測り方
 
 - 境界: task 930の着地。`dagq marks`の`run_env_changed`（`[run.env]` changed: NEXTEST_TEST_THREADS, RUST_TEST_THREADS）のeventを始まりにする。
-- llvm-covを流して着地したrunが10件以上そろったら、6章の測り方と同じ指標（llvm-covの段・build・test段・test段100件あたり・test段の後・`backend_call_failed`とload帯と`exhausted`・captureの時間切れ・`verification_failed`の原因別の件数・load1）を取り、7.1節の表に4・8・6の3列で並べる。範囲は`dagq stats --since <境界のevent> --until <10件目以降の着地のevent> --full`、KPIは`dagq kpi --compare <境界の印> --kind runtime`でも読む。
+- llvm-covを流して着地したrunが10件以上そろったら、6章の測り方と同じ指標（llvm-covの段・build・test段・test段100件あたり・test段の後・`backend_call_failed`とload帯と`exhausted`・captureの時間切れ・`verification_failed`の原因別の件数・load1）を取り、7.1節の表に4・8・6の3列で並べる。範囲は`dagq stats --since <境界のevent> --until <10件目以降の着地のevent> --full`、KPIは`dagq kpi --compare <境界の印> --area runtime`でも読む。
 - 期待するのは、test段100件あたりが8より約1/3伸びる代わりに、段の間のload1の平均の中央値が12未満、captureの時間切れが0件に近づくこと。
 - 期間の中で他の変更（task 931・933のtestの直し、task 932の調査から出た変更など）が着地したら、その境界を書き、前後を分けて読む。
 
