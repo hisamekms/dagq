@@ -4,7 +4,7 @@ type: plan
 title: スパイク：goal review job を Codex（codex exec）の読み取りだけの sandbox で動かせるか
 status: completed
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-09-30
 owners:
   - hisamekms
 tags:
@@ -156,7 +156,7 @@ perl -e 'setpgrp(0,0); exec @ARGV' ~/.local/bin/codex exec --json … "…sleep 
 
 - 起動の前の失敗（実行ファイルが無い）は今の `executable_on` と `preflight` の文言で、起動の後の失敗（認証・利用上限・model）は JSONL の `error` / `turn.failed` の `message` を `codex_turns::classify` で共通の分類（`TurnFailure`）に訳す。goal review job の `job_wall`（task 438 の壁の判定）は今 Claude の出力の文言を読むので、Codex の job では provider の実装が `classify` の結果を壁に訳す
 - 時間の上限で止めるときは、今の `HeadlessJob::stop` の「子孫を pid で止める」を Codex でも使う。止める signal を選べるなら SIGINT が codex 自身にコマンドを片付けさせる
-- 前回の spike と `codex.rs` の `turn_command` の doc（「group を一緒に止めないとコマンドが残る」）は、group ごと止めれば片付くという前提だが、この測定では group への SIGTERM でもコマンドが残った。worker の経路（`headless_session.rs` の `kill_group`）は follow-up で確かめる
+- 前回の spike と `codex.rs` の `turn_command` の doc（「group を一緒に止めないとコマンドが残る」）は、group ごと止めれば片付くという前提だが、この測定では group への SIGTERM でもコマンドが残った。worker の経路（`headless_session.rs` の `kill_group`）は follow-up で確かめる。→ task 1085 で直した: 非対話の worker の turn を止めるとき（時間切れ・無音・exit の要求・wrapper のエラーなど）は、`stop_turn` が先に turn の子孫を pid で集め、turn の process group と合わせて SIGKILL で止める（group だけに頼らない）。今の姿は [非対話の worker の「wrapper が turn を止めるとき」](../design/supervisor-lifecycle/headless-worker.md#wrapperがturnを止めるとき)
 
 ## 5. prompt の Claude の plugin への依存と、Codex で verdict が返るか
 
