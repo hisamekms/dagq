@@ -1,12 +1,15 @@
 //! The headless jobs other than the worker (goal 73): per kind of job
-//! (review, recovery, plan review, goal review, observer) how many ended in
+//! (review, recovery, plan review, goal review, observer, throughput
+//! review) how many ended in
 //! the window, how many failed and at what rate, how long they took and the
 //! verdicts they gave, and the same per provider the job was launched on
 //! (its start's `launch.provider`, `claude` for a launch recorded before it
 //! named one) and per model its session used (the `model` of the
 //! `session_closed` of the start's `session_id`; for a job whose provider
 //! names its session itself, Codex's, the `model` its end records; `unknown`
-//! without one), so that the providers' jobs can be read side by side.
+//! without one), so that the providers' jobs can be read side by side. The
+//! throughput review's are also split by its mode (hourly, daily, weekly),
+//! whose times differ by an order (task 1173).
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -16,13 +19,18 @@ use super::{EventId, RunEvent, Summary, summary, timestamp_millis};
 use crate::domain::event_kind;
 
 /// The kinds of job, in the order `stats` lists them.
-pub const JOB_KINDS: [&str; 5] = [
+pub const JOB_KINDS: [&str; 6] = [
     "review",
     "recovery",
     "plan_review",
     "goal_review",
     "observer",
+    "throughput_review",
 ];
+
+/// The modes of the throughput review (ADR-t996-1), each listed under its
+/// `by_mode` with no job too.
+pub const THROUGHPUT_REVIEW_MODES: [&str; 3] = ["hourly", "daily", "weekly"];
 
 /// The provider of a job whose start recorded none (every job ran on
 /// Claude before launches named their provider).
@@ -79,12 +87,18 @@ pub struct JobStats {
     pub all: JobGroup,
     pub by_provider: BTreeMap<String, JobGroup>,
     pub by_model: BTreeMap<String, JobGroup>,
+    /// The throughput review's per mode (its events' `mode`); the other
+    /// kinds have none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_mode: BTreeMap<String, JobGroup>,
 }
 
 /// One job that ended.
 struct Job {
     provider: String,
     model: String,
+    /// The throughput review's mode.
+    mode: Option<String>,
     failed: bool,
     verdict: Option<String>,
     secs: Option<i64>,
@@ -112,8 +126,21 @@ fn start_of(event: &RunEvent) -> Option<(&'static str, String)> {
             Some(("goal_review", text(&event.payload, "goal_review_id")?))
         }
         event_kind::OBSERVE_STARTED => Some(("observer", String::new())),
+        event_kind::THROUGHPUT_REVIEW_STARTED => Some(("throughput_review", review_key(event)?)),
         _ => None,
     }
+}
+
+/// The throughput review a start or end is of: its mode and period, and its
+/// session id when it has one (reviews of one period may run side by side).
+fn review_key(event: &RunEvent) -> Option<String> {
+    let payload = &event.payload;
+    Some(format!(
+        "{}/{}/{}",
+        text(payload, "mode")?,
+        text(payload, "period")?,
+        text(payload, "session_id").unwrap_or_default()
+    ))
 }
 
 /// The kind of job an event ends, its key, whether it failed and its
@@ -165,6 +192,16 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
                 None,
             )),
         },
+        // An hour no rule met starts no agent (ADR-t996-1 decision 2).
+        event_kind::THROUGHPUT_REVIEW_FINISHED => match payload["outcome"].as_str() {
+            Some("skipped") => None,
+            outcome => Some((
+                "throughput_review",
+                review_key(event)?,
+                outcome != Some("succeeded"),
+                None,
+            )),
+        },
         _ => None,
     }
 }
@@ -192,6 +229,12 @@ pub fn jobs(
         .iter()
         .map(|kind| (*kind, JobStats::default()))
         .collect();
+    if let Some(reviews) = stats.get_mut("throughput_review") {
+        reviews.by_mode = THROUGHPUT_REVIEW_MODES
+            .iter()
+            .map(|mode| ((*mode).to_owned(), JobGroup::default()))
+            .collect();
+    }
     let mut started: HashMap<(&'static str, String), &RunEvent> = HashMap::new();
     for event in events.iter().filter(|event| event.id <= upto) {
         if let Some(key) = start_of(event) {
@@ -226,9 +269,13 @@ pub fn jobs(
                 let from = timestamp_millis(&start?.created_at)?;
                 Some((timestamp_millis(&event.created_at)? - from) / 1000)
             });
+        let mode = (kind == "throughput_review")
+            .then(|| text(&event.payload, "mode"))
+            .flatten();
         let job = Job {
             provider,
             model,
+            mode,
             failed,
             verdict,
             secs,
@@ -245,11 +292,15 @@ pub fn jobs(
             .entry(job.model.clone())
             .or_default()
             .add(&job);
+        if let Some(mode) = &job.mode {
+            entry.by_mode.entry(mode.clone()).or_default().add(&job);
+        }
     }
     for entry in stats.values_mut() {
         entry.all.close();
         entry.by_provider.values_mut().for_each(JobGroup::close);
         entry.by_model.values_mut().for_each(JobGroup::close);
+        entry.by_mode.values_mut().for_each(JobGroup::close);
     }
     stats
 }
@@ -589,5 +640,119 @@ mod tests {
         assert_eq!(json["count"], 0);
         assert!(json.get("secs_values").is_none());
         assert_eq!(json["by_provider"], json!({}));
+    }
+
+    /// The throughput review pairs its end with its start by mode, period
+    /// and session; an hour no rule met (a skipped end) is no job; `failed`
+    /// and `error` are failures; and each mode is counted apart, listed
+    /// with no job too (task 1173).
+    #[test]
+    fn throughput_reviews_are_counted_per_mode_without_the_skipped_hours() {
+        let review = |id: i64, kind: &str, mode: &str, period: &str, extra: Value| {
+            let mut payload = json!({"mode": mode, "period": period});
+            if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+                payload.extend(extra);
+            }
+            event(id, kind, None, payload)
+        };
+        let started = event_kind::THROUGHPUT_REVIEW_STARTED;
+        let finished = event_kind::THROUGHPUT_REVIEW_FINISHED;
+        let codex = json!({"provider": "codex"});
+        let events = [
+            // An hour no rule met: no agent, no job.
+            review(
+                1,
+                finished,
+                "hourly",
+                "2026-09-29T01",
+                json!({"outcome": "skipped"}),
+            ),
+            review(
+                2,
+                started,
+                "hourly",
+                "2026-09-29T02",
+                json!({"session_id": "h2"}),
+            ),
+            // Another supervisor's review of the same hour, side by side.
+            review(
+                3,
+                started,
+                "hourly",
+                "2026-09-29T02",
+                json!({"session_id": "h2b", "launch": codex}),
+            ),
+            review(
+                4,
+                finished,
+                "hourly",
+                "2026-09-29T02",
+                json!({"session_id": "h2b", "outcome": "failed", "duration_secs": 10}),
+            ),
+            review(
+                5,
+                finished,
+                "hourly",
+                "2026-09-29T02",
+                json!({"session_id": "h2", "outcome": "succeeded", "duration_secs": 50}),
+            ),
+            event(
+                6,
+                event_kind::SESSION_CLOSED,
+                None,
+                json!({"session_id": "h2", "model": "claude-opus-5-5"}),
+            ),
+            review(
+                7,
+                started,
+                "daily",
+                "2026-09-28",
+                json!({"session_id": "d"}),
+            ),
+            review(
+                8,
+                finished,
+                "daily",
+                "2026-09-28",
+                json!({"session_id": "d", "outcome": "error", "duration_secs": 900}),
+            ),
+        ];
+        let stats = jobs(&events, EventId::new(0), EventId::new(8), |_| true);
+        let reviews = &stats["throughput_review"];
+        assert_eq!((reviews.all.count, reviews.all.failed), (3, 2));
+        assert_eq!(reviews.all.failed_rate, Some(0.667));
+        assert!(reviews.all.verdicts.is_empty());
+        assert_eq!(reviews.all.secs.total, 960);
+        assert_eq!(
+            reviews.by_mode.keys().collect::<Vec<_>>(),
+            ["daily", "hourly", "weekly"]
+        );
+        let hourly = &reviews.by_mode["hourly"];
+        assert_eq!(
+            (hourly.count, hourly.failed, hourly.failed_rate),
+            (2, 1, Some(0.5))
+        );
+        assert_eq!(
+            (hourly.secs.count, hourly.secs.total, hourly.secs.median),
+            (2, 60, Some(30))
+        );
+        let daily = &reviews.by_mode["daily"];
+        assert_eq!((daily.count, daily.failed, daily.secs.total), (1, 1, 900));
+        let weekly = &reviews.by_mode["weekly"];
+        assert_eq!((weekly.count, weekly.failed_rate), (0, None));
+        assert_eq!(reviews.by_provider["codex"].failed, 1);
+        assert_eq!(reviews.by_provider["claude"].count, 2);
+        assert_eq!(reviews.by_model["claude-opus-5-5"].count, 1);
+        assert_eq!(reviews.by_model[UNKNOWN].count, 2);
+        let json = serde_json::to_value(reviews).unwrap();
+        assert_eq!(json["by_mode"]["hourly"]["count"], 2);
+        assert_eq!(json["by_mode"]["weekly"]["count"], 0);
+        // The other kinds have no mode.
+        let json = serde_json::to_value(&stats["observer"]).unwrap();
+        assert!(json.get("by_mode").is_none(), "{json}");
+        // With no review, the modes are listed still.
+        let none = jobs(&events[..1], EventId::new(0), EventId::new(1), |_| true);
+        assert_eq!(none["throughput_review"].all.count, 0);
+        assert_eq!(none["throughput_review"].by_mode.len(), 3);
     }
 }

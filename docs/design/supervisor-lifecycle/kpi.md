@@ -105,7 +105,7 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 | `session_open.<kind>` / `session_active.<kind>` / `session_active_ratio.<kind>` | worker以外のsessionの、窓に重なった時間の合計と稼働の割合（`stats`の`sessions.by_kind`） | `all` |
 | `forecast.p50_error` / `forecast.p50_abs_error` / `forecast.p50_error_ratio` / `forecast.p90_hit_rate` / `forecast.late_rate` / `forecast.early_rate` | 完了見込みの答え合わせ（下の[完了見込みの答え合わせ](#完了見込みの答え合わせ)） | 答え合わせの層 |
 | `plan.revise_rate` / `plan.duplicate_cancels_after_ready` / `plan.follow_up_canceled_after_adoption` / `plan.task_rework_rate` / `plan.follow_up_adoption_rate` / `plan.follow_up_duplicate_rate` / `plan.follow_up_draft_secs` | 計画の品質（下の[計画の品質](#計画の品質)）。`plan.revise_rate`は`code=`の層も持つ（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | 計画の層と`code=` |
-| `job.count.<kind>` / `job.failed_rate.<kind>` / `job.secs.<kind>` / `job.verdict.<kind>.<verdict>` | worker以外のheadlessのjob（`review` / `recovery` / `plan_review` / `goal_review` / `observer`）の件数・失敗の割合・所要時間の秒・verdictごとの割合（下の[headlessのjobの系列](#headlessのjobの系列)） | `all`・`provider=`・`model=` |
+| `job.count.<kind>` / `job.failed_rate.<kind>` / `job.secs.<kind>` / `job.verdict.<kind>.<verdict>` | worker以外のheadlessのjob（`review` / `recovery` / `plan_review` / `goal_review` / `observer` / `throughput_review`）の件数・失敗の割合・所要時間の秒・verdictごとの割合（下の[headlessのjobの系列](#headlessのjobの系列)） | `all`・`provider=`・`model=`（`throughput_review`はさらに`mode=`） |
 | `review.sendback_rate` | reviewにかかったrunのうちreviseかconcernを受けたものの割合（下の[差し戻しの分類コードごとの系列](#差し戻しの分類コードごとの系列)） | `all`・`code=`・`change=` |
 
 - `drafts_per_landing`と`draft_backlog`は、期間の窓の`stats`の`draft_flow`（[draftの流入と流出](stats.md#draftの流入と流出)、`domain::stats::drafts::draft_flow`）をそのまま読むので、値は同じ窓の`stats --since --until`の`draft_flow`と一致する（期間の終わりと経過秒の起点も`stats`と同じく窓の最後のevent）。`application::kpi`が`draft_origins`を読んで`KpiInput`に渡し、`stats`と同じく出どころの記録の無い`follow_up_registered`のtaskは`follow_up`に数える。draftはrunに属さないので、`findings_open`と同じく`all`だけを出し、`--by`や`change=`の層は持たない（`--goal`は`stats`と同じくgoalのtaskだけを数える）。
@@ -155,13 +155,13 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 
 ## headlessのjobの系列
 
-goal 73（task 1066）。期間の窓の`stats`の`jobs`（[stats](stats.md#headlessのjob)）をそのまま読み、jobの種類ごとに4つのKPIを出す。ClaudeとCodexのgoal reviewを並べて比べるために、層は`all`と、jobの起動のprovider（`provider=<claude|codex>`。`launch.provider`で、無い古い記録は`claude`）と実際のmodel（`model=<model>`。jobのsessionの`session_closed`の`model`、記録の無いjobは`unknown`）で、`--change` / `--area`の層と同じく`--by`によらず常に出す。runの層の`--by provider` / `--by model`（workerの属性）とはKPIの名前で分かれる。jobはtaskの`change`・areaを持たないので`change=`・`area=`の層は持たない。`--goal`は`stats`と同じくそのgoalのjobだけを数える。
+goal 73（task 1066、スループットの見直しはtask 1173）。期間の窓の`stats`の`jobs`（[stats](stats.md#headlessのjob)）をそのまま読み、jobの種類ごとに4つのKPIを出す。ClaudeとCodexのgoal reviewを並べて比べるために、層は`all`と、jobの起動のprovider（`provider=<claude|codex>`。`launch.provider`で、無い古い記録は`claude`）と実際のmodel（`model=<model>`。jobのsessionの`session_closed`の`model`、記録の無いjobは`unknown`）で、`--change` / `--area`の層と同じく`--by`によらず常に出す。スループットの見直し（`throughput_review`。[スループットの見直し](throughput-review.md)）の`job.count` / `job.failed_rate` / `job.secs`は、さらに`stats`の`by_mode`から`mode=<hourly|daily|weekly>`の層を持つ（3つのmodeを記録が0でも出す。毎時と日次・週次では所要時間の桁が違い、費用を見たいのは毎時なので分ける。見直しはverdictを持たないので`job.verdict`は出ない）。runの層の`--by provider` / `--by model`（workerの属性）とはKPIの名前で分かれる。jobはtaskの`change`・areaを持たないので`change=`・`area=`の層は持たない。`--goal`は`stats`と同じくそのgoalのjobだけを数える（observerとthroughput_reviewは0）。
 
-- `job.count.<kind>`: 期間に終わったjobの数（失敗を含む。数えるKPI）。良い向きは持たない。記録が0でも5つの種類の`all`を出す
+- `job.count.<kind>`: 期間に終わったjobの数（失敗を含む。数えるKPI）。良い向きは持たない。記録が0でも6つの種類の`all`を出す
 - `job.failed_rate.<kind>`: `failed ÷ count`。`n`は`count`。良い向きは小さい
 - `job.secs.<kind>`: jobの所要時間の秒の分布（`median`・`p90`・`min`・`max`）。良い向きは小さい
 - `job.verdict.<kind>.<verdict>`: verdictを返したjob（`stats`の`verdicts`の合計）のうちそのverdictだった割合。`n`はverdictを返したjobの数。その層に1件も無いverdictの層は出さない。良い向きは持たない（verdictの分布を比べる値）
-- `details.jobs`: 同じ窓の`stats`の`jobs`の写し（`by_provider`・`by_model`の件数・`verdicts`）
+- `details.jobs`: 同じ窓の`stats`の`jobs`の写し（`by_provider`・`by_model`・`throughput_review`の`by_mode`の件数・`verdicts`）
 
 ## 差し戻しの分類コードごとの系列
 

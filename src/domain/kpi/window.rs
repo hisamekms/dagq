@@ -780,7 +780,8 @@ impl<'a> Context<'a> {
 
         // The headless jobs other than the worker's (goal 73), as `stats`'
         // `jobs` counts them: per kind, over all of them and per provider
-        // and model, so that the providers' jobs compare side by side.
+        // and model (and the throughput review's per mode), so that the
+        // providers' jobs compare side by side.
         for (kind, jobs) in &stats.jobs {
             let groups = std::iter::once((ALL.to_owned(), &jobs.all))
                 .chain(
@@ -792,6 +793,12 @@ impl<'a> Context<'a> {
                     jobs.by_model
                         .iter()
                         .map(|(model, group)| (format!("model={model}"), group)),
+                )
+                // The throughput review's per mode (task 1173).
+                .chain(
+                    jobs.by_mode
+                        .iter()
+                        .map(|(mode, group)| (format!("mode={mode}"), group)),
                 );
             for (stratum, group) in groups {
                 let count = usize::try_from(group.count).unwrap_or(0);

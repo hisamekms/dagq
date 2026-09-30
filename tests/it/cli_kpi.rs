@@ -640,3 +640,99 @@ fn a_target_bound_by_kind_is_refused_with_its_replacement() {
         "{error}"
     );
 }
+
+/// The throughput review's jobs (task 1173) reach `stats --full` and `kpi`
+/// per mode: a skipped hour is no job, `failed` and `error` are failures,
+/// a mode without a job is listed too, and `--compare` reads them.
+#[test]
+fn the_throughput_review_jobs_reach_stats_and_kpi_per_mode() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    ok(&db, &["goal", "add", "a goal"]);
+    let mark = ok(&db, &["mark", "hourly agent"])["id"].as_i64().unwrap();
+    let queue = SqliteQueue::open(&db).unwrap();
+    let record = |kind: EventKind, mode: &str, period: &str, extra: Value| {
+        let mut payload = json!({"mode": mode, "period": period});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        queue.record_queue_event(kind, payload).unwrap();
+    };
+    let finished = EventKind::ThroughputReviewFinished;
+    let started = EventKind::ThroughputReviewStarted;
+    record(
+        finished,
+        "hourly",
+        "2026-09-29T01",
+        json!({"outcome": "skipped"}),
+    );
+    for (mode, period, session, outcome, secs) in [
+        ("hourly", "2026-09-29T02", "h2", "succeeded", 40),
+        ("hourly", "2026-09-29T03", "h3", "failed", 20),
+        ("daily", "2026-09-28", "d", "error", 900),
+    ] {
+        record(
+            started,
+            mode,
+            period,
+            json!({"session_id": session, "launch": {"provider": "claude"}}),
+        );
+        record(
+            finished,
+            mode,
+            period,
+            json!({"session_id": session, "outcome": outcome, "duration_secs": secs}),
+        );
+    }
+
+    let jobs = &ok(&db, &["stats", "--full"])["jobs"]["throughput_review"];
+    assert_eq!(jobs["count"], 3, "{jobs}");
+    assert_eq!(jobs["failed"], 2, "{jobs}");
+    assert_eq!(jobs["failed_rate"], 0.667, "{jobs}");
+    assert_eq!(jobs["by_provider"]["claude"]["count"], 3, "{jobs}");
+    assert_eq!(jobs["by_model"]["unknown"]["count"], 3, "{jobs}");
+    let hourly = &jobs["by_mode"]["hourly"];
+    assert_eq!(
+        (&hourly["count"], &hourly["failed"], &hourly["failed_rate"]),
+        (&json!(2), &json!(1), &json!(0.5)),
+        "{jobs}"
+    );
+    assert_eq!(hourly["secs"]["total"], 60, "{jobs}");
+    assert_eq!(jobs["by_mode"]["daily"]["secs"]["total"], 900, "{jobs}");
+    assert_eq!(jobs["by_mode"]["weekly"]["count"], 0, "{jobs}");
+    // A goal has none of the queue's reviews.
+    let goal = &ok(&db, &["stats", "--goal", "1", "--full"])["jobs"]["throughput_review"];
+    assert_eq!(goal["count"], 0, "{goal}");
+
+    let report = kpi_ok(&db, &config, &["--last", "1"]);
+    let kpis = &report["periods"][0]["kpis"];
+    let count = &kpis["job.count.throughput_review"];
+    for (stratum, value) in [
+        ("all", 3.0),
+        ("provider=claude", 3.0),
+        ("model=unknown", 3.0),
+        ("mode=hourly", 2.0),
+        ("mode=daily", 1.0),
+        ("mode=weekly", 0.0),
+    ] {
+        assert_eq!(count[stratum]["value"], value, "{stratum}: {count}");
+    }
+    assert_eq!(
+        kpis["job.failed_rate.throughput_review"]["mode=hourly"]["value"],
+        0.5
+    );
+    assert_eq!(
+        kpis["job.secs.throughput_review"]["mode=daily"]["median"],
+        900.0
+    );
+
+    let compared = kpi_ok(
+        &db,
+        &config,
+        &["--last", "1", "--compare", &mark.to_string()],
+    );
+    let strata = &compared["compare"]["strata"]["job.count.throughput_review"];
+    assert_eq!(strata["mode=hourly"]["after"]["value"], 2.0, "{strata}");
+    assert_eq!(strata["mode=hourly"]["before"]["value"], 0.0, "{strata}");
+}

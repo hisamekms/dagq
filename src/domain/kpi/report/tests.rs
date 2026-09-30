@@ -630,9 +630,9 @@ fn a_report_shows_the_host_cpu_per_landing() {
     );
 }
 
-/// The headless jobs of the period (goal 73) per kind and per provider:
-/// how many, the share failed, the median time and the share of each
-/// verdict; no section when no job ran.
+/// The headless jobs of the period (goal 73) per kind and per provider
+/// (and the throughput review's per mode): how many, the share failed, the
+/// median time and the share of each verdict; no section when no job ran.
 #[test]
 fn a_report_shows_the_headless_jobs_per_provider() {
     use crate::domain::kpi::Measure;
@@ -660,8 +660,31 @@ fn a_report_shows_the_headless_jobs_per_provider() {
             Measure::ratio(achieved, count - usize::from(failed > 0.0)),
         );
     }
+    for (stratum, count, failed, secs) in [
+        ("all", 3, 1.0, vec![40, 50, 900]),
+        ("mode=hourly", 2, 1.0, vec![40, 50]),
+        ("mode=daily", 1, 0.0, vec![900]),
+        ("mode=weekly", 0, 0.0, vec![]),
+    ] {
+        let mut put = |name: &str, measure: Measure| {
+            kpis.entry(name.to_owned())
+                .or_default()
+                .insert(stratum.to_owned(), measure);
+        };
+        put("job.count.throughput_review", Measure::count(count));
+        put(
+            "job.failed_rate.throughput_review",
+            Measure::ratio(failed, count),
+        );
+        put("job.secs.throughput_review", Measure::secs(secs));
+    }
     let html = render_html(&report);
     assert!(html.contains("<h2>Headless jobs</h2>"), "{html}");
+    // The throughput review per mode, a mode without a job left out.
+    assert!(html.contains(
+        "<tr><td><code>throughput_review</code></td><td>mode=hourly</td><td class=\"num\">2</td><td class=\"num\">50.0%</td>"
+    ), "{html}");
+    assert!(html.contains("<td>mode=daily</td><td class=\"num\">1</td>"));
     assert!(html.contains(
         "<tr><td><code>goal_review</code></td><td>codex</td><td class=\"num\">2</td><td class=\"num\">50.0%</td><td class=\"num\">1m 00s</td><td>achieved 100.0%</td></tr>"
     ), "{html}");
@@ -672,4 +695,5 @@ fn a_report_shows_the_headless_jobs_per_provider() {
     let kpis = html.find("<h2>KPIs of").unwrap();
     assert!(jobs < kpis);
     assert!(!html[jobs..kpis].contains("model="));
+    assert!(!html[jobs..kpis].contains("mode=weekly"));
 }

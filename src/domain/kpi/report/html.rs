@@ -448,9 +448,9 @@ fn host_cpu(page: &mut String, period: &PeriodKpis) {
 }
 
 /// The headless jobs of the period (goal 73), per kind and per provider
-/// they ran on: how many, the share failed, the median time and the share
-/// of each verdict. Kinds without a job are left out, and so is the section
-/// when no job ran.
+/// they ran on (and the throughput review's per mode, task 1173): how many,
+/// the share failed, the median time and the share of each verdict. Kinds
+/// without a job are left out, and so is the section when no job ran.
 fn jobs(page: &mut String, period: &PeriodKpis) {
     let kpis = &period.window.kpis;
     let mut rows = String::new();
@@ -460,7 +460,10 @@ fn jobs(page: &mut String, period: &PeriodKpis) {
         };
         let verdict_prefix = format!("job.verdict.{kind}.");
         for (stratum, count) in counts.iter().filter(|(stratum, count)| {
-            (stratum.as_str() == ALL || stratum.starts_with("provider=")) && count.n > 0
+            (stratum.as_str() == ALL
+                || stratum.starts_with("provider=")
+                || stratum.starts_with("mode="))
+                && count.n > 0
         }) {
             let get = |kpi: &str| kpis.get(kpi).and_then(|strata| strata.get(stratum));
             let failed = format!("job.failed_rate.{kind}");
@@ -488,7 +491,7 @@ fn jobs(page: &mut String, period: &PeriodKpis) {
     if rows.is_empty() {
         return;
     }
-    page.push_str("<h2>Headless jobs</h2><div class=\"scroll\"><table><tr><th>job</th><th>provider</th><th class=\"num\">jobs</th><th class=\"num\">failed</th><th class=\"num\">median</th><th>verdicts</th></tr>");
+    page.push_str("<h2>Headless jobs</h2><div class=\"scroll\"><table><tr><th>job</th><th>provider / mode</th><th class=\"num\">jobs</th><th class=\"num\">failed</th><th class=\"num\">median</th><th>verdicts</th></tr>");
     page.push_str(&rows);
     page.push_str("</table></div>");
 }
