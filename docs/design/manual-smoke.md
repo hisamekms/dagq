@@ -274,6 +274,8 @@ env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
 
 結論: overage で賄える状態では `status: rejected` が出うる（`isUsingOverage: true` を伴う）。今の読み手（`ClaudeTurnReader::line`）は `status == "rejected"` だけで `usage_limit` にして turn を止めるので、その状態では誤って止める。`isUsingOverage` か `overageInUse` が真なら止めない、という runtime の修正を receipt の follow_up にした。実物の stream では確かめていないので、次に確かめる手順を残す。
 
+読み手の修正（task 1153）: `ClaudeTurnReader::line` は `rate_limit_event` の `status: rejected` でも `isUsingOverage` か `overageInUse` が真なら turn を止めないようにした（CLI 自身の条件に合わせた）。実物の stream での確認は下の手順のまま残る。
+
 次に上限に当たったときの手順:
 
 1. 非対話の Claude の run の `turns/turn-NNNNNN.jsonl` が stream の全体を持つ。`turn_finished` の `failure` が `usage_limit` になった run があれば、その file を scratch に写して残す（run dir は後始末で消えうる）。

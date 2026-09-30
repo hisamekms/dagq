@@ -166,6 +166,13 @@ impl ClaudeTurnReader {
     }
 }
 
+/// Whether a `rate_limit_event` stops the turn: the condition Claude Code
+/// (2.1.285) itself uses. A `rejected` window paid for by overage comes with
+/// `isUsingOverage` or `overageInUse` true, and the turn goes on.
+fn usage_limit_hit(info: &Value) -> bool {
+    info["status"] == "rejected" && info["isUsingOverage"] != true && info["overageInUse"] != true
+}
+
 impl TurnReader for ClaudeTurnReader {
     fn line(&mut self, line: &str) -> Vec<TurnSignal> {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
@@ -174,7 +181,7 @@ impl TurnReader for ClaudeTurnReader {
         match event["type"].as_str() {
             Some("system") => self.system(&event),
             Some("assistant") => self.assistant(&event),
-            Some("rate_limit_event") if event["rate_limit_info"]["status"] == "rejected" => {
+            Some("rate_limit_event") if usage_limit_hit(&event["rate_limit_info"]) => {
                 let info = &event["rate_limit_info"];
                 let message = format!(
                     "the {} usage limit was hit (resets at {})",
@@ -397,6 +404,42 @@ mod tests {
         let result = ClaudeTurnReader::default().finish(None, "");
         assert_eq!(result.model, None);
         assert!(result.model_unknown.unwrap().contains("no model"));
+    }
+
+    #[test]
+    fn a_rejected_window_paid_for_by_overage_does_not_stop_the_turn() {
+        for info in [
+            json!({"status": "rejected", "rateLimitType": "five_hour", "isUsingOverage": true, "overageStatus": "allowed"}),
+            json!({"status": "rejected", "rateLimitType": "five_hour", "overageInUse": true}),
+            json!({"status": "allowed_warning", "rateLimitType": "seven_day", "isUsingOverage": false}),
+        ] {
+            let (mut reader, signals) = read(&[
+                init("auto"),
+                json!({"type": "rate_limit_event", "rate_limit_info": info}),
+                json!({"type": "result", "is_error": false, "session_id": "s"}),
+            ]);
+            assert!(
+                !signals
+                    .iter()
+                    .any(|signal| matches!(signal, TurnSignal::Unusable(..))),
+                "{info}: {signals:?}"
+            );
+            let result = reader.finish(Some(&exit(0)), "");
+            assert!(!result.is_error, "{info}");
+            assert_eq!(result.failure, None, "{info}");
+        }
+        let (mut reader, signals) = read(&[
+            init("auto"),
+            json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "seven_day", "isUsingOverage": false, "overageInUse": false, "overageStatus": "rejected", "overageDisabledReason": "out_of_credits"}}),
+        ]);
+        assert!(matches!(
+            signals.last(),
+            Some(TurnSignal::Unusable(TurnFailure::UsageLimit, message)) if message.contains("seven_day")
+        ));
+        assert_eq!(
+            reader.finish(None, "").failure,
+            Some(TurnFailure::UsageLimit)
+        );
     }
 
     #[test]
