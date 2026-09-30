@@ -57,6 +57,9 @@ jobs:
       - name: Test file lines
         run: sh scripts/check-test-file-lines.sh
 
+      - name: E2E quarantine marks
+        run: sh scripts/check-e2e-quarantine.sh
+
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

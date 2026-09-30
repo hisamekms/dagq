@@ -1,0 +1,22 @@
+# The marks of the e2e gate (ADR-t1165-1). The gate that runs the whole e2e
+# before the fixed binary is replaced (auto-update and install) reruns a
+# failed e2e once by name; a test that fails the rerun too passes the gate
+# only when it has a mark here that holds. The format and the rules are in
+# docs/design/supervisor-lifecycle/auto-update.md, and the rules for putting
+# and taking off a mark in AGENTS.md. `sh scripts/check-e2e-quarantine.sh`
+# checks this file (CI runs it).
+#
+# Each mark is one [[test]] with all four keys:
+#
+# [[test]]
+# name = "up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes"
+# reason = "why the test is flaky and how often it failed the gate"
+# task = 1120          # the task that fixes the test
+# until = 2026-10-14   # the last day the mark holds (host-local date)
+#
+# A test of a module under tests/e2e/ is named with its module path, as cargo
+# prints it: broker::a_preferred_worker_does_its_task_through_the_broker_and_lands.
+# At most 3 marks; with more, the gate holds none.
+#
+# No marks now. The first planned mark (the test above, fixed by task 1120)
+# was not put: task 1120 had landed before this file was written.
