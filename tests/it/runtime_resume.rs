@@ -2200,3 +2200,61 @@ fn resumes_after_kills_from_outside_are_not_counted_and_stop_at_their_own_limit(
     // The next kill finds the kill-only resumes used up.
     assert!(kill_and_resume(&mut queue).unwrap().is_none());
 }
+
+#[test]
+fn no_claude_leaves_an_old_claude_resume_for_manual_recovery() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        no_claude: true,
+        ..supervise_options(1, true)
+    };
+    runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &dir.path().join("missing-claude"),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(run.task_id()).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert!(reviewer.prompts().is_empty());
+    // A live registration makes the manual policy and this run's next step visible.
+    let token = LeaseToken::new("no-claude-status");
+    queue
+        .register_supervisor(&token, std::process::id(), 1, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_providers(
+            &token,
+            &[dagq::domain::worker::ProviderCheck {
+                provider: dagq::domain::Provider::Claude,
+                executable: "missing".into(),
+                found: false,
+                error: Some("provider_disabled".into()),
+                modes: vec![],
+            }],
+        )
+        .unwrap();
+    let status = runtime::status(&db).unwrap();
+    assert_eq!(
+        run_attention_of(&status, run.id()).unwrap()["next"],
+        "recover by hand"
+    );
+    assert!(
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "provider_disabled")
+    );
+}

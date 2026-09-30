@@ -532,6 +532,9 @@ enum Command {
     },
     /// Run and monitor tasks in parallel until interrupted. Run this in a dedicated terminal.
     Supervise {
+        /// Never start Claude. Run workers on Codex and handle unsupported roles manually.
+        #[arg(long)]
+        no_claude: bool,
         /// Checkout of the repository whose `main` becomes the base commit;
         /// defaults to the working directory.
         #[arg(long)]
@@ -810,6 +813,9 @@ enum Command {
     },
     /// Start the queue's runtime: a launchd-resident supervisor and the inbox's cmux workspace. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no planner (`plan` does) and forgets the resident planner's record.
     Up {
+        /// Never start Claude. Run workers on Codex and handle unsupported roles manually.
+        #[arg(long)]
+        no_claude: bool,
         /// Maximum number of runs the supervisor executes at once. Passed
         /// to the supervisor only when given; without it, `parallel` of
         /// `[supervisor]` in the main checkout's dagq.toml, else 4.
@@ -2847,6 +2853,7 @@ fn execute(cli: Cli) -> Result<Value> {
             },
         )?,
         Command::Supervise {
+            no_claude,
             repo,
             parallel,
             max_waiting,
@@ -2883,6 +2890,7 @@ fn execute(cli: Cli) -> Result<Value> {
             use dagq::infrastructure::adapters::{Cmux, executable};
             let cmux = executable(&cmux)?;
             let mut options = SuperviseOptions {
+                no_claude,
                 stop: install_stop_signal()?,
                 // A one-shot pass observes only when asked to.
                 observe_interval: Duration::from_secs(observe_interval.unwrap_or(if once {
@@ -2943,12 +2951,17 @@ fn execute(cli: Cli) -> Result<Value> {
                 &db,
                 &checkout(repo),
                 &Cmux { executable: cmux },
-                &executable(&claude)?,
+                &if no_claude {
+                    claude
+                } else {
+                    executable(&claude)?
+                },
                 &env::current_exe()?,
                 &options,
             )?
         }
         Command::Up {
+            no_claude,
             parallel,
             max_waiting,
             runtime_planners,
@@ -2988,6 +3001,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 restart: env::var_os(dagq::lifecycle::UP_RESTART_ENV).is_some(),
             };
             let options = UpOptions {
+                no_claude,
                 parallel,
                 max_waiting,
                 runtime_planners,
@@ -2996,7 +3010,11 @@ fn execute(cli: Cli) -> Result<Value> {
                 no_wait,
                 plugin_dir,
                 cmux: executable(&cmux)?,
-                claude: executable(&claude)?,
+                claude: if no_claude {
+                    claude
+                } else {
+                    executable(&claude)?
+                },
                 codex: dagq::infrastructure::codex::executable(&codex).unwrap_or(codex),
                 startup_timeout: Duration::from_secs(30),
                 handoff_timeout: Duration::from_secs(handoff_timeout),

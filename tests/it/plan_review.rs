@@ -2819,3 +2819,47 @@ fn a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
     assert_eq!(ask.kind, AskKind::ApprovePlan);
     assert_eq!(ask.asked_by, "plan_review");
 }
+
+#[test]
+fn no_claude_plan_review_waits_for_manual_handling_and_opens_no_planner() {
+    let mut fx = fixture();
+    crate::runtime_support::open_hold_ask(&fx.db, dagq::domain::AskReason::Authentication, None);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(
+        &mut queue,
+        "manual plan",
+        &[TaskId::new(1)],
+        Priority::Normal,
+    );
+    let proposal = submit(&mut queue, &[task], None);
+    fx.claude = fx.repo.join("missing-claude");
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    let opts = SuperviseOptions {
+        no_claude: true,
+        codex: fx.repo.join("missing-codex"),
+        observe_interval: Duration::from_secs(1),
+        observe_daily: true,
+        throughput_review: true,
+        ..options(1, Duration::from_secs(3600))
+    };
+    supervise_with(&fx, &backend, &reviewer, &opts);
+    assert!(reviewer.prompts().is_empty());
+    assert!(backend.opened().is_empty());
+    assert!(backend.texts().is_empty());
+    let failed = events(&mut queue, task, "plan_review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("provider_disabled")
+    );
+    assert_eq!(
+        queue.show_proposal(proposal).unwrap().status(),
+        ProposalStatus::Submitted
+    );
+    // No failed-provider timer causes this policy to be retried on each pass.
+    supervise_with(&fx, &backend, &reviewer, &opts);
+    assert_eq!(events(&mut queue, task, "plan_review_failed").len(), 1);
+}

@@ -29,6 +29,9 @@ impl Supervisor<'_> {
     /// queue's open hold ask or its [`ProviderHold`] (an agent that did not
     /// start), Codex by its [`ProviderHold`].
     pub(super) fn provider_held(&self, provider: Provider) -> Option<SwitchReason> {
+        if self.no_claude && provider == Provider::Claude {
+            return Some(SwitchReason::Disabled);
+        }
         let own = self
             .provider_holds
             .iter()
@@ -285,10 +288,16 @@ impl Supervisor<'_> {
         reason: SwitchReason,
         to: Provider,
     ) -> Result<Option<Wall>> {
+        if self.no_claude {
+            // Codex retains its own real hold; do not describe it as a Claude queue hold.
+            return Ok(None);
+        }
         let wall_of = |reason: SwitchReason| match reason {
             SwitchReason::UsageLimit => Some(Wall::UsageLimit),
             SwitchReason::Authentication => Some(Wall::Authentication),
-            SwitchReason::LaunchFailed | SwitchReason::ExecutableMissing => None,
+            SwitchReason::Disabled
+            | SwitchReason::LaunchFailed
+            | SwitchReason::ExecutableMissing => None,
         };
         if from == Provider::Claude && reason != SwitchReason::LaunchFailed {
             return Ok(wall_of(reason));
@@ -389,7 +398,9 @@ impl Supervisor<'_> {
             SwitchReason::UsageLimit => Wall::UsageLimit,
             SwitchReason::Authentication => Wall::Authentication,
             // An agent that did not start is no wall a person moves.
-            SwitchReason::LaunchFailed | SwitchReason::ExecutableMissing => return Ok(()),
+            SwitchReason::Disabled
+            | SwitchReason::LaunchFailed
+            | SwitchReason::ExecutableMissing => return Ok(()),
         };
         let (outcome, _) = ask::hold(
             &mut *self.queue,

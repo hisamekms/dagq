@@ -378,3 +378,32 @@ fn a_goal_review_runs_on_codex_while_claudes_hold_ask_is_open() {
     assert_eq!(asks.len(), 1);
     assert_eq!(asks[0].answer, None, "the ask is still open");
 }
+
+#[test]
+fn no_claude_goal_review_runs_on_codex_and_never_falls_back() {
+    for mode in ["ok", "auth", "missing"] {
+        let mut fx = fixture();
+        roles(&fx, "[roles.goal_review]\nprovider = 'codex'\n");
+        let (goal, _) = goal_done(&fx);
+        let codex = if mode == "missing" {
+            fx.repo.join("missing-codex")
+        } else {
+            stub_codex(&fx, mode, &achieved("done"))
+        };
+        fx.claude = fx.repo.join("missing-claude");
+        let reviewer = StubReviewer::new(&[achieved("must never run")]);
+        let mut opts = options(1, Duration::from_secs(3600));
+        opts.no_claude = true;
+        opts.codex = codex;
+        opts.codex_home = Some(codex_home(&fx));
+        supervise_with(&fx, &PlanWorkspace::default(), &reviewer, &opts);
+        assert!(reviewer.prompts().is_empty());
+        let mut queue = SqliteQueue::open(&fx.db).unwrap();
+        let started = goal_events(&mut queue, goal, "goal_review_started");
+        assert_eq!(started.len(), usize::from(mode != "missing"));
+        for event in started {
+            assert_eq!(event["launch"]["provider"], "codex");
+        }
+        assert!(queue.asks(Default::default()).unwrap().is_empty());
+    }
+}

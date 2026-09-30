@@ -959,6 +959,16 @@ replaced, and `up` starts the old binary again"
                 source.is_none_or(|source| source == SettingSource::Flag)
             };
             let mut arguments = vec!["--db".to_owned(), path_text(db)?, "up".to_owned()];
+            if live
+                .iter()
+                .any(|registration| registration.claude_disabled())
+                && !options
+                    .restart
+                    .iter()
+                    .any(|argument| argument == "--no-claude")
+            {
+                arguments.push("--no-claude".into());
+            }
             if flagged(drained.parallel_source) {
                 arguments.extend(["--parallel".to_owned(), drained.parallel.to_string()]);
             }

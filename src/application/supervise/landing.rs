@@ -155,6 +155,19 @@ impl Supervisor<'_> {
             Some(_) => session_alive(self, run.id())?,
             None => false,
         };
+        if self.no_claude {
+            (self.review_material)(run.task_id())?;
+            return Ok(Phase::Exiting(ExitWatch::new(
+                session,
+                AfterExit::ReviewFailed {
+                    attempt,
+                    error: "provider_disabled: Claude is disabled by --no-claude; review manually"
+                        .into(),
+                    duration_secs: 0,
+                    output: None,
+                },
+            )));
+        }
         // The job's Claude session id (ADR-0048 decision 4).
         let session_id = self.generators.ids.uuid();
         let launch = self.actor_launch(ModelRole::Review);
@@ -731,6 +744,13 @@ impl Supervisor<'_> {
             run.id(),
             run.task_id(),
         );
+        if self.no_claude {
+            question = format!(
+                "provider_disabled: Claude is disabled by --no-claude. No review agent ran for run {} (task {}); review it manually.",
+                run.id(),
+                run.task_id()
+            );
+        }
         if let Some(run_dir) = &run.run_dir() {
             question.push_str(&format!("\nReview material: {run_dir}/review.md"));
             match output {

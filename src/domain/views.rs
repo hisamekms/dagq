@@ -286,6 +286,16 @@ pub struct SupervisorRegistration {
 }
 
 impl SupervisorRegistration {
+    /// An explicit provider policy, distinct from missing executables and timed holds.
+    pub fn claude_disabled(&self) -> bool {
+        self.providers.as_ref().is_some_and(|providers| {
+            providers.iter().any(|p| {
+                p.provider == super::Provider::Claude
+                    && p.error.as_deref() == Some("provider_disabled")
+            })
+        })
+    }
+
     /// `--parallel N`, `--max-waiting N` and `--runtime-planners N` for an
     /// `up` that starts this supervisor again: each value it took from a
     /// flag, or that a registration of an older binary recorded without a
@@ -297,6 +307,9 @@ impl SupervisorRegistration {
             source.is_none_or(|source| source == SettingSource::Flag)
         };
         let mut arguments = Vec::new();
+        if self.claude_disabled() {
+            arguments.push("--no-claude".into());
+        }
         if flagged(self.parallel_source) {
             arguments.extend(["--parallel".to_owned(), self.parallel.to_string()]);
         }

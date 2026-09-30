@@ -838,6 +838,19 @@ pub fn attention(
     control: &dyn ProcessControl,
 ) -> Result<Vec<Attention>> {
     let mut attention = supervisor_attention(&pulses(registrations, now, control));
+    let no_claude = registrations.iter().any(|r| {
+        !crate::domain::SupervisorPulse::judge(r, control.alive(r.pid), now).stale
+            && r.claude_disabled()
+    });
+    if no_claude {
+        attention.push(Attention {
+            run_id: None, task_id: None, pid: None, ask_id: None, reason_category: None,
+            status: "manual".into(), kind: "provider_disabled".into(),
+            last_error: Some("Claude is disabled by --no-claude: use a manual inbox and planner; handle review, plan review, recovery, observer and throughput review manually. Workers wait when Codex is unavailable; Claude workers from earlier runs must be recovered manually.".into()),
+            last_error_code: None, next: AttentionNext::ManualRoles,
+        });
+    }
+
     // A headless job that failed at a login or the usage limit waits in
     // the hold ask that lists it, which is the attention (task 438).
     let asks = queue.asks(AskQuery::default())?;
@@ -907,7 +920,7 @@ pub fn attention(
             });
             continue;
         }
-        let Some((next, kind)) =
+        let Some((mut next, kind)) =
             run_attention_of(&RunHistory::from_events(&events), run.status(), leased)
         else {
             continue;
@@ -915,6 +928,12 @@ pub fn attention(
         if matches!(next, AttentionNext::TriageByHand) && held(HoldJob::Recovery(run.id().clone()))
         {
             continue;
+        }
+        if no_claude
+            && run.actual_provider() == crate::domain::Provider::Claude
+            && next == AttentionNext::Resuming
+        {
+            next = AttentionNext::RecoverByHand;
         }
         let kind = kind.unwrap_or(run.status().as_str()).to_owned();
         attention.push(Attention {

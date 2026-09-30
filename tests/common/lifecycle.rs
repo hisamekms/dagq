@@ -103,6 +103,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             restart: false,
         },
         options: UpOptions {
+            no_claude: false,
             parallel: Some(2),
             max_waiting: None,
             runtime_planners: None,

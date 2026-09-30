@@ -195,6 +195,8 @@ impl ObserveMode {
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
 #[derive(Debug, Clone)]
 pub struct LoopSettings {
+    /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
+    pub no_claude: bool,
     /// Upper bound on runs executing at once (`parallel`), on the runs
     /// waiting for a person outside the slots (`max_waiting`, ADR-0062
     /// decision 7; zero keeps every run in its slot), and on the planners
@@ -503,11 +505,37 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         .get(Worker::DEFAULT)
         .context("no adapters for the interactive Claude worker")?;
     for worker in ports.workers.workers() {
+        if settings.no_claude && worker.provider == crate::domain::Provider::Claude {
+            continue;
+        }
         if let Some(adapter) = ports.workers.get(worker) {
             adapter.agent.preflight()?;
         }
     }
     let mut queue = ports.queues.open()?;
+    for registration in queue.supervisors()? {
+        if ports.processes.alive(registration.pid) {
+            ensure!(
+                registration.claude_disabled() == settings.no_claude,
+                "the live supervisor has a different --no-claude policy; drain it before switching"
+            );
+        }
+    }
+    if settings.no_claude {
+        for run in queue.latest_runs_in_progress()? {
+            if run.actual_provider() == crate::domain::Provider::Claude {
+                ensure!(
+                    !queue
+                        .processes(run.id())?
+                        .iter()
+                        .any(|p| p.exited_at.is_none() && ports.processes.alive(p.pid)),
+                    "Claude run {} is still alive; drain it before --no-claude",
+                    run.id()
+                );
+            }
+        }
+    }
+
     queue.bind_repository(&path_text(&layout.common_dir)?)?;
     let parallel = u32::try_from(settings.limits.parallel.value)
         .context("parallel does not fit a registration")?;
@@ -576,6 +604,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
                 .or(registration.as_ref().and_then(|r| r.mode))
                 .map(|mode| mode.as_str()),
             "auto_update": registration.as_ref().is_some_and(|r| r.auto_update),
+            "no_claude": settings.no_claude,
             "handoff": settings.handoff_token.is_some(),
             "previous_version": previous_version,
         }),
@@ -592,6 +621,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         ports.load_average,
     );
     let mut supervisor = Supervisor {
+        no_claude: settings.no_claude,
         queue,
         queues: ports.queues.clone(),
         layout,
@@ -602,7 +632,12 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
         signals: interactive.signals,
-        workers: ports.workers.workers(),
+        workers: ports
+            .workers
+            .workers()
+            .into_iter()
+            .filter(|w| !settings.no_claude || w.provider != crate::domain::Provider::Claude)
+            .collect(),
         spawner: ports.spawner,
         files: ports.files.clone(),
         processes: ports.processes.clone(),
@@ -704,6 +739,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
 type ProcessSample = (SystemTime, Vec<crate::domain::recovery::ProcessInfo>);
 
 struct Supervisor<'a> {
+    no_claude: bool,
     queue: Box<dyn Queue + Send>,
     /// A connection for each thread beside the loop.
     queues: Arc<dyn QueueOpener>,
@@ -1226,15 +1262,17 @@ impl Supervisor<'_> {
             // An inbox without a watcher is woken while asks wait for it
             // (ADR-t906-1 decision 1 (3)), draining or not: a drain waits
             // for their answers.
-            self.inbox_nudge_pass();
+            if !self.no_claude {
+                self.inbox_nudge_pass();
+            }
             // Reaped on every pass, started only by a supervisor at work that
             // no login or usage limit holds.
             self.throughput_review_pass(
                 options,
-                !stopping && self.claiming && self.queue_hold.is_none(),
+                !self.no_claude && !stopping && self.claiming && self.queue_hold.is_none(),
             );
             if !stopping && self.claiming {
-                if self.queue_hold.is_none() {
+                if !self.no_claude && self.queue_hold.is_none() {
                     self.start_observer_when_due(options);
                 }
                 self.auto_update_pass(options);
@@ -2527,7 +2565,7 @@ impl Supervisor<'_> {
                             }
                         };
                         let mut payload = json!({
-                            "code": ReasonCode::JobFailed,
+                            "code": if self.no_claude { "provider_disabled" } else { ReasonCode::JobFailed.as_str() },
                             "attempt": attempt,
                             "error": error,
                             "duration_secs": duration_secs,

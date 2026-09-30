@@ -295,3 +295,54 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
     assert_eq!(finished["message"], "committed e2e.txt");
     wait_until_not_listed(cmux, &pass.workspaces[0].1);
 }
+
+/// The production CLI flag through real cmux: no Claude executable is
+/// present, a default (interactive Claude) task runs on Codex, and its
+/// lease is released so a person's integration can land the receipt.
+#[test]
+#[ignore = "needs a running cmux; run with --ignored"]
+fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
+    let fixture = fixture();
+    let Fixture {
+        cmux, env, stub, ..
+    } = &fixture;
+    let codex = stub.with_file_name("codex-stub");
+    fs::write(&codex, CODEX_STUB).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_file(stub).unwrap();
+    let task_id = dagq(
+        env,
+        &[
+            "add",
+            "e2e manual landing",
+            "--description",
+            "Add e2e.txt to the worktree.",
+            "--acceptance",
+            "e2e.txt is committed",
+            "--verify",
+            "test -f e2e.txt",
+        ],
+    )["id"]
+        .to_string();
+    dagq(env, &["ready", &task_id, "--bypass-review"]);
+    let mut guard = WorkspaceGuard {
+        cmux: cmux.clone(),
+        ids: Vec::new(),
+    };
+    let pass = supervise_once(
+        &fixture,
+        &["--no-claude", "--codex", codex.to_str().unwrap()],
+        &[&task_id],
+        &mut guard,
+    );
+    assert_eq!(pass.outcome["errors"], json!([]), "{}", pass.outcome);
+    let detail = dagq(env, &["show", &task_id, "--full"]);
+    assert_eq!(detail["runs"][0]["status"], "awaiting_integration");
+    assert_eq!(detail["runs"][0]["actual_provider"], "codex");
+    let events = detail["events"].as_array().unwrap();
+    assert!(!events.iter().any(|e| e["kind"] == "review_started"));
+    let landed = dagq(env, &["integrate", &task_id]);
+    assert_eq!(landed["outcome"], "integrated", "{landed}");
+    wait_until_not_listed(cmux, &pass.workspaces[0].1);
+}

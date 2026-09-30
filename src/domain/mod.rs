@@ -1460,6 +1460,8 @@ pub const HEARTBEAT_TIMEOUT_SECS: i64 = 30;
 /// Consequences), so neither has a value of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionNext {
+    /// Roles disabled by an explicit operator policy need manual handling.
+    ManualRoles,
     ReviewAndIntegrate,
     RestartSupervisor,
     PushMain,
@@ -1585,6 +1587,7 @@ pub const MAX_RESUME_ATTEMPTS: usize = 3;
 impl fmt::Display for AttentionNext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ManualRoles => f.write_str("handle disabled roles manually"),
             Self::ReviewAndIntegrate => f.write_str("review and integrate"),
             Self::RestartSupervisor => f.write_str("restart supervisor"),
             Self::PushMain => f.write_str("push main"),

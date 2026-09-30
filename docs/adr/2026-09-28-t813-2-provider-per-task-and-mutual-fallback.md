@@ -10,6 +10,7 @@ amends:
   - adr-0004 decision 1
   - adr-0047 decision 42
 amended_by:
+  - adr-t1204-1
   - adr-t1063-1
 owners:
   - hisamekms

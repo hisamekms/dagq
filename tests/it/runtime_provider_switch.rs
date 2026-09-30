@@ -818,3 +818,193 @@ esac"#,
 fn switches_of(detail: &dagq::domain::TaskDetail) -> usize {
     payloads(detail, "provider_switched").len()
 }
+
+/// Explicit policy is tested with a missing Claude binary, not a fake login/limit.
+/// Codex completes the task, leaves the lease for a manual review, and the
+/// existing manual integration path can land it.
+#[test]
+fn no_claude_routes_a_worker_to_codex_and_releases_it_for_manual_landing() {
+    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Claude, true);
+    let held = open_hold_ask(&db, AskReason::Cost, Some(USAGE_LIMIT_SUBJECT));
+    set_turns(dir.path(), FINISH);
+    set_codex_model(dir.path(), "gpt-test-codex");
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        no_claude: true,
+        codex: codex.unwrap(),
+        ..supervise_options(1, true)
+    };
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let outcome = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &dir.path().join("missing-claude"),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = detail(&db, TASK);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(run.actual_provider(), Provider::Codex);
+    assert_eq!(switches(&detail)[0].2, "provider_disabled");
+    assert!(reviewer.prompts().is_empty());
+    assert!(reviewer.triage_prompts().is_empty());
+    assert!(payloads(&detail, "review_started").is_empty());
+    assert_eq!(
+        payloads(&detail, "review_failed")[0]["code"],
+        "provider_disabled"
+    );
+    assert_eq!(hold_asks(&db)[0].id, held.id);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let asks: Vec<_> = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == AskKind::ApproveLanding)
+        .collect();
+    assert_eq!(asks.len(), 1);
+    assert!(asks[0].question.contains("provider_disabled"));
+    // Sending the manually reviewed Codex work back resumes Codex, then releases
+    // the lease for another manual review, without starting a Claude review job.
+    queue.answer(asks[0].id, "send_back").unwrap();
+    set_turns(
+        dir.path(),
+        r#"commit revised; receipt "$(git rev-parse HEAD)"; say revised"#,
+    );
+    runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &dir.path().join("missing-claude"),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    let resumed = queue.show(TASK).unwrap();
+    assert_eq!(resumed.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(!payloads(&resumed, "resume_started").is_empty());
+    assert!(payloads(&resumed, "review_started").is_empty());
+    assert!(reviewer.prompts().is_empty());
+    let landed = integrate(&db, 2, &repo).unwrap();
+    assert_eq!(landed["outcome"], "integrated", "{landed}");
+    assert_landed_run(&queue.show(TASK).unwrap().runs[0], &repo, &base);
+}
+
+#[test]
+fn no_claude_without_codex_claims_nothing_and_reports_manual_policy() {
+    let (dir, repo, db, backend, _) = switch_fixture(Provider::Codex, false);
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        no_claude: true,
+        codex: dir.path().join("missing-codex"),
+        ..supervise_options(1, true)
+    };
+    runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &dir.path().join("missing-claude"),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    assert!(detail(&db, TASK).runs.is_empty());
+    assert!(reviewer.prompts().is_empty());
+    assert!(reviewer.triage_prompts().is_empty());
+    assert!(hold_asks(&db).is_empty());
+    // The registration remains as stopped history after --once.
+    let started = queue_events(&db, "supervisor_started");
+    assert_eq!(started[0]["no_claude"], true);
+}
+
+#[test]
+fn no_claude_hands_ended_recovery_to_a_person_without_calling_a_job() {
+    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Codex, true);
+    set_turns(dir.path(), "exit 1");
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        no_claude: true,
+        codex: codex.unwrap(),
+        ..supervise_options(1, true)
+    };
+    runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &dir.path().join("missing-claude"),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    let detail = detail(&db, TASK);
+    assert!(reviewer.triage_prompts().is_empty());
+    assert!(reviewer.prompts().is_empty());
+    let events = serde_json::to_string(&detail).unwrap();
+    assert!(events.contains("provider_disabled"), "{events}");
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .run_lease(detail.runs[0].id())
+            .unwrap()
+            .is_none()
+    );
+    assert!(hold_asks(&db).is_empty());
+}
+
+#[test]
+fn no_claude_waits_on_codex_limit_then_retries_codex_without_a_claude_hold() {
+    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Codex, true);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$TURN" in
+1) error "unexpected status 429 Too Many Requests: You have hit your usage limit. Try again in 2 seconds."; sleep 30 ;;
+*) {FINISH} ;;
+esac"#
+        ),
+    );
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        no_claude: true,
+        codex: codex.unwrap(),
+        ..supervise_options(1, true)
+    };
+    runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &dir.path().join("missing-claude"),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    let detail = detail(&db, TASK);
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert_eq!(detail.runs[0].actual_provider(), Provider::Codex);
+    assert!(switches(&detail).is_empty());
+    assert!(!payloads(&detail, "provider_waiting").is_empty());
+    assert!(
+        queue_events(&db, "ask_opened")
+            .iter()
+            .all(|p| p["kind"] != "queue_hold")
+    );
+    assert!(
+        queue_events(&db, "provider_held")
+            .iter()
+            .all(|p| p["provider"] == "codex")
+    );
+    assert_eq!(stub_calls(&detail.runs[0]).len(), 2);
+}

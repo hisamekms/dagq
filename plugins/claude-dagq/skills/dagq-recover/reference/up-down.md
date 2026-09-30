@@ -16,6 +16,12 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
 - `pruned_supervisors`: dead registrations `up` removed.
 - `doctor`: `unfinished_runs` (with `lease_stale`), `awaiting_integration`, `needs_session`: the open work to report.
 
+### Explicitly run without Claude
+
+On the person's word, drain first and use `up --no-claude` (also accepted by `supervise`). This skips Claude's executable/plugin/trust preflights and inbox creation; keep a manually opened inbox. Workers use Codex, including tasks requesting Claude; when Codex is unavailable they wait without falling back to Claude. A live supervisor with another policy must be drained before changing it. Updates preserve the policy.
+
+`status` lists `provider_disabled` / `handle disabled roles manually`. Handle review, plan review and recovery with this skill's manual procedures; no approval or policy bypass is implied by the flag. Reviews release their leases, write material, and open `approve_landing` with `provider_disabled`; no review agent ran. Runtime planners, observer, throughput review and inbox nudges stay off. Goal reviews configured for Codex continue. Do not run `plan` or `observe` to substitute these roles: those standalone commands still start Claude. Existing Claude workers must finish before switching; an old Claude run needing a resume waits for manual recovery.
+
 ### A supervisor of another build
 
 Update the fixed binary with `install` (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/update.md`), or let `up --auto-update` do it on each runtime landing; never replace the file with `cp`. `up` still replaces a supervisor whose `binary_version` differs from its own when the file changed some other way. `binary_version` is the build identifier (`X.Y.Z` for a release, `X.Y.Z-dev+<commit>[.dirty]` for a build of main), so a rebuild from another commit is replaced like a new release, with no version bump.

@@ -530,6 +530,9 @@ impl Supervisor<'_> {
     /// delivered yet, and end the runtime's planners that are done
     /// (ADR-0041 decisions 12, 13).
     fn tend_planners(&mut self, options: &LoopSettings) -> Result<()> {
+        if self.no_claude {
+            return Ok(());
+        }
         let now = self.generators.clock.now();
         let timeout = i64::try_from(options.planner_timeout.as_secs())?;
         let mut views = self.planner_views()?;

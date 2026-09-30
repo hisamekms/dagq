@@ -2633,3 +2633,46 @@ fn the_plugin_only_job_updates_the_plugin_and_nothing_else() {
     assert_eq!(failed.payload["plugin_only"], true);
     assert!(binaries.calls().is_empty());
 }
+
+#[test]
+fn no_claude_policy_survives_install_drain_and_restart_arguments() {
+    use dagq::application::install::Source;
+    let fixture = fixture();
+    let queue = handoff_supervisor(&fixture, "live", SupervisorMode::InCmux);
+    queue
+        .set_supervisor_providers(
+            &LeaseToken::new("live"),
+            &[dagq::domain::worker::ProviderCheck {
+                provider: dagq::domain::Provider::Claude,
+                executable: "/missing-claude".into(),
+                found: false,
+                error: Some("provider_disabled".into()),
+                modes: vec![],
+            }],
+        )
+        .unwrap();
+    let registrations = queue.supervisors().unwrap();
+    assert!(
+        registrations[0]
+            .flag_arguments()
+            .contains(&"--no-claude".to_owned())
+    );
+    let processes = FakeProcesses::default();
+    let down = || Ok(json!({"outcome": "stopped"}));
+    for explicit in [false, true] {
+        let binaries = FakeBinaries::new(&[(28, false)], false);
+        let mut options = install_options(Source::Binary("/built/dagq".into()));
+        options.allow_breaking = true;
+        if explicit {
+            options.restart.push("--no-claude".into());
+        }
+        install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+        assert_eq!(
+            binaries.up.lock().unwrap()[0]
+                .iter()
+                .filter(|a| *a == "--no-claude")
+                .count(),
+            1
+        );
+    }
+}

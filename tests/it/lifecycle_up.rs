@@ -1580,3 +1580,39 @@ fn up_passes_runtime_planners_only_when_given() {
     let command = in_cmux_command(Some(3));
     assert!(command.contains("'--runtime-planners' '3'"), "{command}");
 }
+
+#[test]
+fn no_claude_up_needs_no_claude_plugin_or_trust_and_opens_no_inbox() {
+    let mut fixture = fixture();
+    fixture.options.no_claude = true;
+    fixture.options.claude = fixture.repo.join("missing-claude");
+    fixture.options.plugin_dir = None;
+    fixture.environment.claude_config = None;
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let report = up(&fixture, &cmux, &launchd, &FakeProcesses::default());
+    assert_eq!(report["supervisor"]["outcome"], "started");
+    assert_eq!(report["inbox"]["outcome"], "skipped");
+    assert_eq!(report["inbox"]["reason"], "provider_disabled");
+    assert!(
+        launchd.installs.lock().unwrap()[0]
+            .2
+            .contains("--no-claude")
+    );
+}
+
+#[test]
+fn no_claude_up_refuses_to_reuse_a_supervisor_with_another_policy() {
+    let mut fixture = fixture();
+    let cmux = FakeCmux::default();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    up(&fixture, &cmux, &launchd, &processes);
+    fixture.options.no_claude = true;
+    let error = format!(
+        "{:#}",
+        try_up(&fixture, &cmux, &launchd, &processes).unwrap_err()
+    );
+    assert!(error.contains("different --no-claude policy"), "{error}");
+    assert_eq!(launchd.installs.lock().unwrap().len(), 1);
+}

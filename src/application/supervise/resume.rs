@@ -56,6 +56,10 @@ impl Supervisor<'_> {
                 wrapper,
                 resumes,
             } = candidate;
+            if self.no_claude && run.actual_provider() == crate::domain::Provider::Claude {
+                // Do not spend resume attempts trying to launch a forbidden provider.
+                continue;
+            }
             let now = self.generators.clock.now();
             let session_alive = wrapper
                 .as_ref()

@@ -62,6 +62,7 @@ impl Supervisor<'_> {
     /// whose role runs on another provider (ADR-t1063-1).
     pub(super) fn actors_on<'s>(&'s self, agent: &'s dyn AgentProvider) -> HostActorExecutor<'s> {
         HostActorExecutor::new(&self.layout.db)
+            .with_no_claude(self.no_claude)
             .with_workspaces(self.cmux)
             .with_provider(agent)
             .with_spawner(self.spawner)

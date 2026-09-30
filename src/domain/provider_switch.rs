@@ -28,6 +28,7 @@ use super::{
 pub const MAX_PROVIDER_SWITCHES: usize = 2;
 
 string_enum!(SwitchReason {
+    Disabled => "provider_disabled",
     ExecutableMissing => "executable_missing",
     Authentication => "authentication",
     UsageLimit => "usage_limit",
@@ -62,6 +63,7 @@ impl SwitchReason {
     /// text says ends then instead ([`reset_at`]).
     pub const fn hold_secs(self) -> i64 {
         match self {
+            Self::Disabled => 0, // Policy, never a timed provider hold.
             Self::UsageLimit => 1800,
             Self::Authentication => 900,
             Self::LaunchFailed | Self::ExecutableMissing => 600,

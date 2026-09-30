@@ -303,3 +303,16 @@ B3 / D3 で `~/.claude.json` に残った `projects` の key は repository root
 - trust の判定は `$CLAUDE_CONFIG_DIR/.claude.json`（未設定なら `~/.claude.json`）の `projects` を、main checkout の root（main worktree。`up` を linked worktree から打っても同じ key になる。決め方と、main checkout が無い repository で `up` が止まることは [Run environment](supervisor-lifecycle/run-environment.md#main-checkoutの決め方)）の path で引く（`claude_trusts_repository`）。親 directory の信頼は見ない（[binary から読める判定](#binary-から読める判定)の 3 のとおり、Claude Code も git root より上は辿らない）。config が無い、HOME も `CLAUDE_CONFIG_DIR` も無い、key が無い、`hasTrustDialogAccepted` が `true` でない、のどれも未信頼として `up` を止める。parse できない config は別の error。`supervise` 自体は検査しない（`up` を経ない起動は従来どおり dialog で止まり、`prompt_waiting` になる）
 - 抑止したダイアログは task 101 の `prompt_waiting` の検知とは重ならない: 検知は画面の兆候を見るだけで、出なくなったダイアログは検知されないだけ。goal 11 の受け入れ条件「`prompt_waiting` が trust 以外で出ない」は、LSP の推奨が 30 秒で閉じる（検知は 90 秒後から）ことと Teach auto mode の抑止で満たす
 
+
+
+## Claude を使わない運転
+
+[ADR-t1204-1](../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)。`up --no-claude` / `supervise --no-claude` は明示的な運転方針で、既定は無効。Claude の実行ファイル・plugin・trust の確認も実行しない。`up` は inbox を `skipped`（`reason: provider_disabled`）として、人が開いた臨時の inbox を使う。既存の supervisor と異なる方針では再利用・引き継ぎせず、先に drain を求める。生きた Claude worker がある場合も起動を拒否する。exec による更新は argv を保ち、drain を伴う install の再起動にも方針を渡す。
+
+- **worker**: Claude を要求する task も headless Codex に振り分け、`provider_switched.reason: provider_disabled` を記録する。requested / actual provider、model、thread の記録は通常と同じ。Codex が無ければ claim せず、途中で利用不能になったら Codex 自身の控えで待ち、Claude に切り替えない。このモードでは Codex の障害を Claude の `queue_hold` にしない。既存の Claude の認証・利用上限の ask は保持するが、手動対応と Codex の運転を止めない（disk・load の関門は従来どおり）。
+- **review**: review material を作り、worker を終了させ、`approve_landing` ask と `review_failed`（`code: provider_disabled`、所要時間 0、実行ログなし）を残して lease を解放する。`review_started` と架空の agent session は作らない。人の手動 review の後は既存の `integrate`、または ask の `land` / `send_back` / `cancel` を使う。Codex の run の差し戻しは Codex の resume、旧 Claude run の resume は手動復旧を待つ。
+- **plan review・復旧**: 既存の job の開始手順が executor の `provider_disabled` によって拒まれ、既存の失敗時の手動対応へ渡る。記録にある launch は要求した値であり、agent は実行されない。plan review の失敗は自動で再試行せず、復旧の失敗は既存の ask / attention になる。認証・費用の障害としては扱わない。
+- **planner・observer・スループットの見直し・inbox**: 自動起動と既存の inbox への nudge を止め、手動代行する。Codex を設定済みの goal review は動き、Claude への fallback は拒む。
+- **表示**: supervisor の `providers` の Claude は `modes: []`、`error: provider_disabled`。`found` は実行ファイルの有無だけを表す。起動の mark に `no_claude` を残す。稼働中の `status` / `watch` は `provider_disabled` の attention（`handle disabled roles manually`）を出し、手動の役割と Codex が無い場合の待ちを示す。個々の review・plan review・復旧は既存の ask / attention も出す。
+
+`HostActorExecutor` は workspace 作成と agent command の構築より前にも Claude を拒否する。通常の起動は既存の provider の振り分けのまま。この flag は当該 supervisor の配下と `up` に適用し、別に人が打つ `plan` や `observe` を変更しない。手動差配中はこれらの Claude を起動するコマンドを打たない。

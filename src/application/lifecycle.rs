@@ -320,6 +320,8 @@ pub type ResolveLanguage = dyn Fn(&Path, Option<&Path>) -> Result<Option<Languag
 
 #[derive(Debug, Clone)]
 pub struct UpOptions {
+    /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
+    pub no_claude: bool,
     /// The supervisor's `--parallel`, passed only when given: without it
     /// the supervisor follows `[supervisor]` of `dagq.toml` (task 698).
     pub parallel: Option<u16>,
@@ -399,11 +401,13 @@ pub fn up(
         .context("queue must already be initialized")?;
     let repository = (ports.inspect_repository)(repo)?;
     cmux.preflight()?;
-    claude.preflight()?;
+    if !options.no_claude {
+        claude.preflight()?;
+    }
     // Without --plugin-dir the inbox loads the plugin the user installed
     // (ADR-t617-2 decisions 1, 4). A restart by the runtime is not a
     // person's `up`, and starts what ran before.
-    if options.plugin_dir.is_none() && !environment.restart {
+    if !options.no_claude && options.plugin_dir.is_none() && !environment.restart {
         require_installed_plugin(claude, &options.claude, &repository.root, "inbox", "up")
             .map_err(|error| anyhow::anyhow!("{error:#}; the supervisor was not started"))?;
     }
@@ -414,9 +418,13 @@ pub fn up(
         Ok(checkout) => checkout.as_path(),
         Err(error) => bail!("{error}; the supervisor was not started"),
     };
-    let trusted = match environment.claude_config.as_deref() {
-        Some(config) => (ports.trusts_repository)(config, trust_root)?,
-        None => false,
+    let trusted = if options.no_claude {
+        true
+    } else {
+        match environment.claude_config.as_deref() {
+            Some(config) => (ports.trusts_repository)(config, trust_root)?,
+            None => false,
+        }
     };
     ensure!(
         trusted,
@@ -506,6 +514,11 @@ pub fn up(
             }));
             continue;
         }
+        let no_claude = registration.claude_disabled();
+        ensure!(
+            no_claude == options.no_claude,
+            "the live supervisor has a different --no-claude policy; drain it with down --wait before up"
+        );
         existing.insert(registration.token.clone());
         if fresh(&registration, processes, now) {
             live.push(registration);
@@ -557,11 +570,15 @@ pub fn up(
         plugin_dir: plugin_dir.as_deref(),
     };
     let retired_sessions = queue.forget_retired_session_workspaces()?;
-    let inbox = sessions.open(
-        SessionRole::Inbox,
-        inbox_workspace_name(&repository.root),
-        || inbox_session_prompt(&db, language.as_ref()),
-    )?;
+    let inbox = if options.no_claude {
+        json!({"outcome": "skipped", "reason": "provider_disabled", "next": "use a manually opened inbox"})
+    } else {
+        sessions.open(
+            SessionRole::Inbox,
+            inbox_workspace_name(&repository.root),
+            || inbox_session_prompt(&db, language.as_ref()),
+        )?
+    };
 
     let mut report = json!({
         "supervisor": supervisor,
@@ -1674,6 +1691,9 @@ fn supervise_arguments(
         "--mode".into(),
         mode.as_str().into(),
     ];
+    if options.no_claude {
+        arguments.push("--no-claude".into());
+    }
     if let Some(dir) = &options.plugin_dir {
         arguments.push("--plugin-dir".into());
         arguments.push(path_text(

@@ -72,7 +72,12 @@ impl Supervisor<'_> {
                 self.apply_hold_answer(ask, answer)?;
             }
         }
-        let hold = unclosed.iter().find_map(queue_hold::hold_of);
+        // The asks remain open and keep their real cause. An explicit ban
+        // does not wait for Claude's login/limit before handing work to a person.
+        let hold = unclosed
+            .iter()
+            .find_map(queue_hold::hold_of)
+            .filter(|_| !self.no_claude);
         match (self.queue_hold, hold) {
             (None, Some(hold)) => {
                 warn!(

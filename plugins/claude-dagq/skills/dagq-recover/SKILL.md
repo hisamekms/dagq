@@ -45,6 +45,8 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 "$DAGQ" install         # build main, swap the binary, hand over
 ```
 
+`up --no-claude` explicitly forbids Claude, uses Codex workers and leaves unsupported roles for manual handling; drain before changing the policy. See `reference/up-down.md`.
+
 `up` is idempotent: one resident supervisor and the inbox workspace, no planner (a person opens each with `dagq plan`). `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`: supervisors take it over without waiting; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` kills the supervisor and loses its active runs: only on the person's explicit word. `--claude` and `--codex` (Codex workers) are fixed on the supervisor as real paths: from a cmux terminal pass `~/.local/bin/claude` and `~/.local/bin/codex`, and after updating either, `down --wait` and `up` again. `reference/up-down.md`: outcomes, the in-cmux case, logs.
 
 ## 6. Review by hand, and a failed push

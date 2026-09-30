@@ -78,7 +78,7 @@ impl Supervisor<'_> {
         let models = self.role_models(role);
         let launch = models.launch(role);
         if !models.switchable(role) {
-            return self.queue_hold.is_none().then_some((launch, false));
+            return (!self.no_claude && self.queue_hold.is_none()).then_some((launch, false));
         }
         match job_route(&launch, true, |provider| self.job_unusable(provider)) {
             JobRoute::Start(launch) => Some((launch, true)),
@@ -96,6 +96,9 @@ impl Supervisor<'_> {
     /// Why a headless job cannot start on `provider` now: this supervisor
     /// has no agent for it (no Codex found that runs), or it is held.
     fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
+        if let Some(reason) = self.provider_held(provider) {
+            return Some(reason);
+        }
         if self.job_agent(provider).is_none() {
             return Some(SwitchReason::ExecutableMissing);
         }

@@ -2,6 +2,8 @@
 
 Read this for attention `review by hand` (`kind` `review_failed`), `review and integrate`, or `push main` (the `dagq-recover` skill, section 6). Everything here is done on the person's word. Never merge, rebase, cherry-pick or fast-forward a run's branch yourself: landing is the runtime's job, and it keeps `main` linear with one squash commit per task. Never read the full diff in the inbox or a planner session.
 
+A review in `--no-claude` mode also comes here: `review_failed` has `code: provider_disabled`, the material exists, and no review agent ran. Its lease is released for the same manual review and integration below.
+
 ## The supervisor reviews first
 
 The supervisor reviews every run it accepts with the session still open (ADR-0027) and records `review_finished` (`verdict`, `reasons`, `reason_codes` (the codes of each reason, primary first), `primary_code` (`null` on a pass), `summary`) in `show ID --full` (the codes: ADR-t947-1, `docs/design/supervisor-lifecycle/review.md`, section "差し戻しの分類コード"). While it holds the run, `status` shows `reviewing (runtime)`: do nothing, and `integrate` refuses it. `pass`: it exits the session, lands the run and pushes. `revise`: it types the reasons into the live session, which fixes them; the run is reviewed again, at most twice. `concern`, or a third review that does not pass: it closes the session and opens an `approve_landing` ask for the inbox, and applies the answer (`land`, `send_back`, `cancel`; below). Do not review those runs again.

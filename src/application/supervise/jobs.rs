@@ -149,7 +149,7 @@ impl<'a> Supervisor<'a> {
     /// (`None` without one).
     pub(super) fn job_agent(&self, provider: Provider) -> Option<&'a dyn AgentProvider> {
         match provider {
-            Provider::Claude => Some(self.reviewer),
+            Provider::Claude => (!self.no_claude).then_some(self.reviewer),
             Provider::Codex => self.codex_jobs,
         }
     }

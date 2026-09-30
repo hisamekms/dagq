@@ -181,6 +181,22 @@ pub enum ActorProgram<'a> {
 }
 
 impl ActorProgram<'_> {
+    fn provider(&self) -> crate::domain::Provider {
+        use crate::domain::Provider;
+        match self {
+            Self::RunWorkspace { run, .. } => run.actual_provider(),
+            Self::SessionAgent { agent, .. } => match agent {
+                SessionAgent::Worker { run, .. }
+                | SessionAgent::Resume { run }
+                | SessionAgent::Turn { run, .. } => run.actual_provider(),
+                SessionAgent::Planner(_) => Provider::Claude,
+            },
+            Self::NamedWorkspace { launch, .. } | Self::Headless { launch, .. } => {
+                launch.map_or(Provider::Claude, |launch| launch.provider)
+            }
+        }
+    }
+
     /// The roles this program is started for: any other is refused.
     fn roles(&self) -> &'static [ActorRole] {
         match self {
@@ -407,6 +423,7 @@ pub struct HostActorExecutor<'a> {
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
     config: ExecutionConfig,
+    no_claude: bool,
 }
 
 impl<'a> HostActorExecutor<'a> {
@@ -419,7 +436,14 @@ impl<'a> HostActorExecutor<'a> {
             provider: None,
             spawner: None,
             config: ExecutionConfig::default(),
+            no_claude: false,
         }
+    }
+
+    /// Refuse Claude before opening a workspace or constructing an agent command.
+    pub fn with_no_claude(mut self, no_claude: bool) -> Self {
+        self.no_claude = no_claude;
+        self
     }
 
     /// The backend of each actor as `config` names it: an actor it puts on
@@ -523,6 +547,10 @@ impl ActorExecutor for HostActorExecutor<'_> {
 
     fn spawn(&self, spec: ActorExecutionSpec<'_>) -> Result<ActorHandle> {
         spec.check()?;
+        anyhow::ensure!(
+            !self.no_claude || spec.program.provider() != crate::domain::Provider::Claude,
+            "provider_disabled: Claude is disabled by --no-claude; handle this role manually"
+        );
         // An actor configured for another backend is refused, never started
         // on the host instead (fail closed).
         let backend = self.config.backend_of(spec.role());
@@ -984,6 +1012,32 @@ mod tests {
             without_mcp: false,
             env: Vec::new(),
             streams: Streams::Null,
+        }
+    }
+
+    #[test]
+    fn no_claude_refuses_every_headless_role_before_accessing_a_provider() {
+        let cwd = Path::new("/work");
+        let executor = HostActorExecutor::new(Path::new("/queue.db")).with_no_claude(true);
+        for role in [
+            ActorRole::RecoveryJob,
+            ActorRole::PlanReviewJob,
+            ActorRole::GoalReviewJob,
+            ActorRole::ThroughputReviewJob,
+            ActorRole::Observer,
+        ] {
+            let error = executor
+                .spawn(ActorExecutionSpec::new(
+                    ActorContext::instance(role, "test"),
+                    WorkspaceAccess::Scratch(cwd.into()),
+                    job(cwd),
+                ))
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("provider_disabled"),
+                "{role:?}: {error}"
+            );
         }
     }
 

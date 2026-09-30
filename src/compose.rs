@@ -225,6 +225,8 @@ pub struct ReleaseUpdateJob {
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
 #[derive(Debug, Clone)]
 pub struct SuperviseOptions {
+    /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
+    pub no_claude: bool,
     /// Upper bound on runs executing at once (`supervise --parallel`);
     /// `None` follows `[supervisor] parallel` of the main checkout's
     /// `dagq.toml`, read again each pass, else 4 (task 698).
@@ -455,6 +457,7 @@ impl std::fmt::Debug for RunFilesPort {
 impl SuperviseOptions {
     pub fn new(parallel: usize, once: bool) -> Self {
         Self {
+            no_claude: false,
             parallel: Some(parallel),
             max_waiting: None,
             once,
@@ -525,6 +528,7 @@ impl SuperviseOptions {
         limits: SlotLimits,
     ) -> LoopSettings {
         LoopSettings {
+            no_claude: self.no_claude,
             limits,
             slot_flags: self.slot_flags(),
             once: self.once,
@@ -686,6 +690,15 @@ pub fn supervise_with_reviewer(
             }
         });
     let workers = worker_adapters(&agent, &transcripts, codex_agent.as_ref());
+    let mut providers = provider_checks(claude, &codex, &workers);
+    if options.no_claude {
+        for provider in &mut providers {
+            if provider.provider == Provider::Claude {
+                provider.modes.clear();
+                provider.error = Some("provider_disabled".into());
+            }
+        }
+    }
     let layout = Layout {
         runs_dir: runs_dir(&db),
         queue_hash: QueueLocation::explicit(&db).hash(),
@@ -694,7 +707,7 @@ pub fn supervise_with_reviewer(
         common_dir: repository.common_dir.clone(),
         claude: claude.into(),
         codex: codex.clone(),
-        providers: provider_checks(claude, &codex, &workers),
+        providers,
         runner: runner.into(),
         pid,
         version: crate::VERSION.to_owned(),
