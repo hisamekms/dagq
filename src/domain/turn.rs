@@ -314,6 +314,12 @@ pub struct TurnResult {
     pub num_turns: Option<u64>,
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<f64>,
+    /// `cost_usd` (and the cost of `tokens`) is the running total of the
+    /// session so far rather than the turn's own (Claude's result's
+    /// `total_cost_usd`, task 1199): the wrapper records the turn's own as
+    /// what it adds to the total the session's last turn recorded.
+    #[serde(skip)]
+    pub cost_cumulative: bool,
     pub usage: Value,
     /// The tools refused a permission, one entry per refusal.
     pub permission_denials: Vec<String>,
@@ -379,6 +385,37 @@ impl TurnMark {
             failure: turn["failure"].as_str().and_then(|f| f.parse().ok()),
             permission_denials: turn["permission_denials"].as_u64().unwrap_or(0) as usize,
         })
+    }
+}
+
+/// The own cost of turn `turn` of the session `session`, whose agent gave
+/// `total`, the session's running total so far (Claude's `total_cost_usd`,
+/// task 1199), from the run's `events` up to its `turn_started`: when the
+/// turn resumed the session, `total` less the total the session's last
+/// turn with one recorded (`session_cost_usd`, or `cost_usd` for a turn
+/// recorded before `session_cost_usd` was, when that was the total),
+/// rounded to a millionth of a dollar. The whole `total` for a turn that
+/// started its session, and when no earlier total was recorded or `total`
+/// is below it (the session is not the one the earlier turn ran in).
+pub fn turn_own_cost(events: &[RunEvent], turn: u64, session: &str, total: f64) -> f64 {
+    let resumed = events
+        .iter()
+        .rfind(|e| e.kind == TURN_STARTED && e.payload["turn"].as_u64() == Some(turn))
+        .is_some_and(|e| e.payload["resume"] == true);
+    if !resumed {
+        return total;
+    }
+    let earlier = events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+        .find_map(|e| match e.payload.get("session_cost_usd") {
+            Some(recorded) => recorded.as_f64(),
+            None => e.payload["cost_usd"].as_f64(),
+        });
+    match earlier {
+        Some(earlier) if total >= earlier => ((total - earlier) * 1e6).round() / 1e6,
+        _ => total,
     }
 }
 
@@ -604,6 +641,88 @@ mod tests {
                 .silence(),
             Duration::from_secs(1)
         );
+    }
+
+    /// A resumed turn's cost is the session's total less the one its last
+    /// turn recorded (or that turn's `cost_usd`, recorded before
+    /// `session_cost_usd` was); a turn that started its session, one
+    /// without an earlier total and one whose total fell below it keep the
+    /// total (task 1199).
+    #[test]
+    fn a_resumed_turn_costs_what_it_added_to_the_sessions_total() {
+        let event = |kind: &str, payload: Value| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let started =
+            |turn: u64, resume: bool| event(TURN_STARTED, json!({"turn": turn, "resume": resume}));
+        let first = [started(1, false)];
+        assert_eq!(turn_own_cost(&first, 1, "s", 4.7212), 4.7212);
+        let resumed = [
+            started(1, false),
+            event(
+                TURN_FINISHED,
+                json!({"turn": 1, "session_id": "s", "cost_usd": 4.7212, "session_cost_usd": 4.7212}),
+            ),
+            // Another session's turn is not the session's.
+            started(2, false),
+            event(
+                TURN_FINISHED,
+                json!({"turn": 2, "session_id": "thread", "cost_usd": null}),
+            ),
+            started(3, true),
+        ];
+        assert_eq!(turn_own_cost(&resumed, 3, "s", 6.0195), 1.2983);
+        // A total below the earlier one is a session of its own.
+        assert_eq!(turn_own_cost(&resumed, 3, "s", 0.5), 0.5);
+        // The turn started a session: its whole total.
+        assert_eq!(turn_own_cost(&resumed, 2, "s", 0.5), 0.5);
+        // Back on Claude after a switch, a turn starts a session of a new
+        // name: its whole total, whatever the earlier session recorded.
+        let switched_back = [
+            started(1, false),
+            event(
+                TURN_FINISHED,
+                json!({"turn": 1, "session_id": "s", "cost_usd": 4.0, "session_cost_usd": 4.0}),
+            ),
+            started(2, false),
+            event(
+                TURN_FINISHED,
+                json!({"turn": 2, "session_id": "thread", "cost_usd": null}),
+            ),
+            started(3, false),
+        ];
+        assert_eq!(turn_own_cost(&switched_back, 3, "s2", 1.5), 1.5);
+        // No earlier turn of the session with a total.
+        let without = [
+            event(
+                TURN_FINISHED,
+                json!({"turn": 1, "session_id": "s", "cost_usd": null, "session_cost_usd": null}),
+            ),
+            started(2, true),
+        ];
+        assert_eq!(turn_own_cost(&without, 2, "s", 2.0), 2.0);
+        assert_eq!(turn_own_cost(&[started(2, true)], 2, "s", 2.0), 2.0);
+        // A turn recorded before `session_cost_usd` was: its `cost_usd` was
+        // the session's total; a later one without a total is skipped.
+        let older = [
+            event(
+                TURN_FINISHED,
+                json!({"turn": 1, "session_id": "s", "cost_usd": 4.0}),
+            ),
+            event(
+                TURN_FINISHED,
+                json!({"turn": 2, "session_id": "s", "cost_usd": null, "session_cost_usd": null}),
+            ),
+            started(3, true),
+        ];
+        assert_eq!(turn_own_cost(&older, 3, "s", 5.5), 1.5);
     }
 
     /// A headless span's turns run from each `turn_started` to its

@@ -6,7 +6,9 @@
 //! and `user` carry the conversation; `system/api_retry` a retried API
 //! error; `rate_limit_event` the usage window; `result` the turn's end,
 //! with `is_error`, `num_turns`, `duration_ms`, `total_cost_usd`, `usage`
-//! and `permission_denials`. While a tool runs the stream carries a
+//! and `permission_denials`. `usage`, `num_turns` and `duration_ms` are the
+//! turn's own; `total_cost_usd` and `modelUsage` are the session's total so
+//! far, a resumed session's earlier turns included (task 1199). While a tool runs the stream carries a
 //! heartbeat (`tool_progress`) every 30 seconds.
 
 use serde_json::Value;
@@ -253,6 +255,10 @@ impl TurnReader for ClaudeTurnReader {
             num_turns: result.and_then(|r| r["num_turns"].as_u64()),
             duration_ms: result.and_then(|r| r["duration_ms"].as_u64()),
             cost_usd: result.and_then(|r| r["total_cost_usd"].as_f64()),
+            // `total_cost_usd` (like `modelUsage`) is the session's total so
+            // far, a resumed session's earlier turns included; `usage`,
+            // `num_turns` and `duration_ms` are the turn's own.
+            cost_cumulative: true,
             usage: result.map_or(Value::Null, |r| r["usage"].clone()),
             permission_denials: result
                 .and_then(|r| r["permission_denials"].as_array())
@@ -360,6 +366,9 @@ mod tests {
             (result.num_turns, result.duration_ms, result.cost_usd),
             (Some(3), Some(1200), Some(0.04))
         );
+        // The cost is the session's running total; the wrapper takes the
+        // turn's own from it.
+        assert!(result.cost_cumulative && !result.tokens_cumulative);
         assert_eq!(result.usage["output_tokens"], 5);
         assert_eq!(
             result.tokens.map(|tokens| tokens.payload()),

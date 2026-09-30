@@ -44,7 +44,7 @@ use crate::domain::{
     turn::{
         LIMITS_FILE, TurnFailure, TurnLimits, TurnOutcome, TurnRequest, TurnResult, TurnSession,
         TurnSignal, exit_path, idle_marker, output_path, pending, request_path, session_name,
-        taken_path, turns_dir,
+        taken_path, turn_own_cost, turns_dir,
     },
     worker_model::WorkerSession,
 };
@@ -594,43 +594,51 @@ impl<'a> Turns<'a> {
         failure: Option<TurnFailure>,
         stopped: Option<&str>,
         exit_code: Option<i32>,
-        result: TurnResult,
+        mut result: TurnResult,
     ) -> Result<Turn> {
         let run = self.run;
+        let (cost, session_cost) = self.turn_cost(turn, &result)?;
+        result.cost_usd = cost;
+        if let Some(tokens) = result.tokens.as_mut().filter(|_| session_cost.is_some()) {
+            tokens.cost_usd = cost;
+        }
         let (tokens, tokens_total) = self.turn_tokens(&result)?;
         // The provider the turn ran on: the wrapper's copy of the run may
         // predate a switch (ADR-t813-2).
         let provider = self.queue.run(run.id())?.actual_provider();
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::TurnFinished,
-            json!({
-                "turn": turn,
-                "outcome": outcome,
-                "failure": failure,
-                "stopped": stopped,
-                "exit_code": exit_code,
-                "message": result.message,
-                "session_id": result.session_id,
-                "session_created": result.session_created,
-                "num_turns": result.num_turns,
-                "duration_ms": result.duration_ms,
-                "cost_usd": result.cost_usd,
-                "usage": result.usage,
-                "provider": provider,
-                // The model the agent ran the turn on, as it says (Codex's
-                // is not the claim's Claude model), else why it is not
-                // known.
-                "model": result.model,
-                "model_unknown": result.model_unknown,
-                // The runtime's kinds of token, which the span sums
-                // (ADR-t813-2 decision 7).
-                "tokens": tokens.as_ref().map(TokenUsage::payload),
-                "tokens_total": tokens_total.as_ref().map(TokenUsage::payload),
-                "permission_denials": result.permission_denials.len(),
-                "denied_tools": result.permission_denials,
-            }),
-        )?;
+        let mut payload = json!({
+            "turn": turn,
+            "outcome": outcome,
+            "failure": failure,
+            "stopped": stopped,
+            "exit_code": exit_code,
+            "message": result.message,
+            "session_id": result.session_id,
+            "session_created": result.session_created,
+            "num_turns": result.num_turns,
+            "duration_ms": result.duration_ms,
+            "cost_usd": result.cost_usd,
+            "usage": result.usage,
+            "provider": provider,
+            // The model the agent ran the turn on, as it says (Codex's
+            // is not the claim's Claude model), else why it is not
+            // known.
+            "model": result.model,
+            "model_unknown": result.model_unknown,
+            // The runtime's kinds of token, which the span sums
+            // (ADR-t813-2 decision 7).
+            "tokens": tokens.as_ref().map(TokenUsage::payload),
+            "tokens_total": tokens_total.as_ref().map(TokenUsage::payload),
+            "permission_denials": result.permission_denials.len(),
+            "denied_tools": result.permission_denials,
+        });
+        // The session's running total the turn's cost was taken from, which
+        // the session's next turn takes its own from (task 1199).
+        if let Some(total) = session_cost {
+            payload["session_cost_usd"] = json!(total);
+        }
+        self.queue
+            .record_runtime_event(run.id(), EventKind::TurnFinished, payload)?;
         // The idle marker the supervisor's watches read, written only once
         // the turn is recorded.
         let marker = run.idle_marker_path()?;
@@ -656,6 +664,24 @@ impl<'a> Turns<'a> {
             failure,
             result,
         })
+    }
+
+    /// The turn's own cost, and the session's running total when the
+    /// provider gives that instead (Claude's `total_cost_usd`, task 1199):
+    /// what the turn added to the total the session's last turn recorded
+    /// ([`turn_own_cost`]); the whole total without a session id.
+    fn turn_cost(&mut self, turn: u64, result: &TurnResult) -> Result<(Option<f64>, Option<f64>)> {
+        let Some(total) = result.cost_usd.filter(|_| result.cost_cumulative) else {
+            return Ok((result.cost_usd, None));
+        };
+        let Some(session) = result.session_id.as_deref() else {
+            return Ok((Some(total), Some(total)));
+        };
+        let events = self.queue.run_events(self.run.id())?;
+        Ok((
+            Some(turn_own_cost(&events, turn, session, total)),
+            Some(total),
+        ))
     }
 
     /// The turn's own tokens, and the session's running total when the

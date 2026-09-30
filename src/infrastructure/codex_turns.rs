@@ -433,6 +433,7 @@ impl TurnReader for CodexTurnReader {
             // `turn.completed` carries the thread's total so far, a
             // resumed thread's earlier turns included.
             tokens_cumulative: true,
+            cost_cumulative: false,
             permission_denials: std::mem::take(&mut self.denials),
             session_missing: stderr.contains("no rollout found"),
             model: model.as_ref().ok().cloned(),

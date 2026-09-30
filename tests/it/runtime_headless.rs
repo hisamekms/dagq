@@ -112,6 +112,7 @@ fn a_headless_run_lands_after_its_first_turn() {
     assert_eq!(finished["failure"], Value::Null);
     assert_eq!(finished["usage"]["input_tokens"], 7);
     assert_eq!(finished["cost_usd"], 0.01);
+    assert_eq!(finished["session_cost_usd"], 0.01);
     assert_eq!(finished["num_turns"], 2);
     assert_eq!(finished["permission_denials"], 0);
     assert_eq!(finished["session_created"], true);
@@ -214,7 +215,9 @@ esac"#
 }
 
 /// Acceptance (2): a review's revise goes to the same session as a resume;
-/// its receipt is reviewed again and the run lands.
+/// its receipt is reviewed again and the run lands. Claude's
+/// `total_cost_usd` is the session's total, so the resume's turn costs what
+/// it added to it and the run's turns sum to the last total (task 1199).
 #[test]
 fn a_revise_is_sent_to_the_same_session_as_a_resume() {
     let (dir, repo, db, backend) = headless_fixture(&[]);
@@ -222,8 +225,8 @@ fn a_revise_is_sent_to_the_same_session_as_a_resume() {
         dir.path(),
         &format!(
             r#"case "$MODE" in
-start) {FINISH} ;;
-resume) printf 'fix\n' >> change.txt; git commit -q -am fix; receipt "$(git rev-parse HEAD)"; say fixed ;;
+start) COST=4.7212; {FINISH} ;;
+resume) COST=6.0195; printf 'fix\n' >> change.txt; git commit -q -am fix; receipt "$(git rev-parse HEAD)"; say fixed ;;
 esac"#
         ),
     );
@@ -248,6 +251,28 @@ esac"#
     assert_eq!(requested[0]["what"], "revise request", "{requested:?}");
     assert_eq!(reviewer.prompts().len(), 2);
     assert!(backend.texts().is_empty());
+    let finished = payloads(&detail, "turn_finished");
+    assert_eq!(finished.len(), 2, "{finished:?}");
+    let costs: Vec<f64> = finished
+        .iter()
+        .map(|turn| turn["cost_usd"].as_f64().unwrap())
+        .collect();
+    assert_eq!(costs, [4.7212, 1.2983], "{finished:?}");
+    assert!((costs.iter().sum::<f64>() - 6.0195).abs() < 1e-9);
+    for (turn, (cost, total)) in finished.iter().zip([(4.7212, 4.7212), (1.2983, 6.0195)]) {
+        assert_eq!(turn["tokens"]["cost_usd"], cost, "{turn}");
+        assert_eq!(turn["session_cost_usd"], total, "{turn}");
+        // The turn's own usage, turns and time as the result says.
+        assert_eq!(
+            turn["usage"],
+            json!({"input_tokens": 7, "output_tokens": 3}),
+            "{turn}"
+        );
+        assert_eq!(
+            (turn["num_turns"].clone(), turn["duration_ms"].clone()),
+            (json!(2), json!(5))
+        );
+    }
 }
 
 /// Acceptance (2): a run parked `needs_session` (its receipt lacks the
