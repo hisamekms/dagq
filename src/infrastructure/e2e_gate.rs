@@ -23,7 +23,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::application::install::{E2eOutcome, E2eSettings};
+use crate::application::broker::{self, MachineSpec, Reconnecting};
+use crate::application::install::{E2eOutcome, E2eSettings, E2eSkip, PODMAN_E2E, PodmanCheck};
+use crate::infrastructure::broker_podman::{FileLock, PodmanCli};
 
 /// How long one cmux call of the gate (`ping`, a group's listing or
 /// deletion) and the `ps` of the cleanup may take.
@@ -52,6 +54,12 @@ pub fn run(
     if let Some(cmux) = &settings.cmux {
         ping(cmux)?;
     }
+    let skipped = settings.podman.as_ref().and_then(|check| {
+        podman_answers(check).err().map(|reason| E2eSkip {
+            tests: PODMAN_E2E.iter().map(|test| (*test).to_owned()).collect(),
+            reason,
+        })
+    });
     fs::create_dir_all(&settings.scratch)
         .with_context(|| format!("create {}", settings.scratch.display()))?;
     // What an earlier gate left when it was stopped before its cleanup; a
@@ -85,6 +93,13 @@ pub fn run(
         checkout.display(),
         root.display()
     );
+    if let Some(skipped) = &skipped {
+        let _ = writeln!(log, "== {}", skipped.sentence());
+    }
+    let skip_filters: Vec<&str> = skipped
+        .iter()
+        .flat_map(|skipped| skipped.tests.iter().map(String::as_str))
+        .collect();
     let mut command = match &settings.command {
         Some(command) => {
             let mut shell = Command::new("/bin/sh");
@@ -95,9 +110,15 @@ pub fn run(
             let mut cargo =
                 Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
             cargo.args(["test", "--locked", "--test", "e2e", "--", "--ignored"]);
+            for filter in &skip_filters {
+                cargo.args(["--skip", filter]);
+            }
             cargo
         }
     };
+    if !skip_filters.is_empty() {
+        command.env(SKIP_ENV, skip_filters.join(" "));
+    }
     command
         .current_dir(checkout)
         .envs(env.iter().map(|(key, value)| (key, value)))
@@ -166,7 +187,27 @@ pub fn run(
         failed_tests: failed_tests(&output),
         secs,
         cleanup,
+        skipped,
     })
+}
+
+/// The env naming the `--skip` filters of the tests the gate does not run
+/// (space separated), for a `command` in place of cargo's.
+pub const SKIP_ENV: &str = "DAGQ_E2E_SKIP";
+
+/// Whether dagq's machine is ready and its connection answers, waiting
+/// for a lost connection within `check`'s bounds (ADR-t1162-1); why not.
+fn podman_answers(check: &PodmanCheck) -> std::result::Result<(), String> {
+    let podman =
+        PodmanCli::resolve(check.executable.as_deref()).map_err(|error| error.to_string())?;
+    let podman = Reconnecting {
+        inner: podman,
+        reconnect: check.reconnect,
+    };
+    let lock = FileLock::machine(&check.lock_home);
+    broker::connect(&podman, &lock, &MachineSpec::default())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// The tests a libtest output names as failed (`test <name> ... FAILED`),
@@ -454,7 +495,97 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             queue_dir: Some(dir.join("queue")),
             scratch: dir.join("scratch"),
             log: dir.join("logs").join("e2e.log"),
+            podman: None,
         }
+    }
+
+    /// A fake podman: dagq's machine runs, and its connection answers
+    /// `info` unless `cut`, when every command on it loses the connection.
+    fn fake_podman(dir: &Path, cut: bool) -> PodmanCheck {
+        let podman = dir.join(if cut { "podman-cut" } else { "podman" });
+        fs::write(
+            &podman,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  'machine list'*) \
+echo '[{{\"Name\":\"dagq\",\"Running\":true}}]' ;;\n  '--connection dagq info'*) {} ;;\nesac\n",
+                if cut {
+                    "echo 'Error: unable to connect to Podman socket: failed to connect: ssh: \
+handshake failed: read tcp 127.0.0.1:1->127.0.0.1:65003: read: connection reset by peer' >&2; \
+exit 125"
+                } else {
+                    "echo 6.1.2"
+                }
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
+        PodmanCheck {
+            executable: Some(podman),
+            lock_home: dir.join("config"),
+            reconnect: crate::application::broker::Reconnect {
+                reruns: 1,
+                probes: 2,
+                interval: Duration::ZERO,
+            },
+        }
+    }
+
+    /// Podman that answers runs every e2e; podman that cannot be reached
+    /// has the podman tests skipped (`--skip` through `DAGQ_E2E_SKIP`),
+    /// named with the reason in the outcome, its report and the log
+    /// (ADR-t1162-1); podman that is missing is the same.
+    #[test]
+    fn podman_that_cannot_be_reached_skips_only_the_podman_e2e_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let command = "echo \"skip [$DAGQ_E2E_SKIP]\"; echo 'test e2e::a ... ok'";
+        let mut settings = settings(dir, command, Duration::from_secs(30));
+
+        settings.podman = Some(fake_podman(dir, false));
+        let outcome = run(dir, None, &settings).unwrap();
+        assert!(outcome.passed && outcome.skipped.is_none(), "{outcome:?}");
+        assert!(
+            fs::read_to_string(&settings.log)
+                .unwrap()
+                .contains("skip []")
+        );
+        assert!(outcome.report(&settings).get("skipped").is_none());
+        assert!(dir.join("config/dagq/podman-machine.lock").exists());
+
+        settings.podman = Some(fake_podman(dir, true));
+        let outcome = run(dir, None, &settings).unwrap();
+        assert!(outcome.passed, "{outcome:?}");
+        let skipped = outcome.skipped.clone().unwrap();
+        assert_eq!(skipped.tests, ["broker::"]);
+        assert!(skipped.reason.contains("handshake failed"), "{skipped:?}");
+        assert!(skipped.reason.contains("did not answer"), "{skipped:?}");
+        let log = fs::read_to_string(&settings.log).unwrap();
+        assert!(log.contains("skip [broker::]"), "{log}");
+        assert!(
+            log.contains("the e2e did not run broker:: because podman could not be reached"),
+            "{log}"
+        );
+        let report = outcome.report(&settings);
+        assert_eq!(report["status"], "passed");
+        assert_eq!(report["skipped"]["tests"], json!(["broker::"]));
+
+        settings.podman = Some(PodmanCheck {
+            executable: Some(dir.join("no-podman")),
+            ..fake_podman(dir, false)
+        });
+        let outcome = run(dir, None, &settings).unwrap();
+        let skipped = outcome.skipped.unwrap();
+        assert!(skipped.reason.contains("podman_missing"), "{skipped:?}");
+
+        // A failing e2e still fails with the podman tests skipped.
+        let mut failing = self::settings(
+            dir,
+            "echo 'test e2e::broken ... FAILED'; exit 101",
+            Duration::from_secs(30),
+        );
+        failing.podman = Some(fake_podman(dir, true));
+        let outcome = run(dir, None, &failing).unwrap();
+        assert!(!outcome.passed && outcome.skipped.is_some(), "{outcome:?}");
     }
 
     /// The e2e runs with the `[run.env]`, the cmux and a `TMPDIR` of its

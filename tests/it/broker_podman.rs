@@ -19,8 +19,10 @@ use dagq::application::broker_admin::AuditQuery;
 use dagq::compose::{
     BrokerStartOptions, broker_audit, broker_logs, broker_start, broker_status, broker_stop,
 };
-use dagq::infrastructure::broker_podman::{FileLock, PodmanCli, free_port, get_health};
-use dagq::infrastructure::location::{QueueLocation, data_home};
+use dagq::infrastructure::broker_podman::{
+    FileLock, PodmanCli, free_port, get_health, machine_lock_home,
+};
+use dagq::infrastructure::location::QueueLocation;
 
 use crate::common::{Bounded, on_timeout, within};
 
@@ -32,7 +34,7 @@ fn podman() -> PodmanCli {
 }
 
 fn host_lock() -> FileLock {
-    FileLock::machine(&data_home().unwrap())
+    FileLock::machine(&machine_lock_home().unwrap())
 }
 
 fn git(dir: &Path, args: &[&str]) {

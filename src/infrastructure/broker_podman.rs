@@ -1,7 +1,7 @@
 //! The adapters of the broker's lifecycle ([`crate::application::broker`],
 //! ADR-t827-3): [`PodmanCli`] runs the podman executable, [`FileLock`] is
 //! the host-wide lock of dagq's machine (`flock` on
-//! `$XDG_DATA_HOME/dagq/podman-machine.lock`), [`HttpHealth`] asks
+//! `$XDG_CONFIG_HOME/dagq/podman-machine.lock`), [`HttpHealth`] asks
 //! `GET /v1/health` on `127.0.0.1` with a hand-written HTTP/1.1 request
 //! (dagq has no HTTP dependency, ADR-t827-1 decision 2), and
 //! [`BrokerState`] is `<queue dir>/broker/state.json`. The image's build
@@ -83,11 +83,39 @@ pub struct FileLock {
     pub path: PathBuf,
 }
 
+/// Where the host-wide lock of dagq's machine lives: the config home podman
+/// finds its machines under (`$XDG_CONFIG_HOME`, else `~/.config`), never
+/// `$XDG_DATA_HOME`, which a throwaway queue (an e2e's fixture) points
+/// elsewhere while podman's machine stays the one of the host. A lock under
+/// the data home let two e2e run the machine at once, one stopping it under
+/// the other's build (task 1162).
+pub fn machine_lock_home() -> Result<PathBuf> {
+    machine_lock_home_from(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn machine_lock_home_from(
+    config: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    let absolute = |value: Option<std::ffi::OsString>| {
+        value.map(PathBuf::from).filter(|path| path.is_absolute())
+    };
+    if let Some(config) = absolute(config) {
+        return Ok(config);
+    }
+    let home = absolute(home).context("XDG_CONFIG_HOME and HOME are unset or not absolute")?;
+    Ok(home.join(".config"))
+}
+
 impl FileLock {
-    /// The host-wide lock of dagq's machine, `<data home>/dagq/podman-machine.lock`.
-    pub fn machine(data_home: &Path) -> Self {
+    /// The host-wide lock of dagq's machine,
+    /// `<lock home>/dagq/podman-machine.lock` ([`machine_lock_home`]).
+    pub fn machine(lock_home: &Path) -> Self {
         Self {
-            path: data_home.join("dagq").join(MACHINE_LOCK_FILE),
+            path: lock_home.join("dagq").join(MACHINE_LOCK_FILE),
         }
     }
 
@@ -291,6 +319,26 @@ mod tests {
         };
         let error = gone.run(&["--version".to_owned()]).unwrap_err();
         assert_eq!(error.code, FailureCode::PodmanMissing);
+    }
+
+    #[test]
+    fn the_machine_lock_follows_the_config_home_not_the_data_home() {
+        let some = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(
+            machine_lock_home_from(some("/xdg/config"), some("/home/u")).unwrap(),
+            Path::new("/xdg/config")
+        );
+        for bad in ["", "relative"] {
+            assert_eq!(
+                machine_lock_home_from(some(bad), some("/home/u")).unwrap(),
+                Path::new("/home/u/.config")
+            );
+        }
+        assert!(machine_lock_home_from(None, None).is_err());
+        assert_eq!(
+            FileLock::machine(Path::new("/home/u/.config")).path,
+            Path::new("/home/u/.config/dagq/podman-machine.lock")
+        );
     }
 
     #[test]

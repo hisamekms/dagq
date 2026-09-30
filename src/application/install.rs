@@ -137,6 +137,50 @@ pub struct E2eSettings {
     pub scratch: PathBuf,
     /// Where the e2e's output is appended.
     pub log: PathBuf,
+    /// The podman the e2e's podman tests ([`PODMAN_E2E`]) use: before the
+    /// e2e, dagq's machine is made ready and its connection must answer
+    /// within the wait; when it does not, those tests are not run and the
+    /// outcome says so (ADR-t1162-1). `None` checks nothing.
+    pub podman: Option<PodmanCheck>,
+}
+
+/// The e2e tests that need podman (dagq's machine) besides cmux: the
+/// `--skip` filters of the tests not run when podman cannot be reached
+/// (ADR-t1162-1).
+pub const PODMAN_E2E: &[&str] = &["broker::"];
+
+/// How the gate checks podman before the e2e (ADR-t1162-1).
+#[derive(Debug, Clone)]
+pub struct PodmanCheck {
+    /// The podman executable; `None` is `podman` on `PATH`.
+    pub executable: Option<PathBuf>,
+    /// Where the host-wide lock of dagq's machine lives.
+    pub lock_home: PathBuf,
+    /// How long a lost connection is waited for.
+    pub reconnect: crate::application::broker::Reconnect,
+}
+
+/// The e2e tests the gate did not run, and why (ADR-t1162-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct E2eSkip {
+    /// The `--skip` filters of the tests not run.
+    pub tests: Vec<String>,
+    pub reason: String,
+}
+
+impl E2eSkip {
+    pub fn to_json(&self) -> Value {
+        json!({"tests": self.tests, "reason": self.reason})
+    }
+
+    /// A sentence for a person: which tests were not run and why.
+    pub fn sentence(&self) -> String {
+        format!(
+            "the e2e did not run {} because podman could not be reached: {}",
+            self.tests.join(", "),
+            self.reason
+        )
+    }
 }
 
 /// How the gate's e2e went.
@@ -150,6 +194,9 @@ pub struct E2eOutcome {
     pub secs: u64,
     /// What was cleaned up after it (groups, processes, the directory).
     pub cleanup: Value,
+    /// The tests not run because podman could not be reached
+    /// (ADR-t1162-1).
+    pub skipped: Option<E2eSkip>,
 }
 
 impl E2eOutcome {
@@ -168,14 +215,21 @@ impl E2eOutcome {
         format!("{what}; see {}", settings.log.display())
     }
 
-    /// The `e2e` of a report: `passed` with its time.
+    /// The `e2e` of a report: `passed` with its time, and the tests it did
+    /// not run (`skipped`) when there are any.
     pub fn report(&self, settings: &E2eSettings) -> Value {
-        json!({"status": "passed", "secs": self.secs, "log": settings.log})
+        let mut report = json!({"status": "passed", "secs": self.secs, "log": settings.log});
+        if let Some(skipped) = &self.skipped {
+            report["skipped"] = skipped.to_json();
+        }
+        report
     }
 }
 
 /// Whether `install` runs the e2e of a checkout it builds (ADR-t963-1
 /// decision 1). A binary, a rollback and a release have no gate.
+// Made once per `install`; boxing the settings buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum E2eGate {
     /// The source has none (not dagq's source, or a built binary).

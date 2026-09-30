@@ -384,6 +384,7 @@ pub fn run(ports: &JobPorts, db: &Path, options: &JobOptions) -> Result<Value> {
         watch_timeout: options.watch_timeout,
         poll: options.poll,
         pid: options.pid,
+        e2e_skipped: Default::default(),
     };
     let paths = &options.paths;
     let built = ports
@@ -458,16 +459,21 @@ fn e2e_gate(
         )
         .map(Some);
     }
-    job.subject.record(
-        &*queue,
-        EventKind::UpdateE2ePassed,
-        json!({
-            "pid": job.pid,
-            "secs": outcome.secs,
-            "log": log,
-            "cleanup": outcome.cleanup,
-        }),
-    )?;
+    let mut passed = json!({
+        "pid": job.pid,
+        "secs": outcome.secs,
+        "log": log,
+        "cleanup": outcome.cleanup,
+    });
+    // The tests it did not run for want of podman go on to the
+    // `update_installed` too, so the swap does not pass them silently
+    // (ADR-t1162-1).
+    if let Some(skipped) = &outcome.skipped {
+        passed["skipped"] = skipped.to_json();
+        job.e2e_skipped.replace(Some(skipped.clone()));
+    }
+    job.subject
+        .record(&*queue, EventKind::UpdateE2ePassed, passed)?;
     Ok(None)
 }
 
@@ -526,6 +532,7 @@ pub fn run_release(
         watch_timeout: options.watch_timeout,
         poll: options.poll,
         pid: options.pid,
+        e2e_skipped: Default::default(),
     };
     let step = plugin.map_or(PluginStep::Skipped, PluginStep::Update);
     if options.plugin_only {
@@ -628,6 +635,14 @@ fn plugin_only(queue: &mut dyn Queue, job: &Job, version: &str, step: PluginStep
     if let Some(message) = message {
         payload["message"] = json!(message);
     }
+    if let Some(skipped) = &*job.e2e_skipped.borrow() {
+        payload["e2e_skipped"] = skipped.to_json();
+        let sentence = skipped.sentence();
+        payload["message"] = json!(match payload["message"].as_str() {
+            Some(message) => format!("{message}; {sentence}"),
+            None => sentence,
+        });
+    }
     job.subject
         .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;
     let mut value = payload;
@@ -699,6 +714,9 @@ struct Job<'a> {
     watch_timeout: Duration,
     poll: Duration,
     pid: u32,
+    /// The e2e tests the gate did not run (ADR-t1162-1), which
+    /// `update_installed` names.
+    e2e_skipped: std::cell::RefCell<Option<install::E2eSkip>>,
 }
 
 /// Check `binary` (its `update_built` recorded), leave it to a person when
@@ -914,6 +932,14 @@ fn put_in_place(
     }
     if let Some(message) = message {
         payload["message"] = json!(message);
+    }
+    if let Some(skipped) = &*job.e2e_skipped.borrow() {
+        payload["e2e_skipped"] = skipped.to_json();
+        let sentence = skipped.sentence();
+        payload["message"] = json!(match payload["message"].as_str() {
+            Some(message) => format!("{message}; {sentence}"),
+            None => sentence,
+        });
     }
     job.subject
         .record(&*queue, EventKind::UpdateInstalled, payload.clone())?;

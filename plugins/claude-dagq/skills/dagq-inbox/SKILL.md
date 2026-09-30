@@ -56,7 +56,7 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 - `decide the draft in a planner` (`draft_planner_exhausted`), `decide the finding in a planner` (`finding_planner_exhausted`), `decide the waiting tasks in a planner` (`dependency_stranded`), `check the planner` (`planner_unresponsive`), `plan review by hand` (`plan_review_failed`): tell the person, who works in a planner (`dagq-recover` section 8).
 - A worker provider that cannot be used: runs switch to the other by themselves; the person acts only on a `queue_hold` ask (login, limit). Codex's hold is `status`'s `provider_hold`; headless runs take no keys (`skills/dagq/reference/provider.md`).
 - `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH, so it claims and lands nothing; the person installs it. It clears by itself.
-- `report the update` (`update_installed`): tell the person its `version`, `commit` (or `release`) and any `reason`; after a plugin update, reopened inbox and planner sessions load the new plugin.
+- `report the update` (`update_installed`): tell the person its `version`, `commit` (or `release`) and any `reason`/`message`; after a plugin update, reopened inbox and planner sessions load the new plugin.
 - `report the review`, `check the failed review`: notices, `reference/watch.md`.
 - `fix the push command` (`kpi_push_abandoned`): the KPI push command (`[push]` of `host.toml`) gave up a message after three failures; the person fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).

@@ -15,7 +15,7 @@ use dagq_broker_protocol::PROTOCOL_VERSION;
 use crate::application::broker::{
     self as broker, BrokerControl, BrokerFailure, BrokerResult, ContainerLimits, ContainerSpec,
     FailureCode, HEALTH_TIMEOUT, HealthProbe, HostLock, ImageSource, MachineSpec, Podman,
-    PodmanOutput, StartReport, StopReport, container_name,
+    PodmanOutput, Reconnecting, StartReport, StopReport, container_name,
 };
 
 use super::broker_podman::{BrokerState, FileLock, free_port, tokens_active};
@@ -334,20 +334,22 @@ impl BrokerControl for QueueBroker {
     }
 }
 
-/// The real ports: `podman` (`None` is `podman` on `PATH`), the host-wide
-/// lock under `data_home`, the health over loopback, and the image built
-/// from the material this binary embeds (never a checkout's files).
-pub fn system_ports(podman: Option<&Path>, data_home: &Path) -> BrokerPorts {
+/// The real ports: `podman` (`None` is `podman` on `PATH`) that waits for a
+/// lost connection to the machine ([`Reconnecting`], task 1162), the
+/// host-wide lock under `lock_home` ([`super::broker_podman::machine_lock_home`]),
+/// the health over loopback, and the image built from the material this
+/// binary embeds (never a checkout's files).
+pub fn system_ports(podman: Option<&Path>, lock_home: &Path) -> BrokerPorts {
     use super::broker_image::EmbeddedSource;
     use super::broker_podman::{HttpHealth, PodmanCli};
     let source: Arc<dyn ImageSource + Send + Sync> = Arc::new(EmbeddedSource::of_this_build());
     let podman: Arc<dyn Podman + Send + Sync> = match PodmanCli::resolve(podman) {
-        Ok(podman) => Arc::new(podman),
+        Ok(podman) => Arc::new(Reconnecting::new(podman)),
         Err(failure) => Arc::new(MissingPodman(failure)),
     };
     BrokerPorts {
         podman,
-        host_lock: Arc::new(FileLock::machine(data_home)),
+        host_lock: Arc::new(FileLock::machine(lock_home)),
         health: Arc::new(HttpHealth::default()),
         source,
     }

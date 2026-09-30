@@ -307,6 +307,143 @@ fn checked(
 }
 
 // ---------------------------------------------------------------------------
+// A lost connection to the machine.
+
+/// Podman's words for a command on a machine's connection that was cut on
+/// the way (ssh's handshake reset, the connection refused or reset, the
+/// stream ended) rather than a command that ran and failed (task 1162).
+pub const LOST_CONNECTION_WORDS: &[&str] = &[
+    "ssh: handshake failed",
+    "connection reset by peer",
+    "connection refused",
+    "broken pipe",
+    "unexpected EOF",
+    "server probably quit",
+    "Error: EOF",
+    "Cannot connect to Podman",
+];
+
+/// Whether `output` is a command whose connection was lost on the way
+/// ([`LOST_CONNECTION_WORDS`] in podman's own stderr). Stdout is not
+/// read: a `build` prints its steps' output there, and a download that
+/// failed inside the image is not a lost connection to rebuild after.
+pub fn lost_connection(output: &PodmanOutput) -> bool {
+    !output.success
+        && LOST_CONNECTION_WORDS
+            .iter()
+            .any(|words| output.stderr.contains(words))
+}
+
+/// How long a lost connection is waited for (task 1162): after a command
+/// on a machine's connection is cut, the connection is asked (`podman
+/// --connection <machine> info`) up to `probes` times, `interval` apart,
+/// and once it answers the command runs again, at most `reruns` times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reconnect {
+    pub reruns: u32,
+    pub probes: u32,
+    pub interval: Duration,
+}
+
+/// The production wait: three reruns, each after up to ten asks 3 seconds
+/// apart (about 30 seconds for the connection to come back).
+pub const RECONNECT: Reconnect = Reconnect {
+    reruns: 3,
+    probes: 10,
+    interval: Duration::from_secs(3),
+};
+
+/// A podman whose commands on a machine's connection (`--connection
+/// <machine> ...`) that lose the connection on the way are run again once
+/// the connection answers, within [`Reconnect`]'s bounds (task 1162). A
+/// connection that does not come back, or a command that keeps losing it,
+/// ends with its last output (with a note of the wait), which the caller
+/// fails as before (`podman_failed` and the like). Other commands, and
+/// failures that are not a lost connection, pass through unchanged.
+pub struct Reconnecting<P> {
+    pub inner: P,
+    pub reconnect: Reconnect,
+}
+
+impl<P: Podman> Reconnecting<P> {
+    pub fn new(inner: P) -> Self {
+        Self {
+            inner,
+            reconnect: RECONNECT,
+        }
+    }
+
+    /// Whether `machine`'s connection answers `podman info` within the
+    /// probes; the last failure's words when it does not.
+    fn answers(&self, machine: &str) -> BrokerResult<Result<(), String>> {
+        let mut last = String::new();
+        for _ in 0..self.reconnect.probes {
+            std::thread::sleep(self.reconnect.interval);
+            let output = self.inner.run(&on_machine(
+                machine,
+                &["info", "--format", "{{.Version.Version}}"],
+            ))?;
+            if output.success {
+                return Ok(Ok(()));
+            }
+            last = output.words().to_owned();
+        }
+        Ok(Err(last))
+    }
+}
+
+impl<P: Podman> Podman for Reconnecting<P> {
+    fn run(&self, args: &[String]) -> BrokerResult<PodmanOutput> {
+        let mut output = self.inner.run(args)?;
+        let machine = match args {
+            [flag, machine, ..] if flag == "--connection" => machine.clone(),
+            _ => return Ok(output),
+        };
+        let mut reruns = 0;
+        while lost_connection(&output) {
+            if reruns == self.reconnect.reruns {
+                output.stderr.push_str(&format!(
+                    "\n(the connection to {machine} was lost again after {reruns} reruns)"
+                ));
+                break;
+            }
+            if let Err(last) = self.answers(&machine)? {
+                output.stderr.push_str(&format!(
+                    "\n(podman --connection {machine} info did not answer in {} asks {}s apart: {last})",
+                    self.reconnect.probes,
+                    self.reconnect.interval.as_secs()
+                ));
+                break;
+            }
+            reruns += 1;
+            output = self.inner.run(args)?;
+        }
+        Ok(output)
+    }
+}
+
+/// Make dagq's machine ready and its connection answer, as a `start`
+/// would before its image (the e2e gate's check, task 1162): the machine
+/// ensured under the host lock through a [`Reconnecting`] podman, so a
+/// connection lost on the way is waited for within its bounds. An error
+/// is podman that cannot be reached: missing, busy with another machine,
+/// or a connection that did not answer.
+pub fn connect<P: Podman>(
+    podman: &Reconnecting<P>,
+    lock: &dyn HostLock,
+    spec: &MachineSpec,
+) -> BrokerResult<MachineOutcome> {
+    let outcome = ensure_machine(podman, lock, spec)?;
+    checked(
+        podman,
+        &on_machine(&spec.name, &["info", "--format", "{{.Version.Version}}"]),
+        FailureCode::PodmanFailed,
+        &format!("podman --connection {} info", spec.name),
+    )?;
+    Ok(outcome)
+}
+
+// ---------------------------------------------------------------------------
 // The machine.
 
 /// dagq's machine and its resources (ADR-t827-3 decision 7): the fewest
@@ -2062,6 +2199,171 @@ mod tests {
 
     fn info() -> [&'static str; 3] {
         ["--connection", "dagq", "info"]
+    }
+
+    const RESET: &str = "Cannot connect to Podman. Please verify your connection\nError: unable to connect to Podman socket: failed to connect: ssh: handshake failed: read tcp 127.0.0.1:64562->127.0.0.1:65003: read: connection reset by peer";
+
+    fn reconnecting(script: Script) -> Reconnecting<Script> {
+        Reconnecting {
+            inner: script,
+            reconnect: Reconnect {
+                reruns: 2,
+                probes: 3,
+                interval: Duration::ZERO,
+            },
+        }
+    }
+
+    fn exit(code: i32, stderr: &str) -> PodmanOutput {
+        PodmanOutput {
+            code: Some(code),
+            ..fail(stderr)
+        }
+    }
+
+    #[test]
+    fn lost_connections_are_told_from_commands_that_failed() {
+        for words in [
+            RESET,
+            "Error: server probably quit: unexpected EOF",
+            "Error: EOF",
+            "ssh: connect to 127.0.0.1:65003: connection refused",
+            "write: broken pipe",
+        ] {
+            assert!(lost_connection(&exit(125, words)), "{words}");
+        }
+        assert!(!lost_connection(&exit(1, "")));
+        assert!(!lost_connection(&exit(125, "Error: no such image")));
+        assert!(!lost_connection(&ok(RESET)));
+        // A build step's output (stdout) is not podman's connection.
+        let build = PodmanOutput {
+            stdout: "error: failed to download: connection reset by peer".to_owned(),
+            ..exit(
+                1,
+                "Error: building at STEP \"RUN cargo build\": exit status 101",
+            )
+        };
+        assert!(!lost_connection(&build));
+    }
+
+    #[test]
+    fn a_lost_connection_is_waited_for_and_the_command_runs_again() {
+        let image = ["--connection", "dagq", "image", "exists"];
+        let podman = reconnecting(
+            Script::default()
+                .on(&image, vec![exit(125, RESET), ok("")])
+                .on(&info(), vec![exit(125, RESET), ok("6.1.2")]),
+        );
+        assert!(image_exists(&podman, MACHINE, "localhost/dagq-broker:x").unwrap());
+        // The connection answered on the second ask, and then the command
+        // ran once more.
+        assert_eq!(
+            podman.inner.calls(),
+            [
+                "--connection dagq image exists localhost/dagq-broker:x",
+                "--connection dagq info --format {{.Version.Version}}",
+                "--connection dagq info --format {{.Version.Version}}",
+                "--connection dagq image exists localhost/dagq-broker:x",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_connection_that_does_not_come_back_is_podman_failed() {
+        let image = ["--connection", "dagq", "image", "exists"];
+        let podman = reconnecting(
+            Script::default()
+                .on(&image, vec![exit(125, RESET)])
+                .on(&info(), vec![exit(125, RESET)]),
+        );
+        let error = image_exists(&podman, MACHINE, "localhost/dagq-broker:x").unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanFailed);
+        assert!(error.message.contains("handshake failed"), "{error}");
+        assert!(
+            error
+                .message
+                .contains("podman --connection dagq info did not answer in 3 asks"),
+            "{error}"
+        );
+        assert_eq!(podman.inner.called("--connection dagq info"), 3);
+        assert_eq!(podman.inner.called("--connection dagq image exists"), 1);
+
+        // One that answers but keeps cutting the command: at most the
+        // reruns, then the command's failure.
+        let podman = reconnecting(
+            Script::default()
+                .on(&image, vec![exit(125, RESET)])
+                .on(&info(), vec![ok("6.1.2")]),
+        );
+        let error = image_exists(&podman, MACHINE, "localhost/dagq-broker:x").unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanFailed);
+        assert!(
+            error.message.contains("lost again after 2 reruns"),
+            "{error}"
+        );
+        assert_eq!(podman.inner.called("--connection dagq image exists"), 3);
+    }
+
+    #[test]
+    fn other_failures_and_commands_pass_through_unchanged() {
+        let podman = reconnecting(
+            Script::default()
+                .on(
+                    &["--connection", "dagq", "image", "exists"],
+                    vec![exit(1, "")],
+                )
+                .on(
+                    &["--connection", "dagq", "rm"],
+                    vec![exit(125, "Error: no such container")],
+                )
+                .on(&["machine", "start"], vec![fail("Error: EOF")]),
+        );
+        assert!(!image_exists(&podman, MACHINE, "localhost/dagq-broker:x").unwrap());
+        let rm = podman
+            .run(&on_machine(MACHINE, &["rm", "--force", "dagq-broker-x"]))
+            .unwrap();
+        assert_eq!(rm.stderr, "Error: no such container");
+        // Not a command on the connection: the machine's own steps judge it.
+        let start = podman.run(&MachineSpec::default().start_args()).unwrap();
+        assert_eq!(start.stderr, "Error: EOF");
+        assert_eq!(podman.inner.called("--connection dagq info"), 0);
+        // A podman that cannot run at all is an error at once.
+        let missing = reconnecting(Script {
+            missing: true,
+            ..Script::default()
+        });
+        let error = image_exists(&missing, MACHINE, "x").unwrap_err();
+        assert_eq!(error.code, FailureCode::PodmanMissing);
+    }
+
+    #[test]
+    fn connect_readies_the_machine_and_waits_for_its_connection() {
+        let lock = CountingLock::default();
+        // Running, its connection cut once: waited for, not restarted.
+        let podman = reconnecting(
+            Script::default()
+                .on(&list(), vec![ok(RUNNING)])
+                .on(&info(), vec![exit(125, RESET), ok("6.1.2")]),
+        );
+        let outcome = connect(&podman, &lock, &MachineSpec::default()).unwrap();
+        assert!(!outcome.restarted && !outcome.started, "{outcome:?}");
+        assert_eq!(podman.inner.called("machine stop"), 0);
+        assert_eq!(lock.held.get(), 1);
+
+        // Another machine runs: busy, nothing started.
+        let podman = reconnecting(Script::default().on(&list(), vec![ok(OTHER_RUNNING)]));
+        let error = connect(&podman, &lock, &MachineSpec::default()).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineBusy);
+
+        // A connection that never answers, even after the restart.
+        let podman = reconnecting(
+            Script::default()
+                .on(&list(), vec![ok(RUNNING)])
+                .on(&info(), vec![exit(125, RESET)]),
+        );
+        let error = connect(&podman, &lock, &MachineSpec::default()).unwrap_err();
+        assert_eq!(error.code, FailureCode::MachineFailed);
+        assert!(error.message.contains("did not answer"), "{error}");
     }
 
     #[test]

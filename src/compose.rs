@@ -863,7 +863,7 @@ pub fn supervise_with_reviewer(
                     Some(settings) => settings.ports.clone(),
                     None => crate::infrastructure::broker_queue::system_ports(
                         setup.host.config.podman.as_deref().map(Path::new),
-                        &data_home()?,
+                        &crate::infrastructure::broker_podman::machine_lock_home()?,
                     ),
                 };
                 let mut control = queue_broker(
@@ -1743,6 +1743,18 @@ same in one step",
             queue_dir: Some(location.queue_dir.clone()),
             scratch: paths.e2e.clone(),
             log: e2e_log(&job.log),
+            // The broker's e2e: podman on PATH with the default machine
+            // (host.toml's `podman` and resources are not read here,
+            // ADR-t1162-1). A command in place of the e2e (tests) has no
+            // broker's e2e, so the host's podman is not touched for it.
+            podman: match job.e2e_command {
+                Some(_) => None,
+                None => Some(installation::PodmanCheck {
+                    executable: None,
+                    lock_home: crate::infrastructure::broker_podman::machine_lock_home()?,
+                    reconnect: crate::application::broker::RECONNECT,
+                }),
+            },
         };
         update::run(
             &update::JobPorts {
@@ -2112,7 +2124,7 @@ a person installs it (brew install podman), or sets [broker] mode = \"disabled\"
             Some(options) => options.ports.clone(),
             None => crate::infrastructure::broker_queue::system_ports(
                 setup.host.config.podman.as_deref().map(Path::new),
-                &data_home()?,
+                &crate::infrastructure::broker_podman::machine_lock_home()?,
             ),
         };
         let broker = queue_broker(
@@ -3025,7 +3037,10 @@ fn location_broker(
     let podman = podman
         .map(Path::to_path_buf)
         .or_else(|| setup.host.config.podman.as_ref().map(PathBuf::from));
-    let ports = system_ports(podman.as_deref(), &data_home()?);
+    let ports = system_ports(
+        podman.as_deref(),
+        &crate::infrastructure::broker_podman::machine_lock_home()?,
+    );
     Ok(queue_broker(
         location.queue_dir.clone(),
         location.runs_dir.clone(),

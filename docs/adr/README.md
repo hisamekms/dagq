@@ -122,6 +122,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t946-1](2026-09-29-t946-1-kill-only-resumes-have-their-own-limit.md) | 外からのkill（session_killed）で止まったsessionのresumeは試行3回の上限に数えず、killだけの試行の別の上限で止める（ADR-0047決定24をamends） | 2026-09-29 |
 | [ADR-t1063-1](2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md) | worker以外のheadlessのjobのproviderを役割ごとの設定で選び（既定claude）、権限を意図で渡してproviderの実装が訳し、最終の返答のtextを受け取る。使えないproviderからはworkerと同じ条件でもう一方に切り替え、控えはproviderごとのまま、どのprovider・modelで動いたかを全てのjobで記録する（ADR-t813-2決定6をamends） | 2026-09-29 |
 | [ADR-t1091-1](2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md) | ADRをamendsで直すか丸ごと置き換えるかを、IDの形でなく元のADRの決定の数と変える範囲で決め、決定を複数持つ新しい形のADRもamendsで直せるようにする（ADR-t598-1決定5をamends） | 2026-09-30 |
+| [ADR-t1162-1](2026-09-30-t1162-1-e2e-gate-skips-podman-e2e-only-when-podman-is-unreachable.md) | 固定バイナリを入れ替える前のe2eの関門で、上限つきで待ってもpodmanに繋がらないときだけpodmanに頼るe2eを流さずに残りで判定し、流さなかったことを記録してinboxに届ける（ADR-t963-1決定1をamends） | 2026-09-30 |
 
 ## 置き換え・廃止されたADR
 

@@ -135,7 +135,15 @@ fn status_and_doctor_show_the_watcher_alive_while_it_watches_and_absent_after_th
     assert!(watcher["absent_secs"].as_i64().unwrap() >= 200, "{watcher}");
     let doctor = past.doctor(&db, false, None).unwrap();
     assert_eq!(doctor["inbox_watcher"]["state"], "absent");
-    assert_eq!(doctor["inbox_watcher"], *watcher);
+    // The same but for `absent_secs`: `later` reads the wall clock on each
+    // call, so doctor may be a second past status.
+    let mut same = doctor["inbox_watcher"].clone();
+    let absent = same["absent_secs"].take().as_i64().unwrap();
+    let expected = watcher["absent_secs"].as_i64().unwrap();
+    assert!((expected..=expected + 2).contains(&absent), "{doctor}");
+    let mut watcher = watcher.clone();
+    watcher["absent_secs"] = serde_json::Value::Null;
+    assert_eq!(same, watcher);
 }
 
 #[test]
