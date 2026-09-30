@@ -257,6 +257,15 @@ esac"#
             !roots.contains("/.git\""),
             "not the whole common dir: {roots}"
         );
+        // The worktree trusted on every call, so that Codex does not
+        // persist a trust in the person's config (task 1174).
+        let worktree = run.worktree_path().unwrap();
+        assert!(
+            line.contains(&format!(
+                r#" -c| projects={{"{worktree}"={{trust_level="trusted"}}}}|"#
+            )),
+            "call {at}: {line}"
+        );
         assert_eq!(line.contains(" resume|"), at > 0, "{line}");
         assert_eq!(line.contains(" -C|"), at == 0, "{line}");
     }

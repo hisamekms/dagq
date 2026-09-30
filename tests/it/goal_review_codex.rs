@@ -152,7 +152,13 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
     );
     assert!(calls[0].starts_with(&expected), "{}", calls[0]);
     assert!(calls[0].contains("the median landing is under 5 minutes"));
-    for refused in ["dangerously", "bypass", "writable_roots", "--session-id"] {
+    for refused in [
+        "dangerously",
+        "bypass",
+        "writable_roots",
+        "trust_level",
+        "--session-id",
+    ] {
         assert!(!calls[0].contains(refused), "{refused}: {}", calls[0]);
     }
     // The job's role and actor reach the sandbox's `dagq` (spike 2.).

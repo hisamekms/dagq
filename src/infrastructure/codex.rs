@@ -176,6 +176,26 @@ fn cargo_home() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".cargo"))
 }
 
+/// `projects={"<worktree>"={trust_level="trusted"}}`: the worktree trusted
+/// for the turn only. `codex exec` (0.155.1) trusts the project it starts
+/// a thread in when no trust is configured for it and the sandbox may
+/// write there, and persists that as `[projects."<main checkout>"]` in the
+/// person's `~/.codex/config.toml`
+/// (`app-server/src/request_processors/thread_processor.rs`
+/// `thread_start_task`); a trust given here is found first
+/// (`config/src/config_toml.rs` `get_active_project`), so nothing is
+/// written. The path goes in the value, as a quoted key: the key of a
+/// `-c` is split at every `.` (task 1174).
+pub fn trust_config(worktree: &Path) -> Result<String> {
+    let path = worktree
+        .to_str()
+        .with_context(|| format!("{} is not UTF-8", worktree.display()))?;
+    Ok(format!(
+        r#"projects={{{}={{trust_level="trusted"}}}}"#,
+        serde_json::to_string(path)?
+    ))
+}
+
 /// `-c sandbox_workspace_write.writable_roots=[…]`: the roots as a TOML
 /// array of strings (JSON's escapes are TOML's).
 pub fn writable_roots_config(roots: &[PathBuf]) -> Result<String> {
@@ -290,8 +310,8 @@ impl AgentProvider for Codex {
     /// `codex exec --json -C <worktree>` for the first turn and `codex exec
     /// resume --json … <thread id>` after it (`resume` has no `-C`, so the
     /// worktree is its working directory either way), with
-    /// [`SANDBOX_CONFIG`] and the run's [`writable_roots`] as `-c` on each,
-    /// the prompt after `--`. It leads a session of its own, but Codex runs
+    /// [`SANDBOX_CONFIG`], the run's [`writable_roots`] and the worktree's
+    /// [`trust_config`] as `-c` on each, the prompt after `--`. It leads a session of its own, but Codex runs
     /// each command in a process group of the command's own, which a
     /// signal to the turn's group does not reach (task 1061): the wrapper
     /// stops a turn with its descendants by pid as well (task 1085).
@@ -326,7 +346,7 @@ impl AgentProvider for Codex {
         for config in SANDBOX_CONFIG
             .into_iter()
             .map(str::to_owned)
-            .chain([writable_roots_config(&roots)?])
+            .chain([writable_roots_config(&roots)?, trust_config(worktree)?])
         {
             command.arg("-c").arg(config);
         }
@@ -343,8 +363,11 @@ impl AgentProvider for Codex {
     /// `codex exec --json --sandbox read-only -C <cwd> -- <prompt>` in
     /// `cwd` (ADR-t1063-1 decision 2, spike 1.): the job's intent is read
     /// in [`JOB_SANDBOX`], its environment (role, queue) is the caller's,
-    /// and nothing of the person's Codex settings is changed. Codex names
-    /// its thread itself, so no session id is given.
+    /// and nothing of the person's Codex settings is changed. No
+    /// [`trust_config`]: in the read-only sandbox Codex neither trusts nor
+    /// persists the project, and a trust would change the job's default
+    /// approval and load the project's `.codex` config. Codex names its
+    /// thread itself, so no session id is given.
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
         let _ = access;
         let mut command = CommandSpec::new(&self.executable);
@@ -594,7 +617,8 @@ mod tests {
             assert!(
                 !args.iter().any(|arg| arg.contains("dangerously")
                     || arg.contains("bypass")
-                    || arg.contains("writable_roots")),
+                    || arg.contains("writable_roots")
+                    || arg.contains("trust_level")),
                 "{args:?}"
             );
         }
@@ -711,6 +735,14 @@ mod tests {
             &writable_roots(&worktree, &run_dir, &cargo_home().unwrap()).unwrap(),
         )
         .unwrap();
+        let trust = trust_config(&worktree).unwrap();
+        assert_eq!(
+            trust,
+            format!(
+                r#"projects={{"{}"={{trust_level="trusted"}}}}"#,
+                worktree.display()
+            )
+        );
         let first = codex
             .turn_command(&run, "-do it", TurnSession::New("ignored"))
             .unwrap();
@@ -726,6 +758,8 @@ mod tests {
             SANDBOX_CONFIG[2],
             "-c",
             roots.as_str(),
+            "-c",
+            trust.as_str(),
         ];
         let worktree_text = worktree.display().to_string();
         let mut expected = vec!["exec", "--json", "-C", worktree_text.as_str()];
