@@ -10,7 +10,20 @@
 //! The launchd `up` / `down` test is temporarily off even under `--ignored`:
 //! no project runs the launchd mode now, and without a cmux socket password
 //! its preflight always stops `up`. It returns at once, printing why, unless
-//! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test always runs.
+//! `DAGQ_E2E_LAUNCHD=1` is set; the in-cmux `up` / `down` test runs
+//! outside the sandboxed Codex-worker exclusion described below.
+//!
+//! A sandboxed Codex worker excludes only these host-permission cases by
+//! full-name `--skip` (ADR-t963-1 decision 5):
+//! `broker::a_preferred_worker_does_its_task_through_the_broker_and_lands`
+//! (Podman machine), `killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands`
+//! and `up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes`
+//! (external process liveness), and
+//! `install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands` and
+//! `auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands`
+//! (signalling across the sandbox boundary). The install/auto-update gate
+//! does not skip them. Names and reasons used by the worker's receipt are in
+//! `CODEX_WORKER_E2E_EXCLUSIONS` in `src/domain/validation.rs`.
 #[path = "e2e/broker.rs"]
 mod broker;
 #[path = "e2e/cleanup.rs"]

@@ -23,6 +23,7 @@ use super::{
     integrate::{integrate_logs, log_names},
     or_none, tail,
 };
+use crate::domain::validation::CODEX_WORKER_E2E_EXCLUSIONS;
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
     Ask, BundleKey, CommitSha, DraftOrigin, DraftTarget, EvidenceCheck, FindingView, Goal, GoalId,
@@ -525,6 +526,9 @@ pub fn prompt(
     // touch `[e2e] paths`; the marks matter only then.
     if required.contains(&EvidenceCheck::E2e) || !e2e_paths.is_empty() {
         evidence.push_str(&e2e_marks_line(task, e2e_marks));
+        if route == Route::Headless(Provider::Codex) {
+            evidence.push_str(&codex_worker_e2e_line());
+        }
     }
     // The declared scope (ADR-0029): changing anything else parks the run.
     let paths = if task.paths().is_empty() {
@@ -596,6 +600,24 @@ pub fn prompt(
     ))
 }
 
+/// The fixed subset a sandboxed Codex worker can omit. This instruction is
+/// only in Codex worker requests; the install/auto-update gate sees none of
+/// these exclusions.
+fn codex_worker_e2e_line() -> String {
+    let mut command = "cargo test --locked --test e2e -- --ignored".to_owned();
+    for (name, _) in CODEX_WORKER_E2E_EXCLUSIONS {
+        command.push_str(&format!(" --skip {name}"));
+    }
+    let reasons = CODEX_WORKER_E2E_EXCLUSIONS
+        .iter()
+        .map(|(name, reason)| format!("{name}: {reason}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Codex worker E2E: if this run owes E2E evidence, after the last change run `{command}`. Only these named host-permission cases may be excluded: {reasons}. Run all other ignored E2E tests. In the receipt set `e2e.evidence_or_reason` to a JSON string with `command` (the exact command run), `result` (`passed`), and `excluded` (an array of objects with `name` and the exact `reason` above, in command order). A full suite run may use the command without `--skip` and an empty `excluded` array. If an E2E mark permits a failed test after its named rerun, add a `marked` array with objects containing its `name`, `rerun` result, and `mark` reason. If a selected E2E returns early under its own documented condition, add a `note` explaining it. Do not report the excluded tests as passed. A missing or unapproved exclusion, a command that differs from the report, or a failed result is not accepted as E2E evidence. The install and auto-update supervisor gates run the full suite without these exclusions.\n"
+    )
+}
+
 /// Whether the run owes `e2e` when its task does not require it
 /// (ADR-t963-1 decision 2): the repository's `[e2e] paths` decide from the
 /// diff at validation. Before the diff is made, the expectation reads the
@@ -643,7 +665,7 @@ pub(crate) fn e2e_marks_line(task: &Task, marks: &[Mark]) -> String {
         })
         .collect();
     format!(
-        "E2E marks that hold now ({file} in your worktree): {list}. When you run the whole e2e and tests fail, rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more. A test that passes its rerun is flaky: name it in the e2e evidence. If every test that fails its rerun too is one of the marked tests above, your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/), and this task (task {task}) is not the task that fixes it, report `e2e` as passed and write in its evidence the tests passed under a mark and the result of their rerun. Otherwise, as without marks: fix the failure, or write the receipt with result failed.\n",
+        "E2E marks that hold now ({file} in your worktree): {list}. When you run the required e2e and tests fail, rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more. A test that passes its rerun is flaky: name it in the e2e evidence. If every test that fails its rerun too is one of the marked tests above, your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/), and this task (task {task}) is not the task that fixes it, report `e2e` as passed and write in its evidence the tests passed under a mark and the result of their rerun. Otherwise, as without marks: fix the failure, or write the receipt with result failed.\n",
         file = e2e_quarantine::FILE,
         list = list.join("; "),
         task = task.id(),
@@ -1376,6 +1398,9 @@ pub(crate) fn resume_request(
     let marks = e2e_marks_line(task, e2e_marks);
     if !marks.is_empty() {
         lines.push(format!("If you run the e2e: {}", marks.trim_end()));
+    }
+    if route == Route::Headless(Provider::Codex) {
+        lines.push(codex_worker_e2e_line());
     }
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
@@ -2589,6 +2614,40 @@ mod tests {
             e2e_expectation(&[], &["tests/e2e.rs".to_owned()], &e2e).contains("required only if")
         );
         assert_eq!(e2e_expectation(&[EvidenceCheck::E2e], &[], &e2e), "");
+    }
+
+    #[test]
+    fn only_codex_worker_prompts_name_the_host_permission_e2e_exclusions() {
+        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let paths = ["tests/e2e.rs".to_owned()];
+        let codex = run_on(Provider::Codex, WorkerMode::Headless);
+        let codex_prompt = prompt(&task, &codex, None, &[], &[], &[], None, &paths, &[]).unwrap();
+        let line = codex_worker_e2e_line();
+        assert!(codex_prompt.contains(&line));
+        for (name, reason) in CODEX_WORKER_E2E_EXCLUSIONS {
+            assert!(line.contains(&format!("--skip {name}")));
+            assert!(line.contains(&format!("{name}: {reason}")));
+        }
+        let claude = run_on(Provider::Claude, WorkerMode::Headless);
+        let claude_prompt = prompt(&task, &claude, None, &[], &[], &[], None, &paths, &[]).unwrap();
+        assert!(!claude_prompt.contains("Codex worker E2E:"));
+        assert!(!claude_prompt.contains("--skip broker::"));
+        let request = ResumeRequest {
+            main: CommitSha::try_from(SHA).unwrap(),
+            branch: "main".into(),
+            reason: "evidence missing: e2e".into(),
+            kind: ResumeKind::EvidenceMissing,
+        };
+        assert!(
+            resume_request(&task, &codex, &request, &[], &[])
+                .unwrap()
+                .contains(&line)
+        );
+        assert!(
+            !resume_request(&task, &claude, &request, &[], &[])
+                .unwrap()
+                .contains("Codex worker E2E:")
+        );
     }
 
     /// The e2e marks that hold (ADR-t1165-1 decision 6) are named in the

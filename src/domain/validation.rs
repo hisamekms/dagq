@@ -5,13 +5,104 @@
 //! and asks again, so no Git call is made for a check an earlier rejection
 //! already settled. [`Validation`] is the outcome the store records.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitSha, DomainError, EvidenceCheck, ReasonCode, Receipt, RunId, evidence_missing_reason,
+    CommitSha, DomainError, EvidenceCheck, Provider, ReasonCode, Receipt, RunId,
+    evidence_missing_reason,
     measure::LoadSummary,
     scope::{glob_matches, out_of_scope, scope_violation_reason},
 };
+
+/// The only host-permission-dependent tests a Codex worker may omit. The
+/// install and auto-update gate does not use this list and runs every test.
+pub const CODEX_WORKER_E2E_EXCLUSIONS: &[(&str, &str)] = &[
+    (
+        "broker::a_preferred_worker_does_its_task_through_the_broker_and_lands",
+        "Podman machine is outside the Codex workspace-write sandbox",
+    ),
+    (
+        "killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands",
+        "checks the liveness of a supervisor process outside the sandbox",
+    ),
+    (
+        "up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes",
+        "checks the liveness of a cmux-started supervisor outside the sandbox",
+    ),
+    (
+        "install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands",
+        "signals a supervisor process across the sandbox boundary",
+    ),
+    (
+        "auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands",
+        "signals a supervisor process across the sandbox boundary",
+    ),
+];
+
+/// A Codex worker's structured claim within `e2e.evidence_or_reason`.
+/// The command is checked against the named exclusions, rather than treating
+/// a nonempty string as proof that an arbitrary subset was run.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexE2eEvidence {
+    command: String,
+    result: String,
+    excluded: Vec<CodexE2eExclusion>,
+    #[serde(default)]
+    marked: Vec<CodexE2eMarked>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexE2eExclusion {
+    name: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexE2eMarked {
+    name: String,
+    rerun: String,
+    mark: String,
+}
+
+fn codex_e2e_evidence_valid(text: &str) -> bool {
+    let Ok(evidence) = serde_json::from_str::<CodexE2eEvidence>(text) else {
+        return false;
+    };
+    if evidence.result != "passed" {
+        return false;
+    }
+    if evidence
+        .note
+        .as_ref()
+        .is_some_and(|note| note.trim().is_empty())
+    {
+        return false;
+    }
+    if evidence.marked.iter().any(|test| {
+        test.name.trim().is_empty() || test.rerun.trim().is_empty() || test.mark.trim().is_empty()
+    }) {
+        return false;
+    }
+    let mut command = "cargo test --locked --test e2e -- --ignored".to_owned();
+    let mut seen = std::collections::HashSet::new();
+    for excluded in &evidence.excluded {
+        if !seen.insert(excluded.name.as_str())
+            || !CODEX_WORKER_E2E_EXCLUSIONS
+                .iter()
+                .any(|(name, reason)| *name == excluded.name && *reason == excluded.reason)
+        {
+            return false;
+        }
+        command.push_str(" --skip ");
+        command.push_str(&excluded.name);
+    }
+    evidence.command == command
+}
 
 /// Why validation requires `e2e` of a run (ADR-t963-1 decision 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -178,6 +269,7 @@ pub struct ReceiptFacts<'a> {
     pub run_id: &'a RunId,
     pub base: &'a CommitSha,
     pub required: &'a [EvidenceCheck],
+    pub provider: Provider,
     pub paths: &'a [String],
     pub e2e_paths: &'a [String],
     pub receipt_path: &'a str,
@@ -202,6 +294,7 @@ impl<'a> ReceiptFacts<'a> {
             run_id,
             base,
             required,
+            provider: Provider::Claude,
             paths,
             e2e_paths: &[],
             receipt_path,
@@ -217,6 +310,11 @@ impl<'a> ReceiptFacts<'a> {
     /// With the repository's `[e2e] paths` (ADR-t963-1 decision 2).
     pub fn with_e2e_paths(mut self, e2e_paths: &'a [String]) -> Self {
         self.e2e_paths = e2e_paths;
+        self
+    }
+
+    pub fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = provider;
         self
     }
 
@@ -417,7 +515,21 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
             Some(head),
         );
     }
-    let missing = receipt.missing_evidence(&required);
+    let mut missing = receipt.missing_evidence(&required);
+    if facts.provider == Provider::Codex
+        && required.contains(&EvidenceCheck::E2e)
+        && !missing.contains(&EvidenceCheck::E2e)
+        && !codex_e2e_evidence_valid(receipt.e2e().evidence_or_reason())
+    {
+        missing.push(EvidenceCheck::E2e);
+    }
+    if facts.provider != Provider::Codex
+        && required.contains(&EvidenceCheck::E2e)
+        && !missing.contains(&EvidenceCheck::E2e)
+        && receipt.e2e().evidence_or_reason().contains("--skip")
+    {
+        missing.push(EvidenceCheck::E2e);
+    }
     if !missing.is_empty() {
         return Judgement::Reject(Rejection {
             reason: evidence_missing_reason(&missing),
@@ -489,10 +601,21 @@ mod tests {
         paths: &[String],
         e2e_paths: &[String],
     ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
+        run_with_e2e_and_provider(world, required, paths, e2e_paths, Provider::Claude)
+    }
+
+    fn run_with_e2e_and_provider(
+        world: &World,
+        required: &[EvidenceCheck],
+        paths: &[String],
+        e2e_paths: &[String],
+        provider: Provider,
+    ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
         let id = RunId::new("r1").unwrap();
         let base = sha(BASE);
         let mut facts = ReceiptFacts::new(&id, &base, required, paths, "/runs/r1/receipt.json")
-            .with_e2e_paths(e2e_paths);
+            .with_e2e_paths(e2e_paths)
+            .with_provider(provider);
         let mut asked = Vec::new();
         loop {
             match judge(&facts) {
@@ -773,6 +896,85 @@ mod tests {
 
     fn globs(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_owned()).collect()
+    }
+
+    #[test]
+    fn codex_e2e_exclusions_name_tests_in_the_e2e_suite() {
+        let root = include_str!("../../tests/e2e.rs");
+        let broker = include_str!("../../tests/e2e/broker.rs");
+        for (name, _) in CODEX_WORKER_E2E_EXCLUSIONS {
+            let (source, function) = match name.strip_prefix("broker::") {
+                Some(function) => (broker, function),
+                None => (root, *name),
+            };
+            assert!(source.contains(&format!("fn {function}()")), "{name}");
+        }
+    }
+
+    #[test]
+    fn codex_e2e_accepts_only_reported_approved_exclusions_when_required() {
+        let paths = globs(&["tests/e2e.rs"]);
+        let mut world = sound();
+        world.changes = paths.clone();
+        let exclusions = CODEX_WORKER_E2E_EXCLUSIONS
+            .iter()
+            .map(|(name, reason)| serde_json::json!({"name": name, "reason": reason}))
+            .collect::<Vec<_>>();
+        let command = CODEX_WORKER_E2E_EXCLUSIONS.iter().fold(
+            "cargo test --locked --test e2e -- --ignored".to_owned(),
+            |mut command, (name, _)| {
+                command.push_str(&format!(" --skip {name}"));
+                command
+            },
+        );
+        let mut accepted = |evidence: serde_json::Value, provider| {
+            let mut receipt: serde_json::Value =
+                serde_json::from_str(&receipt_text("r1", "succeeded", "passed")).unwrap();
+            receipt["e2e"]["evidence_or_reason"] = evidence.to_string().into();
+            world.receipt = Some(receipt.to_string());
+            run_with_e2e_and_provider(&world, &[], &[], &paths, provider)
+                .0
+                .1
+        };
+        let good =
+            serde_json::json!({"command": command, "result": "passed", "excluded": exclusions});
+        assert_eq!(
+            accepted(good.clone(), Provider::Codex),
+            Judgement::Accept(sha(HEAD))
+        );
+        let full = serde_json::json!({"command": "cargo test --locked --test e2e -- --ignored", "result": "passed", "excluded": []});
+        assert_eq!(
+            accepted(full, Provider::Codex),
+            Judgement::Accept(sha(HEAD))
+        );
+        let one = serde_json::json!({
+            "command": format!("cargo test --locked --test e2e -- --ignored --skip {}", CODEX_WORKER_E2E_EXCLUSIONS[0].0),
+            "result": "passed",
+            "excluded": [{"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": CODEX_WORKER_E2E_EXCLUSIONS[0].1}]
+        });
+        assert_eq!(accepted(one, Provider::Codex), Judgement::Accept(sha(HEAD)));
+        for bad in [
+            serde_json::json!({"command": command, "result": "passed", "excluded": []}),
+            serde_json::json!({"command": "cargo test --locked --test e2e -- --ignored --skip unrelated", "result": "passed", "excluded": [{"name": "unrelated", "reason": "host"}]}),
+            serde_json::json!({"command": command, "result": "passed", "excluded": [{"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": "other"}]}),
+            serde_json::json!({"command": command, "result": "failed", "excluded": exclusions}),
+            serde_json::json!({"command": format!("cargo test --locked --test e2e -- --ignored --skip {0} --skip {0}", CODEX_WORKER_E2E_EXCLUSIONS[0].0), "result": "passed", "excluded": [{"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": CODEX_WORKER_E2E_EXCLUSIONS[0].1}, {"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": CODEX_WORKER_E2E_EXCLUSIONS[0].1}]}),
+        ] {
+            let refused = rejection(accepted(bad, Provider::Codex));
+            assert_eq!(refused.code, ReasonCode::EvidenceMissing);
+            assert_eq!(refused.evidence_missing, [EvidenceCheck::E2e]);
+        }
+        assert_eq!(
+            accepted(
+                serde_json::json!("ordinary Claude evidence"),
+                Provider::Claude
+            ),
+            Judgement::Accept(sha(HEAD)),
+        );
+        assert_eq!(
+            rejection(accepted(good, Provider::Claude)).evidence_missing,
+            [EvidenceCheck::E2e]
+        );
     }
 
     #[test]

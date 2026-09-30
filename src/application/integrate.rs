@@ -98,7 +98,8 @@ pub fn check_receipt(
         task.paths(),
         receipt_path,
     )
-    .with_e2e_paths(e2e_paths);
+    .with_e2e_paths(e2e_paths)
+    .with_provider(run.actual_provider());
     let worktree =
         || -> Result<&Path> { Ok(Path::new(run.worktree_path().context("missing worktree")?)) };
     loop {
@@ -2385,6 +2386,54 @@ mod tests {
             panic!("the diff stays outside the e2e paths");
         };
         assert!(!accepted.e2e_requirement.required);
+    }
+
+    #[test]
+    fn check_receipt_uses_the_actual_provider_for_codex_e2e_exclusions() {
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        let run = run_on(dir, RunStatus::Validating, Provider::Codex);
+        let repository = FakeRepository::sound();
+        let e2e_paths = ["src/**".to_owned()];
+        let mut receipt = json!({
+            "run_id": RUN,
+            "result": "succeeded",
+            "commit": HEAD,
+            "tests": {"status": "passed", "evidence_or_reason": "cargo test"},
+            "e2e": {"status": "passed", "evidence_or_reason": "cargo test --test e2e: 1 passed"},
+            "subagent_review": {"status": "not_applicable", "evidence_or_reason": "Codex has no subagent"},
+            "summary": "done"
+        });
+        let write = |receipt: &serde_json::Value| {
+            files
+                .write(&dir.join("receipt.json"), receipt.to_string().as_bytes())
+                .unwrap();
+        };
+        write(&receipt);
+        let rejected = check_receipt(&repository, &files, &task(&[]), &run, &e2e_paths)
+            .unwrap()
+            .expect_err("Codex needs structured E2E evidence");
+        assert_eq!(rejected.evidence_missing, [EvidenceCheck::E2e]);
+        let evidence = json!({
+            "command": "cargo test --locked --test e2e -- --ignored",
+            "result": "passed",
+            "excluded": []
+        });
+        receipt["e2e"]["evidence_or_reason"] = evidence.to_string().into();
+        write(&receipt);
+        let accepted = check_receipt(&repository, &files, &task(&[]), &run, &e2e_paths)
+            .unwrap()
+            .unwrap_or_else(|rejection| panic!("{}", rejection.reason));
+        assert!(accepted.e2e_requirement.required);
+
+        // Claude's existing free-form evidence is still valid.
+        receipt["e2e"]["evidence_or_reason"] = "cargo test --test e2e: 1 passed".into();
+        write(&receipt);
+        let claude = run_on(dir, RunStatus::Validating, Provider::Claude);
+        assert!(
+            check_receipt(&repository, &files, &task(&[]), &claude, &e2e_paths)
+                .unwrap()
+                .is_ok()
+        );
     }
 
     /// A Codex worker has no subagent: its receipt reports subagent_review

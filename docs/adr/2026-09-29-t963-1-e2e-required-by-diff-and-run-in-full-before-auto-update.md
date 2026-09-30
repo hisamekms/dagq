@@ -47,6 +47,7 @@ related:
 2. **workerのe2eの要否を、runの差分とrepositoryが宣言するpathから決める。** repositoryは`dagq.toml`にe2eが要るpathをglobで書き（言語に依らない。書式はADR-0029の`--paths`と同じ）、validatingは、宣言パスの検査（ADR-0029）と同じrunの差分がどれかのglobに触れるときだけ、receiptの`e2e`を要求したevidenceとして扱う。taskに`--evidence e2e`を明示したものは今までどおり必須。`dagq.toml`に書かなければ既定は空で、差分からは何も要求しない（今までの`--evidence`だけの動き）。
 3. **この repository で置く範囲は、実cmux・実プロセスの境目だけにする。** cmuxのadapter、process、launchd、lifecycle（`up` / `down`・引き継ぎ）、integrate、install、update、actor（worker・planner・inbox・jobのsession）の起動。`supervise`の判断の部分は含めない。理由: runtimeのcommitの多くが触るので含めると狭める効果がほぼ消え、その判断はfakeのcmuxのin-processのtest（`tests/it/runtime_*`）が確かめ、実物との組み合わせは決定1の関門が本番の前に確かめる。具体のglobは`docs/design`に書く。
 4. **e2eは着地の処理（integrate）では流さない。** integrateの検証は1本ずつ直列なので、1件ごとに約3分を足すと着地の上限が下がり、実cmuxに依る不安定な失敗が全部の着地を止める。本番を守るのは決定1の関門で、着地ごとに流す必要は無い。
+5. **Codex worker の sandbox に限り、host 権限に依存する名前の決まった e2e を除外する。** workspace-write sandbox から Podman machine や cmux が起動した supervisor の生存確認・signal を扱えないので、worker prompt が列挙する該当 test の完全な名前だけを `--skip` で除外する。残りは決定 2 の差分ベースの要件どおり最後の変更の後に流す。receipt の `e2e` はコマンド、結果、除外した名前と理由を構造化した evidence で示し、validating は Codex の必須 e2e について名前のない・承認されていない省略を受理しない。除外した test を passed と数えない。Claude worker にはこの例外を適用しない。決定 1 の `install` と auto-update の関門は worker の prompt を使わず、同じ除外を継承せず全件を流す。（2026-09-30、task 1206）
 
 ADR-0047の決定28のうち「taskが要求するevidenceは`add --evidence`で固定して持つ」部分を、e2eについては差分からも要求しうるように改める。判定の順序、`evidence_missing`の`needs_session`とresume、`tests`・`subagent_review`の扱いは変えない。
 
