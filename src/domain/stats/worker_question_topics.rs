@@ -56,7 +56,8 @@ pub struct TopicAsks {
     /// The asks with no answer yet.
     pub open: i64,
     /// What happened to the ask's run after the answer: it landed, it
-    /// failed, or its review raised a concern.
+    /// ended failed (its latest status is `failed` and it moved there
+    /// after the answer), or its review raised a concern.
     pub outcomes: Outcomes,
 }
 
@@ -128,7 +129,10 @@ pub fn worker_question_topics(
     let mut by_id: HashMap<String, usize> = HashMap::new();
     // Per run, the events after which something happened to it.
     let mut landed: HashMap<String, Vec<EventId>> = HashMap::new();
-    let mut failed: HashMap<String, Vec<EventId>> = HashMap::new();
+    // Per run, its latest status and the event it moved to it at, like
+    // the `status` of `stats`' runs: a run that ended failed is one whose
+    // latest status is `failed`.
+    let mut statuses: HashMap<String, (String, EventId)> = HashMap::new();
     let mut concerns: HashMap<String, Vec<EventId>> = HashMap::new();
     for event in events {
         let run = event.run_id.as_ref().map(|run| run.as_str().to_owned());
@@ -179,12 +183,25 @@ pub fn worker_question_topics(
             }
             _ => {}
         }
-        if payload_status(&event.payload) == Some("failed")
-            && let Some(run) = run
-        {
-            failed.entry(run).or_default().push(event.id);
+        let status = if event.kind == "run_integrated" {
+            Some("integrated")
+        } else {
+            payload_status(&event.payload)
+        };
+        if let (Some(status), Some(run)) = (status, run) {
+            let latest = statuses
+                .entry(run)
+                .or_insert_with(|| (status.to_owned(), event.id));
+            if latest.0 != status {
+                *latest = (status.to_owned(), event.id);
+            }
         }
     }
+    let failed: HashMap<String, Vec<EventId>> = statuses
+        .into_iter()
+        .filter(|(_, (status, _))| status == "failed")
+        .map(|(run, (_, since))| (run, vec![since]))
+        .collect();
     let offset_ms = utc_offset_secs * 1000;
     let mut secs: BTreeMap<String, (Vec<i64>, Vec<i64>)> = BTreeMap::new();
     let mut runs: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -395,6 +412,49 @@ mod tests {
             worker_question_topics(&events, EventId::new(16), EventId::new(16), jst, |_| true);
         assert_eq!((later.asks, later.runs), (0, 0));
         assert!(later.by_topic.is_empty());
+    }
+
+    /// A run that fails after the answer, is resumed and lands counts as
+    /// landed only; one that ends failed after the answer counts as failed
+    /// once, however many events repeat its status; a failure before the
+    /// answer counts for none.
+    #[test]
+    fn counts_failed_only_when_the_run_ends_failed_after_the_answer() {
+        let status = |id, task, run, kind, status: &str| {
+            event(id, task, run, kind, json!({"status": status}), "10:30")
+        };
+        let events = vec![
+            question(1, 1, 1, "r1", json!(["design_choice"]), "10:00"),
+            answer(2, 1, 1, "r1", "10:05"),
+            status(3, 1, "r1", "session_finished", "failed"),
+            status(4, 1, "r1", "triage_finished", "failed"),
+            status(5, 1, "r1", "resume_started", "running"),
+            status(6, 1, "r1", "run_integrated", "integrated"),
+            question(7, 2, 2, "r2", json!(["design_choice"]), "10:00"),
+            answer(8, 2, 2, "r2", "10:05"),
+            status(9, 2, "r2", "session_finished", "failed"),
+            status(10, 2, "r2", "triage_finished", "failed"),
+            status(11, 3, "r3", "session_finished", "failed"),
+            question(12, 3, 3, "r3", json!(["other"]), "10:40"),
+            event(
+                13,
+                3,
+                "r3",
+                "ask_answered",
+                json!({"ask_id": 3, "status": "failed"}),
+                "10:45",
+            ),
+        ];
+        let table = worker_question_topics(&events, EventId::new(0), EventId::new(13), 0, |_| true);
+        assert_eq!(
+            table.by_topic["design_choice"].outcomes,
+            Outcomes {
+                landed: 1,
+                failed: 1,
+                concern: 0
+            }
+        );
+        assert_eq!(table.by_topic["other"].outcomes, Outcomes::default());
     }
 
     #[test]
