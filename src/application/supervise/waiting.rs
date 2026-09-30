@@ -365,23 +365,20 @@ impl Supervisor<'_> {
         // A headless session takes no turn by itself, so it never moves
         // while it waits: an answer of its `stalled` ask that the
         // supervisor delivers (`stop`, or an instruction) ends the wait, and
-        // is sent once the run is back in its slot (task 1104).
-        if headless(&run) {
-            for (id, kind) in &held {
-                if *kind != AskKind::Stalled {
-                    continue;
-                }
-                let ask = self.queue.read_ask(*id)?;
-                if ask.closed_at.is_none()
-                    && ask
-                        .answer
-                        .as_deref()
-                        .is_some_and(super::stall::headless_delivers)
-                {
-                    self.end_wait(slot, WaitCause::Answered, Some((*id, kind.clone())))?;
-                    return Ok(Step::Continue);
-                }
-            }
+        // is sent once the run is back in its slot (task 1104). The ask is
+        // the run's unclosed one, not only one the wait holds: an ask its
+        // watch opened again for `intervene` during the wait, and answered
+        // before it joined the wait, joins it no more (task 1179).
+        if headless(&run)
+            && held.iter().any(|(_, kind)| *kind == AskKind::Stalled)
+            && let Some(ask) = self.queue.unclosed_stalled_ask(run.id())?
+            && ask
+                .answer
+                .as_deref()
+                .is_some_and(super::stall::headless_delivers)
+        {
+            self.end_wait(slot, WaitCause::Answered, Some((ask.id, AskKind::Stalled)))?;
+            return Ok(Step::Continue);
         }
         let held_kind = |kind: AskKind| held.iter().find(|(_, k)| *k == kind).cloned();
         // A receipt the first session wrote during the wait moved it on,

@@ -82,6 +82,7 @@ mod runtime_forecast;
 mod runtime_handoff;
 mod runtime_headless;
 mod runtime_headless_jobs;
+mod runtime_headless_stall;
 mod runtime_host_metrics;
 mod runtime_integrate;
 mod runtime_job_verdicts;

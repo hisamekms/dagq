@@ -48,9 +48,10 @@ pub(super) const SEND_THRESHOLD: &str = "send_confirm_secs";
 /// if it stays idle, or have a person step in.
 pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "intervene"];
 
-/// The option a headless session's `stalled` ask adds after
-/// [`STALLED_OPTIONS`]: the supervisor has the session end (its exit
-/// request), and the run goes on as one that ended without a receipt.
+/// The option a headless session's `stalled` ask has after `wait`, in place
+/// of `intervene` ([`headless_options`]): the supervisor has the session end
+/// (its exit request), and the run goes on as one that ended without a
+/// receipt.
 pub(super) const STOP_OPTION: &str = "stop";
 
 /// The options of a `stalled` ask: [`STALLED_OPTIONS`], then those of the
@@ -61,6 +62,33 @@ pub(super) fn stalled_options(note: Option<&Note>) -> Vec<String> {
         if !options.contains(option) {
             options.push(option.clone());
         }
+    }
+    options
+}
+
+/// The answer of an interactive session's `stalled` ask for a person to
+/// step in (ADR-0043), which a headless session's ask does not offer: its
+/// session takes no keys (task 1179).
+const INTERVENE_OPTION: &str = "intervene";
+
+/// Whether `answer` is `intervene` (or `intervene: <text>`).
+fn answered_intervene(answer: &str) -> bool {
+    answer.trim().starts_with(INTERVENE_OPTION)
+}
+
+/// The options of a headless session's `stalled` ask: `options` without
+/// `intervene`, and [`STOP_OPTION`] right after `wait` (task 1179).
+pub(super) fn headless_options(options: Vec<String>) -> Vec<String> {
+    let mut options: Vec<String> = options
+        .into_iter()
+        .filter(|o| o != INTERVENE_OPTION)
+        .collect();
+    if !options.iter().any(|o| o == STOP_OPTION) {
+        let at = options
+            .iter()
+            .position(|o| o == "wait")
+            .map_or(0, |i| i + 1);
+        options.insert(at, STOP_OPTION.to_owned());
     }
     options
 }
@@ -78,8 +106,7 @@ fn answered_wait(answer: Option<&str>) -> bool {
 /// `stalled` ask from the run's slot: `stop` (the exit request) or an
 /// instruction (the next turn), not `wait`, `propose` or `intervene`.
 pub(super) fn headless_delivers(answer: &str) -> bool {
-    let answer = answer.trim();
-    !answered_wait(Some(answer)) && !answer.starts_with("intervene")
+    !answered_wait(Some(answer)) && !answered_intervene(answer)
 }
 
 pub(super) const STALL_EXITED_CLOSED: &str = "the session exited; closed by the runtime";
@@ -141,6 +168,18 @@ struct Asked {
     threshold: &'static str,
 }
 
+/// A headless session's `stalled` ask answered `intervene` and closed,
+/// whose ask is opened again (task 1179).
+#[derive(Debug, Clone, Copy)]
+struct Reopen {
+    /// The ask answered `intervene`.
+    previous: AskId,
+    /// When it was opened.
+    at: SystemTime,
+    detected_after_secs: i64,
+    threshold: &'static str,
+}
+
 /// Why the session's watch parks its run for a session of its own.
 #[derive(Debug, Clone)]
 enum Park {
@@ -181,6 +220,9 @@ pub(super) struct StallWatch {
     /// After `intervene` (or an ask a person closed), no ask until the
     /// session ends a turn after this.
     held: Option<SystemTime>,
+    /// A headless session's `stalled` ask answered `intervene`, closed, to
+    /// be opened again with the headless options (task 1179).
+    reopen: Option<Reopen>,
     /// The recovery job of the idle after the nudge, until its end is
     /// recorded.
     /// Boxed: rarely set, and the watch is part of every session's phase.
@@ -233,6 +275,128 @@ fn stalled_ask(
                 && ask.run_id.as_ref() == Some(run)
                 && id.is_none_or(|id| ask.id == id)
         }))
+}
+
+/// Whether the end of the `stalled` ask `id` of the run is recorded.
+fn ask_resolved(queue: &dyn Queue, run: &TaskRun, id: AskId) -> Result<bool> {
+    Ok(queue.run_events(run.id())?.iter().any(|e| {
+        e.kind == event_kind::STALL_RESOLVED
+            && e.payload["phase"] == PHASE
+            && e.payload["detection"] == "ask"
+            && e.payload["ask_id"] == json!(id)
+    }))
+}
+
+/// Open a `stalled` ask of the run to the inbox.
+fn new_stalled_ask(
+    sv: &mut Supervisor<'_>,
+    run: &TaskRun,
+    question: String,
+    options: Vec<String>,
+    reason_category: AskReason,
+) -> Result<AskId> {
+    let outcome = ask::ask(
+        &mut *sv.queue,
+        &sv.layout.main_checkout,
+        NewAsk {
+            kind: AskKind::Stalled,
+            task_id: Some(run.task_id()),
+            run_id: Some(run.id().clone()),
+            question,
+            options,
+            asked_by: SessionRole::Supervisor.as_str().into(),
+            reason_category,
+            topics: Vec::new(),
+            finding_id: None,
+        },
+        sv.cmux,
+    )?;
+    let id = AskId::new(outcome["id"].as_i64().context("ask returned no id")?);
+    info!(ask_id = %id, run_id = %run.id(), "stalled ask {id} of {} opened (notified: {})", run.id(), outcome["notified"]);
+    Ok(id)
+}
+
+/// What the `stalled` ask says of the nudge before it.
+fn nudged_text(nudge: Option<Nudge>, now: SystemTime) -> String {
+    nudge.map_or_else(
+        || "although its turns were refused permissions too often to get on".to_owned(),
+        |nudge| {
+            format!(
+                "although the supervisor nudged it {}s ago to write its receipt, ask a worker_question or say what it waits for",
+                secs_between(nudge.at, now)
+            )
+        },
+    )
+}
+
+/// What `wait` does to a headless session's ask of its idle: the ask
+/// follows its next turn.
+const WAIT_ASKS_AFTER_TURN: &str = " (the supervisor asks again after its next turn)";
+
+/// Where the answers of a `stalled` ask's question start, after what it
+/// says of the session: a headless one's, and an interactive one's (or
+/// one opened before task 1179).
+const ANSWERS_START: [&str; 2] = ["Before answering, read what its turns did", "Answer `wait`"];
+
+/// The sentence of an ask opened again for an `intervene` answer, up to
+/// its end.
+const REOPENED_FROM: &str = " Its stalled ask ";
+const REOPENED_TO: &str = "so it is asked again.";
+
+/// The question of a headless session's `stalled` ask: `situation` (what
+/// the session did, and a recovery job's diagnosis), then its answers,
+/// then its last turns (`turns`). The session has no screen and takes no
+/// keys (ADR-t813-1 decision 4): a person reads what its turns did before
+/// answering, and an instruction is its next turn; there is no
+/// `intervene` (task 1179). `wait` says what `wait` does besides leaving
+/// the session alone.
+pub(super) fn headless_ask_text(
+    run_id: &RunId,
+    situation: &str,
+    wait: &str,
+    turns: &str,
+) -> String {
+    format!(
+        "{situation} Before answering, read what its turns did: their last lines are below, and the run's `turns/` directory and `dagq timeline {run_id}` have the rest (see the dagq-recover skill). Answer `wait` to leave the session alone{wait}, or `stop` to have the supervisor end the session (its exit request; the run then ends without a receipt and goes to its recovery job). Any other text is sent as the session's next turn: a headless session takes no keys, so an instruction is given this way. Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\n{turns}"
+    )
+}
+
+/// What the question of a `stalled` ask says of the session, before its
+/// answers, without the sentence of an earlier `intervene`: `None` when
+/// it has no answers the watch knows.
+fn situation_of(question: &str) -> Option<String> {
+    let at = ANSWERS_START
+        .iter()
+        .filter_map(|start| question.find(start))
+        .min()?;
+    let mut situation = question[..at].trim_end().to_owned();
+    if let Some(from) = situation.find(REOPENED_FROM)
+        && let Some(len) = situation[from..].find(REOPENED_TO)
+    {
+        situation.replace_range(from..from + len + REOPENED_TO.len(), "");
+    }
+    Some(situation)
+}
+
+/// The question of a headless session's `stalled` ask of its idle.
+fn headless_question(
+    sv: &Supervisor<'_>,
+    run: &TaskRun,
+    idle_secs: i64,
+    nudged: &str,
+    recovered: &str,
+) -> String {
+    let situation = format!(
+        "The headless session of run {run_id} (task {task_id}) ended its turn without a receipt or an open question ({idle_secs}s ago, phase: {PHASE}), {nudged}.{recovered}",
+        run_id = run.id(),
+        task_id = run.task_id(),
+    );
+    headless_ask_text(
+        run.id(),
+        &situation,
+        WAIT_ASKS_AFTER_TURN,
+        &turns_excerpt(sv, run),
+    )
 }
 
 /// The sends of the supervisor's an input marker is matched against.
@@ -320,8 +484,29 @@ impl StallWatch {
                 .and_then(at_event)
         };
         // A person stepped in, or had the session stopped, on an ask closed
-        // since.
-        watch.held = latest_outcome("answered_intervene").max(latest_outcome("answered_stop"));
+        // since. A headless session's `intervene` is no step in: its ask
+        // is opened again instead (task 1179).
+        watch.held = latest_outcome("answered_stop");
+        if !headless(run) {
+            watch.held = watch.held.max(latest_outcome("answered_intervene"));
+        }
+        // A recovery job's escalation names its ask (ADR-0047), and its
+        // alert the setting it was judged by.
+        let threshold_of = |id: AskId| {
+            let recovery = events.iter().find(|e| {
+                e.kind == event_kind::RECOVERY_FINISHED && e.payload["ask_id"] == json!(id)
+            });
+            match recovery {
+                Some(e) if e.payload["alert"] == RecoveryAlert::IdleProcess.as_str() => {
+                    IDLE_PROCESS_THRESHOLD
+                }
+                Some(e) if e.payload["alert"] == RecoveryAlert::LongBackground.as_str() => {
+                    BACKGROUND_THRESHOLD
+                }
+                Some(e) if e.payload["reason"] == SEND_UNCONFIRMED => SEND_THRESHOLD,
+                _ => IDLE_THRESHOLD,
+            }
+        };
         watch.wait_from = latest_outcome("answered_wait");
         // An instruction a recovery job had typed is an input too, and its
         // repair restarted the count.
@@ -399,6 +584,15 @@ impl StallWatch {
         {
             if answered_wait(ask.answer.as_deref()) {
                 watch.wait_from = watch.wait_from.max(Some(at_unix(closed)));
+            } else if headless(run) && ask.answer.as_deref().is_some_and(answered_intervene) {
+                // A headless session's `intervene` holds nothing: its ask
+                // is opened again (task 1179).
+                watch.reopen = Some(Reopen {
+                    previous: ask.id,
+                    at: at_unix(ask.created_at + 1),
+                    detected_after_secs: 0,
+                    threshold: threshold_of(ask.id),
+                });
             } else {
                 watch.held = watch.held.max(Some(at_unix(closed + 1)));
             }
@@ -407,32 +601,52 @@ impl StallWatch {
             }
         }
         if let Some(ask) = queue.unclosed_stalled_ask(run.id())? {
-            let applied = ask.answered_at.is_some() && resolved("ask", Some(ask.id));
-            // A recovery job's escalation names its ask (ADR-0047), and its
-            // alert the setting it was judged by.
-            let recovery = events.iter().find(|e| {
-                e.kind == event_kind::RECOVERY_FINISHED && e.payload["ask_id"] == json!(ask.id)
-            });
+            // A headless session's `intervene` is never applied: its watch
+            // closes the ask and opens it again, recording its outcome only
+            // if the previous supervisor did not (task 1179).
+            let reopens = headless(run) && ask.answer.as_deref().is_some_and(answered_intervene);
+            let applied = !reopens && ask.answered_at.is_some() && resolved("ask", Some(ask.id));
             watch.asked = Some(Asked {
                 id: ask.id,
                 at: at_unix(ask.created_at + 1),
                 detected_after_secs: 0,
                 applied,
-                threshold: match recovery {
-                    Some(e) if e.payload["alert"] == RecoveryAlert::IdleProcess.as_str() => {
-                        IDLE_PROCESS_THRESHOLD
-                    }
-                    Some(e) if e.payload["alert"] == RecoveryAlert::LongBackground.as_str() => {
-                        BACKGROUND_THRESHOLD
-                    }
-                    Some(e) if e.payload["reason"] == SEND_UNCONFIRMED => SEND_THRESHOLD,
-                    _ => IDLE_THRESHOLD,
-                },
+                threshold: threshold_of(ask.id),
             });
             if applied {
                 watch.held = watch.held.max(ask.answered_at.map(|at| at_unix(at + 1)));
             }
             // An ask follows the nudge, which escalated to it.
+            if let Some(nudge) = &mut watch.nudge {
+                nudge.settled = true;
+            }
+        } else if headless(run)
+            && let Some(at) = events.iter().rposition(|e| {
+                e.kind == event_kind::STALL_RESOLVED
+                    && e.payload["phase"] == PHASE
+                    && e.payload["detection"] == "ask"
+                    && e.payload["reopened"] == true
+            })
+            && let event = &events[at]
+            // Nothing was sent to the session since: an ask opened again
+            // then settled by a receipt or a question is not opened again.
+            && !events[at..].iter().any(|e| {
+                e.kind == event_kind::TURN_REQUESTED
+                    || e.kind == event_kind::ASK_DELIVERED
+                    || e.kind == event_kind::STALL_NUDGED
+            })
+            && let Some(previous) = event.payload["ask_id"].as_i64().map(AskId::new)
+            && stalled_ask(queue, run.id(), None)?
+                .is_some_and(|ask| ask.id == previous && ask.closed_at.is_some())
+        {
+            // The previous supervisor closed an ask answered `intervene`
+            // and stopped before it opened the next one.
+            watch.reopen = Some(Reopen {
+                previous,
+                at: at_event(event).unwrap_or(UNIX_EPOCH),
+                detected_after_secs: event.payload["detected_after_secs"].as_i64().unwrap_or(0),
+                threshold: threshold_of(previous),
+            });
             if let Some(nudge) = &mut watch.nudge {
                 nudge.settled = true;
             }
@@ -808,7 +1022,10 @@ impl StallWatch {
         run: &TaskRun,
         receipt: bool,
     ) -> Result<()> {
-        if self.nudge.is_none_or(|n| n.settled) && self.asked.is_none() && self.recovering.is_none()
+        if self.nudge.is_none_or(|n| n.settled)
+            && self.asked.is_none()
+            && self.reopen.is_none()
+            && self.recovering.is_none()
         {
             return Ok(());
         }
@@ -817,6 +1034,7 @@ impl StallWatch {
         }
         let outcome = self.moved_outcome();
         self.recovery_resolved(sv, run, outcome)?;
+        self.reopen = None;
         if let Some(nudge) = &mut self.nudge
             && !nudge.settled
         {
@@ -853,6 +1071,7 @@ impl StallWatch {
             )?;
         }
         self.recovery_resolved(sv, run, "run_ended")?;
+        self.reopen = None;
         self.close(sv, run, STALL_EXITED_CLOSED, "run_ended")
     }
 
@@ -965,7 +1184,7 @@ impl StallWatch {
             let outcome = self.moved_outcome();
             self.recovery_resolved(sv, run, outcome)?;
         }
-        if self.asked.is_some() {
+        if self.asked.is_some() || self.reopen.is_some() {
             self.watch_ask(sv, run, marker, now, recovery.is_some())?;
             return Ok(None);
         }
@@ -1370,24 +1589,9 @@ impl StallWatch {
         let recovered = note.map_or_else(String::new, |note| {
             format!(" And {}.\n{}\n", note.why, note.text)
         });
-        let nudged = nudge.map_or_else(
-            || "although its turns were refused permissions too often to get on".to_owned(),
-            |nudge| {
-                format!(
-                    "although the supervisor nudged it {}s ago to write its receipt, ask a worker_question or say what it waits for",
-                    secs_between(nudge.at, now)
-                )
-            },
-        );
+        let nudged = nudged_text(nudge, now);
         let question = if headless(run) {
-            // A headless session has no screen and takes no keys: a
-            // person steps in through the run (ADR-t813-1 decision 4).
-            format!(
-                "The headless session of run {run_id} (task {task_id}) ended its turn without a receipt or an open question ({idle_secs}s ago, phase: {PHASE}), {nudged}.{recovered} Answer `wait` to leave the session alone (the supervisor asks again after its next turn), `stop` to have the supervisor end the session (its exit request; the run then ends without a receipt and goes to its recovery job), or `intervene` to read what its turns did and bring it to a person (a headless session takes no keys: an instruction is usually answered as the text of the next turn, see the dagq-recover skill). Any other text is sent as the session's next turn. Answer `propose` (or `propose: <why>`) to have a planner of the runtime's propose a remedy for its cause; the session is then left alone as for `wait`. This ask closes itself once the session moves on.\n\n{turns}",
-                run_id = run.id(),
-                task_id = run.task_id(),
-                turns = turns_excerpt(sv, run),
-            )
+            headless_question(sv, run, idle_secs, &nudged, &recovered)
         } else {
             let screen = match sv.cmux.capture(workspace) {
                 Ok(screen) => sv.signals.screen_excerpt(&screen),
@@ -1401,27 +1605,12 @@ impl StallWatch {
             )
         };
         let mut options = stalled_options(note);
-        if headless(run) && !options.iter().any(|o| o == STOP_OPTION) {
-            options.insert(STALLED_OPTIONS.len(), STOP_OPTION.to_owned());
+        if headless(run) {
+            options = headless_options(options);
         }
-        let outcome = ask::ask(
-            &mut *sv.queue,
-            &sv.layout.main_checkout,
-            NewAsk {
-                kind: AskKind::Stalled,
-                task_id: Some(run.task_id()),
-                run_id: Some(run.id().clone()),
-                question,
-                options,
-                asked_by: SessionRole::Supervisor.as_str().into(),
-                reason_category: note.map_or(AskReason::RecoveryFailed, |note| note.category),
-                topics: Vec::new(),
-                finding_id: None,
-            },
-            sv.cmux,
-        )?;
-        let id = AskId::new(outcome["id"].as_i64().context("ask returned no id")?);
-        warn!(ask_id = %id, run_id = %run.id(), "run {} stays idle without a receipt after its nudge; stalled ask {id} (notified: {})", run.id(), outcome["notified"]);
+        let category = note.map_or(AskReason::RecoveryFailed, |note| note.category);
+        let id = new_stalled_ask(sv, run, question, options, category)?;
+        warn!(ask_id = %id, run_id = %run.id(), "run {} stays idle without a receipt after its nudge; stalled ask {id}", run.id());
         self.recovery_resolved(sv, run, "escalated")?;
         self.asked = Some(Asked {
             id,
@@ -1450,6 +1639,83 @@ impl StallWatch {
         Ok(id)
     }
 
+    /// Open again the `stalled` ask of a headless session whose previous
+    /// ask was answered `intervene` and closed: the same options without
+    /// `intervene` and the same reason, at once, with no nudge and no
+    /// recovery job (task 1179).
+    fn reopen_ask(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        reopen: Reopen,
+        now: SystemTime,
+    ) -> Result<()> {
+        // An ask closed by someone before the watch applied its answer
+        // has no outcome yet.
+        if !ask_resolved(&*sv.queue, run, reopen.previous)? {
+            let mut payload = Self::resolved_payload(
+                sv,
+                "ask",
+                reopen.threshold,
+                reopen.detected_after_secs,
+                reopen.at,
+                "answered_intervene",
+            );
+            payload["reopened"] = json!(true);
+            Self::record_resolved(
+                sv,
+                run,
+                payload,
+                Some(reopen.previous),
+                "ask",
+                "answered_intervene",
+            )?;
+        }
+        let previous = stalled_ask(&*sv.queue, run.id(), Some(reopen.previous))?;
+        let (options, category) = previous.as_ref().map_or_else(
+            || (stalled_options(None), AskReason::RecoveryFailed),
+            |ask| (ask.options.clone(), ask.reason_category),
+        );
+        let reopened = format!(
+            "{REOPENED_FROM}{} was answered `intervene`, which a headless session cannot take (it has no screen and takes no keys), {REOPENED_TO}",
+            reopen.previous
+        );
+        // What the previous ask said of the session (its alert, its
+        // diagnosis) stands; only its answers are the headless ones.
+        let question = match previous
+            .as_ref()
+            .and_then(|ask| situation_of(&ask.question))
+        {
+            Some(situation) => headless_ask_text(
+                run.id(),
+                &format!("{situation}{reopened}"),
+                if reopen.threshold == IDLE_THRESHOLD {
+                    WAIT_ASKS_AFTER_TURN
+                } else {
+                    ""
+                },
+                &turns_excerpt(sv, run),
+            ),
+            None => headless_question(
+                sv,
+                run,
+                reopen.detected_after_secs,
+                &nudged_text(self.nudge, now),
+                &reopened,
+            ),
+        };
+        let id = new_stalled_ask(sv, run, question, headless_options(options), category)?;
+        warn!(ask_id = %id, run_id = %run.id(), "stalled ask {} of {} was answered intervene, which its headless session cannot take; stalled ask {id} asks again", reopen.previous, run.id());
+        self.asked = Some(Asked {
+            id,
+            at: now,
+            detected_after_secs: reopen.detected_after_secs,
+            applied: false,
+            threshold: reopen.threshold,
+        });
+        Ok(())
+    }
+
     /// Follow the `stalled` ask a recovery job of a session in a revise or
     /// a resume escalated to (their watch runs no idle detection):
     /// close it once the session moves on and apply its answer.
@@ -1459,7 +1725,7 @@ impl StallWatch {
         run: &TaskRun,
         idle_marker: &Path,
     ) -> Result<()> {
-        if self.asked.is_none() {
+        if self.asked.is_none() && self.reopen.is_none() {
             return Ok(());
         }
         let marker = sv.files.modified(idle_marker).ok();
@@ -1481,6 +1747,12 @@ impl StallWatch {
         now: SystemTime,
         send: bool,
     ) -> Result<()> {
+        // Kept until the ask opens: a failure tries again on the next look.
+        if let Some(reopen) = self.reopen {
+            self.reopen_ask(sv, run, reopen, now)?;
+            self.reopen = None;
+            return Ok(());
+        }
         let Some(asked) = self.asked else {
             return Ok(());
         };
@@ -1488,8 +1760,23 @@ impl StallWatch {
             // Someone closed it: its answer `wait` counts again, anything
             // else (or none) is a person who took the session over.
             self.asked = None;
-            let wait = stalled_ask(&*sv.queue, run.id(), Some(asked.id))?
-                .is_some_and(|ask| answered_wait(ask.answer.as_deref()));
+            let answer =
+                stalled_ask(&*sv.queue, run.id(), Some(asked.id))?.and_then(|ask| ask.answer);
+            let wait = answered_wait(answer.as_deref());
+            // A headless session's `intervene` holds nothing: its ask is
+            // opened again (task 1179).
+            if headless(run) && answer.as_deref().is_some_and(answered_intervene) {
+                let reopen = Reopen {
+                    previous: asked.id,
+                    at: asked.at,
+                    detected_after_secs: asked.detected_after_secs,
+                    threshold: asked.threshold,
+                };
+                self.reopen = Some(reopen);
+                self.reopen_ask(sv, run, reopen, now)?;
+                self.reopen = None;
+                return Ok(());
+            }
             if wait {
                 // A `wait` on a send not taken does not stand for the idle.
                 if asked.threshold != SEND_THRESHOLD {
@@ -1544,6 +1831,46 @@ impl StallWatch {
                     self.wait_from = Some(now);
                 }
                 info!(ask_id = %ask.id, run_id = %run.id(), "stalled ask {} of {} answered wait; counting its idle again", ask.id, run.id());
+            }
+            // A headless session takes no keys, so a person has no way in:
+            // `intervene` (answered to an ask opened before it was taken
+            // off its options, or typed as text) closes the ask and opens
+            // it again with the headless options, and nothing is sent
+            // (task 1179). Its outcome is recorded before the ask is
+            // closed, and marked `reopened`: an adopter of a supervisor
+            // that stopped in between opens the ask, once, without
+            // recording it again.
+            Some(answer) if headless(run) && answered_intervene(answer) => {
+                if !ask_resolved(&*sv.queue, run, ask.id)? {
+                    let mut payload = Self::resolved_payload(
+                        sv,
+                        "ask",
+                        asked.threshold,
+                        asked.detected_after_secs,
+                        asked.at,
+                        "answered_intervene",
+                    );
+                    payload["reopened"] = json!(true);
+                    Self::record_resolved(
+                        sv,
+                        run,
+                        payload,
+                        Some(ask.id),
+                        "ask",
+                        "answered_intervene",
+                    )?;
+                }
+                sv.queue.close_ask(ask.id)?;
+                self.asked = None;
+                let reopen = Reopen {
+                    previous: ask.id,
+                    at: asked.at,
+                    detected_after_secs: asked.detected_after_secs,
+                    threshold: asked.threshold,
+                };
+                self.reopen = Some(reopen);
+                self.reopen_ask(sv, run, reopen, now)?;
+                self.reopen = None;
             }
             // `stop` has a headless session end: its exit request, sent
             // once (the wrapper stops a running turn and exits), never as
@@ -1637,6 +1964,40 @@ impl StallWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 1179: an ask opened again keeps what the previous one said of
+    /// the session, whatever its answers were, and names only the latest
+    /// `intervene`.
+    #[test]
+    fn the_situation_of_a_stalled_question_stops_at_its_answers() {
+        let run = RunId::new("r").unwrap();
+        let asked = headless_ask_text(
+            &run,
+            "The headless session has had background work running (alert: long_background), and the job escalated.\nDiagnosis: stuck\n",
+            "",
+            "turn 1: success",
+        );
+        assert!(!asked.contains("intervene"), "{asked}");
+        assert!(asked.contains("`stop`") && asked.ends_with("\n\nturn 1: success"));
+        assert_eq!(
+            situation_of(&asked).as_deref(),
+            Some(
+                "The headless session has had background work running (alert: long_background), and the job escalated.\nDiagnosis: stuck"
+            )
+        );
+        // An interactive ask's, or one opened before task 1179.
+        let old = "pid 7 is idle (alert: idle_process). And the job gave up.\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen).";
+        assert_eq!(
+            situation_of(old).as_deref(),
+            Some("pid 7 is idle (alert: idle_process). And the job gave up.")
+        );
+        // The sentence of an earlier reopening goes.
+        let again = format!(
+            "It ended its turn.{REOPENED_FROM}3 was answered `intervene`, which a headless session cannot take (it has no screen and takes no keys), {REOPENED_TO} Before answering, read what its turns did: ..."
+        );
+        assert_eq!(situation_of(&again).as_deref(), Some("It ended its turn."));
+        assert_eq!(situation_of("no answers here"), None);
+    }
 
     const THRESHOLD: Duration = Duration::from_secs(1200);
     const CONFIRM: Duration = Duration::from_secs(60);

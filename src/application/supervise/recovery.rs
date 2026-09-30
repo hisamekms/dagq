@@ -1544,15 +1544,29 @@ impl SessionWatch {
             warn!(run_id = %run.id(), "run {}: {}; a stalled ask is already open, so no other is asked", run.id(), note.why);
             return Ok(());
         }
-        let question = format!(
-            "The session of run {run_id} (task {task_id}) in workspace {workspace} has had background work running for {idle_secs}s (alert: long_background, over {threshold}s), and {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop its background work, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
-            run_id = run.id(),
-            task_id = run.task_id(),
-            workspace = self.workspace,
-            threshold = sv.stall.background_alert_secs,
-            why = note.why,
-            text = note.text,
-        );
+        let question = if headless(run) {
+            // No screen and no keys: its turns, and no `intervene` (task
+            // 1179).
+            let situation = format!(
+                "The headless session of run {run_id} (task {task_id}) has had background work running for {idle_secs}s (alert: long_background, over {threshold}s), and {why}.\n{text}",
+                run_id = run.id(),
+                task_id = run.task_id(),
+                threshold = sv.stall.background_alert_secs,
+                why = note.why,
+                text = note.text.trim_end(),
+            );
+            super::stall::headless_ask_text(run.id(), &situation, "", &turns_excerpt(sv, run))
+        } else {
+            format!(
+                "The session of run {run_id} (task {task_id}) in workspace {workspace} has had background work running for {idle_secs}s (alert: long_background, over {threshold}s), and {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop its background work, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
+                run_id = run.id(),
+                task_id = run.task_id(),
+                workspace = self.workspace,
+                threshold = sv.stall.background_alert_secs,
+                why = note.why,
+                text = note.text,
+            )
+        };
         let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
         options.extend(
             note.options
@@ -1561,6 +1575,10 @@ impl SessionWatch {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
+        // A headless session takes no keys: no `intervene` (task 1179).
+        if headless(run) {
+            options = super::stall::headless_options(options);
+        }
         let outcome = ask::ask(
             &mut *sv.queue,
             &sv.layout.main_checkout,
@@ -1684,20 +1702,38 @@ impl SessionWatch {
             .collect::<Vec<_>>()
             .join("; ");
         let idle_secs = idle.iter().map(|p| p.idle_secs).max().unwrap_or(0);
-        let question = format!(
-            "The session of run {run_id} (task {task_id}) in workspace {workspace} has processes that have used almost no CPU time for over {threshold}s (alert: idle_process): {listed}. And {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop the processes, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
-            run_id = run.id(),
-            task_id = run.task_id(),
-            workspace = self.workspace,
-            threshold = sv.stall.idle_process_secs,
-            why = note.why,
-            text = note.text,
-        );
+        let question = if headless(run) {
+            // No screen and no keys: its turns, and no `intervene` (task
+            // 1179).
+            let situation = format!(
+                "The headless session of run {run_id} (task {task_id}) has processes that have used almost no CPU time for over {threshold}s (alert: idle_process): {listed}. And {why}.\n{text}",
+                run_id = run.id(),
+                task_id = run.task_id(),
+                threshold = sv.stall.idle_process_secs,
+                why = note.why,
+                text = note.text.trim_end(),
+            );
+            super::stall::headless_ask_text(run.id(), &situation, "", &turns_excerpt(sv, run))
+        } else {
+            format!(
+                "The session of run {run_id} (task {task_id}) in workspace {workspace} has processes that have used almost no CPU time for over {threshold}s (alert: idle_process): {listed}. And {why}.\n{text}\nAnswer `wait` to leave the session alone, or `intervene` to step in yourself (read the screen, stop the processes, type an instruction; see the dagq-recover skill). This ask closes itself once the session moves on.",
+                run_id = run.id(),
+                task_id = run.task_id(),
+                workspace = self.workspace,
+                threshold = sv.stall.idle_process_secs,
+                why = note.why,
+                text = note.text,
+            )
+        };
         let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
         for option in &note.options {
             if !options.contains(option) {
                 options.push(option.clone());
             }
+        }
+        // A headless session takes no keys: no `intervene` (task 1179).
+        if headless(run) {
+            options = super::stall::headless_options(options);
         }
         let outcome = ask::ask(
             &mut *sv.queue,
