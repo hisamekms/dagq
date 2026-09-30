@@ -20,6 +20,8 @@ mod common;
 mod headless;
 #[path = "e2e/other_repository.rs"]
 mod other_repository;
+#[path = "e2e/planner.rs"]
+mod planner;
 
 use cleanup::{
     GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_retrying, listed_group,
@@ -39,9 +41,13 @@ use std::{
 const BIN: &str = env!("CARGO_BIN_EXE_dagq");
 /// The version the binary under test records on its registration.
 const VERSION: &str = dagq::VERSION;
-/// Longer than the supervisor's own 120 s exit-request timeout so its error
-/// surfaces first.
-const SUPERVISE_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a test waits for a supervisor to take a run through a pass
+/// (claim, workspace, session, receipt, review, `/exit`, landing). A pass
+/// took 26 to 90 s at load average 20 to 40 in the auto-update's e2e gate
+/// (2026-09-29 and 30, task 1008), and a `/exit` cmux lost takes the
+/// supervisor's 120 s exit-request timeout and a retry on top of that: the
+/// step limit covers both, so a wait fails only when the pass stops.
+const SUPERVISE_TIMEOUT: Duration = common::STEP_LIMIT;
 /// Passed to every `supervise` the tests start: the load of the host (other
 /// e2e tests running in parallel, other runs) must not hold back the claims
 /// a test waits for.
@@ -68,6 +74,44 @@ pub(crate) const WAIT_LIMIT: Duration = common::STEP_LIMIT;
 /// terminal, which the supervisor types through cmux.
 const STUB: &str = r#"#!/bin/sh
 set -eu
+# An idle session waits for `/exit` the way Claude Code does: its input box
+# is drawn at the bottom of the screen with what is typed in it, so the
+# supervisor's checks of a `/exit` read it as with Claude Code (task 1008):
+# typed but not submitted (Enter again), or lost to a cmux timeout (an
+# empty box: typed again). Without the box every read was `not_ready` and a
+# lost `/exit` was never sent again. The wait line names no `/exit`, which
+# would read as a trace of one.
+wait_for_exit() {
+  printf 'idle; waiting for the exit request\n'
+  rule=──────────────────────────────────────────────────
+  typed=
+  nl=$(printf '\nx')
+  nl=${nl%x}
+  cr=$(printf '\r')
+  stty -icanon -echo min 1 2>/dev/null || true
+  while :; do
+    printf '%s\n\342\235\257 %s\n%s\n  ? for shortcuts\n' "$rule" "$typed" "$rule"
+    key=$(dd bs=1 count=1 2>/dev/null; printf x)
+    key=${key%x}
+    # The terminal is gone.
+    [ -n "$key" ] || exit 0
+    case "$key" in
+      "$nl"|"$cr")
+        # Submitted: the box is drawn empty again. A `/exit` typed again
+        # over one that arrived late still exits.
+        line=$typed
+        typed=
+        case "$line" in */exit)
+          printf '%s\n\342\235\257 \n%s\n  ? for shortcuts\n' "$rule" "$rule"
+          break ;;
+        esac ;;
+      *) typed=$typed$key ;;
+    esac
+  done
+  stty icanon echo 2>/dev/null || true
+  printf 'bye\n'
+  exit 0
+}
 if [ "${1:-}" = "--version" ]; then
   printf 'claude-stub 0.0.0\n'
   exit 0
@@ -122,12 +166,7 @@ if [ "${DAGQ_ROLE:-}" = planner ]; then
   idle="$add_dir/idle.json"
   printf '{"hook_event_name":"Stop","stop_hook_active":false}\n' > "$idle.tmp"
   mv "$idle.tmp" "$idle"
-  printf 'idle; waiting for /exit\n'
-  while read -r line; do
-    [ "$line" = "/exit" ] && break
-  done
-  printf 'bye\n'
-  exit 0
+  wait_for_exit
 fi
 if [ "$output" = stream-json ]; then
   # A headless worker's turn (ADR-t813-1): `claude -p --output-format
@@ -212,12 +251,7 @@ if [ -n "$resume" ]; then
   idle="$add_dir/idle.json"
   printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$resume" > "$idle.tmp"
   mv "$idle.tmp" "$idle"
-  printf 'idle; waiting for /exit\n'
-  while read -r line; do
-    [ "$line" = "/exit" ] && break
-  done
-  printf 'bye\n'
-  exit 0
+  wait_for_exit
 fi
 [ -n "$session_id" ] && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \
   && [ -n "$model" ] && [ -n "$effort" ] \
@@ -303,11 +337,7 @@ while [ -f "$shared/watching" ] && [ ! -f "$shared/listed" ]; do sleep 0.2; done
 idle="$add_dir/idle.json"
 printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}\n' "$session_id" > "$idle.tmp"
 mv "$idle.tmp" "$idle"
-printf 'idle; waiting for /exit\n'
-while read -r line; do
-  [ "$line" = "/exit" ] && break
-done
-printf 'bye\n'
+wait_for_exit
 "#;
 
 const E2E_DAGQ_TOML: &str =
@@ -747,10 +777,13 @@ fn supervise_once(
             child.reaped();
             break status;
         }
-        assert!(
-            started.elapsed() < SUPERVISE_TIMEOUT,
-            "supervise did not finish within {SUPERVISE_TIMEOUT:?}"
-        );
+        if started.elapsed() >= SUPERVISE_TIMEOUT {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+            child.reaped();
+            let stderr = joined(stderr, "the supervisor's stderr reader");
+            panic!("supervise did not finish within {SUPERVISE_TIMEOUT:?}; its stderr:\n{stderr}");
+        }
         for task in tasks {
             if workspaces.iter().any(|(t, _)| t == task) {
                 continue;
@@ -1418,7 +1451,18 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let Fixture {
         cmux, repo, env, ..
     } = &fixture;
-    let task_id = add_ready_task(env, "e2e adopted task", &[]);
+    // The worker holds until the supervisor is killed: a stub that wrote
+    // its receipt at once left the run `running` only for the moments
+    // before its validation, which a loaded host's slower polls of `show`
+    // missed, and the test then waited for a state that had passed
+    // (task 1008).
+    let task_id = add_ready_task_described(
+        env,
+        "e2e adopted task",
+        "Add e2e.txt to the worktree. E2E-HOLD",
+        &[],
+        &[],
+    );
     let mut guard = WorkspaceGuard {
         cmux: cmux.clone(),
         ids: Vec::new(),
@@ -1446,15 +1490,22 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let victim_stderr = reader(victim.0.stderr.take().unwrap());
     let victim_pid = victim.0.id();
     let started = Instant::now();
+    let mut victim_stderr = Some(victim_stderr);
     let run = loop {
-        assert!(
-            victim.0.try_wait().unwrap().is_none(),
-            "the supervisor exited before the worker started"
-        );
-        assert!(
-            started.elapsed() < SUPERVISE_TIMEOUT,
-            "the worker did not start within {SUPERVISE_TIMEOUT:?}"
-        );
+        let exited = victim.0.try_wait().unwrap().is_some();
+        if exited || started.elapsed() >= SUPERVISE_TIMEOUT {
+            let _ = victim.0.kill();
+            let _ = victim.0.wait();
+            victim.reaped();
+            let log = joined(
+                victim_stderr.take().unwrap(),
+                "the supervisor's stderr reader",
+            );
+            let runs = dagq(env, &["show", &task_id, "--full"])["runs"].clone();
+            panic!(
+                "the worker did not start within {SUPERVISE_TIMEOUT:?} (the supervisor exited: {exited}); runs: {runs}\nsupervisor stderr:\n{log}"
+            );
+        }
         let detail = dagq(env, &["show", &task_id, "--full"]);
         if let Some(run) = detail["runs"].as_array().unwrap().last()
             && run["status"] == "running"
@@ -1463,6 +1514,7 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         }
         thread::sleep(Duration::from_millis(200));
     };
+    let victim_stderr = victim_stderr.take().unwrap();
     let run_id = run["id"].as_str().unwrap().to_owned();
     let workspace = run["workspace_id"].as_str().unwrap().to_owned();
     guard.record(&workspace);
@@ -1478,6 +1530,8 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
         joined(victim_stderr, "the killed supervisor's stderr reader")
     );
     assert!(!pid_alive(victim_pid));
+    // The worker finishes its receipt with no supervisor watching it.
+    fs::write(Path::new(run["run_dir"].as_str().unwrap()).join("go"), "").unwrap();
 
     // What the inbox sees before anyone adopts: the registration and
     // the lease are stale by pid, the wrapper is alive, and the run keeps going.
@@ -2166,196 +2220,6 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
     assert_eq!(dagq(env, &["status"])["supervisors"], Value::Array(vec![]));
     // The inbox workspace is left open by `down`; the guard closes it.
     assert!(workspace_listed(cmux, &inbox));
-}
-
-/// The planners of the queue as `planners --all` lists them, by ID.
-fn planners(env: &Env) -> Vec<Value> {
-    dagq(env, &["planners", "--all"])["planners"]
-        .as_array()
-        .unwrap()
-        .clone()
-}
-
-/// Type `/exit` at a session's prompt the way the supervisor does.
-fn send_exit(cmux: &Path, workspace: &str) {
-    for args in [
-        &["send", "--workspace", workspace, "--", "/exit"][..],
-        &["send-key", "--workspace", workspace, "--", "enter"],
-    ] {
-        let output = Command::new(cmux).args(args).bounded_output().unwrap();
-        assert!(output.status.success(), "{args:?}: {output:?}");
-    }
-}
-
-/// `dagq plan` opens planners on demand, side by side (ADR-0041 decision
-/// 6): each in its own workspace `[<repo>]planner#<id>` with the
-/// planner's role, queue, origin and ID in its environment, in the queue's
-/// group, Blue and not pinned. Each runs the session wrapper, whose agent
-/// (the stub) submits a proposal owned by that workspace and goes idle;
-/// `planners` reports each alive and idle, then the one sent `/exit` as no
-/// longer alive with its exit code, and closed once its workspace is gone.
-#[test]
-#[ignore = "needs a running cmux; run with --ignored"]
-fn plan_opens_planners_side_by_side_that_submit_go_idle_and_exit() {
-    let fixture = fixture();
-    let Fixture {
-        cmux,
-        repo,
-        stub,
-        env,
-        db,
-        ..
-    } = &fixture;
-    let mut workspaces = WorkspaceGuard {
-        cmux: cmux.clone(),
-        ids: Vec::new(),
-    };
-    let plugin_dir = fixture._dir.path().join("plugin");
-    fs::create_dir(&plugin_dir).unwrap();
-    let plan_args = [
-        "plan",
-        "--cmux",
-        cmux.to_str().unwrap(),
-        "--claude",
-        stub.to_str().unwrap(),
-        "--plugin-dir",
-        plugin_dir.to_str().unwrap(),
-    ];
-    let first = dagq_opening(env, &[], &plan_args, &mut workspaces);
-    let second = dagq_opening(env, &[], &plan_args, &mut workspaces);
-    eprintln!("plan: {first}\nplan: {second}");
-    let repo_name = repo.file_name().unwrap().to_str().unwrap();
-    let db = db.canonicalize().unwrap();
-    let group = fixture.group().expect("the queue's workspace group exists");
-    let members: Vec<String> = group["member_workspace_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|id| id.as_str().unwrap().to_ascii_lowercase())
-        .collect();
-    let mut ids = Vec::new();
-    for (report, planner) in [(&first, 1), (&second, 2)] {
-        assert_eq!(report["planner"]["id"], planner, "{report}");
-        assert_eq!(report["name"], format!("[{repo_name}]planner#{planner}"));
-        assert_eq!(report["warnings"], json!([]), "{report}");
-        let id = report["planner"]["workspace_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        uuid::Uuid::parse_str(&id).expect("workspace id is a UUID");
-        let listed = listed_workspace(cmux, &id).expect("the planner workspace is listed");
-        assert_eq!(listed["title"], format!("[{repo_name}]planner#{planner}"));
-        assert_eq!(listed["pinned"], false, "{listed}");
-        assert_eq!(listed["custom_color"], "#1565C0", "{listed}");
-        let workspace_env = workspace_env(cmux, &id);
-        assert_eq!(workspace_env["DAGQ_ROLE"], "planner", "{workspace_env}");
-        assert_eq!(workspace_env["DAGQ_QUEUE"], db.to_str().unwrap());
-        assert_eq!(workspace_env["DAGQ_PLANNER_ORIGIN"], "person");
-        assert_eq!(workspace_env["DAGQ_PLANNER_ID"], planner.to_string());
-        assert!(members.contains(&id.to_ascii_lowercase()), "{group}");
-        ids.push(id);
-    }
-    assert_ne!(ids[0], ids[1]);
-
-    // Both planners run at once: each submits its own proposal and goes
-    // idle, which `planners` reports from its wrapper and idle marker.
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let listed = planners(env);
-        if listed.iter().all(|planner| planner["state"] == "idle") && listed.len() == 2 {
-            for planner in &listed {
-                assert_eq!(planner["alive"], true, "{planner}");
-                assert!(planner["idle_since"].is_i64(), "{planner}");
-                assert!(planner["wrapper_pid"].is_u64(), "{planner}");
-                assert!(planner["agent_pid"].is_u64(), "{planner}");
-            }
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "planners never went idle: {listed:#?}"
-        );
-        thread::sleep(Duration::from_millis(300));
-    }
-    let proposals = dagq(env, &["proposal", "list"]);
-    let mut owners: Vec<String> = proposals["proposals"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|proposal| {
-            assert_eq!(proposal["owner"]["origin"], "person", "{proposal}");
-            proposal["owner"]["workspace_id"]
-                .as_str()
-                .unwrap()
-                .to_ascii_lowercase()
-        })
-        .collect();
-    owners.sort();
-    let mut expected: Vec<String> = ids.iter().map(|id| id.to_ascii_lowercase()).collect();
-    expected.sort();
-    assert_eq!(owners, expected, "{proposals}");
-    for (report, planner) in [(&first, 1), (&second, 2)] {
-        let dir = PathBuf::from(report["dir"].as_str().unwrap());
-        let debug = fs::read_to_string(dir.join("claude.log")).unwrap();
-        eprintln!("planner {planner}: {debug}");
-        assert!(
-            debug.contains(&format!(
-                "--plugin-dir {}",
-                plugin_dir.canonicalize().unwrap().display()
-            )),
-            "{debug}"
-        );
-        assert!(
-            debug.contains(&format!(
-                "env: DAGQ_ROLE=planner DAGQ_PLANNER_ORIGIN=person DAGQ_PLANNER_ID={planner}"
-            )),
-            "{debug}"
-        );
-    }
-
-    // The first planner is sent /exit: its wrapper records the exit and it
-    // is no longer alive; the second is still idle.
-    send_exit(cmux, &ids[0]);
-    let deadline = Instant::now() + WAIT_LIMIT;
-    let exited = loop {
-        let listed = planners(env);
-        if listed[0]["exit_code"] == 0 {
-            break listed;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "planner 1 never exited: {listed:#?}"
-        );
-        thread::sleep(Duration::from_millis(300));
-    };
-    assert!(
-        exited[0]["state"] == "exited" || exited[0]["state"] == "closed",
-        "{exited:#?}"
-    );
-    assert_eq!(exited[0]["alive"], false);
-    assert_eq!(exited[1]["state"], "idle", "{exited:#?}");
-
-    // A person closes the first planner's workspace (cmux may already have
-    // closed it with its command): `planners` reports it closed, and the
-    // next `plan` opens a third.
-    if workspace_listed(cmux, &ids[0]) {
-        let close = Command::new(cmux)
-            .args(["workspace", "close", &ids[0]])
-            .bounded_output()
-            .unwrap();
-        assert!(close.status.success(), "{close:?}");
-    }
-    wait_until_not_listed(cmux, &ids[0]);
-    let third = dagq_opening(env, &[], &plan_args, &mut workspaces);
-    assert_eq!(third["planner"]["id"], 3, "{third}");
-    let states: Vec<Value> = planners(env)
-        .iter()
-        .map(|planner| planner["state"].clone())
-        .collect();
-    assert_eq!(states[0], "closed", "{states:?}");
-    assert_eq!(states[1], "idle", "{states:?}");
-    assert_eq!(states.len(), 3, "{states:?}");
-    send_exit(cmux, &ids[1]);
 }
 
 /// `install` hands a supervisor over to the new binary while its worker
