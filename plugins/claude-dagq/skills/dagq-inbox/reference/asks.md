@@ -2,8 +2,8 @@
 
 Read this when an open ask's kind, options or effect is unclear (the `dagq-inbox` skill, step 3). Whatever the kind, show the ask as written and add no recommendation of your own.
 
-- `approve_landing`: a review's doubt: `land` / `send_back` / `cancel`.
-- `approve_plan`: plan review's concern: `ready` / `send_back: <reason>` / `cancel`.
+- `approve_landing`: a review's doubt: `land` / `send_back` / `cancel`. When the run's last review was a `revise` or `concern` (not a failed review), the supervisor records the answer as `review_outcome` against that review's codes for `stats` `review_reasons` (ADR-t947-1); the codes come from the review, so never ask the person for one.
+- `approve_plan`: plan review's concern: `ready` / `send_back: <reason>` / `cancel`. Recorded the same way as `plan_review_outcome`; never ask the person for a code.
 - `decide`: a failed, interrupted or resume-exhausted run the recovery job could not fix: `retry` / `resume` / `cancel`, no `resume` once resumes are used up, plus the job's options, which send the run back to the job.
 - `stalled`: a session idle without a receipt after one nudge (`reason: idle_without_receipt`), a typed text the session did not take (`reason: send_unconfirmed`), or a job's escalation; the question lists background work and screen: `wait` (the supervisor closes it, counts again), `intervene` (a person steps in), `propose`. It closes itself once the session moves on (`reference/status.md` of this skill).
 - `worker_question`: typed into the worker's terminal, or sent as the next turn of a headless run (answered the same way). Its `topics` (in `status`' `asks` and the ask; the first is the primary) say what the worker left undecided, next to `reason_category`: show them with the question.
