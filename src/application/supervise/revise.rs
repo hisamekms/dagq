@@ -96,6 +96,13 @@ pub(super) enum ReviseOutcome {
     Ended(String),
 }
 
+/// Whether `idle` ends the turn of the revise: written after the last input
+/// typed (`input_at`, in a later millisecond, task 1050), with no input the
+/// session took since (`input`) still running a turn (task 672).
+fn idle_ends_turn(idle: &IdleMarker, input_at: SystemTime, input: Option<&InputMarker>) -> bool {
+    super::file_time::written_after(idle.modified(), input_at) && !idle.turn_open_after(input)
+}
+
 impl ReviseWatch {
     pub(super) fn new(
         run: &TaskRun,
@@ -311,8 +318,7 @@ impl ReviseWatch {
         // turn that is still running: only the idle that ends it ends the
         // revise (task 672).
         let input = InputMarker::read(&*sv.files, sv.signals, &idle_marker)?;
-        let idle =
-            idle.filter(|idle| idle.modified() > input_at && !idle.turn_open_after(input.as_ref()));
+        let idle = idle.filter(|idle| idle_ends_turn(idle, input_at, input.as_ref()));
         // A headless turn's ask not taken yet is taken at the next pass,
         // which judges the idle with it.
         if idle.is_some() && ask_requests_pending(sv, run) {
@@ -369,5 +375,33 @@ impl ReviseWatch {
             ))));
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::file_time::at_ns;
+    use super::*;
+
+    /// Task 1050: an idle marker of the millisecond of the revise's last
+    /// input (an adopter's, from an event) does not end its turn.
+    #[test]
+    fn a_marker_of_the_inputs_millisecond_does_not_end_the_revise() {
+        let path = Path::new("/run/idle.json");
+        let input_at = at_ns(250, 0);
+        let idle = |at| IdleMarker::written_at(path, at);
+        assert!(!idle_ends_turn(&idle(at_ns(250, 700_000)), input_at, None));
+        assert!(idle_ends_turn(&idle(at_ns(251, 0)), input_at, None));
+        // An input taken after the marker still runs its turn.
+        let input = InputMarker {
+            modified: at_ns(252, 0),
+            source: InputSource::Typed,
+            text: None,
+        };
+        assert!(!idle_ends_turn(
+            &idle(at_ns(251, 0)),
+            input_at,
+            Some(&input)
+        ));
     }
 }

@@ -70,6 +70,22 @@ impl IdleMarker {
         }
     }
 
+    /// A marker the agent wrote at `modified` with no background work, for
+    /// a test.
+    #[cfg(test)]
+    pub(super) fn written_at(path: &Path, modified: SystemTime) -> Self {
+        Self {
+            path: path.to_owned(),
+            modified,
+            hook: IdleHook {
+                background_running: false,
+                background_tasks: Vec::new(),
+                evidence: Vec::new(),
+            },
+            inferred: None,
+        }
+    }
+
     /// Whether the screen showed this idle rather than the agent's hook
     /// writing it.
     pub(super) fn is_inferred(&self) -> bool {
@@ -111,9 +127,10 @@ impl IdleMarker {
         self.inferred.is_none() && input.is_some_and(|input| input.modified > self.modified)
     }
 
-    /// Idle, by a marker written after `since`.
+    /// Idle, by a marker written after `since`, in a later millisecond
+    /// (task 1050).
     pub(super) fn idle_since(&self, since: SystemTime) -> bool {
-        !self.background_running() && self.modified > since
+        !self.background_running() && super::file_time::written_after(self.modified, since)
     }
 
     /// Evidence that the agent went idle after publishing the receipt: the
@@ -275,6 +292,20 @@ impl ScreenProbes {
     }
 }
 
+/// Why the idle marker `marker` does not tell the session is idle after
+/// its last input (`last_input`, [`screen_idle::last_input`]); `None` when
+/// it does. A marker of the last input's millisecond, or of its very time,
+/// is from before it (task 1050).
+fn marker_state(marker: Option<&IdleMarker>, last_input: SystemTime) -> Option<MarkerState> {
+    match marker {
+        None => Some(MarkerState::Missing),
+        Some(idle) if !super::file_time::written_after(idle.modified(), last_input) => {
+            Some(MarkerState::Stale)
+        }
+        Some(_) => None,
+    }
+}
+
 impl Supervisor<'_> {
     /// The idle marker of the session of `run` in `workspace`, or, while
     /// it is missing or older than the session's last input (its input
@@ -298,10 +329,8 @@ impl Supervisor<'_> {
             return Ok(marker);
         }
         let last_input = screen_idle::last_input(&*self.files, idle_marker, after);
-        let state = match &marker {
-            None => MarkerState::Missing,
-            Some(idle) if idle.modified() < last_input => MarkerState::Stale,
-            Some(_) => return Ok(marker),
+        let Some(state) = marker_state(marker.as_ref(), last_input) else {
+            return Ok(marker);
         };
         let now = self.files.now();
         let floor = unix_millis(last_input);
@@ -735,5 +764,70 @@ mod tests {
             after.iter().all(|&wait| wait == base.as_secs()),
             "{after:?}"
         );
+    }
+
+    use super::super::file_time::at_ns;
+
+    /// Task 1050: a marker of the millisecond of `since` (an adopter's, from
+    /// an event) is not idle since it.
+    #[test]
+    fn a_marker_of_the_millisecond_of_since_is_not_idle_since_it() {
+        let files = MemoryFiles::default();
+        let marker = Path::new("/run/idle.json");
+        files.put(marker, at_ns(250, 700_000), "{}");
+        let idle = IdleMarker::read(&files, &Signals, marker).unwrap().unwrap();
+        assert!(!idle.idle_since(at_ns(250, 0)));
+        assert!(!idle.idle_since(at_ns(250, 900_000)));
+        assert!(idle.idle_since(at_ns(249, 999_999)));
+    }
+
+    /// Task 1050: `session_idle` takes an idle marker for one that tells only
+    /// when written in a later millisecond than the last input, as its input
+    /// marker, the supervisor's stamp and the caller's time (`after`, an
+    /// adopter's from an event) make it. One of that millisecond, or of its
+    /// very time, is stale: the screen stands in for it.
+    #[test]
+    fn a_marker_of_the_last_inputs_millisecond_is_stale() {
+        let files = MemoryFiles::default();
+        let marker = Path::new("/run/idle.json");
+        let input = marker.with_file_name(crate::application::stats::PROMPT_SUBMIT_MARKER);
+        let stamp = marker.with_file_name(screen_idle::SUPERVISOR_INPUT_FILE);
+        let state = |files: &MemoryFiles, written: SystemTime, after: SystemTime| {
+            let last_input = screen_idle::last_input(files, marker, after);
+            marker_state(Some(&IdleMarker::written_at(marker, written)), last_input)
+        };
+        assert_eq!(
+            marker_state(None, at_ns(250, 0)),
+            Some(MarkerState::Missing)
+        );
+        // The caller's time, from an event.
+        let after = at_ns(250, 0);
+        assert_eq!(
+            state(&files, at_ns(250, 700_000), after),
+            Some(MarkerState::Stale)
+        );
+        assert_eq!(
+            state(&files, at_ns(250, 0), after),
+            Some(MarkerState::Stale)
+        );
+        assert_eq!(state(&files, at_ns(251, 0), after), None);
+        // The input marker, a file time: the very time and its millisecond.
+        files.put(&input, at_ns(400, 300_000), "{}");
+        assert_eq!(
+            state(&files, at_ns(400, 300_000), after),
+            Some(MarkerState::Stale)
+        );
+        assert_eq!(
+            state(&files, at_ns(400, 900_000), after),
+            Some(MarkerState::Stale)
+        );
+        assert_eq!(state(&files, at_ns(401, 0), after), None);
+        // The supervisor's stamp.
+        files.put(&stamp, at_ns(600, 100_000), "{}");
+        assert_eq!(
+            state(&files, at_ns(600, 500_000), after),
+            Some(MarkerState::Stale)
+        );
+        assert_eq!(state(&files, at_ns(601, 0), after), None);
     }
 }

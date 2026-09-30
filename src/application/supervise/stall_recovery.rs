@@ -17,6 +17,7 @@
 //! `send_event`), and its end is recorded once (`stall_resolved` of
 //! `detection: recovery` with the same `send_event`).
 
+use super::file_time::{recorded_at, written_after};
 use super::*;
 use crate::domain::RunEvent;
 use crate::domain::recovery::{HEADLESS_STALLED_ACTIONS, SEND_UNCONFIRMED, STALLED_ACTIONS};
@@ -74,13 +75,6 @@ fn repaired(finished: &RunEvent) -> bool {
         .is_some_and(|applied| applied.iter().any(|a| a != "wait"))
 }
 
-/// When `event` was recorded, on the files' wall clock.
-pub(super) fn recorded_at(event: &RunEvent) -> SystemTime {
-    crate::domain::stats::timestamp_millis(&event.created_at).map_or(UNIX_EPOCH, |ms| {
-        UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
-    })
-}
-
 /// What the person is told the session did with the send.
 fn situation(send: &RunEvent) -> String {
     let what = send.payload["what"].as_str().unwrap_or("text");
@@ -121,8 +115,42 @@ fn turn_left_open(
     let waited = super::stall::elapsed(input, now);
     marker.is_none_or(|marker| marker <= input)
         && after_sends
-        && input_at.is_none_or(|at| input >= at)
+        && input_at.is_none_or(|at| !written_after(at, input))
         && waited >= threshold
+}
+
+/// Whether the idle marker written at `marker` ended a turn since the
+/// session's last input: the last text the supervisor typed and the last
+/// input it took ([`StallWatch::turn_since_input`]), the stage's input
+/// (`input_at`, in a later millisecond, task 1050) and its input marker
+/// (`input`).
+fn turn_ended_since_input(
+    stall: &StallWatch,
+    marker: SystemTime,
+    input_at: Option<SystemTime>,
+    input: Option<&InputMarker>,
+) -> bool {
+    stall.turn_since_input(marker)
+        && input_at.is_none_or(|at| written_after(marker, at))
+        && input.is_none_or(|input| marker > input.modified)
+}
+
+/// Whether the idle marker at `idle_marker`, the receipt at `receipt` or
+/// the input marker `input` (unless a notice of the agent's own) was
+/// written after `at`, in a later millisecond (task 1050).
+fn files_moved_since(
+    files: &dyn RunFiles,
+    idle_marker: &Path,
+    receipt: &Path,
+    input: Option<&InputMarker>,
+    at: SystemTime,
+) -> bool {
+    let newer = |path: &Path| files.modified(path).is_ok_and(|m| written_after(m, at));
+    newer(idle_marker)
+        || newer(receipt)
+        || input.is_some_and(|input| {
+            input.source != InputSource::Agent && written_after(input.modified, at)
+        })
 }
 
 impl SessionWatch {
@@ -147,9 +175,7 @@ impl SessionWatch {
             .ok()
             .flatten();
         if marker.is_some_and(|marker| {
-            self.stall.turn_since_input(marker)
-                && self.input_at.is_none_or(|at| marker > at)
-                && input.is_none_or(|input| marker > input.modified)
+            turn_ended_since_input(&self.stall, marker, self.input_at, input.as_ref())
         }) {
             return true;
         }
@@ -259,11 +285,14 @@ impl SessionWatch {
     /// marker, its input marker (unless a notice of the agent's own) or its
     /// receipt written since.
     fn moved_since(&self, sv: &Supervisor<'_>, at: SystemTime) -> Result<bool> {
-        let newer = |path: &Path| sv.files.modified(path).is_ok_and(|m| m > at);
         let input = InputMarker::read(&*sv.files, sv.signals, &self.idle_marker)?;
-        Ok(newer(&self.idle_marker)
-            || newer(&self.receipt_path)
-            || input.is_some_and(|input| input.source != InputSource::Agent && input.modified > at))
+        Ok(files_moved_since(
+            &*sv.files,
+            &self.idle_marker,
+            &self.receipt_path,
+            input.as_ref(),
+            at,
+        ))
     }
 
     /// One look at the sends the session did not take (ADR-0047 decision
@@ -715,5 +744,125 @@ mod tests {
         let short = Duration::from_millis(200);
         assert!(!turn_left_open(at(100), None, true, None, ms(199), short));
         assert!(turn_left_open(at(100), None, true, None, ms(200), short));
+    }
+
+    use super::super::file_time::at_ns;
+
+    /// Task 1050: an input of the millisecond of the stage's input
+    /// (`input_at`, an adopter's from an event) is taken after it, as the
+    /// input of a send's millisecond is.
+    #[test]
+    fn an_input_of_the_stages_millisecond_is_taken_after_it() {
+        let short = Duration::from_millis(200);
+        let input = at_ns(250, 100_000);
+        let now = at_ns(900, 0);
+        assert!(turn_left_open(
+            input,
+            None,
+            true,
+            Some(at_ns(250, 0)),
+            now,
+            short
+        ));
+        assert!(turn_left_open(
+            input,
+            None,
+            true,
+            Some(at_ns(250, 900_000)),
+            now,
+            short
+        ));
+        assert!(!turn_left_open(
+            input,
+            None,
+            true,
+            Some(at_ns(251, 0)),
+            now,
+            short
+        ));
+    }
+
+    /// Task 1050: for `at_prompt`, a marker of the millisecond of the
+    /// stage's input (`input_at`, an adopter's from an event) or of the last
+    /// text typed has not ended a turn since.
+    #[test]
+    fn a_marker_of_the_stages_millisecond_has_not_ended_its_turn() {
+        let stall = StallWatch::default();
+        let input_at = Some(at_ns(250, 0));
+        assert!(!turn_ended_since_input(
+            &stall,
+            at_ns(250, 700_000),
+            input_at,
+            None
+        ));
+        assert!(turn_ended_since_input(
+            &stall,
+            at_ns(251, 0),
+            input_at,
+            None
+        ));
+        let mut stall = StallWatch::default();
+        stall.input_sent(at_ns(300, 0), None);
+        assert!(!turn_ended_since_input(
+            &stall,
+            at_ns(300, 400_000),
+            input_at,
+            None
+        ));
+        assert!(turn_ended_since_input(
+            &stall,
+            at_ns(301, 0),
+            input_at,
+            None
+        ));
+        // An input the session took after the marker still runs its turn.
+        let input = InputMarker {
+            modified: at_ns(301, 500),
+            source: InputSource::Typed,
+            text: None,
+        };
+        assert!(!turn_ended_since_input(
+            &stall,
+            at_ns(301, 0),
+            input_at,
+            Some(&input)
+        ));
+    }
+
+    /// Task 1050: for `moved_since`, the idle marker, the receipt and the
+    /// input marker of the millisecond of the send's event have not moved;
+    /// of the next millisecond they have (a notice of the agent's own never).
+    #[test]
+    fn files_of_the_sends_millisecond_have_not_moved() {
+        use crate::application::memory_files::MemoryFiles;
+        let files = MemoryFiles::default();
+        let idle = Path::new("/run/idle.json");
+        let receipt = Path::new("/run/receipt.json");
+        let send = at_ns(250, 0);
+        assert!(!files_moved_since(&files, idle, receipt, None, send));
+        files.put(idle, at_ns(250, 700_000), "{}");
+        files.put(receipt, at_ns(250, 900_000), "{}");
+        let input = |modified, source| InputMarker {
+            modified,
+            source,
+            text: None,
+        };
+        let same = input(at_ns(250, 800_000), InputSource::Typed);
+        assert!(!files_moved_since(&files, idle, receipt, Some(&same), send));
+        let typed = input(at_ns(251, 0), InputSource::Typed);
+        assert!(files_moved_since(&files, idle, receipt, Some(&typed), send));
+        let notice = input(at_ns(251, 0), InputSource::Agent);
+        assert!(!files_moved_since(
+            &files,
+            idle,
+            receipt,
+            Some(&notice),
+            send
+        ));
+        files.put(receipt, at_ns(251, 0), "{}");
+        assert!(files_moved_since(&files, idle, receipt, None, send));
+        files.put(receipt, at_ns(250, 0), "{}");
+        files.put(idle, at_ns(251, 0), "{}");
+        assert!(files_moved_since(&files, idle, receipt, None, send));
     }
 }

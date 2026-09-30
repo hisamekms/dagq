@@ -114,6 +114,17 @@ struct Recovering {
     repaired_at: Option<SystemTime>,
 }
 
+impl Recovering {
+    /// Whether the session moved since the job started (or since its
+    /// repair): an idle marker (`marker`) or an input it took (`taken`)
+    /// written in a later millisecond than the event (task 1050).
+    fn moved(&self, marker: Option<SystemTime>, taken: Option<SystemTime>) -> bool {
+        let since = self.repaired_at.unwrap_or(self.at);
+        marker.is_some_and(|m| written_after(m, since))
+            || taken.is_some_and(|t| written_after(t, since))
+    }
+}
+
 /// The `stalled` ask of this phase that nobody closed.
 #[derive(Debug, Clone, Copy)]
 struct Asked {
@@ -239,14 +250,18 @@ fn send_explains(sent: SystemTime, at: SystemTime, confirm: Duration) -> bool {
         && elapsed(sent, at) < confirm.saturating_mul(2) + SEND_SLACK + Duration::from_secs(1)
 }
 
+/// Whether the idle marker `marker` shows a turn the session took since
+/// `since` (a `stalled` ask opened, a person stepped in): written in a later
+/// millisecond (task 1050).
+fn marker_moved(marker: Option<SystemTime>, since: SystemTime) -> bool {
+    marker.is_some_and(|m| written_after(m, since))
+}
+
 fn at_unix(secs: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
 
-fn at_event(event: &crate::domain::RunEvent) -> Option<SystemTime> {
-    crate::domain::stats::timestamp_millis(&event.created_at)
-        .map(|ms| UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0)))
-}
+use super::file_time::{event_time as at_event, written_after};
 
 impl StallWatch {
     /// Rebuild the watch of an adopted run from its events and its
@@ -454,15 +469,33 @@ impl StallWatch {
 
     /// Whether the session took an input at `input` (its input marker) no
     /// earlier than the last text the supervisor typed: the text, if any,
-    /// is not still waiting to be taken.
+    /// is not still waiting to be taken. Compared to the millisecond, an
+    /// input of the send's millisecond is taken after it: the hook may
+    /// write the marker before the send's event is recorded (task 1050).
     pub(super) fn taken_after_sends(&self, input: SystemTime) -> bool {
-        self.last_input.is_none_or(|at| input >= at)
+        self.last_input.is_none_or(|at| !written_after(at, input))
     }
 
     /// Whether the session ended a turn (its idle marker `marker`) since the
     /// last text the supervisor typed and the last input it took.
     pub(super) fn turn_since_input(&self, marker: SystemTime) -> bool {
-        self.last_input.is_none_or(|at| marker > at) && self.taken.is_none_or(|at| marker > at)
+        self.last_input.is_none_or(|at| written_after(marker, at))
+            && self.taken.is_none_or(|at| marker > at)
+    }
+
+    /// Whether the idle marker written at `modified` ended a turn after the
+    /// last text the supervisor typed and after a person stepped in (the
+    /// times an adopter reads from events, to the millisecond: a marker of
+    /// their millisecond is from before them, task 1050).
+    fn ended_after_inputs(&self, modified: SystemTime) -> bool {
+        self.last_input.is_none_or(|at| written_after(modified, at))
+            && self.held.is_none_or(|at| written_after(modified, at))
+    }
+
+    /// After a person's `wait`, whether the idle marker written at
+    /// `modified` is of a turn after the answer; `None` without one.
+    fn after_wait(&self, modified: SystemTime) -> Option<bool> {
+        self.wait_from.map(|wait| written_after(modified, wait))
     }
 
     /// The session took `input` (its input marker), `idle` being its idle
@@ -504,7 +537,9 @@ impl StallWatch {
             .flatten()
             .filter(|idle| *idle < input.modified)
             .max()?;
-        if self.held.is_some_and(|at| idle <= at) || self.sent_by_supervisor(&input, confirm) {
+        if self.held.is_some_and(|at| !written_after(idle, at))
+            || self.sent_by_supervisor(&input, confirm)
+        {
             return None;
         }
         let from = self.wait_from.map_or(idle, |at| at.max(idle));
@@ -922,12 +957,13 @@ impl StallWatch {
         // The session moved since the idle's recovery job started (or since
         // its repair): the job's detection ended, and a job still running
         // is stopped by the session's watch ([`Self::recovering`]).
-        if let Some(recovering) = self.recovering.as_deref() {
-            let since = recovering.repaired_at.unwrap_or(recovering.at);
-            if marker.is_some_and(|m| m > since) || self.taken.is_some_and(|t| t > since) {
-                let outcome = self.moved_outcome();
-                self.recovery_resolved(sv, run, outcome)?;
-            }
+        if self
+            .recovering
+            .as_deref()
+            .is_some_and(|recovering| recovering.moved(marker, self.taken))
+        {
+            let outcome = self.moved_outcome();
+            self.recovery_resolved(sv, run, outcome)?;
         }
         if self.asked.is_some() {
             self.watch_ask(sv, run, marker, now, recovery.is_some())?;
@@ -939,9 +975,7 @@ impl StallWatch {
         let modified = idle.modified();
         // The session has not ended a turn since the last text it was sent,
         // or since a person stepped in.
-        if self.last_input.is_some_and(|at| modified <= at)
-            || self.held.is_some_and(|at| modified <= at)
-        {
+        if !self.ended_after_inputs(modified) {
             return Ok(None);
         }
         // An input it took since its last turn ended started a turn of its
@@ -995,7 +1029,7 @@ impl StallWatch {
             }
             // A headless session takes no turn by itself: after `wait` the
             // ask follows its next turn.
-            if headless(run) && self.wait_from.is_some_and(|wait| idle.modified() <= wait) {
+            if headless(run) && self.after_wait(idle.modified()) == Some(false) {
                 return Ok(None);
             }
             self.open_ask(sv, run, workspace, &idle, idle_secs, Some(nudge), now, None)?;
@@ -1094,8 +1128,8 @@ impl StallWatch {
         }
         // After a person's `wait` the ask follows the next turn: a headless
         // session takes none by itself.
-        if let Some(wait) = self.wait_from {
-            if idle.modified() > wait {
+        if let Some(after) = self.after_wait(idle.modified()) {
+            if after {
                 self.open_ask(sv, run, workspace, idle, idle_secs, self.nudge, now, None)?;
             }
             return Ok(None);
@@ -1481,7 +1515,7 @@ impl StallWatch {
             }
             return Ok(());
         };
-        let moved = |since: SystemTime| marker.is_some_and(|m| m > since);
+        let moved = |since: SystemTime| marker_moved(marker, since);
         match ask.answer.as_deref().map(str::trim) {
             None if moved(asked.at) => {
                 self.close(sv, run, STALL_MOVED_CLOSED, "resolved_by_itself")?;
@@ -1835,5 +1869,88 @@ mod tests {
             watch.input_taken(typed(700), Some(at(100)), THRESHOLD, CONFIRM),
             None
         );
+    }
+
+    use super::super::file_time::at_ns;
+
+    /// Task 1050: a marker of the same millisecond as the event of the last
+    /// text typed, a person's step in, a `wait` or a recovery job's request
+    /// is from before it; one of the next millisecond is after it.
+    #[test]
+    fn a_marker_of_the_events_millisecond_is_from_before_it() {
+        let event = at_ns(250, 0);
+        let same = at_ns(250, 700_000);
+        let next = at_ns(251, 0);
+        // The last text typed (an adopted `stall_nudged`).
+        let mut watch = StallWatch::default();
+        watch.input_sent(event, None);
+        assert!(!watch.turn_since_input(same));
+        assert!(!watch.ended_after_inputs(same));
+        assert!(watch.turn_since_input(next));
+        assert!(watch.ended_after_inputs(next));
+        // An input marker of the send's millisecond is the send taken.
+        assert!(watch.taken_after_sends(same));
+        assert!(watch.taken_after_sends(at_ns(250, 0)));
+        assert!(!watch.taken_after_sends(at_ns(249, 999_999)));
+        // A person who stepped in (`answered_intervene`).
+        let held = StallWatch {
+            held: Some(event),
+            ..StallWatch::default()
+        };
+        assert!(!held.ended_after_inputs(same));
+        assert!(held.ended_after_inputs(next));
+        // An idle of the millisecond of the step in is not one that ended
+        // since: no `stall_preempted` for the input after it.
+        let mut watch = held.clone();
+        assert_eq!(
+            watch.input_taken(typed(10), Some(same), THRESHOLD, CONFIRM),
+            None
+        );
+        let mut watch = held;
+        assert!(
+            watch
+                .input_taken(typed(10), Some(next), THRESHOLD, CONFIRM)
+                .is_some()
+        );
+        // `wait` (`answered_wait`).
+        let waited = StallWatch {
+            wait_from: Some(event),
+            ..StallWatch::default()
+        };
+        assert_eq!(waited.after_wait(same), Some(false));
+        assert_eq!(waited.after_wait(next), Some(true));
+        assert_eq!(StallWatch::default().after_wait(next), None);
+        // A recovery job's request, then its repair.
+        let mut recovering = Recovering {
+            attempt: 1,
+            reason: IDLE_WITHOUT_RECEIPT,
+            at: event,
+            detected_after_secs: 0,
+            repaired_at: None,
+        };
+        assert!(!recovering.moved(Some(same), Some(same)));
+        assert!(recovering.moved(Some(next), None));
+        assert!(recovering.moved(None, Some(next)));
+        recovering.repaired_at = Some(at_ns(900, 0));
+        assert!(!recovering.moved(Some(next), Some(at_ns(900, 999_999))));
+        assert!(recovering.moved(Some(at_ns(901, 0)), None));
+    }
+
+    /// Task 1050: a marker of the millisecond of a `stalled` ask's opening
+    /// or of a person's step in (an adopter's, from an event) is not a turn
+    /// the session took since, for `watch_ask`.
+    #[test]
+    fn a_marker_of_the_asks_millisecond_has_not_moved() {
+        let since = at_ns(250, 0);
+        assert!(!marker_moved(None, since));
+        assert!(!marker_moved(Some(at_ns(250, 700_000)), since));
+        assert!(!marker_moved(Some(at_ns(250, 0)), since));
+        assert!(marker_moved(Some(at_ns(251, 0)), since));
+        // An ask an adopter reads in whole seconds is taken from the next
+        // second (`at_unix(created_at + 1)`), at_ns(1_000, 0).
+        let asked = at_unix(1_000_000 + 1);
+        assert!(!marker_moved(Some(at_ns(999, 999_999)), asked));
+        assert!(!marker_moved(Some(at_ns(1_000, 700_000)), asked));
+        assert!(marker_moved(Some(at_ns(1_001, 0)), asked));
     }
 }

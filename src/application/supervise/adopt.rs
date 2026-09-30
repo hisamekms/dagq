@@ -1,7 +1,7 @@
 //! Adoption (ADR-0012): runs whose supervisor died while their session
 //! lives on are taken over, each in the phase it was in.
 
-use super::stall_recovery::recorded_at;
+use super::file_time::recorded_at;
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::RunEvent;

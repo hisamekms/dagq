@@ -13,7 +13,7 @@
 //! Claude session stopped at such a wall is parked and resumed as a
 //! headless Codex one ([`interactive_switch`]).
 
-use super::stall_recovery::recorded_at;
+use super::file_time::recorded_at;
 use super::*;
 use crate::domain::{
     provider_switch::{

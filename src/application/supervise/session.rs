@@ -363,6 +363,18 @@ impl Stage {
     }
 }
 
+/// Whether the idle marker at `idle_marker` exists and, when `at` (the last
+/// input typed) is known, was written after it, in a later millisecond
+/// (task 1050).
+fn marker_after(files: &dyn RunFiles, idle_marker: &Path, at: Option<SystemTime>) -> bool {
+    match at {
+        Some(at) => files
+            .modified(idle_marker)
+            .is_ok_and(|modified| super::file_time::written_after(modified, at)),
+        None => files.exists(idle_marker),
+    }
+}
+
 impl SessionWatch {
     /// The watch of a live session asked at `input_at` to fix what its
     /// review or a conflict named ([`ReviseWatch`]), or what parked its run
@@ -444,13 +456,11 @@ impl SessionWatch {
     /// after the last input typed when one is known (the stage's input, or
     /// the last answer typed into a worker's own session).
     fn marked_idle(&self, sv: &Supervisor<'_>) -> bool {
-        match self.input_at.max(self.answered_at) {
-            Some(at) => sv
-                .files
-                .modified(&self.idle_marker)
-                .is_ok_and(|modified| modified > at),
-            None => sv.files.exists(&self.idle_marker),
-        }
+        marker_after(
+            &*sv.files,
+            &self.idle_marker,
+            self.input_at.max(self.answered_at),
+        )
     }
 
     /// Whether, without such a marker, its screen shows it idle
@@ -583,7 +593,7 @@ impl SessionWatch {
                 // like background work after the receipt.
                 Some(idle)
                     if self.stale.is_some_and(|n| {
-                        idle.modified() <= n.at && !n.waited_out(&*sv.files, sv.cmux)
+                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, sv.cmux)
                     }) =>
                 {
                     None
@@ -1187,3 +1197,27 @@ pub(super) const INPUT_READY_CLOSED: &str =
 
 /// A session's screen is read for a dialog at most this often.
 pub(super) const PROMPT_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+mod tests {
+    use super::super::file_time::at_ns;
+    use super::*;
+    use crate::application::memory_files::MemoryFiles;
+
+    /// Task 1050: for `marked_idle`, an idle marker of the millisecond of
+    /// the last input typed (an adopter's, from an event) is not idle after
+    /// it; without a known input any marker is.
+    #[test]
+    fn a_marker_of_the_inputs_millisecond_is_not_idle_after_it() {
+        let files = MemoryFiles::default();
+        let marker = Path::new("/run/idle.json");
+        let input = Some(at_ns(250, 0));
+        assert!(!marker_after(&files, marker, input));
+        assert!(!marker_after(&files, marker, None));
+        files.put(marker, at_ns(250, 700_000), "{}");
+        assert!(!marker_after(&files, marker, input));
+        assert!(marker_after(&files, marker, None));
+        files.put(marker, at_ns(251, 0), "{}");
+        assert!(marker_after(&files, marker, input));
+    }
+}

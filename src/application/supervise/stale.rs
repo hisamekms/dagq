@@ -93,9 +93,7 @@ pub(super) fn adopted_stale_nudge(
     else {
         return Ok(None);
     };
-    let at = crate::domain::stats::timestamp_millis(&nudged.created_at).map_or(UNIX_EPOCH, |ms| {
-        UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0))
-    });
+    let at = super::file_time::recorded_at(nudged);
     Ok(Some(StaleNudge {
         at,
         typed_at: at,
@@ -195,11 +193,20 @@ impl StaleNudge {
             .is_ok_and(|waited| waited >= cmux.resume_timeout())
     }
 
-    /// The receipt at `path` changed after the request was typed.
+    /// Whether the idle marker written at `idle` answers the request: written
+    /// after it was typed (or after the return from a wait), in a later
+    /// millisecond (task 1050).
+    pub(super) fn answered_by(&self, idle: SystemTime) -> bool {
+        super::file_time::written_after(idle, self.at)
+    }
+
+    /// The receipt at `path` changed after the request was typed, in a
+    /// later millisecond (task 1050): one of the request's millisecond is
+    /// the receipt from before it.
     pub(super) fn rewritten(&self, files: &dyn RunFiles, path: &Path) -> bool {
         files
             .modified(path)
-            .is_ok_and(|modified| modified > self.typed_at)
+            .is_ok_and(|modified| super::file_time::written_after(modified, self.typed_at))
     }
 
     /// Record how the request ended, once: `rewritten`, `unchanged` or
@@ -224,5 +231,46 @@ impl StaleNudge {
             .record_runtime_event(run.id(), EventKind::StaleReceiptResolved, payload)?;
         info!(run_id = %run.id(), "the request to rewrite the receipt of {} ended: {outcome}", run.id());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::memory_files::MemoryFiles;
+
+    use super::super::file_time::at_ns;
+
+    /// Task 1050: an adopter reads when the request was typed from its
+    /// `stale_receipt_nudged` event, to the millisecond: a receipt of that
+    /// millisecond is the one from before the request, not rewritten.
+    #[test]
+    fn a_receipt_of_the_requests_millisecond_is_not_rewritten() {
+        let files = MemoryFiles::default();
+        let receipt = Path::new("/run/receipt.json");
+        let nudge = StaleNudge {
+            at: at_ns(250, 0),
+            typed_at: at_ns(250, 0),
+            settled: false,
+        };
+        assert!(!nudge.rewritten(&files, receipt));
+        files.put(receipt, at_ns(250, 700_000), "{}");
+        assert!(!nudge.rewritten(&files, receipt));
+        files.put(receipt, at_ns(251, 0), "{}");
+        assert!(nudge.rewritten(&files, receipt));
+    }
+
+    /// Task 1050: an idle marker of the millisecond of the request (an
+    /// adopter's, from `stale_receipt_nudged`) does not answer it.
+    #[test]
+    fn a_marker_of_the_requests_millisecond_does_not_answer_it() {
+        let nudge = StaleNudge {
+            at: at_ns(250, 0),
+            typed_at: at_ns(250, 0),
+            settled: false,
+        };
+        assert!(!nudge.answered_by(at_ns(250, 700_000)));
+        assert!(!nudge.answered_by(at_ns(249, 0)));
+        assert!(nudge.answered_by(at_ns(251, 0)));
     }
 }

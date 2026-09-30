@@ -427,6 +427,15 @@ impl RecoveryWatch {
         Ok(watch)
     }
 
+    /// Whether the `long_background` idle marker written at `marker` was
+    /// already handed to a job: an adopter reads the marker's time from
+    /// `marker_at_ms`, to the millisecond, so the marker is compared at the
+    /// millisecond too (task 1050).
+    fn marker_seen(&self, marker: SystemTime) -> bool {
+        self.seen
+            .is_some_and(|seen| !super::file_time::written_after(marker, seen))
+    }
+
     /// Stop a job still running: the session ended or the run moved on.
     pub(super) fn stop(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) {
         self.stop_for(sv, run, None, "session_ended");
@@ -1371,8 +1380,7 @@ impl SessionWatch {
         let idle_secs = secs_between(since, now);
         if super::stall::elapsed(since, now) <= sv.stall.background_alert()
             || self.recovery.recheck.is_some_and(|at| now < at)
-            || (self.recovery.recheck.is_none()
-                && self.recovery.seen.is_some_and(|seen| marker <= seen))
+            || (self.recovery.recheck.is_none() && self.recovery.marker_seen(marker))
         {
             return Ok(());
         }
@@ -1880,5 +1888,23 @@ mod tests {
             sample_interval(Duration::from_millis(300)),
             Duration::from_millis(300)
         );
+    }
+
+    use super::super::file_time::at_ns;
+
+    /// Task 1050: an adopter reads the marker handed to a `long_background`
+    /// job from `marker_at_ms`: the same marker, whose file time keeps
+    /// nanoseconds, is the one seen, not a new one to hand again.
+    #[test]
+    fn the_marker_handed_to_a_job_is_seen_at_the_millisecond() {
+        let marker = at_ns(250, 700_000);
+        let watch = RecoveryWatch {
+            seen: Some(at_millis(millis(marker))),
+            ..RecoveryWatch::default()
+        };
+        assert!(watch.marker_seen(marker));
+        assert!(watch.marker_seen(at_ns(249, 0)));
+        assert!(!watch.marker_seen(at_ns(251, 0)));
+        assert!(!RecoveryWatch::default().marker_seen(marker));
     }
 }
