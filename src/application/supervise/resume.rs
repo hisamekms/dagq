@@ -385,7 +385,7 @@ impl Supervisor<'_> {
             &request.main,
         )?;
         let message = with_instruction(
-            resume_request(&task, run, request, &landed)?,
+            resume_request(&task, run, request, &landed, &self.e2e_marks(run))?,
             self.verifier.language().as_ref(),
         );
         self.files.write(

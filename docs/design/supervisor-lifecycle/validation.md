@@ -4,14 +4,15 @@ type: design
 title: "Validation"
 status: current
 created: 2026-09-26
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: runtime
 related:
   - design-supervisor-lifecycle
   - adr-0040
   - adr-0029
   - adr-t963-1
+  - adr-t1165-1
 ---
 
 # Validation
@@ -40,6 +41,6 @@ related:
 - **記録**: `validation_finished`に`e2e_requirement`（`{required, source?, paths?}`。`source`は`task` / `paths`、`paths`は`source: paths`のとき合った差分のpath。求めないときは`{"required": false}`）を載せる。差分を読む前に外れた（1–5で拒んだ）runで、差分が要否を決めるときは載せない。`evidence_missing`にも、`e2e`を求めたときは同じ`e2e_requirement`を載せる。`stats`はこれを記録した最後の`validation_finished`で`runs[].e2e`と`e2e`の群を作る（[stats](stats.md)）。
 - **resume**: 差分で`e2e`を求めて止めたrunのresumeは、最後の`validation_finished`の`e2e_requirement.required`を見て、書き直されたreceiptの解決の判定（`ResumeWatch::required_evidence`と、衝突だけのresumeを飛ばす`resolved_head`）にも`e2e`を含める。解決したresumeは、`integrate`が呼ばれていないrunならもう一度validatingを通り、そこで差分から決め直す。`integration_approved`のあるrun（着地のresume）はvalidatingを通らずに着地へ進む。その解決の判定は前のvalidatingが差分で求めた`e2e`を含むが、`integrate`のreceiptの検査はtaskの要るevidenceだけを見るので、着地のresumeでの衝突の解消が新しく`[e2e] paths`に触れても、そこでは`e2e`を求め直さない（本番を守るのは入れ替え前のe2eの関門）。
 - **integrateの検査**: `integrate`のreceiptの検査（[`integrate`](integrate.md)）はtaskの要るevidenceだけを見る。差分で求めた`e2e`はvalidatingが確かめ済みで、resumeで書き直したreceiptもvalidatingを通る。e2eは`integrate`では流さない（ADR-t963-1決定4）。
-- **workerに知らせる**: workerのprompt（[Prompt](prompt.md)）に、`[e2e] paths`のglobと、差分がそれに触れたら`e2e`が必須であること、taskの`paths`から読んだ見込みを1行で書く。taskが`e2e`を要るなら`Required evidence:`の行だけ。
+- **workerに知らせる**: workerのprompt（[Prompt](prompt.md)）に、`[e2e] paths`のglobと、差分がそれに触れたら`e2e`が必須であること、taskの`paths`から読んだ見込みを1行で書く。taskが`e2e`を要るなら`Required evidence:`の行だけ。runのworktreeの`.config/e2e-quarantine.toml`に効いている印があれば、promptとresumeの依頼に印のtestの名前と、落ちたe2eの1回の流し直しと、印で通したときの`e2e`の書き方（`passed`とevidenceに印で通したtestと流し直しの結果）と印を効かせない条件（差分がそのtestを変える、taskがその印の直すtask）を載せる（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定6、task 1167。[Prompt](prompt.md)）。validatingは印を読まず、判定は変えない: receiptの`e2e`が`passed`でevidenceがあれば通る。
 - **この repository で置く範囲**（task 966が、固定バイナリがtask 965を含むのを確かめてから`dagq.toml`の`[e2e] paths`に理由のコメントつきで書いた。AGENTS.mdの規則もあわせて、runtimeのtaskに一律の`--evidence e2e`を付けない形に改めた）: cmuxのadapter（`src/infrastructure/adapters.rs`）、process（`src/infrastructure/process.rs`・`src/infrastructure/sessions.rs`）、launchd（`src/infrastructure/launchd.rs`）、lifecycle（`src/application/lifecycle.rs`・`src/application/supervise/handoff.rs`）、integrate（`src/application/integrate.rs`）、install（`src/application/install.rs`・`src/infrastructure/binaries.rs`）、update（`src/application/update.rs`・`src/application/supervise/update.rs`・`src/infrastructure/e2e_gate.rs`）、actorの起動（`src/application/actor_executor.rs`・`src/application/session.rs`・`src/application/headless_session.rs`・`src/infrastructure/claude.rs`・`src/infrastructure/codex.rs`）と、e2eそのもの（`tests/e2e.rs`）。`src/application/supervise/`の判断の部分は含めない（ADR-t963-1決定3）。
 - **test**: `src/domain/validation.rs`の`a_diff_touching_the_e2e_paths_requires_e2e`・`a_diff_outside_the_e2e_paths_lands_without_e2e`・`a_task_that_requires_e2e_keeps_it_whatever_the_diff`・`without_e2e_paths_the_diff_requires_nothing`、`tests/it/runtime_evidence.rs`の`a_diff_touching_the_e2e_paths_parks_the_run_without_e2e`・`a_diff_outside_the_e2e_paths_lands_without_e2e_unless_the_task_requires_it`。

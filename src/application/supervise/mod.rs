@@ -652,6 +652,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         hold_continue: HashMap::new(),
         draining: false,
         update: update::UpdateWatch::default(),
+        utc_offset: settings.utc_offset,
         rechecks: recheck::Rechecks::default(),
         max_load: settings.max_load,
         load_average: ports.load_average,
@@ -773,6 +774,9 @@ struct Supervisor<'a> {
     triaged: Vec<Value>,
     /// The clock and IDs `queue` also uses.
     generators: Generators,
+    /// The host's time zone ([`LoopSettings::utc_offset`]): the local day
+    /// the e2e marks of a worker's prompt are judged on.
+    utc_offset: fn(i64) -> i64,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4).
     stall: StallConfig,
     /// The `[conflicts]` thresholds the plan review's hotspots and the

@@ -178,6 +178,21 @@ pub fn judge(
     }
 }
 
+/// The marks of `file` that hold on the local day `today` for a test that
+/// failed its rerun, judged as the gate judges them but with no gate before
+/// counted: what a worker's local e2e may pass under (ADR-t1165-1 decision
+/// 6), which keeps no count of failures in a row. None when the file has
+/// more than [`LIMIT`] marks or cannot be read.
+pub fn holding(file: &QuarantineFile, today: i64) -> Vec<Mark> {
+    let names: Vec<String> = file.marks().iter().map(|mark| mark.name.clone()).collect();
+    let judged = judge(file, &names, today, &|_| 0);
+    file.marks()
+        .iter()
+        .filter(|mark| judged.quarantined.contains(&mark.name))
+        .cloned()
+        .collect()
+}
+
 /// The marks of the file's `text`, or why it cannot be read.
 pub fn parse(text: &str) -> Result<Vec<Mark>, String> {
     #[derive(Default)]
@@ -491,5 +506,31 @@ name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
         let judged = judge(&QuarantineFile::of("[x]"), &["a".to_owned()], today, &|_| 0);
         assert_eq!(judged.unmarked, ["a"]);
         assert!(judged.ignored.is_empty());
+    }
+
+    #[test]
+    fn the_marks_a_worker_passes_under_are_those_in_date_and_within_the_limit() {
+        let today = date("2026-10-01").unwrap();
+        let file = QuarantineFile::of(&format!(
+            "{}{}{}",
+            mark("held", "2026-10-01"),
+            mark("expired", "2026-09-30"),
+            mark("later", "2026-12-31")
+        ));
+        let names: Vec<String> = holding(&file, today)
+            .into_iter()
+            .map(|mark| mark.name)
+            .collect();
+        assert_eq!(names, ["held", "later"]);
+        let over = QuarantineFile::of(&format!(
+            "{}{}{}{}",
+            mark("a", "2026-12-31"),
+            mark("b", "2026-12-31"),
+            mark("c", "2026-12-31"),
+            mark("d", "2026-12-31")
+        ));
+        assert!(holding(&over, today).is_empty());
+        assert!(holding(&QuarantineFile::of("[x]"), today).is_empty());
+        assert!(holding(&QuarantineFile::Absent, today).is_empty());
     }
 }

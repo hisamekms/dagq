@@ -593,7 +593,7 @@ impl Supervisor<'_> {
                     kind: ResumeKind::Precheck,
                 };
                 let message = with_instruction(
-                    resume_request(&task, run, &request, &landed)?,
+                    resume_request(&task, run, &request, &landed, &self.e2e_marks(run))?,
                     self.verifier.language().as_ref(),
                 );
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);

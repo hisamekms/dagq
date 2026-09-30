@@ -302,6 +302,64 @@ fn a_diff_touching_the_e2e_paths_parks_the_run_without_e2e() {
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
 }
 
+/// The e2e marks of `.config/e2e-quarantine.toml` in the run's worktree
+/// that hold (ADR-t1165-1 decision 6) are named in the worker's prompt and
+/// in the resume's request, with the one rerun and how a mark passes
+/// `e2e`; an expired mark is not.
+#[test]
+fn the_worker_and_resume_prompts_name_the_e2e_marks_that_hold() {
+    let (_dir, repo, db) = evidence_fixture(&[]);
+    fs::create_dir_all(repo.join(".config")).unwrap();
+    fs::write(
+        repo.join(".config/e2e-quarantine.toml"),
+        "[[test]]\nname = \"held_e2e\"\nreason = \"flaky\"\ntask = 41\nuntil = 2999-12-31\n\n\
+[[test]]\nname = \"expired_e2e\"\nreason = \"old\"\ntask = 42\nuntil = 2020-01-01\n",
+    )
+    .unwrap();
+    git(&repo, &["add", ".config"]);
+    with_e2e_paths(&repo, "[\"change.txt\"]");
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "{RECEIPT_E2E}commit work; receipt_e2e \"$(git rev-parse HEAD)\" not_applicable 'no e2e path changed'"
+        ),
+    );
+    backend.resume_script_for(
+        2,
+        &format!(
+            "{RECEIPT_E2E}await_message; receipt_e2e \"$(git rev-parse HEAD)\" passed 'e2e: 3 passed'; idle; await_exit"
+        ),
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    let run = &detail.runs[0];
+    let prompt = read_prompt(run);
+    let resume =
+        fs::read_to_string(Path::new(run.run_dir().unwrap()).join("resume-1.txt")).unwrap();
+    for text in [&prompt, &resume] {
+        assert!(
+            text.contains("held_e2e (fixed by task 41, until 2999-12-31: flaky)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rerun each failed test once by name"),
+            "{text}"
+        );
+        assert!(
+            text.contains("this task (task 2) is not the task that fixes it"),
+            "{text}"
+        );
+        assert!(!text.contains("expired_e2e"), "{text}");
+    }
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+}
+
 /// A run whose diff stays outside `[e2e] paths` owes no e2e: its receipt
 /// reporting it `not_applicable` is accepted and the run lands; the same
 /// repository still holds a task that requires e2e to it.

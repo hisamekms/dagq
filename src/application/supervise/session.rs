@@ -6,6 +6,7 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::exit::CAUSE_EXIT_TIMEOUT;
 use crate::domain::language::with_instruction;
+use crate::domain::{e2e_quarantine, host_metrics};
 
 impl Supervisor<'_> {
     /// Start the validation of `run` on a thread (see [`spawn_validation`]).
@@ -27,6 +28,29 @@ impl Supervisor<'_> {
             warn!("[e2e] paths of dagq.toml could not be read; e2e is required by the task only: {error:#}");
             Vec::new()
         })
+    }
+    /// The e2e marks of `.config/e2e-quarantine.toml` in `run`'s worktree
+    /// that hold today (ADR-t1165-1 decision 6), for its prompts; none
+    /// before the worktree exists. A file that cannot be read has none
+    /// hold, as at the gate.
+    pub(super) fn e2e_marks(&self, run: &TaskRun) -> Vec<e2e_quarantine::Mark> {
+        let Some(worktree) = run.worktree_path() else {
+            return Vec::new();
+        };
+        let path = Path::new(worktree).join(e2e_quarantine::FILE);
+        let file = match self.files.read_to_string(&path) {
+            Ok(text) => e2e_quarantine::QuarantineFile::of(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                warn!(run_id = %run.id(), "{} could not be read, so no e2e mark holds for the run: {error}", path.display());
+                return Vec::new();
+            }
+        };
+        if let Some(error) = file.error() {
+            warn!(run_id = %run.id(), "no e2e mark holds for the run: {error}");
+        }
+        let now = self.generators.clock.now();
+        e2e_quarantine::holding(&file, host_metrics::local_day(now, (self.utc_offset)(now)))
     }
     /// The executor every AI actor the supervisor starts goes through: its
     /// workspaces through cmux, its agents through the review provider and
@@ -124,6 +148,7 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             &siblings,
             inherited.as_ref(),
             &self.e2e_paths(),
+            &self.e2e_marks(run),
         )?;
         // A Claude worker the supervisor gave the broker's tools is told of
         // them (ADR-t827-4 decision 1).
@@ -184,8 +209,10 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
         // The broker's tools (`preferred`): the worker is told of them in
-        // its prompt, written again with them.
-        if self.broker_grant(&run) {
+        // its prompt, written again with them. The e2e marks are read from
+        // the worktree, which exists only now.
+        let granted = self.broker_grant(&run);
+        if granted || !self.e2e_marks(&run).is_empty() {
             self.write_prompt(&task, &run, &run_dir)?;
         }
         let command = shell_join(&[

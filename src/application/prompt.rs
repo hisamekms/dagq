@@ -6,6 +6,7 @@
 //! triage, and the requests it types into a live session (a resume, a
 //! revise, a receipt that does not match).
 
+use crate::domain::e2e_quarantine::{self, Mark};
 use crate::domain::event_kind;
 use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
 use crate::domain::headless_job::JobAccess;
@@ -432,6 +433,7 @@ pub fn prompt(
     siblings: &[Task],
     inherited: Option<&Inheritance>,
     e2e_paths: &[String],
+    e2e_marks: &[Mark],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let inherited = inherited.map(Inheritance::section).unwrap_or_default();
@@ -519,6 +521,11 @@ pub fn prompt(
         )
     };
     evidence.push_str(&e2e_expectation(&required, task.paths(), e2e_paths));
+    // A worker runs e2e only when its task requires it or its diff may
+    // touch `[e2e] paths`; the marks matter only then.
+    if required.contains(&EvidenceCheck::E2e) || !e2e_paths.is_empty() {
+        evidence.push_str(&e2e_marks_line(task, e2e_marks));
+    }
     // The declared scope (ADR-0029): changing anything else parks the run.
     let paths = if task.paths().is_empty() {
         String::new()
@@ -614,6 +621,32 @@ fn e2e_expectation(required: &[EvidenceCheck], paths: &[String], e2e_paths: &[St
     format!(
         "E2E evidence is decided by your diff: validation requires `e2e` (passed with evidence in the receipt, or the run waits for a session to add it) when the change from the base commit touches any of these paths from the repository's dagq.toml [e2e] paths: {}. {expected}; when it touches none, report `e2e` as not_applicable with that reason.\n",
         e2e_paths.join(", ")
+    )
+}
+
+/// What a worker's local e2e may pass under (ADR-t1165-1 decision 6): the
+/// marks of `.config/e2e-quarantine.toml` in its worktree that hold now
+/// ([`e2e_quarantine::holding`]), the one rerun by name of a failed e2e,
+/// how the receipt's `e2e` reads when a mark passes it, and when a mark
+/// does not. Empty without such marks, which leaves the prompt as before.
+pub(crate) fn e2e_marks_line(task: &Task, marks: &[Mark]) -> String {
+    if marks.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = marks
+        .iter()
+        .map(|mark| {
+            format!(
+                "{} (fixed by task {}, until {}: {})",
+                mark.name, mark.task, mark.until, mark.reason
+            )
+        })
+        .collect();
+    format!(
+        "E2E marks that hold now ({file} in your worktree): {list}. When you run the whole e2e and tests fail, rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more. A test that passes its rerun is flaky: name it in the e2e evidence. If every test that fails its rerun too is one of the marked tests above, your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/), and this task (task {task}) is not the task that fixes it, report `e2e` as passed and write in its evidence the tests passed under a mark and the result of their rerun. Otherwise, as without marks: fix the failure, or write the receipt with result failed.\n",
+        file = e2e_quarantine::FILE,
+        list = list.join("; "),
+        task = task.id(),
     )
 }
 
@@ -1223,6 +1256,7 @@ pub(crate) fn resume_request(
     run: &TaskRun,
     request: &ResumeRequest,
     landed: &[PredecessorSummary],
+    e2e_marks: &[Mark],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
@@ -1338,6 +1372,10 @@ pub(crate) fn resume_request(
             _ => "",
         };
         lines.push(format!("2. {checks}{reproduce} Commit the result."));
+    }
+    let marks = e2e_marks_line(task, e2e_marks);
+    if !marks.is_empty() {
+        lines.push(format!("If you run the e2e: {}", marks.trim_end()));
     }
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
@@ -2391,6 +2429,27 @@ mod tests {
         .unwrap()
     }
 
+    fn task_with_evidence(id: i64, required_evidence: Vec<EvidenceCheck>) -> Task {
+        Task::restore(TaskRecord {
+            id: TaskId::new(id),
+            title: "work".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands: Vec::new(),
+            required_evidence,
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status: TaskStatus::InProgress,
+            goal_id: None,
+            context: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::DEFAULT,
+        })
+        .unwrap()
+    }
+
     fn run(task_id: i64, status: RunStatus, result_commit: Option<&str>) -> TaskRun {
         TaskRun::restore(RunRecord {
             id: RunId::new(RUN).unwrap(),
@@ -2478,6 +2537,7 @@ mod tests {
             &[],
             None,
             &[],
+            &[],
         )
         .unwrap();
         assert!(
@@ -2489,7 +2549,7 @@ mod tests {
             )),
             "{text}"
         );
-        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap();
         assert!(alone.contains("Predecessor tasks: none\n"));
         assert!(!alone.contains("Carried over from run"));
     }
@@ -2506,14 +2566,14 @@ mod tests {
         ];
         let decided = "E2E evidence is decided by your diff";
         let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let text = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e).unwrap();
+        let text = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &[]).unwrap();
         assert!(text.contains(decided), "{text}");
         assert!(
             text.contains("src/infrastructure/**, tests/e2e.rs"),
             "{text}"
         );
         assert!(text.contains("required only if your diff touches one of them"));
-        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap();
         assert!(!none.contains(decided), "{none}");
 
         assert_eq!(
@@ -2531,6 +2591,63 @@ mod tests {
         assert_eq!(e2e_expectation(&[EvidenceCheck::E2e], &[], &e2e), "");
     }
 
+    /// The e2e marks that hold (ADR-t1165-1 decision 6) are named in the
+    /// worker prompt of a run that may owe e2e and in the resume request,
+    /// with the one rerun, how a mark passes `e2e` and when it does not;
+    /// without marks, or when the run owes no e2e, the prompt is as before.
+    #[test]
+    fn the_worker_and_resume_prompts_name_the_e2e_marks_that_hold() {
+        let own_run = run(7, RunStatus::Claimed, None);
+        let e2e = ["tests/e2e.rs".to_owned()];
+        let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+        let marks = e2e_quarantine::parse(
+            "[[test]]\nname = \"broker::lands\"\nreason = \"flaky\"\ntask = 41\nuntil = 2026-10-15\n",
+        )
+        .unwrap();
+        let named = "broker::lands (fixed by task 41, until 2026-10-15: flaky)";
+        let marked = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &marks).unwrap();
+        for part in [
+            named,
+            ".config/e2e-quarantine.toml in your worktree",
+            "rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more",
+            "your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/)",
+            "this task (task 7) is not the task that fixes it, report `e2e` as passed",
+            "the tests passed under a mark and the result of their rerun",
+        ] {
+            assert!(marked.contains(part), "{part}: {marked}");
+        }
+        let plain = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &[]).unwrap();
+        assert_eq!(marked.replace(&e2e_marks_line(&open, &marks), ""), plain);
+        assert!(!plain.contains("E2E marks"), "{plain}");
+        let owes_none = prompt(&open, &own_run, None, &[], &[], &[], None, &[], &marks).unwrap();
+        assert_eq!(
+            owes_none,
+            prompt(&open, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap()
+        );
+        let required = task_with_evidence(8, vec![EvidenceCheck::E2e]);
+        assert!(
+            prompt(&required, &own_run, None, &[], &[], &[], None, &[], &marks)
+                .unwrap()
+                .contains(named)
+        );
+
+        let request = ResumeRequest {
+            main: CommitSha::try_from(SHA).unwrap(),
+            branch: "main".into(),
+            reason: "why".into(),
+            kind: ResumeKind::EvidenceMissing,
+        };
+        let resumed = resume_request(&open, &own_run, &request, &[], &marks).unwrap();
+        assert!(
+            resumed.contains("If you run the e2e: E2E marks"),
+            "{resumed}"
+        );
+        assert!(resumed.contains(named), "{resumed}");
+        let without = resume_request(&open, &own_run, &request, &[], &[]).unwrap();
+        assert!(!without.contains("E2E marks"), "{without}");
+        assert_eq!(e2e_marks_line(&open, &[]), "");
+    }
+
     /// The worker, resume and revise prompts show the verification commands
     /// as integrate's to run and send the session to the repository's own
     /// instructions for its checks, with the verification commands as the
@@ -2541,7 +2658,7 @@ mod tests {
         let own_run = run(7, RunStatus::Claimed, None);
         let checks = "the repository's instructions (AGENTS.md or CLAUDE.md) ask a worker to run";
 
-        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap();
         assert!(worker.contains(
             "Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n[\n  \"make gate\"\n]\n"
         ));
@@ -2570,6 +2687,7 @@ mod tests {
             &[],
             Some(&inheritance),
             &[],
+            &[],
         )
         .unwrap();
         let (before, carried) = retried.split_once("Carried over from run").unwrap();
@@ -2593,7 +2711,7 @@ mod tests {
                 reason: "why".into(),
                 kind,
             };
-            let text = resume_request(&verified, &own_run, &request, &[]).unwrap();
+            let text = resume_request(&verified, &own_run, &request, &[], &[]).unwrap();
             assert!(text.contains(checks), "{kind:?}: {text}");
             assert!(text.contains(default), "{kind:?}: {text}");
             assert!(!text.contains("Rerun the verification commands"), "{text}");
@@ -2896,7 +3014,7 @@ mod tests {
     /// request, the revise, the receipt mismatch, the stale receipt, the
     /// nudge, an answer and a recovery job's instruction.
     fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
-        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None, &[]).unwrap()];
+        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None, &[], &[]).unwrap()];
         for kind in [
             ResumeKind::Landing,
             ResumeKind::EvidenceMissing,
@@ -2913,7 +3031,7 @@ mod tests {
                 reason: "why".into(),
                 kind,
             };
-            texts.push(resume_request(task, run, &request, &[]).unwrap());
+            texts.push(resume_request(task, run, &request, &[], &[]).unwrap());
         }
         texts.push(revise_request(task, run, 1, &["fix it".into()]).unwrap());
         texts.push(revise_mismatch_request(run, "the revise", "stale").unwrap());
