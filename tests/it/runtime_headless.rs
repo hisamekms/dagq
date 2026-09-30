@@ -385,6 +385,33 @@ esac"#,
     assert!(event_kinds(&detail).contains(&"evidence_missing"));
 }
 
+/// The silence the turns of
+/// [`a_silent_turn_is_stopped_and_its_recovery_job_resumes_the_session`]
+/// are held to: long against the stub's start to its first line (once
+/// [`exec_the_stub_once`] ran it) and the 0.1 s ticks of [`KEEP_SAYING`]
+/// under load.
+const SILENCE_MILLIS: u64 = 800;
+
+/// Says `tick` every 0.1 s in the background (pid in `$ticker`), so that a
+/// turn's slow steps (a commit under load) are not silent.
+const KEEP_SAYING: &str = "(while :; do say tick; sleep 0.1; done) & ticker=$!";
+
+/// Runs the stub `claude` of `backend` once, outside any run: the first
+/// exec of a file just written can wait on macOS's check of it, under load
+/// for longer than [`SILENCE_MILLIS`], and a first turn stopped before its
+/// first line never named its session.
+fn exec_the_stub_once(dir: &Path, backend: &TestWorkspace) {
+    use common::Bounded;
+    let warm = dir.join("warm-up");
+    fs::create_dir_all(&warm).unwrap();
+    let output = Command::new(backend.headless.as_ref().unwrap())
+        .args(["--add-dir", &warm.display().to_string()])
+        .current_dir(&warm)
+        .bounded_output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
 /// Acceptance (5) and (5b): a turn silent past `[stall].turn_silence_secs`
 /// is stopped with what it runs; the session ends and the run goes to its
 /// recovery job as a run that failed, whose `resume` with an instruction
@@ -397,20 +424,19 @@ fn a_silent_turn_is_stopped_and_its_recovery_job_resumes_the_session() {
         &format!(
             r#"case "$MODE" in
 start) say starting; sleep 60 ;;
-resume) {FINISH} ;;
+resume) {KEEP_SAYING}; {FINISH}; kill $ticker ;;
 esac"#
         ),
     );
+    exec_the_stub_once(dir.path(), &backend);
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(backend);
     let (reviewer, supervisor) = supervise_thread(
         &db,
         &repo,
         backend.clone(),
-        dagq::domain::stall::StallConfig {
-            turn_silence_secs: 5,
-            ..Default::default()
-        },
+        dagq::domain::stall::StallConfig::default()
+            .with_millis("turn_silence_secs", SILENCE_MILLIS),
         &[repair(
             json!({"action": "resume", "instruction": "commit your work and write the receipt"}),
             "the turn hung",
@@ -420,7 +446,8 @@ esac"#
     let run = &detail.runs[0];
     let finished = payloads(&detail, "turn_finished");
     assert_eq!(finished[0]["outcome"], "silent", "{finished:?}");
-    assert_eq!(finished[0]["stopped"], "no output for 5s");
+    // Events record the milliseconds as their whole seconds.
+    assert_eq!(finished[0]["stopped"], "no output for 1s");
     assert_eq!(finished[1]["outcome"], "succeeded");
     let requested = payloads(&detail, "recovery_requested");
     assert_eq!(requested.len(), 1, "{requested:?}");
@@ -457,10 +484,7 @@ fn a_turn_past_its_limit_is_stopped() {
         &db,
         &repo,
         backend.clone(),
-        dagq::domain::stall::StallConfig {
-            turn_limit_secs: 1,
-            ..Default::default()
-        },
+        dagq::domain::stall::StallConfig::default().with_millis("turn_limit_secs", 500),
         &[],
     );
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
