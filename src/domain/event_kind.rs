@@ -40,6 +40,7 @@ event_kinds! {
     AskDelivered => "ask_delivered",
     AskDeliveryFailed => "ask_delivery_failed",
     AskOpened => "ask_opened",
+    AskRequestTaken => "ask_request_taken",
     AskUpdated => "ask_updated",
     AuthRequired => "auth_required",
     AuthorizationDenied => "authorization_denied",
@@ -429,6 +430,10 @@ pub const ASK_CLOSED: &str = EventKind::AskClosed.as_str();
 pub const ASK_DELIVERED: &str = EventKind::AskDelivered.as_str();
 pub const ASK_DELIVERY_FAILED: &str = EventKind::AskDeliveryFailed.as_str();
 pub const ASK_OPENED: &str = EventKind::AskOpened.as_str();
+/// A Codex worker's ask request its supervisor took from the run directory
+/// (ADR-t813-3 decision 3): `request`, `outcome` (`opened` or `refused`),
+/// and the `ask_id` it opened or the `reason` it was refused.
+pub const ASK_REQUEST_TAKEN: &str = EventKind::AskRequestTaken.as_str();
 pub const ASK_UPDATED: &str = EventKind::AskUpdated.as_str();
 pub const AUTH_REQUIRED: &str = EventKind::AuthRequired.as_str();
 /// A state-changing command the [`super::Authorizer`] refused (ADR-t728-1
@@ -685,6 +690,7 @@ mod tests {
             (EventKind::AskDelivered, "ask_delivered"),
             (EventKind::AskDeliveryFailed, "ask_delivery_failed"),
             (EventKind::AskOpened, "ask_opened"),
+            (EventKind::AskRequestTaken, "ask_request_taken"),
             (EventKind::AskUpdated, "ask_updated"),
             (EventKind::AuthRequired, "auth_required"),
             (EventKind::AuthorizationDenied, "authorization_denied"),

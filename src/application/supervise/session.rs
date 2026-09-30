@@ -527,6 +527,9 @@ impl SessionWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<TaskRun>> {
+        // A headless worker's asks wait in its run directory (ADR-t813-3
+        // decision 3): opened before its turn's end is read.
+        take_ask_requests(sv, run);
         let processes = sv.queue.processes(run.id())?;
         self.watch_first_commit(sv, run)?;
         if !self.receipt_seen && sv.files.is_file(&self.receipt_path) {
@@ -959,14 +962,19 @@ impl SessionWatch {
         if answers.is_empty() {
             return Ok(None);
         }
-        let failed = RunHistory::from_events(&sv.queue.run_events(run.id())?).failed_deliveries();
+        let events = sv.queue.run_events(run.id())?;
+        let failed = RunHistory::from_events(&events).failed_deliveries();
         answers.retain(|ask| !failed.contains(&ask.id));
         if answers.is_empty() {
             return Ok(None);
         }
+        // A headless session between turns takes the answer as its next
+        // turn, whether the ask opened before or after its turn ended.
+        let between = headless(run) && between_turns(sv, &self.idle_marker, &events);
         // Background work does not hold an answer back: typing into the
         // prompt opens no dialog, only /exit does.
         let idle_at = match sv.files.modified(&self.idle_marker) {
+            Ok(_) if between => Some(i64::MAX),
             Ok(modified) => Some(unix_seconds(modified)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error).context("inspect idle marker"),

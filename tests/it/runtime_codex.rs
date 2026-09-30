@@ -11,16 +11,16 @@ use crate::runtime_support;
 use dagq::domain::{AskReason, Provider, queue_hold::USAGE_LIMIT_SUBJECT, worker::WorkerMode};
 use runtime_support::*;
 
-const TASK: TaskId = TaskId::new(2);
+pub(crate) const TASK: TaskId = TaskId::new(2);
 
 /// A turn that commits and writes a receipt naming the new head.
-const FINISH: &str = r#"commit work; receipt "$(git rev-parse HEAD)"; say finished"#;
+pub(crate) const FINISH: &str = r#"commit work; receipt "$(git rev-parse HEAD)"; say finished"#;
 
 /// The fixture's task, canceled, and in its place task 2 (`test task`) for
 /// a Codex worker; the backend runs its turns with the stub `codex` of
 /// [`headless_codex`], which the supervisor is given too (so that it
 /// claims the task).
-fn codex_fixture() -> (Fixture, PathBuf, PathBuf, TestWorkspace, PathBuf) {
+pub(crate) fn codex_fixture() -> (Fixture, PathBuf, PathBuf, TestWorkspace, PathBuf) {
     let (dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
@@ -54,13 +54,13 @@ fn codex_fixture() -> (Fixture, PathBuf, PathBuf, TestWorkspace, PathBuf) {
     (dir, repo, db, backend, codex)
 }
 
-fn detail(db: &Path) -> dagq::domain::TaskDetail {
+pub(crate) fn detail(db: &Path) -> dagq::domain::TaskDetail {
     SqliteQueue::open(db).unwrap().show(TASK).unwrap()
 }
 
 /// Supervise with the stub `codex` on a thread, with reviews of
 /// `verdicts` in order.
-fn supervise_thread(
+pub(crate) fn supervise_thread(
     db: &Path,
     repo: &Path,
     backend: Arc<TestWorkspace>,
@@ -87,7 +87,10 @@ fn supervise_thread(
 }
 
 /// Wait for the supervisor thread and its sessions.
-fn finished(backend: &TestWorkspace, supervisor: thread::JoinHandle<Result<Value>>) -> Value {
+pub(crate) fn finished(
+    backend: &TestWorkspace,
+    supervisor: thread::JoinHandle<Result<Value>>,
+) -> Value {
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -95,7 +98,10 @@ fn finished(backend: &TestWorkspace, supervisor: thread::JoinHandle<Result<Value
 }
 
 /// The one open ask of `kind`'s reason once it opened.
-fn open_ask(db: &Path, matches: impl Fn(&dagq::domain::Ask) -> bool) -> dagq::domain::Ask {
+pub(crate) fn open_ask(
+    db: &Path,
+    matches: impl Fn(&dagq::domain::Ask) -> bool,
+) -> dagq::domain::Ask {
     wait_until(db, common::STEP_LIMIT, |queue| {
         queue
             .asks(AskQuery::default())

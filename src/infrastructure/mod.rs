@@ -1,4 +1,6 @@
 pub mod adapters;
+pub mod agent_dir;
+pub mod ask_requests;
 pub mod asks;
 pub mod binaries;
 pub mod broker_config;

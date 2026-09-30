@@ -308,7 +308,14 @@ impl AgentProvider for Codex {
         let roots = writable_roots(worktree, run_dir, &cargo_home()?)?;
         write_rules(worktree)?;
         let mut command = CommandSpec::new(&self.executable);
-        command.current_dir(worktree).arg("exec");
+        // Its `dagq ask` writes a request to the run directory, which the
+        // sandbox lets it write, instead of the queue (ADR-t813-3
+        // decision 3).
+        command.current_dir(worktree).env(
+            crate::domain::ask_request::ASK_REQUESTS_ENV,
+            run_dir.join(crate::domain::ask_request::ASK_REQUESTS_DIR),
+        );
+        command.arg("exec");
         if resume.is_some() {
             command.arg("resume");
         }
@@ -733,6 +740,13 @@ mod tests {
         expected.extend(sandbox);
         expected.extend(["--", "th-1", "answer"]);
         assert_eq!(args(&resumed), expected);
+        // Both tell its `dagq ask` where the run's ask requests go.
+        for command in [&first, &resumed] {
+            let asks = run_dir.join(crate::domain::ask_request::ASK_REQUESTS_DIR);
+            assert!(command.get_envs().any(|(key, value)| key
+                == crate::domain::ask_request::ASK_REQUESTS_ENV
+                && value == Some(asks.as_os_str())));
+        }
         // The rules are in the worktree, excluded.
         assert!(worktree.join(RULES_PATH).is_file());
         assert!(

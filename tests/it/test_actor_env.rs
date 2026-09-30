@@ -1,7 +1,10 @@
 //! The helper that keeps the tests' `dagq` from running as the actor of the
 //! session running the tests (task 789).
 
-use crate::common::{WithoutActor, actor::ACTOR_ENV};
+use crate::common::{
+    WithoutActor,
+    actor::{ACTOR_ENV, TURN_ENV},
+};
 use dagq::domain::{ActorContext, RunId, TaskId};
 use std::{collections::HashMap, process::Command};
 
@@ -53,5 +56,10 @@ fn the_actor_env_is_dropped_unless_the_command_sets_it() {
     assert_eq!(env["DAGQ_QUEUE"].as_deref(), Some("queue.db"));
     for name in &ACTOR_ENV[2..] {
         assert_eq!(env[*name], None, "{name}");
+    }
+    // A Codex worker's turn's ask directory goes too (ADR-t813-3 decision 3).
+    assert_eq!(TURN_ENV, [dagq::domain::ask_request::ASK_REQUESTS_ENV]);
+    for name in TURN_ENV {
+        assert_eq!(env[name], None, "{name}");
     }
 }

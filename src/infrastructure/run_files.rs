@@ -169,6 +169,9 @@ impl RunFiles for LocalRunFiles {
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
+    fn open_agent_dir(&self, dir: &Path) -> io::Result<crate::application::AgentDir> {
+        super::agent_dir::open(dir)
+    }
 }
 
 /// The longest run of backticks in the file and its last byte, read in chunks.

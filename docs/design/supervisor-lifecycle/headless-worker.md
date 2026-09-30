@@ -42,6 +42,7 @@ related:
 | `exit` | supervisor | 終了の依頼 |
 | `limits.json` | supervisor | turnの上限（`silence_secs`・`limit_secs`。testが秒未満で入れたときは`silence_ms`・`limit_ms`も持ち、秒の代わりに使う。[Stall thresholds](stall-thresholds.md)）。`[stall]`から |
 | `turn-NNNNNN.jsonl` / `.err` | agent | turnのstdout（providerのJSONL）とstderr |
+| `../ask-requests/<id>.json` / `.taken` | Codexのworkerの`dagq ask` / supervisor | askの要求と、取り込んだ印（run dirの直下の`ask-requests/`。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)） |
 
 supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`とworkerのroleの拒否、`autoMode`）で、`turn_command`がturnのたびに書く。
 
@@ -81,6 +82,7 @@ wrapper自身がturnの途中で終わるとき（エラー）は、上と同じ
 
 ## turnの後の扱い
 
+- **Codexのworkerのask**: sandboxの中の`dagq ask`はqueueに書けないので、run dirの`ask-requests/`への要求になり、supervisorが見張りのpassの最初に検査して開く（dirはlinkを辿らずに開いた記述子に対してだけ扱う。取り込まれていない通常のfileの要求があるうちはidle markerでturnの終わりを判じない）（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)、ADR-t813-3の決定3）。開いたaskは下のaskと同じに扱う。
 - **成功**（receiptかaskが残ったturnを含む）: wrapperは次の依頼を待つ。supervisorはidle markerを読み、receiptがあれば今のvalidatingへ（[receipt and session exit](receipt-and-session-exit.md)）、`worker_question`が開いていれば答えを待つ（runはslotを空けて待ちになる。ADR-0071の読み替え、決定6）。答えは`answer to ask N: ...`を依頼にして送る（[workerの質問への回答の送信](worker-question-answer.md)）。
 - **receiptもaskも無いturnの終わり**（`StallWatch::observe_turn`）: 対話の`idle_without_receipt_secs`は待たず（閾値0）、決まった文の促し（`stall_nudged`）を依頼で送る。促しは1 phaseに`HEADLESS_NUDGES`（2）回まで（対話は1回。ADR-0047決定30の読み替え）。前の促しの`stall_resolved`は`nudged_again`になる。使い切った後のturnも同じなら復旧jobの`stalled`（理由`turn_without_receipt`）にする。
 - **permissionの拒否が続いて進まない**: receiptもaskも無く終わったturnの`permission_denials`が`PERMISSION_DENIAL_LIMIT`（3）件以上なら、促さずにすぐ復旧jobの`stalled`（理由`permission_denied`）にする。

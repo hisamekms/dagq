@@ -71,7 +71,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 
 状態を変える全てのCLIのコマンドは、parseではなくapplicationの層でmutationの前に`Authorizer`を通る（[Authorization](authorization.md#適用の範囲)）。
 
-- 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
+- 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。Codexのworkerの`dagq ask`はqueueを開かずにrun dirへの要求になり（ADR-t813-3の決定3）、supervisorがそのrunのworkerとして同じ`StaticPolicy`の`ask.open`に通してから開く。supervisorはsandboxの外で動くので、workerが書くそのdirとrun dirを`O_NOFOLLOW`で開いた記述子に対してだけ扱い、linkを辿らず、通常のfileでないentryは読みも動かしもしない（`ask-requests/`の取り込みではworkerの代わりにrunのdirの外を読み書きしない。run dirの他のfileはまだlinkを辿る。[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「まだ無いもの」。commandもqueueを要らない同じ検査を先に行い、通らなければすぐに拒む）（policyの拒否は`authorization_denied`（roleは`worker`）と、runの`ask_request_taken`（`refused`）に残る。[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
 - 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、eventには記録しない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job）の`permissions.deny`には、roleが持たないcommandの`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定

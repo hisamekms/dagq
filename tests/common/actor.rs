@@ -13,9 +13,16 @@ use std::process::Command;
 /// do not inherit: the runtime's own list (task 902).
 pub use dagq::domain::actor::ACTOR_ENV;
 
+/// What a Codex worker's turn adds to the env (`DAGQ_ASK_REQUESTS`,
+/// ADR-t813-3 decision 3), which the children do not inherit either: tests
+/// run in such a turn would otherwise have every `dagq ask` of a worker they
+/// start write to that turn's run directory. It names no actor, so it is not
+/// in the runtime's [`ACTOR_ENV`].
+pub const TURN_ENV: [&str; 1] = [dagq::domain::ask_request::ASK_REQUESTS_ENV];
+
 pub trait WithoutActor {
-    /// Drops the [`ACTOR_ENV`] the command would inherit from the test
-    /// process. A variable the command sets itself (the worker env of a stub
+    /// Drops the [`ACTOR_ENV`] and [`TURN_ENV`] the command would inherit
+    /// from the test process. A variable the command sets itself (the worker env of a stub
     /// agent's spec, a test's `env("DAGQ_ROLE", ..)`) stays, whether set
     /// before or after.
     fn without_actor_env(&mut self) -> &mut Self;
@@ -23,7 +30,7 @@ pub trait WithoutActor {
 
 impl WithoutActor for Command {
     fn without_actor_env(&mut self) -> &mut Self {
-        for name in ACTOR_ENV {
+        for name in ACTOR_ENV.into_iter().chain(TURN_ENV) {
             let set = self.get_envs().any(|(key, _)| key == name);
             if !set {
                 self.env_remove(name);

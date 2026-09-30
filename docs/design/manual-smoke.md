@@ -137,7 +137,7 @@ background のコマンドの summary は `Background command "<Bash tool の de
 
 ## 非対話の worker のスモーク
 
-非対話の worker の経路（[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)、[非対話のworker](supervisor-lifecycle/headless-worker.md)）と Codex の worker（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）は、stub の provider（`tests/it/runtime_headless.rs`・`runtime_codex.rs`・`runtime_provider_switch.rs`）でだけ自動 test される。実物の CLI の出力の形・認証・sandbox・session（thread）の resume は stub では確かめられないので、Claude Code か Codex CLI の版を上げたとき、turn の組み立て（`turn_command`）か出力の読み手（`ClaudeTurnReader`・`CodexTurnReader`）か Codex の権限（`-c` と rules）を変えたときに、実 Codex と実 Claude の非対話の worker を 1 本ずつ使い捨て repository で着地させる。人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。
+非対話の worker の経路（[ADR-t813-1](../adr/2026-09-28-t813-1-headless-worker-path.md)、[非対話のworker](supervisor-lifecycle/headless-worker.md)）と Codex の worker（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）は、stub の provider（`tests/it/runtime_headless.rs`・`runtime_codex.rs`・`runtime_codex_ask.rs`・`runtime_provider_switch.rs`）でだけ自動 test される（stub の turn は sandbox なしで走る）。実物の CLI の出力の形・認証・sandbox・session（thread）の resume は stub では確かめられないので、Claude Code か Codex CLI の版を上げたとき、turn の組み立て（`turn_command`）か出力の読み手（`ClaudeTurnReader`・`CodexTurnReader`）か Codex の権限（`-c` と rules）を変えたときに、実 Codex と実 Claude の非対話の worker を 1 本ずつ使い捨て repository で着地させる。人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。
 
 ### 手順
 
@@ -145,16 +145,18 @@ background のコマンドの summary は `Background command "<Bash tool の de
 2. 前提を確かめて記録する: `~/.local/bin/claude --version`、`~/.local/bin/codex --version`、`codex login status`（ログイン済み）、Claude のログイン（`claude -p 'say ok'` が答える）。`~/.codex/config.toml`・`~/.codex/auth.json`・`~/.claude` は書き換えない（runtime も書かない）。
 3. task を 2 件登録して `ready` にする。どちらも `--verify 'test -f seed.txt'` と、description に「`smoke-<provider>.txt` に 1 行足して commit し、receipt を書く」。
    - Codex: `tq add "codex headless smoke" --provider codex ...`
-   - Claude: `tq add "claude headless smoke" --headless ...`。description に「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する」を足し、answer の turn（同じ session の resume）も通す。Codex の worker の sandbox の中の `dagq ask` はまだ queue に届かない（[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker) の「まだ無いもの」）ので、Codex の task には ask を求めない。
+   - Claude: `tq add "claude headless smoke" --headless ...`
+   - どちらの description にも「最初に `dagq ask --run $DAGQ_RUN_ID --kind worker_question --because scope --topic other --question '続けてよいか'` を打って turn を終え、答えを受けてから作業する」を足し、answer の turn（同じ session か thread の resume）も通す。Codex の worker の sandbox の中の `dagq ask` は queue に書かず、run dir の `ask-requests/` への要求になり、supervisor がそれを検査して ask を開く（[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)、task 890）。実 Codex の sandbox の中でこの経路が通ることは stub の test では確かめられないので、ここで確かめる。Codex の worker が打つ `dagq` は task 890 を含むバイナリにする（それより前の固定バイナリは queue を開こうとして sandbox に拒まれる）: description に scratch のバイナリの path を書くか、`[run.env]` で scratch のバイナリを先にした `PATH` を渡す。Codex の `dagq ask` は queue の場所を解決しないので `XDG_DATA_HOME` は要らない。
    - worker が `dagq` を打つ task のために、使い捨て repository の `dagq.toml` の `[run.env]` に `XDG_DATA_HOME = "<scratch>/xdg"` を置く（[作業の内訳のスモーク](#作業の内訳のスモーク)の注の「worker の `dagq`」）。
    - `tq ready ID --bypass-review` を add が返した ID だけに打つ。
 4. 専用の cmux workspace で `tq supervise --parallel 2 --claude ~/.local/bin/claude --codex ~/.local/bin/codex --log-dir <scratch>/logs --observe-interval 0 --observe-daily false --report-daily false --forecast-snapshots false --host-metrics-interval 0` を起動する。`tq status` の `supervisors[].providers` で claude と codex がどちらも `found: true`、codex の `modes` が `["headless"]` であることを見る。
-5. Claude の task の `worker_question` に `tq answer <id> --text 'yes'` と答える。
+5. 両方の task の `worker_question` に `tq answer <id> --text 'yes'` と答える。
 6. 両方の run が着地したら次を集めて確かめる。
    - `tq show ID`: task `completed`、run `integrated`、run の `requested_provider` と `actual_provider` が task の provider のまま（切り替えが無い）、`worker_mode: headless`。
    - `tq events --run RUN --full`: `run_claimed` の `provider`・`requested_provider`・`worker_mode`・`provider_version`・`codex_version`（supervisor が Codex の worker を動かすので、どちらの run にも載る）。`turn_requested` / `turn_started` / `turn_finished` の列（`outcome: succeeded`、`failure: null`、`usage` と `tokens`）。Codex は `turn_session_identified`（thread の id）と、`turn_finished` の `tokens_total`。Claude は answer の turn が同じ session の resume（`turn_started` の `session_id` が run の id）。`provider_switched` が無い。
    - run dir の `turns/turn-NNNNNN.jsonl` が CLI の出力（Claude は stream-json、Codex は `--json` の JSONL）で、`turns/` の依頼の記録と対になっている。
    - Codex の run: 着地した commit に `.codex/rules/dagq-deny.rules` が入っていない（`info/exclude`）。`~/.codex/config.toml` の更新時刻が変わっていない。
+   - Codex の run の ask: 最初の turn の出力（`turns/turn-000001.jsonl` の `command_execution`）で `dagq ask` が `"requested": true` を出して 0 で終わっている。run の `ask_request_taken`（`outcome: opened`、`ask_id`）が 1 件で、run dir の `ask-requests/` には `<id>.taken` だけが残る。ask の `asked_by` が `worker`。answer の turn は `turn_requested` の `what` が `answer of ask N`、`turn_started` の `session_id` が `turn_session_identified` の thread（`codex exec resume`）。`authorization_denied` が無い。
    - `tq stats --full` の `runs[]` の `provider`・`actual_provider`・`route`・`turns`（`by_provider`）。`tq kpi --by provider` と `--by route` に 2 本が分かれて出る。
    - `origin/main` に task ごとに 1 commit。
 7. 余力があれば切り替えも見る: supervisor を止め、`--codex <scratch>/no-such-codex` で起動し直して Codex の task をもう 1 件流すと、非対話の Claude で始まり（`provider_switched`、`phase: start`、`reason: executable_missing`）着地する。

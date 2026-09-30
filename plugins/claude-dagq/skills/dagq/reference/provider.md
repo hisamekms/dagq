@@ -18,7 +18,7 @@ A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worke
 ### Which to choose (planner)
 
 - No reason given: give neither flag. Claude interactive stays the default until a measuring task decides otherwise.
-- The person wants the task done on Codex: `--provider codex`. Codex does no subagent review: its run needs no `subagent_review` evidence (the supervisor's review job still reviews it before landing). A Codex worker's own `dagq ask` from inside its sandbox is not wired yet (`provider-lifecycle.md`, "まだ無いもの"), so give it a task whose acceptance leaves little to ask.
+- The person wants the task done on Codex: `--provider codex`. Codex does no subagent review: its run needs no `subagent_review` evidence (the supervisor's review job still reviews it before landing). A Codex worker asks as any worker does: its `dagq ask` inside the sandbox writes a request to the run dir (`ask-requests/`), and the supervisor checks it and opens the `worker_question` (`ask_request_taken` on the run; `provider-lifecycle.md`, the Codex worker section).
 - Claude headless (`--headless`): only when the person asks for it, for example to compare the routes.
 - Never pick a provider to route around a login or a usage limit: the runtime falls back by itself (below).
 

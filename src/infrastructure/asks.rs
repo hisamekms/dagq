@@ -34,6 +34,81 @@ impl SqliteQueue {
         Ok(outcome)
     }
 
+    /// Open the ask of the ask request `request` a worker of run `owner`
+    /// wrote to its run directory (ADR-t813-3 decision 3), as [`Self::ask`]
+    /// does, and record `ask_request_taken` (`outcome: opened`) on `owner`
+    /// in the same transaction, so a request is opened once whatever
+    /// stops the supervisor. A request already taken opens nothing: its
+    /// ask is returned (`created: false`), or `None` when it was refused.
+    pub fn ask_on_request(
+        &mut self,
+        owner: &RunId,
+        request: &str,
+        ask: NewAsk,
+    ) -> Result<Option<AskOutcome>> {
+        ask.validate()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(taken) = request_taken(&tx, owner, request)? {
+            let outcome = match taken.get("ask_id").and_then(serde_json::Value::as_i64) {
+                Some(id) => Some(AskOutcome {
+                    ask: read_ask(&tx, AskId::new(id))?,
+                    created: false,
+                }),
+                None => None,
+            };
+            tx.commit()?;
+            return Ok(outcome);
+        }
+        let outcome = insert_ask(&tx, &ask)?;
+        ask_event(
+            &tx,
+            Some(run_task(&tx, owner)?),
+            Some(owner),
+            EventKind::AskRequestTaken,
+            json!({
+                "request": request,
+                "outcome": "opened",
+                "ask_id": outcome.ask.id,
+                "created": outcome.created,
+            }),
+        )?;
+        tx.commit()?;
+        Ok(Some(outcome))
+    }
+
+    /// Record that the ask request `request` of run `owner` opens no ask
+    /// (`ask_request_taken`, `outcome: refused`, with `reason`), unless it
+    /// was taken already. Whether it was recorded now.
+    pub fn refuse_ask_request(
+        &mut self,
+        owner: &RunId,
+        request: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if request_taken(&tx, owner, request)?.is_some() {
+            return Ok(false);
+        }
+        ask_event(
+            &tx,
+            Some(run_task(&tx, owner)?),
+            Some(owner),
+            EventKind::AskRequestTaken,
+            json!({"request": request, "outcome": "refused", "reason": reason}),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Whether the ask request `request` of run `owner` was taken.
+    pub fn ask_request_taken(&self, owner: &RunId, request: &str) -> Result<bool> {
+        Ok(request_taken(&self.conn, owner, request)?.is_some())
+    }
+
     /// Open the `queue_hold` ask of the hold's reason and subject with its
     /// run or headless job, or add it to the open one (ADR-0047 decision
     /// 42). A new ask writes `ask_opened` on the queue; a run or job that
@@ -1038,6 +1113,34 @@ pub(super) fn record_ask_closed(conn: &Connection, ask: &Ask) -> Result<()> {
         EventKind::AskClosed,
         json!({"ask_id": ask.id, "kind": ask.kind}),
     )
+}
+
+/// The payload of the `ask_request_taken` of `request` on run `owner`.
+fn request_taken(
+    conn: &Connection,
+    owner: &RunId,
+    request: &str,
+) -> Result<Option<serde_json::Value>> {
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM run_events WHERE run_id=?1 AND kind=?2
+             AND json_extract(payload,'$.request')=?3 ORDER BY id LIMIT 1",
+            params![owner, EventKind::AskRequestTaken.as_str(), request],
+            |row| row.get(0),
+        )
+        .optional()?;
+    payload
+        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+        .transpose()
+}
+
+/// The task of run `run`.
+fn run_task(conn: &Connection, run: &RunId) -> Result<TaskId> {
+    conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |r| {
+        r.get(0)
+    })
+    .optional()?
+    .with_context(|| format!("run {run} does not exist"))
 }
 
 /// An ask's event: on its task (and run), or, for a task-less `blocked`

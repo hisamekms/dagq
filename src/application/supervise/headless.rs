@@ -169,6 +169,24 @@ pub(super) fn last_turn(sv: &Supervisor<'_>, idle_marker: &Path) -> Option<TurnM
         .and_then(|content| TurnMark::parse(&content))
 }
 
+/// Whether the headless session is between turns: its idle marker names
+/// the last turn that started (`events` are the run's). What is sent then
+/// is the next turn's request, however long ago the turn ended: a Codex
+/// worker's ask opens only at its supervisor's next pass after the turn
+/// that asked it ended (ADR-t813-3 decision 3), so an idle marker older
+/// than the ask does not mean the session went on past it.
+pub(super) fn between_turns(sv: &Supervisor<'_>, idle_marker: &Path, events: &[RunEvent]) -> bool {
+    let Some(mark) = last_turn(sv, idle_marker) else {
+        return false;
+    };
+    events
+        .iter()
+        .filter(|event| event.kind == event_kind::TURN_STARTED)
+        .filter_map(|event| event.payload["turn"].as_u64())
+        .max()
+        .is_none_or(|started| mark.turn >= started)
+}
+
 /// What the recovery job of a headless session reads instead of its
 /// screen: its last turns, as recorded.
 pub(super) fn turns_excerpt(sv: &Supervisor<'_>, run: &TaskRun) -> String {
