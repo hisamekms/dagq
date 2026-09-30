@@ -696,8 +696,14 @@ pub struct TestWorkspace {
     /// that capture (the submit's confirmation) still shows the text taken,
     /// and a later one (the send's start check) shows this.
     pub screen_after_confirm: Mutex<Option<String>>,
-    /// [`Self::screen_after_confirm`] armed by a `send_text`.
+    /// [`Self::screen_after_confirm`] armed by a `send_text` or, from
+    /// [`Self::screen_after_exit`], by a delivered `send_exit`.
     armed_screen: Mutex<Option<String>>,
+    /// The screen the first capture after the next delivered `send_exit`
+    /// leaves, once: that capture (the submit's confirmation) still shows
+    /// the screen the `/exit` reached, and every later one (an exit retry's)
+    /// shows this, a dialog that came up after it, whatever the load.
+    pub screen_after_exit: Mutex<Option<String>>,
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
     pub headless: Option<PathBuf>,
@@ -753,6 +759,7 @@ impl TestWorkspace {
             screen_after_text: Mutex::new(None),
             screen_after_confirm: Mutex::new(None),
             armed_screen: Mutex::new(None),
+            screen_after_exit: Mutex::new(None),
             headless: None,
             codex: None,
         }
@@ -1182,6 +1189,9 @@ impl WorkspaceBackend for TestWorkspace {
         }
         let run_dir = self.session_run_dir(workspace_id);
         fs::write(exit_request_path(&run_dir), "")?;
+        if let Some(after) = self.screen_after_exit.lock().unwrap().take() {
+            *self.armed_screen.lock().unwrap() = Some(after);
+        }
         if self.send_times_out {
             // The /exit got there: the transcript shows it.
             *self.screen.lock().unwrap() = format!("❯ /exit\n{READY_SCREEN}");

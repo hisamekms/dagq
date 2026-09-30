@@ -140,31 +140,21 @@ fn used_up_retries_over_a_dialog_close_a_reviewed_resume_and_judge_it() {
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     review_passed(&db, &run);
-    // Kept at a second: the dialog shown 300ms after the /exit (and the
-    // test's poll) must be on the screen before the first retry reads it.
+    // The dialog comes up once the submit's confirmation has read the
+    // screen the first /exit reached (the stub arms it on send_exit and
+    // shows it after the next capture), so the first retry, due a second
+    // later, reads it with no timing of the test's thread involved.
     backend.exit_timeout = Duration::from_secs(1);
     backend.close_ends_session = true;
     backend.resume_script_for(2, IGNORES_FIRST_EXIT);
+    *backend.screen_after_exit.lock().unwrap() = Some(DIALOG_SCREEN.into());
     let before = backend.exits_sent.load(Ordering::SeqCst);
-    let backend = Arc::new(backend);
-    let handle = {
-        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || {
-            supervise_with(
-                &db,
-                &repo,
-                &backend,
-                &retrying(2, Duration::from_millis(300)),
-            )
-        })
-    };
-    wait_until(&db, common::STEP_LIMIT, |queue| {
-        !payloads(&queue.show(TaskId::new(2)).unwrap(), "exit_requested").is_empty()
-    });
-    thread::sleep(Duration::from_millis(300));
-    *backend.screen.lock().unwrap() = DIALOG_SCREEN.into();
-    let outcome = joined(handle, "the supervisor thread to return").unwrap();
-    backend.join();
+    let outcome = supervised(
+        &db,
+        &repo,
+        &backend,
+        &retrying(2, Duration::from_millis(300)),
+    );
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     // Only the first /exit: nothing is typed over the dialog.
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst) - before, 1);
