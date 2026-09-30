@@ -17,6 +17,8 @@
 
 use serde_json::{Value, json};
 
+use super::{RunEvent, UPDATE_E2E_PASSED, UPDATE_FAILED};
+
 /// Where the marks live, relative to the checkout.
 pub const FILE: &str = ".config/e2e-quarantine.toml";
 
@@ -363,6 +365,40 @@ fn date(text: &str) -> Option<i64> {
     (1..=days_in_month)
         .contains(&day)
         .then(|| super::host_metrics::days_from_civil(year, month, day))
+}
+
+/// How many gates right before this one (`history`, newest first) `test`
+/// failed its rerun in, in a row. A gate that passed without a rerun, or
+/// whose rerun `test` passed or was not in, ends the row; one that told
+/// nothing of its tests (it or its rerun ran past its timeout or could not
+/// start, or an older runtime recorded no rerun) is passed over.
+/// Shared by the gate's judgement and `stats`' count of the gate's tests.
+pub fn failures_in_a_row<'a>(history: impl IntoIterator<Item = &'a RunEvent>, test: &str) -> usize {
+    let mut count = 0;
+    for event in history {
+        let gate = event.kind == UPDATE_E2E_PASSED
+            || (event.kind == UPDATE_FAILED && event.payload["stage"] == "e2e");
+        if !gate {
+            continue;
+        }
+        match event.payload.get("rerun") {
+            // A rerun past its timeout or that could not start told
+            // nothing of its tests.
+            Some(rerun) if rerun["timed_out"] == true || rerun.get("error").is_some() => {}
+            Some(rerun) => {
+                let failed = rerun["failed"]
+                    .as_array()
+                    .is_some_and(|failed| failed.iter().any(|name| name == test));
+                if !failed {
+                    break;
+                }
+                count += 1;
+            }
+            None if event.kind == UPDATE_E2E_PASSED => break,
+            None => {}
+        }
+    }
+    count
 }
 
 #[cfg(test)]

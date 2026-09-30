@@ -12,8 +12,9 @@
 use serde_json::{Value, json};
 
 use super::install::{E2eOutcome, E2eSettings};
+pub use crate::domain::e2e_quarantine::failures_in_a_row;
 use crate::domain::{
-    RunEvent, UPDATE_E2E_PASSED, UPDATE_FAILED,
+    RunEvent,
     e2e_quarantine::{self, QuarantineFile},
     host_metrics,
 };
@@ -156,44 +157,11 @@ pub fn judge(
     }
 }
 
-/// How many gates right before this one (`history`, newest first) `test`
-/// failed its rerun in, in a row. A gate that passed without a rerun, or
-/// whose rerun `test` passed or was not in, ends the row; one that told
-/// nothing of its tests (it or its rerun ran past its timeout or could not
-/// start, or an older runtime recorded no rerun) is passed over.
-pub fn failures_in_a_row(history: &[RunEvent], test: &str) -> usize {
-    let mut count = 0;
-    for event in history {
-        let gate = event.kind == UPDATE_E2E_PASSED
-            || (event.kind == UPDATE_FAILED && event.payload["stage"] == "e2e");
-        if !gate {
-            continue;
-        }
-        match event.payload.get("rerun") {
-            // A rerun past its timeout or that could not start told
-            // nothing of its tests.
-            Some(rerun) if rerun["timed_out"] == true || rerun.get("error").is_some() => {}
-            Some(rerun) => {
-                let failed = rerun["failed"]
-                    .as_array()
-                    .is_some_and(|failed| failed.iter().any(|name| name == test));
-                if !failed {
-                    break;
-                }
-                count += 1;
-            }
-            None if event.kind == UPDATE_E2E_PASSED => break,
-            None => {}
-        }
-    }
-    count
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::install::E2eRerun;
-    use crate::domain::EventId;
+    use crate::domain::{EventId, UPDATE_E2E_PASSED, UPDATE_FAILED};
     use std::{path::Path, time::Duration};
 
     fn settings() -> E2eSettings {

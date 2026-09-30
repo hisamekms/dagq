@@ -686,6 +686,13 @@ pub fn observer_prompt(
            A finding that already holds those events is not recorded again.\n\
          - A test that failed only in the worker's own sessions (`integrate_runs` below `flaky_runs`) is its work in progress, not a flaky test: no finding.\n\
          - When a `flaky_test` finding's test is no longer a candidate and the window's `failed_tests.tests` shows no `integrate` failure of it, you may resolve the finding.\n\
+         - stats' `updates.e2e.tests` counts, per e2e test of the automatic update's e2e gate (the gate reruns failed e2e tests once by name, and a test under a mark of `.config/e2e-quarantine.toml` that fails its rerun too is only recorded), \
+           `failed` (the gates it failed in), `passed_on_rerun` (flaky), `quarantined` (let through by its mark), `failed_gate` (it failed the gate), `failures_in_a_row` (the latest gates it failed the rerun of in a row; a mark stops holding at 3), \
+           `event_ids` (those gates' `update_e2e_passed` / `update_failed` events, the newest first), `marked` and `mark_task` (the task its mark names).\n\
+         - Record each e2e test with a `failed` of 2 or more (passed on the rerun or let through by its mark included) as a finding of kind `flaky_test` on the queue with the test's name as the subject and its `event_ids` as the evidence, \
+           and add `--propose` when it needs a task to make it stable (it fails again and again, `failed_gate` or `failures_in_a_row` is above 0, or its mark stands): \
+           the runtime's planner checks the existing tasks with `search` / `related` (a `mark_task` is one) before it adds one. A finding that already holds those events is not recorded again. \
+           The counts cover the stats' window only, so a test that fails twice a day may show it only in the 24 hours read once a day.\n\
          \n\
          Reading the KPIs (`kpi` in the inputs, `{dagq} kpi` for more):\n\
          - `kpi.targets` is each target of `[kpi.targets]` judged on the days and on the weeks: `state` is `ok`, `missed` (off target fewer periods in a row than `kpi.config.breach_periods` days or `breach_weeks` weeks), \
@@ -825,6 +832,12 @@ mod tests {
             "A finding that already holds those events is not recorded again.",
             "failed only in the worker's own sessions",
             "you may resolve the finding",
+            "`updates.e2e.tests`",
+            "`passed_on_rerun` (flaky), `quarantined` (let through by its mark), `failed_gate` (it failed the gate), `failures_in_a_row`",
+            "Record each e2e test with a `failed` of 2 or more (passed on the rerun or let through by its mark included) as a finding of kind `flaky_test` on the queue",
+            "its `event_ids` as the evidence",
+            "add `--propose` when it needs a task to make it stable",
+            "checks the existing tasks with `search` / `related`",
         ] {
             assert!(prompt.contains(text), "the prompt lacks {text:?}");
         }

@@ -118,6 +118,7 @@ related:
 - **`draft_flow`**: `{landings, registered, adopted, canceled, kept_draft, backlog, oldest_backlog_secs, oldest_backlog_task_id, drafts_per_landing, inflow_per_outflow, by_origin: {<origin>: {registered, adopted, canceled, kept_draft, backlog, oldest_backlog_secs, oldest_backlog_task_id}}}`（task 470）。`asks`と同じwindowと`--goal`の絞り込みで、着地の数とruntimeやjobが登録したdraftの流入・流出・滞留を並べる（下の[draftの流入と流出](#draftの流入と流出)）
 - **`landing_utilization`**: `{window_secs, busy_secs, utilization, peak_hour: {start, utilization}, attempts, landed, attempt_secs: {count, min, median, p90, max}, queue: {mean, max, runs}}`（goal 72、task 991）。`host`と同じ時間の窓（下の[着地の直列処理の使用率](#着地の直列処理の使用率)）で、`integrate`の試行が1本だけの着地slotを占めた割合と、試行の時間、slotの順番待ちのrunの数
 - **`sessions`**: `{window: {after, upto}, by_kind: {<kind>: {count, open, active, active_ratio, open_now, inferred, active_unavailable, tokens, models}}}`。`backend_failures`と同じwindowと重なるClaude sessionの区間をkindごとに数える（下の[Claude session](#claude-session)）
+- **`updates`**: 自動更新の`update_*`の集計（形と数え方は[Auto-update](auto-update.md)の`stats`の項）。`e2e.tests`はe2eの関門のtestの名前ごとに、関門で落ちた回数`failed`・流し直しで通った`passed_on_rerun`・印で通した`quarantined`・関門を落とした`failed_gate`・windowの終わりの続けての失敗`failures_in_a_row`・根拠の関門のevent`event_ids`（新しい順に5件まで）・windowの最後の関門が読んだ印の有無`marked`と印の`mark_task`を出す（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定4、task 1166。`domain::stats::updates::E2eTestStats`）。observerはこれを`flaky_test`のfindingにする（[Observer](observer.md)）
 
 ## 着地待ちの内訳
 
