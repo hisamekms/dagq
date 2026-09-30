@@ -1755,6 +1755,7 @@ same in one step",
                     reconnect: crate::application::broker::RECONNECT,
                 }),
             },
+            utc_offset_secs: clock::local_utc_offset(self.generators.clock.now()),
         };
         update::run(
             &update::JobPorts {

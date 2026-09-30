@@ -695,6 +695,7 @@ pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;
 pub mod disk;
+pub mod e2e_quarantine;
 mod error;
 pub mod event_kind;
 pub use event_kind::EventKind;

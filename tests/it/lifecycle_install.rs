@@ -75,6 +75,38 @@ fn e2e_passed(secs: u64) -> E2eOutcome {
     }
 }
 
+/// An e2e whose `failed` tests failed, rerun by name, with `still` failing
+/// again, and the marks of `marks` (`(name, until)`) (ADR-t1165-1).
+fn e2e_rerun(failed: &[&str], still: &[&str], marks: &[(&str, &str)]) -> E2eOutcome {
+    let names = |tests: &[&str]| tests.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>();
+    let text: String = marks
+        .iter()
+        .map(|(name, until)| {
+            format!(
+                "[[test]]\nname = \"{name}\"\nreason = \"flaky\"\ntask = 1120\nuntil = {until}\n"
+            )
+        })
+        .collect();
+    E2eOutcome {
+        failed_tests: names(failed),
+        secs: 200,
+        cleanup: json!({"removed": true}),
+        rerun: Some(dagq::application::install::E2eRerun {
+            tests: names(failed),
+            failed: names(still),
+            secs: 30,
+            cleanup: json!({"removed": true}),
+            ..Default::default()
+        }),
+        quarantine: if marks.is_empty() {
+            Default::default()
+        } else {
+            dagq::domain::e2e_quarantine::QuarantineFile::of(&text)
+        },
+        ..Default::default()
+    }
+}
+
 /// The e2e gate's settings of the tests: nothing runs them.
 fn e2e_settings(dir: &Path) -> dagq::application::install::E2eSettings {
     dagq::application::install::E2eSettings {
@@ -86,6 +118,7 @@ fn e2e_settings(dir: &Path) -> dagq::application::install::E2eSettings {
         scratch: dir.join("e2e"),
         log: dir.join("e2e.log"),
         podman: None,
+        utc_offset_secs: 0,
     }
 }
 
@@ -347,6 +380,34 @@ fn install_of_a_checkout_replaces_nothing_unless_its_e2e_passes() {
         json!({"tests": ["broker::"], "reason": "broker podman_missing"}),
         "{report}"
     );
+
+    // Rerun by name (ADR-t1165-1): a flaky and a quarantined test are
+    // installed and named; one failing the rerun under no mark is not.
+    let rerun = FakeBinaries::new(&[], true);
+    *rerun.e2e.lock().unwrap() = Some(e2e_rerun(
+        &["e2e::a", "e2e::b"],
+        &["e2e::b"],
+        &[("e2e::b", "2999-12-31")],
+    ));
+    let report = install_with(&fixture, &rerun, &processes, &no_down, &checkout()).unwrap();
+    let e2e = &report["e2e"];
+    assert_eq!(e2e["status"], "passed", "{report}");
+    assert_eq!(e2e["flaky"], json!(["e2e::a"]), "{report}");
+    assert_eq!(e2e["quarantined"], json!(["e2e::b"]), "{report}");
+    assert_eq!(e2e["rerun"]["log"], "/queue/e2e.rerun.log", "{report}");
+    let unmarked = FakeBinaries::new(&[], true);
+    *unmarked.e2e.lock().unwrap() = Some(e2e_rerun(&["e2e::a"], &["e2e::a"], &[]));
+    let error = format!(
+        "{:#}",
+        install_with(&fixture, &unmarked, &processes, &no_down, &checkout()).unwrap_err()
+    );
+    assert!(
+        error.contains("the rerun by name failed too: e2e::a")
+            && error.contains("see /queue/e2e.log and /queue/e2e.rerun.log")
+            && error.contains("nothing was replaced"),
+        "{error}"
+    );
+    assert!(unmarked.calls().iter().all(|c| !c.starts_with("replace")));
 
     let binary = FakeBinaries::new(&[], true);
     let report = install_with(
@@ -1159,6 +1220,135 @@ fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
     assert_eq!(e2e["timed_out"], 1, "{stats}");
     assert_eq!(stats["updates"]["failed_by_stage"]["e2e"], 4, "{stats}");
     assert!(restarted.lock().unwrap().is_empty());
+}
+
+/// The gate reruns the failed e2e by name once (ADR-t1165-1): a build whose
+/// failed tests passed the rerun (flaky), or failed it under a mark that
+/// holds (quarantined), is installed with them named on
+/// `update_e2e_passed`; a test failing the rerun under no mark, under an
+/// expired mark, under a file of more than 3 marks, or under a mark whose
+/// test failed the rerun of 3 gates in a row, fails the gate with why in
+/// the error and the ask.
+#[test]
+fn the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest() {
+    let fixture = fixture();
+    let queue = auto_supervisor(&fixture);
+    let processes = FakeProcesses::default();
+    let restarted = Mutex::new(Vec::new());
+    let dir = fixture._dir.path();
+    let target = dir.join("bin").join("dagq");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "old build").unwrap();
+    let rerun_log = dir.join("queue-dir").join("e2e.rerun.log");
+    let held = [("e2e::b", "2999-12-31")];
+
+    // a passes its rerun, b fails it under a mark: installed.
+    let binaries = UpdateBinaries::new(dir, false, &[]).with_e2e(Ok(e2e_rerun(
+        &["e2e::a", "e2e::b"],
+        &["e2e::b"],
+        &held,
+    )));
+    let report = thread::scope(|scope| {
+        scope.spawn(|| take_and_heartbeat(&fixture, &processes, true));
+        run_update_job(&fixture, &binaries, &processes, &restarted)
+    });
+    assert_eq!(report["outcome"], "installed", "{report}");
+    let passed = queue
+        .update_events(10)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.kind == "update_e2e_passed")
+        .unwrap()
+        .payload;
+    assert_eq!(passed["flaky"], json!(["e2e::a"]), "{passed}");
+    assert_eq!(passed["quarantined"], json!(["e2e::b"]), "{passed}");
+    assert_eq!(passed["rerun"]["tests"], json!(["e2e::a", "e2e::b"]));
+    assert_eq!(passed["rerun"]["failed"], json!(["e2e::b"]));
+    assert_eq!(passed["rerun"]["log"], json!(rerun_log));
+    assert_eq!(passed["quarantine"]["marks"][0]["task"], 1120, "{passed}");
+    assert_eq!(passed["quarantine"]["ignored"], json!([]));
+
+    let failing = |outcome: E2eOutcome, expected: &[&str]| {
+        let binaries = UpdateBinaries::new(dir, false, &[]).with_e2e(Ok(outcome));
+        let report = run_update_job(&fixture, &binaries, &processes, &restarted);
+        assert_eq!(report["stage"], "e2e", "{report}");
+        assert!(
+            binaries.calls().iter().all(|c| !c.starts_with("replace")),
+            "{:?}",
+            binaries.calls()
+        );
+        let asks = queue.asks(dagq::application::AskQuery::default()).unwrap();
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert_eq!(asks[0].kind, dagq::domain::AskKind::UpdateFailed);
+        let error = report["error"].as_str().unwrap();
+        for part in expected {
+            assert!(error.contains(part), "{part}: {error}");
+            assert!(
+                asks[0].question.contains(part),
+                "{part}: {}",
+                asks[0].question
+            );
+        }
+        assert!(error.contains(&rerun_log.display().to_string()), "{error}");
+        report
+    };
+
+    // A test failing its rerun under no mark.
+    let report = failing(
+        e2e_rerun(&["e2e::a"], &["e2e::a"], &held),
+        &[
+            "the rerun by name failed too: e2e::a",
+            "no mark of .config/e2e-quarantine.toml holds for e2e::a",
+        ],
+    );
+    assert_eq!(report["rerun"]["failed"], json!(["e2e::a"]), "{report}");
+    assert_eq!(report["quarantined"], json!([]));
+    assert_eq!(report["failed_tests"], json!(["e2e::a"]));
+
+    // Under an expired mark.
+    let report = failing(
+        e2e_rerun(&["e2e::b"], &["e2e::b"], &[("e2e::b", "2020-01-01")]),
+        &["e2e::b: its mark expired after 2020-01-01"],
+    );
+    assert_eq!(
+        report["quarantine"]["ignored"][0],
+        json!({"name": "e2e::b", "reason": "expired", "detail": "its mark expired after 2020-01-01"}),
+        "{report}"
+    );
+
+    // Under a file of more than 3 marks.
+    let report = failing(
+        e2e_rerun(
+            &["e2e::b"],
+            &["e2e::b"],
+            &[
+                ("e2e::b", "2999-12-31"),
+                ("e2e::c", "2999-12-31"),
+                ("e2e::d", "2999-12-31"),
+                ("e2e::e", "2999-12-31"),
+            ],
+        ),
+        &[".config/e2e-quarantine.toml has 4 marks, more than 3"],
+    );
+    assert_eq!(report["quarantine"]["ignored"][3]["reason"], "over_limit");
+
+    // b failed the rerun of the two gates before: the third fails.
+    let report = failing(
+        e2e_rerun(&["e2e::b"], &["e2e::b"], &held),
+        &["e2e::b: it failed the rerun of 3 gates in a row"],
+    );
+    assert_eq!(
+        report["quarantine"]["ignored"][0]["reason"],
+        "failed_in_a_row"
+    );
+
+    let stats = common::cli::ok(&fixture.location.db, &["stats", "--full"]);
+    let e2e = &stats["updates"]["e2e"];
+    assert_eq!(
+        (e2e["passed"].as_i64(), e2e["failed"].as_i64()),
+        (Some(1), Some(4)),
+        "{stats}"
+    );
 }
 
 /// A build whose e2e passed with the podman tests not run (podman could

@@ -142,6 +142,23 @@ pub struct E2eSettings {
     /// within the wait; when it does not, those tests are not run and the
     /// outcome says so (ADR-t1162-1). `None` checks nothing.
     pub podman: Option<PodmanCheck>,
+    /// The host's offset from UTC in seconds, for the local date a mark's
+    /// `until` is read against (ADR-t1165-1).
+    pub utc_offset_secs: i64,
+}
+
+impl E2eSettings {
+    /// Where the rerun of the failed tests is written (ADR-t1165-1): the
+    /// log with `.rerun.log` for its `.log`.
+    pub fn rerun_log(&self) -> PathBuf {
+        let name = self
+            .log
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stem = name.strip_suffix(".log").unwrap_or(&name);
+        self.log.with_file_name(format!("{stem}.rerun.log"))
+    }
 }
 
 /// The e2e tests that need podman (dagq's machine) besides cmux: the
@@ -197,6 +214,28 @@ pub struct E2eOutcome {
     /// The tests not run because podman could not be reached
     /// (ADR-t1162-1).
     pub skipped: Option<E2eSkip>,
+    /// The rerun of the failed tests by name (ADR-t1165-1); `None` when the
+    /// e2e passed, ran past its timeout or named no failed test.
+    pub rerun: Option<E2eRerun>,
+    /// The marks the gate found in the checkout (ADR-t1165-1).
+    pub quarantine: crate::domain::e2e_quarantine::QuarantineFile,
+}
+
+/// How the rerun of the tests the e2e failed went (ADR-t1165-1): the same
+/// checkout, env and target, the tests by name (`--exact`), within the same
+/// timeout and cleaned up the same way.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct E2eRerun {
+    /// The tests rerun.
+    pub tests: Vec<String>,
+    /// The ones that failed again (all of them when the rerun ran past its
+    /// timeout, could not start or failed naming none).
+    pub failed: Vec<String>,
+    pub timed_out: bool,
+    pub secs: u64,
+    pub cleanup: Value,
+    /// Why it could not start.
+    pub error: Option<String>,
 }
 
 impl E2eOutcome {
@@ -525,13 +564,29 @@ may pass --skip-e2e to install without it)",
                             checkout.display()
                         )
                     })?;
-                    ensure!(
-                        outcome.passed,
-                        "{}: nothing was replaced (a person may pass --skip-e2e to install \
-without it)",
-                        outcome.failure(settings)
-                    );
-                    outcome.report(settings)
+                    // The automatic update's gates before this one, for a
+                    // marked test failing in a row (ADR-t1165-1); a queue
+                    // that cannot be read has none.
+                    let history = db
+                        .filter(|db| files.is_file(db))
+                        .and_then(|db| (ports.queues)(db).open().ok())
+                        .and_then(|queue| queue.update_events(super::e2e_verdict::HISTORY).ok())
+                        .unwrap_or_default();
+                    let verdict =
+                        super::e2e_verdict::judge(&outcome, settings, &history, ports.clock.now());
+                    if let Some(failure) = &verdict.failure {
+                        bail!(
+                            "{failure}: nothing was replaced (a person may pass --skip-e2e to \
+install without it)"
+                        );
+                    }
+                    let mut report = outcome.report(settings);
+                    if let (Some(report), Some(fields)) =
+                        (report.as_object_mut(), verdict.fields.as_object())
+                    {
+                        report.extend(fields.clone());
+                    }
+                    report
                 }
             };
             built

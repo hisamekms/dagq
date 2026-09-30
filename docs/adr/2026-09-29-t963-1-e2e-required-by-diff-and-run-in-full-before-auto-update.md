@@ -13,6 +13,7 @@ amends:
   - adr-0073 decision 17
 amended_by:
   - adr-t1162-1
+  - adr-t1165-1
 owners:
   - hisamekms
 tags:

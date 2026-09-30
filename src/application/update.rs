@@ -442,22 +442,21 @@ fn e2e_gate(
             return failed(queue, job, "e2e", &error, json!({"e2e_log": log})).map(Some);
         }
     };
-    if !outcome.passed {
-        let error = anyhow::anyhow!("{}", outcome.failure(settings));
-        return failed(
-            queue,
-            job,
-            "e2e",
-            &error,
-            json!({
-                "e2e_log": log,
-                "failed_tests": outcome.failed_tests,
-                "timed_out": outcome.timed_out,
-                "secs": outcome.secs,
-                "cleanup": outcome.cleanup,
-            }),
-        )
-        .map(Some);
+    // The gates before this one, for a marked test failing in a row
+    // (ADR-t1165-1).
+    let history = queue.update_events(super::e2e_verdict::HISTORY)?;
+    let verdict = super::e2e_verdict::judge(&outcome, settings, &history, ports.clock.now());
+    if let Some(failure) = &verdict.failure {
+        let error = anyhow::anyhow!("{failure}");
+        let mut details = json!({
+            "e2e_log": log,
+            "failed_tests": outcome.failed_tests,
+            "timed_out": outcome.timed_out,
+            "secs": outcome.secs,
+            "cleanup": outcome.cleanup,
+        });
+        extend(&mut details, &verdict.fields);
+        return failed(queue, job, "e2e", &error, details).map(Some);
     }
     let mut passed = json!({
         "pid": job.pid,
@@ -465,6 +464,7 @@ fn e2e_gate(
         "log": log,
         "cleanup": outcome.cleanup,
     });
+    extend(&mut passed, &verdict.fields);
     // The tests it did not run for want of podman go on to the
     // `update_installed` too, so the swap does not pass them silently
     // (ADR-t1162-1).
@@ -475,6 +475,13 @@ fn e2e_gate(
     job.subject
         .record(&*queue, EventKind::UpdateE2ePassed, passed)?;
     Ok(None)
+}
+
+/// Add the fields of `extra` (an object) to `value` (an object).
+fn extend(value: &mut Value, extra: &Value) {
+    if let (Some(value), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+        value.extend(extra.clone());
+    }
 }
 
 /// The release update's job (ADR-t618-1 decision 5): the settings of one

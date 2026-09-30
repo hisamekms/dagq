@@ -14,6 +14,7 @@ pub mod broker_admin;
 pub mod broker_run;
 pub mod commands;
 pub mod diagram;
+pub mod e2e_verdict;
 pub mod execution;
 pub mod forecast;
 mod headless_session;

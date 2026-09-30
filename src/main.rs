@@ -2138,6 +2138,9 @@ fn execute(cli: Cli) -> Result<Value> {
                         .log_dir
                         .join(format!("install-{}.e2e.log", generators.clock.now())),
                     podman,
+                    utc_offset_secs: dagq::infrastructure::clock::local_utc_offset(
+                        generators.clock.now(),
+                    ),
                 })
             }
             Source::Checkout(_) if skip_e2e => E2eGate::Skip,

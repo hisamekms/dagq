@@ -24,7 +24,10 @@ use std::{
 };
 
 use crate::application::broker::{self, MachineSpec, Reconnecting};
-use crate::application::install::{E2eOutcome, E2eSettings, E2eSkip, PODMAN_E2E, PodmanCheck};
+use crate::application::install::{
+    E2eOutcome, E2eRerun, E2eSettings, E2eSkip, PODMAN_E2E, PodmanCheck,
+};
+use crate::domain::e2e_quarantine::{self, QuarantineFile};
 use crate::infrastructure::broker_podman::{FileLock, PodmanCli};
 
 /// How long one cmux call of the gate (`ping`, a group's listing or
@@ -70,33 +73,160 @@ pub fn run(
             clean_up(&earlier, settings.cmux.as_deref());
         }
     }
+    let first = pass(
+        checkout,
+        target_dir,
+        settings,
+        &env,
+        &Pass {
+            log: &settings.log,
+            skipped: skipped.as_ref(),
+            rerun: None,
+        },
+    )?;
+    let passed = !first.timed_out && first.success;
+    let failed = failed_tests(&first.output);
+    // The failed tests once more by name, as the rerun of the landing's
+    // verification (ADR-t1165-1). An e2e past its timeout, one that named
+    // no failed test, or one that ended before libtest's summary (a
+    // `within` past its limit exits the binary, cutting off tests that
+    // then name no result) is not rerun.
+    let finished = first
+        .output
+        .lines()
+        .any(|line| line.trim_start().starts_with("test result: FAILED"));
+    let rerun = (!passed && !first.timed_out && finished && !failed.is_empty()).then(|| {
+        let rerun_log = settings.rerun_log();
+        match pass(
+            checkout,
+            target_dir,
+            settings,
+            &env,
+            &Pass {
+                log: &rerun_log,
+                skipped: skipped.as_ref(),
+                rerun: Some(&failed),
+            },
+        ) {
+            Ok(again) => {
+                // Only a test the rerun reports `ok` passed it: one it
+                // failed, or never reported (cut off, past the timeout),
+                // failed it.
+                let passed = passed_tests(&again.output);
+                let still: Vec<String> = failed
+                    .iter()
+                    .filter(|test| again.timed_out || !passed.contains(test))
+                    .cloned()
+                    .collect();
+                E2eRerun {
+                    tests: failed.clone(),
+                    failed: still,
+                    timed_out: again.timed_out,
+                    secs: again.secs,
+                    cleanup: again.cleanup,
+                    error: None,
+                }
+            }
+            Err(error) => E2eRerun {
+                tests: failed.clone(),
+                failed: failed.clone(),
+                error: Some(format!("{error:#}")),
+                ..Default::default()
+            },
+        }
+    });
+    Ok(E2eOutcome {
+        passed,
+        timed_out: first.timed_out,
+        failed_tests: failed,
+        secs: first.secs,
+        cleanup: first.cleanup,
+        skipped,
+        rerun,
+        quarantine: read_quarantine(checkout),
+    })
+}
+
+/// The marks of `checkout`'s `.config/e2e-quarantine.toml` (ADR-t1165-1).
+pub fn read_quarantine(checkout: &Path) -> QuarantineFile {
+    match fs::read_to_string(checkout.join(e2e_quarantine::FILE)) {
+        Ok(text) => QuarantineFile::of(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => QuarantineFile::Absent,
+        Err(error) => QuarantineFile::Unreadable(error.to_string()),
+    }
+}
+
+/// One run of the e2e of the gate: where its output goes, the tests not run
+/// and, for the rerun, the tests to run by name.
+struct Pass<'a> {
+    log: &'a Path,
+    skipped: Option<&'a E2eSkip>,
+    rerun: Option<&'a [String]>,
+}
+
+/// How one run went.
+struct Ran {
+    success: bool,
+    timed_out: bool,
+    /// What it appended to its log.
+    output: String,
+    secs: u64,
+    cleanup: Value,
+}
+
+/// Run the e2e once as `how` says in a `TMPDIR` of its own, within the
+/// timeout, and clean up after it; an error is one that could not start.
+fn pass(
+    checkout: &Path,
+    target_dir: Option<&Path>,
+    settings: &E2eSettings,
+    env: &[(String, String)],
+    how: &Pass,
+) -> Result<Ran> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
+    // The rerun's own, beside the first's if that could not be removed;
+    // both end in the gate's pid, which the next gate reads.
+    let kind = if how.rerun.is_some() { ".rerun" } else { "" };
     let root = settings
         .scratch
-        .join(format!("{stamp}-{}", std::process::id()));
+        .join(format!("{stamp}{kind}-{}", std::process::id()));
     fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
-    if let Some(dir) = settings.log.parent() {
+    if let Some(dir) = how.log.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
     let mut log = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&settings.log)
-        .with_context(|| format!("open {}", settings.log.display()))?;
+        .open(how.log)
+        .with_context(|| format!("open {}", how.log.display()))?;
     let start = log.seek(SeekFrom::End(0)).unwrap_or_default();
-    let _ = writeln!(
-        log,
-        "== the e2e of {} (TMPDIR {})",
-        checkout.display(),
-        root.display()
-    );
-    if let Some(skipped) = &skipped {
+    match how.rerun {
+        None => {
+            let _ = writeln!(
+                log,
+                "== the e2e of {} (TMPDIR {})",
+                checkout.display(),
+                root.display()
+            );
+        }
+        Some(tests) => {
+            let _ = writeln!(
+                log,
+                "== the rerun by name of the e2e tests that failed in {}: {} (TMPDIR {})",
+                checkout.display(),
+                tests.join(" "),
+                root.display()
+            );
+        }
+    }
+    if let Some(skipped) = how.skipped {
         let _ = writeln!(log, "== {}", skipped.sentence());
     }
-    let skip_filters: Vec<&str> = skipped
+    let skip_filters: Vec<&str> = how
+        .skipped
         .iter()
         .flat_map(|skipped| skipped.tests.iter().map(String::as_str))
         .collect();
@@ -110,14 +240,27 @@ pub fn run(
             let mut cargo =
                 Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
             cargo.args(["test", "--locked", "--test", "e2e", "--", "--ignored"]);
-            for filter in &skip_filters {
-                cargo.args(["--skip", filter]);
+            match how.rerun {
+                // `--exact` makes every filter a whole name, the skipped
+                // ones included, so they are left out: a test not run is
+                // not among the failed.
+                Some(tests) => {
+                    cargo.arg("--exact").args(tests);
+                }
+                None => {
+                    for filter in &skip_filters {
+                        cargo.args(["--skip", filter]);
+                    }
+                }
             }
             cargo
         }
     };
     if !skip_filters.is_empty() {
         command.env(SKIP_ENV, skip_filters.join(" "));
+    }
+    if let Some(tests) = how.rerun {
+        command.env(RERUN_ENV, tests.join(" "));
     }
     command
         .current_dir(checkout)
@@ -164,7 +307,7 @@ pub fn run(
     signal_group(child.id(), libc::SIGKILL);
     let secs = started.elapsed().as_secs();
     let mut output = String::new();
-    if let Ok(mut file) = fs::File::open(&settings.log)
+    if let Ok(mut file) = fs::File::open(how.log)
         && file.seek(SeekFrom::Start(start)).is_ok()
     {
         let _ = file.read_to_string(&mut output);
@@ -172,7 +315,8 @@ pub fn run(
     let cleanup = clean_up(&root, settings.cmux.as_deref());
     let _ = writeln!(
         log,
-        "== the e2e {} after {secs}s; cleanup: {cleanup}",
+        "== the {} {} after {secs}s; cleanup: {cleanup}",
+        if how.rerun.is_some() { "rerun" } else { "e2e" },
         if timed_out {
             "timed out".to_owned()
         } else {
@@ -181,15 +325,18 @@ pub fn run(
             })
         }
     );
-    Ok(E2eOutcome {
-        passed: !timed_out && status.is_some_and(|status| status.success()),
+    Ok(Ran {
+        success: status.is_some_and(|status| status.success()),
         timed_out,
-        failed_tests: failed_tests(&output),
+        output,
         secs,
         cleanup,
-        skipped,
     })
 }
+
+/// The env naming the tests the rerun runs by name (space separated), for
+/// a `command` in place of cargo's (ADR-t1165-1).
+pub const RERUN_ENV: &str = "DAGQ_E2E_RERUN";
 
 /// The env naming the `--skip` filters of the tests the gate does not run
 /// (space separated), for a `command` in place of cargo's.
@@ -225,6 +372,19 @@ pub fn failed_tests(output: &str) -> Vec<String> {
         }
     }
     failed
+}
+
+/// The tests a libtest output reports as passed (`test <name> ... ok`).
+pub fn passed_tests(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("test ")
+                .and_then(|rest| rest.strip_suffix(" ... ok"))
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// `cmux ping`, or why the e2e cannot start.
@@ -496,6 +656,7 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             scratch: dir.join("scratch"),
             log: dir.join("logs").join("e2e.log"),
             podman: None,
+            utc_offset_secs: 0,
         }
     }
 
@@ -664,6 +825,123 @@ exit 125"
         );
         assert_eq!(outcome.cleanup["removed"], true, "{outcome:?}");
         assert!(subdirectories(&stopped.scratch).is_empty());
+    }
+
+    /// A failing e2e reruns its failed tests by name (`DAGQ_E2E_RERUN` for
+    /// a command) in a `TMPDIR` of its own, writing to the rerun's log and
+    /// cleaning up after it; the tests that failed again are named, and the
+    /// checkout's marks are read (ADR-t1165-1). Only a test the rerun
+    /// reports `ok` passed it: one past its timeout, or that reports none or
+    /// not all, fails the rest. An e2e past its timeout, naming no failed
+    /// test or cut off before libtest's summary is not rerun.
+    #[test]
+    fn a_failing_e2e_reruns_its_failed_tests_by_name_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let command = "if [ -n \"$DAGQ_E2E_RERUN\" ]; then echo \"rerun [$DAGQ_E2E_RERUN] $TMPDIR\"; \
+mkdir -p \"$TMPDIR/.tmpA/data/dagq/q1\"; echo 'test e2e::a ... ok'; echo 'test e2e::b ... FAILED'; \
+exit 101; else echo 'test e2e::a ... FAILED'; echo 'test e2e::b ... FAILED'; echo 'test e2e::c ... ok'; \
+echo 'test result: FAILED. 1 passed; 2 failed'; exit 101; fi";
+        let settings = settings(dir, command, Duration::from_secs(30));
+        fs::create_dir_all(dir.join(".config")).unwrap();
+        fs::write(
+            dir.join(e2e_quarantine::FILE),
+            "[[test]]\nname = \"e2e::b\"\nreason = \"flaky\"\ntask = 1120\nuntil = 2026-10-15\n",
+        )
+        .unwrap();
+        let outcome = run(dir, None, &settings).unwrap();
+        assert!(!outcome.passed, "{outcome:?}");
+        assert_eq!(outcome.failed_tests, ["e2e::a", "e2e::b"]);
+        let rerun = outcome.rerun.clone().unwrap();
+        assert_eq!(rerun.tests, ["e2e::a", "e2e::b"]);
+        assert_eq!(rerun.failed, ["e2e::b"]);
+        assert!(!rerun.timed_out && rerun.error.is_none(), "{rerun:?}");
+        assert_eq!(rerun.cleanup["groups"], json!(["G-1"]), "{rerun:?}");
+        assert_eq!(rerun.cleanup["removed"], true);
+        assert!(subdirectories(&settings.scratch).is_empty());
+        let QuarantineFile::Marks(marks) = &outcome.quarantine else {
+            panic!("{:?}", outcome.quarantine);
+        };
+        assert_eq!(marks[0].name, "e2e::b");
+        let first = fs::read_to_string(&settings.log).unwrap();
+        assert!(!first.contains("rerun ["), "{first}");
+        let again = fs::read_to_string(settings.rerun_log()).unwrap();
+        assert!(again.contains("rerun [e2e::a e2e::b]"), "{again}");
+        assert!(
+            again.contains("== the rerun by name of the e2e tests that failed in")
+                && again.contains(".rerun-"),
+            "{again}"
+        );
+
+        // A passing e2e is not rerun, and no file means no marks.
+        let passing = self::settings(dir, "echo 'test e2e::a ... ok'", Duration::from_secs(30));
+        fs::remove_file(dir.join(e2e_quarantine::FILE)).unwrap();
+        let outcome = run(dir, None, &passing).unwrap();
+        assert!(outcome.passed && outcome.rerun.is_none(), "{outcome:?}");
+        assert_eq!(outcome.quarantine, QuarantineFile::Absent);
+
+        // A rerun past its timeout, naming nothing, or cut off before a
+        // test reports, fails what it did not report `ok`.
+        let failing = "echo 'test e2e::a ... FAILED'; echo 'test e2e::b ... FAILED'; \
+echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
+        let stuck = self::settings(
+            dir,
+            &format!(
+                "if [ -n \"$DAGQ_E2E_RERUN\" ]; then echo 'test e2e::a ... ok'; sleep 30; fi; {failing}"
+            ),
+            Duration::from_secs(1),
+        );
+        let rerun = run(dir, None, &stuck).unwrap().rerun.unwrap();
+        assert!(rerun.timed_out, "{rerun:?}");
+        assert_eq!(rerun.failed, ["e2e::a", "e2e::b"]);
+        let silent = self::settings(
+            dir,
+            &format!("if [ -n \"$DAGQ_E2E_RERUN\" ]; then exit 1; fi; {failing}"),
+            Duration::from_secs(30),
+        );
+        let rerun = run(dir, None, &silent).unwrap().rerun.unwrap();
+        assert_eq!(rerun.failed, ["e2e::a", "e2e::b"], "{rerun:?}");
+        let cut_off = self::settings(
+            dir,
+            &format!(
+                "if [ -n \"$DAGQ_E2E_RERUN\" ]; then echo 'test e2e::b ... FAILED'; exit 101; fi; {failing}"
+            ),
+            Duration::from_secs(30),
+        );
+        let rerun = run(dir, None, &cut_off).unwrap().rerun.unwrap();
+        assert_eq!(rerun.failed, ["e2e::a", "e2e::b"], "{rerun:?}");
+
+        // An e2e past its timeout, naming no failed test, or cut off before
+        // libtest's summary (a test left without a result) is not rerun.
+        let unnamed = self::settings(dir, "exit 101", Duration::from_secs(30));
+        assert!(run(dir, None, &unnamed).unwrap().rerun.is_none());
+        let exited = self::settings(
+            dir,
+            "echo 'test e2e::a ... FAILED'; exit 101",
+            Duration::from_secs(30),
+        );
+        let outcome = run(dir, None, &exited).unwrap();
+        assert_eq!(outcome.failed_tests, ["e2e::a"]);
+        assert!(outcome.rerun.is_none(), "{outcome:?}");
+    }
+
+    /// A file that cannot be read is no marks, with why.
+    #[test]
+    fn the_marks_are_read_from_the_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        assert_eq!(read_quarantine(dir), QuarantineFile::Absent);
+        fs::create_dir_all(dir.join(e2e_quarantine::FILE)).unwrap();
+        assert!(matches!(
+            read_quarantine(dir),
+            QuarantineFile::Unreadable(_)
+        ));
+        fs::remove_dir(dir.join(e2e_quarantine::FILE)).unwrap();
+        fs::write(dir.join(e2e_quarantine::FILE), "[x]\n").unwrap();
+        assert!(matches!(
+            read_quarantine(dir),
+            QuarantineFile::Unreadable(error) if error.contains("[[test]]")
+        ));
     }
 
     /// An earlier gate's directory is cleaned up before the e2e unless its
