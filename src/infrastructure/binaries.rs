@@ -6,6 +6,7 @@
 //! and the replacement of a file by a rename in its directory (ADR-0045
 //! decisions 11, 12).
 
+use crate::infrastructure::git_binary::git_executable;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
@@ -204,7 +205,7 @@ impl Binaries for LocalBinaries {
 
     fn checkout(&self, repository: &Path, checkout: &Path, commit: &str) -> Result<()> {
         let git = |dir: &Path, arguments: &[&str]| -> Result<()> {
-            let output = Command::new("git")
+            let output = Command::new(git_executable()?)
                 .arg("-C")
                 .arg(dir)
                 .args(arguments)

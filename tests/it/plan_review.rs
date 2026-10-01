@@ -5,6 +5,7 @@
 //! for a draft blocker.
 
 use crate::common;
+use dagq::infrastructure::git_binary::git_executable;
 
 use common::Bounded;
 
@@ -39,7 +40,7 @@ use std::{
 use tempfile::TempDir;
 
 pub(crate) fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -2438,7 +2439,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
         .id();
     queue.transition(running, TaskAction::BypassReview).unwrap();
     let head = String::from_utf8(
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .arg("-C")
             .arg(&fx.repo)
             .args(["rev-parse", "HEAD"])

@@ -42,6 +42,7 @@ use cleanup::{
     wait_for_listed, wait_until_not_listed, workspace_listed,
 };
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
+use dagq::infrastructure::git_binary::git_executable;
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -391,7 +392,7 @@ fn preflight(cmux: &Path) -> String {
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
-    let result = Command::new("git")
+    let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)

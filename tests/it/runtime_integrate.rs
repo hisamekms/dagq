@@ -3,6 +3,7 @@
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
@@ -162,7 +163,7 @@ impl MainRemote for OvertakenPush {
 fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
     let (dir, repo, db) = fixture();
     let origin = dir.path().join("origin.git");
-    let made = Command::new("git")
+    let made = Command::new(git_executable().expect("git executable"))
         .args(["init", "--bare", "-b", "main"])
         .arg(&origin)
         .bounded_output()
@@ -350,7 +351,7 @@ fn no_push_and_a_missing_origin_skip_the_push() {
 fn git_adapter_pushes_main_to_a_bare_origin() {
     let (dir, repo, db, run) = awaiting_run();
     let origin = dir.path().join("origin.git");
-    let made = Command::new("git")
+    let made = Command::new(git_executable().expect("git executable"))
         .args(["init", "--bare", "-b", "main"])
         .arg(&origin)
         .bounded_output()
@@ -390,7 +391,7 @@ fn git_adapter_pushes_main_to_a_bare_origin() {
 fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
     let (dir, repo, db, _run) = awaiting_run();
     let origin = dir.path().join("origin.git");
-    let made = Command::new("git")
+    let made = Command::new(git_executable().expect("git executable"))
         .args(["init", "--bare", "-b", "main"])
         .arg(&origin)
         .bounded_output()
@@ -436,7 +437,7 @@ fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
 fn the_push_follows_the_repository_table_of_dagq_toml() {
     let bare = |dir: &Path, name: &str| {
         let path = dir.join(name);
-        let made = Command::new("git")
+        let made = Command::new(git_executable().expect("git executable"))
             .args(["init", "--bare", "-b", "main"])
             .arg(&path)
             .bounded_output()
@@ -556,7 +557,7 @@ fn an_unreadable_repository_table_fails_the_push() {
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
-    Command::new("git")
+    Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -1825,7 +1826,7 @@ fn rebind_follows_a_moved_repository_and_the_awaiting_run_lands() {
     let worktree = PathBuf::from(run.worktree_path().unwrap().to_owned());
     // The run worktree's `.git` file still points into the old repository.
     assert!(
-        !Command::new("git")
+        !Command::new(git_executable().expect("git executable"))
             .arg("-C")
             .arg(&worktree)
             .arg("status")

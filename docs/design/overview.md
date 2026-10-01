@@ -4,8 +4,8 @@ type: design
 title: System overview
 status: current
 created: 2026-09-21
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-09-30
+last_verified: 2026-09-30
 scope: system
 related:
   - adr-0001
@@ -79,3 +79,7 @@ CLI / Claude plugin / Codex plugin
 タスクは`draft | submitted | ready | in_progress | completed | canceled`を持つ。`submitted`はplan review待ちで（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定8）、plannerが`submit`でproposalにして出す。`ready`にするのはplan reviewの経路と、人の`ready --bypass-review`と、失敗したrunの再試行だけ。`ready`で依存先がすべて`completed`のタスクだけがschedulerの起動候補になる。詳細な実行状態はTaskRunに保存する。
 
 supervisorはagentの完了レシート、コミット、テスト、worktreeのclean状態を確認してからworkspaceを削除する。worktreeとbranchは`integrate`がmainへ着地させるまで残し、着地後に`integrate`が削除する。
+
+### Gitの実行fileの解決
+
+`infrastructure::git_binary::git_executable`はprocessごとの`LazyLock`で、最初のPATHから`git`の絶対pathを一度だけ解決する。`GitRepository`、`git_common_dir`・`main_checkout_of`・commit messageの読取り、binary更新とbrokerのcommitter読取り、およびroot packageのtestのgit helperはこの解決を共有する。macOSで解決先が`/usr/bin/git`（Command Line Tools / Xcodeのxcrun shim）のときだけ、`/usr/bin/xcrun --find git`で選択中のdeveloper toolsの実体を求める。絶対pathで、正規化できる実行可能な通常fileならそれを使う。Homebrew・Linuxなどのgitには追加の探索をしない。xcrunの起動失敗・非zero終了・30秒の探索期限・不正な出力・実体の不在や実行権限の不足では、最初に見つけたgitへfallbackする。最初のPATHにもgitが無ければ従来どおりエラーになる。解決結果（fallbackとエラーを含む）はprocessの寿命中固定で、PATHやdeveloper toolsを変えた場合は次のprocessから反映される。git操作自体の引数・結果・timeout・閾値は変えない。

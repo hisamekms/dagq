@@ -1,6 +1,7 @@
 use crate::common;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use common::cli::*;
 
@@ -223,7 +224,7 @@ fn events_full_and_filters_narrow_what_they_read() {
 fn bind(db: &Path, dir: &Path, package: &str) {
     let repo = dir.join(format!("repo-{package}"));
     std::fs::create_dir_all(&repo).unwrap();
-    let init = std::process::Command::new("git")
+    let init = std::process::Command::new(git_executable().expect("git executable"))
         .args(["init", "-q"])
         .current_dir(&repo)
         .status()

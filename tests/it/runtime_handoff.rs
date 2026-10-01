@@ -3,6 +3,7 @@ use crate::runtime_adopt::backdate_event;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
@@ -821,7 +822,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     };
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let head = |repo: &Path| {
-        let output = Command::new("git")
+        let output = Command::new(git_executable().expect("git executable"))
             .arg("-C")
             .arg(repo)
             .args(["rev-parse", "main"])

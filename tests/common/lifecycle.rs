@@ -3,6 +3,7 @@
 
 use super::Bounded;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use anyhow::{Result, bail};
 use dagq::{
@@ -31,7 +32,7 @@ use std::{
 use tempfile::TempDir;
 
 pub fn git(repo: &Path, args: &[&str]) {
-    let result = Command::new("git")
+    let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)

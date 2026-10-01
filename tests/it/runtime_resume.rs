@@ -2,6 +2,7 @@
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
@@ -81,7 +82,7 @@ fn conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it() {
     assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
 
     // The session resolves the conflict on top of main.
-    let rebase = Command::new("git")
+    let rebase = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(&worktree)
         .args(["rebase", &first_landed])
@@ -90,7 +91,7 @@ fn conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it() {
     assert!(!rebase.status.success());
     fs::write(worktree.join("change.txt"), "resolved by the session\n").unwrap();
     git(&worktree, &["add", "change.txt"]);
-    let status = Command::new("git")
+    let status = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(&worktree)
         .env("GIT_EDITOR", "true")
@@ -577,7 +578,7 @@ fn unresolved_attempt(db: &Path, run: &TaskRun, main: &str) {
 /// that session did, and return the new head.
 fn resolve_in_worktree(run: &TaskRun, main: &str) -> String {
     let worktree = Path::new(run.worktree_path().unwrap());
-    let rebase = Command::new("git")
+    let rebase = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(worktree)
         .args(["rebase", main])
@@ -586,7 +587,7 @@ fn resolve_in_worktree(run: &TaskRun, main: &str) -> String {
     assert!(!rebase.status.success());
     fs::write(worktree.join("change.txt"), "resolved by the session\n").unwrap();
     git(worktree, &["add", "change.txt"]);
-    let status = Command::new("git")
+    let status = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(worktree)
         .env("GIT_EDITOR", "true")

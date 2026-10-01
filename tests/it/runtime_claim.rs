@@ -3,6 +3,7 @@
 //! the adapters.
 use crate::runtime_support;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
@@ -1123,7 +1124,7 @@ fn resident_supervisor_without_runs_is_listed_until_it_stops() {
         wait_for_heartbeat(&db, &registered, &mut supervisor);
     }
     assert!(queue.show(TaskId::new(1)).unwrap().runs.is_empty());
-    let blob = Command::new("git")
+    let blob = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(&repo)
         .args(["hash-object", "-w", "--stdin"])
@@ -1193,7 +1194,7 @@ fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
     assert_eq!(outcome["outcome"], "finished", "{outcome}");
     assert_eq!(outcome["runs"], json!([]));
     assert_eq!(outcome["errors"], json!([]));
-    let status = Command::new("git")
+    let status = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(&repo)
         .args(["rev-parse", "--verify", "--quiet", "refs/heads/main"])

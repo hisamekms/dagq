@@ -6,6 +6,7 @@
 mod common;
 
 use common::{Bounded, WithoutActor};
+use dagq::infrastructure::git_binary::git_executable;
 
 use std::{
     fs,
@@ -495,7 +496,7 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
     assert!(
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .args(["init", "-q", "-b", "main"])
             .current_dir(&repo)
             .bounded_status()
@@ -839,7 +840,7 @@ fn session_start_hook_prints_status_only_in_the_sessions_up_opens() {
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
     assert!(
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .args(["init", "-q", "-b", "main"])
             .current_dir(&repo)
             .bounded_status()
@@ -1206,7 +1207,7 @@ fn launcher_resolves_the_binary_and_the_repository_queue_under_the_data_home() {
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
     assert!(
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .args(["init", "-q", "-b", "main"])
             .current_dir(&repo)
             .bounded_status()
@@ -1273,7 +1274,7 @@ fn launcher_resolves_the_binary_and_the_repository_queue_under_the_data_home() {
     // A worktree of the same repository shares the queue.
     let worktree = dir.path().join("wt");
     assert!(
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
             .args(["commit", "-q", "--allow-empty", "-m", "init"])
             .current_dir(&repo)
@@ -1282,7 +1283,7 @@ fn launcher_resolves_the_binary_and_the_repository_queue_under_the_data_home() {
             .success()
     );
     assert!(
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .args(["worktree", "add", "-q", "--detach"])
             .arg(&worktree)
             .current_dir(&repo)

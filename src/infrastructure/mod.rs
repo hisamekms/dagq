@@ -21,6 +21,7 @@ pub mod e2e_gate;
 pub mod event_actor;
 mod finding_planners;
 mod findings;
+pub mod git_binary;
 mod goal_reviews;
 mod headless_jobs;
 pub mod host_metrics;

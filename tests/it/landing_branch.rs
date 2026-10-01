@@ -5,6 +5,7 @@
 //! while `doctor` shows what resolved. The `main` repositories of the other
 //! tests keep landing on `main`.
 use crate::{common, runtime_support};
+use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
@@ -16,7 +17,7 @@ fn renamed(to: &str) -> (Fixture, PathBuf, PathBuf) {
 }
 
 fn has_branch(repo: &Path, name: &str) -> bool {
-    Command::new("git")
+    Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args([

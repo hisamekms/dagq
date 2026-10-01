@@ -2,6 +2,7 @@
 //! exit request and the dialogs on the worker's screen.
 use crate::common;
 use crate::runtime_support;
+use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
 
@@ -127,7 +128,7 @@ fn valid_receipt_is_verified_and_awaits_integration() {
     assert!(run.last_error().is_none());
     let commit = run.result_commit().unwrap();
     assert_ne!(commit, run.base_commit());
-    let head = Command::new("git")
+    let head = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(run.worktree_path().unwrap())
         .args(["rev-parse", "HEAD"])
@@ -192,7 +193,7 @@ fn valid_receipt_is_verified_and_awaits_integration() {
         closed.payload["closed_at"],
         json!(run.workspace_closed_at().unwrap())
     );
-    let branch = Command::new("git")
+    let branch = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(run.worktree_path().unwrap())
         .args(["symbolic-ref", "HEAD"])

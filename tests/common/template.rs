@@ -12,6 +12,7 @@
 //! queue is copied as a single file: its WAL is checkpointed and closed
 //! first. Tests of the migrations themselves migrate as before.
 
+use dagq::infrastructure::git_binary::git_executable;
 use std::{
     fs,
     os::unix::io::AsRawFd,
@@ -172,7 +173,7 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 fn git(repo: &Path, args: &[&str]) {
-    let result = Command::new("git")
+    let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)

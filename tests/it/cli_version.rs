@@ -1,4 +1,5 @@
 use crate::common;
+use dagq::infrastructure::git_binary::git_executable;
 
 use common::cli::*;
 use common::{Bounded, WithoutActor};
@@ -409,7 +410,7 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
         ],
     ] {
         assert!(
-            Command::new("git")
+            Command::new(git_executable().expect("git executable"))
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
@@ -530,7 +531,7 @@ fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new("git")
+        let output = Command::new(git_executable().expect("git executable"))
             .arg("-C")
             .arg(&repo)
             .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])

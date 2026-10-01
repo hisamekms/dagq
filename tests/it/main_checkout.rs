@@ -5,6 +5,7 @@
 //! a bare one has no main checkout and stops `up`, `supervise`,
 //! `integrate` and `doctor`'s repository with why.
 use crate::{common, runtime_support};
+use dagq::infrastructure::git_binary::git_executable;
 
 use dagq::infrastructure::{
     adapters::{main_checkout_of, naming_checkout},
@@ -23,7 +24,7 @@ fn configure(repo: &Path) {
 fn separate_git_dir(dir: &Path) -> (PathBuf, PathBuf) {
     let main = dir.join("main");
     let sep = dir.join("sep.git");
-    let out = Command::new("git")
+    let out = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(dir)
         .args(["init", "-q", "-b", "trunk", "--separate-git-dir"])
@@ -58,7 +59,7 @@ fn separate_git_dir(dir: &Path) -> (PathBuf, PathBuf) {
 /// `dagq.toml` names a branch; the worktree is returned.
 fn bare_with_worktree(dir: &Path, source: &Path) -> (PathBuf, PathBuf) {
     let bare = dir.join("bare.git");
-    let out = Command::new("git")
+    let out = Command::new(git_executable().expect("git executable"))
         .args(["clone", "-q", "--bare"])
         .arg(source)
         .arg(&bare)

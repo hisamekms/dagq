@@ -3,6 +3,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::common;
+use dagq::infrastructure::git_binary::git_executable;
 pub mod headless;
 mod thread_stacks;
 pub use crate::common::{Bounded, WithoutActor};
@@ -59,7 +60,7 @@ pub fn sha(commit: &str) -> CommitSha {
 }
 
 pub fn git(repo: &Path, args: &[&str]) {
-    let result = Command::new("git")
+    let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -2191,7 +2192,7 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
 }
 
 pub fn git_out(repo: &Path, args: &[&str]) -> String {
-    let result = Command::new("git")
+    let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)

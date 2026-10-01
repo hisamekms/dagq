@@ -1,3 +1,4 @@
+use crate::infrastructure::git_binary::git_executable;
 use crate::{
     application::{
         AgentProvider, CommandSpec, DetachedRefusal, FileStamp, LandingBranchStamp, MainRemote,
@@ -596,7 +597,7 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 /// Canonical Git common directory of the repository containing `path`. Every
 /// worktree of a repository, including run worktrees, resolves to the same one.
 pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
-    let git = executable(Path::new("git"))?;
+    let git = git_executable()?;
     let raw = output(Command::new(&git).arg("-C").arg(path).args([
         "rev-parse",
         "--path-format=absolute",
@@ -618,7 +619,7 @@ pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
 /// worktree. Both are errors that say why and what to do: the `dagq.toml`
 /// of the worktree dagq runs in is never read in the main checkout's place.
 pub fn main_checkout_of(path: &Path) -> Result<PathBuf> {
-    let git = executable(Path::new("git"))?;
+    let git = git_executable()?;
     let common_dir = git_common_dir(path)?;
     let listing =
         output(
@@ -694,7 +695,7 @@ pub fn naming_checkout(binding: Option<&Path>, checkout: &Path) -> PathBuf {
 /// The full message of `commit` in the repository whose Git directory is
 /// `git_dir`; `None` when Git cannot read it there.
 pub fn commit_message(git_dir: &Path, commit: &str) -> Option<String> {
-    let git = executable(Path::new("git")).ok()?;
+    let git = git_executable().ok()?;
     output(Command::new(&git).arg("--git-dir").arg(git_dir).args([
         "show",
         "-s",
@@ -741,7 +742,7 @@ pub struct GitRepository {
 
 impl GitRepository {
     pub fn inspect(path: &Path) -> Result<Self> {
-        let git = executable(Path::new("git"))?;
+        let git = git_executable()?;
         let root = PathBuf::from(
             output(
                 Command::new(&git)
@@ -3477,7 +3478,7 @@ mod tests {
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
+        Command::new(git_executable().expect("git executable"))
             .arg("-C")
             .arg(dir)
             .args(args)

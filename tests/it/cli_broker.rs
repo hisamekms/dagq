@@ -4,6 +4,7 @@
 //! machine. The tests on a real podman are in `broker_podman.rs`.
 
 use crate::common;
+use dagq::infrastructure::git_binary::git_executable;
 
 use common::{Bounded, WithoutActor};
 
@@ -100,7 +101,7 @@ fn a_repository_queue_walks_the_steps_and_records_the_failure() {
     let dir = tempfile::tempdir().unwrap();
     let (repo, data) = (dir.path().join("repo"), dir.path().join("data"));
     fs::create_dir_all(&repo).unwrap();
-    let git = Command::new("git")
+    let git = Command::new(git_executable().expect("git executable"))
         .args(["init", "-q"])
         .current_dir(&repo)
         .bounded_status()
@@ -161,7 +162,7 @@ fn logs_only_read_and_fail_with_a_code_without_podman_or_a_machine() {
     let dir = tempfile::tempdir().unwrap();
     let (repo, data) = (dir.path().join("repo"), dir.path().join("data"));
     fs::create_dir_all(&repo).unwrap();
-    let git = Command::new("git")
+    let git = Command::new(git_executable().expect("git executable"))
         .args(["init", "-q"])
         .current_dir(&repo)
         .bounded_status()

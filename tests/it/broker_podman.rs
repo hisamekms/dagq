@@ -5,6 +5,7 @@
 //! tests: `cargo test --locked --test it broker_podman:: -- --ignored`.
 //! The first run builds the image in the machine and takes minutes.
 
+use dagq::infrastructure::git_binary::git_executable;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 use std::process::Command;
@@ -38,7 +39,7 @@ fn host_lock() -> FileLock {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(dir)
         .args(args)

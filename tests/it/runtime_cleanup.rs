@@ -3,6 +3,7 @@
 //! left pointing at an old repository (task 405), and the runners of
 //! ended runs (task 696).
 use crate::{common, runtime_support};
+use dagq::infrastructure::git_binary::git_executable;
 
 use dagq::{application::RunFiles, runtime::RunFilesPort};
 use runtime_support::*;
@@ -34,7 +35,7 @@ fn payloads_of(queue: &SqliteQueue, run: &TaskRun, kind: &str) -> Vec<Value> {
 
 /// Whether the branch exists in `repo`.
 fn branch_exists(repo: &Path, branch: &str) -> bool {
-    Command::new("git")
+    Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(["rev-parse", "--verify", "--quiet"])

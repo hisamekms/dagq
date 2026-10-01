@@ -10,6 +10,7 @@
 //!
 //! [Broker]: ../../docs/design/broker.md
 
+use crate::infrastructure::git_binary::git_executable;
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -220,7 +221,7 @@ fn remove_if_there(path: &Path) -> Result<()> {
 /// of the repository at `dir` (the container has no `~/.gitconfig`).
 pub fn git_committer(dir: &Path) -> Result<Committer> {
     let read = |key: &str| -> Result<String> {
-        let output = std::process::Command::new("git")
+        let output = std::process::Command::new(git_executable()?)
             .arg("-C")
             .arg(dir)
             .args(["config", "--get", key])

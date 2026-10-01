@@ -3,6 +3,7 @@
 
 use crate::common;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::git_binary::git_executable;
 
 use common::{Bounded, WithoutActor};
 
@@ -17,7 +18,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn git(repo: &Path, args: &[&str]) {
-    let result = Command::new("git")
+    let result = Command::new(git_executable().expect("git executable"))
         .arg("-C")
         .arg(repo)
         .args(args)

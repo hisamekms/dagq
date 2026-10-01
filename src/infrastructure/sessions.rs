@@ -1286,6 +1286,7 @@ fn insert_at(
 mod tests {
     use super::*;
     use crate::domain::LeaseToken;
+    use crate::infrastructure::git_binary::git_executable;
 
     thread_local! {
         /// The transcripts read on this thread.
@@ -1812,7 +1813,7 @@ mod tests {
     fn bind(conn: &Connection, dir: &std::path::Path, package: &str) {
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let init = std::process::Command::new("git")
+        let init = std::process::Command::new(git_executable().expect("git executable"))
             .args(["init", "-q"])
             .current_dir(&repo)
             .status()
