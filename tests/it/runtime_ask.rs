@@ -5,6 +5,102 @@ use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
+#[test]
+fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
+    use dagq::{
+        application::{TaskStore, integrate::register_follow_ups},
+        domain::{ClaimOutcome, DraftOrigin, NewTask, TaskAction},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let mut queue = crate::common::template::queue(&db);
+    let source = queue
+        .add(NewTask {
+            title: "source".into(),
+            description: String::new(),
+            acceptance: "a".into(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            goal_id: None,
+            context: String::new(),
+            provider: None,
+            worker_mode: None,
+        })
+        .unwrap();
+    queue
+        .transition(source.id(), TaskAction::BypassReview)
+        .unwrap();
+    let ClaimOutcome::Claimed { run } = queue
+        .claim(&sha("0123456789abcdef0123456789abcdef01234567"))
+        .unwrap()
+    else {
+        panic!("nothing claimed");
+    };
+    let entries = json!([
+        {"title": "first", "description": "one", "category": "defect"},
+        {"title": "second", "description": "two"},
+        {"title": "third", "description": "three"},
+    ]);
+    // Fail after the first draft was written. Readers (including planner_drafts)
+    // must never see that prefix of the receipt.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_second_origin BEFORE INSERT ON draft_origins
+        WHEN json_extract(NEW.material, '$.index') = 1
+        BEGIN SELECT RAISE(ABORT, 'injected origin failure'); END;",
+    )
+    .unwrap();
+    assert!(register_follow_ups(&mut queue, &source, run.id(), Some(&entries)).is_empty());
+    assert!(queue.planner_drafts().unwrap().is_empty());
+    assert_eq!(queue.list(&Default::default()).unwrap().total, 1);
+    assert!(
+        queue
+            .run_events(run.id())
+            .unwrap()
+            .iter()
+            .all(|e| e.kind != "follow_up_registered")
+    );
+    conn.execute_batch("DROP TRIGGER fail_second_origin")
+        .unwrap();
+
+    let added = register_follow_ups(&mut queue, &source, run.id(), Some(&entries));
+    assert_eq!(added.len(), 3);
+    let targets = queue.planner_drafts().unwrap();
+    assert_eq!(
+        targets.iter().map(|t| t.task.id()).collect::<Vec<_>>(),
+        added.iter().map(|a| a.task_id).collect::<Vec<_>>()
+    );
+    for (index, draft) in added.iter().enumerate() {
+        assert_eq!(queue.follow_up_depth(draft.task_id).unwrap(), 1);
+        let (origin, material) = queue.draft_origin(draft.task_id).unwrap().unwrap();
+        assert_eq!(origin, DraftOrigin::FollowUp);
+        assert_eq!(material["source_run_id"], run.id().as_str());
+        assert_eq!(material["index"], index);
+        assert_eq!(
+            material["category"],
+            if index == 0 { "defect" } else { "unlabeled" }
+        );
+    }
+    let registered: Vec<_> = queue
+        .run_events(run.id())
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "follow_up_registered")
+        .collect();
+    assert_eq!(registered.len(), 3);
+    for (index, recorded) in registered.iter().enumerate() {
+        assert_eq!(recorded.payload["index"], index);
+        assert_eq!(recorded.payload["task_id"], added[index].task_id.as_i64());
+    }
+    assert!(register_follow_ups(&mut queue, &source, run.id(), Some(&entries)).is_empty());
+    assert_eq!(queue.list(&Default::default()).unwrap().total, 4);
+}
+
 fn watch_role(
     db: &Path,
     after: Option<i64>,

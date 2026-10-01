@@ -2182,6 +2182,15 @@ pub enum PlannerAnswerRoute {
 /// where each came from, the planner of the runtime's opened for each, and
 /// the `planner_question` answers the supervisor types into a planner.
 pub trait DraftPlannerStore {
+    /// Register every still-unrecorded entry of one receipt atomically,
+    /// including skipped entries and their `follow_up_registered` events.
+    fn register_follow_ups(
+        &mut self,
+        run: &RunId,
+        entries: Vec<FollowUpRegistration>,
+        depth: i64,
+        goal_closed: bool,
+    ) -> Result<Vec<crate::domain::RegisteredFollowUp>>;
     /// Record where a draft the runtime or a job registered came from, and
     /// what its planner is shown about it. A draft has one origin: a second
     /// call for it is refused.
@@ -2289,6 +2298,15 @@ pub trait DraftPlannerStore {
     fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>>;
     /// Whether typing the answer of `ask` ever failed.
     fn ask_delivery_failed(&self, ask: AskId) -> Result<bool>;
+}
+
+/// One receipt entry prepared by integrate for atomic registration.
+pub struct FollowUpRegistration {
+    pub index: usize,
+    pub entry: serde_json::Value,
+    pub category: String,
+    pub draft: Option<NewTask>,
+    pub skipped: Option<&'static str>,
 }
 
 /// A planner of the runtime's that holds a place under

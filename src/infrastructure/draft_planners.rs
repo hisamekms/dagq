@@ -10,7 +10,7 @@
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
 use crate::domain::event_kind::{self, EventKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -18,16 +18,17 @@ use serde_json::{Value, json};
 
 use super::{
     asks::{ask_row, read_ask},
-    sqlite::{SqliteQueue, event, read_task},
+    sqlite::{SqliteQueue, event, insert_task, read_task},
 };
 use crate::application::{
-    DraftPlannerStart, DraftPlannerStore, FindingPlannerStart, PlannerAnswerRoute,
+    DraftPlannerStart, DraftPlannerStore, FindingPlannerStart, FollowUpRegistration,
+    PlannerAnswerRoute,
 };
 use crate::domain::{
     Ask, AskId, AskKind, BundleKey, DraftBundleMember, DraftBundleView, DraftOrigin, DraftOutcome,
     DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView, FollowUpDraft,
-    GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession, Task, TaskId, TaskOrigin,
-    TaskStatus,
+    GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession, RegisteredFollowUp,
+    RunHistory, RunId, Task, TaskId, TaskOrigin, TaskStatus,
     follow_up::{FollowUpFacts, adopt_needs_person},
 };
 
@@ -66,6 +67,86 @@ fn targets() -> String {
 }
 
 impl SqliteQueue {
+    pub fn register_follow_ups(
+        &mut self,
+        run: &RunId,
+        entries: Vec<FollowUpRegistration>,
+        depth: i64,
+        goal_closed: bool,
+    ) -> Result<Vec<RegisteredFollowUp>> {
+        ensure!(depth >= 0, "follow_up_depth must not be negative");
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source: TaskId =
+            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |row| {
+                row.get(0)
+            })?;
+        let registered: HashSet<u64> =
+            RunHistory::from_events(&super::runtime_store::run_events_of(&tx, run)?)
+                .registered_follow_ups()
+                .into_iter()
+                .collect();
+        let mut added = Vec::new();
+        for entry in entries {
+            if registered.contains(&(entry.index as u64)) {
+                continue;
+            }
+            let payload = if let Some(new) = entry.draft {
+                new.validate()?;
+                if let (Some(changes), Some(change)) = (&self.changes, &new.change) {
+                    changes.check(change)?;
+                }
+                let created = insert_task(&tx, new, &self.generators.clock.timestamp())?;
+                tx.execute(
+                    "UPDATE tasks SET follow_up_depth=?2 WHERE id=?1",
+                    params![created.id(), depth],
+                )?;
+                let material = json!({
+                    "source_task_id": source, "source_run_id": run,
+                    "index": entry.index, "category": entry.category,
+                });
+                tx.execute(
+                    "INSERT INTO draft_origins(task_id, origin, material, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        created.id(),
+                        DraftOrigin::FollowUp.as_str(),
+                        serde_json::to_string(&material)?,
+                        self.generators.clock.now()
+                    ],
+                )?;
+                added.push(RegisteredFollowUp {
+                    task_id: created.id(),
+                    title: created.title().to_owned(),
+                });
+                let mut payload = json!({
+                    "task_id": created.id(), "title": created.title(),
+                    "index": entry.index, "category": entry.category,
+                });
+                if goal_closed {
+                    payload["goal_closed"] = json!(true);
+                }
+                payload
+            } else {
+                json!({
+                    "task_id": null, "title": entry.entry["title"],
+                    "index": entry.index, "skipped": entry.skipped,
+                    "category": entry.category, "follow_up": entry.entry,
+                })
+            };
+            event(
+                &tx,
+                source,
+                Some(run),
+                EventKind::FollowUpRegistered,
+                payload,
+            )?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
     pub fn record_draft_origin(
         &mut self,
         task: TaskId,
@@ -416,6 +497,15 @@ impl SqliteQueue {
 }
 
 impl DraftPlannerStore for SqliteQueue {
+    fn register_follow_ups(
+        &mut self,
+        run: &RunId,
+        entries: Vec<FollowUpRegistration>,
+        depth: i64,
+        goal_closed: bool,
+    ) -> Result<Vec<RegisteredFollowUp>> {
+        SqliteQueue::register_follow_ups(self, run, entries, depth, goal_closed)
+    }
     fn record_draft_origin(
         &mut self,
         task: TaskId,

@@ -25,16 +25,16 @@ use std::{
 use tracing::{info, warn};
 
 use super::{
-    AskStore, Clock, IdGenerator, Landing, MainRemote, ProcessControl, Queue, Repository, RunFiles,
-    RunLog, Verifier, path_text, reason_of_error, tail,
+    AskStore, Clock, FollowUpRegistration, IdGenerator, Landing, MainRemote, ProcessControl, Queue,
+    Repository, RunFiles, RunLog, Verifier, path_text, reason_of_error, tail,
 };
 use crate::domain::{
     ActorContext, ActorRole, AuthorizationError, Authorizer, Capability, Resource, StaticPolicy,
 };
 use crate::domain::{
-    CommitSha, DraftOrigin, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult,
-    Reason, ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus,
-    Task, TaskId, TaskRun,
+    CommitSha, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult, Reason,
+    ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus, Task,
+    TaskId, TaskRun,
     disk::{DiskConfig, gib},
     event_kind, evidence_missing_reason, heartbeat_stale,
     landing_branch::{DEFAULT_REMOTE, LandingBranch, RemoteSource, missing_remote},
@@ -849,11 +849,10 @@ fn push_main(
 /// entry's `index` and its `category` (ADR-t947-3: as the worker wrote it,
 /// `unlabeled` without one), which the draft's origin material keeps too,
 /// and an entry already recorded is not looked at again, so
-/// a second call for the same run adds nothing (the task and its event are
-/// written one after the other, so only a failure to record between them
-/// could let a later call register it twice). A registration that fails is
-/// only reported: the landing stands either way. Returns what this call
-/// registered.
+/// a second call for the same run adds nothing. All unregistered entries of
+/// one receipt, including skipped events, are committed in one transaction.
+/// A registration that fails is only reported: the landing stands either way.
+/// Returns what this call registered.
 pub fn register_follow_ups<Q: Queue + ?Sized>(
     queue: &mut Q,
     task: &Task,
@@ -862,18 +861,6 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
 ) -> Vec<RegisteredFollowUp> {
     let Some(entries) = follow_ups.and_then(Value::as_array) else {
         return Vec::new();
-    };
-    let registered: Vec<u64> = match queue.run_events(run_id) {
-        Ok(events) => RunHistory::from_events(&events).registered_follow_ups(),
-        Err(error) => {
-            warn!(
-                op = "follow_up",
-                run_id = %run_id,
-                error = %format_args!("{error:#}"),
-                "run {run_id}: follow_ups not registered: {error:#}"
-            );
-            return Vec::new();
-        }
     };
     let goal_closed = match task.goal_id() {
         Some(goal_id) => match queue.show_goal(goal_id) {
@@ -908,140 +895,64 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
             crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH
         }
     };
-    let mut added = Vec::new();
-    for (index, entry) in entries.iter().enumerate() {
-        if registered.contains(&(index as u64)) {
-            continue;
-        }
-        let title = entry["title"].as_str().map(str::trim).unwrap_or_default();
-        let description = entry["description"].as_str();
-        // The worker's category of it (ADR-t947-3), `unlabeled` without
-        // one; an unknown one is kept as it is.
-        let category = crate::domain::follow_up_category(entry);
-        let skipped = if title.is_empty() {
-            Some("title is not a non-blank string")
-        } else if description.is_none() {
-            Some("description is not a string")
-        } else {
-            None
-        };
-        if let Some(reason) = skipped {
-            warn!(
-                op = "follow_up",
-                run_id = %run_id,
-                reason,
-                "run {run_id}: follow_up {index} was not registered: {reason}"
-            );
-            let payload = json!({
-                "task_id": null,
-                "title": entry["title"],
-                "index": index,
-                "skipped": reason,
-                "category": category,
-                "follow_up": entry,
-            });
-            if let Err(error) =
-                queue.record_runtime_event(run_id, EventKind::FollowUpRegistered, payload)
-            {
-                warn!(
-                    op = "follow_up",
-                    run_id = %run_id,
-                    error = %format_args!("{error:#}"),
-                    "run {run_id}: could not record follow_up_registered: {error:#}"
-                );
+    let prepared = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let title = entry["title"].as_str().map(str::trim).unwrap_or_default();
+            let description = entry["description"].as_str();
+            let skipped = if title.is_empty() {
+                Some("title is not a non-blank string")
+            } else if description.is_none() {
+                Some("description is not a string")
+            } else {
+                None
+            };
+            let draft = description
+                .filter(|_| skipped.is_none())
+                .map(|description| NewTask {
+                    title: title.to_owned(),
+                    description: description.to_owned(),
+                    acceptance: String::new(),
+                    verification_commands: Vec::new(),
+                    required_evidence: Vec::new(),
+                    paths: Vec::new(),
+                    priority: Default::default(),
+                    change: None,
+                    dependencies: Vec::new(),
+                    goal_dependencies: Vec::new(),
+                    goal_id: task.goal_id().filter(|_| !goal_closed),
+                    context: format!(
+                        "follow_up proposed by the receipt of run {run_id} of task {} ({})",
+                        task.id(),
+                        task.title()
+                    ),
+                    provider: None,
+                    worker_mode: None,
+                });
+            FollowUpRegistration {
+                index,
+                entry: entry.clone(),
+                category: crate::domain::follow_up_category(entry),
+                draft,
+                skipped,
             }
-            continue;
-        }
-        let new = NewTask {
-            title: title.to_owned(),
-            description: description.unwrap_or_default().to_owned(),
-            acceptance: String::new(),
-            verification_commands: Vec::new(),
-            required_evidence: Vec::new(),
-            paths: Vec::new(),
-            priority: Default::default(),
-            change: None,
-            dependencies: Vec::new(),
-            goal_dependencies: Vec::new(),
-            goal_id: task.goal_id().filter(|_| !goal_closed),
-            context: format!(
-                "follow_up proposed by the receipt of run {run_id} of task {} ({})",
-                task.id(),
-                task.title()
-            ),
-            provider: None,
-            worker_mode: None,
-        };
-        let created = match queue.add(new) {
-            Ok(created) => created,
-            Err(error) => {
-                warn!(
-                    op = "follow_up",
-                    run_id = %run_id,
-                    error = %format_args!("{error:#}"),
-                    "run {run_id}: follow_up {title:?} was not registered: {error:#}"
-                );
-                continue;
+        })
+        .collect();
+    match queue.register_follow_ups(run_id, prepared, depth, goal_closed) {
+        Ok(added) => {
+            for item in &added {
+                info!(op = "follow_up", run_id = %run_id, follow_up_task_id = %item.task_id,
+                    "run {run_id}: follow_up {:?} registered as draft task {}", item.title, item.task_id);
             }
-        };
-        if let Err(error) = queue.set_follow_up_depth(created.id(), depth) {
-            warn!(
-                op = "follow_up",
-                run_id = %run_id,
-                task_id = %created.id(),
-                error = %format_args!("{error:#}"),
-                "run {run_id}: could not record the follow_up_depth of task {}: {error:#}",
-                created.id()
-            );
+            added
         }
-        // The draft waits for a planner of the runtime's (ADR-0041 decision
-        // 16), which is shown where it came from.
-        let material = json!({
-            "source_task_id": task.id(),
-            "source_run_id": run_id,
-            "index": index,
-            "category": category,
-        });
-        if let Err(error) =
-            queue.record_draft_origin(created.id(), DraftOrigin::FollowUp, &material)
-        {
-            warn!(
-                op = "follow_up",
-                run_id = %run_id,
-                task_id = %created.id(),
-                error = %format_args!("{error:#}"),
-                "run {run_id}: could not record where draft task {} came from: {error:#}",
-                created.id()
-            );
+        Err(error) => {
+            warn!(op = "follow_up", run_id = %run_id, error = %format_args!("{error:#}"),
+                "run {run_id}: follow_ups not registered: {error:#}");
+            Vec::new()
         }
-        let mut payload = json!({"task_id": created.id(), "title": created.title(), "index": index, "category": category});
-        if goal_closed {
-            payload["goal_closed"] = json!(true);
-        }
-        if let Err(error) =
-            queue.record_runtime_event(run_id, EventKind::FollowUpRegistered, payload)
-        {
-            warn!(
-                op = "follow_up",
-                run_id = %run_id,
-                error = %format_args!("{error:#}"),
-                "run {run_id}: could not record follow_up_registered: {error:#}"
-            );
-        }
-        info!(
-            op = "follow_up",
-            run_id = %run_id,
-            follow_up_task_id = %created.id(),
-            "run {run_id}: follow_up {:?} registered as draft task {}",
-            created.title(),
-            created.id()
-        );
-        added.push(RegisteredFollowUp {
-            task_id: created.id(),
-            title: created.title().to_owned(),
-        });
     }
-    added
 }
 
 enum Verdict {
