@@ -99,3 +99,46 @@ pub fn supervise_thread_in(
     };
     (reviewer, supervisor)
 }
+
+/// Keep startup scheduling out of tests of a running turn's time limits.
+/// The real child is already running, but the wrapper cannot start its
+/// limit/silence timers until `spawn` returns. Each turn (including resume)
+/// must publish a fresh marker after its prerequisites are ready.
+pub struct ReadySpawner {
+    pub inner: StubSpawner,
+    pub ready: Option<PathBuf>,
+}
+
+impl Spawner for ReadySpawner {
+    fn spawn(&self, spec: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>> {
+        if let Some(ready) = &self.ready {
+            match fs::remove_file(ready) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut child = self.inner.spawn(spec, streams)?;
+        if let Some(ready) = &self.ready {
+            let _waiting = common::within(common::STEP_LIMIT, "the turn's ready marker");
+            while !ready.exists() {
+                // A turn may write the marker and exit between the checks.
+                ensure!(
+                    child.try_wait()?.is_none() || ready.exists(),
+                    "turn exited before {}",
+                    ready.display()
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Ok(child)
+    }
+}
+
+/// Have every turn signal readiness with the returned shell command.
+pub fn ready_turn(dir: &Path, backend: &mut TestWorkspace) -> String {
+    let ready = dir.join("turn-ready");
+    let command = format!(": > {}", shell_join(&[ready.display().to_string()]));
+    backend.headless_ready = Some(ready);
+    command
+}

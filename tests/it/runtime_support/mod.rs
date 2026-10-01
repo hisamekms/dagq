@@ -703,6 +703,8 @@ pub struct TestWorkspace {
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
     pub headless: Option<PathBuf>,
+    /// Wait for this per-turn marker before the wrapper starts its timers.
+    pub headless_ready: Option<PathBuf>,
     /// The `codex` a headless Codex run's wrapper calls for its turns
     /// ([`headless_codex`]).
     pub codex: Option<PathBuf>,
@@ -757,6 +759,7 @@ impl TestWorkspace {
             armed_screen: Mutex::new(None),
             screen_after_exit: Mutex::new(None),
             headless: None,
+            headless_ready: None,
             codex: None,
         }
     }
@@ -868,9 +871,14 @@ impl WorkspaceBackend for TestWorkspace {
             return Ok(workspace);
         }
         let headless = headless_provider(run, self.headless.as_deref(), self.codex.as_deref());
+        let ready = self.headless_ready.clone();
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
             if let Some((provider, other)) = headless {
+                let spawner = headless::ReadySpawner {
+                    inner: spawner,
+                    ready,
+                };
                 return runtime::session_with_providers(
                     &db,
                     &id,
@@ -961,9 +969,14 @@ impl WorkspaceBackend for TestWorkspace {
         let id = run.id().clone();
         let mut sessions = self.sessions.lock().unwrap();
         let workspace = workspace_id(sessions.len());
+        let ready = self.headless_ready.clone();
         let worker = thread::spawn(move || {
             let spawner = StubSpawner { db: db.clone() };
             if let Some((provider, other)) = headless {
+                let spawner = headless::ReadySpawner {
+                    inner: spawner,
+                    ready,
+                };
                 return runtime::session_with_providers(
                     &db,
                     &id,

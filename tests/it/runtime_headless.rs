@@ -316,32 +316,13 @@ esac"#,
     assert!(event_kinds(&detail).contains(&"evidence_missing"));
 }
 
-/// The silence the turns of
-/// [`a_silent_turn_is_stopped_and_its_recovery_job_resumes_the_session`]
-/// are held to: long against the stub's start to its first line (once
-/// [`exec_the_stub_once`] ran it) and the 0.1 s ticks of [`KEEP_SAYING`]
-/// under load.
+/// The quiet period after the stub signals readiness. Resume turns keep
+/// emitting output during slow work such as commits.
 const SILENCE_MILLIS: u64 = 800;
 
 /// Says `tick` every 0.1 s in the background (pid in `$ticker`), so that a
 /// turn's slow steps (a commit under load) are not silent.
 const KEEP_SAYING: &str = "(while :; do say tick; sleep 0.1; done) & ticker=$!";
-
-/// Runs the stub `claude` of `backend` once, outside any run: the first
-/// exec of a file just written can wait on macOS's check of it, under load
-/// for longer than [`SILENCE_MILLIS`], and a first turn stopped before its
-/// first line never named its session.
-fn exec_the_stub_once(dir: &Path, backend: &TestWorkspace) {
-    use common::Bounded;
-    let warm = dir.join("warm-up");
-    fs::create_dir_all(&warm).unwrap();
-    let output = Command::new(backend.headless.as_ref().unwrap())
-        .args(["--add-dir", &warm.display().to_string()])
-        .current_dir(&warm)
-        .bounded_output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
 
 /// Acceptance (5) and (5b): a turn silent past `[stall].turn_silence_secs`
 /// is stopped with what it runs; the session ends and the run goes to its
@@ -349,17 +330,17 @@ fn exec_the_stub_once(dir: &Path, backend: &TestWorkspace) {
 /// is a resume of the same session, and the run lands.
 #[test]
 fn a_silent_turn_is_stopped_and_its_recovery_job_resumes_the_session() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
+    let (dir, repo, db, mut backend) = headless_fixture(&[]);
+    let ready = ready_turn(dir.path(), &mut backend);
     set_turns(
         dir.path(),
         &format!(
             r#"case "$MODE" in
-start) say starting; sleep 60 ;;
-resume) {KEEP_SAYING}; {FINISH}; kill $ticker ;;
+start) say starting; {ready}; sleep 60 ;;
+resume) {KEEP_SAYING}; {ready}; {FINISH}; kill $ticker ;;
 esac"#
         ),
     );
-    exec_the_stub_once(dir.path(), &backend);
     let base = git_out(&repo, &["rev-parse", "main"]);
     let backend = Arc::new(backend);
     let (reviewer, supervisor) = supervise_thread(
@@ -405,10 +386,13 @@ esac"#
 /// recorded as `timed_out`, and its run goes to its recovery job.
 #[test]
 fn a_turn_past_its_limit_is_stopped() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
+    let (dir, repo, db, mut backend) = headless_fixture(&[]);
+    let ready = ready_turn(dir.path(), &mut backend);
     set_turns(
         dir.path(),
-        r#"i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"#,
+        &format!(
+            "say starting; {ready}; i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"
+        ),
     );
     let backend = Arc::new(backend);
     let (_reviewer, supervisor) = supervise_thread(
@@ -958,11 +942,24 @@ fn still_running(pid: u32) -> bool {
 /// not reach.
 #[test]
 fn a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group() {
-    let (dir, repo, db, backend) = headless_fixture(&[]);
+    let (dir, repo, db, mut backend) = headless_fixture(&[]);
+    let ready = ready_turn(dir.path(), &mut backend);
+    // Publish only after setpgrp and the complete PID write. The spawner
+    // waits for `ready` before returning, so even a slow first exec cannot
+    // spend the turn's limit before the outside command exists. The initial
+    // 3 s delay deliberately exceeds the 2 s limit to exercise this ordering.
     set_turns(
         dir.path(),
         &format!(
-            "{OUTSIDE_THE_GROUP}\ni=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"
+            r#"sleep 3
+perl -e 'setpgrp(0, 0) or die "setpgrp: $!";
+open(my $pid, ">", "$ARGV[0]/outside.pid") or die $!;
+print $pid "$$\n"; close($pid) or die $!;
+rename "$ARGV[0]/outside.pid", "$ARGV[0]/outside-ready.pid" or die $!;
+exec "sleep", "600"' "$RUN_DIR" >/dev/null 2>&1 &
+while [ ! -f "$RUN_DIR/outside-ready.pid" ]; do sleep 0.01; done
+{ready}
+i=0; while [ $i -lt 300 ]; do say tick; sleep 0.1; i=$((i + 1)); done"#
         ),
     );
     let backend = Arc::new(backend);
@@ -980,7 +977,7 @@ fn a_turn_past_its_limit_is_stopped_with_its_command_outside_its_group() {
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = detail(&db);
-    let outside = Reaped(written_pid(&detail.runs[0], "outside.pid"));
+    let outside = Reaped(written_pid(&detail.runs[0], "outside-ready.pid"));
     let finished = payloads(&detail, "turn_finished");
     assert_eq!(finished[0]["outcome"], "timed_out", "{finished:?}");
     assert!(
