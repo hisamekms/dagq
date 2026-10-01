@@ -130,6 +130,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t1233-3](2026-10-02-t1233-3-this-repository-passes-on-linux-before-containers.md) | このrepository（dagq自身）は、先にLinuxでbuildとtestを通し、その後に自分のrunの実行側をコンテナで動かす | 2026-10-02 |
 | [ADR-t1233-4](2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md) | queue serviceはsupervisorと同じ`up`・`down`・引き継ぎで起動・停止し、supervisorが見張って起動し直し、落ちたときの知らせはserviceを通らない経路で届け、brokerより前のhost構成では実行側のprincipalを制御側がrun・jobごとに発行して失効させるtokenで認証する | 2026-10-02 |
 | [ADR-t1233-5](2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md) | 読み取りのroleのjobとworkerはDBのpathなしでqueue serviceの読み取りのユースケースで読み、roleごとの範囲はservice側のpolicyが決める。goal 82ではworkerを含む全roleに今の`queue.read`と同じ範囲を許し、Codexのsandboxの中からもserviceに届くようにする（ADR-t813-3決定3をamends） | 2026-10-02 |
+| [ADR-t1222-1](2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md) | Codexのobserverは、jobのdagqをクライアントモードにしてqueue service経由でfindingの記録・更新・resolveとfindingに紐づくblockedのaskを書き、書ける範囲はservice側がobserverのroleに限り、記録の帰属は今のobserverのまま保ち、Claudeのobserverも同じ経路にし、許す道具の代わりはread-onlyのsandboxとservice側の認可が果たす（ADR-t1063-1決定2・3をamends） | 2026-10-02 |
 
 goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
 

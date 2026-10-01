@@ -10,6 +10,7 @@ amends:
   - adr-t813-2 decision 6
 amended_by:
   - adr-t1204-1
+  - adr-t1222-1
 owners:
   - hisamekms
 tags:
