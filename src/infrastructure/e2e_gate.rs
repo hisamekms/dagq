@@ -536,17 +536,60 @@ pub fn queue_hashes(root: &Path) -> Vec<String> {
     hashes
 }
 
-/// Clean up what the e2e left under `root`: its processes, its groups in
-/// `cmux` and the directory, which stays when a group could not be deleted
-/// (the next gate finds it by the same hashes). What was done.
+/// Clean up what the e2e left under `root`: processes, cmux workspaces
+/// and groups, then the directory. On failure keep the root and queue
+/// hashes so the next gate can retry even after the fixtures are gone.
 pub fn clean_up(root: &Path, cmux: Option<&Path>) -> Value {
     let stopped = stop_processes_inside(root);
-    let hashes = queue_hashes(root);
+    let mut hashes = queue_hashes(root);
+    let remembered = root.join(".cleanup-queue-hashes.json");
+    if let Ok(bytes) = fs::read(&remembered)
+        && let Ok(saved) = serde_json::from_slice::<Vec<String>>(&bytes)
+    {
+        hashes.extend(saved);
+    }
     let mut deleted = Vec::new();
+    let mut closed = Vec::new();
     let mut errors = Vec::new();
-    if let (Some(cmux), false) = (cmux, hashes.is_empty()) {
-        match delete_groups(cmux, &hashes) {
-            Ok(groups) => deleted = groups,
+    if let Some(cmux) = cmux {
+        match workspaces_inside(root, cmux, &mut hashes) {
+            Ok(workspaces) => {
+                hashes.sort();
+                hashes.dedup();
+                // Closing the last workspace loses the env that identified
+                // its group. Keep its hash until group deletion succeeds.
+                let saved = if hashes.is_empty() {
+                    Ok(())
+                } else {
+                    fs::create_dir_all(root)
+                        .and_then(|()| fs::write(&remembered, serde_json::to_vec(&hashes).unwrap()))
+                };
+                if let Err(error) = saved {
+                    errors.push(format!("remember cleanup queue hashes: {error}"));
+                } else {
+                    for id in workspaces {
+                        let _ = bounded(Command::new(cmux).args([
+                            "workspace-action",
+                            "--action",
+                            "unpin",
+                            "--workspace",
+                            &id,
+                        ]));
+                        match cmux_call(cmux, &["workspace", "close", &id]) {
+                            Ok(_) => closed.push(id),
+                            Err(error) => errors.push(format!("{error:#}")),
+                        }
+                    }
+                    if !hashes.is_empty() {
+                        match delete_groups(cmux, &hashes) {
+                            Ok(groups) => deleted = groups,
+                            Err(error) => errors.push(format!("{error:#}")),
+                        }
+                    }
+                }
+            }
+            // A window may disappear while being listed. Without a full
+            // listing leave cmux alone and keep the root for the next gate.
             Err(error) => errors.push(format!("{error:#}")),
         }
     }
@@ -563,9 +606,75 @@ pub fn clean_up(root: &Path, cmux: Option<&Path>) -> Value {
         "dir": root,
         "processes": stopped,
         "groups": deleted,
+        "workspaces": closed,
         "removed": removed,
         "errors": errors,
     })
+}
+
+/// Read every window before selecting any workspace for closure. The
+/// fixture need not exist: its workspace env still identifies the gate.
+fn workspaces_inside(root: &Path, cmux: &Path, hashes: &mut Vec<String>) -> Result<Vec<String>> {
+    let query = |args: &[&str]| -> Result<Value> {
+        serde_json::from_slice(&cmux_call(cmux, args)?.stdout)
+            .with_context(|| format!("decode cmux {args:?}"))
+    };
+    let windows = query(&["--json", "--id-format", "uuids", "list-windows"])?;
+    let listing = crate::infrastructure::adapters::merged_workspace_listing(&windows, |window| {
+        query(&[
+            "--json",
+            "--id-format",
+            "uuids",
+            "workspace",
+            "list",
+            "--window",
+            window,
+        ])
+    })?;
+    let real = root.canonicalize().ok();
+    let inside = |value: &str| {
+        let path = Path::new(value);
+        !path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+            && (path.starts_with(root) || real.as_ref().is_some_and(|root| path.starts_with(root)))
+    };
+    let mut selected = Vec::new();
+    for workspace in listing["workspaces"].as_array().unwrap() {
+        let id = workspace["id"].as_str().context("workspace has no ID")?;
+        // A workspace may close between the listing and its env (runs close
+        // theirs all the time); it is gone, so there is nothing to close.
+        let Ok(env) = query(&["workspace", "env", id, "--json"]) else {
+            continue;
+        };
+        if !["DAGQ_QUEUE", "E2E_SHARED"]
+            .iter()
+            .any(|key| env["env"][key].as_str().is_some_and(inside))
+        {
+            continue;
+        }
+        selected.push(id.to_owned());
+        // E2E_SHARED alone must not select a different queue's group.
+        if let Some(queue) = env["env"]["DAGQ_QUEUE"]
+            .as_str()
+            .filter(|queue| inside(queue))
+            && let Some(hash) = Path::new(queue).parent().and_then(Path::file_name)
+        {
+            hashes.push(hash.to_string_lossy().into_owned());
+        }
+    }
+    Ok(selected)
+}
+
+fn cmux_call(cmux: &Path, args: &[&str]) -> Result<Output> {
+    let output =
+        bounded(Command::new(cmux).args(args)).with_context(|| format!("run cmux {args:?}"))?;
+    ensure!(
+        output.status.success(),
+        "cmux {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output)
 }
 
 /// Stop the processes an argument of whose command line is a path inside
@@ -759,6 +868,7 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             &cmux,
             format!(
                 "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n  ping) {} ;;\n  \
+*'list-windows'*) echo '[]' ;;\n  \
 *'workspace-group list'*) echo '{{\"groups\":[{{\"id\":\"G-1\",\"external_id\":\"q1\"}},\
 {{\"id\":\"G-2\",\"external_id\":\"production\"}}]}}' ;;\nesac\n",
                 calls.display(),
@@ -1134,6 +1244,146 @@ echo 'test result: FAILED. 0 passed; 2 failed'; exit 101";
         assert!(running.exists());
         let calls = fs::read_to_string(dir.join("cmux-calls")).unwrap();
         assert!(calls.contains("workspace-group delete G-1"), "{calls}");
+    }
+
+    /// Missing fixtures are found by env across all windows, for this gate
+    /// and a dead predecessor, while a live gate and production stay intact.
+    #[test]
+    fn cleanup_finds_missing_fixtures_by_workspace_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let settings = settings(dir, "exit 0", Duration::from_secs(30));
+        let current = settings.scratch.join("current-4000000000");
+        let gone = settings.scratch.join("old-4000000000");
+        let live = settings
+            .scratch
+            .join(format!("live-{}", std::process::id()));
+        for root in [&current, &gone, &live] {
+            fs::create_dir_all(root).unwrap();
+        }
+        let production = dir.join("data/dagq/production/queue.db");
+        let envs = [
+            (
+                "current",
+                json!({"DAGQ_QUEUE": current.join("missing/data/dagq/q1/queue.db")}),
+            ),
+            (
+                "old",
+                json!({"DAGQ_QUEUE": gone.join("missing/data/dagq/q2/queue.db")}),
+            ),
+            (
+                "live",
+                json!({"DAGQ_QUEUE": live.join("missing/data/dagq/live/queue.db")}),
+            ),
+            ("production", json!({"DAGQ_QUEUE": production})),
+            (
+                "shared",
+                json!({"E2E_SHARED": current.join("missing/shared")}),
+            ),
+            (
+                "outside",
+                json!({"DAGQ_QUEUE": dir.join("outside/queue.db")}),
+            ),
+            (
+                "prefix",
+                json!({"DAGQ_QUEUE": format!("{}-other/data/dagq/other/queue.db", current.display())}),
+            ),
+            (
+                "parent",
+                json!({"DAGQ_QUEUE": current.join("../outside/data/dagq/other/queue.db")}),
+            ),
+        ];
+        let cmux = settings.cmux.as_ref().unwrap();
+        let calls = dir.join("cmux-calls");
+        let mut script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n\
+*list-windows*) echo '[{{\"id\":\"W1\"}},{{\"id\":\"W2\"}}]' ;;\n\
+*'workspace list --window W1') echo '{{\"workspaces\":[{{\"id\":\"production\"}},{{\"id\":\"live\"}}]}}' ;;\n\
+*'workspace list --window W2') echo '{{\"workspaces\":[{{\"id\":\"vanished\"}},{{\"id\":\"current\"}},{{\"id\":\"old\"}},{{\"id\":\"shared\"}},{{\"id\":\"outside\"}},{{\"id\":\"prefix\"}},{{\"id\":\"parent\"}}]}}' ;;\n\
+*'workspace-group list') echo '{{\"groups\":[{{\"id\":\"G1\",\"external_id\":\"q1\"}},{{\"id\":\"G2\",\"external_id\":\"q2\"}},{{\"id\":\"LIVE\",\"external_id\":\"live\"}},{{\"id\":\"PROD\",\"external_id\":\"production\"}}]}}' ;;\n",
+            calls.display()
+        );
+        for (id, env) in envs {
+            script.push_str(&format!(
+                "'workspace env {id} --json') echo '{}' ;;\n",
+                json!({"env": env})
+            ));
+        }
+        script.push_str("esac\n");
+        fs::write(cmux, script).unwrap();
+        let cleanup = clean_up(&current, Some(cmux));
+        assert_eq!(
+            cleanup["workspaces"],
+            json!(["current", "shared"]),
+            "{cleanup}"
+        );
+        assert_eq!(cleanup["groups"], json!(["G1"]));
+        assert_eq!(cleanup["removed"], true);
+        assert!(run(dir, None, &settings).unwrap().passed);
+        assert!(!gone.exists());
+        assert!(live.exists());
+        let calls = fs::read_to_string(calls).unwrap();
+        assert!(calls.contains("workspace close old"), "{calls}");
+        assert!(
+            calls.contains("workspace-group delete G2 --close-workspaces"),
+            "{calls}"
+        );
+        for id in ["live", "production", "outside", "prefix", "parent"] {
+            assert!(!calls.contains(&format!("workspace close {id}")), "{calls}");
+        }
+        for id in ["LIVE", "PROD"] {
+            assert!(
+                !calls.contains(&format!("workspace-group delete {id}")),
+                "{calls}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_keeps_the_root_and_hash_when_cmux_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("gate");
+        fs::create_dir_all(&root).unwrap();
+        let cmux = fake_cmux(dir.path(), false);
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n\
+*list-windows*) echo '[{{\"id\":\"W\"}}]' ;;\n\
+*'workspace list --window W') echo '{{\"workspaces\":[{{\"id\":\"lost\"}}]}}' ;;\n\
+'workspace env lost --json') echo '{}' ;;\n\
+*'workspace-group list') exit 1 ;;\nesac\n",
+            json!({"env": {"DAGQ_QUEUE": root.join("gone/data/dagq/q1/queue.db")}})
+        );
+        fs::write(&cmux, script).unwrap();
+        let cleanup = clean_up(&root, Some(&cmux));
+        assert_eq!(cleanup["workspaces"], json!(["lost"]));
+        assert_eq!(cleanup["removed"], false);
+        assert!(!cleanup["errors"].as_array().unwrap().is_empty());
+        // With the workspace gone its persisted hash still finds the group.
+        fake_cmux(dir.path(), false);
+        let cleanup = clean_up(&root, Some(&cmux));
+        assert_eq!(cleanup["groups"], json!(["G-1"]));
+        assert_eq!(cleanup["removed"], true);
+
+        fs::create_dir_all(root.join("fixture/data/dagq/q1")).unwrap();
+        fs::write(
+            &cmux,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n\
+*list-windows*) echo '[{{\"id\":\"W1\"}},{{\"id\":\"W2\"}}]' ;;\n\
+*'workspace list --window W1') echo '{{\"workspaces\":[{{\"id\":\"lost\"}}]}}' ;;\n\
+*) exit 1 ;;\nesac\n",
+                dir.path().join("failed-list-calls").display()
+            ),
+        )
+        .unwrap();
+        let cleanup = clean_up(&root, Some(&cmux));
+        assert_eq!(cleanup["workspaces"], json!([]));
+        assert_eq!(cleanup["groups"], json!([]));
+        assert_eq!(cleanup["removed"], false);
+        let calls = fs::read_to_string(dir.path().join("failed-list-calls")).unwrap();
+        assert!(calls.contains("workspace list --window W2"));
+        assert!(!calls.contains("workspace close"));
+        assert!(!calls.contains("workspace-group delete"));
     }
 
     /// Without a running cmux the e2e does not start.
