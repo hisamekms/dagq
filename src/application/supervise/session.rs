@@ -29,20 +29,19 @@ impl Supervisor<'_> {
             Vec::new()
         })
     }
-    /// The e2e marks of `.config/e2e-quarantine.toml` in `run`'s worktree
-    /// that hold today (ADR-t1165-1 decision 6), for its prompts; none
-    /// before the worktree exists. A file that cannot be read has none
-    /// hold, as at the gate.
+    /// Marks in the landing branch's committed tree, read afresh for each
+    /// prompt and resume. Neither a worker's edits nor uncommitted main
+    /// checkout edits may grant an exception (ADR-t1165-1 decision 6).
     pub(super) fn e2e_marks(&self, run: &TaskRun) -> Vec<e2e_quarantine::Mark> {
-        let Some(worktree) = run.worktree_path() else {
-            return Vec::new();
-        };
-        let path = Path::new(worktree).join(e2e_quarantine::FILE);
-        let file = match self.files.read_to_string(&path) {
-            Ok(text) => e2e_quarantine::QuarantineFile::of(&text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        let text = self
+            .repository
+            .main_head()
+            .and_then(|head| self.repository.file_in(head.as_str(), e2e_quarantine::FILE));
+        let file = match text {
+            Ok(Some(text)) => e2e_quarantine::QuarantineFile::of(&text),
+            Ok(None) => return Vec::new(),
             Err(error) => {
-                warn!(run_id = %run.id(), "{} could not be read, so no e2e mark holds for the run: {error}", path.display());
+                warn!(run_id = %run.id(), "{} in the landing branch's committed tree could not be read, so no e2e mark holds for the run: {error:#}", e2e_quarantine::FILE);
                 return Vec::new();
             }
         };
@@ -210,10 +209,9 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             json!({"path": plan.worktree_path, "branch": plan.branch}),
         )?;
         // The broker's tools (`preferred`): the worker is told of them in
-        // its prompt, written again with them. The e2e marks are read from
-        // the worktree, which exists only now.
+        // its prompt, written again with them.
         let granted = self.broker_grant(&run);
-        if granted || !self.e2e_marks(&run).is_empty() {
+        if granted {
             self.write_prompt(&task, &run, &run_dir)?;
         }
         let command = shell_join(&[

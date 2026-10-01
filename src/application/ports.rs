@@ -2802,6 +2802,11 @@ pub trait Repository {
     fn is_dagq_source(&self) -> bool;
     /// The landing branch's current commit, read again on every call.
     fn main_head(&self) -> Result<CommitSha>;
+    /// Read a UTF-8 blob in a commit's tree; `None` if the path is absent.
+    fn file_in(&self, _commit: &str, _path: &str) -> Result<Option<String>> {
+        anyhow::bail!("this repository cannot read committed files")
+    }
+
     /// Main's first-parent history since `since` (unix seconds) and the
     /// paths it has now, for `conflict_hotspots`; a repository that cannot
     /// tell has none.

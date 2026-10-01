@@ -647,10 +647,12 @@ fn e2e_expectation(required: &[EvidenceCheck], paths: &[String], e2e_paths: &[St
 }
 
 /// What a worker's local e2e may pass under (ADR-t1165-1 decision 6): the
-/// marks of `.config/e2e-quarantine.toml` in its worktree that hold now
-/// ([`e2e_quarantine::holding`]), the one rerun by name of a failed e2e,
-/// how the receipt's `e2e` reads when a mark passes it, and when a mark
-/// does not. Empty without such marks, which leaves the prompt as before.
+/// marks of `.config/e2e-quarantine.toml` in the landing branch's committed
+/// tree (read by `Supervisor::e2e_marks`, never from the run's worktree)
+/// that hold now ([`e2e_quarantine::holding`]), the one rerun by name of a
+/// failed e2e, how the receipt's `e2e` reads when a mark passes it, and
+/// when a mark does not. Empty without such marks, which leaves the prompt
+/// as before.
 pub(crate) fn e2e_marks_line(task: &Task, marks: &[Mark]) -> String {
     if marks.is_empty() {
         return String::new();
@@ -665,7 +667,7 @@ pub(crate) fn e2e_marks_line(task: &Task, marks: &[Mark]) -> String {
         })
         .collect();
     format!(
-        "E2E marks that hold now ({file} in your worktree): {list}. When you run the required e2e and tests fail, rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more. A test that passes its rerun is flaky: name it in the e2e evidence. If every test that fails its rerun too is one of the marked tests above, your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/), and this task (task {task}) is not the task that fixes it, report `e2e` as passed and write in its evidence the tests passed under a mark and the result of their rerun. Otherwise, as without marks: fix the failure, or write the receipt with result failed.\n",
+        "E2E marks that hold now ({file} in the landing branch's committed tree): {list}. When you run the required e2e and tests fail, rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more. A test that passes its rerun is flaky: name it in the e2e evidence. If every test that fails its rerun too is one of the marked tests above, your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/), and this task (task {task}) is not the task that fixes it, report `e2e` as passed and write in its evidence the tests passed under a mark and the result of their rerun. Otherwise, as without marks: fix the failure, or write the receipt with result failed.\n",
         file = e2e_quarantine::FILE,
         list = list.join("; "),
         task = task.id(),
@@ -2669,7 +2671,7 @@ mod tests {
         let marked = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &marks).unwrap();
         for part in [
             named,
-            ".config/e2e-quarantine.toml in your worktree",
+            ".config/e2e-quarantine.toml in the landing branch's committed tree",
             "rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more",
             "your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/)",
             "this task (task 7) is not the task that fixes it, report `e2e` as passed",
@@ -2706,6 +2708,12 @@ mod tests {
         assert!(resumed.contains(named), "{resumed}");
         let without = resume_request(&open, &own_run, &request, &[], &[]).unwrap();
         assert!(!without.contains("E2E marks"), "{without}");
+        let precheck = ResumeRequest {
+            kind: ResumeKind::Precheck,
+            ..request
+        };
+        let resumed = resume_request(&open, &own_run, &precheck, &[], &marks).unwrap();
+        assert!(resumed.contains(named), "{resumed}");
         assert_eq!(e2e_marks_line(&open, &[]), "");
     }
 

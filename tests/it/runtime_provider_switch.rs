@@ -321,6 +321,63 @@ esac"#
     assert_eq!(versions[0]["version"], "codex", "{versions}");
 }
 
+/// A provider switch rewrites the prompt from main's committed marks,
+/// excluding the mark the first provider put in its own worktree.
+#[test]
+fn switching_provider_keeps_only_the_landed_e2e_marks() {
+    let (dir, repo, db, backend, codex) = switch_fixture(Provider::Codex, true);
+    fs::create_dir_all(repo.join(".config")).unwrap();
+    fs::write(
+        repo.join(".config/e2e-quarantine.toml"),
+        "[[test]]\nname = \"landed_e2e\"\nreason = \"flaky\"\ntask = 41\nuntil = 2999-12-31\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[e2e]\npaths = [\"tests/e2e.rs\"]\n",
+    )
+    .unwrap();
+    git(&repo, &["add", ".config", "dagq.toml"]);
+    git(&repo, &["commit", "-qm", "landed marks"]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"
+        printf '%s' "$PROMPT" > "$RUN_DIR/marks-prompt-$TURN.txt"
+        if [ -n "$THREAD" ]; then
+            sed 's/landed_e2e/worker_only_e2e/' .config/e2e-quarantine.toml > .config/new
+            mv .config/new .config/e2e-quarantine.toml
+            {CODEX_LIMIT}
+        else
+            git restore .config/e2e-quarantine.toml
+            {FINISH}
+        fi
+    "#
+        ),
+    );
+    let backend = Arc::new(backend);
+    let supervisor = supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        codex.as_deref(),
+        &[verdict("pass", &[], "fine")],
+    );
+    finished(&db, &backend, supervisor);
+    let detail = detail(&db, TASK);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert_eq!(run.actual_provider(), Provider::Claude);
+    for turn in [1, 2] {
+        let prompt = fs::read_to_string(
+            Path::new(run.run_dir().unwrap()).join(format!("marks-prompt-{turn}.txt")),
+        )
+        .unwrap();
+        assert!(prompt.contains("landed_e2e (fixed by task 41"), "{prompt}");
+        assert!(!prompt.contains("worker_only_e2e"), "{prompt}");
+    }
+}
+
 /// Acceptance (2) and (3): a Codex turn at Codex's usage limit holds Codex
 /// (`provider_held`) without an ask, and has its call made again on Claude
 /// in a new session; the run lands. While Codex is held, a Codex task that

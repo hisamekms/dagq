@@ -956,6 +956,23 @@ impl GitRepository {
         )
     }
 
+    /// Read the blob from the object store, never from a checkout or index.
+    pub fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+        let entry =
+            output(
+                self.git_root()
+                    .args(["ls-tree", "--name-only", "-z", commit, "--", path]),
+            )?;
+        if entry.is_empty() {
+            return Ok(None);
+        }
+        output(
+            self.git_root()
+                .args(["cat-file", "blob", &format!("{commit}:{path}")]),
+        )
+        .map(Some)
+    }
+
     /// Symbolic HEAD of a worktree, or None when detached.
     pub fn current_branch(&self, worktree: &Path) -> Result<Option<String>> {
         let (status, stdout, stderr) = capture(
@@ -1837,6 +1854,9 @@ impl Repository for GitRepository {
     }
     fn main_head(&self) -> Result<CommitSha> {
         GitRepository::main_head(self)
+    }
+    fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+        GitRepository::file_in(self, commit, path)
     }
     fn main_history(&self, since: i64) -> Result<MainHistory> {
         GitRepository::main_history(self, since)
@@ -3451,6 +3471,30 @@ mod tests {
         );
         let git = GitRepository::inspect(dir.path()).unwrap();
         (dir, git)
+    }
+
+    #[test]
+    fn committed_files_ignore_checkout_edits_and_report_missing_or_unreadable_blobs() {
+        let (dir, git) = committed_repository();
+        let head = git.main_head().unwrap();
+        fs::write(dir.path().join("change.txt"), "uncommitted").unwrap();
+        assert_eq!(
+            git.file_in(head.as_str(), "change.txt").unwrap(),
+            Some("0\n".into())
+        );
+        assert_eq!(git.file_in(head.as_str(), "absent").unwrap(), None);
+        assert!(git.file_in("refs/heads/missing", "change.txt").is_err());
+        fs::write(dir.path().join("binary"), [0xff]).unwrap();
+        assert!(git_in(dir.path(), &["add", "binary"]).status.success());
+        assert!(
+            git_in(dir.path(), &["commit", "-qm", "binary"])
+                .status
+                .success()
+        );
+        assert!(
+            git.file_in(git.main_head().unwrap().as_str(), "binary")
+                .is_err()
+        );
     }
 
     /// The landing branch follows origin's HEAD before `main` and

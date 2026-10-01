@@ -302,7 +302,7 @@ fn a_diff_touching_the_e2e_paths_parks_the_run_without_e2e() {
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
 }
 
-/// The e2e marks of `.config/e2e-quarantine.toml` in the run's worktree
+/// The e2e marks of `.config/e2e-quarantine.toml` committed on main
 /// that hold (ADR-t1165-1 decision 6) are named in the worker's prompt and
 /// in the resume's request, with the one rerun and how a mark passes
 /// `e2e`; an expired mark is not.
@@ -318,11 +318,23 @@ fn the_worker_and_resume_prompts_name_the_e2e_marks_that_hold() {
     .unwrap();
     git(&repo, &["add", ".config"]);
     with_e2e_paths(&repo, "[\"change.txt\"]");
+    // Even the main checkout's uncommitted edits are not trusted.
+    fs::write(repo.join(".config/e2e-quarantine.toml"), mark("dirty_main")).unwrap();
+    let edits = format!(
+        "printf '%s' '{}' > .config/e2e-quarantine.toml; git add .config; \
+         printf '%s' '{}' > {}/.config/e2e-quarantine.toml; \
+         git -C {} add .config; git -C {} commit -qm 'replace mark after claim'; ",
+        mark("worker_only"),
+        mark("new_main"),
+        shell_join(&[repo.display().to_string()]),
+        shell_join(&[repo.display().to_string()]),
+        shell_join(&[repo.display().to_string()])
+    );
     let backend = TestWorkspace::new(
         &db,
         false,
         &format!(
-            "{RECEIPT_E2E}commit work; receipt_e2e \"$(git rev-parse HEAD)\" not_applicable 'no e2e path changed'"
+            "{RECEIPT_E2E}{edits}commit work; receipt_e2e \"$(git rev-parse HEAD)\" not_applicable 'no e2e path changed'"
         ),
     );
     backend.resume_script_for(
@@ -339,14 +351,23 @@ fn the_worker_and_resume_prompts_name_the_e2e_marks_that_hold() {
         .show(TaskId::new(2))
         .unwrap();
     let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration, "{detail:?}");
     let prompt = read_prompt(run);
     let resume =
         fs::read_to_string(Path::new(run.run_dir().unwrap()).join("resume-1.txt")).unwrap();
+    assert!(
+        prompt.contains("held_e2e (fixed by task 41, until 2999-12-31: flaky)"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("new_main"), "{prompt}");
+    assert!(
+        resume.contains("new_main (fixed by task 41, until 2999-12-31: flaky)"),
+        "{resume}"
+    );
+    assert!(!resume.contains("held_e2e"), "{resume}");
     for text in [&prompt, &resume] {
-        assert!(
-            text.contains("held_e2e (fixed by task 41, until 2999-12-31: flaky)"),
-            "{text}"
-        );
+        assert!(!text.contains("worker_only"), "{text}");
+        assert!(!text.contains("dirty_main"), "{text}");
         assert!(
             text.contains("rerun each failed test once by name"),
             "{text}"
@@ -358,6 +379,58 @@ fn the_worker_and_resume_prompts_name_the_e2e_marks_that_hold() {
         assert!(!text.contains("expired_e2e"), "{text}");
     }
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+}
+
+fn mark(name: &str) -> String {
+    format!("[[test]]\nname = \"{name}\"\nreason = \"flaky\"\ntask = 41\nuntil = 2999-12-31\n")
+}
+
+/// Worker-only marks cannot grant an exception when main has no usable marks.
+#[test]
+fn unusable_main_marks_leave_worker_and_resume_prompts_without_marks() {
+    for text in [
+        None,
+        Some(String::new()),
+        Some("invalid toml [".into()),
+        Some(
+            (0..4)
+                .map(|i| mark(&format!("over_limit_{i}")))
+                .collect::<String>(),
+        ),
+    ] {
+        let (_dir, repo, db) = evidence_fixture(&[EvidenceCheck::E2e]);
+        if let Some(text) = text {
+            fs::create_dir_all(repo.join(".config")).unwrap();
+            fs::write(repo.join(".config/e2e-quarantine.toml"), text).unwrap();
+            git(&repo, &["add", ".config"]);
+            git(&repo, &["commit", "-qm", "main marks"]);
+        }
+        let backend = TestWorkspace::new(
+            &db,
+            false,
+            &format!(
+                "{RECEIPT_E2E}mkdir -p .config; printf '%s' '{}' > .config/e2e-quarantine.toml; git add .config; commit work; receipt_e2e \"$(git rev-parse HEAD)\" not_applicable 'no e2e'",
+                mark("worker_only")
+            ),
+        );
+        backend.resume_script_for(2, &format!(
+            "{RECEIPT_E2E}await_message; receipt_e2e \"$(git rev-parse HEAD)\" passed 'e2e passed'; idle; await_exit"
+        ));
+        let outcome = supervise(&db, &repo, &backend).unwrap();
+        backend.join();
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        let detail = SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(2))
+            .unwrap();
+        let run = &detail.runs[0];
+        let resume =
+            fs::read_to_string(Path::new(run.run_dir().unwrap()).join("resume-1.txt")).unwrap();
+        for prompt in [read_prompt(run), resume] {
+            assert!(!prompt.contains("E2E marks"), "{prompt}");
+        }
+        assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    }
 }
 
 /// A run whose diff stays outside `[e2e] paths` owes no e2e: its receipt
