@@ -730,6 +730,22 @@ fn run_update_job(
     processes: &FakeProcesses,
     restarted: &Mutex<Vec<String>>,
 ) -> Value {
+    run_update_job_with_handoff_timeout(
+        fixture,
+        binaries,
+        processes,
+        restarted,
+        Duration::from_secs(5),
+    )
+}
+
+fn run_update_job_with_handoff_timeout(
+    fixture: &Fixture,
+    binaries: &UpdateBinaries,
+    processes: &FakeProcesses,
+    restarted: &Mutex<Vec<String>>,
+    handoff_timeout: Duration,
+) -> Value {
     use dagq::application::update;
     let queues = |db: &Path| -> std::sync::Arc<dyn dagq::application::QueueOpener> {
         std::sync::Arc::new(dagq::infrastructure::runtime_store::SqliteOpener {
@@ -766,7 +782,7 @@ fn run_update_job(
             build_command: None,
             e2e: e2e_settings(&dir.join("queue-dir")),
             restart: vec!["--cmux".into(), "/opt/cmux".into()],
-            handoff_timeout: Duration::from_secs(5),
+            handoff_timeout,
             watch_timeout: Duration::from_secs(5),
             poll: Duration::from_millis(20),
             pid: 7,
@@ -1949,6 +1965,11 @@ fn install_keeps_the_binary_unless_every_supervisor_failed_the_handoff() {
     assert_eq!(calls.last().unwrap(), "restore /opt/bin/dagq");
 }
 
+// The withdrawal trigger synchronizes the timeout race; it does not need
+// a unix-second boundary. Successor registration permits started_at ==
+// asked_at, and the update watch separately waits for heartbeat_later.
+const LATE_HANDOFF_TIMEOUT: Duration = Duration::from_millis(200);
+
 /// What a supervisor does once it took its request just as the handoff's
 /// wait ran out.
 #[derive(Clone, Copy)]
@@ -2059,7 +2080,7 @@ fn a_handoff_looks_again_at_a_supervisor_that_took_it_as_the_wait_ran_out() {
                 std::slice::from_ref(&registration),
                 Path::new("/opt/bin/dagq"),
                 VERSION,
-                Duration::from_secs(1),
+                LATE_HANDOFF_TIMEOUT,
                 Duration::from_millis(20),
             )
             .unwrap()
@@ -2099,7 +2120,7 @@ fn a_handoff_looks_again_at_a_supervisor_that_took_it_as_the_wait_ran_out() {
         "{error}"
     );
     assert!(
-        error.contains("not back 1s after the wait ran out"),
+        error.contains("not back 0.2s after the wait ran out"),
         "{error}"
     );
     assert_eq!(handed.now, None);
@@ -2190,7 +2211,7 @@ fn install_counts_a_supervisor_that_took_the_handoff_as_the_wait_ran_out() {
         let processes = FakeProcesses::default();
         let no_down = || -> Result<Value> { panic!("no drain") };
         let mut options = install_options(Source::Binary("/built/dagq".into()));
-        options.handoff_timeout = Duration::from_secs(1);
+        options.handoff_timeout = LATE_HANDOFF_TIMEOUT;
         let result = thread::scope(|scope| {
             scope.spawn(|| {
                 back_after_withdrawal(
@@ -2246,7 +2267,13 @@ fn the_update_job_installs_past_a_supervisor_that_took_the_handoff_as_the_wait_r
                 true,
             )
         });
-        run_update_job(&fixture, &binaries, &processes, &restarted)
+        run_update_job_with_handoff_timeout(
+            &fixture,
+            &binaries,
+            &processes,
+            &restarted,
+            LATE_HANDOFF_TIMEOUT,
+        )
     });
     assert_eq!(report["outcome"], "installed", "{report}");
     assert!(
