@@ -11,7 +11,7 @@ use common::*;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 
 use dagq_broker_client::mcp::TEXT_LIMIT_BYTES;
@@ -29,9 +29,8 @@ struct Mcp {
 
 impl Mcp {
     fn start(broker: &Broker, token_file: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_dagq-broker-client"))
+        let mut child = client_command(std::env::var_os("LLVM_PROFILE_FILE"))
             .arg("mcp")
-            .env_clear()
             .env(URL_ENV, &broker.url)
             .env(TOKEN_FILE_ENV, token_file)
             .stdin(Stdio::piped())

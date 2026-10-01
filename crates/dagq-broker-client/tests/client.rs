@@ -17,6 +17,19 @@ use dagq_broker_client::{BrokerClient, ClientError, TOKEN_FILE_ENV, URL_ENV};
 use dagq_broker_protocol::{BrokerCapability, ErrorCode, fs as fs_ops, git, process};
 
 #[test]
+fn client_command_preserves_only_a_supplied_coverage_destination() {
+    use std::ffi::OsStr;
+
+    let profile = OsStr::new("/tmp/llvm-cov-target/client-%p-%m.profraw");
+    let command = client_command(Some(profile.to_owned()));
+    assert_eq!(
+        command.get_envs().collect::<Vec<_>>(),
+        vec![(OsStr::new("LLVM_PROFILE_FILE"), Some(profile))]
+    );
+    assert_eq!(client_command(None).get_envs().count(), 0);
+}
+
+#[test]
 fn the_library_does_fs_process_and_git_in_the_run_worktree() {
     let broker = Broker::start();
     let token_file = broker.full_token_file("jti-lib");

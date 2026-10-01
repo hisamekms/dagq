@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -234,12 +235,22 @@ impl Output {
     }
 }
 
-/// Run `dagq-broker-client <args>` with only `env`, feeding `stdin`, and
+/// Clear the client's environment, preserving the supplied coverage destination.
+/// Without it, an instrumented child writes default_*.profraw in the crate directory.
+pub fn client_command(profile_file: Option<OsString>) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq-broker-client"));
+    command.env_clear();
+    if let Some(profile_file) = profile_file {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
+    command
+}
+
+/// Run `dagq-broker-client <args>` with `env` and the coverage destination, feeding `stdin`, and
 /// wait at most [`LIMIT`].
 pub fn cli(args: &[&str], env: &[(&str, &str)], stdin: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dagq-broker-client"))
+    let mut child = client_command(std::env::var_os("LLVM_PROFILE_FILE"))
         .args(args)
-        .env_clear()
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
