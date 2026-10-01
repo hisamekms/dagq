@@ -42,18 +42,12 @@ pub fn invoke_as(role: Option<&str>, db: &Path, args: &[&str]) -> Output {
 pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     let bin = db.parent().unwrap().join("bin");
     if !bin.join("cmux").exists() {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("cmux");
-        std::fs::write(
+        crate::common::template::script(
             &stub,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
-                bin.join("notifications").display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/notifications\"\n",
+        );
     }
     let path = std::env::join_paths(
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),

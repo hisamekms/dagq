@@ -539,7 +539,7 @@ fn observe_kills_an_agent_past_its_timeout_with_its_children() {
 /// finds first on PATH.
 fn observer_claude_stub(db: &Path) -> PathBuf {
     let stub = db.parent().unwrap().join("claude-observer-stub");
-    fs::write(
+    crate::common::template::script(
         &stub,
         r#"#!/bin/sh
 if [ "$1" = "-p" ]; then
@@ -549,10 +549,8 @@ if [ "$1" = "-p" ]; then
 fi
 printf 'test provider\n'
 "#,
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     stub
 }
 
@@ -587,17 +585,13 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     };
     let runner = db.parent().unwrap().join("observer-runner");
     let arguments = db.parent().unwrap().join("observer-arguments");
-    fs::write(
+    crate::common::template::script(
         &runner,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec '{}' \"$@\"\n",
-            arguments.display(),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"${{0%/*}}/observer-arguments\"\nexec '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_dagq")
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let supervise_observed = || {
         runtime::supervise(
             &db,
@@ -1121,24 +1115,19 @@ fn supervisor_observing(db: &Path, repo: &Path) -> (thread::JoinHandle<Result<Va
     }
     let pids = db.parent().unwrap().join("observer.pids");
     let stub = db.parent().unwrap().join("claude-observer-stub");
-    fs::write(
+    crate::common::template::script(
         &stub,
-        format!(
-            r#"#!/bin/sh
+        r#"#!/bin/sh
 if [ "$1" = "-p" ]; then
   sleep 60 &
-  echo "$$ $!" > '{pids}.tmp' && mv '{pids}.tmp' '{pids}'
+  echo "$$ $!" > "${0%/*}/observer.pids.tmp" && mv "${0%/*}/observer.pids.tmp" "${0%/*}/observer.pids"
   wait
   exit 0
 fi
 printf 'test provider\n'
 "#,
-            pids = pids.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     let backend = TestWorkspace::new(db, false, VALID_AGENT);
     let options = SuperviseOptions {
         observe_interval: Duration::from_secs(3600),
@@ -1224,25 +1213,19 @@ fn a_handoff_leaves_no_observer_process() {
 #[test]
 fn observe_uses_only_the_selected_cmux_for_workspace_listing() {
     use dagq::observer::ObserveMode;
-    use std::os::unix::fs::PermissionsExt;
     let (_dir, _repo, db) = fixture();
     let cmux = db.parent().unwrap().join("selected-cmux");
     let calls = db.parent().unwrap().join("cmux-calls");
-    fs::write(
+    crate::common::template::script(
         &cmux,
-        format!(
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> '{}'
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "${0%/*}/cmux-calls"
 case "$4" in
-  list-windows) echo '[{{"id":"test-window"}}]' ;;
-  workspace) echo '{{"workspaces":[]}}' ;;
+  list-windows) echo '[{"id":"test-window"}]' ;;
+  workspace) echo '{"workspaces":[]}' ;;
 esac
 "#,
-            calls.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&cmux, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let provider = ObserverProvider {
         script: "exit 0".into(),
     };

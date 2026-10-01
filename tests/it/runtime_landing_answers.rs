@@ -172,7 +172,6 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
 /// one that applied the answers, without asking again or reviewing again.
 #[test]
 fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
-    use std::os::unix::fs::PermissionsExt;
     let (fixture, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     add_ready_task(&mut queue, "second", &[]);
@@ -219,8 +218,8 @@ fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
     }
 
     fs::create_dir_all(tool.parent().unwrap()).unwrap();
-    fs::write(&tool, "#!/bin/sh\nexec \"$@\"\n").unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&tool, "#!/bin/sh\nexec \"$@\"\n");
+
     let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 4);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     for task in [1, 2] {

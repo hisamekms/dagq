@@ -1,7 +1,6 @@
 //! Runtime tests: the push of the KPIs to the host's command (ADR-0051
 //! decisions 18, 22 and 23) after the supervisor's daily reports.
 use dagq::domain::EventKind;
-use std::os::unix::fs::PermissionsExt;
 
 use crate::runtime_support;
 
@@ -88,15 +87,13 @@ fn setup(body: &str, push: bool) -> Setup {
 /// The push script: `body` after what it read is kept in `inbox`, one
 /// file per message with its environment next to it.
 fn write_script(script: &Path, inbox: &Path, body: &str) {
-    fs::write(
+    crate::common::template::script_env(
         script,
         format!(
-            "#!/bin/sh\nn=$(ls '{inbox}' | wc -l | tr -d ' ')\ncat > \"{inbox}/$n.json\"\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$DAGQ_PUSH_KIND\" \"$DAGQ_QUEUE\" \"$DAGQ_REPORT_HTML\" \"$DAGQ_REPORT_JSON\" > \"{inbox}/$n.env\"\n{body}\n",
-            inbox = inbox.display()
+            "#!/bin/sh\nn=$(ls \"$STUB_INBOX\" | wc -l | tr -d ' ')\ncat > \"$STUB_INBOX/$n.json\"\nprintf '%s\\n%s\\n%s\\n%s\\n' \"$DAGQ_PUSH_KIND\" \"$DAGQ_QUEUE\" \"$DAGQ_REPORT_HTML\" \"$DAGQ_REPORT_JSON\" > \"$STUB_INBOX/$n.env\"\n{body}\n"
         ),
-    )
-    .unwrap();
-    fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+        &[("STUB_INBOX", inbox.to_str().unwrap())],
+    );
 }
 
 /// What the command read, each message with its environment, in order

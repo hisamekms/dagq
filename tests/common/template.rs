@@ -77,6 +77,55 @@ pub fn repository(repo: &Path, seed: &str) {
     copy_tree(&template.join("repo"), repo);
 }
 
+/// Install an immutable, already executed shell stub. Hardlinks preserve the
+/// fixture path through canonicalize (symlinks would move `$0` and sidecars to
+/// the cache). Call this again to replace a stub; never write through its link.
+/// The content key and `made` lock share the inode across nextest processes too.
+pub fn script(path: &Path, script: impl AsRef<str>) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = script.as_ref();
+    let (shebang, body) = script.split_once('\n').expect("stub shebang");
+    assert!(shebang.starts_with("#!/bin/sh"), "shell stub: {shebang}");
+    let content =
+        format!("{shebang}\nif [ \"${{DAGQ_TEST_STUB_WARMUP:-}}\" = 1 ]; then exit 0; fi\n{body}");
+    let name = format!("script-f1-{:x}", Sha256::digest(content.as_bytes()));
+    let template = made(&name, |building| {
+        let stub = building.join("stub");
+        fs::write(&stub, &content).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            Command::new(&stub)
+                .env("DAGQ_TEST_STUB_WARMUP", "1")
+                .bounded_status()
+                .unwrap()
+                .success()
+        );
+    });
+    // Publish replacements atomically, without modifying a shared inode.
+    let link = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+    let link = link.into_temp_path();
+    fs::remove_file(&link).unwrap();
+    fs::hard_link(template.join("stub"), &link).unwrap();
+    fs::rename(&link, path).unwrap();
+}
+
+/// Per-fixture shell environment, sourced after the warmup guard. Values are
+/// quoted as data, and are not put in the test process's global environment.
+pub fn script_env(path: &Path, body: impl AsRef<str>, env: &[(&str, &str)]) {
+    let mut values = String::new();
+    for (key, value) in env {
+        assert!(key.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'));
+        values.push_str(&format!("{key}='{}'\n", value.replace('\'', "'\\''")));
+    }
+    let sidecar = path.with_file_name(format!(
+        "{}.env",
+        path.file_name().unwrap().to_str().unwrap()
+    ));
+    fs::write(sidecar, values).unwrap();
+    let (shebang, body) = body.as_ref().split_once('\n').unwrap();
+    script(path, format!("{shebang}\n. \"$0.env\"\n{body}"));
+}
+
 fn short(digest: &[u8]) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }

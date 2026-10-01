@@ -267,13 +267,11 @@ fn a_restart_by_the_runtime_does_not_check_the_installed_plugin() {
     assert_eq!(plugin_call(&fixture), None);
 
     let binary = fixture._dir.path().join("restarted-dagq");
-    fs::write(
+    crate::common::template::script(
         &binary,
         "#!/bin/sh\nprintf '{\"restart\": \"%s\", \"arguments\": \"%s\"}' \"$DAGQ_UP_RESTART\" \"$*\"\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     let printed = dagq::infrastructure::binaries::LocalBinaries
         .run(&binary, &["up".into(), "--in-cmux".into()])
         .unwrap();
@@ -314,23 +312,19 @@ fn plugin_version_reads_the_enabled_entry_of_the_plugin_list() {
 #[test]
 fn the_installed_plugin_is_read_and_updated_through_claude() {
     use dagq::application::InstalledPlugin;
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls");
     let claude = dir.path().join("claude");
-    fs::write(
+    crate::common::template::script(
         &claude,
         format!(
-            "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> '{log}'\ncase \"$*\" in\n\
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> \"${{0%/*}}/calls\"\ncase \"$*\" in\n\
 'plugin list --json') printf '%s' '{ENABLED}' ;;\n\
-'plugin update claude-dagq@dagq') [ -f '{fail}' ] && {{ echo 'fetch failed' >&2; exit 1; }}; echo updated ;;\n\
+'plugin update claude-dagq@dagq') [ -f \"${{0%/*}}/fail\" ] && {{ echo 'fetch failed' >&2; exit 1; }}; echo updated ;;\n\
 *) echo ok ;;\nesac\n",
-            log = log.display(),
-            fail = dir.path().join("fail").display(),
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     let cwd = dir.path().canonicalize().unwrap();
     let plugin = dagq::infrastructure::adapters::ClaudePlugin {
         executable: claude.clone(),

@@ -723,11 +723,11 @@ fn a_turn_started_in_another_permission_mode_is_stopped() {
     // The stub says `default`, as haiku does for `auto`.
     let stub = backend.headless.clone().unwrap();
     let text = fs::read_to_string(&stub).unwrap();
-    fs::write(
+    // A new shared template; the stub's hardlink is read-only.
+    crate::common::template::script(
         &stub,
         text.replacen("#!/bin/sh\n", "#!/bin/sh\nPERMISSION_SAID=default\n", 1),
-    )
-    .unwrap();
+    );
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");

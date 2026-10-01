@@ -64,15 +64,10 @@ pub(crate) fn queue() -> Queue {
         panic!("nothing claimed");
     };
     let cmux = dir.path().join("cmux-stub");
-    fs::write(
+    common::template::script(
         &cmux,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
-            dir.path().join("notifications").display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&cmux, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/notifications\"\n",
+    );
     Queue {
         db: dir.path().join("queue.db"),
         _dir: dir,

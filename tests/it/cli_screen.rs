@@ -38,21 +38,15 @@ const READY: &str = "\
 /// A stub `cmux` beside `db`: `read-screen` prints the `screen` file, and
 /// every call is appended to `calls`. Returns its path.
 fn stub_cmux(db: &Path, screen: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let dir = db.parent().unwrap().join("screen-cmux");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("screen"), screen).unwrap();
     let stub = dir.join("cmux");
-    fs::write(
+    common::template::script(
         &stub,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\n\
-             if [ \"$1\" = read-screen ]; then cat '{dir}/screen'; fi\n",
-            dir = dir.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n\
+         if [ \"$1\" = read-screen ]; then cat \"${0%/*}/screen\"; fi\n",
+    );
     stub
 }
 

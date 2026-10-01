@@ -4,7 +4,6 @@
 //! job that installs it on the answer or without asking (decisions 4, 5),
 //! through a stub `cargo` that fails, so nothing is ever replaced.
 use dagq::domain::EventKind;
-use std::os::unix::fs::PermissionsExt;
 
 use crate::{common, runtime_support};
 
@@ -66,33 +65,28 @@ fn setup(host: &str, current: &str, fail: bool) -> Setup {
     let answer = if fail {
         "echo 'curl: (6) Could not resolve host: index.crates.io' >&2; exit 6".to_owned()
     } else {
-        format!(
-            "case \"$*\" in *If-None-Match*) printf 'HTTP/2 304\\r\\netag: \"e1\"\\r\\n\\r\\n';; *) printf 'HTTP/2 200\\r\\netag: \"e1\"\\r\\n\\r\\n'; cat '{}';; esac",
-            index.display()
-        )
+        "case \"$*\" in *If-None-Match*) printf 'HTTP/2 304\\r\\netag: \"e1\"\\r\\n\\r\\n';; *) printf 'HTTP/2 200\\r\\netag: \"e1\"\\r\\n\\r\\n'; cat \"${0%/*}/index.txt\";; esac".to_owned()
     };
-    fs::write(
+    crate::common::template::script(
         &curl,
         format!(
-            "#!/bin/sh\nn=$(ls '{calls}' | wc -l | tr -d ' ')\nprintf '%s\\n' \"$@\" > \"{calls}/$n\"\n{answer}\n",
-            calls = calls.display()
+            "#!/bin/sh\nn=$(ls \"{calls}\" | wc -l | tr -d ' ')\nprintf '%s\\n' \"$@\" > \"{calls}/$n\"\n{answer}\n",
+            calls = "${0%/*}/curl-calls"
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     // A cargo that cannot install: it notes its arguments and fails.
     let cargo_calls = queue_dir.join("cargo-calls");
     fs::create_dir(&cargo_calls).unwrap();
     let cargo = queue_dir.join("cargo");
-    fs::write(
+    crate::common::template::script(
         &cargo,
         format!(
-            "#!/bin/sh\nn=$(ls '{calls}' | wc -l | tr -d ' ')\nprintf '%s\\n' \"$@\" > \"{calls}/$n\"\necho 'error: could not compile dagq' >&2\nexit 101\n",
-            calls = cargo_calls.display()
+            "#!/bin/sh\nn=$(ls \"{calls}\" | wc -l | tr -d ' ')\nprintf '%s\\n' \"$@\" > \"{calls}/$n\"\necho 'error: could not compile dagq' >&2\nexit 101\n",
+            calls = "${0%/*}/cargo-calls"
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     let base = supervise_options(1, true);
     let options = SuperviseOptions {
         update: dagq::application::supervise::UpdateSettings {
@@ -592,17 +586,16 @@ fn an_interrupted_release_job_is_reported_not_retried() {
 /// call's arguments in `<claude>.calls`.
 fn plugin_claude(s: &Setup, version: &str) -> PathBuf {
     let claude = s.db.canonicalize().unwrap().with_file_name("plugin-claude");
-    fs::write(
+    crate::common::template::script(
         &claude,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\ncase \"$*\" in\n\
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{calls}\"\ncase \"$*\" in\n\
 'plugin list --json') printf '%s' '[{{\"id\":\"claude-dagq@dagq\",\"version\":\"{version}\",\"enabled\":true}}]' ;;\n\
 *) echo ok ;;\nesac\n",
-            calls = claude.with_extension("calls").display(),
+            calls = "$0.calls",
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     claude
 }
 

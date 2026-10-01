@@ -530,15 +530,13 @@ fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
     } else {
         "printf '## Conclusion\\n- reviewed by %s\\n' \"$DAGQ_ROLE\"; exit 0"
     };
-    fs::write(
+    crate::common::template::script(
         &stub,
         format!(
             "#!/bin/sh\ncase \"$*\" in *\"You are the throughput review job\"*) {review} ;; esac\nprintf 'test provider\\n'\n"
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     stub
 }
 

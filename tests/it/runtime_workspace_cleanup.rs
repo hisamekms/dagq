@@ -15,39 +15,36 @@ use runtime_support::*;
 /// A stub cmux of one window that lists `listed` but the workspaces it
 /// closed, and appends each closed one to `<dir>/closed`.
 fn stub_cmux(dir: &Path, listed: &[&str]) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let closed = dir.join("closed");
     fs::write(dir.join("listed"), listed.join("\n") + "\n").unwrap();
     let stub = dir.join("cmux");
-    fs::write(
+    common::template::script_env(
         &stub,
-        format!(
-            r#"#!/bin/sh
-closed='{closed}'
-listed='{listed}'
+        r#"#!/bin/sh
+closed="$STUB_CLOSED"
+listed="$STUB_LISTED"
 touch "$closed"
 case "$*" in
-  *list-windows*) echo '[{{"id":"W"}}]' ;;
+  *list-windows*) echo '[{"id":"W"}]' ;;
   *'workspace list'*)
-    printf '{{"workspaces":['
+    printf '{"workspaces":['
     sep=''
     while read -r id; do
       [ -n "$id" ] || continue
       grep -qx "$id" "$closed" && continue
-      printf '%s{{"id":"%s"}}' "$sep" "$id"
+      printf '%s{"id":"%s"}' "$sep" "$id"
       sep=','
     done < "$listed"
-    printf ']}}\n' ;;
+    printf ']}\n' ;;
   'workspace close '*) echo "$3" >> "$closed"; echo 'OK workspace:1' ;;
   *) echo OK ;;
 esac
 "#,
-            closed = closed.display(),
-            listed = dir.join("listed").display(),
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        &[
+            ("STUB_CLOSED", closed.to_str().unwrap()),
+            ("STUB_LISTED", dir.join("listed").to_str().unwrap()),
+        ],
+    );
     stub
 }
 

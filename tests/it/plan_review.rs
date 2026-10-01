@@ -74,9 +74,8 @@ pub(crate) fn fixture() -> Fixture {
     let blocker = add(&mut queue, "blocker", &[], Priority::Normal);
     assert_eq!(blocker, TaskId::new(1));
     let claude = dir.path().join("claude-stub");
-    fs::write(&claude, "#!/bin/sh\nprintf 'stub\\n'\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&claude, "#!/bin/sh\nprintf 'stub\\n'\n");
+
     Fixture {
         _dir: dir,
         _test: common::test(),

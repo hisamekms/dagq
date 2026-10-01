@@ -186,10 +186,8 @@ fn the_backfill_stops_at_the_retention_and_old_temporary_files_go() {
 
 /// A stub `name` in `bin` running `body`.
 fn stub(bin: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = bin.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&path, format!("#!/bin/sh\n{body}\n"));
 }
 
 /// The reports carry the near-term dependency diagram d2 and TALA drew
@@ -238,10 +236,7 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
     stub(
         &bin,
         "d2",
-        &format!(
-            "[ \"$1\" = --layout=tala ] || exit 9\necho call >> '{}'\nprintf '<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><style>@font-face{{src:url(\"data:font/woff;base64,AA==\")}}</style><image href=\"https://example.com/i.png\"/><script>x()</script><text>'\nsed 's/</[/g'\nprintf '</text></svg>'",
-            calls.display()
-        ),
+        "[ \"$1\" = --layout=tala ] || exit 9\necho call >> \"${0%/*}/../d2-calls\"\nprintf '<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><style>@font-face{src:url(\"data:font/woff;base64,AA==\")}</style><image href=\"https://example.com/i.png\"/><script>x()</script><text>'\nsed 's/</[/g'\nprintf '</text></svg>'",
     );
     let path =
         std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();

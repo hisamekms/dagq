@@ -85,16 +85,12 @@ fn the_cmux_adapter_notifies_with_title_body_and_an_optional_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let dump = dir.path().join("args.txt");
     let stub = dir.path().join("cmux-stub");
-    fs::write(
+    crate::common::template::script_env(
         &stub,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n[ \"$1\" = notify ] || exit 2\n[ \"$3\" != fail ]\n",
-            dump.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$STUB_PATH\"\n[ \"$1\" = notify ] || exit 2\n[ \"$3\" != fail ]\n",
+        &[("STUB_PATH", dump.to_str().unwrap())],
+    );
+
     let cmux = Cmux { executable: stub };
     let args = || fs::read_to_string(&dump).unwrap();
     cmux.notify("dagq repo: task 1 failed", "a task\nnext: x", Some("WS"))
@@ -118,16 +114,12 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let dump = dir.path().join("args.txt");
     let stub = dir.path().join("cmux-stub");
-    fs::write(
+    crate::common::template::script_env(
         &stub,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \"$1\" in workspace) echo 'OK workspace:7' ;; --json) echo '{{\"caller\":{{\"workspace_id\":\"01234567-89ab-4def-8123-000000000007\"}}}}' ;; esac\n",
-            dump.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$STUB_PATH\"\ncase \"$1\" in workspace) echo 'OK workspace:7' ;; --json) echo '{\"caller\":{\"workspace_id\":\"01234567-89ab-4def-8123-000000000007\"}}' ;; esac\n",
+        &[("STUB_PATH", dump.to_str().unwrap())],
+    );
+
     let cmux = Cmux { executable: stub };
     cmux.send_text("WS", "line one\n\tline two\\n\n").unwrap();
     assert_eq!(
@@ -209,16 +201,12 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
     let dir = tempfile::tempdir().unwrap();
     let dump = dir.path().join("env.txt");
     let stub = dir.path().join("cmux-stub");
-    fs::write(
+    crate::common::template::script_env(
         &stub,
-        format!(
-            "#!/bin/sh\n[ \"$1\" = ping ] || exit 2\n/usr/bin/env > '{0}'\necho \"PARENT=$PPID\" >> '{0}'\nprintf 'PONG\\n'\n",
-            dump.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\n[ \"$1\" = ping ] || exit 2\n/usr/bin/env > \"$STUB_PATH\"\necho \"PARENT=$PPID\" >> \"$STUB_PATH\"\nprintf 'PONG\\n'\n",
+        &[("STUB_PATH", dump.to_str().unwrap())],
+    );
+
     let cmux = Cmux {
         executable: stub.clone(),
     };
@@ -269,11 +257,10 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
         socket_password: None,
         config_home: None,
     };
-    fs::write(
+    crate::common::template::script(
         &stub,
         "#!/bin/sh\necho 'only processes started inside cmux can connect' >&2\nexit 1\n",
-    )
-    .unwrap();
+    );
     let error = cmux.preflight_detached(&environment).unwrap_err();
     assert!(error.is::<DetachedRefusal>(), "{error:#}");
     let error = format!("{error:#}");
@@ -282,7 +269,7 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
         error.ends_with("only processes started inside cmux can connect"),
         "{error}"
     );
-    fs::write(&stub, "#!/bin/sh\necho PING\n").unwrap();
+    crate::common::template::script(&stub, "#!/bin/sh\necho PING\n");
     let error = cmux.preflight_detached(&environment).unwrap_err();
     assert!(error.is::<DetachedRefusal>(), "{error:#}");
     assert!(
@@ -292,14 +279,11 @@ fn the_cmux_adapter_pings_orphaned_with_the_detached_environment() {
 
     // A ping that hangs is killed at the deadline and reported.
     let pid_file = dir.path().join("pid.txt");
-    fs::write(
+    crate::common::template::script_env(
         &stub,
-        format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 60\n",
-            pid_file.display()
-        ),
-    )
-    .unwrap();
+        "#!/bin/sh\necho $$ > \"$STUB_PATH\"\nexec /bin/sleep 60\n",
+        &[("STUB_PATH", pid_file.to_str().unwrap())],
+    );
     let error = cmux
         .preflight_detached_within(&environment, Duration::from_millis(300))
         .unwrap_err();
@@ -328,17 +312,12 @@ fn the_cmux_adapter_marks_a_workspace_and_unpins_it_before_closing() {
     let dump = dir.path().join("args.txt");
     let stub = dir.path().join("cmux-stub");
     // The unpin of `GONE` and the close of `STUCK` fail.
-    fs::write(
+    crate::common::template::script_env(
         &stub,
-        format!(
-            "#!/bin/sh\nprintf '%s ' \"$@\" >> '{}'\necho >> '{}'\ncase \"$*\" in *'unpin --workspace GONE') exit 1 ;; 'workspace close STUCK') exit 1 ;; 'workspace close'*) echo \"OK workspace:3\" ;; *) echo OK ;; esac\n",
-            dump.display(),
-            dump.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\nprintf '%s ' \"$@\" >> \"$STUB_PATH\"\necho >> \"$STUB_PATH\"\ncase \"$*\" in *'unpin --workspace GONE') exit 1 ;; 'workspace close STUCK') exit 1 ;; 'workspace close'*) echo \"OK workspace:3\" ;; *) echo OK ;; esac\n",
+        &[("STUB_PATH", dump.to_str().unwrap())],
+    );
+
     let cmux = Cmux { executable: stub };
     let calls = || {
         let calls = fs::read_to_string(&dump).unwrap_or_default();

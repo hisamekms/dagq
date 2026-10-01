@@ -45,7 +45,7 @@ fn stub_codex(fx: &Fixture, mode: &str, verdict: &Value) -> PathBuf {
     fs::write(dir.join("codex-mode"), mode).unwrap();
     let script = format!(
         r#"#!/bin/sh
-DIR='{dir}'
+DIR="${{0%/*}}"
 [ "$1" = --version ] && {{ echo "codex-cli 0.155.1"; exit 0; }}
 for arg in "$@"; do printf '%s|' "$arg" | tr '\n' ' '; done >> "$DIR/codex-args.txt"
 printf '\n' >> "$DIR/codex-args.txt"
@@ -72,11 +72,9 @@ printf '{{"timestamp":"%s","type":"turn_context","payload":{{"model":"{CODEX_MOD
 cat "$DIR/codex-reply.jsonl"
 printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
 "#,
-        dir = dir.display(),
     );
-    fs::write(&stub, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&stub, script);
+
     stub
 }
 

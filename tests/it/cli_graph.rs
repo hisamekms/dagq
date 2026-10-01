@@ -2,7 +2,6 @@
 //! and the SVG drawn by a stub `d2` found on PATH, or why there is none.
 
 use std::{
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
@@ -27,8 +26,7 @@ fn invoke_with_bin(db: &Path, bin: &Path, args: &[&str]) -> Output {
 
 fn stub(bin: &Path, name: &str, body: &str) {
     let path = bin.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&path, format!("#!/bin/sh\n{body}\n"));
 }
 
 #[test]

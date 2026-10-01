@@ -31,7 +31,6 @@ use std::{fs, path::Path, sync::atomic::Ordering, time::Duration};
 /// decision 9); found, `up` reports where.
 #[test]
 fn up_refuses_a_run_env_program_its_path_does_not_find() {
-    use std::os::unix::fs::PermissionsExt;
     let mut fixture = fixture();
     let bin = fixture.repo.parent().unwrap().join("tools");
     fs::create_dir(&bin).unwrap();
@@ -61,8 +60,8 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
             .is_empty()
     );
     let tool = bin.join("sccache");
-    fs::write(&tool, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&tool, "#!/bin/sh\n");
+
     fixture.environment.path = format!("{}:/usr/bin:/bin", bin.display());
     let report = up(&fixture, &cmux, &launchd, &processes);
     assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
@@ -80,7 +79,6 @@ fn up_refuses_a_run_env_program_its_path_does_not_find() {
 /// for (every other test here).
 #[test]
 fn up_refuses_a_broker_mode_without_podman_on_its_path() {
-    use std::os::unix::fs::PermissionsExt;
     let mut fixture = fixture();
     let bin = fixture.repo.parent().unwrap().join("tools");
     fs::create_dir(&bin).unwrap();
@@ -144,8 +142,8 @@ fn up_refuses_a_broker_mode_without_podman_on_its_path() {
 
     // Found: `up` goes on and says where.
     let podman = bin.join("podman");
-    fs::write(&podman, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(&podman, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&podman, "#!/bin/sh\n");
+
     let report = up(&fixture, &cmux, &launchd, &processes);
     assert_eq!(report["broker"]["mode"], "preferred", "{report}");
     assert_eq!(report["broker"]["podman"], podman.to_str().unwrap());

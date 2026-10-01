@@ -135,3 +135,5 @@ mod source_repository;
 mod test_actor_env;
 mod worker_escalation;
 mod worker_model;
+
+mod stub_templates;

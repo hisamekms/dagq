@@ -137,7 +137,6 @@ fn a_resumed_session_gets_the_run_env_too() {
 /// program that is missing, so it waits with the claims until it is found.
 #[test]
 fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
-    use std::os::unix::fs::PermissionsExt;
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (_run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -162,8 +161,8 @@ fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
     assert!(payloads(&detail, "resume_started").is_empty());
 
     fs::create_dir_all(tool.parent().unwrap()).unwrap();
-    fs::write(&tool, "#!/bin/sh\nexec \"$@\"\n").unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&tool, "#!/bin/sh\nexec \"$@\"\n");
+
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -196,7 +195,6 @@ fn a_broken_dagq_toml_stops_provisioning_before_the_workspace() {
 
 #[test]
 fn a_missing_run_env_program_stops_claims_and_landings_until_it_is_found() {
-    use std::os::unix::fs::PermissionsExt;
     let (fixture, repo, db) = fixture();
     let tool = fixture.dir.path().join("bin").join("sccache");
     fs::write(
@@ -260,8 +258,8 @@ fn a_missing_run_env_program_stops_claims_and_landings_until_it_is_found() {
 
     // Found: the change is recorded, the attention ends and the task runs.
     fs::create_dir_all(tool.parent().unwrap()).unwrap();
-    fs::write(&tool, "#!/bin/sh\nexec \"$@\"\n").unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&tool, "#!/bin/sh\nexec \"$@\"\n");
+
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");

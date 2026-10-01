@@ -389,7 +389,6 @@ const FAST_SUPERVISOR: [&str; 6] = [
 /// same way; without a previous binary it refuses.
 #[test]
 fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue").join("queue.db");
     ok(&db, &["init"]);
@@ -421,8 +420,8 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
     }
     let stub = |name: &str, text: &str| {
         let path = dir.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::common::template::script(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n"));
+
         path
     };
     let (cmux, claude) = (stub("cmux", "PONG"), stub("claude", "stub 1.0"));
@@ -525,7 +524,6 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
 /// back and opens the `update_failed` ask; `status` shows each step.
 #[test]
 fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("queue").join("queue.db");
     ok(&db, &["init"]);
@@ -556,8 +554,8 @@ fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
     let seed = commit("seed.txt");
     let stub = |name: &str, text: &str| {
         let path = dir.path().join(name);
-        std::fs::write(&path, text).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::common::template::script(&path, text);
+
         path
     };
     let cmux = stub("cmux", "#!/bin/sh\nprintf 'PONG\\n'\n");

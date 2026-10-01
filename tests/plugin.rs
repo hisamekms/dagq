@@ -378,12 +378,12 @@ fn hook_commands_run_from_a_plugin_directory_with_a_space() {
     // A stand-in launcher that records its arguments.
     let log = root.join("calls.log");
     let stub = root.join("bin/dagq");
-    fs::write(
+    crate::common::template::script_env(
         &stub,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$STUB_PATH\"\n",
+        &[("STUB_PATH", log.to_str().unwrap())],
+    );
+
     let hooks = hooks_manifest();
     let mut commands = Vec::new();
     for groups in hooks["hooks"].as_object().unwrap().values() {
@@ -1531,7 +1531,7 @@ fn check_plugin_version_names_what_is_wrong_with_the_marketplace_entry_of_a_tag(
 /// building a second dagq.
 fn fake_binary(dir: &Path, name: &str, version: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(
+    crate::common::template::script(
         &path,
         format!(
             "#!/bin/sh\ncase \"$1\" in\n\
@@ -1539,9 +1539,8 @@ fn fake_binary(dir: &Path, name: &str, version: &str) -> PathBuf {
              locate) printf '{{\\n  \"db\": \"/fake/queue.db\"\\n}}\\n' ;;\n\
              esac\n"
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     path
 }
 

@@ -9,7 +9,6 @@ use common::{Bounded, WithoutActor};
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Output},
 };
@@ -35,16 +34,11 @@ fn json(bytes: &[u8]) -> Value {
 /// logging its arguments.
 fn fake_podman(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("podman");
-    let log = dir.join("podman.log");
-    fs::write(
+    crate::common::template::script(
         &path,
-        format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n  'machine list'*) echo '[]' ;;\nesac\nexit 0\n",
-            log.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        "#!/bin/sh\necho \"$*\" >> \"${0%/*}/podman.log\"\ncase \"$*\" in\n  'machine list'*) echo '[]' ;;\nesac\nexit 0\n",
+    );
+
     path
 }
 

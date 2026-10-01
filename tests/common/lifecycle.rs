@@ -68,17 +68,15 @@ pub fn fixture() -> Fixture {
     let claude = dir.path().join("claude-stub");
     // `plugin list --json` prints `<stub>.plugins` (see `list_plugins`),
     // and fails when there is none.
-    fs::write(
+    crate::common::template::script(
         &claude,
         "#!/bin/sh\nif [ \"$1\" = plugin ]; then printf '%s\\n' \"$*\" > \"$0.plugin-args\"; \
 pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.0\\n'\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     let cmux = dir.path().join("cmux-stub");
-    fs::write(&cmux, "#!/bin/sh\nprintf 'PONG\\n'\n").unwrap();
-    fs::set_permissions(&cmux, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&cmux, "#!/bin/sh\nprintf 'PONG\\n'\n");
+
     // Claude Code has accepted the folder trust dialog at the repository root.
     let claude_config = dir.path().join("claude.json");
     let root = repo.canonicalize().unwrap();

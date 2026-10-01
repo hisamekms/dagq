@@ -10,7 +10,6 @@ use dagq::domain::{
     worker::{Worker, WorkerMode},
 };
 use runtime_support::*;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn add_task(
@@ -187,8 +186,8 @@ fn a_task_of_a_worker_the_supervisor_cannot_run_is_deferred() {
 fn the_providers_are_recorded_on_the_registration() {
     let (dir, repo, db) = fixture();
     let codex = dir.path().join("codex-stub");
-    fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script(&codex, "#!/bin/sh\nexit 0\n");
+
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let stop = Arc::new(AtomicBool::new(false));
     let options = SuperviseOptions {

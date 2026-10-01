@@ -7,7 +7,7 @@ use crate::common;
 
 use common::cli::*;
 
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{fs, path::Path};
 
 /// A stub `cargo` that appends its arguments to `<stub>.args` and, unless
 /// `fails`, leaves the test's dagq binary at `<--root>/bin/dagq` (and no
@@ -22,12 +22,11 @@ fn stub_cargo(dir: &Path, fails: bool) -> std::path::PathBuf {
             env!("CARGO_BIN_EXE_dagq")
         )
     };
-    fs::write(
+    crate::common::template::script(
         &cargo,
         format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n{install}\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     cargo
 }
 

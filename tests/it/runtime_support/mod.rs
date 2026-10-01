@@ -181,7 +181,6 @@ impl Spawner for StubSpawner {
 /// when it names none, so no test reaches the host's cmux or its inbox
 /// (task 1128).
 pub fn fake_cmux_dir(db: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let dir = db.parent().unwrap().join("fake-cmux");
     let stub = dir.join("cmux");
     if !stub.exists() {
@@ -189,15 +188,11 @@ pub fn fake_cmux_dir(db: &Path) -> PathBuf {
         // Written aside and renamed, so a stub started at the same time
         // never runs half a script.
         let aside = dir.join(format!("cmux.{:?}", thread::current().id()));
-        fs::write(
+        crate::common::template::script(
             &aside,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
-                dir.join("calls").display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&aside, fs::Permissions::from_mode(0o755)).unwrap();
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n",
+        );
+
         fs::rename(&aside, &stub).unwrap();
     }
     dir
@@ -1391,7 +1386,6 @@ impl AgentProvider for HeadlessProvider {
 /// for the `idle_process` watch).
 pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
     let stub = dir.join("claude-headless");
-    let turns = dir.join("turn.sh");
     let script = format!(
         r#"#!/bin/sh
 MODE=; SESSION=; RUN_DIR=; PERMISSION=; PROMPT=
@@ -1437,12 +1431,11 @@ printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","per
 [ -n "$RESULTED" ] || result
 "#,
         dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
-        db = shell_join(&[db.display().to_string()]),
-        turns = shell_join(&[turns.display().to_string()]),
+        db = "\"$STUB_DB\"",
+        turns = "\"${0%/*}/turn.sh\"",
     );
-    fs::write(&stub, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script_env(&stub, script, &[("STUB_DB", db.to_str().unwrap())]);
+
     set_turns(dir, "say working");
     stub
 }
@@ -1474,7 +1467,6 @@ pub fn set_codex_model(dir: &Path, model: &str) {
 /// [RESULT] [EVIDENCE]`, `ask QUESTION`.
 pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let stub = dir.join("codex-headless");
-    let turns = dir.join("turn.sh");
     let script = format!(
         r#"#!/bin/sh
 MODE=start; THREAD=; PROMPT=; ROOTS=
@@ -1551,14 +1543,13 @@ fi
 [ -n "$ENDED" ] || result
 "#,
         dagq = shell_join(&[env!("CARGO_BIN_EXE_dagq").to_owned()]),
-        db = shell_join(&[db.display().to_string()]),
-        turns = shell_join(&[turns.display().to_string()]),
-        model = shell_join(&[dir.join("codex-model").display().to_string()]),
-        home = shell_join(&[dir.join(CODEX_HOME).display().to_string()]),
+        db = "\"$STUB_DB\"",
+        turns = "\"${0%/*}/turn.sh\"",
+        model = "\"${0%/*}/codex-model\"",
+        home = "\"${0%/*}/codex-home\"",
     );
-    fs::write(&stub, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::template::script_env(&stub, script, &[("STUB_DB", db.to_str().unwrap())]);
+
     set_turns(dir, "say working");
     stub
 }
@@ -1594,15 +1585,13 @@ pub fn claude_stub(db: &Path) -> PathBuf {
     let stub = db.parent().unwrap().join("claude-stub");
     // A live session's recovery job escalates (so the alert's ask opens);
     // anything else prints no verdict.
-    fs::write(
+    crate::common::template::script(
         &stub,
         format!(
             "#!/bin/sh\ncase \"$*\" in *\"{LIVE_RECOVERY}\"*) printf '%s\\n' '{ESCALATE}' ;; *) printf 'test provider\\n' ;; esac\n"
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    );
+
     stub
 }
 
