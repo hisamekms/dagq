@@ -2823,8 +2823,19 @@ fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gon
         move_to_window(cmux, &[&left, &live], &window.id);
     }
     for id in [&left, &live] {
-        let listed = listed_workspace(cmux, id).expect("the workspace is listed");
-        assert_eq!(listed["pinned"], true, "{listed}");
+        // As in assert_look, cmux can acknowledge pin before listing it.
+        let deadline = Instant::now() + WAIT_LIMIT;
+        loop {
+            let listed = listed_workspace(cmux, id).expect("the workspace is listed");
+            if listed["pinned"] == true {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "workspace {id} never became pinned: {listed}"
+            );
+            thread::sleep(Duration::from_millis(200));
+        }
     }
     eprintln!(
         "{} workspaces in {} windows",
