@@ -723,6 +723,7 @@ pub mod prediction;
 pub mod proposal;
 pub mod provider_switch;
 pub mod queue_hold;
+pub mod queue_service;
 pub mod reason;
 mod receipt;
 pub mod recheck;
@@ -1571,6 +1572,11 @@ pub enum AttentionNext {
     /// fixes what it names (a machine of theirs running, say). It ends once
     /// the broker runs again.
     BrokerStatus,
+    /// The supervisor could not keep the queue service running (it did not
+    /// start again within its limit, `queue_service_down`, ADR-t1233-4
+    /// decision 3): a person reads `dagq service status` and the service's
+    /// log, and runs `up` again. It ends once the service runs again.
+    QueueServiceStatus,
     /// The supervisor gave up on a run whose session it kept open through
     /// validation, review, revise or its `/exit`, and could not send that
     /// session `/exit` (a `runtime_error` with `lease_released` and
@@ -1627,6 +1633,7 @@ impl fmt::Display for AttentionNext {
             Self::CheckReview => f.write_str("check the failed review"),
             Self::FixPush => f.write_str("fix the push command"),
             Self::BrokerStatus => f.write_str("dagq broker status"),
+            Self::QueueServiceStatus => f.write_str("dagq service status"),
             Self::ExitSession => f.write_str("exit the session"),
         }
     }
@@ -1665,6 +1672,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::THROUGHPUT_REVIEW_FINISHED,
     kpi::push::KPI_PUSH_ABANDONED,
     broker::BROKER_UNHEALTHY,
+    queue_service::QUEUE_SERVICE_DOWN,
     "ask_opened",
     "ask_answered",
     "ask_delivery_failed",
@@ -1860,6 +1868,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         }
         (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
         (broker::BROKER_UNHEALTHY, _) => Some(AttentionNext::BrokerStatus),
+        (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
         }
@@ -2685,6 +2694,12 @@ mod attention_tests {
                 Some(BrokerStatus),
             ),
             ("broker_healthy", json!({}), None),
+            (
+                "queue_service_down",
+                json!({"reason": "start_failed"}),
+                Some(QueueServiceStatus),
+            ),
+            ("queue_service_running", json!({}), None),
             ("broker_started", json!({"port": 1}), None),
             (
                 "push_finished",
@@ -2914,6 +2929,7 @@ mod attention_tests {
         assert_eq!(CheckReview.to_string(), "check the failed review");
         assert_eq!(FixPush.to_string(), "fix the push command");
         assert_eq!(BrokerStatus.to_string(), "dagq broker status");
+        assert_eq!(QueueServiceStatus.to_string(), "dagq service status");
         assert_eq!(
             DecideWaiting.to_string(),
             "decide the waiting tasks in a planner"

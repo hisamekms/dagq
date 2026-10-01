@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 tags:
   - security
@@ -74,6 +74,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 
 - 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。Codexのworkerの`dagq ask`はqueueを開かずにrun dirへの要求になり（ADR-t813-3の決定3）、supervisorがそのrunのworkerとして同じ`StaticPolicy`の`ask.open`に通してから開く。supervisorはsandboxの外で動くので、workerが書くそのdirとrun dirを`O_NOFOLLOW`で開いた記述子に対してだけ扱い、linkを辿らず、通常のfileでないentryは読みも動かしもしない（`ask-requests/`の取り込みではworkerの代わりにrunのdirの外を読み書きしない。run dirの他のfileはまだlinkを辿る。[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「まだ無いもの」。commandもqueueを要らない同じ検査を先に行い、通らなければすぐに拒む）（policyの拒否は`authorization_denied`（roleは`worker`）と、runの`ask_request_taken`（`refused`）に残る。[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
+- queue service（[Queue service](queue-service.md)）は、`ask`・`show`・`note`のユースケースを、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。今の段ではworkerとjobはまだserviceを使わず、DBを直接開く（goal 82の段(3)で切り替える）
 - 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、eventには記録しない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job）の`permissions.deny`には、roleが持たないcommandの`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
 
@@ -132,7 +133,7 @@ inboxは全てのaskにanswerでき、`dagq-recover`の手作業（`integrate`�
 capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`StaticPolicy`）はbackendを替えても変えない。sandboxやserviceは、同じ模型の上に強制の点を足すだけで、模型を作り直さない（ADR-t728-1の決定6）。
 
 1. **Podman（draftのgoal 38）**: `ExecutorBackend::Podman`は予約の名前で、今は`ensure_implemented`がerrorにし、選ばれたactorを起動しない（hostに黙って戻さない。fail closed）。最初に隔離するのは、最も広いworktreeを持ち信頼しないworkerで、`[actors.worker] backend = "podman"`の形で選ぶ。containerはrunのworktreeだけをmountし、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。予約のcapability（filesystem・network・secret）はこのbackendが強制する
-2. **queue service / broker（goal 38）**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookをworkerの環境から分けてwrapperのactorとして判定する
+2. **queue service / broker（goal 82・goal 38）**: DBの直接操作とenvの偽装を塞ぐには、AI actorがqueueのファイルに触れず、制御側のserviceにだけ依頼する形にする。serviceの土台（unix socket・APIのversion・tokenによるprincipalとservice側の判定・`ask`・`show`・`note`）はある（[Queue service](queue-service.md)、ADR-t1233-1・ADR-t1233-4）。host構成ではtokenのfileも同じユーザーが読めるので、助言的であることは変わらない（ADR-t1233-4決定5）。serviceは起動した制御側が発行した資格（actor idとrunに紐づくもの）でactorを識別し、`DAGQ_ROLE`を信用しない。判定は今と同じapplicationの境界（`Planning`・`Dialogue`・`Operation`・`Integrator`）で行い、wrapperとhookをworkerの環境から分けてwrapperのactorとして判定する
 3. **Integratorの分離**: pushの資格情報をIntegratorのプロセスだけに持たせ、supervisorとAI actorから外す
 4. **人しか出せない承認（I6）**: 承認の経路（別のterminal、署名、人の端末からの確認など）を決めてから、`answer_approval`のaskのanswerを人だけに限る
 

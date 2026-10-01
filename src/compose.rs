@@ -375,9 +375,39 @@ pub struct SuperviseOptions {
     /// loopback and [`crate::application::supervise::BROKER_HEALTH_INTERVAL`].
     /// Only a mode other than `disabled` uses them. Tests set them.
     pub broker: Option<BrokerOptions>,
+    /// Keep the queue's service running (ADR-t1233-4 decision 2): the
+    /// supervisor `up` starts gets it; `None` (a `--once` pass, the tests)
+    /// keeps none and holds nothing for it.
+    pub queue_service: Option<QueueServiceOptions>,
     /// Counts the supervisor loop's passes, one at the top of each; tests
     /// keep a clone and wait for passes past a threshold (task 1046).
     pub passes: Arc<AtomicU64>,
+}
+
+/// How the supervisor keeps the queue's service ([`SuperviseOptions::queue_service`]).
+#[derive(Debug, Clone)]
+pub struct QueueServiceOptions {
+    /// The binary the service runs: the supervisor's own.
+    pub executable: PathBuf,
+    /// The cmux a new ask notifies the inbox through.
+    pub cmux: PathBuf,
+    pub interval: Duration,
+    pub start_timeout: Duration,
+    /// Starts, looks at and stops the service instead of the system's
+    /// control of `executable`; tests set it.
+    pub control: Option<QueueServiceControlPort>,
+}
+
+/// The control [`QueueServiceOptions::control`] gives the supervisor.
+#[derive(Clone)]
+pub struct QueueServiceControlPort(
+    pub Arc<dyn crate::application::queue_service::QueueServiceControl>,
+);
+
+impl std::fmt::Debug for QueueServiceControlPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QueueServiceControlPort")
+    }
 }
 
 /// What [`SuperviseOptions::broker`] gives the supervisor's broker.
@@ -504,6 +534,7 @@ impl SuperviseOptions {
             codex_home: None,
             host_metrics: None,
             broker: None,
+            queue_service: None,
             passes: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -987,6 +1018,25 @@ pub fn supervise_with_reviewer(
         host_metrics,
         broker,
         broker_leftovers,
+        queue_service: options.queue_service.as_ref().map(|settings| {
+            crate::application::supervise::QueueServicePort {
+                control: settings.control.as_ref().map_or_else(
+                    || {
+                        Arc::new(
+                            crate::infrastructure::queue_service::SystemQueueService::new(
+                                &db,
+                                &settings.executable,
+                                &settings.cmux,
+                            ),
+                        )
+                            as Arc<dyn crate::application::queue_service::QueueServiceControl>
+                    },
+                    |port| port.0.clone(),
+                ),
+                interval: settings.interval,
+                start_timeout: settings.start_timeout,
+            }
+        }),
         layout,
     };
     supervisor::supervise(
@@ -1206,6 +1256,7 @@ impl OneShot {
         if matches!(role, None | Some(SessionRole::Inbox)) {
             status["inbox_watcher"] = self.inbox_watcher(db);
             status["broker"] = status_broker(db, queue);
+            status["queue_service"] = queue_service_view(db, Some(queue));
         }
         Ok(status)
     }
@@ -1246,6 +1297,7 @@ impl OneShot {
         let (schema, queue) = SqliteQueue::inspect_read_only(db)?;
         // The broker's mode and health, from a queue that can be read.
         let mut broker_view = None;
+        let mut service_view = None;
         let mut report = match queue {
             ReadOnlyQueue::Refused { binding, error } => {
                 if let Some(common_dir) = common_dir {
@@ -1262,6 +1314,7 @@ impl OneShot {
                     queue.assert_repository(common_dir)?;
                 }
                 broker_view = Some(broker_queue_view(db, &queue));
+                service_view = Some(queue_service_view(db, Some(&queue)));
                 let run_env = doctor_run_env(&queue, db).map_err(|error| format!("{error:#}"));
                 let mut report = health::doctor(
                     &queue,
@@ -1284,6 +1337,9 @@ impl OneShot {
         report["inbox_watcher"] = self.inbox_watcher(db);
         // The resource broker's podman and last recorded state (ADR-t827-3).
         report["broker"] = doctor_broker(db, broker_view.as_ref());
+        // The queue service (ADR-t1233-4): whether it answers, and its
+        // attention from a queue that can be read.
+        report["queue_service"] = service_view.unwrap_or_else(|| queue_service_view(db, None));
         // The host's `[update]`, with what was taken as its default
         // (ADR-t618-1 decision 3).
         report["release_update"] = serde_json::to_value(host_update(db))?;
@@ -2083,6 +2139,13 @@ same in one step",
                 })
             },
             broker: self,
+            queue_service: &|db, executable, cmux| {
+                Box::new(
+                    crate::infrastructure::queue_service::SystemQueueService::new(
+                        db, executable, cmux,
+                    ),
+                )
+            },
         }
     }
 }
@@ -3176,6 +3239,90 @@ pub fn broker_status(location: &QueueLocation, podman: Option<&Path>) -> Result<
     value["podman"] = json!(executable);
     value["recorded"] = serde_json::to_value(state)?;
     Ok(value)
+}
+
+/// The queue service as `status`, `doctor` and `dagq service status` show
+/// it (ADR-t1233-4): what a look at its record and its socket found
+/// ([`crate::infrastructure::queue_service::probe`]), the API version this
+/// binary speaks, and the attention its latest event leaves standing
+/// (`queue_service_down`) when `queue` can be read.
+fn queue_service_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
+    use crate::domain::queue_service::{API_VERSION, QUEUE_SERVICE_ATTENTION_KINDS};
+    let queue_dir = db.parent().unwrap_or(Path::new("."));
+    let mut view = serde_json::to_value(crate::infrastructure::queue_service::probe(queue_dir))
+        .unwrap_or(Value::Null);
+    view["client_api_version"] = json!(API_VERSION);
+    view["attention"] =
+        match queue.map(|queue| queue.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS)) {
+            None => Value::Null,
+            Some(Ok(latest)) => json!(latest.is_some_and(|event| {
+                crate::domain::queue_service::attention_stands(Some(event.kind.as_str()))
+            })),
+            Some(Err(error)) => json!({"error": format!("{error:#}")}),
+        };
+    view
+}
+
+/// `dagq service status`: [`queue_service_view`], read without changing
+/// anything.
+pub fn queue_service_status(db: &Path) -> Value {
+    let queue = SqliteQueue::open_read_only(db).ok();
+    queue_service_view(db, queue.as_ref())
+}
+
+/// `dagq service start`: [`crate::application::queue_service::ensure`] with
+/// `executable`, recorded as `queue_service_started` (`by: service start`)
+/// unless one of this build already answered.
+pub fn queue_service_start(db: &Path, executable: &Path, cmux: &Path) -> Result<Value> {
+    let queue = SqliteQueue::open(db)?;
+    let control =
+        crate::infrastructure::queue_service::SystemQueueService::new(db, executable, cmux);
+    let report = crate::application::queue_service::ensure(
+        &control,
+        crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
+    )?;
+    if report["outcome"] != "reused" {
+        crate::application::RunLog::record_queue_event(
+            &queue,
+            EventKind::QueueServiceStarted,
+            json!({
+                "by": "service start",
+                "pid": report["service"]["pid"],
+                "build": report["service"]["build"],
+                "api_version": report["service"]["api_version"],
+                "socket": report["service"]["socket"],
+                "restart": false,
+                "replaced": report["replaced"],
+            }),
+        )?;
+    }
+    Ok(report)
+}
+
+/// `dagq service stop`: stop the queue's service, recorded as
+/// `queue_service_stopped` (`by: service stop`) when one ran. A supervisor
+/// at work starts it again at its next look.
+pub fn queue_service_stop(db: &Path) -> Result<Value> {
+    use crate::application::queue_service::QueueServiceControl;
+    let queue = SqliteQueue::open(db)?;
+    let control = crate::infrastructure::queue_service::SystemQueueService::new(
+        db,
+        Path::new("dagq"),
+        Path::new("cmux"),
+    );
+    Ok(
+        match control.stop(crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT)? {
+            Some(pid) => {
+                crate::application::RunLog::record_queue_event(
+                    &queue,
+                    EventKind::QueueServiceStopped,
+                    json!({"pid": pid, "by": "service stop"}),
+                )?;
+                json!({"outcome": "stopped", "pid": pid})
+            }
+            None => json!({"outcome": "not_running"}),
+        },
+    )
 }
 
 /// `dagq broker logs`: the last `tail` lines of the queue's container's

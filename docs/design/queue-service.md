@@ -1,0 +1,130 @@
+---
+id: design-queue-service
+type: design
+title: Queue service
+status: current
+created: 2026-10-02
+updated: 2026-10-02
+last_verified: 2026-10-02
+scope: runtime
+tags:
+  - security
+  - runtime
+related:
+  - adr-t1233-1
+  - adr-t1233-4
+  - adr-t1233-5
+  - adr-t728-1
+  - design-security
+  - design-authorization
+  - design-persistence
+  - design-supervisor-lifecycle-status
+  - design-supervisor-lifecycle-doctor
+---
+
+# Queue service
+
+hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
+
+今の段（goal 82の段(2)の前半、task 1234）: serviceがあり、`hello`・`ask`・`show`・`note`のユースケースを答える。**supervisor・inbox・planner・人のCLI・workerとjobのdagqは、今までどおりDBを直接開く。** workerとjobのdagqをクライアントモードにし、DBのpathを渡さないのは段(3)で、tokenの発行と受け渡し（claim・resume・jobの起動）もそこで足す。queue全体の読み取りのユースケース（`events`・`timeline`・`stats`など）はtask 1242が足す。
+
+名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・gitを仲介するresource broker（[Resource broker](broker.md)）とは別。
+
+## 置き場所と形
+
+queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`service/`（mode 0700）に置く（`src/infrastructure/queue_service.rs`）。
+
+| ファイル | 中身 |
+| --- | --- |
+| `queue.sock` | unix socket（mode 0600）。このpathがmacOSの`sun_path`の上限（103 bytes）を超えるqueue（長い一時ディレクトリの下のもの）では、代わりに`/tmp/dagq-<uid>/<queue dirのsha256の先頭16桁>.sock`（そのdirはこのユーザーのもので mode 0700、linkでないことを確かめる）に置く。どの呼び出し元もqueueのディレクトリから同じpathを求める（`socket_path`） |
+| `lock` | serviceが生きている間`flock`の排他（`LOCK_EX`）で持つ。2つ目のserviceは取れずに`a queue service already runs for this queue`で止まる。見る側（status・supervisor）は共有（`LOCK_SH`）で試し、取れれば「居ない」と判定する（見る側どうしは互いを妨げない）。止めるときにsignalを送るのは、`hello`が答えたpidか、記録のpidが今このqueueの`service serve`を動かしている（`ps`で確かめる）ときだけ |
+| `state.json` | 動いているserviceの記録（`pid`・`build`・`api_version`・`socket`・`started_at`）。止まるときに消す |
+| `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
+| `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
+| `credentials/<actor idのsha256>` | tokenの値（mode 0600）。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
+
+1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる（`MAX_REQUEST_BYTES`は1 MiB）。transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。要求ごとにDBへの接続を開き、principalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
+
+```json
+{"api_version": 1, "token": "<64 hex>", "use_case": "ask", "params": {...}}
+{"api_version": 1, "min_api_version": 1, "ok": true, "result": {...}}
+{"api_version": 1, "min_api_version": 1, "ok": false, "error": {"code": "authorization_denied", "message": "..."}}
+```
+
+## API versionと互換
+
+互換はqueueのschemaではなくAPIのversionで判定する（ADR-t1233-1決定2）。`API_VERSION`（今は1）と`MIN_API_VERSION`（今は1）を`src/domain/queue_service.rs`が持つ。
+
+- serviceは要求の`api_version`が`MIN_API_VERSION`〜`API_VERSION`の外なら、tokenも読まずに`api_version_mismatch`で断る
+- 答えは常に`api_version`と`min_api_version`を持ち、クライアントは自分の版がその範囲に入るか（`understands`）で、知らない版のserviceを使わない
+- 古い版の呼び出し元が読めない変更（欄の意味の変更・ユースケースの削除）で`API_VERSION`を上げ、新しい版の呼び出し元を断るまでの間は`MIN_API_VERSION`を据え置く
+
+## principalとtoken
+
+serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`と`task_id`）をtokenから決め、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
+
+- 発行: 制御側（supervisor）だけが`queue_service::issue`で発行する。AI actorにtokenを作るコマンドは無い。tokenは32 bytesの乱数のhex。発行できるprincipalはAI actor（`TrustLevel::UntrustedAgent`）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く。同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）
+- 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。加えてserviceは、principalがrunを名指すtokenを、そのrunの状態が`integrated`・`succeeded`・`failed`・`interrupted`のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`）
+- 断り: tokenが無い（`missing_token`）・発行していない値か失効した（`unknown_token`）・runが終わった（`run_ended`）要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（`use_case`・`reason`。tokenの値は書かない）に残す。actorはservice自身（role `supervisor`、id `queue-service:<pid>`。制御側の一部）
+- 段(3)で呼び出し元に渡すenvの名前は`DAGQ_SERVICE_SOCKET`（socketのpath）と`DAGQ_SERVICE_TOKEN_FILE`（tokenのfileのpath）。今はどちらも誰も設定しない
+- host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めて記録を正しくするためのもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
+
+## ユースケース
+
+`src/application/queue_service.rs`の`QueueService::handle`が、versionの検査、tokenの検査、ユースケースの順に行う。認可はCLIと同じapplicationの境界（`Dialogue`・`Gate`と`StaticPolicy`）を、principalのactorでservice側で通す。拒否はCLIと同じ`authorization_denied`（拒まれたprincipalがactor）に記録し、`authorization_denied`のcodeで返す。paramsが読めなければ`bad_request`、ユースケースの失敗（無いtask、読めないoptionなど）は`failed`。
+
+| use_case | params | 答え | capabilityとresource |
+| --- | --- | --- | --- |
+| `hello` | なし | `service`・`build`・`pid`・`api_version`・`min_api_version` | tokenを要らない（生存と版の確認だけ） |
+| `ask` | `dagq ask`と同じ: `kind`・`question`・`options`・`because`・`topics`・`task_id`・`run_id`・`finding_id` | `dagq ask`の出力 | `ask.open`（new ask）、`blocked`の`finding_id`つきは`finding.ask`。workerは自分のrunとtaskだけ、`worker_question`だけ。`asked_by`はprincipalのもの |
+| `show` | `id`・`full`（既定false）・`events`（既定5） | `dagq show`（`--full`）の出力 | `queue.read`（task）。goal 82では全roleがqueue全体を読める（ADR-t1233-5決定3） |
+| `note` | `task`・`run`・`goal`のどれか1つと`text`・`kind` | `dagq note`の出力 | `note.write`。workerは自分のtaskとrunだけ。`by`はprincipalのもの |
+
+`ask`はCLIと同じく、新しいaskをinboxにcmuxで知らせる（serviceの`--cmux`。見つからなくても知らせが失敗するだけでaskは開く）。
+
+## 起動と停止（ADR-t1233-4決定1・2）
+
+serviceは`dagq --db <db> service serve --cmux <cmux>`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。起動するときはactorを名指すenv（`DAGQ_ROLE`など）を外し、`setsid`で起動元のsessionから離し、もう1度forkして起動元の子でなくし（execで入れ替わるsupervisorにzombieを残さない）、`service.log`に出力を足す。起動したものは、このbuildのserviceが答えれば（競った別の起動元のものでも）成功とする。`SIGINT`・`SIGTERM`で受け付けを止めて終わる。queueのDBが消えれば（使い捨てのqueueの片付け）2秒以内に自分で終わる（`outcome: queue_gone`）。
+
+- `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。このbuildのserviceが答えれば`reused`、居なければ`started`、別のbuildか答えないものが居れば止めて`replaced`。起動できなければ`up`はsupervisorを起動せずに止まる。結果は`up`の出力の`queue_service`（`outcome`・`service`・`replaced`）で、`started` / `replaced`はevent `queue_service_started`（`by: up`）に残す。`UpOptions::queue_service`がfalse（`up`の他の段のtest）なら何もしない
+- supervisor: `up`が起動したsupervisor（`--once`でないもの）は`QUEUE_SERVICE_INTERVAL`（10秒）ごとにserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`、`by: supervisor`、2回目からは`restart: true`、入れ替えなら`replaced`）。起動し直しは`QUEUE_SERVICE_RESTART_WINDOW`（600秒）に`QUEUE_SERVICE_RESTARTS`（3回）まで。別のbuildの入れ替えは数えず、入れ替えて動いたbuildはそれ以後そのまま受け入れる（`install`が新しいバイナリを置いた後でexecの前のsupervisorは、自分のbuildと違う新しいserviceを入れ替え続けない）。drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）
+- serviceが居ない間、supervisorは新しいclaimと、queueのjob（plan review・goal review・observer・スループットの見直し）の起動を控える。走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
+- `down`: supervisorが居なければ（`--force`の後、`--wait`のdrainの後も）serviceを止めて`queue_service_stopped`（`by: down`）に残し、出力の`queue_service`に`{"outcome": "stopped", "pid"}`を出す。drainを待たない`down`は、signalの前に`queue_service_stop_requested`（`supervisors`・`by: down`）を書いて`{"outcome": "left_to_the_drain"}`を出し、drainを終えた最後のsupervisorが止める（`queue_service_stopped`、`by: supervisor`）。serviceが動いていなければ`queue_service`の欄を出さない
+- `install`と`install --allow-breaking`: `install`のdrain（`down --wait`）の後の`up`が新しいバイナリで起動する。drainしない引き継ぎでは、新しいバイナリのsupervisorの最初の見張りが入れ替える
+- 人の手: `dagq service start [--cmux]`（`service.lifecycle`。`ensure`と同じで`by: service start`）・`dagq service stop`（`by: service stop`。supervisorが動いていれば次の見張りで起動し直す）・`dagq service status`（`queue.read`）
+
+## 落ちたときの知らせ（ADR-t1233-4決定3）
+
+supervisorが起動し直せなかった（`start_failed`）か、上限に達した（`restart_limit`）ときは、queueのattention `queue_service_down`（`reason`・`message`・`supervisor`）をDBに直接書く（serviceを通らない）。inboxの`watch`と`status`はDBを直接読むので、serviceが落ちても届く。1つの失敗につき1回で、serviceがまた動けば（`queue_service_started`・`queue_service_running`）消える。attentionは`kind: queue_service_down`・`status`にその`reason`・`next: dagq service status`・`last_error`に`message`（`run_id` / `task_id`はnull）。人は`dagq service status`と`service.log`を見て、`up`か`service start`を打ち直す。supervisorも居ないときは今までどおり`restart supervisor`が出る。
+
+段(3)以降のクライアントモードのdagqは、serviceに届かないときに届かないことの分かるerrorを返し、DBを直接開くことへ戻らない（ADR-t1233-1決定7）。
+
+## statusとdoctor
+
+`status`（`--role`なしと`--role inbox`）・`doctor`・`dagq service status`は`queue_service`を出す（`compose::queue_service_view`）。
+
+```json
+{"state": "running", "socket": "<queue dir>/service/queue.sock", "pid": 4242, "build": "0.4.0-dev+abc", "api_version": 1, "min_api_version": 1, "build_matches": true, "started_at": 1790000000, "client_api_version": 1, "attention": false}
+```
+
+- `state`: `running`（`hello`に答えた）・`stopped`（lockを誰も持たない）・`unreachable`（lockは持たれているが答えない。`error`に理由）
+- `pid`・`build`・`api_version`・`min_api_version`は`hello`の答え、答えなければ`state.json`の記録。`build_matches`はこのバイナリのbuild識別子と同じか
+- `client_api_version`はこのバイナリが話すAPIの版
+- `attention`は`queue_service_down`が立っているか（queueが読めなければnull）
+
+見るだけで、serviceを起動も停止もしない（socketへの`hello`を1回打つ）。
+
+## event
+
+queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`・`supervisor`・`service start`）・`pid`・`build`・`api_version`・`socket`・`restart`・`replaced`、supervisorが書くものは`supervisor`）・`queue_service_stopped`（`pid`・`by`（`down`・`supervisor`・`service stop`））・`queue_service_stop_requested`（`supervisors`・`by: down`）・`queue_service_down`（attention。`reason`・`message`）・`queue_service_running`（答えがまた返った）・`queue_service_unauthenticated`（`use_case`・`reason`）。
+
+## 権限
+
+`service start`・`service stop`・`service serve`は`up`・`down`と同じ`service.lifecycle`（`Operation::QueueService`。user・inbox・planner・supervisor）、`service status`は`queue.read`。workerとjobのClaudeの`permissions.deny`には`Bash(dagq service start:*)`などが入る（`DAGQ_COMMANDS`）。
+
+## まだ無いもの
+
+- 段(3): workerとjobのdagqのクライアントモード、claim・resume・jobの起動でのtokenの発行と受け渡し、runの終わりでのtokenのfileの片付け、Codexのsandboxからsocketへの到達（ADR-t1233-5決定4）
+- task 1242: queue全体の読み取りのユースケース（`events`・`timeline`・`stats`・`kpi`・`marks`・`search`・`related`・`findings`・`goal show`など）
+- goal 82の段(2)の後半: proposal・findingのユースケース
+- 段(4)〜(6)（goal 38）: queueのbroker、supervisorとCLIのservice経由化、integrateのverificationの隔離

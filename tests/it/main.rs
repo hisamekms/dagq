@@ -60,6 +60,7 @@ mod queue_proposals;
 mod queue_runs;
 mod queue_schema;
 mod queue_search;
+mod queue_service;
 mod queue_tasks;
 mod related;
 mod runtime_abandon;

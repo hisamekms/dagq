@@ -117,6 +117,8 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             startup_timeout: Duration::from_secs(5),
             handoff_timeout: Duration::from_secs(5),
             auto_update: false,
+            // The queue service's start has its own tests (queue_service).
+            queue_service: false,
             poll: Duration::from_millis(20),
         },
         _dir: dir,

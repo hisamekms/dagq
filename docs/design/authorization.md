@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - adr-t728-1
@@ -156,7 +156,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | --- | --- | --- |
 | `init` `migrate`（`--check`を含む） `rebind` | `queue.admin` | queue |
 | `install` / `auto-update` | `service.install` | queue |
-| `up` `down` `broker start` `broker stop` | `service.lifecycle` | queue |
+| `up` `down` `broker start` `broker stop` `service start` `service stop` `service serve` | `service.lifecycle` | queue |
 | `plan` | `planner.open` | queue |
 | `supervise` | `scheduler.supervise` | queue |
 | `observe`（`--history`を除く） | `observe.run` | queue |
@@ -193,6 +193,10 @@ host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserに�
 - **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れない（fieldがmoduleの外から見えない）ので、`GitRepository`のpushはIntegratorの外から呼べない
 
 host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
+
+### queue serviceのユースケース（service側）
+
+queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipal（role・actor id・run・task）をactorにして、`ask`と`note`を上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に通す。クライアントが名乗るroleは使わない。拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。tokenを発行するのは制御側だけで、AI actorにtokenを作るコマンドは無い。goal 82では読み取りを狭めず、全roleがqueue全体を読める（ADR-t1233-5決定3）。
 
 ### ほかのコマンド（CLIの入口）
 

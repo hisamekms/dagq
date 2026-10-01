@@ -4,8 +4,8 @@ type: design
 title: "`status`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -35,6 +35,7 @@ related:
 - 自動更新: `update_failed`のaskのうち、`retry` / `skip`と答えられ、`auto_update`のliveな登録が居るものは、supervisorが適用するので`applying the answer of ask N (runtime)`にする（[Auto-update](auto-update.md#auto-update)）。
 - push: `push_failed`を持つ`integrated`のrunのうち、その`push_failed`がqueue全体で最後の`push_finished`より後のもの（`runs_with_pending_push`）を`domain::run_attention`で`push main`にする。`kind`は`push_failed`、`last_error`はその`error`。taskは`completed`でも出る。後の`integrate`のpushが成功すればmainはそれまでの着地を含むので消える。`push_skipped`は消さない。手で`git push origin main`してもqueueには記録されないので、次の`push_finished`までは残る。
 - run env: queueの最新の`run_env_program_missing` / `run_env_program_found`が`run_env_program_missing`なら、`kind: run_env_program_missing`、`status: missing`、`next: install tool`、`last_error`にその`message`（`run_id` / `task_id`はnull）。supervisorは見つかるまでclaimも着地もしない（[Run environment](run-environment.md#runenvが名指すプログラムの検査)）。
+- queue service: queueの最新の`queue_service_down` / `queue_service_running` / `queue_service_started` / `queue_service_stopped`が`queue_service_down`なら、`kind: queue_service_down`、`status`にその`reason`（`start_failed`・`restart_limit`）、`next: dagq service status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。serviceがまた動けば消える（[Queue service](../queue-service.md#落ちたときの知らせadr-t1233-4決定3)）。
 - broker: queueの最新の`broker_unhealthy` / `broker_healthy` / `broker_started` / `broker_stopped`が`broker_unhealthy`なら、`kind: broker_unhealthy`、`status`にその`reason`（`unhealthy`・`machine_busy`・`podman_missing`など）、`next: dagq broker status`、`last_error`にその`message`（`run_id` / `task_id`はnull）。brokerが動けば（`broker_started`・`broker_healthy`）消える（[Broker](../broker.md#supervisorの統合)）。
 - KPIのpush: queueの最新の`kpi_push_sent` / `kpi_push_abandoned`が`kpi_push_abandoned`なら、`kind: kpi_push_abandoned`、`status: failed`、`reason_category: recovery_failed`、`next: fix the push command`、`last_error`にその`message`（`run_id` / `task_id`はnull）。次のpushが成功すると消える（[push](push.md#実行再試行失敗)）。
 - ask（[ADR-0022](../../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask / answer](ask.md#ask--answer--asks)）: closeされていないaskを`asks`表の順に並べる。未回答のものは`kind: ask_opened`、`status: open`、`next: answer ask <id>`、回答済みのものは`kind: ask_answered`、`status: answered`、`next: read the answer of ask <id> and close it`。ただし回答済みの`worker_question`は`delivering the answer of ask <id> (runtime)`か`send the answer of ask <id> to the worker and close it`（[workerの質問への回答の送信](worker-question-answer.md#workerの質問への回答の送信)）。回答済みの`approve_landing`で、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`のどれかなら`applying the answer of ask <id> (runtime)`（supervisorが適用する。[Review](review.md#review-supervisor)の6）。項目は`ask_id`を持ち、`run_id`はaskのrun（taskだけのaskはnull）、`last_error`はnull。
@@ -44,3 +45,5 @@ related:
 `status`（`--role`なし）と`status --role inbox`は`inbox_watcher`も返す（[ADR-t906-1](../../adr/2026-09-28-t906-1-guarantee-the-inbox-watch.md)）: `{state（alive / absent）, watching, last_seen_at, absent_secs, grace_secs}`。`watch --role inbox`がqueueのディレクトリの`inbox-watchers/`に残した記録を`application::inbox_watcher::judge`で判定したもので、heartbeatの新しさで決まり、記録のpidのprocessが居ない・開始時刻が合わない記録はheartbeatが新しくても数えない（task 927。`--until-attention`のtimeoutの無いwatchはheartbeatだけで判定する。閾値と猶予は[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）。`--role planner`は返さない。入口は`OneShot::status_of`で、時刻は`OneShot`の`Clock`（testはfakeのclockを渡す）。pluginのStop hookは`watching`が0のinboxのturnの終わりを止める（[plugin integration](../plugin-integration.md)）。
 
 `status`（`--role`なし）と`status --role inbox`は、resource brokerの`broker`も返す（`compose::status_broker`。`doctor`の`broker`も同じ`mode`・`health`・`active_tokens`を持つ。欄の全体は[Broker](../broker.md#status-と-doctor)）: `mode`は、queueがbindしたcheckoutの`dagq.toml`の`[broker]`を`host.toml`で落としたもの（`disabled`・`preferred`・`required`。読めなければ`{"error"}`）。`health`は`{state, reason, at}`で、queueの最新の`broker_started` / `broker_healthy` / `broker_unhealthy` / `broker_stopped`から`healthy`・`unhealthy`（`reason`はそのeventの`reason`）・`stopped`を、どれも無ければ`unknown`を出す（`domain::broker::health_report`。記録を読むだけで、podmanもbrokerへの要求も打たない）。`active_tokens`は、runが今持つbrokerのtokenの数（`<queue dir>/broker/active`の有効な印の数）。actorの`backend: host`・`enforcement: advisory`はbrokerの有無で変わらない。
+
+`status`（`--role`なし）と`status --role inbox`は、queue serviceの`queue_service`も返す（`compose::queue_service_view`。`doctor`と`dagq service status`も同じ）: `state`（`running`・`stopped`・`unreachable`）・`socket`・`pid`・`build`・`api_version`・`min_api_version`・`build_matches`・`started_at`・`client_api_version`・`attention`（`queue_service_down`が立っているか）。socketに`hello`を1回打つだけで、serviceを起動も停止もしない（[Queue service](../queue-service.md#statusとdoctor)）。

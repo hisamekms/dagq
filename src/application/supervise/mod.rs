@@ -125,6 +125,7 @@ mod plan_review;
 mod provider;
 mod push;
 mod queue_hold;
+mod queue_service;
 mod recheck;
 mod recovery;
 mod release;
@@ -146,6 +147,10 @@ pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub use self::host_metrics::HostMetricsPort;
+pub use self::queue_service::{
+    QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,
+    QUEUE_SERVICE_START_TIMEOUT, QueueServicePort,
+};
 pub use self::release::{RELEASE_LOOK, ReleasePort};
 pub use self::report::ReportPort;
 pub use self::update::{UPDATE_INTERVAL, UpdateSettings};
@@ -392,6 +397,9 @@ pub struct Ports<'a> {
     /// With the mode `disabled` only: the runs' tokens an earlier mode
     /// left, revoked with no podman (task 1125); `None` otherwise.
     pub broker_leftovers: Option<Arc<dyn crate::application::broker_run::RunTokens>>,
+    /// Keeps the queue's service running (ADR-t1233-4 decision 2); `None`
+    /// keeps none and holds nothing for it (a `--once` pass, the tests).
+    pub queue_service: Option<QueueServicePort>,
     pub layout: Layout,
 }
 
@@ -688,6 +696,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         moved: HashMap::new(),
         hold_continue: HashMap::new(),
         draining: false,
+        service_up: true,
         update: update::UpdateWatch::default(),
         utc_offset: settings.utc_offset,
         rechecks: recheck::Rechecks::default(),
@@ -706,6 +715,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         broker_port: ports.broker.clone(),
         broker_leftovers: ports.broker_leftovers.clone(),
         broker: broker::BrokerWatch::default(),
+        queue_service_port: ports.queue_service.clone(),
+        queue_service: queue_service::QueueServiceWatch::default(),
         push: push::PushWatch::default(),
         loads: HashMap::new(),
         defer: claim_defer::DeferWatch::default(),
@@ -886,6 +897,9 @@ struct Supervisor<'a> {
     /// This pass drains (a stop, a handoff, or claiming stopped after a
     /// provisioning failure): nothing may wait for the program to appear.
     draining: bool,
+    /// Whether the queue service ran at the last look, or no service is
+    /// kept (ADR-t1233-4 decision 2): new claims and jobs wait for it.
+    service_up: bool,
     /// The automatic update's look at main (ADR-0045 decision 17).
     update: update::UpdateWatch,
     /// The landing recheck running and the one due (ADR-0068).
@@ -907,6 +921,10 @@ struct Supervisor<'a> {
     broker_leftovers: Option<Arc<dyn crate::application::broker_run::RunTokens>>,
     /// The broker's job and what the supervisor knows of it.
     broker: broker::BrokerWatch,
+    /// Keeps the queue's service; `None` keeps none.
+    queue_service_port: Option<QueueServicePort>,
+    /// What the supervisor knows of the queue's service.
+    queue_service: queue_service::QueueServiceWatch,
     /// Reads the limit on the improvement proposals running.
     max_improvement_proposals: Arc<dyn Fn() -> Result<usize> + Send + Sync>,
     /// The report job and the day the reports were last found written.
@@ -1119,6 +1137,9 @@ impl Supervisor<'_> {
             // `down` stops sees no other one left (ADR-t827-3 decision 2).
             if result.is_ok() && options.stop.load(Ordering::SeqCst) {
                 self.stop_broker_after_down();
+                // The queue service after the supervisor (ADR-t1233-4
+                // decision 1).
+                self.stop_queue_service_after_down();
             }
         }
         result
@@ -1238,6 +1259,10 @@ impl Supervisor<'_> {
             // The tokens of the runs that ended are revoked, before a claim
             // can issue one.
             self.broker_sweep();
+            // The queue service looked at, started again or replaced
+            // (ADR-t1233-4 decision 2); while it is down no new run and no
+            // queue's job starts.
+            self.service_up = self.queue_service_pass(!stopping && self.claiming);
             if self.claiming && !stopping {
                 self.fill_slots(self.parallel, options.sweep_interval)?;
                 self.sample_candidates(self.parallel);
@@ -1271,10 +1296,14 @@ impl Supervisor<'_> {
             // no login or usage limit holds.
             self.throughput_review_pass(
                 options,
-                !self.no_claude && !stopping && self.claiming && self.queue_hold.is_none(),
+                !self.no_claude
+                    && !stopping
+                    && self.claiming
+                    && self.queue_hold.is_none()
+                    && self.service_up,
             );
             if !stopping && self.claiming {
-                if !self.no_claude && self.queue_hold.is_none() {
+                if !self.no_claude && self.queue_hold.is_none() && self.service_up {
                     self.start_observer_when_due(options);
                 }
                 self.auto_update_pass(options);
@@ -1284,12 +1313,13 @@ impl Supervisor<'_> {
             // pass, which claims them.
             // A login or usage limit that holds the queue starts no job
             // (task 437); one in progress is followed.
-            let starting = !stopping && self.claiming && self.queue_hold.is_none();
+            let starting =
+                !stopping && self.claiming && self.queue_hold.is_none() && self.service_up;
             let mut progressed = self.plan_review_pass(options, starting);
             // The goal review decides on the hold itself: one whose role
             // names its provider may run on Codex while Claude is held
             // (ADR-t1063-1 decision 5); one that names none waits as above.
-            progressed |= self.goal_review_pass(!stopping && self.claiming);
+            progressed |= self.goal_review_pass(!stopping && self.claiming && self.service_up);
             if self.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space or one a triage or resume waits
@@ -1386,6 +1416,11 @@ impl Supervisor<'_> {
         // decision 9; checked at the top of the pass); the runs in flight
         // and their reviews go on (resumes wait above).
         if self.run_env_missing || self.landing_unresolved {
+            return Ok(());
+        }
+        // A queue service that is down holds the new claims; the runs in
+        // flight go on (ADR-t1233-4 decision 2).
+        if !self.service_up {
             return Ok(());
         }
         // The runs in flight go on; only new claims wait (task 327).

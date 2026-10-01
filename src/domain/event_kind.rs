@@ -162,6 +162,12 @@ event_kinds! {
     PushFinished => "push_finished",
     PushSkipped => "push_skipped",
     QueueHoldApplied => "queue_hold_applied",
+    QueueServiceDown => "queue_service_down",
+    QueueServiceRunning => "queue_service_running",
+    QueueServiceStarted => "queue_service_started",
+    QueueServiceStopRequested => "queue_service_stop_requested",
+    QueueServiceStopped => "queue_service_stopped",
+    QueueServiceUnauthenticated => "queue_service_unauthenticated",
     ReceiptObserved => "receipt_observed",
     RecoveryFailed => "recovery_failed",
     RecoveryFinished => "recovery_finished",
@@ -395,6 +401,13 @@ impl EventKind {
                 // A provider's hold and its end (ADR-t813-2 decision 6).
                 | ProviderHeld
                 | ProviderReleased
+                // The queue service (ADR-t1233-4) is the queue's.
+                | QueueServiceDown
+                | QueueServiceRunning
+                | QueueServiceStarted
+                | QueueServiceStopRequested
+                | QueueServiceStopped
+                | QueueServiceUnauthenticated
         )
     }
 }
@@ -827,6 +840,18 @@ mod tests {
             (EventKind::PushFinished, "push_finished"),
             (EventKind::PushSkipped, "push_skipped"),
             (EventKind::QueueHoldApplied, "queue_hold_applied"),
+            (EventKind::QueueServiceDown, "queue_service_down"),
+            (EventKind::QueueServiceRunning, "queue_service_running"),
+            (EventKind::QueueServiceStarted, "queue_service_started"),
+            (
+                EventKind::QueueServiceStopRequested,
+                "queue_service_stop_requested",
+            ),
+            (EventKind::QueueServiceStopped, "queue_service_stopped"),
+            (
+                EventKind::QueueServiceUnauthenticated,
+                "queue_service_unauthenticated",
+            ),
             (EventKind::ReceiptObserved, "receipt_observed"),
             (EventKind::RecoveryFailed, "recovery_failed"),
             (EventKind::RecoveryFinished, "recovery_finished"),

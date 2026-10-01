@@ -4,8 +4,8 @@ type: design
 title: SQLite persistence
 status: current
 created: 2026-09-21
-updated: 2026-10-01
-last_verified: 2026-10-01
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: persistence
 related:
   - adr-t807-1
@@ -177,6 +177,11 @@ runtimeやjobが作ったdraftに立てるplanner（[ADR-0044](../adr/0044-findi
 - supervisorのreview（[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）はschemaを変えない。sessionを開いたまま検証に進むrunは`finish_supervision_live`で`running → validating`（`supervision_finished`の`session_live: true`、`exit_code: null`）、reviseで書き直したreceiptは`restart_validation`で`awaiting_integration → validating`にする（どちらもそのtokenのlease行を要求して更新する）。`awaiting_integration`のrunはreviewの間supervisorのlease行を持ち、adoptの対象になる（`runs_leased_by_others` / `adopt_run`）。`approve_landing`の`send_back` / `cancel`はlease行の無い`awaiting_integration`のrunだけを`needs_session` / `failed`にし、`landing_decided`を書く（`decide_landing`）。`approve_landing`の`ask_answered`は、runが`awaiting_integration`で回答が`land` / `send_back` / `cancel`のどれかなら`runtime_delivers: true`を持つ。
 - 時刻とID（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)の方針7と訂正）: `SqliteQueue`は`Generators`（applicationの`Clock`と`IdGenerator`の組）を持ち、`open` / `init`はinfrastructureの`SystemClock`（`SystemTime::now`）と`UuidGenerator`（`Uuid::new_v4`）を入れる。`with_generators`で差し替えられ、テストは固定時刻・固定IDを注入する（`tests/it/queue_runs.rs`のclaim、`tests/it/runtime_claim.rs`のleaseのstale判定と、壁時計を120秒飛ばした後の自分のleaseの更新）。runtimeがSQLの中で`strftime('now')` / `unixepoch()`を呼んで書いていた値（`tasks` / `goals`の`updated_at`、claimの`created_at`、`run_leases` / `supervisors` / `run_processes`の`heartbeat_at`、`supervisors.started_at`、`exited_at`、`workspace_closed_at`、`session_workspaces.created_at`、`asks`の`answered_at` / `closed_at`、integrateが`completed`にするtaskの`updated_at`）と、leaseの鮮度の判定（`heartbeat_at >= ?now - 30`、`adopt_run`などの`lease_is_stale(lease, now)`）の基準時刻は、すべてこの`Clock`から読んでbindする。1つの操作は時刻を1回読んで使い回す（claimはrunの`created_at`・taskの`updated_at`・最初のleaseの`heartbeat_at`を同じ時刻から作り、`heartbeat`は`supervisors`と`run_leases`に同じ値を書く）。`Clock::timestamp()`は`%Y-%m-%dT%H:%M:%fZ`（UTC、ミリ秒）、`Clock::now()`はUNIX秒で、列の型と書式はSQLiteが作っていたものと同じ。schemaの`DEFAULT (strftime(...,'now'))` / `DEFAULT (unixepoch())`は変えておらず、列を指定しない`INSERT`（`run_events.created_at`、`asks.created_at`、`run_processes`の登録時の時刻など）ではこれまでどおりDBが時刻を入れる。
 - 着地で読んだreceiptは`Receipt::check`を通った直後に`integration_receipt`イベント（`main`、receiptの`commit`、`receipt`にJSON全体。`follow_ups`を含む）で記録する（`record_runtime_event`、lease外）。着地に至らなかった試行でも残るので、`needs_session`をセッションが解消した後のreceipt（解消後のcommit、evidence、`summary`、`follow_ups`）は`validation_finished`ではなく、そのrunの最後の`integration_receipt`が持つ。専用テーブルや列は持たない。
+
+
+### queue service
+
+queue service（[Queue service](queue-service.md)、ADR-t1233-1決定2）も queue DBを開くプロセスの1つで、要求ごとに`SqliteQueue::open`で接続を開き、要求のprincipalのactor（`with_actor`）で書く。goal 82の段(2)ではsupervisor・inbox・planner・人のCLI・workerとjobのdagqもDBを直接開くので、serviceとそれらの書き込みは今までどおりSQLiteのtransactionとleaseの規則で並ぶ（ADR-t1233-1のConsequences）。serviceのファイル（socket・lock・`state.json`・token）はqueueのディレクトリの`service/`に置き、DBには置かない（migrationは要らない）。最終の姿（段(5)）ではserviceがDBを開く唯一のプロセスになり、互換はschemaではなくAPIのversionで判定する。
 
 ## Transactions and constraints
 

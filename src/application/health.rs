@@ -1036,6 +1036,28 @@ pub fn attention(
             next: AttentionNext::BrokerStatus,
         });
     }
+    // The queue service the supervisor could not keep running waits for a
+    // person until it runs again (ADR-t1233-4 decision 3): the supervisor
+    // writes it here, on the DB, not through the service.
+    if let Some(event) =
+        queue.latest_queue_event(&crate::domain::queue_service::QUEUE_SERVICE_ATTENTION_KINDS)?
+        && crate::domain::queue_service::attention_stands(Some(event.kind.as_str()))
+    {
+        let reason = event.payload.get("reason").and_then(Value::as_str);
+        let message = event.payload.get("message").and_then(Value::as_str);
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: reason.unwrap_or("down").into(),
+            kind: crate::domain::queue_service::QUEUE_SERVICE_DOWN.into(),
+            last_error: message.map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::QueueServiceStatus,
+        });
+    }
     // A proposal whose plan review failed, or whose planner did not answer
     // a revise, waits for a person outside any ask (ADR-0041 decisions 13,
     // 17); it is shown on the proposal's first task.

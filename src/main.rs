@@ -1201,6 +1201,13 @@ enum Command {
         #[command(subcommand)]
         command: BrokerCommand,
     },
+    /// The queue service: the host process that opens the queue for the callers given its
+    /// socket and a token, with use cases (ask, show, note) authorized on its side. `up` starts
+    /// it before the supervisor, the supervisor starts it again, and `down` stops it.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Bind the queue to the repository containing the working directory (or
     /// --repo) after the repository moved; the one command that changes the
     /// binding. Refused while a supervisor runs. Pass --db for a queue still
@@ -1355,6 +1362,29 @@ enum FindingCommand {
         id: i64,
         #[arg(long)]
         reason: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Report whether the queue service runs and answers, its pid, build, API version and
+    /// socket, and its attention, without changing anything.
+    Status,
+    /// Start the queue service of this binary unless one of its build answers, replacing one
+    /// of another build; `up` does this before the supervisor.
+    Start {
+        /// cmux the service notifies the inbox of a new ask through.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
+    /// Stop the queue service; `down` does this after the supervisor.
+    Stop,
+    /// Run the queue service in the foreground until SIGINT or SIGTERM (what `start`, `up`
+    /// and the supervisor run in the background). A second one for the same queue is refused.
+    Serve {
+        /// cmux the service notifies the inbox of a new ask through.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
     },
 }
 
@@ -1559,6 +1589,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             command:
                 BrokerCommand::Status { .. } | BrokerCommand::Logs { .. } | BrokerCommand::Audit { .. },
         }
+        | Command::Service {
+            command: ServiceCommand::Status,
+        }
         | Command::Notes { .. }
         | Command::Marks { .. }
         | Command::Findings { .. }
@@ -1586,6 +1619,10 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Down { .. }
         | Command::Broker {
             command: BrokerCommand::Start { .. } | BrokerCommand::Stop { .. },
+        }
+        | Command::Service {
+            command:
+                ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
         }
         | Command::Plan { .. }
         | Command::Supervise { .. }
@@ -1745,6 +1782,10 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::Broker {
             command: BrokerCommand::Start { .. } | BrokerCommand::Stop { .. },
         } => Operation::Broker,
+        Command::Service {
+            command:
+                ServiceCommand::Start { .. } | ServiceCommand::Stop | ServiceCommand::Serve { .. },
+        } => Operation::QueueService,
         Command::Plan { .. } => Operation::Plan,
         Command::Supervise { .. } => Operation::Supervise,
         // Starting a job of the supervisor's timer, as `observe` (ADR-t996-1).
@@ -2201,6 +2242,30 @@ fn execute(cli: Cli) -> Result<Value> {
         return one_shot.doctor(&db, full, common_dir.as_deref());
     }
     // The broker's container needs no queue state, only its paths.
+    if let Command::Service { command } = cli.command {
+        use dagq::infrastructure::adapters::executable;
+        return match command {
+            ServiceCommand::Status => Ok(dagq::compose::queue_service_status(&db)),
+            ServiceCommand::Start { cmux } => dagq::compose::queue_service_start(
+                &db,
+                &env::current_exe()?,
+                &executable(&cmux).unwrap_or(cmux),
+            ),
+            ServiceCommand::Stop => dagq::compose::queue_service_stop(&db),
+            ServiceCommand::Serve { cmux } => {
+                dagq::infrastructure::queue_service::serve(
+                    &dagq::infrastructure::queue_service::ServeOptions {
+                        db: db.clone(),
+                        // A missing cmux fails only an ask's notification.
+                        cmux: executable(&cmux).unwrap_or(cmux),
+                        generators: generators.clone(),
+                        stop: install_stop_signal()?,
+                        poll: Duration::from_millis(50),
+                    },
+                )
+            }
+        };
+    }
     if let Command::Broker { command } = cli.command {
         return match command {
             BrokerCommand::Status { podman } => {
@@ -2303,7 +2368,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Migrate { .. }
         | Command::Install { .. }
         | Command::Doctor { .. }
-        | Command::Broker { .. } => {
+        | Command::Broker { .. }
+        | Command::Service { .. } => {
             unreachable!()
         }
         Command::Add {
@@ -2940,6 +3006,15 @@ fn execute(cli: Cli) -> Result<Value> {
                 }),
                 // The host's Claude Code scratchpads (task 1100).
                 scratchpad_roots: None,
+                // A supervisor at work keeps the queue's service (ADR-t1233-4
+                // decision 2); a one-shot pass does not.
+                queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {
+                    executable: env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq")),
+                    cmux: cmux.clone(),
+                    interval: dagq::application::supervise::QUEUE_SERVICE_INTERVAL,
+                    start_timeout: dagq::application::supervise::QUEUE_SERVICE_START_TIMEOUT,
+                    control: None,
+                }),
                 ..SuperviseOptions::new(dagq::domain::slot_limits::DEFAULT_PARALLEL, once)
             };
             // Tests shorten the heartbeat and the pauses between passes
@@ -3025,6 +3100,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 startup_timeout: Duration::from_secs(30),
                 handoff_timeout: Duration::from_secs(handoff_timeout),
                 auto_update,
+                queue_service: true,
                 poll: Duration::from_millis(500),
             };
             one_shot.up(
@@ -3725,6 +3801,9 @@ mod tests {
             ("up", &[]),
             ("down", &[]),
             ("broker start", &[]),
+            ("service start", &[]),
+            ("service stop", &[]),
+            ("service serve", &[]),
             ("broker stop", &[]),
             ("plan", &[]),
             ("supervise", &[]),
@@ -3846,6 +3925,7 @@ mod tests {
         "broker status",
         "broker logs",
         "broker audit",
+        "service status",
         // Follow the queue's events (`queue.watch`).
         "watch",
         // Write a file out of the queue (`queue.export`), not the queue.
