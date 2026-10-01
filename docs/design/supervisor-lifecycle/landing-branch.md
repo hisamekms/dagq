@@ -4,8 +4,8 @@ type: design
 title: "Landing branch"
 status: current
 created: 2026-09-27
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-01
+last_verified: 2026-10-01
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -84,9 +84,9 @@ push = false
 | `remote`を書かず、`origin`が無い | pushしない（今までどおり） | `push_skipped`（`reason: "the repository has no remote origin"`） |
 | `remote`を書き、そのremoteが無い | 設定の誤り。着地は取り消さない | `push_failed`（`error`にremoteが無いこと） |
 | 着地の後に`[repository]`が読めない | pushしない。着地は取り消さない | `push_failed`（`error`に読めない理由、`remote`は`origin`） |
-| remoteが在る | `git push <remote> refs/heads/<branch>:refs/heads/<branch>` | 成功は`push_finished`、失敗は`push_failed` |
+| remoteが在る | `git push <remote> refs/heads/<branch>:refs/heads/<branch>` | 成功は`push_finished`。失敗してもremoteの先端に着地commitが含まれれば`push_finished`、含まれないか確認できなければ`push_failed` |
 
-- payloadは今の`remote`・`commit`（・`reason` / `error`、`push_failed`は`code: push_failed`も）に`branch`を足す。`push_failed`のattention（`push main`）と、runが`integrated`のまま残る扱いは変えない。人の手のpushは`git push <remote> <branch>`になる。
+- payloadは今の`remote`・`commit`（・`reason` / `error`、`push_failed`は`code: push_failed`も）に`branch`を足す。`push_finished`の`already_delivered`は通常の成功で`false`、失敗後にremoteへの到達を確認した成功で`true`。`push_failed`のattention（`push main`）と、runが`integrated`のまま残る扱いは変えない。人の手のpushは`git push <remote> <branch>`になる。
 - remote側のbranchの名前はローカルと同じで、別の名前へpushする設定は持たない。
 
 解決の結果は`remote`・`remote_source`（`config` / `default`）・`remote_exists`・`push`で表す。

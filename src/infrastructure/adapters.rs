@@ -2014,6 +2014,95 @@ impl MainRemote for GitRepository {
         );
         Ok(())
     }
+
+    fn contains_landed_commit(
+        &self,
+        remote: &str,
+        branch: &LandingBranch,
+        commit: &CommitSha,
+    ) -> Result<bool> {
+        let reference = branch.reference();
+        let (status, stdout, stderr) = capture(
+            Command::new(&self.git)
+                .current_dir(&self.common_dir)
+                .arg("--git-dir")
+                .arg(&self.common_dir)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args(["ls-remote", remote, &reference]),
+            PUSH_TIMEOUT,
+        )?;
+        ensure!(
+            status.success(),
+            "git ls-remote {remote} failed ({status}): {stderr}"
+        );
+        let Some(head) = stdout.lines().find_map(|line| {
+            let (sha, name) = line.split_once('\t')?;
+            (name == reference).then_some(sha)
+        }) else {
+            return Ok(false);
+        };
+        let head = object_id(head, "remote branch head")?;
+        let has_object = |sha: &CommitSha| -> Result<bool> {
+            let (status, _, stderr) = capture(
+                Command::new(&self.git)
+                    .current_dir(&self.common_dir)
+                    .arg("--git-dir")
+                    .arg(&self.common_dir)
+                    .args(["cat-file", "-e", &format!("{}^{{commit}}", sha.as_str())]),
+                Duration::from_secs(30),
+            )?;
+            match status.code() {
+                Some(0) => Ok(true),
+                Some(1) => Ok(false),
+                _ => bail!("git cat-file failed ({status}): {stderr}"),
+            }
+        };
+        if !has_object(&head)? {
+            // Fetch into the object store without touching FETCH_HEAD, which
+            // other landings may be using at the same time.
+            let (status, _, stderr) = capture(
+                Command::new(&self.git)
+                    .current_dir(&self.common_dir)
+                    .arg("--git-dir")
+                    .arg(&self.common_dir)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .args([
+                        "fetch",
+                        "--no-write-fetch-head",
+                        "--no-tags",
+                        remote,
+                        &reference,
+                    ]),
+                PUSH_TIMEOUT,
+            )?;
+            ensure!(
+                status.success(),
+                "git fetch {remote} failed ({status}): {stderr}"
+            );
+            ensure!(
+                has_object(&head)?,
+                "remote branch head {head} is unavailable after fetch"
+            );
+        }
+        let (status, _, stderr) = capture(
+            Command::new(&self.git)
+                .current_dir(&self.common_dir)
+                .arg("--git-dir")
+                .arg(&self.common_dir)
+                .args([
+                    "merge-base",
+                    "--is-ancestor",
+                    commit.as_str(),
+                    head.as_str(),
+                ]),
+            Duration::from_secs(30),
+        )?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("git merge-base failed ({status}): {stderr}"),
+        }
+    }
 }
 
 pub struct Cmux {

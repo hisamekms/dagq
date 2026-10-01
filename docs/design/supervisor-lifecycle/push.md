@@ -4,8 +4,8 @@ type: design
 title: "KPIのpush（目標割れの記録とホストのコマンドへの通知）"
 status: current
 created: 2026-09-27
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-01
+last_verified: 2026-10-01
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -19,7 +19,7 @@ related:
 
 [ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定18（目標割れの始まりと解消のevent）・22・23の実装（task 432）。supervisorが日次の[レポート](report.md)を書いた後に、目標割れの始まりと解消をqueueのeventに記録し、ホストの設定に書いたコマンドがあれば、日次・週次のまとめと目標割れの即時通知をそのコマンドのstdinに渡す。runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookのURLやtoken）はrepositoryにもeventにも入らない。
 
-ここのpushはホストのコマンドへの通知で、着地したbranchのGitのpushではない。着地したbranchのpushは`Integrator`だけが行う（[`integrate`](integrate.md)の9、[Authorization](../authorization.md#着地とpushintegrator)、ADR-t728-2）。
+ここのpushはホストのコマンドへの通知で、着地したbranchのGitのpushではない。着地したbranchのpushは`Integrator`だけが行う（[`integrate`](integrate.md)の9、[Authorization](../authorization.md#着地とpushintegrator)、ADR-t728-2）。Gitのpushが失敗しても、remoteのbranchが着地commitをすでに含むと確認できたときは`push_finished`（payloadの`already_delivered: true`）として扱う。この規則はホストのコマンドへのKPI通知には適用しない。
 
 ## 設定（host.tomlの`[push]`）
 

@@ -742,6 +742,7 @@ fn push_main(
     let failed = |remote: &str, error: &anyhow::Error| {
         report(PushResult::Failed, remote, Some(format!("{error:#}")), None)
     };
+    let mut already_delivered = false;
     let report = match remote {
         None => {
             let config = repository.repository_config().unwrap_or_default();
@@ -772,7 +773,19 @@ fn push_main(
                     Ok(false) => report(PushResult::Failed, name, Some(missing_remote(name)), None),
                     Ok(true) => match main_remote.push_main(grant, name, onto) {
                         Ok(()) => report(PushResult::Pushed, name, None, None),
-                        Err(error) => failed(name, &error),
+                        Err(error) => {
+                            match main_remote.contains_landed_commit(name, onto, commit) {
+                                Ok(true) => {
+                                    already_delivered = true;
+                                    report(PushResult::Pushed, name, None, None)
+                                }
+                                Ok(false) => failed(name, &error),
+                                Err(check_error) => {
+                                    warn!(op = "push", run_id = %run_id, error = %format_args!("{check_error:#}"), "could not check remote after failed push");
+                                    failed(name, &error)
+                                }
+                            }
+                        }
                     },
                     Err(error) => failed(name, &error),
                 }
@@ -782,7 +795,7 @@ fn push_main(
     let (kind, payload) = match report.outcome {
         PushResult::Pushed => (
             EventKind::PushFinished,
-            json!({"remote": report.remote, "branch": report.branch, "commit": commit}),
+            json!({"remote": report.remote, "branch": report.branch, "commit": commit, "already_delivered": already_delivered}),
         ),
         PushResult::Skipped => (
             EventKind::PushSkipped,

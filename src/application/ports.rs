@@ -968,6 +968,14 @@ pub trait MainRemote {
         remote: &str,
         branch: &crate::domain::landing_branch::LandingBranch,
     ) -> Result<()>;
+    /// After a failed push, whether the remote branch already contains the
+    /// commit landed by this run. An error leaves the push failed.
+    fn contains_landed_commit(
+        &self,
+        remote: &str,
+        branch: &crate::domain::landing_branch::LandingBranch,
+        commit: &crate::domain::CommitSha,
+    ) -> Result<bool>;
 }
 
 /// The one `CMUX_*` variable a detached process may carry: cmux's CLI

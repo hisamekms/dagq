@@ -14,6 +14,8 @@ struct TestRemote {
     missing: bool,
     config_error: Option<String>,
     failure: Option<String>,
+    contains: bool,
+    check_error: Option<String>,
     pushes: Mutex<Vec<String>>,
 }
 
@@ -41,6 +43,18 @@ impl MainRemote for TestRemote {
             None => Ok(()),
         }
     }
+
+    fn contains_landed_commit(
+        &self,
+        _: &str,
+        _: &dagq::domain::landing_branch::LandingBranch,
+        _: &dagq::domain::CommitSha,
+    ) -> Result<bool> {
+        if let Some(error) = &self.check_error {
+            bail!("{error}");
+        }
+        Ok(self.contains)
+    }
 }
 
 fn integrate_with(db: &Path, repo: &Path, remote: Option<&dyn MainRemote>) -> Value {
@@ -61,7 +75,9 @@ fn integrate_pushes_the_landed_main_to_origin() {
     let landed = git_out(&repo, &["rev-parse", "main"]);
     assert_eq!(
         events_of(&db, run.id(), "push_finished"),
-        [json!({"remote": "origin", "branch": "main", "commit": landed})]
+        [
+            json!({"remote": "origin", "branch": "main", "commit": landed, "already_delivered": false})
+        ]
     );
     let status = runtime::status(&db).unwrap();
     assert!(run_attention_of(&status, run.id()).is_none(), "{status}");
@@ -83,6 +99,156 @@ fn integrate_pushes_the_landed_main_to_origin() {
     assert_eq!(
         (hit.task_id, hit.run_id.as_deref(), hit.status.as_deref()),
         (Some(1), Some(run.id().as_str()), Some("completed"))
+    );
+}
+
+#[test]
+fn a_rejected_push_already_on_the_remote_does_not_raise_attention() {
+    let (_dir, repo, db, run) = awaiting_run();
+    let remote = TestRemote {
+        failure: Some("cannot lock ref: is at newer but expected older".into()),
+        contains: true,
+        ..TestRemote::default()
+    };
+    let outcome = integrate_with(&db, &repo, Some(&remote));
+    assert_eq!(outcome["push"]["outcome"], "pushed");
+    let landed = git_out(&repo, &["rev-parse", "main"]);
+    assert_eq!(
+        events_of(&db, run.id(), "push_finished"),
+        [
+            json!({"remote": "origin", "branch": "main", "commit": landed, "already_delivered": true})
+        ]
+    );
+    assert!(events_of(&db, run.id(), "push_failed").is_empty());
+    assert!(run_attention_of(&runtime::status(&db).unwrap(), run.id()).is_none());
+}
+
+/// While the first landing is pushing, land and push the next run. The
+/// delayed first push then reports Git's stale-ref rejection.
+struct OvertakenPush {
+    db: PathBuf,
+    repo: PathBuf,
+    second: Mutex<Option<Value>>,
+}
+
+impl MainRemote for OvertakenPush {
+    fn has_remote(&self, remote: &str) -> Result<bool> {
+        Ok(remote == "origin")
+    }
+
+    fn push_main(
+        &self,
+        _: &dagq::application::integrate::PushGrant,
+        _: &str,
+        _: &dagq::domain::landing_branch::LandingBranch,
+    ) -> Result<()> {
+        let second = integrate_next(&self.db, &self.repo);
+        assert_eq!(second["push"]["outcome"], "pushed", "{second}");
+        *self.second.lock().unwrap() = Some(second);
+        bail!("cannot lock ref 'refs/heads/main': is at newer but expected older")
+    }
+
+    fn contains_landed_commit(
+        &self,
+        remote: &str,
+        branch: &dagq::domain::landing_branch::LandingBranch,
+        commit: &dagq::domain::CommitSha,
+    ) -> Result<bool> {
+        GitRepository::inspect(&self.repo)?.contains_landed_commit(remote, branch, commit)
+    }
+}
+
+#[test]
+fn a_later_landing_pushes_both_commits_before_the_first_push_finishes() {
+    let (dir, repo, db) = fixture();
+    let origin = dir.path().join("origin.git");
+    let made = Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(&origin)
+        .bounded_output()
+        .unwrap();
+    assert!(made.status.success());
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let a = add_file_task(
+        &mut queue,
+        &backend,
+        "first",
+        "a.txt",
+        "a",
+        &["test -f seed.txt"],
+    );
+    let b = add_file_task(
+        &mut queue,
+        &backend,
+        "second",
+        "b.txt",
+        "b",
+        &["test -f seed.txt"],
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
+    let run_a = queue.show(a).unwrap().runs[0].clone();
+    let run_b = queue.show(b).unwrap().runs[0].clone();
+    let first = queue.next_awaiting_integration().unwrap().unwrap();
+    let second = if first.id() == run_a.id() {
+        run_b
+    } else {
+        run_a
+    };
+    let remote = OvertakenPush {
+        db: db.clone(),
+        repo: repo.clone(),
+        second: Mutex::new(None),
+    };
+    let outcome = runtime::integrate(&db, IntegrateTarget::Next, &repo, Some(&remote)).unwrap();
+    assert_eq!(outcome["run"]["id"], json!(first.id()));
+    assert_eq!(outcome["push"]["outcome"], "pushed");
+    assert_eq!(
+        remote.second.lock().unwrap().as_ref().unwrap()["run"]["id"],
+        json!(second.id())
+    );
+    let first_commit = queue.show(first.task_id()).unwrap().runs[0]
+        .result_commit()
+        .unwrap()
+        .as_str()
+        .to_owned();
+    let second_commit = git_out(&repo, &["rev-parse", "main"]);
+    assert_ne!(first_commit, second_commit);
+    assert_eq!(git_out(&origin, &["rev-parse", "main"]), second_commit);
+    assert_eq!(
+        git_out(&repo, &["rev-parse", &format!("{second_commit}^")]),
+        first_commit
+    );
+    assert_eq!(
+        events_of(&db, first.id(), "push_finished")[0]["already_delivered"],
+        true
+    );
+    assert!(events_of(&db, first.id(), "push_failed").is_empty());
+    assert!(run_attention_of(&runtime::status(&db).unwrap(), first.id()).is_none());
+}
+
+#[test]
+fn a_failed_remote_check_keeps_the_original_push_failure() {
+    let (_dir, repo, db, run) = awaiting_run();
+    let remote = TestRemote {
+        failure: Some("authentication failed".into()),
+        check_error: Some("remote unavailable".into()),
+        ..TestRemote::default()
+    };
+    let outcome = integrate_with(&db, &repo, Some(&remote));
+    assert_eq!(outcome["push"]["outcome"], "failed");
+    assert_eq!(outcome["push"]["error"], "authentication failed");
+    assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
+    assert_eq!(
+        run_attention_of(&runtime::status(&db).unwrap(), run.id()).unwrap()["kind"],
+        "push_failed"
     );
 }
 
@@ -220,6 +386,47 @@ fn git_adapter_pushes_main_to_a_bare_origin() {
     assert_eq!(events_of(&db, run.id(), "push_failed").len(), 1);
 }
 
+#[test]
+fn git_adapter_checks_whether_a_later_remote_head_contains_the_landing() {
+    let (dir, repo, db, _run) = awaiting_run();
+    let origin = dir.path().join("origin.git");
+    let made = Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(&origin)
+        .bounded_output()
+        .unwrap();
+    assert!(made.status.success());
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    integrate(&db, 1, &repo).unwrap();
+    let first = git_out(&repo, &["rev-parse", "main"]);
+    git(&repo, &["commit", "--allow-empty", "-m", "later landing"]);
+    let second = git_out(&repo, &["rev-parse", "main"]);
+    git(&repo, &["push", "origin", "main"]);
+    let adapter = GitRepository::inspect(&repo).unwrap();
+    let branch = dagq::domain::landing_branch::LandingBranch::main();
+    let first_commit = dagq::domain::CommitSha::parse(first.clone(), "first").unwrap();
+    let second_commit = dagq::domain::CommitSha::parse(second.clone(), "second").unwrap();
+    assert!(
+        adapter
+            .contains_landed_commit("origin", &branch, &first_commit)
+            .unwrap()
+    );
+
+    // The remote now advances on a different line. The second landing is
+    // absent, even though the remote has a branch named main.
+    git(&repo, &["reset", "--hard", &first]);
+    git(&repo, &["commit", "--allow-empty", "-m", "other history"]);
+    git(&repo, &["push", "--force", "origin", "main"]);
+    assert!(
+        !adapter
+            .contains_landed_commit("origin", &branch, &second_commit)
+            .unwrap()
+    );
+}
+
 /// `[repository]` of dagq.toml steers the real adapter's push
 /// (ADR-t615-1): `remote` pushes to that remote, `push = false` skips the
 /// push without looking at the remote, and a `remote` the repository does
@@ -269,7 +476,9 @@ fn the_push_follows_the_repository_table_of_dagq_toml() {
     );
     assert_eq!(
         events_of(&db, run.id(), "push_finished"),
-        [json!({"remote": "upstream", "branch": "main", "commit": landed})]
+        [
+            json!({"remote": "upstream", "branch": "main", "commit": landed, "already_delivered": false})
+        ]
     );
 
     // push = false: skipped with its own reason, origin untouched.
