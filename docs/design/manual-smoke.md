@@ -201,6 +201,54 @@ Codex の run の確認点ごとの観察と結論:
 - 手順 4 の `status` の `supervisors[].providers`（run の当時の値は記録に残らない）。
 - run の当時の `~/.codex/config.toml` の中身（前後を比べていない。更新時刻と今の中身だけ）。
 
+### 結果（2026-09-30、本番の Claude の記録から、task 1175）
+
+task 1102 の後、ask 224 で人が了承して planner が `--headless` を付けた次の 7 task が着地した。ask 214 と同じく使い捨ての queue は作らず、本番の記録に手順 6 を当てた。固定バイナリ `~/.local/bin/dagq`（`0.4.0-dev+0e8c4020daa113cddac40504c1a2980d3ea56649`）で、各 task の `show <ID> --full`、各 run の `events --run <RUN> --full --all`・`timeline <RUN>`、`stats --full`、`kpi --since 2026-09-30T00:00:00Z --until 2026-09-30T03:00:00Z --by provider` と `--by route` を読んだ。加えて run dir（`~/.local/share/dagq/77067154921b9014/runs/<RUN>/`）の `turns/`・`claude-headless-settings.json` と Git の記録を読んだ。queue の状態は変えていない。以下の時刻は UTC。
+
+| task | run ID | claim → integrated（2026-09-30） | 着地 commit | turn 数 |
+| --- | --- | --- | --- | --- |
+| 1097 | `b80aa96e-00af-4fbf-9dfc-2d311f366230` | 01:33:36 → 02:08:06 | `701ce4f9` | 1 |
+| 1096 | `b1adcaab-f8f5-497d-bf8e-c254f991d54c` | 00:33:03 → 00:50:46 | `0aec4d9d` | 1 |
+| 1042 | `934022a1-25ff-47b9-b619-4872779dc632` | 00:33:05 → 00:57:25 | `34447280` | 1 |
+| 1058 | `c6ef5297-f626-41a8-ac91-97cccd00e2f7` | 00:57:33 → 01:33:29 | `eb5c5d27` | 1 |
+| 1110 | `aeb46a29-d188-4fac-964f-267d80b2c3bb` | 02:08:14 → 02:09:25 | `5ddbf68e` | 1 |
+| 1107 | `4fa32d81-5aa5-41ee-8620-da278ff6b055` | 00:22:46 → 00:32:59 | `d33dfc9d` | 1 |
+| 1050 | `2d1f5abd-0c40-4cd7-8073-9f0ce058ae9a` | 00:57:33 → 02:01:25 | `530b32fb` | 2（revise 1 回） |
+
+**Claude Code は全 7 run・8 turn とも 2.1.283**（`run_claimed.provider_version`・`claude_version` と stream の `system/init.claude_code_version` が一致）。現在の host の版から推測した値ではない。claim 時の dagq は task 1107・1096・1042 が `b502eb9c`、1058・1050 が `d33dfc9d`、1097 が `34447280`、1110 が `20f6bd62` の dev build。
+
+| 確認点 | 観察（読んだコマンドと値） | 結論 |
+| --- | --- | --- |
+| task と run の状態 | 7 件の `show --full` が task `status: completed`、run `status: integrated`。各 `events` に表の commit の `run_integrated` と `task_status_changed`（in_progress→completed） | 全て着地した |
+| provider と切り替え | 7 件とも task `provider: claude`、run `requested_provider: claude`・`actual_provider: claude`。各 `events` の `provider_switched` は 0 件、各 `timeline.provider_switches: []`、`stats.runs[].provider_switches: 0` | 切り替え無し。切り替えの reason とフォールバックの実動作は未確認 |
+| 経路と claim | `show` と `timeline` の `worker_mode: headless`。7 件の `run_claimed` は `provider: claude`・`requested_provider: claude`・`worker_mode: headless`・`provider_version: 2.1.283`・`claude_version: 2.1.283`・`codex_version: 0.155.1`・`model: claude-opus-5-5` | Claude の非対話の経路で動いた |
+| turn の列 | 初回は 7 件とも `turn_started` の `turn: 1`・`resume: false`・`request: null`・`what: the task's prompt`・`session_id: <RUN>`。最初の prompt に `turn_requested` は無い。開始→終了の event ID は 1097: 48512→48592、1096: 48118→48193、1042: 48129→48199、1058: 48288→48437、1110: 48688→48703、1107: 48035→48040、1050: 48292→48420。8 turn 全て `turn_finished` は `outcome: succeeded`・`failure: null`・`exit_code: 0`・`permission_denials: 0`・`denied_tools: []`・`session_created: true`・`model: claude-opus-5-5`、`session_id` は run ID | 開始・終了・model・結果を記録できた。最初の turn に依頼の file が無いのも設計どおり |
+| revise の resume | 1050 の `review_finished`（48427）が `verdict: revise` → `turn_requested`（48433、`seq: 1`・`what: revise request`）→ `turn_started`（48434、`turn: 2`・`request: 1`・`resume: true`・`session_id: 2d1f5abd-0c40-4cd7-8073-9f0ce058ae9a`）→ `turn_finished`（48474、成功）→ review pass（48479）→ integrated（48633）。`timeline` に worker と revise の command 区間がある | 同じ session の revise を確認。run の再作成ではない |
+| answer・needs_session の resume | 全 7 件の `events --full --all` に `ask_opened`・`session_resumed` は無く、needs_session への遷移も無い。依頼は上の revise 1 件だけ。`stats.runs[].resumes: 0` は全 7 件（revise はこの欄の resume に数えない） | worker_question と answer、needs_session からの同じ session の resume は確かめていない。1050 でも質問は出なかった |
+| usage と tokens | 8 個の JSONL の最後の `result.usage` が各 `turn_finished.usage` と一致。`usage.input_tokens`・`cache_creation_input_tokens`・`cache_read_input_tokens`・`output_tokens` が `tokens.input`・`cache_creation`・`cache_read`・`output` に対応（下表）。`tokens_total: null`、`tokens.messages: 1`。`duration_ms` と `num_turns` も記録される | turn の usage と token 数を読めた。`num_turns` は CLI 内の turn 数で、dagq の turn の数ではない。費用には下記の旧記録の注意がある |
+| `turns/` の出力と依頼 | 全て stream-json。各 file に `system/init` と最後の `result`（`subtype: success`・`is_error: false`）が 1 件ずつあり、両方の `session_id` は run ID、init の `permissionMode: auto`。間に `assistant`・`user`・`rate_limit_event`・`system/thinking_tokens`、tool の進捗などがある。行数は下表。8 個の `.err` は空。全 7 dir の `limits.json` は `silence_secs: 900`・`limit_secs: 14400`、`exit` が残る。1050 だけ `request-000001.taken.json`（`seq: 1`・`what: revise request`）と `turn-000002.jsonl` があり、他の 6 dir に request は無い | stream と依頼・event が対応。resume 後の stream も同じ session ID |
+| 人の Claude の設定 | 全 7 run の `claude-headless-settings.json` に `permissions.deny`（`Bash(pkill:*)`・`Bash(killall:*)` など）と `autoMode.environment: ["$defaults"]` があり、hooks は無い。claim の 4 build を `git show <commit>:src/infrastructure/adapters.rs` で読み、`turn_command` の書き込み先が `run_dir.join(HEADLESS_SETTINGS)`、起動引数が `--settings <その file>` であることを確認。`~/.claude/settings.json` の現在の mtime は 2026-09-30T02:43:57.387735Z（7 run の終了後） | runtime の worker 起動が人の設定でなく run ごとの設定を書くことは、当時のコードと残った file で確認。実行前の設定の控え・書き込み監査が無いため、`~/.claude` 全体の不変や CLI 自身・他 session による更新の有無は証明できない |
+| stats の層 | `stats --full` の対象 7 run は全て `provider: claude`・`actual_provider: claude`・`route: headless`・`provider_version: 2.1.283`・`claude_version: 2.1.283`・`worker_model: claude-opus-5-5`。`turns.by_provider.claude` は計 8 turn・failed 0。1050 は count 2・secs 1849・tokens.total 11,508,379、他は count 1（下表） | provider・経路・turn が見える。revise の turn も含む |
+| kpi の層 | 指定した 00:00〜03:00 の窓では `--by provider` の `landings.provider=claude` が 16、`--by route` は `route=headless` が 7・`route=interactive` が 9。headless の `phase.work` は n 7・中央値 323 秒、`session_active.worker` は n 7・中央値 326 秒、`resumes_per_run` は n 7・value 0 | stats の対象 7 run と照合して Claude/headless の着地を確認。provider と route は別の切り口で、Claude の 16 件を全て headless と読まない |
+| `origin/main` の commit | `git log --format=%h --grep 'Dagq-Task: <ID>$' HEAD` は各 task に表の 1 commit。`git merge-base --is-ancestor <commit> origin/main` は 7 件とも 0。6 件に `push_finished` があるが、1097 は `push_failed`（48659、remote の main の ref lock 競合）で、その run の `push_finished` は無い | local の origin/main 参照には 7 commit が含まれる。1097 自身の push 成功とは言えない（live remote は問い合わせていない） |
+
+`turn_finished` と stream から読んだ turn ごとの値（tokens は input / cache_creation / cache_read / output の順。行数は `turn-NNNNNN.jsonl`、stats の秒は `turns.by_provider.claude.secs`）:
+
+| task / turn | tokens | duration_ms / num_turns | JSONL 行数 | stats 秒 / tokens.total（run 全体） |
+| --- | --- | --- | --- | --- |
+| 1097 / 1 | 52 / 85,486 / 2,060,689 / 12,197 | 560138 / 28 | 235 | 562 / 2,158,424 |
+| 1096 / 1 | 24 / 58,007 / 734,543 / 4,349 | 324556 / 12 | 58 | 326 / 796,923 |
+| 1042 / 1 | 32 / 74,384 / 1,151,169 / 6,454 | 324854 / 16 | 98 | 326 / 1,232,039 |
+| 1058 / 1 | 98 / 124,624 / 4,761,313 / 33,417 | 1699967 / 49 | 453 | 1701 / 4,919,452 |
+| 1110 / 1 | 10 / 59,008 / 280,380 / 2,148 | 32229 / 5 | 16 | 34 / 341,546 |
+| 1107 / 1 | 12 / 55,921 / 328,179 / 2,167 | 47933 / 6 | 23 | 50 / 386,279 |
+| 1050 / 1 | 120 / 165,175 / 7,626,404 / 44,474 | 1431499 / 63 | 450 | 1849 / 11,508,379（2 turn 合計） |
+| 1050 / 2 | 38 / 27,085 / 3,627,284 / 17,799 | 414080 / 19 | 102 | 同上 |
+
+旧記録の注意: 1050 の `turn_finished.cost_usd` は 1 回目 4.721233400000003、2 回目 6.019502200000002 で、stream の `result.total_cost_usd`（session の累計）をそのまま記録している。`stats.turns.by_provider.claude.tokens.cost_usd` は 10.740735 となり、turn の費用として足すと重複する。これは [非対話の worker の Claude の読み手](supervisor-lifecycle/headless-worker.md) に記載された task 1199 より前の記録で、修正後も過去の記録は補正しない。今回見た不一致と、修正後の実 resume の測定を receipt の follow_ups に残した。
+
+この 7 run では、Claude の着地と revise の同一 session の resume を確認できた。未確認なのは answer と needs_session の resume、provider が使えない場合の切り替え、設定の実行前後の比較、手順 1〜5・7・8 の使い捨て queue での操作。Codex 固有の rules・sandbox・ask-requests の確認点は今回の Claude の対象外で、task 1102 の未確認事項を解消したとはみなさない。
+
 ## 非対話の Claude の前提の確認
 
 非対話の Claude の経路（[非対話の worker](supervisor-lifecycle/headless-worker.md)）が前提にしていて、stub では確かめられない 3 点を、実 `claude -p` で確かめた（task 864、2026-09-30）。queue も supervisor も使わず、scratch の使い捨て repository `dagq-worker-t864-1e1fe057`（`git init -b main` と `seed.txt` の 1 commit）で `claude` を直接起動した。Claude Code は 2.1.285（`~/.local/bin/claude` の link 先 `~/.local/share/claude/versions/2.1.285`）。本番の queue・`~/.local/bin/dagq`・`~/.claude` の設定は変えていない（2. で `~/.claude/projects` に置いた transcript と、1. の turn が書いた transcript は、終わってから消した）。Claude Code の版を上げたとき、または読み手（`src/infrastructure/claude_turns.rs`）・turn の止め方（`headless_session.rs` の `stop_turn`）・`turn_session_exists` を変えたときに、同じ手順で確かめ直す。
