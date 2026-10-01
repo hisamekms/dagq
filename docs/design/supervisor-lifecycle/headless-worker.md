@@ -4,8 +4,8 @@ type: design
 title: "非対話のworker"
 status: current
 created: 2026-09-28
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -32,7 +32,7 @@ related:
 
 ## run dirの`turns/`
 
-`src/domain/turn.rs`が名前を決める。
+`src/domain/turn.rs`が名前を決める。supervisorとwrapperはrun dirと`turns/`をlinkを辿らずに開いた記述子でfileを扱う（task 1184）。通常のfileだけを上限付きで読み、書き込みは新規の一時fileからrenameし、turnの出力は新しいinodeの記述子へ渡す。link・FIFOの指す先を読み書きせず、FIFOのopenで待たない。idle markerとreceiptも同じ境界で扱う（[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)の「run dirの他のfile」）。
 
 | file | 書く側 | 中身 |
 | --- | --- | --- |
@@ -45,6 +45,19 @@ related:
 | `../ask-requests/<id>.json` / `.taken` | Codexのworkerの`dagq ask` / supervisor | askの要求と、取り込んだ印（run dirの直下の`ask-requests/`。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)） |
 
 supervisorは最初のsessionのworkspaceを開く前（`provision`）とresumeのworkspaceを開く前（`start_resume`）に`prepare_turns`を行い、`limits.json`を書き、前のsessionの終了の依頼と取られていない依頼を捨てる。turnの設定は`claude-headless-settings.json`（`permissions.deny`だけ。`SIGNAL_BY_NAME_DENIED`とworkerのroleの拒否、`autoMode`）で、`turn_command`がturnのたびに書く。
+
+task 1184でrun dirのI/Oを洗い出し、次の呼び出しを`agent_dir`の記述子に対する操作へ寄せた。通常のfileが読めない・書けない場合のrunの失敗の扱いは既存の経路を使う（不正な依頼ならwrapperはerrorで終了し、復旧へ渡る）。
+
+| 呼び出し | 対象と扱い |
+| --- | --- |
+| `supervise/headless.rs`・`headless_session.rs` → `LocalRunFiles` | 依頼・終了依頼・limits・prompt・idle markerと一時file。終了依頼は通常のfileだけを認める |
+| supervisorのsession・resume・revise・validation・review → `LocalRunFiles` | receipt、idle marker、設定・review material。全文は64MiBまで。非通常のidle markerはwarnして印なしとする |
+| `LocalSpawner`・`adapters::run_shell_to_log`・`diff_to_file` | turnのstdout/stderr・検証log・差分。新しいfileの記述子を子processに渡す |
+| `adapters::write_settings`・`turn_command`・`create` | Claudeの設定（Codexからの切り替え後も）とworkspaceの作成結果。安全な一時fileからrename |
+| `runtime_store::Refusals`・`sessions::work_breakdown` | 診断logへの追加。通常のfileを上限付きで読み、新しいinodeで置き換える。読めなければlogだけを欠く |
+| `broker_token`・`LocalRunFiles`のtree操作 | runのbroker設定と後始末。dirの列挙・子dirのopen・削除・大きさの集計も記述子に対して行い、linkを辿らない |
+
+queueのdirなどworkerが書けない場所と、workerが書くrun dir（直下の`turns/`・`broker/`など）を区別する。pathにqueueの`runs/`の下の部分（run dirとその中）があるときだけ（`agent_dir::in_run_dir`）、`LocalRunFiles`と`agent_dir`の`create_file`・`append`は記述子の操作を使う: ディレクトリの初回openが指定したdirとその親の2段をlinkとして拒み、最後の要素のfileもlinkを辿らず（`O_NOFOLLOW`と`AT_SYMLINK_NOFOLLOW`）、通常のfileだけを64MiBまで読み、書きはlinkを置き換える。それ以外のpath（queueのdirとDB、installしたバイナリやbrokerのclient、macOSの`/tmp`、linkにしたdata dir、scratchpad）はhostのもので、`std::fs`と同じくlinkを辿り、上限も当てない。`in_run_dir`はpathだけで決め、最初の`runs`という名前の要素の下を run dir とみなすので、queueより上に`runs`というdirがあるhostのpath（`/Users/x/runs/project/...`）もrun dirの扱い（linkを拒むだけで、辿る範囲は広がらない）になる。任意の深さのpathを安全にするAPIではない。`LocalRunFiles::copy`の元（runtimeのバイナリ）はruntimeのもので、linkを辿って読み、64MiBの上限を当てない。Claudeのdebug logのhookの失敗は`RunFiles::read_tail`で末尾だけを読むので、64MiBを超えるlogでも見つかる。treeの走査は開いたdirから`openat`で子へ進む。`ask-requests/`は既存の`open_agent_dir`と専用の上限・拒否のeventを使う。
 
 ## turnの記録
 

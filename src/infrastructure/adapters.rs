@@ -554,7 +554,8 @@ pub fn run_shell_to_log(
     log: &Path,
     timeout: Duration,
 ) -> Result<ExitStatus> {
-    let file = fs::File::create(log).with_context(|| format!("create {}", log.display()))?;
+    let file =
+        super::agent_dir::create_file(log).with_context(|| format!("create {}", log.display()))?;
     let mut child = Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
@@ -1967,7 +1968,8 @@ impl Repository for GitRepository {
         GitRepository::diff_numbers(self, base, head)
     }
     fn diff_to_file(&self, base: &str, head: &str, path: &Path) -> Result<()> {
-        let file = fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+        let file = super::agent_dir::create_file(path)
+            .with_context(|| format!("create {}", path.display()))?;
         GitRepository::diff_to(self, base, head, &file)
     }
     fn create_worktree(&self, run: &TaskRun) -> Result<String> {
@@ -2189,9 +2191,11 @@ impl WorkspaceBackend for Cmux {
             tags,
         )?;
         // Persist the returned handle before resolving its stable UUID.
-        fs::write(
-            Path::new(run.run_dir().context("missing run directory")?).join("workspace-create.txt"),
-            &raw,
+        crate::application::RunFiles::write(
+            &super::run_files::LocalRunFiles,
+            &Path::new(run.run_dir().context("missing run directory")?)
+                .join("workspace-create.txt"),
+            raw.as_bytes(),
         )?;
         self.identify_created(workspace_handle(&raw)?)
     }
@@ -2976,9 +2980,10 @@ impl AgentProvider for ClaudeCode {
     ) -> Result<CommandSpec> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let settings = run_dir.join(HEADLESS_SETTINGS);
-        fs::write(
+        crate::application::RunFiles::write(
+            &super::run_files::LocalRunFiles,
             &settings,
-            headless_worker_settings(&permission_deny(ActorRole::Worker))?,
+            headless_worker_settings(&permission_deny(ActorRole::Worker))?.as_bytes(),
         )
         .with_context(|| format!("write {}", settings.display()))?;
         let mut command = CommandSpec::new(&self.executable);
@@ -3119,7 +3124,8 @@ fn write_settings(
             runtime_session_settings(idle_marker, &deny)?
         }
     };
-    fs::write(path, text).with_context(|| format!("write {}", path.display()))
+    crate::application::RunFiles::write(&super::run_files::LocalRunFiles, path, text.as_bytes())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Settings of the headless review: no hooks, the `permissions.deny` of

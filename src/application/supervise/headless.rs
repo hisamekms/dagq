@@ -83,7 +83,7 @@ pub(super) fn stalled_answer_what(ask: AskId) -> String {
 /// yet dropped with its session.
 pub(super) fn exit_requested(sv: &Supervisor<'_>, run: &TaskRun) -> bool {
     run.run_dir()
-        .is_some_and(|dir| sv.files.exists(&exit_path(Path::new(dir))))
+        .is_some_and(|dir| sv.files.is_file(&exit_path(Path::new(dir))))
 }
 
 /// The request `what` written for the headless session of `run`, waiting

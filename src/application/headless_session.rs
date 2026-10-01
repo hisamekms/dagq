@@ -162,9 +162,19 @@ impl Tail {
             self.partial.extend_from_slice(&bytes);
         }
         let mut lines = Vec::new();
-        while let Some(at) = self.partial.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.partial.drain(..=at).collect();
-            lines.push(String::from_utf8_lossy(&line[..at]).into_owned());
+        if let Some(at) = self.partial.iter().rposition(|b| *b == b'\n') {
+            lines.extend(
+                self.partial[..at]
+                    .split(|b| *b == b'\n')
+                    .map(|line| String::from_utf8_lossy(line).into_owned()),
+            );
+            self.partial.drain(..=at);
+        }
+        // A worker can append indefinitely without a newline. Keep
+        // that from growing the wrapper without bound.
+        if self.partial.len() > 64 * 1024 * 1024 {
+            tracing::warn!(path = %path.display(), "discard turn output with an overlong line");
+            self.partial.clear();
         }
         if rest && !self.partial.is_empty() {
             lines.push(String::from_utf8_lossy(&std::mem::take(&mut self.partial)).into_owned());
@@ -315,7 +325,7 @@ impl<'a> Turns<'a> {
     /// `None` once the exit is requested.
     fn next_request(&mut self, run_dir: &Path) -> Result<Option<TurnRequest>> {
         loop {
-            if self.files.exists(&exit_path(run_dir)) {
+            if self.files.is_file(&exit_path(run_dir)) {
                 return Ok(None);
             }
             let names: Vec<String> = self
@@ -812,7 +822,7 @@ impl<'a> Turns<'a> {
                 return Ok((Some(exit), None, tail));
             }
             if stop.is_none() {
-                stop = if self.files.exists(&exit_path(run_dir)) {
+                stop = if self.files.is_file(&exit_path(run_dir)) {
                     Some(Stop {
                         outcome: TurnOutcome::Stopped,
                         failure: None,

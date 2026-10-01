@@ -2,7 +2,6 @@
 //! `Command`, started with the streams the caller asked for.
 
 use std::{
-    fs,
     process::{Child, Command, ExitStatus, Stdio},
     sync::atomic::{AtomicI32, Ordering::SeqCst},
 };
@@ -115,11 +114,11 @@ impl Spawner for LocalSpawner {
             Streams::Files { stdout, stderr } => {
                 command
                     .stdin(Stdio::null())
-                    .stdout(fs::File::create(stdout)?)
-                    .stderr(fs::File::create(stderr)?);
+                    .stdout(super::agent_dir::create_file(stdout)?)
+                    .stderr(super::agent_dir::create_file(stderr)?);
             }
             Streams::Log(log) => {
-                let log = fs::File::create(log)?;
+                let log = super::agent_dir::create_file(log)?;
                 command
                     .stdin(Stdio::null())
                     .stdout(log.try_clone()?)
@@ -181,6 +180,50 @@ impl Spawned for LocalChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn redirected_output_never_writes_through_worker_links() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("auth.json");
+        fs::write(&outside, b"secret").unwrap();
+        let run = temp.path().join("runs/run");
+        fs::create_dir_all(run.join("turns")).unwrap();
+        let out = run.join("turns/turn-000002.jsonl");
+        let err = run.join("turns/turn-000002.err");
+        symlink(&outside, &out).unwrap();
+        symlink(&outside, &err).unwrap();
+        let mut spec = CommandSpec::new("/bin/sh");
+        spec.args(["-c", "printf output; printf error >&2"]);
+        let mut child = LocalSpawner
+            .spawn(
+                &spec,
+                Streams::Files {
+                    stdout: &out,
+                    stderr: &err,
+                },
+            )
+            .unwrap();
+        assert!(child.wait().unwrap().success);
+        assert_eq!(fs::read(&out).unwrap(), b"output");
+        assert_eq!(fs::read(&err).unwrap(), b"error");
+        assert_eq!(fs::read(&outside).unwrap(), b"secret");
+        fs::rename(run.join("turns"), run.join("original")).unwrap();
+        symlink(temp.path(), run.join("turns")).unwrap();
+        assert!(
+            LocalSpawner
+                .spawn(
+                    &spec,
+                    Streams::Files {
+                        stdout: &out,
+                        stderr: &err
+                    }
+                )
+                .is_err()
+        );
+        assert!(!temp.path().join("turn-000002.jsonl").exists());
+    }
 
     #[test]
     fn a_spec_starts_with_its_arguments_environment_and_directory() {

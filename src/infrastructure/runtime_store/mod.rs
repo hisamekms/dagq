@@ -6,8 +6,6 @@
 //! `run_log` reads runs and events, and `queue_records` serves reports.
 //! The helpers they share stay here.
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -218,19 +216,11 @@ impl Refusals<'_> {
     /// write loses the line and not the operation's error.
     fn record(&self, id: &RunId, message: &str, reason: &DomainError) {
         let run_dir = RunPaths::new(self.runs_dir, id).run_dir;
-        if !run_dir.is_dir() {
-            return;
-        }
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(run_dir.join(REFUSALS_LOG))
+        let line = format!("[{}] {message}: {reason}\n", self.generators.clock.now());
+        if let Err(error) = super::agent_dir::append(&run_dir.join(REFUSALS_LOG), line.as_bytes())
+            && error.kind() != std::io::ErrorKind::NotFound
         {
-            let _ = writeln!(
-                file,
-                "[{}] {message}: {reason}",
-                self.generators.clock.now()
-            );
+            tracing::warn!(%id, %error, "could not append run refusal");
         }
     }
 }

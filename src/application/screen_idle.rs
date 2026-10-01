@@ -416,9 +416,10 @@ pub fn hook_failure(
     signals: &dyn AgentSignals,
     debug_log: &Path,
 ) -> Option<String> {
-    let bytes = files.read(debug_log).ok()?;
-    let tail = &bytes[bytes.len().saturating_sub(DEBUG_LOG_TAIL_BYTES)..];
-    let line = signals.idle_hook_failure(&String::from_utf8_lossy(tail))?;
+    let tail = files
+        .read_tail(debug_log, DEBUG_LOG_TAIL_BYTES as u64)
+        .ok()?;
+    let line = signals.idle_hook_failure(&String::from_utf8_lossy(&tail))?;
     Some(line.chars().take(HOOK_ERROR_EXCERPT_CHARS).collect())
 }
 

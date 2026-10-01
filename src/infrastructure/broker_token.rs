@@ -197,26 +197,15 @@ fn put_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .with_context(|| format!("{} has no dir", path.display()))?;
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("file");
-    let temporary = dir.join(format!(".{name}.{}", uuid::Uuid::new_v4()));
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(TOKEN_MODE)
-        .open(&temporary)
-        .and_then(|mut file| {
-            file.write_all(bytes)?;
-            file.sync_all()
-        })
-        .and_then(|()| fs::rename(&temporary, path));
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written.with_context(|| format!("write {}", path.display()))
+    crate::application::RunFiles::create_dir_all(&super::run_files::LocalRunFiles, dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    let (dir, name) = super::agent_dir::Directory::parent(path)?;
+    dir.replace(name, |file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+    .map(drop)
+    .with_context(|| format!("write {}", path.display()))
 }
 
 fn remove_if_there(path: &Path) -> Result<()> {
@@ -305,7 +294,10 @@ impl RunTokens for QueueRunTokens {
         remove_if_there(&token_path(&self.queue_dir, run.as_str()))?;
         if let Some(run_dir) = run_dir {
             let dir = run_dir.join(crate::application::broker_run::RUN_BROKER_DIR);
-            match fs::remove_dir_all(&dir) {
+            match crate::application::RunFiles::remove_dir_all(
+                &super::run_files::LocalRunFiles,
+                &dir,
+            ) {
                 Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => {

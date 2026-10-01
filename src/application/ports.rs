@@ -304,6 +304,15 @@ pub trait RunFiles: Send + Sync {
         let offset = usize::try_from(offset).unwrap_or(usize::MAX);
         Ok(bytes.get(offset..).unwrap_or_default().to_vec())
     }
+    /// The last `bytes` bytes of `path` (all of a shorter file), read
+    /// without the whole of a large file such as an agent's debug log.
+    fn read_tail(&self, path: &Path, bytes: u64) -> io::Result<Vec<u8>> {
+        let all = self.read(path)?;
+        let from = all
+            .len()
+            .saturating_sub(usize::try_from(bytes).unwrap_or(usize::MAX));
+        Ok(all[from..].to_vec())
+    }
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     /// When the file was last written.
     fn modified(&self, path: &Path) -> io::Result<SystemTime>;
@@ -331,7 +340,9 @@ pub trait RunFiles: Send + Sync {
     /// Write `text`, then the bytes of the file `body` as a block fenced
     /// with one backtick more than its longest backtick run (three at
     /// least) and labelled `info`, to a new file at `path`, and sync it.
-    /// `body` is read in chunks, never whole.
+    /// `body` is read in chunks, never whole. Local run material is limited
+    /// to 64 MiB; links and special files are refused, and the destination
+    /// is published by atomic rename.
     fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()>;
     /// The wall clock that stamps the files: a time compared with a
     /// file's modification time is read here, not from the [`Clock`].

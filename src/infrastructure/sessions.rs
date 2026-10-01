@@ -725,11 +725,7 @@ fn work_breakdown(
             .map(|command| format!("{}\n", command.line(&span_payload)))
             .collect();
         let path = std::path::Path::new(&run_dir).join(WORKTIME_FILE);
-        let written = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()));
+        let written = super::agent_dir::append(&path, lines.as_bytes());
         if let Err(error) = written {
             info!(
                 "session span {} ({}): {} not written: {error}",
