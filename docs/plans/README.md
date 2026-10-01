@@ -16,7 +16,7 @@ tags:
 
 - [Current plan](current.md)
 - [Milestones](milestones.md)
-- [ADR 0001〜0034の棚卸しと統合ADRの組](adr-inventory.md)
+- [ADR 0001〜0034の決定・後継ADR・designの対応表](adr-inventory.md)
 - [cargo llvm-cov nextestへの切り替え前後のintegrateのverifyの所要時間と遅いtest](nextest-measurement.md)（ADR-0076決定6の測定）
 - [cargo llvm-cov nextestのtest段の後（一覧・profrawのmerge・report）の内訳](nextest-post-test-stage.md)（task 564）
 - [着地の検証でcoverageの計測をやめたときの短縮の見積もり](coverage-at-landing.md)（task 967）

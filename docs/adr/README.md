@@ -36,7 +36,7 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 
 ## 有効なADR
 
-`status: accepted`のADR。`accepted_on`はgit logで`status: accepted`が入ったcommitの日（ADR-0009はgoal 1で実装済みのため、ADRの棚卸しの変更で`accepted`にした日）。0001〜0034のうち後のADRに決定を上書きされたものと、それを丸ごと置き換える統合ADRの組は[ADRの棚卸し](../plans/adr-inventory.md)にあり、統合ADRが`accepted`になるときにこの表から下の対応表に移る。
+`status: accepted`のADR。`accepted_on`はgit logで`status: accepted`が入ったcommitの日（ADR-0009はgoal 1で実装済みのため、ADRの棚卸しの変更で`accepted`にした日）。0001〜0034の決定の判定・後継ADR・今の姿を持つdesignの参照先は[ADRの対応表](../plans/adr-inventory.md)にある。ADR-t598-1決定4に従い、今の姿をまとめる統合ADRは作らない。
 
 | ADR | Title | accepted_on |
 | --- | --- | --- |
@@ -139,7 +139,7 @@ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決�
 
 ## 置き換え・廃止されたADR
 
-`status: superseded` / `deprecated`のADRと後継の対応。`deprecated`の行は`superseded_by`を空にし、日付の列に`deprecated_on`を書く。0001〜0034の棚卸し（後続のtask）で統合ADRが`accepted`になるときにも行が加わる。
+`status: superseded` / `deprecated`のADRと後継の対応。`deprecated`の行は`superseded_by`を空にし、日付の列に`deprecated_on`を書く。0001〜0034の棚卸しの旧組A〜CはADR-0052〜0054への置き換え済みの記録で、組D〜Jの統合ADR計画は取り消された（[対応表](../plans/adr-inventory.md#統合adrの組過去の記録)）。
 
 | ADR | Status | superseded_by | superseded_on / deprecated_on |
 | --- | --- | --- | --- |
