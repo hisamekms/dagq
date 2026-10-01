@@ -44,6 +44,7 @@ impl AgentProvider for ObserverProvider {
 fn observe_options(mode: dagq::observer::ObserveMode) -> dagq::observer::ObserveOptions {
     dagq::observer::ObserveOptions {
         mode,
+        cmux: None,
         since: None,
         dry_run: false,
         timeout: Duration::from_secs(60),
@@ -456,7 +457,10 @@ fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
     let required = queue_events(&db, "auth_required");
     assert_eq!(required.len(), 1, "{required:?}");
     assert_eq!(required[0]["job"], "observer");
-    let second = observe(&db, &logged_out, &observe_options(ObserveMode::Daily)).unwrap();
+    // An explicitly missing executable has the same hold behavior as None.
+    let mut missing = observe_options(ObserveMode::Daily);
+    missing.cmux = Some(db.parent().unwrap().join("missing-cmux"));
+    let second = observe(&db, &logged_out, &missing).unwrap();
     assert_eq!(second["hold_ask_id"], json!(asks[0].id), "{second}");
     assert_eq!(queue_events(&db, "auth_required").len(), 1);
     // A failure at no wall is no hold.
@@ -551,15 +555,32 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     let options = SuperviseOptions {
         observe_interval: Duration::from_secs(3600),
         observe_daily: true,
+        update: dagq::application::supervise::UpdateSettings {
+            cmux: Some(PathBuf::from("/usr/bin/true")),
+            ..Default::default()
+        },
         ..SuperviseOptions::new(1, true)
     };
+    let runner = db.parent().unwrap().join("observer-runner");
+    let arguments = db.parent().unwrap().join("observer-arguments");
+    fs::write(
+        &runner,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec '{}' \"$@\"\n",
+            arguments.display(),
+            env!("CARGO_BIN_EXE_dagq")
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
     let supervise_observed = || {
         runtime::supervise(
             &db,
             &repo,
             &backend,
             &observer_claude_stub(&db),
-            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &runner,
             &options,
         )
         .unwrap()
@@ -568,6 +589,11 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     // hourly one; `--once` waits for each before it exits.
     let outcome = supervise_observed();
     assert_eq!(outcome["runs"], json!([]));
+    let arguments = fs::read_to_string(&arguments).unwrap();
+    assert!(
+        arguments.contains("observe\n--cmux\n/usr/bin/true\n"),
+        "{arguments}"
+    );
     let finished = queue_events(&db, "observe_finished");
     assert_eq!(
         finished
@@ -1093,6 +1119,10 @@ printf 'test provider\n'
     let options = SuperviseOptions {
         observe_interval: Duration::from_secs(3600),
         observe_daily: false,
+        update: dagq::application::supervise::UpdateSettings {
+            cmux: Some(PathBuf::from("/usr/bin/true")),
+            ..Default::default()
+        },
         ..SuperviseOptions::new(1, false)
     };
     let supervisor = {
@@ -1164,5 +1194,78 @@ fn a_handoff_leaves_no_observer_process() {
     assert!(
         gone(child),
         "the agent's child {child} outlived the handoff"
+    );
+}
+
+#[test]
+fn observe_uses_only_the_selected_cmux_for_workspace_listing() {
+    use dagq::observer::{ObserveMode, observe};
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, _repo, db) = fixture();
+    let cmux = db.parent().unwrap().join("selected-cmux");
+    let calls = db.parent().unwrap().join("cmux-calls");
+    fs::write(
+        &cmux,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$4" in
+  list-windows) echo '[{{"id":"test-window"}}]' ;;
+  workspace) echo '{{"workspaces":[]}}' ;;
+esac
+"#,
+            calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cmux, fs::Permissions::from_mode(0o755)).unwrap();
+    let provider = ObserverProvider {
+        script: "exit 0".into(),
+    };
+    let mut options = observe_options(ObserveMode::Daily);
+    options.dry_run = true;
+    let without = observe(&db, &provider, &options).unwrap();
+    assert!(!calls.exists());
+    options.cmux = Some(db.parent().unwrap().join("missing-cmux"));
+    let missing = observe(&db, &provider, &options).unwrap();
+    assert_eq!(missing["dry_run"], without["dry_run"]);
+    assert!(
+        !missing["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("workspace_mismatch")
+    );
+    assert!(!calls.exists());
+    options.cmux = Some(cmux.clone());
+    observe(&db, &provider, &options).unwrap();
+    assert!(
+        fs::read_to_string(&calls)
+            .unwrap()
+            .contains("workspace list")
+    );
+    fs::remove_file(&calls).unwrap();
+    // Exercise CLI parsing and forwarding as well as the library entry point.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "observe",
+            "--dry-run",
+            "--daily",
+            "--cmux",
+            cmux.to_str().unwrap(),
+        ])
+        .bounded_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(&calls)
+            .unwrap()
+            .contains("workspace list")
     );
 }

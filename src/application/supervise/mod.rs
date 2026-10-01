@@ -292,6 +292,8 @@ pub struct Layout {
     pub common_dir: PathBuf,
     /// The `claude` the run sessions start.
     pub claude: PathBuf,
+    /// The cmux executable passed to the observer.
+    pub cmux: PathBuf,
     /// The `codex` a Codex worker starts (`supervise --codex`), resolved
     /// when it was found.
     pub codex: PathBuf,
@@ -1849,6 +1851,8 @@ impl Supervisor<'_> {
             .arg("--db")
             .arg(&self.layout.db)
             .arg("observe")
+            .arg("--cmux")
+            .arg(&self.layout.cmux)
             .arg("--claude")
             .arg(&self.layout.claude)
             .current_dir(&self.layout.repo_root);

@@ -392,6 +392,10 @@ pub(crate) fn options(runtime_planners: usize, planner_timeout: Duration) -> Sup
         generators: clock::system(),
         runtime_planners: Some(runtime_planners),
         planner_timeout,
+        update: dagq::application::supervise::UpdateSettings {
+            cmux: Some(PathBuf::from("/usr/bin/true")),
+            ..Default::default()
+        },
         ..SuperviseOptions::new(2, true)
     }
 }

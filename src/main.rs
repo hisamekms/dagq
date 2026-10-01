@@ -780,6 +780,10 @@ enum Command {
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        /// cmux executable for workspace listing and inbox notifications; bare names resolve
+        /// on PATH. If not found, neither listing nor notification is attempted.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
     },
     /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
     /// (daily) or the ISO week before this one (weekly). An hour the runtime's rules find unremarkable starts
@@ -3292,6 +3296,7 @@ fn execute(cli: Cli) -> Result<Value> {
             daily,
             timeout,
             claude,
+            cmux,
             ..
         } => {
             use dagq::infrastructure::adapters::{ClaudeCode, executable};
@@ -3311,6 +3316,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     } else {
                         ObserveMode::Hourly
                     },
+                    cmux: Some(cmux),
                     since: since.map(EventId::new),
                     dry_run,
                     timeout: Duration::from_secs(timeout),

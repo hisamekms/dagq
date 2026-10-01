@@ -706,6 +706,7 @@ pub fn supervise_with_reviewer(
         main_checkout: main_checkout.clone(),
         common_dir: repository.common_dir.clone(),
         claude: claude.into(),
+        cmux: options.update.cmux.clone().unwrap_or_else(|| "cmux".into()),
         codex: codex.clone(),
         providers,
         runner: runner.into(),

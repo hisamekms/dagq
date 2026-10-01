@@ -62,6 +62,9 @@ pub use crate::application::supervise::{DAILY_WINDOW_SECS, ObserveMode};
 #[derive(Debug, Clone)]
 pub struct ObserveOptions {
     pub mode: ObserveMode,
+    /// cmux executable; bare names resolve on PATH. None disables workspace
+    /// listing and inbox notifications, as does an executable not found.
+    pub cmux: Option<PathBuf>,
     /// The cursor to read `stats` past; by default the hourly observation's
     /// saved cursor, or for the daily one the last event 24 hours ago.
     pub since: Option<EventId>,
@@ -115,10 +118,12 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
         (None, ObserveMode::Hourly) => read_cursor(&db)?,
         (None, ObserveMode::Daily) => Some(queue.event_id_before(started - DAILY_WINDOW_SECS)?),
     };
-    // The cmux on PATH lists the workspaces for `workspace_mismatch`;
+    // The configured cmux lists the workspaces for `workspace_mismatch`;
     // without one, only that alert is left unjudged.
-    let cmux = crate::infrastructure::adapters::executable(Path::new("cmux"))
-        .ok()
+    let cmux = options
+        .cmux
+        .as_deref()
+        .and_then(|path| crate::infrastructure::adapters::executable(path).ok())
         .map(|executable| crate::infrastructure::adapters::Cmux { executable });
     let one_shot = crate::compose::OneShot::new(queue.generators().clone());
     let stats = one_shot.stats_of(
