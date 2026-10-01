@@ -363,7 +363,56 @@ env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<scratch>/cfg-empty \
 
 ### 結果
 
-まだ行っていない（task 1065 は worker として動き、使い捨ての queue を作れないため。receipt の `follow_ups`（`ops`）で人か inbox に任せた）。本番の queue で Codex の goal review を動かすのは、固定バイナリがこの task を含むものに入れ替わった後の task 1067 が `dagq.toml` に `provider` を書いてから。流したら、この節に版と確認点の結果を足す。
+#### 2026-09-30: 本番の記録による確認（task 1114）
+
+使い捨て queue の手作業に代えて、task 1067 の着地後に本番で動いた Codex の goal review 2 件を読んだ（2026-09-30 15:53 JST 時点）。worker は本番の状態を変えず、固定バイナリ `~/.local/bin/dagq` の読み取りコマンドと既存の file だけを読んだ。新しい job の起動・書き込みの試行・設定の変更はしていない。
+
+版: `codex --version` は `codex-cli 0.155.1`、`claude --version` は `2.1.285 (Claude Code)`。対象 2 件の rollout の `session_meta.payload.cli_version` も `0.155.1`（`originator: codex_exec`）。Claude の版は測定時の版で、過去の Claude の job の版を示すものではない。今回の `codex --version` は PATH alias を作れない警告（`Operation not permitted`）を出したが、下記の job の `review.err` にはその警告は無い。
+
+読んだコマンド（以下の `dagq` は全て固定バイナリ）:
+
+```sh
+~/.local/bin/dagq locate
+~/.local/bin/dagq events --full --all --run ad2a9f09-1eb3-482c-8329-126dbdf35207
+~/.local/bin/dagq events --full --all --kind goal_review_started --kind goal_review_finished --kind goal_review_failed --since 2026-09-29T17:52:27Z
+~/.local/bin/dagq stats --full
+codex --version
+claude --version
+```
+
+`locate` の `db` は `~/.local/share/dagq/77067154921b9014/queue.db`。その親を以下の `<queue>` とする。1067 の `run_integrated`（event 45157、2026-09-29T17:52:27.312Z）は commit `49add659cebea4607cec6d6db7000036ceb1021e`。この後の goal review の event は開始 2 件・完了 2 件・失敗 0 件だった（読み取り時の cursor 49989）。
+
+| goal ID / job ID（`goal_review_id`） | 開始 → 完了（UTC）/ event ID | `session_id`（完了時） | 判定 / 時間 |
+| --- | --- | --- | --- |
+| 67 / 16（attempt 1） | 2026-09-29T22:35:00.800Z → 22:36:07.364Z / 46663 → 46691 | `01a0ef4e-a0e3-7080-9136-997c701080d7` | `verdict: achieved`・`decision: achieved` / 66 秒 |
+| 69 / 17（attempt 1） | 2026-09-30T00:33:00.230Z → 00:34:40.532Z / 48090 → 48142 | `01a0efba-a6f8-7021-9c9b-7fa3876966b5` | `verdict: achieved`・`decision: achieved` / 100 秒 |
+
+file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を行ごとに読み、`type` と `item.type` ごとに数え、`command_execution` の `command`・`exit_code` と stderr 全文を確認した。対象は `<queue>/goal-reviews/{16,17}/review.out`・`review.err` と、`~/.codex/sessions` から thread ID で探した次の 2 file:
+
+- `2026/09/30/rollout-2026-09-30T07-35-02-01a0ef4e-a0e3-7080-9136-997c701080d7.jsonl`
+- `2026/09/30/rollout-2026-09-30T09-33-02-01a0efba-a6f8-7021-9c9b-7fa3876966b5.jsonl`
+
+手順 5 の確認点ごとの結果:
+
+| 確認点 | 観察（上記のコマンド・file の値） | 結論 |
+| --- | --- | --- |
+| launch・thread・decision | 開始 2 件とも `launch: {role: goal_review, provider: codex, model: null, effort: medium, source: dagq.toml}`、`session_id: null`。完了 2 件とも上表の thread ID、`model: gpt-6-astra`、`model_unknown` 無し、`overridden: null` | Codex で起動して実モデルと判定を記録できた。本番は effort を省略しているため `medium` であり、手順 2 の `low` は試していない |
+| stdout の JSONL と最終の返答 | job 16 は 17 行（`thread.started` 1、`turn.started` 1、`item.started` 6、`item.completed` 8、`turn.completed` 1）。job 17 は 24 行（同じ順に 1・1・9・12・1）。それぞれ最初の thread ID は完了 event と一致し、最後は `turn.completed` | 実 Codex の JSONL を読み、runtime が両方の verdict を `achieved` として記録できた |
+| sandbox 内の dagq の読み取り・書き込みの拒否 | 完了した `command_execution` は job 16 が 6 件、17 が 9 件で全て `exit_code: 0`。16 は `~/.local/bin/dagq list`・`goal show 67 --full`・`show 972`・`show 973`・`show 974`、17 は `list`・`goal show 69 --full`・`show 1105` と `kpi/add/edit --help` を含む。他は `cat`・`sed`・`rg`・`git show/log` などの読み取り。書き込みのコマンドは無い | dagq の読み取りは成功。書き込みを sandbox が拒むことは未確認（試行が無い）。`add/edit --help` は help を読むだけで task の登録・編集ではない |
+| stderr と bypass の警告 | 2 件の `review.err` はどちらも `Reading additional input from stdin...` の 1 行だけ。`--dangerously` などの bypass の警告は無い | 警告は観察されなかった。ただし警告が無いことだけで起動の全引数を証明することはできない |
+| `ps` の起動の引数 | 終了済みの job のため当時の `ps` は無い。代わりに両 rollout の `turn_context` が `sandbox_policy: {type: read-only}`・`approval_policy: never`・`effort: medium`、`cwd` が本番 main checkout を持つ。JSONL の形は上記のとおり | read-only の実効設定は記録で確認できた。`--json --sandbox read-only -C ...` と bypass flag の不在を argv そのもので確かめる点は本番の記録では見られない |
+| rollout の model | 両 rollout の `turn_context.payload.model` は `gpt-6-astra` | それぞれの `goal_review_finished.model` と一致 |
+| stats の provider / model | `jobs.goal_review.by_provider.codex` と `by_model.gpt-6-astra` はともに `count: 2`・`failed: 0`・`failed_rate: 0.0`・`secs: {count: 2, median: 83, total: 166}`・`verdicts: {achieved: 2}` | 2 件の時間（66 + 100 秒）・判定と一致。手順の 1 件の代わりに本番の 2 件を数えた |
+| `~/.codex/config.toml` の更新時刻 | 対象 job の起動前と終了後の時刻を控えた記録は無い | 本番の記録では見られない。現在の時刻だけでは当時変わらなかったと判定できない |
+
+同じ `stats --full` の `jobs.goal_review.by_provider.claude` は `count: 10`・`failed: 0`・`failed_rate: 0.0`・`secs: {count: 10, median: 23, total: 249}`・`verdicts: {achieved: 9, ask: 1}`。`by_model.unknown` も同じ値だった。provider 別に並べて読めることは確認できたが、goal の内容と件数が異なり、Claude の実モデルも unknown なので、83 秒と 23 秒を provider の性能差とは判断しない。この stats は `--since` を付けない集計であり、上記の event の期間限定とは区別する。
+
+本番の記録では見られない点と、次に見るために必要なこと:
+
+- 手順 6 の切り替え: 上記期間の開始 2 件の launch に `switched_from`・`switch_reason` は無く、失敗 event も無い。`executable_missing` による Claude への切り替えは未確認。人か inbox が使い捨て queue で手順 6 を行い、切り替え先の launch と完了を採取する必要がある。本番で実行ファイルを壊して試さない。
+- 書き込みの拒否: 人か inbox が使い捨て queue の read-only job に無害な file の書き込みを試させ、拒否の出力を採取する必要がある。今回の成功した読み取りだけでは拒否の挙動は分からない。
+- argv と config の前後比較: 人か inbox が使い捨て queue の job の実行中に `ps` で引数を採取し、`~/.codex/config.toml` の更新時刻を起動前・終了後に控える必要がある。rollout の read-only 設定は argv の全体や config の不変性の代わりにはならない。
+- 手順 7 の使い捨て queue の後始末は今回は対象外（作成していない）。次に手作業のスモークを行った場合は手順どおりに行う。
 
 ## 他の repository のスモーク
 
