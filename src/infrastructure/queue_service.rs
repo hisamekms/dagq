@@ -50,7 +50,7 @@ use crate::domain::queue_service::{
 };
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
-    FindingStatus, NewAsk, NewFinding, NewNote, RunEvent, RunId, RunStatus, TaskId,
+    FindingStatus, NewAsk, NewFinding, NewNote, ProposalId, RunEvent, RunId, RunStatus, TaskId,
 };
 
 /// The tokens' principals in [`SERVICE_DIR`].
@@ -650,6 +650,16 @@ impl ServiceQueue for ServiceSqlite {
             Err(error) if error.downcast_ref::<RunNotFound>().is_some() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+    fn proposals(&self, all: bool) -> Result<Value> {
+        Ok(json!({"proposals": TaskStore::proposals(&self.queue, all)?}))
+    }
+
+    fn show_proposal(&self, id: ProposalId) -> Result<Value> {
+        Ok(serde_json::to_value(TaskStore::show_proposal(
+            &self.queue,
+            id,
+        )?)?)
     }
 }
 

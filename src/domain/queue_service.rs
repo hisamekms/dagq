@@ -54,6 +54,18 @@ string_enum!(UseCase {
     Show => "show",
     // Write a note on a task, a run or a goal.
     Note => "note",
+    // The proposals awaiting plan review, as `dagq proposal list` prints
+    // them.
+    ProposalList => "proposal_list",
+    // A proposal, as `dagq proposal show` prints it.
+    ProposalShow => "proposal_show",
+    // Record a finding, or update the open one of the same kind, target
+    // and subject, as `dagq finding record` does.
+    FindingRecord => "finding_record",
+    // Mark a finding resolved, as `dagq finding resolve` does.
+    FindingResolve => "finding_resolve",
+    // Mark a finding dismissed, as `dagq finding dismiss` does.
+    FindingDismiss => "finding_dismiss",
 });
 
 // Why the service refused or failed a request.

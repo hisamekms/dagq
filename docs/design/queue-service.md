@@ -14,6 +14,8 @@ related:
   - adr-t1233-1
   - adr-t1233-4
   - adr-t1233-5
+  - adr-t1222-1
+  - design-supervisor-lifecycle-observer
   - adr-t728-1
   - design-security
   - design-authorization
@@ -26,7 +28,7 @@ related:
 
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-今の段（goal 82の段(2)の前半、task 1234）: serviceがあり、`hello`・`ask`・`show`・`note`のユースケースを答える。**supervisor・inbox・planner・人のCLI・workerとjobのdagqは、今までどおりDBを直接開く。** workerとjobのdagqをクライアントモードにし、DBのpathを渡さないのは段(3)で、tokenの発行と受け渡し（claim・resume・jobの起動）もそこで足す。queue全体の読み取りのユースケース（`events`・`timeline`・`stats`など）はtask 1242が足す。
+今の段（goal 82の段(2)、task 1234・1235）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）のユースケースを答える。**supervisor・inbox・planner・人のCLI・workerとjobのdagqは、今までどおりDBを直接開く。** workerとjobのdagqをクライアントモードにし、DBのpathを渡さないのは段(3)で、tokenの発行と受け渡し（claim・resume・jobの起動）もそこで足す。queue全体の読み取りのユースケース（`events`・`timeline`・`stats`など）はtask 1242が足す。
 
 名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・gitを仲介するresource broker（[Resource broker](broker.md)）とは別。
 
@@ -79,6 +81,13 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | `ask` | `dagq ask`と同じ: `kind`・`question`・`options`・`because`・`topics`・`task_id`・`run_id`・`finding_id` | `dagq ask`の出力 | `ask.open`（new ask）、`blocked`の`finding_id`つきは`finding.ask`。workerは自分のrunとtaskだけ、`worker_question`だけ。`asked_by`はprincipalのもの |
 | `show` | `id`・`full`（既定false）・`events`（既定5） | `dagq show`（`--full`）の出力 | `queue.read`（task）。goal 82では全roleがqueue全体を読める（ADR-t1233-5決定3） |
 | `note` | `task`・`run`・`goal`のどれか1つと`text`・`kind` | `dagq note`の出力 | `note.write`。workerは自分のtaskとrunだけ。`by`はprincipalのもの |
+| `proposal_list` | `all`（既定false） | `dagq proposal list`（`--all`）の出力（`{"proposals": [...]}`） | `queue.read`（queue）。全role |
+| `proposal_show` | `id` | `dagq proposal show`の出力 | `queue.read`（queue）。全role。無いproposalは`failed` |
+| `finding_record` | `dagq finding record`と同じ: `kind`・対象を1つ（`task`・`run`・`goal`か`queue: true`）・`subject`（既定は空）・`summary`・`detail`・`impact`・`evidence`（eventのidの配列）・`propose` | `dagq finding record`の出力（findingと`created`・`changed`） | `finding.record`（対象）。tokenを発行するAI actorのうち今のpolicyで持つのはobserverとinboxで、plannerとworkerとjobには無い。同じ種類・対象・subjectのopenかproposedのfindingへの合流（新しい根拠で回数と根拠を足し、新しいものが無ければ何も書かない）と根拠の検査は、CLIと同じ`record_finding`の1つのtransaction。`by`はprincipalのもの |
+| `finding_resolve` | `id`・`reason` | `dagq finding resolve`の出力 | `finding.resolve`。今のpolicyで持つのはobserver・inbox・plannerで、workerとjobには無い。`by`はprincipalのもの |
+| `finding_dismiss` | `id`・`reason` | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
+
+observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`kind: blocked`と`finding_id`。capabilityは`finding.ask`）で送る。findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
 
 `ask`はCLIと同じく、新しいaskをinboxにcmuxで知らせる（serviceの`--cmux`。見つからなくても知らせが失敗するだけでaskは開く）。
 
@@ -126,5 +135,4 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 
 - 段(3): workerとjobのdagqのクライアントモード、claim・resume・jobの起動でのtokenの発行と受け渡し、runの終わりでのtokenのfileの片付け、Codexのsandboxからsocketへの到達（ADR-t1233-5決定4）
 - task 1242: queue全体の読み取りのユースケース（`events`・`timeline`・`stats`・`kpi`・`marks`・`search`・`related`・`findings`・`goal show`など）
-- goal 82の段(2)の後半: proposal・findingのユースケース
 - 段(4)〜(6)（goal 38）: queueのbroker、supervisorとCLIのservice経由化、integrateのverificationの隔離

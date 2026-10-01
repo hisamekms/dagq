@@ -9,9 +9,13 @@
 //! [`Dialogue`] and [`Gate`]), and a request that names no principal as
 //! `queue_service_unauthenticated`.
 //!
-//! The use cases of goal 82's stage (2): `hello`, `ask`, `show` (a task
-//! with its runs, the whole queue being readable to every role,
-//! ADR-t1233-5 decision 3) and `note`. The supervisor and the command line
+//! The use cases of goal 82's stage (2): `hello`, `ask` (with the
+//! observer's `blocked` ask on a finding), `show` (a task with its runs,
+//! the whole queue being readable to every role, ADR-t1233-5 decision 3),
+//! `note`, `proposal_list` and `proposal_show`, and the findings'
+//! `finding_record` (which updates the open finding of the same kind,
+//! target and subject), `finding_resolve` and `finding_dismiss`
+//! (ADR-t1222-1 decisions 1, 2 and 4). The supervisor and the command line
 //! still open the DB themselves.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
@@ -31,8 +35,9 @@ use crate::domain::queue_service::{
 };
 use crate::domain::{
     ActorContext, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError, Capability,
-    Finding, FindingId, FindingOutcome, FindingStatus, GoalId, NewAsk, NewFinding, NewNote,
-    NoteTarget, Resource, RunEvent, RunId, RunStatus, StaticPolicy, TaskId,
+    EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId, NewAsk,
+    NewFinding, NewNote, NoteTarget, ProposalId, Resource, RunEvent, RunId, RunStatus,
+    StaticPolicy, TaskId,
 };
 
 /// The queue as one use case of the service reads and changes it, written
@@ -43,6 +48,11 @@ pub trait ServiceQueue: DialogueStore {
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value>;
     /// The status of run `id`; `None` for a run the queue does not know.
     fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>>;
+    /// The proposals as `dagq proposal list` prints them: the submitted
+    /// and revising ones, or with `all` every one.
+    fn proposals(&self, all: bool) -> Result<Value>;
+    /// Proposal `id` as `dagq proposal show` prints it.
+    fn show_proposal(&self, id: ProposalId) -> Result<Value>;
 }
 
 /// What the service runs its use cases on.
@@ -242,6 +252,69 @@ struct NoteParams {
     kind: Option<String>,
 }
 
+/// `proposal_list`'s params: those of `dagq proposal list`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposalListParams {
+    #[serde(default)]
+    all: bool,
+}
+
+/// `proposal_show`'s params: those of `dagq proposal show`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposalShowParams {
+    id: i64,
+}
+
+/// `finding_record`'s params: those of `dagq finding record`, one target
+/// (`task`, `run`, `goal`, or `queue: true`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindingRecordParams {
+    kind: String,
+    #[serde(default)]
+    task: Option<i64>,
+    #[serde(default)]
+    run: Option<String>,
+    #[serde(default)]
+    goal: Option<i64>,
+    #[serde(default)]
+    queue: bool,
+    #[serde(default)]
+    subject: String,
+    summary: String,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    impact: Option<String>,
+    #[serde(default)]
+    evidence: Vec<i64>,
+    #[serde(default)]
+    propose: Option<String>,
+}
+
+/// `finding_resolve`'s and `finding_dismiss`'s params: those of `dagq
+/// finding resolve` and `dagq finding dismiss`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindingStatusParams {
+    id: i64,
+    reason: String,
+}
+
+/// Authorize reading the whole queue: every role reads it in goal 82
+/// (ADR-t1233-5 decision 3), and the policy is still asked, on the
+/// service's side, as it would be for a narrower one.
+fn authorize_read(store: &Store<'_>, actor: &ActorContext, resource: &Resource) -> Result<()> {
+    Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    }
+    .authorize(store, Capability::QueueRead, resource)?;
+    Ok(())
+}
+
 /// Run `use_case` as `actor` on `queue`.
 fn run(
     queue: &mut dyn ServiceQueue,
@@ -290,15 +363,65 @@ fn run(
         UseCase::Show => {
             let p: ShowParams = params(use_case, raw)?;
             let id = TaskId::new(p.id);
-            // Every role reads the whole queue in goal 82 (ADR-t1233-5
-            // decision 3); the policy is still asked, on the service's
-            // side, as it would be for a narrower one.
-            Gate {
-                actor,
-                authorizer: &StaticPolicy,
-            }
-            .authorize(&store, Capability::QueueRead, &Resource::task(id))?;
+            authorize_read(&store, actor, &Resource::task(id))?;
             store.0.show(id, p.full, p.events)
+        }
+        UseCase::ProposalList => {
+            let p: ProposalListParams = params(use_case, raw)?;
+            authorize_read(&store, actor, &Resource::Queue)?;
+            store.0.proposals(p.all)
+        }
+        UseCase::ProposalShow => {
+            let p: ProposalShowParams = params(use_case, raw)?;
+            // The command line reads a proposal as the queue
+            // (`queue.read` on the queue), and so does the service.
+            authorize_read(&store, actor, &Resource::Queue)?;
+            store.0.show_proposal(ProposalId::new(p.id))
+        }
+        UseCase::FindingRecord => {
+            let p: FindingRecordParams = params(use_case, raw)?;
+            let target = match (p.task, p.run, p.goal, p.queue) {
+                (Some(task), None, None, false) => FindingTarget::Task(TaskId::new(task)),
+                (None, Some(run), None, false) => FindingTarget::Run(RunId::new(run)?),
+                (None, None, Some(goal), false) => FindingTarget::Goal(GoalId::new(goal)),
+                (None, None, None, true) => FindingTarget::Queue,
+                _ => {
+                    return Err(BadParams(
+                        "finding_record names one target: task, run, goal or queue".to_owned(),
+                    )
+                    .into());
+                }
+            };
+            let outcome =
+                Dialogue::new(&mut store, actor, &StaticPolicy).record_finding(NewFinding {
+                    kind: p.kind,
+                    target,
+                    subject: p.subject,
+                    summary: p.summary,
+                    detail: p.detail,
+                    // `dagq finding record` takes high, normal or low
+                    // only, before anything runs.
+                    impact: p
+                        .impact
+                        .map(|impact| impact.parse())
+                        .transpose()
+                        .map_err(|error| BadParams(format!("finding_record's impact: {error}")))?,
+                    evidence: p.evidence.into_iter().map(EventId::new).collect(),
+                    propose: p.propose,
+                    by: actor.written_by().to_owned(),
+                })?;
+            Ok(serde_json::to_value(outcome)?)
+        }
+        UseCase::FindingResolve | UseCase::FindingDismiss => {
+            let p: FindingStatusParams = params(use_case, raw)?;
+            let id = FindingId::new(p.id);
+            let mut dialogue = Dialogue::new(&mut store, actor, &StaticPolicy);
+            let finding = if use_case == UseCase::FindingResolve {
+                dialogue.resolve_finding(id, &p.reason)?
+            } else {
+                dialogue.dismiss_finding(id, &p.reason)?
+            };
+            Ok(serde_json::to_value(finding)?)
         }
     }
 }
@@ -454,17 +577,25 @@ mod tests {
         fn mark(&mut self, _: MarkChange, _: &str) -> Result<Value> {
             Err(anyhow!("mark"))
         }
-        fn record_finding(&mut self, _: NewFinding) -> Result<FindingOutcome> {
-            Err(anyhow!("finding"))
+        fn record_finding(&mut self, finding: NewFinding) -> Result<FindingOutcome> {
+            self.log.lock().unwrap().push(json!({
+                "finding": finding.kind, "target": format!("{:?}", finding.target),
+                "by": finding.by,
+            }));
+            Err(anyhow!("recorded"))
         }
         fn set_finding_status(
             &mut self,
-            _: FindingId,
-            _: FindingStatus,
-            _: &str,
-            _: &str,
+            id: FindingId,
+            to: FindingStatus,
+            reason: &str,
+            by: &str,
         ) -> Result<Finding> {
-            Err(anyhow!("finding"))
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"finding": id, "to": to.as_str(), "reason": reason, "by": by}));
+            Err(anyhow!("set"))
         }
     }
 
@@ -474,6 +605,12 @@ mod tests {
         }
         fn run_status(&self, id: &RunId) -> Result<Option<RunStatus>> {
             Ok((id.as_str() == "r1").then_some(self.status))
+        }
+        fn proposals(&self, all: bool) -> Result<Value> {
+            Ok(json!({"proposals": [], "all": all}))
+        }
+        fn show_proposal(&self, id: ProposalId) -> Result<Value> {
+            Ok(json!({"proposal": id}))
         }
     }
 
@@ -488,6 +625,10 @@ mod tests {
             Ok(match token {
                 "worker" => Some(Principal::worker(&run, TaskId::new(1))),
                 "review" => Some(Principal::of(&ActorContext::review_job(&run, 1))),
+                "observer" => Some(Principal::of(&ActorContext::instance(
+                    ActorRole::Observer,
+                    "s1",
+                ))),
                 "broken" => return Err(anyhow!("unreadable")),
                 _ => None,
             })
@@ -677,6 +818,22 @@ mod tests {
             (UseCase::Note, json!({"text": "no target"})),
             (UseCase::Note, json!({"task": 1, "goal": 2, "text": "two"})),
             (UseCase::Ask, json!({"sql": "x"})),
+            (UseCase::ProposalShow, json!({})),
+            (UseCase::ProposalList, json!({"all": true, "owner": "x"})),
+            (
+                UseCase::FindingRecord,
+                json!({"kind": "stall", "summary": "no target"}),
+            ),
+            (
+                UseCase::FindingRecord,
+                json!({"kind": "stall", "summary": "two", "task": 1, "queue": true}),
+            ),
+            (
+                UseCase::FindingRecord,
+                json!({"kind": "stall", "summary": "s", "queue": true, "impact": "huge"}),
+            ),
+            (UseCase::FindingResolve, json!({"id": 1})),
+            (UseCase::FindingDismiss, json!({"reason": "x"})),
         ] {
             let response = service.handle(&request(Some("worker"), use_case, params.clone()));
             assert_eq!(
@@ -685,6 +842,103 @@ mod tests {
                 "{params}"
             );
         }
+    }
+
+    #[test]
+    fn the_observer_writes_findings_as_itself_and_nothing_else() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let pop = || backend.log.lock().unwrap().pop().unwrap();
+        // A finding on each target, recorded as the observer.
+        for (target, debug) in [
+            (json!({"queue": true}), "Queue"),
+            (json!({"task": 3}), "Task(TaskId(3))"),
+            (json!({"goal": 4}), "Goal(GoalId(4))"),
+            (json!({"run": "r9"}), "Run(RunId(\"r9\"))"),
+        ] {
+            let mut params = json!({"kind": "stall", "summary": "s", "evidence": [7]});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(target.as_object().unwrap().clone());
+            let response =
+                service.handle(&request(Some("observer"), UseCase::FindingRecord, params));
+            // The store's own error comes back as a failure.
+            assert_eq!(code(&response), Some(ServiceErrorCode::Failed));
+            assert_eq!(
+                pop(),
+                json!({"finding": "stall", "target": debug, "by": "observer"})
+            );
+        }
+        let response = service.handle(&request(
+            Some("observer"),
+            UseCase::FindingResolve,
+            json!({"id": 5, "reason": "gone"}),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::Failed));
+        assert_eq!(
+            pop(),
+            json!({"finding": 5, "to": "resolved", "reason": "gone", "by": "observer"})
+        );
+        // Dismissing and noting are not the observer's, nor is a finding
+        // the worker's: refused and recorded as the one refused.
+        for (token, use_case, params, capability) in [
+            (
+                "observer",
+                UseCase::FindingDismiss,
+                json!({"id": 5, "reason": "no"}),
+                "finding.dismiss",
+            ),
+            (
+                "observer",
+                UseCase::Note,
+                json!({"task": 1, "text": "x"}),
+                "note.write",
+            ),
+            (
+                "worker",
+                UseCase::FindingRecord,
+                json!({"kind": "stall", "summary": "s", "queue": true}),
+                "finding.record",
+            ),
+            (
+                "worker",
+                UseCase::FindingResolve,
+                json!({"id": 5, "reason": "gone"}),
+                "finding.resolve",
+            ),
+        ] {
+            let response = service.handle(&request(Some(token), use_case, params));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{use_case:?}"
+            );
+            let denial = pop();
+            assert_eq!(denial["event"], "authorization_denied");
+            assert_eq!(denial["role"], token);
+            assert_eq!(denial["capability"], capability);
+        }
+        // The proposals are read by every role.
+        for token in ["observer", "worker", "review"] {
+            let listed = service.handle(&request(
+                Some(token),
+                UseCase::ProposalList,
+                json!({"all": true}),
+            ));
+            assert_eq!(listed.result, Some(json!({"proposals": [], "all": true})));
+            let shown = service.handle(&request(
+                Some(token),
+                UseCase::ProposalShow,
+                json!({"id": 2}),
+            ));
+            assert_eq!(shown.result, Some(json!({"proposal": 2})));
+        }
+        assert!(backend.log.lock().unwrap().is_empty());
     }
 
     struct Control {

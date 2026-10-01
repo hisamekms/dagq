@@ -34,15 +34,15 @@ use serde_json::{Value, json};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A queue with one task claimed as run `run`, and a stub cmux beside it.
-struct Queue {
+pub(crate) struct Queue {
     _dir: tempfile::TempDir,
-    db: PathBuf,
-    cmux: PathBuf,
-    run: TaskRun,
+    pub(crate) db: PathBuf,
+    pub(crate) cmux: PathBuf,
+    pub(crate) run: TaskRun,
 }
 
 impl Queue {
-    fn dir(&self) -> &Path {
+    pub(crate) fn dir(&self) -> &Path {
         self.db.parent().unwrap()
     }
 }
@@ -54,7 +54,7 @@ impl Drop for Queue {
     }
 }
 
-fn queue() -> Queue {
+pub(crate) fn queue() -> Queue {
     let (dir, mut queue) = common::queue::fixture();
     let task = queue.add(common::queue::new_task("served")).unwrap();
     queue
@@ -81,19 +81,19 @@ fn queue() -> Queue {
     }
 }
 
-fn start(queue: &Queue) -> Value {
+pub(crate) fn start(queue: &Queue) -> Value {
     ok(
         &queue.db,
         &["service", "start", "--cmux", queue.cmux.to_str().unwrap()],
     )
 }
 
-fn token(queue: &Queue, principal: &Principal) -> String {
+pub(crate) fn token(queue: &Queue, principal: &Principal) -> String {
     let issued = service::issue(queue.dir(), principal, 1).unwrap();
     service::read_token(&issued.file).unwrap()
 }
 
-fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value) -> Value {
+pub(crate) fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value) -> Value {
     let response = service::call(
         &service::socket_path(queue.dir()),
         &ServiceRequest {
@@ -108,7 +108,7 @@ fn call(queue: &Queue, token: Option<&str>, use_case: UseCase, params: Value) ->
     serde_json::to_value(response).unwrap()
 }
 
-fn events(db: &Path, kind: &str) -> Vec<Value> {
+pub(crate) fn events(db: &Path, kind: &str) -> Vec<Value> {
     ok(db, &["events", "--all", "--full", "--kind", kind])["events"]
         .as_array()
         .unwrap()
