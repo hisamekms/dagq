@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 /// The model the stub `codex` writes to its rollouts.
@@ -32,7 +33,8 @@ fn codex_home(fx: &Fixture) -> PathBuf {
 /// appends its arguments (each ended by `|`) to `codex-args.txt` and its
 /// role and actor to `codex-actors.txt`, prints `thread.started` (thread
 /// `codex-thread-<call>`) and `turn.started`, then, as `codex-mode` says,
-/// fails at the login (`auth`) or the usage limit (`limit`), or writes the
+/// waits for a command in another process group (`timeout`), fails at the
+/// login (`auth`) or the usage limit (`limit`), or writes the
 /// thread's rollout with its model's `turn_context` and prints the reply in
 /// `codex-reply.jsonl` and `turn.completed`.
 fn stub_codex(fx: &Fixture, mode: &str, verdict: &Value) -> PathBuf {
@@ -52,6 +54,11 @@ THREAD="codex-thread-$(wc -l < "$DIR/codex-actors.txt" | tr -d ' ')"
 echo "Reading additional input from stdin..." >&2
 printf '{{"type":"thread.started","thread_id":"%s"}}\n{{"type":"turn.started"}}\n' "$THREAD"
 case "$(cat "$DIR/codex-mode")" in
+  timeout)
+    printf '{{"type":"item.started","item":{{"id":"c1","type":"command_execution","command":"sleep 120","status":"in_progress"}}}}\n'
+    perl -e 'setpgrp(0,0) or die "setpgrp: $!"; open(my $f, ">", $ARGV[0]) or die $!; print $f "$$ ", getpgrp(0), " ", getppid(), " ", getpgrp(getppid()), "\n"; close($f) or die $!; exec "sleep", "120"; die "exec: $!"' "$DIR/codex-child.pid" &
+    wait
+    exit 0 ;;
   auth)
     printf '{{"type":"error","message":"unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"}}\n{{"type":"turn.failed","error":{{"message":"unexpected status 401 Unauthorized"}}}}\n'
     exit 1 ;;
@@ -119,6 +126,92 @@ fn queue_events(fx: &Fixture, kind: &str) -> Vec<Value> {
 fn codex_config() -> Option<Vec<u8>> {
     let home = std::env::var_os("HOME")?;
     fs::read(Path::new(&home).join(".codex/config.toml")).ok()
+}
+
+/// A Codex command can lead its own process group (spike 4.). Killing
+/// only Codex or its group must not leave that command behind.
+#[test]
+fn a_timed_out_codex_goal_review_stops_a_command_in_another_process_group() {
+    let fx = fixture();
+    roles(&fx, "[roles.goal_review]\nprovider = \"codex\"\n");
+    let (goal, _) = goal_done(&fx);
+    let codex = stub_codex(&fx, "timeout", &achieved("never returned"));
+    let pid_file = fx.db.parent().unwrap().join("codex-child.pid");
+    // Even a failing assertion must not leave the stub's command running.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Some(pid) = fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|s| s.split_whitespace().next()?.parse::<u32>().ok())
+            {
+                // SAFETY: kill takes no pointers; this is our stub's child.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+    }
+    let _cleanup = Cleanup(pid_file.clone());
+    let mut reviewer = crate::runtime_support::TestReviewer::new(&[]);
+    reviewer.timeout = Duration::from_secs(3);
+    let mut opts = options(0, Duration::from_secs(3600));
+    opts.codex = codex;
+    opts.codex_home = Some(codex_home(&fx));
+    let outcome = {
+        let _wait = crate::common::within(Duration::from_secs(30), "Codex goal review to time out");
+        dagq::runtime::supervise_with_reviewer(
+            &fx.db,
+            &fx.repo,
+            &PlanWorkspace::default(),
+            &fx.claude,
+            &reviewer,
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &opts,
+        )
+        .unwrap()
+    };
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let pids: Vec<u32> = fs::read_to_string(&pid_file)
+        .expect("the command records its pid after entering a separate process group")
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(pids.len(), 4);
+    let child = pids[0];
+    assert_eq!(pids[1], child, "the command leads its own process group");
+    assert_ne!(pids[1], pids[3], "the command's group differs from Codex's");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while crate::runtime_support::running(child) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !crate::runtime_support::running(child),
+        "Codex's command {child} outlived the goal review"
+    );
+    // The command is gone: disarm the cleanup so it cannot hit a reused pid.
+    fs::remove_file(&pid_file).unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let failed = goal_events(&mut queue, goal, "goal_review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("the headless goal review did not finish within 3 seconds"),
+        "{failed:?}"
+    );
+    let rows: Vec<(u32, String, Option<String>, Option<i64>)> = Connection::open(&fx.db)
+        .unwrap()
+        .prepare("SELECT pid, provider, outcome, ended_at FROM headless_jobs WHERE kind='goal_review' AND goal_id=?1")
+        .unwrap()
+        .query_map([goal], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, pids[2], "the command was a child of this job");
+    assert_eq!(rows[0].1, "codex");
+    assert_eq!(rows[0].2.as_deref(), Some("stopped"));
+    assert!(rows[0].3.is_some(), "the job row is closed: {rows:?}");
 }
 
 /// `provider = "codex"`: the job is `codex exec --json` in the read-only
