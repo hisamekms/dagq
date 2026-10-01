@@ -1508,6 +1508,10 @@ impl Supervisor<'_> {
                 Err(error) => {
                     self.resolve_landing_branch();
                     if self.landing_unresolved {
+                        info!(
+                            event = "claim_landing_branch_unresolved",
+                            "claim held after the landing branch stopped resolving during the pass"
+                        );
                         break;
                     }
                     return Err(error);

@@ -1175,14 +1175,17 @@ fn load_deleting_main() -> Option<f64> {
 /// `resident_supervisor_without_runs_is_listed_until_it_stops` (task 1018).
 #[test]
 fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
-    let (_dir, repo, db) = fixture();
+    let (dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
     let options = SuperviseOptions {
         load_average: load_deleting_main,
         ..supervise_options(1, true)
     };
     DELETE_MAIN_IN.with(|armed| *armed.borrow_mut() = Some(repo.clone()));
-    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    let telemetry = Telemetry::open(&dir.path().join("logs"), "supervise");
+    let outcome = telemetry
+        .in_scope(|| supervise_with(&db, &repo, &backend, &options))
+        .unwrap();
     assert!(
         DELETE_MAIN_IN.with(|armed| armed.borrow().is_none()),
         "the pass never read the load"
@@ -1213,6 +1216,21 @@ fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
     assert!(task.runs.is_empty());
     assert!(queue.run_leases().unwrap().is_empty());
     assert!(queue.supervisors().unwrap().is_empty());
+
+    // Queue state alone also passes if a new load read deletes main before
+    // the top-of-pass check. Require the claim's mid-pass recheck itself.
+    let log = fs::read_to_string(telemetry.path.as_ref().unwrap()).unwrap();
+    let records: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        records.iter().any(|record| {
+            record["fields"]["event"] == "claim_landing_branch_unresolved"
+                && record["target"] == "dagq::application::supervise"
+        }),
+        "the claim did not recheck the landing branch during the pass: {log}"
+    );
 }
 
 /// A supervisor's progress goes to its process's JSON Lines file in the

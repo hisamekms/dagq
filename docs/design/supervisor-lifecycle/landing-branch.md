@@ -114,6 +114,8 @@ pass の先頭の`check_landing_branch`は、毎passで`git`を起動しない�
 
 main checkoutの無いrepository（印を読めない）と、`Repository`の既定の実装（testのfake）は、今までどおり毎passで解決する。変えないもの: 着地ごとに1度の解決（task 667）、`fill_slots`のclaimで`main_head`が失敗したときの解決し直し（task 1018。印に依らずその場で解決する）、`up`のpreflight、`doctor`、supervisorの起動時の解決。
 
+`fill_slots`のclaimのloopで`main_head`が失敗し、その場の`resolve_landing_branch`でも解決できずclaimを保留してloopを抜けるときは、tracingのINFO eventに`event = "claim_landing_branch_unresolved"`を記録する（task 1137）。これはpassの途中の再確認で保留した印で、先頭の`check_landing_branch`では出さない。先頭のstampのキャッシュで解決を省いたかどうかには依らない。`tests/it/runtime_claim.rs`の`main_vanishing_after_the_landing_branch_check_holds_the_claim`はsupervisorのJSONLの`fields.event`でこの印を確かめ、mainが先頭で消えただけでは通らない。
+
 ## 既存のqueueの互換
 
 `[repository]`の無い`dagq.toml`（とファイルの無いrepository）では、`origin`のHEADが`main`を指すか、`main`が在れば着地先は`main`、pushは`origin`へ行う。dagq自身のrepositoryはこれに当たり、設定を足さずに今までと同じ振る舞いになる。DBのschemaとeventのkindは変わらない（payloadに`branch`が増えるだけ）。
