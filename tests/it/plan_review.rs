@@ -283,6 +283,8 @@ pub(crate) struct PlanWorkspace {
     /// What `capture` returns, or its failure; none is an empty screen
     /// (no input box).
     pub(crate) screen: Mutex<Option<Result<String, String>>>,
+    /// Fail text submission after recording the attempted call.
+    pub(crate) send_text_error: Option<String>,
 }
 
 impl PlanWorkspace {
@@ -320,6 +322,9 @@ impl WorkspaceBackend for PlanWorkspace {
             .lock()
             .unwrap()
             .push((workspace_id.into(), text.into()));
+        if let Some(error) = &self.send_text_error {
+            bail!("{error}");
+        }
         Ok(())
     }
     fn send_enter(&self, _: &str) -> Result<()> {

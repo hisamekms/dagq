@@ -257,6 +257,70 @@ fn an_idle_inbox_is_nudged_twice_then_the_person_is_notified_then_nothing() {
 }
 
 #[test]
+fn failed_submissions_are_recorded_once_and_advance_to_the_next_nudge() {
+    let mut inbox = Inbox::new(READY, true);
+    let error = "fake inbox text submission failed";
+    inbox.backend.send_text_error = Some(error.into());
+
+    // send_text fails and the line is not left in the box, so submit_input
+    // returns that error.
+    // Each supervise call must still return successfully.
+    inbox.supervise_twice(400);
+    let first = inbox.nudges(INBOX_NUDGED);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["absent_since"], 0);
+    assert_eq!(first[0]["attempt"], 1);
+    assert_eq!(first[0]["action"], "typed");
+    assert_eq!(first[0]["workspace_id"], INBOX);
+    let failed = |attempt| {
+        json!({
+            "absent_since": 0,
+            "attempt": attempt,
+            "action": "typed",
+            "workspace_id": INBOX,
+            "error": error,
+        })
+    };
+    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1)]);
+    assert_eq!(inbox.typed().len(), 1);
+
+    // A fresh supervisor reads the failed attempt from the persisted claim.
+    // The screen remains eligible, so only the history prevents a retry.
+    inbox.supervise_twice(500);
+    assert_eq!(inbox.typed().len(), 1);
+    assert_eq!(inbox.nudges(INBOX_NUDGED), first);
+    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1)]);
+    assert!(inbox.backend.notifications().is_empty());
+
+    inbox.supervise_twice(1_020);
+    assert_eq!(inbox.typed().len(), 2);
+    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1), failed(2)]);
+    assert!(inbox.backend.notifications().is_empty());
+    inbox.supervise_twice(1_100);
+    assert_eq!(inbox.typed().len(), 2);
+    assert_eq!(inbox.nudges(INBOX_NUDGED).len(), 2);
+
+    inbox.supervise(1_640);
+    inbox.supervise_twice(3_000);
+    assert_eq!(inbox.typed().len(), 2);
+    let notifications = inbox.backend.notifications();
+    assert_eq!(notifications.len(), 1);
+    assert!(notifications[0].0.contains("inbox has no watch"));
+    let nudges = inbox.nudges(INBOX_NUDGED);
+    let attempts: Vec<_> = nudges
+        .iter()
+        .map(|n| {
+            (
+                n["attempt"].as_i64().unwrap(),
+                n["action"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(attempts, [(1, "typed"), (2, "typed"), (3, "notified")]);
+    assert_eq!(inbox.nudges(INBOX_NUDGE_FAILED), [failed(1), failed(2)]);
+}
+
+#[test]
 fn an_inbox_at_work_or_with_a_line_typed_is_not_nudged() {
     let inbox = Inbox::new(WORKING, true);
     inbox.supervise_twice(400);
