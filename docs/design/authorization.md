@@ -60,6 +60,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | | `screen.read` / `screen.send` | `run screen` `planner screen` / `run send` `planner send`（sessionの画面を読む・送る。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)、[sessionへの送信と確認](supervisor-lifecycle/session-send.md#人とinboxの画面の読み取りと送信)） |
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
 | | `run.recover` | `recover` |
+| | `workspace.cleanup` | `run close-workspaces`（終わったrunの残ったworkspaceの片付け。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定6） |
 | | `service.lifecycle` | `up` `down` `broker start` `broker stop` |
 | | `service.install` | `install` `auto-update` |
 | | `queue.admin` | `init` `migrate` `rebind` |
@@ -85,7 +86,7 @@ CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`req
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
 | observer | 読み取り・`queue.watch`・`finding.record`・`finding.resolve`・`finding.ask` | `finding.resolve`と`finding.ask`はfindingだけ |
-| supervisor | 読み取り・`queue.watch`・`queue.export`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`は持たない |
+| supervisor | 読み取り・`queue.watch`・`queue.export`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（自分の掃除を使う）は持たない |
 | wrapper | 読み取り・`session.run`・`session.record` | なし |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
 
@@ -164,6 +165,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | `observe`（`--history`を除く） | `observe.run` | queue |
 | `integrate ID` / `integrate --next` | `landing.request` | task / queue |
 | `recover RUN` | `run.recover` | run（読めないidは`Unresolved`） |
+| `run close-workspaces` / `run close-workspaces RUN` / `run close-workspaces --task ID` | `workspace.cleanup` | queue / run（読めないidは`Unresolved`） / task |
 | `review ID` | `review.prepare` | task |
 | `session --run RUN` | `session.run` | run（読めないidは`Unresolved`） |
 | `planner-session --planner ID` | `session.run` | planner |
@@ -175,6 +177,7 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 
 - userとinboxは全てを打てる（inboxは人の言葉での代行で、dagq-recoverの手作業の`integrate`・`recover`・`review`を含む。区別は記録のactorが持つ）
 - `run screen` / `run send` / `planner screen` / `planner send`はuserとinboxだけ（ADR-t1228-1の決定7）。plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
+- `run close-workspaces`（`workspace.cleanup`）はuserとinboxだけ（ADR-t1228-1の決定7）。plannerとsupervisorを含むほかのroleは拒む。supervisorは終わったrunのworkspaceを自分の掃除（[Run workspaces](supervisor-lifecycle/run-workspaces.md)）で閉じ、このCLIを使わない。閉じた`workspace_closed`は呼び出し元をactorにして記録する
 - plannerは人に頼まれた`up`・`down`・`install`と、`init`・`migrate`・`rebind`・`plan`、自分のplannerの`planner-session`と`session-event`を打てる（ADR-t728-1の決定7のとおり今の権限のまま）。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む
 - worker・4つのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
 - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。errorの形は計画系と同じ

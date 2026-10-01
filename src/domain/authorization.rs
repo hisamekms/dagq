@@ -61,6 +61,8 @@ string_enum!(Capability {
     // Scheduler transitions and the service.
     Supervise => "scheduler.supervise",
     RunRecover => "run.recover",
+    // Closing the workspaces ended runs left open (ADR-t1228-1 decision 6).
+    WorkspaceCleanup => "workspace.cleanup",
     ServiceLifecycle => "service.lifecycle",
     BinaryInstall => "service.install",
     QueueAdmin => "queue.admin",
@@ -76,7 +78,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -111,6 +113,7 @@ impl Capability {
         Self::ScreenSend,
         Self::Supervise,
         Self::RunRecover,
+        Self::WorkspaceCleanup,
         Self::ServiceLifecycle,
         Self::BinaryInstall,
         Self::QueueAdmin,
@@ -339,6 +342,7 @@ const USER: &[Capability] = &[
     C::ScreenSend,
     C::Supervise,
     C::RunRecover,
+    C::WorkspaceCleanup,
     C::ServiceLifecycle,
     C::BinaryInstall,
     C::QueueAdmin,
@@ -655,6 +659,7 @@ mod tests {
                 C::AskAnswer,
                 C::IntegrationRequest,
                 C::RunRecover,
+                C::WorkspaceCleanup,
                 C::TaskReadyBypassReview,
                 C::TaskCancel,
                 C::GoalClose,
@@ -802,6 +807,7 @@ mod tests {
             C::AskAnswer,
             C::AskClose,
             C::Supervise,
+            C::WorkspaceCleanup,
         ] {
             let error = StaticPolicy
                 .authorize(&planner, capability, &task_in(TaskStatus::Draft))
@@ -943,12 +949,15 @@ mod tests {
         ] {
             assert!(allowed(&supervisor, capability, &Resource::Queue));
         }
+        // The supervisor closes ended runs' workspaces on its own path
+        // (ADR-t1228-1 decision 7).
         for capability in [
             C::AskAnswer,
             C::TaskReadyBypassReview,
             C::Land,
             C::Push,
             C::ReviewSubmit,
+            C::WorkspaceCleanup,
         ] {
             assert!(!allowed(&supervisor, capability, &Resource::Queue));
         }

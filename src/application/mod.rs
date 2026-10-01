@@ -43,6 +43,7 @@ pub mod session;
 pub mod stats;
 pub mod supervise;
 pub mod update;
+pub mod workspace_cleanup;
 
 pub use crate::domain::ClaimRank;
 pub use ports::*;

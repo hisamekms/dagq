@@ -129,6 +129,7 @@ mod runtime_verify_flaky;
 mod runtime_verify_retry;
 mod runtime_waiting;
 mod runtime_waiting_stages;
+mod runtime_workspace_cleanup;
 mod source_repository;
 mod test_actor_env;
 mod worker_escalation;

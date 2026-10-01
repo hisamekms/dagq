@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
-use dagq::application::commands::operations::{HookSession, Operation};
+use dagq::application::commands::operations::{HookSession, Operation, WorkspaceScope};
 use dagq::{
     application::{StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph},
     domain::{
@@ -908,8 +908,8 @@ enum Command {
     },
     /// A run's session, named by its run id or its task id (the task's
     /// latest run): read its screen, or send it a key of a fixed set or the
-    /// answer of an answered ask (ADR-t1228-1). Each is recorded with its
-    /// actor.
+    /// answer of an answered ask; or close the workspaces ended runs left
+    /// open (ADR-t1228-1). Each is recorded with its actor.
     Run {
         #[command(subcommand)]
         command: RunCommand,
@@ -1497,6 +1497,26 @@ enum RunCommand {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
+    /// List, or with --apply close, the workspaces ended runs (integrated, succeeded, failed,
+    /// interrupted) left open that cmux still lists, as the supervisor's sweep would; it needs
+    /// no supervisor. Without RUN or --task: every run the sweep takes. RUN or --task also takes
+    /// the run a triage left (triage by hand), once no live lease, wrapper or agent is behind it.
+    /// Never closes a live or waiting run's workspace, nor the inbox's, the supervisor's or a
+    /// planner's. Lists only (a dry run) unless --apply.
+    CloseWorkspaces {
+        /// Run ID: only this run's workspaces; refused unless it ended.
+        #[arg(conflicts_with = "task")]
+        run: Option<String>,
+        /// Task ID: the workspaces of every ended run of this task.
+        #[arg(long)]
+        task: Option<i64>,
+        /// Close them; without it, only list what would be closed.
+        #[arg(long)]
+        apply: bool,
+        /// cmux executable that lists and closes the workspaces.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1880,18 +1900,27 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         }
         Command::Review { id } => Operation::Review(TaskId::new(*id)),
         Command::Recover { run: id } => Operation::Recover(run(id)),
+        Command::Run {
+            command: RunCommand::CloseWorkspaces { run: id, task, .. },
+        } => Operation::CloseWorkspaces(match (id, task) {
+            (Some(id), _) => WorkspaceScope::Run(run(id)),
+            (None, Some(task)) => WorkspaceScope::Task(TaskId::new(*task)),
+            (None, None) => WorkspaceScope::All,
+        }),
         Command::Session { run: id, .. } => Operation::Session(run(id)),
         Command::PlannerSession { planner, .. } => {
             Operation::PlannerSession(PlannerId::new(*planner))
         }
-        Command::Run { command } => {
-            let (RunCommand::Screen { run: target, .. } | RunCommand::Send { run: target, .. }) =
-                command;
+        Command::Run {
+            command:
+                command
+                @ (RunCommand::Screen { run: target, .. } | RunCommand::Send { run: target, .. }),
+        } => {
             let resource = dagq::application::screen::RunTarget::parse(target)
                 .map_or(Resource::Unresolved, |target| target.resource());
             match command {
                 RunCommand::Screen { .. } => Operation::ReadScreen(resource),
-                RunCommand::Send { .. } => Operation::SendToScreen(resource),
+                _ => Operation::SendToScreen(resource),
             }
         }
         Command::Planner { command } => match command {
@@ -3356,6 +3385,33 @@ fn execute(cli: Cli) -> Result<Value> {
                         &sending,
                     )?
                 }
+                RunCommand::CloseWorkspaces {
+                    run,
+                    task,
+                    apply,
+                    cmux,
+                } => {
+                    use dagq::application::workspace_cleanup::{
+                        CleanupTarget, close_ended_workspaces,
+                    };
+                    use dagq::infrastructure::adapters::SystemProcesses;
+                    let target = match (run, task) {
+                        (Some(run), _) => CleanupTarget::Run(RunId::new(run)?),
+                        (None, Some(task)) => CleanupTarget::Task(TaskId::new(task)),
+                        (None, None) => CleanupTarget::All,
+                    };
+                    serde_json::to_value(close_ended_workspaces(
+                        &mut queue,
+                        &Cmux {
+                            executable: executable(&cmux)?,
+                        },
+                        &SystemProcesses,
+                        &*generators.clock,
+                        &actor,
+                        &target,
+                        apply,
+                    )?)?
+                }
             }
         }
         Command::Planner { command } => {
@@ -3986,6 +4042,9 @@ mod tests {
             ("throughput-review", &[]),
             ("integrate", &["1"]),
             ("recover", &["r1"]),
+            ("run close-workspaces", &["--apply"]),
+            ("run close-workspaces", &["r1"]),
+            ("run close-workspaces", &["--task", "1"]),
             ("review", &["1"]),
             (
                 "session",

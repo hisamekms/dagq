@@ -58,6 +58,10 @@ pub enum Operation {
     /// `recover RUN`; `None` for a run id that cannot be read.
     Recover(Option<RunId>),
     Review(TaskId),
+    /// `run close-workspaces`: the workspaces ended runs left open, of one
+    /// run (`None` for a run id that cannot be read), of one task, or all
+    /// (ADR-t1228-1 decision 6).
+    CloseWorkspaces(WorkspaceScope),
     /// The session wrapper of a run; `None` for a run id that cannot be read.
     Session(Option<RunId>),
     PlannerSession(PlannerId),
@@ -69,6 +73,14 @@ pub enum Operation {
     /// `run send` and `planner send` (ADR-t1228-1 decision 5), on what it
     /// names as for [`Self::ReadScreen`].
     SendToScreen(Resource),
+}
+
+/// What `run close-workspaces` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceScope {
+    All,
+    Run(Option<RunId>),
+    Task(TaskId),
 }
 
 fn run_or_unresolved(run: Option<&RunId>) -> Resource {
@@ -94,6 +106,14 @@ impl Operation {
             ),
             Self::Recover(run) => (C::RunRecover, run_or_unresolved(run.as_ref())),
             Self::Review(task) => (C::PrepareReview, Resource::task(*task)),
+            Self::CloseWorkspaces(scope) => (
+                C::WorkspaceCleanup,
+                match scope {
+                    WorkspaceScope::All => Resource::Queue,
+                    WorkspaceScope::Run(run) => run_or_unresolved(run.as_ref()),
+                    WorkspaceScope::Task(task) => Resource::task(*task),
+                },
+            ),
             Self::Session(run) => (C::SessionRun, run_or_unresolved(run.as_ref())),
             Self::PlannerSession(planner) => (C::SessionRun, Resource::Planner(*planner)),
             Self::ReadScreen(resource) => (C::ScreenRead, resource.clone()),
@@ -335,6 +355,51 @@ mod tests {
         // A worker without its run in its environment owns no session.
         let anonymous = ActorContext::instance(ActorRole::Worker, 1);
         assert!(!allowed(&anonymous, &Operation::Session(Some(run("r1")))));
+    }
+
+    /// ADR-t1228-1 decision 7: the user and the inbox close the
+    /// workspaces ended runs left; no other role does, the supervisor
+    /// included (it sweeps them on its own path).
+    #[test]
+    fn only_the_user_and_the_inbox_close_ended_runs_workspaces() {
+        let scopes = [
+            WorkspaceScope::All,
+            WorkspaceScope::Run(Some(run("r1"))),
+            WorkspaceScope::Task(TaskId::new(1)),
+        ];
+        for actor in [
+            ActorContext::user(),
+            ActorContext::instance(ActorRole::Inbox, "inbox"),
+        ] {
+            for scope in &scopes {
+                assert!(allowed(&actor, &Operation::CloseWorkspaces(scope.clone())));
+            }
+        }
+        let mut others = vec![ActorContext::worker(&run("r1"), TaskId::new(1))];
+        others.extend(
+            ActorRole::ALL
+                .into_iter()
+                .filter(|role| !matches!(role, ActorRole::User | ActorRole::Inbox))
+                .map(|role| ActorContext::instance(role, 1)),
+        );
+        for actor in others {
+            for scope in &scopes {
+                let log = Log::default();
+                let operation = Operation::CloseWorkspaces(scope.clone());
+                let error = authorize(&actor, &StaticPolicy, &log, &operation).unwrap_err();
+                let error = error.downcast_ref::<AuthorizationError>().unwrap();
+                assert_eq!(error.capability, Capability::WorkspaceCleanup);
+                assert_eq!(log.0.borrow().len(), 1, "{actor:?} {scope:?}");
+            }
+        }
+        assert_eq!(
+            Operation::CloseWorkspaces(WorkspaceScope::Run(None)).request(),
+            (Capability::WorkspaceCleanup, Resource::Unresolved)
+        );
+        assert_eq!(
+            Operation::CloseWorkspaces(WorkspaceScope::Task(TaskId::new(2))).request(),
+            (Capability::WorkspaceCleanup, Resource::task(TaskId::new(2)))
+        );
     }
 
     #[test]
