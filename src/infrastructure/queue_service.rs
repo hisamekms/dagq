@@ -40,6 +40,7 @@ use super::dialogue::DialogueQueue;
 use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
+use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
     QueueService, QueueServiceControl, ServiceBackend, ServiceProbe, ServiceQueue,
 };
@@ -562,6 +563,7 @@ impl ServiceBackend for SqliteServiceBackend {
             .with_actor(actor.clone());
         Ok(Box::new(ServiceSqlite {
             queue,
+            db: self.db.clone(),
             queue_dir: self.queue_dir.clone(),
             cmux: Cmux {
                 executable: self.cmux.clone(),
@@ -581,6 +583,7 @@ impl ServiceBackend for SqliteServiceBackend {
 /// One request's queue.
 struct ServiceSqlite {
     queue: SqliteQueue,
+    db: PathBuf,
     queue_dir: PathBuf,
     cmux: Cmux,
 }
@@ -660,6 +663,20 @@ impl ServiceQueue for ServiceSqlite {
             &self.queue,
             id,
         )?)?)
+    }
+
+    /// As the command line reads it (`compose::read_queue`), with the
+    /// service's own cmux for `stats`' workspaces: as for the command
+    /// line, a cmux that does not resolve lists none.
+    fn read(&mut self, read: &QueueRead) -> Result<Value> {
+        let cmux = super::adapters::executable(&self.cmux.executable)
+            .ok()
+            .map(|executable| Cmux { executable });
+        let one_shot = crate::compose::OneShot {
+            user_config: crate::infrastructure::language::user_config_file(),
+            ..crate::compose::OneShot::new(self.queue.generators().clone())
+        };
+        crate::compose::read_queue(&mut self.queue, &self.db, &one_shot, cmux.as_ref(), read)
     }
 }
 

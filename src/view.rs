@@ -8,6 +8,9 @@ use serde_json::{Map, Value, json};
 
 use crate::domain::{GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail, reason};
 
+/// The one key of a command's value that is printed as is instead of as
+/// JSON: `graph --format d2|svg` without `--out`.
+pub const RAW_STDOUT: &str = "__dagq_raw_stdout";
 /// Characters a long text field keeps before `…`.
 pub const TEXT_LIMIT: usize = 300;
 /// Latest events a compact view keeps unless told otherwise.

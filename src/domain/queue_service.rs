@@ -66,7 +66,79 @@ string_enum!(UseCase {
     FindingResolve => "finding_resolve",
     // Mark a finding dismissed, as `dagq finding dismiss` does.
     FindingDismiss => "finding_dismiss",
+    // The reads of the whole queue a read role's job or a worker runs
+    // (ADR-t1233-5 decisions 1 and 3), each as the command of its name
+    // prints it.
+    List => "list",
+    Candidates => "candidates",
+    Graph => "graph",
+    Status => "status",
+    Asks => "asks",
+    Events => "events",
+    Timeline => "timeline",
+    Stats => "stats",
+    Kpi => "kpi",
+    Forecast => "forecast",
+    Notes => "notes",
+    Marks => "marks",
+    Findings => "findings",
+    Search => "search",
+    Related => "related",
+    GoalList => "goal_list",
+    GoalShow => "goal_show",
+    Lint => "lint",
+    ObserveHistory => "observe_history",
 });
+
+impl UseCase {
+    /// The use case a `dagq` command line goes to through the service:
+    /// `words` are its arguments after the global options, the subcommand
+    /// first. `None` for a command the service does not answer (the
+    /// control side's, `watch`, `report`, `graph --out`, `ask close`,
+    /// `observe` without `--history`, `locate`, `doctor`, the planning
+    /// commands, ...).
+    pub fn of_command(words: &[&str]) -> Option<Self> {
+        let has = |flag: &str| {
+            words
+                .iter()
+                .any(|word| *word == flag || word.starts_with(&format!("{flag}=")))
+        };
+        let command = *words.first()?;
+        let next = words.get(1).copied();
+        Some(match (command, next) {
+            ("ask", Some("close")) => return None,
+            ("ask", _) => Self::Ask,
+            ("show", _) => Self::Show,
+            ("note", _) => Self::Note,
+            ("proposal", Some("list")) => Self::ProposalList,
+            ("proposal", Some("show")) => Self::ProposalShow,
+            ("finding", Some("record")) => Self::FindingRecord,
+            ("finding", Some("resolve")) => Self::FindingResolve,
+            ("finding", Some("dismiss")) => Self::FindingDismiss,
+            ("list", _) => Self::List,
+            ("candidates", _) => Self::Candidates,
+            ("graph", _) if has("--out") => return None,
+            ("graph", _) => Self::Graph,
+            ("status", _) => Self::Status,
+            ("asks", _) => Self::Asks,
+            ("events", _) => Self::Events,
+            ("timeline", _) => Self::Timeline,
+            ("stats", _) => Self::Stats,
+            ("kpi", _) => Self::Kpi,
+            ("forecast", _) => Self::Forecast,
+            ("notes", _) => Self::Notes,
+            ("marks", _) => Self::Marks,
+            ("findings", _) => Self::Findings,
+            ("search", _) => Self::Search,
+            ("related", _) => Self::Related,
+            ("goal", Some("list")) => Self::GoalList,
+            ("goal", Some("show")) => Self::GoalShow,
+            ("lint", _) => Self::Lint,
+            ("observe", _) if has("--history") => Self::ObserveHistory,
+            _ => return None,
+        })
+    }
+}
 
 // Why the service refused or failed a request.
 string_enum!(ServiceErrorCode {
@@ -383,5 +455,48 @@ mod tests {
         assert!(attention_stands(Some(QUEUE_SERVICE_DOWN)));
         assert!(!attention_stands(Some(QUEUE_SERVICE_RUNNING)));
         assert!(!attention_stands(None));
+    }
+
+    #[test]
+    fn a_command_line_goes_to_its_use_case_and_the_rest_to_none() {
+        for (words, use_case) in [
+            (&["events", "--full"][..], "events"),
+            (&["goal", "show", "3"], "goal_show"),
+            (&["goal", "list"], "goal_list"),
+            (&["proposal", "show", "1"], "proposal_show"),
+            (&["finding", "record", "--kind", "x"], "finding_record"),
+            (&["observe", "--history"], "observe_history"),
+            (&["observe", "--limit", "5", "--history"], "observe_history"),
+            (&["ask", "--kind", "blocked"], "ask"),
+            (&["graph", "--format", "d2"], "graph"),
+            (&["stats"], "stats"),
+        ] {
+            assert_eq!(
+                UseCase::of_command(words).map(UseCase::as_str),
+                Some(use_case),
+                "{words:?}"
+            );
+        }
+        for words in [
+            &[][..],
+            &["watch"],
+            &["report"],
+            &["locate"],
+            &["doctor"],
+            &["observe"],
+            &["observe", "--daily"],
+            &["graph", "--format", "svg", "--out", "g.svg"],
+            &["graph", "--out=g.d2"],
+            &["ask", "close", "3"],
+            &["goal", "add", "x"],
+            &["goal"],
+            &["proposal", "withdraw", "1"],
+            &["finding"],
+            &["mark", "x"],
+            &["add"],
+            &["integrate"],
+        ] {
+            assert_eq!(UseCase::of_command(words), None, "{words:?}");
+        }
     }
 }

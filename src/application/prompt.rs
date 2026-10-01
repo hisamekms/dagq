@@ -3367,4 +3367,95 @@ mod tests {
             assert!(interactive.contains(kept), "{kept}: {interactive}");
         }
     }
+
+    /// The `dagq <command> ...` spans in backquotes of `text`, without
+    /// `dagq`.
+    fn dagq_commands(text: &str) -> Vec<&str> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|span| span.strip_prefix("dagq "))
+            .collect()
+    }
+
+    /// Every `dagq` command the prompts of the jobs that read the queue
+    /// (the plan review, the goal review, the observer and the throughput
+    /// review with the dagq skill's procedure it carries) and the
+    /// worker's and planners' shared reading lines name goes to a use case
+    /// of the queue service, so their client-mode `dagq` takes it
+    /// (ADR-t1233-5 decision 1, docs/design/queue-service.md). The review
+    /// and recovery jobs run no command (`JobAccess::ReadFiles`).
+    #[test]
+    fn every_dagq_command_a_job_s_prompt_names_is_a_use_case_of_the_queue_service() {
+        use crate::domain::queue_service::UseCase;
+        use crate::domain::throughput_review::{HOUR_MS, ReviewMode, window};
+        let (plan, _) = plan_prompt(2, 0);
+        let goal = goal_review_prompt(&GoalReviewMaterial {
+            goal: json!({"id": 7}),
+            tasks: Vec::new(),
+            events: Vec::new(),
+            previous: Vec::new(),
+            gaps_in_a_row: 0,
+            repo_root: Path::new("/repo"),
+        });
+        let observer = crate::observer::observer_prompt(
+            crate::observer::ObserveMode::Hourly,
+            "dagq",
+            None,
+            &json!({}),
+        )
+        .unwrap();
+        let throughput = [ReviewMode::Hourly, ReviewMode::Daily, ReviewMode::Weekly]
+            .map(|mode| {
+                crate::throughput_review::review_prompt(
+                    &window(mode, 1_790_655_900_000, 9 * HOUR_MS),
+                    "dagq",
+                    &json!({}),
+                    Path::new("/q/input.json"),
+                )
+                .unwrap()
+            })
+            .join("\n");
+        let mut named = std::collections::BTreeSet::new();
+        for (who, text) in [
+            ("plan review", plan.as_str()),
+            ("goal review", &goal),
+            ("observer", &observer),
+            ("throughput review", &throughput),
+            ("record reading", RECORD_READING),
+            ("worker reading", WORKER_READING),
+        ] {
+            let commands = dagq_commands(text);
+            assert!(!commands.is_empty(), "{who} names no dagq command");
+            for command in commands {
+                let words: Vec<&str> = command.split_whitespace().collect();
+                let use_case = UseCase::of_command(&words);
+                assert!(
+                    use_case.is_some(),
+                    "the {who} prompt names `dagq {command}`, which no use case of the queue service answers"
+                );
+                named.insert(use_case.unwrap().as_str());
+            }
+        }
+        // The reads the prompts name, as docs/design/queue-service.md lists
+        // them.
+        for read in [
+            "show",
+            "proposal_show",
+            "events",
+            "timeline",
+            "stats",
+            "kpi",
+            "marks",
+            "search",
+            "related",
+            "findings",
+            "goal_show",
+            "forecast",
+            "lint",
+            "observe_history",
+        ] {
+            assert!(named.contains(read), "no prompt names {read}: {named:?}");
+        }
+    }
 }

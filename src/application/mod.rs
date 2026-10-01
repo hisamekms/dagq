@@ -31,6 +31,7 @@ pub mod planner;
 mod ports;
 pub mod prompt;
 pub mod push;
+pub mod queue_reads;
 pub mod queue_service;
 pub mod rebind;
 pub mod recording;

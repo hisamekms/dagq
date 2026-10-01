@@ -15,8 +15,11 @@
 //! `note`, `proposal_list` and `proposal_show`, and the findings'
 //! `finding_record` (which updates the open finding of the same kind,
 //! target and subject), `finding_resolve` and `finding_dismiss`
-//! (ADR-t1222-1 decisions 1, 2 and 4). The supervisor and the command line
-//! still open the DB themselves.
+//! (ADR-t1222-1 decisions 1, 2 and 4), and the reads of the whole queue a
+//! read role's job or a worker runs (`events`, `timeline`, `stats`, `kpi`,
+//! `search`, `goal_show`, ...: [`QueueRead`], answered as the command line
+//! answers them). The supervisor and the command line still open the DB
+//! themselves.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -29,6 +32,7 @@ use tracing::warn;
 
 use super::commands::dialogue::{Dialogue, DialogueStore, MarkChange};
 use super::commands::{DenialLog, Gate};
+use super::queue_reads::{BadRead, QueueRead};
 use crate::domain::queue_service::{
     API_VERSION, MIN_API_VERSION, Principal, ServiceErrorCode, ServiceRequest, ServiceResponse,
     ServiceState, UseCase, answers, run_holds_token,
@@ -53,6 +57,8 @@ pub trait ServiceQueue: DialogueStore {
     fn proposals(&self, all: bool) -> Result<Value>;
     /// Proposal `id` as `dagq proposal show` prints it.
     fn show_proposal(&self, id: ProposalId) -> Result<Value>;
+    /// A read of the whole queue as its command prints it.
+    fn read(&mut self, read: &QueueRead) -> Result<Value>;
 }
 
 /// What the service runs its use cases on.
@@ -115,7 +121,9 @@ impl QueueService<'_> {
                     ServiceErrorCode::AuthorizationDenied,
                     refused.to_string(),
                 ),
-                None if error.downcast_ref::<BadParams>().is_some() => {
+                None if error.downcast_ref::<BadParams>().is_some()
+                    || error.downcast_ref::<BadRead>().is_some() =>
+                {
                     ServiceResponse::failure(ServiceErrorCode::BadRequest, format!("{error:#}"))
                 }
                 None => ServiceResponse::failure(ServiceErrorCode::Failed, format!("{error:#}")),
@@ -323,8 +331,33 @@ fn run(
     raw: &Value,
 ) -> Result<Value> {
     let mut store = Store(queue);
+    // The reads of the whole queue (ADR-t1233-5 decisions 1 to 3), each
+    // authorized as the command line asks for its command.
+    if let Some(read) = QueueRead::parse(use_case, raw)? {
+        authorize_read(&store, actor, &read.resource())?;
+        return store.0.read(&read);
+    }
     match use_case {
         UseCase::Hello => unreachable!("hello is answered before a principal"),
+        UseCase::List
+        | UseCase::Candidates
+        | UseCase::Graph
+        | UseCase::Status
+        | UseCase::Asks
+        | UseCase::Events
+        | UseCase::Timeline
+        | UseCase::Stats
+        | UseCase::Kpi
+        | UseCase::Forecast
+        | UseCase::Notes
+        | UseCase::Marks
+        | UseCase::Findings
+        | UseCase::Search
+        | UseCase::Related
+        | UseCase::GoalList
+        | UseCase::GoalShow
+        | UseCase::Lint
+        | UseCase::ObserveHistory => unreachable!("a read is answered above"),
         UseCase::Ask => {
             let p: AskParams = params(use_case, raw)?;
             let ask = NewAsk {
@@ -611,6 +644,9 @@ mod tests {
         }
         fn show_proposal(&self, id: ProposalId) -> Result<Value> {
             Ok(json!({"proposal": id}))
+        }
+        fn read(&mut self, read: &QueueRead) -> Result<Value> {
+            Ok(json!({"read": format!("{read:?}")}))
         }
     }
 
@@ -937,6 +973,40 @@ mod tests {
                 json!({"id": 2}),
             ));
             assert_eq!(shown.result, Some(json!({"proposal": 2})));
+        }
+        assert!(backend.log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_role_reads_the_whole_queue_and_a_bad_read_is_a_bad_request() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for token in ["worker", "review", "observer"] {
+            let response = service.handle(&request(
+                Some(token),
+                UseCase::Events,
+                json!({"full": true, "run": "r9"}),
+            ));
+            let read = response.result.unwrap()["read"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(read.starts_with("Events(EventsRead"), "{read}");
+            assert!(read.contains("full: true"), "{read}");
+            let response = service.handle(&request(Some(token), UseCase::GoalList, Value::Null));
+            assert_eq!(response.result.unwrap()["read"], "GoalList");
+        }
+        for (use_case, params) in [
+            (UseCase::Stats, json!({"cmux": "/bin/sh"})),
+            (UseCase::Kpi, json!({"period": "year"})),
+            (UseCase::Candidates, json!({"x": 1})),
+        ] {
+            let response = service.handle(&request(Some("worker"), use_case, params));
+            assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
         }
         assert!(backend.log.lock().unwrap().is_empty());
     }

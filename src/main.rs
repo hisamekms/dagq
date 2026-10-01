@@ -16,16 +16,15 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 use dagq::application::commands::operations::{HookSession, Operation, WorkspaceScope};
+use dagq::application::queue_reads::{self as reads, QueueRead};
 use dagq::{
-    application::{StatusFilter, TaskQuery, TaskStore, claim_candidates, dependency_graph},
+    application::TaskStore,
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Authorizer,
-        Capability, EventId, FindingId, FindingQuery, FindingTarget, GoalEdit, GoalId, GoalVerdict,
-        LeaseToken, NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteQuery, NoteTarget,
-        PlannerId, PlannerOrigin, PlannerOwner, ProposalId, Resource, RunId, SessionRole,
-        StaticPolicy, Submission, TaskChange, TaskEdit, TaskId, TaskStatus,
-        search::{self, SearchQuery},
-        worker::WorkerMode,
+        Capability, EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken,
+        NewAsk, NewFinding, NewGoal, NewNote, NewTask, NoteTarget, PlannerId, PlannerOrigin,
+        PlannerOwner, ProposalId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit,
+        TaskId, TaskStatus, worker::WorkerMode,
     },
     infrastructure::{adapters::path_text, location::QueueLocation, sqlite::SqliteQueue},
 };
@@ -1301,24 +1300,7 @@ const PRIORITIES: [&str; 5] = ["interrupt", "urgent", "high", "normal", "low"];
 /// The providers a task's worker may run on (ADR-t813-2 decision 1).
 const PROVIDERS: [&str; 2] = ["claude", "codex"];
 
-/// A `kpi --change`: a task change, or `unknown` for the tasks without one.
-fn parse_kpi_change(value: &str) -> Result<String, String> {
-    if value == TaskChange::NONE {
-        return Ok(value.to_owned());
-    }
-    value
-        .parse::<TaskChange>()
-        .map(String::from)
-        .map_err(|error| error.to_string())
-}
-
-fn parse_kpi_area(value: &str) -> Result<String, String> {
-    use dagq::domain::areas::{OTHER, UNKNOWN, check_name};
-    if value == UNKNOWN || value == OTHER {
-        return Ok(value.to_owned());
-    }
-    check_name(value).map(|()| value.to_owned())
-}
+use reads::{parse_kpi_area, parse_kpi_change};
 
 fn parse_role(value: Option<String>) -> Result<Option<SessionRole>> {
     Ok(value.map(|value| value.parse()).transpose()?)
@@ -2456,10 +2438,11 @@ fn execute(cli: Cli) -> Result<Value> {
         queue.assert_repository(common_dir)?;
     }
     // The repository's set of changes holds the tasks the planning
-    // commands register, edit, submit and lint (ADR-t980-1).
+    // commands register, edit and submit (ADR-t980-1); lint reads it
+    // itself (`compose::read_queue`).
     if matches!(
         cli.command,
-        Command::Add { .. } | Command::Edit { .. } | Command::Submit { .. } | Command::Lint { .. }
+        Command::Add { .. } | Command::Edit { .. } | Command::Submit { .. }
     ) {
         let changes = dagq::compose::task_changes(&queue)?;
         queue = queue.with_changes(changes);
@@ -2490,6 +2473,16 @@ fn execute(cli: Cli) -> Result<Value> {
                 &StaticPolicy,
             )
         }};
+    }
+    // The reads of the queue, as the queue service answers them too
+    // (ADR-t1233-5 decision 1).
+    macro_rules! read {
+        ($read:expr) => {
+            read!($read, None)
+        };
+        ($read:expr, $cmux:expr) => {
+            dagq::compose::read_queue(&mut queue, &db, &one_shot, $cmux, &$read)?
+        };
     }
     Ok(match cli.command {
         Command::Init
@@ -2545,27 +2538,14 @@ fn execute(cli: Cli) -> Result<Value> {
             limit,
             before,
             full,
-        } => {
-            let status = if all {
-                StatusFilter::Any
-            } else if status.is_empty() {
-                StatusFilter::Open
-            } else {
-                StatusFilter::Only(
-                    status
-                        .iter()
-                        .map(|value| value.trim().parse::<TaskStatus>())
-                        .collect::<Result<_, _>>()?,
-                )
-            };
-            serde_json::to_value(queue.list(&TaskQuery {
-                status,
-                goal_id: goal_id.map(GoalId::new),
-                limit: usize::try_from(limit)?,
-                before: before.map(TaskId::new),
-                full,
-            })?)?
-        }
+        } => read!(QueueRead::List(reads::ListRead {
+            status,
+            all,
+            goal: goal_id,
+            limit,
+            before,
+            full,
+        })),
         Command::Show { id, full, events } => {
             let detail = queue.show(TaskId::new(id))?;
             if full {
@@ -2606,14 +2586,7 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Lint { tasks, proposals } => {
-            let mut targets: Vec<TaskId> = tasks.into_iter().map(TaskId::new).collect();
-            for id in proposals {
-                targets.extend_from_slice(queue.show_proposal(ProposalId::new(id))?.task_ids());
-            }
-            let mut seen = std::collections::HashSet::new();
-            targets.retain(|id| seen.insert(*id));
-            let input = queue.lint_input(&targets)?;
-            json!({"tasks": targets, "violations": dagq::domain::lint::lint(&input)})
+            read!(QueueRead::Lint(reads::LintRead { tasks, proposals }))
         }
         Command::Proposal { command } => match command {
             ProposalCommand::List { all } => json!({"proposals": queue.proposals(all)?}),
@@ -2668,14 +2641,9 @@ fn execute(cli: Cli) -> Result<Value> {
             GoalCommand::Ready { id } => {
                 serde_json::to_value(planning!().ready_goal(GoalId::new(id))?)?
             }
-            GoalCommand::List => serde_json::to_value(queue.list_goals()?)?,
+            GoalCommand::List => read!(QueueRead::GoalList),
             GoalCommand::Show { id, full } => {
-                let detail = queue.show_goal(GoalId::new(id))?;
-                if full {
-                    serde_json::to_value(detail)?
-                } else {
-                    dagq::view::goal_detail(&detail)
-                }
+                read!(QueueRead::GoalShow(reads::GoalShowRead { id, full }))
             }
             GoalCommand::Edit {
                 id,
@@ -2779,12 +2747,12 @@ fn execute(cli: Cli) -> Result<Value> {
             task_id,
             since,
             limit,
-        } => serde_json::to_value(queue.notes(&NoteQuery {
-            goal_id: goal_id.map(GoalId::new),
-            task_id: task_id.map(TaskId::new),
-            since: since.map(EventId::new),
-            limit: usize::try_from(limit)?,
-        })?)?,
+        } => read!(QueueRead::Notes(reads::NotesRead {
+            goal: goal_id,
+            task: task_id,
+            since,
+            limit,
+        })),
         Command::Mark {
             label,
             note,
@@ -2800,7 +2768,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 at,
             },
         })?,
-        Command::Marks { since, until } => dagq::compose::marks(&queue, since, until)?,
+        Command::Marks { since, until } => {
+            read!(QueueRead::Marks(reads::MarksRead { since, until }))
+        }
         Command::Finding {
             command:
                 FindingCommand::Record {
@@ -2847,25 +2817,17 @@ fn execute(cli: Cli) -> Result<Value> {
             goal,
             queue: on_queue,
             full,
-        } => {
-            let findings = queue.findings(&FindingQuery {
-                id: id.map(FindingId::new),
-                all,
-                statuses: status
-                    .iter()
-                    .map(|value| value.parse())
-                    .collect::<Result<_, _>>()?,
-                kinds,
-                target: finding_target(task, run, goal)?
-                    .or(on_queue.then_some(FindingTarget::Queue)),
-                full,
-            })?;
-            // The limit's settings not reading does not hide the findings.
-            let improvements = one_shot
-                .improvements_of(&queue)
-                .unwrap_or_else(|error| json!({"error": format!("{error:#}")}));
-            json!({"findings": findings, "improvements": improvements})
-        }
+        } => read!(QueueRead::Findings(reads::FindingsRead {
+            id,
+            all,
+            status,
+            kinds,
+            task,
+            run,
+            goal,
+            queue: on_queue,
+            full,
+        })),
         Command::Search {
             query,
             status,
@@ -2873,94 +2835,52 @@ fn execute(cli: Cli) -> Result<Value> {
             goal_id,
             limit,
             full,
-        } => serde_json::to_value(
-            queue.search(&SearchQuery {
-                terms: query,
-                kinds: kinds
-                    .iter()
-                    .map(|kind| kind.parse())
-                    .collect::<Result<_, _>>()?,
-                statuses: status
-                    .iter()
-                    .map(|value| search::parse_status(value))
-                    .collect::<Result<_, _>>()?,
-                goal_id: goal_id.map(GoalId::new),
-                limit: usize::try_from(limit)?,
-                full,
-            })?,
-        )?,
+        } => read!(QueueRead::Search(reads::SearchRead {
+            query,
+            status,
+            kinds,
+            goal: goal_id,
+            limit,
+            full,
+        })),
         Command::Related {
             task_id,
             status,
             limit,
-        } => serde_json::to_value(
-            queue.related(
-                task_id,
-                &status
-                    .iter()
-                    .map(|status| status.as_str().to_owned())
-                    .collect::<Vec<_>>(),
-                usize::try_from(limit)?,
-            )?,
-        )?,
-        Command::Candidates => {
-            let graph = dependency_graph(queue.graph_input()?, None);
-            serde_json::to_value(claim_candidates(queue.candidates()?, &graph))?
-        }
+        } => read!(QueueRead::Related(reads::RelatedRead {
+            task: task_id,
+            status: status
+                .iter()
+                .map(|status| status.as_str().to_owned())
+                .collect(),
+            limit,
+        })),
+        Command::Candidates => read!(QueueRead::Candidates),
         Command::Graph {
             goal_id,
             format,
-            out,
+            out: None,
+        } => read!(QueueRead::Graph(reads::GraphRead {
+            goal: goal_id,
+            format,
+        })),
+        Command::Graph {
+            goal_id,
+            format,
+            out: Some(out),
         } => {
-            let input = queue.graph_input()?;
-            let goal_id = goal_id.map(GoalId::new);
-            let graph = dependency_graph(input.clone(), goal_id);
-            if format == "json" {
-                anyhow::ensure!(out.is_none(), "--out needs --format d2 or svg");
-                serde_json::to_value(graph)?
-            } else {
-                let titles = queue
-                    .list_goals()?
-                    .into_iter()
-                    .map(|goal| (goal.id, goal.title))
-                    .collect();
-                let diagram = match goal_id {
-                    // The goal's prerequisites and critical steps outside it
-                    // are drawn too (ADR-0077 decision 1).
-                    Some(goal) => dagq::application::diagram::near_term_in_goal(
-                        &dependency_graph(input, None),
-                        &graph,
-                        goal,
-                        &titles,
-                    ),
-                    None => dagq::application::diagram::near_term(&graph, &titles),
-                };
-                let source = diagram.to_d2();
-                let text = if format == "svg" {
-                    dagq::infrastructure::d2::render_svg(
-                        &source,
-                        env::var_os("PATH").as_deref(),
-                        dagq::infrastructure::d2::RENDER_TIMEOUT,
-                    )?
-                } else {
-                    source
-                };
-                match out {
-                    Some(out) => {
-                        let out = cwd.join(out);
-                        std::fs::write(&out, &text)
-                            .with_context(|| format!("write {}", out.display()))?;
-                        json!({
-                            "format": format,
-                            "out": out,
-                            "tasks": diagram.task_ids(),
-                        })
-                    }
-                    None => json!({ RAW_STDOUT: text }),
-                }
-            }
+            anyhow::ensure!(format != "json", "--out needs --format d2 or svg");
+            let (text, tasks) =
+                dagq::compose::graph_diagram(&queue, goal_id.map(GoalId::new), &format)?;
+            let out = cwd.join(out);
+            std::fs::write(&out, &text).with_context(|| format!("write {}", out.display()))?;
+            json!({
+                "format": format,
+                "out": out,
+                "tasks": tasks,
+            })
         }
-        Command::Status { role: r } => one_shot.status_of(&db, &queue, parse_role(r)?)?,
+        Command::Status { role } => read!(QueueRead::Status(reads::RoleRead { role })),
         Command::Ask {
             command: Some(AskCommand::Close { id }),
             ..
@@ -3000,12 +2920,8 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Answer { id, text } => {
             serde_json::to_value(dialogue!(&no_cmux).answer(AskId::new(id), &text)?)?
         }
-        Command::Asks { open, role: r, all } => {
-            json!({"asks": queue.asks(dagq::application::AskQuery {
-            all,
-            open,
-            role: parse_role(r)?,
-        })?})
+        Command::Asks { open, role, all } => {
+            read!(QueueRead::Asks(reads::AsksRead { open, role, all }))
         }
         Command::Events {
             after,
@@ -3018,25 +2934,20 @@ fn execute(cli: Cli) -> Result<Value> {
             kind,
             since,
             until,
-        } => dagq::watch::events_in(
-            &queue,
-            &dagq::watch::EventsQuery {
-                after: EventId::new(after),
-                limit: limit as usize,
-                all,
-                full,
-                filter: dagq::domain::EventFilter {
-                    kinds: (!kind.is_empty()).then_some(kind),
-                    run: run.map(RunId::new).transpose()?,
-                    task: task.map(TaskId::new),
-                    goal: goal.map(GoalId::new),
-                    since: since.as_deref().map(dagq::watch::event_time).transpose()?,
-                    until: until.as_deref().map(dagq::watch::event_time).transpose()?,
-                },
-            },
-        )?,
+        } => read!(QueueRead::Events(reads::EventsRead {
+            after,
+            limit,
+            all,
+            full,
+            run,
+            task,
+            goal,
+            kind,
+            since,
+            until,
+        })),
         Command::Timeline { run, gap, full } => {
-            dagq::watch::timeline_in(&queue, &RunId::new(run)?, gap, full)?
+            read!(QueueRead::Timeline(reads::TimelineRead { run, gap, full }))
         }
         Command::Watch {
             after,
@@ -3518,43 +3429,31 @@ fn execute(cli: Cli) -> Result<Value> {
             compare,
             window,
             goal_id,
-        } => one_shot.kpi_of(
-            &queue,
-            &db,
-            &dagq::domain::kpi::KpiQuery {
-                period: period.parse().map_err(anyhow::Error::msg)?,
-                last: usize::from(last),
-                at,
-                since,
-                until,
-                changes,
-                areas,
-                by: by
-                    .iter()
-                    .map(|axis| axis.parse())
-                    .collect::<Result<_, String>>()
-                    .map_err(anyhow::Error::msg)?,
-                cross,
-                compare,
-                window_days: window,
-                goal_id: goal_id.map(GoalId::new),
-            },
-        )?,
+        } => read!(QueueRead::Kpi(reads::KpiRead {
+            period,
+            last,
+            at,
+            since,
+            until,
+            changes,
+            areas,
+            by,
+            cross,
+            compare,
+            window,
+            goal: goal_id,
+        })),
         Command::Forecast {
             task_id,
             goal_id,
             parallel,
             trials,
-        } => one_shot.forecast_of(
-            &queue,
-            &db,
-            &dagq::application::forecast::ForecastQuery {
-                task_id: task_id.map(TaskId::new),
-                goal_id: goal_id.map(GoalId::new),
-                parallel: parallel.map(usize::from),
-                trials: trials as usize,
-            },
-        )?,
+        } => read!(QueueRead::Forecast(reads::ForecastRead {
+            task: task_id,
+            goal: goal_id,
+            parallel,
+            trials,
+        })),
         Command::Report {
             period,
             at,
@@ -3578,24 +3477,23 @@ fn execute(cli: Cli) -> Result<Value> {
             use dagq::infrastructure::adapters::{Cmux, executable};
             // A missing cmux leaves only `workspace_mismatch` unjudged.
             let cmux = executable(&cmux).ok().map(|executable| Cmux { executable });
-            one_shot.stats_of(
-                &queue,
-                &db,
-                &dagq::domain::stats::StatsQuery {
+            read!(
+                QueueRead::Stats(reads::StatsRead {
                     since,
                     until,
-                    goal_id: goal_id.map(GoalId::new),
+                    goal: goal_id,
                     full,
-                },
+                }),
                 cmux.as_ref()
-                    .map(|cmux| cmux as &dyn dagq::application::stats::WorkspaceListing),
-            )?
+            )
         }
         Command::Observe {
             history: true,
             limit,
             ..
-        } => dagq::observer::history(&queue, limit)?,
+        } => read!(QueueRead::ObserveHistory(reads::ObserveHistoryRead {
+            limit
+        })),
         Command::Observe {
             history: false,
             since,
@@ -3874,9 +3772,7 @@ fn run(mut arguments: Vec<OsString>) -> Result<Value> {
     }
 }
 
-/// The one key of a command's value that is printed as is instead of as
-/// JSON: `graph --format d2|svg` without `--out`.
-const RAW_STDOUT: &str = "__dagq_raw_stdout";
+use dagq::view::RAW_STDOUT;
 
 fn main() -> ExitCode {
     let result = run(env::args_os().collect()).and_then(|value| {

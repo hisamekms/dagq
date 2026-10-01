@@ -28,7 +28,7 @@ related:
 
 hostで動き、queue DBを開いてユースケース単位のAPIを、service側で認可して提供するプロセス。決定の理由は[ADR-t1233-1](../adr/2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md)（制御側と実行側の分け方・serviceとAPIと認可・unix socket・段）、[ADR-t1233-4](../adr/2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md)（起動・停止の責任・落ちたときの知らせ方・tokenによるprincipalの認証）、[ADR-t1233-5](../adr/2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md)（読み取りの範囲）。
 
-今の段（goal 82の段(2)、task 1234・1235）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）のユースケースを答える。**supervisor・inbox・planner・人のCLI・workerとjobのdagqは、今までどおりDBを直接開く。** workerとjobのdagqをクライアントモードにし、DBのpathを渡さないのは段(3)で、tokenの発行と受け渡し（claim・resume・jobの起動）もそこで足す。queue全体の読み取りのユースケース（`events`・`timeline`・`stats`など）はtask 1242が足す。
+今の段（goal 82の段(2)、task 1234・1235・1242）: serviceがあり、`hello`・`ask`・`show`・`note`（task 1234）と、`proposal_list`・`proposal_show`・`finding_record`・`finding_resolve`・`finding_dismiss`（task 1235。goal 80のCodexのobserverの書き込みの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（task 1242。[読み取りのユースケース](#読み取りのユースケース)）のユースケースを答える。**supervisor・inbox・planner・人のCLI・workerとjobのdagqは、今までどおりDBを直接開く。** workerとjobのdagqをクライアントモードにし、DBのpathを渡さないのは段(3)で、tokenの発行と受け渡し（claim・resume・jobの起動）もそこで足す。
 
 名前: この文書の「broker」はqueueのbroker（段(4)）のこと。fs・process・gitを仲介するresource broker（[Resource broker](broker.md)）とは別。
 
@@ -86,10 +86,61 @@ serviceは呼び出しのprincipal（`role`・`actor_id`・workerなら`run_id`�
 | `finding_record` | `dagq finding record`と同じ: `kind`・対象を1つ（`task`・`run`・`goal`か`queue: true`）・`subject`（既定は空）・`summary`・`detail`・`impact`・`evidence`（eventのidの配列）・`propose` | `dagq finding record`の出力（findingと`created`・`changed`） | `finding.record`（対象）。tokenを発行するAI actorのうち今のpolicyで持つのはobserverとinboxで、plannerとworkerとjobには無い。同じ種類・対象・subjectのopenかproposedのfindingへの合流（新しい根拠で回数と根拠を足し、新しいものが無ければ何も書かない）と根拠の検査は、CLIと同じ`record_finding`の1つのtransaction。`by`はprincipalのもの |
 | `finding_resolve` | `id`・`reason` | `dagq finding resolve`の出力 | `finding.resolve`。今のpolicyで持つのはobserver・inbox・plannerで、workerとjobには無い。`by`はprincipalのもの |
 | `finding_dismiss` | `id`・`reason` | `dagq finding dismiss`の出力 | `finding.dismiss`。observerには無い（ADR-t1222-1決定2）。今のpolicyでこれを持つのはinboxとplannerで、workerとjobには無い |
+| 読み取り（`list`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`marks`・`search`・`related`・`findings`・`goal_show`など） | そのコマンドのoption | そのコマンドの出力 | `queue.read`（queue）。全role。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（`kind: blocked`と`finding_id`。capabilityは`finding.ask`）で送る。findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、`finding_recorded` / `finding_updated` / `finding_status_changed`の`by`と`ask_opened`の`asked_by`は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
 
 `ask`はCLIと同じく、新しいaskをinboxにcmuxで知らせる（serviceの`--cmux`。見つからなくても知らせが失敗するだけでaskは開く）。
+
+## 読み取りのユースケース
+
+queue全体の読み取り（ADR-t1233-5決定1〜3、task 1242）。1つの読み取りのコマンドに1つのユースケースで、paramsはそのコマンドのoption（名前はlong optionの名前、既定値はCLIの既定値）、答えはそのコマンドが出すJSONと同じ。CLIとserviceは同じ`compose::read_queue`（`src/compose.rs`）で答え、paramsは`application::queue_reads::QueueRead`が読む（CLIのparserが拒む値、例えば`limit: 0`・知らない`format`・`role`・`kind`・`change`・`area`・`status`、読めないrun id、2つの対象は`bad_request`）。認可はCLIがそのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通す。goal 82では全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。`stats`・`kpi`・`forecast`・`status`の「今」はserviceが要求を受けた時刻で、CLIと同じ。
+
+| use_case | CLI | params（既定） |
+| --- | --- | --- |
+| `list` | `list` | `status`（配列）・`all`・`goal`・`limit`（20）・`before`・`full` |
+| `candidates` | `candidates` | なし |
+| `graph` | `graph`（`--out`なし） | `goal`・`format`（`json`か`d2`。`d2`は`{"__dagq_raw_stdout": <本文>}`で、CLIはこれをそのまま出す。`svg`はhostのd2を起動するので受け取らない） |
+| `status` | `status` | `role`（`inbox`・`planner`） |
+| `asks` | `asks` | `open`・`role`・`all` |
+| `events` | `events` | `after`（0）・`limit`（100）・`all`・`full`・`run`・`task`・`goal`・`kind`（配列）・`since`・`until` |
+| `timeline` | `timeline RUN` | `run`・`gap`（`DEFAULT_GAP_SECS`）・`full` |
+| `stats` | `stats`（`--cmux`なし） | `since`・`until`（cursorの文字列かevent id）・`goal`・`full`。`workspace_mismatch`はserviceの`--cmux`でworkspaceを見る |
+| `kpi` | `kpi` | `period`（`day`）・`last`（7）・`at`・`since`・`until`・`change`・`area`・`by`（配列）・`cross`・`compare`・`window`（`DEFAULT_WINDOW_DAYS`）・`goal` |
+| `forecast` | `forecast` | `task`・`goal`・`parallel`・`trials`（`DEFAULT_TRIALS`） |
+| `notes` | `notes` | `goal`・`task`・`since`・`limit`（20） |
+| `marks` | `marks` | `since`・`until` |
+| `findings` | `findings` | `id`・`all`・`status`・`kind`（配列）・対象を高々1つ（`task`・`run`・`goal`か`queue: true`）・`full` |
+| `search` | `search QUERY` | `query`・`status`・`kind`・`goal`・`limit`（20）・`full` |
+| `related` | `related TASK` | `task`・`status`・`limit`（10） |
+| `goal_list` | `goal list` | なし |
+| `goal_show` | `goal show ID` | `id`・`full` |
+| `lint` | `lint` | `tasks`・`proposals`（どちらかは要る） |
+| `observe_history` | `observe --history` | `limit`（`observer::HISTORY_LIMIT`） |
+
+`show`・`proposal_list`・`proposal_show`は上の表。paramsは書き出すファイルも実行するprogramも受け取らず（`stats`と`planners`の`--cmux`、`graph`の`--out`）、読み取りでserviceが別のprogramを起動するのは`stats`の`workspace_mismatch`のためのserviceの`--cmux`だけ（`graph --format svg`のd2は起動しない）。serviceの`--cmux`が見つからなければ、CLIと同じくworkspaceを見ない。`domain::queue_service::UseCase::of_command`が、dagqのコマンドの引数（サブコマンドから）から行き先のユースケースを決める（段(3)のクライアントモードが使う。`graph --out`・`ask close`・`--history`の無い`observe`は`None`）。
+
+### 読み取りのroleとworkerが打つコマンド
+
+promptとskillが打たせるdagqのコマンドと、行き先のユースケース。jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くことを`application::prompt`のunit test（`every_dagq_command_a_job_s_prompt_names_is_a_use_case_of_the_queue_service`）が、それぞれの読み取りがserviceでもCLIと同じJSONを返すことを`tests/it/queue_service_reads.rs`が確かめる。
+
+| 呼び出し元 | どこが言うか | コマンド |
+| --- | --- | --- |
+| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`と`RECORD_READING`、AGENTS.mdのplan reviewの節 | `show ID`・`proposal show ID`・`search`・`related`・`findings`・`stats`・`lint`・`events --full`・`timeline RUN` |
+| goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt` | `show ID`・`goal show ID --full`・`findings`・`events --goal ID --full`・`search` |
+| observer（`QueueCli`） | `observer::observer_prompt` | 読み取り: `findings [ID] [--full]`・`stats`・`kpi`・`marks`・`notes`・`show ID`・`asks`・`graph`・`forecast`・`goal show ID`・`events --full`・`timeline RUN`・`observe --history`。書き込み: `finding record`・`finding resolve`・`ask --kind blocked --finding ID` |
+| スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | `kpi [--period] [--last] [--area] [--change]`・`stats [--since] [--until] [--full]`・`timeline RUN`・`events --full --kind --since --until`・`asks`・`marks`・`findings`・`show ID`・`forecast` |
+| review job・復旧job（`ReadFiles`） | `prompt::review_prompt`・`prompt::recovery_prompt` | なし（Bashを持たず、dagqを打たない） |
+| runtimeが立てるplanner | `RECORD_READING` | `events --full`・`timeline RUN`（plannerは段(3)でもDBを直接開く） |
+| worker | runtimeのprompt（`WORKER_READING`） | `ask`（書き込み）。`list`・`show`は作業の初めに打たないよう言う（権限の範囲ではない。ADR-t1233-5決定3） |
+| worker（`measure`のtask） | AGENTS.mdの「テストの制約」のchangeの`measure`、measureのtaskのdescription（commit 2ae2c673のtask、task 1205・1114・1034・1026・601・1200） | `stats --full`・`events --full`・`timeline RUN`・`kpi`（`--compare`・`--area`・`--change`・`--by`）・`marks`・`forecast` |
+| worker・job | dagq skillの`SKILL.md`と`reference/`（`inspect.md`・`kpi.md`・`register.md`・`scope.md`・`provider.md`・`goal-close.md`・`observer.md`） | `list`・`show`・`graph`・`candidates`・`status`・`asks`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`notes`・`marks`・`findings`・`search`・`related`・`proposal list`・`proposal show`・`goal list`・`goal show`・`lint`・`observe --history` |
+
+ユースケースの無いコマンド（クライアントモードではserviceに届かない）:
+
+- `watch`（`queue.watch`。inboxのもの）、`report`と`graph --out`（`export.file`。ファイルを書く）: jobとworkerのpolicyに無い操作で、今のCLIでも拒まれる
+- `graph --format svg`: hostのd2を起動するので、serviceは読み取りとして受け取らない（`json`と`d2`は答える）。promptとskillはsvgを名指さない
+- `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`broker status|logs|audit`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。クライアントモードでどう答えるか（DBのpathを出さずに答えるか、届かないことの分かるerrorにするか）は段(3)が決める
 
 ## 起動と停止（ADR-t1233-4決定1・2）
 
@@ -134,5 +185,5 @@ queueのevent（`EventKind::is_queue`）: `queue_service_started`（`by`（`up`�
 ## まだ無いもの
 
 - 段(3): workerとjobのdagqのクライアントモード、claim・resume・jobの起動でのtokenの発行と受け渡し、runの終わりでのtokenのfileの片付け、Codexのsandboxからsocketへの到達（ADR-t1233-5決定4）
-- task 1242: queue全体の読み取りのユースケース（`events`・`timeline`・`stats`・`kpi`・`marks`・`search`・`related`・`findings`・`goal show`など）
+- 段(3): クライアントモードの`locate`・`doctor`をどう答えるか（[読み取りのユースケース](#読み取りのユースケース)の「ユースケースの無いコマンド」）
 - 段(4)〜(6)（goal 38）: queueのbroker、supervisorとCLIのservice経由化、integrateのverificationの隔離
