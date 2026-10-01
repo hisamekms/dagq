@@ -1235,3 +1235,42 @@ fn a_dialog_while_revising_is_recorded_as_prompt_waiting() {
     assert_eq!(payloads(&detail, "prompt_waiting").len(), 1);
     assert!(queue.asks(AskQuery::default()).unwrap().is_empty());
 }
+
+/// The general runtime fixture needs the failed-review state, not an
+/// extra no-verdict job. Explicit review tests retain the production retry.
+#[test]
+fn the_default_test_reviewer_skips_retry_but_still_asks_after_its_job() {
+    assert!(SuperviseOptions::new(4, true).retry_unreadable_review);
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]));
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert!(payloads(&detail, "review_retried").is_empty());
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["attempt"], 1);
+    let asks = queue.asks(AskQuery::default()).unwrap();
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0].kind, AskKind::ApproveLanding);
+    assert_eq!(failed[0]["ask_id"], json!(asks[0].id));
+    assert!(asks[0].question.contains("review-1.out"));
+    assert!(!asks[0].question.contains("review-2.out"));
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    let closed = detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
+        .collect::<Vec<_>>();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].payload["reason"], "job_finished");
+    let failed_event = detail
+        .events
+        .iter()
+        .find(|e| e.kind == "review_failed")
+        .unwrap();
+    assert!(closed[0].id < failed_event.id);
+}

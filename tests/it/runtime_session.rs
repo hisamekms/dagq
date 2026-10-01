@@ -1666,7 +1666,7 @@ fn unanswered_exit_request_times_out_and_keeps_the_run() {
         .unwrap();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_retrying(&db, &repo, &backend))
     };
     // The stuck_exit ask follows the timeout through its recovery job on a
     // later pass: it is opened (and notified), then the job's

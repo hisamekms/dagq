@@ -80,3 +80,17 @@ related:
 `adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`は、task 945の`acceptance_conflict`を相手（ADR・同じtaskの条件・事実）で3つに分けたもの。境は「workerが、条件を満たすと別の決まりや事実に反すると書いているか」で、書いていればこの3つ、単に届いていなければ`acceptance_unmet`。
 
 - **人の答えからの補い**（ADR-t947-1決定4）: 6の`approve_landing`の答えを適用するとき（`apply_landing_answer`の最初、runの状態を変える前）、supervisorはrunの最後のreview（`review_finished` / `review_failed`の最後のもの）がreviseかconcernの`review_finished`なら（concernと、使い切った・sessionが終わった・切り替えられなかったreviseがaskになったもの）、それを指す`review_outcome`（`attempt`、`ask_id`、`outcome`、そのverdictの`reason_codes`と`primary_code`。コードより前のverdictは各理由を`unlabeled`）を記録する。`outcome`は`land` → `deviation_accepted`（reviewの誤りの候補を含む）、`send_back` → `deviation_rejected`（verdictのコードを引き継ぐ）、`cancel` → `canceled`（`domain::review_reason::answer_outcome`）。同じaskの`review_outcome`があれば記録しない（途中で止まった適用の続きで二重に書かない）。最後のreviewが`review_failed`（reviewの失敗のask）か、passの後の衝突の事前判定が開いたaskには記録しない。workerに返したreviseには人の答えが無いので記録しない（askになったreviseは答えがあるので記録し、`stats`ではそのreviseのコードの`outcomes`と`concern_wait_secs`に入る）。人にコードを選ばせない（`tests/it/runtime_review_reasons.rs`）。
+
+## test からの retry の差し替え
+
+`SuperviseOptions::retry_unreadable_review` は既定で `true`。読めない verdict を
+1 回だけ retry する production の方針は変わらず、CLI・`dagq.toml`・環境変数から
+この値を変える経路はない。test は `false` を渡すと、最初の unreadable verdict から
+通常の失敗処理（review session の close、worker の exit、`approve_landing` の ask）へ
+進める。起動失敗・timeout・読める verdict の扱いは変わらない。
+
+`tests/it/runtime_support` の通常の `supervise` / `supervise_with` と `run_agent` は
+この retry を省く。retry と verdict の無い review 後の ask を確認する test は
+`supervise_retrying` / `supervise_retrying_with` / `awaiting_run_retrying` を明示する。
+`supervise_reviewed` / `supervise_reviewed_with` と直接の runtime 呼び出しは caller の
+設定を保つので、既存の `TestReviewer` による retry の検証は既定の 1 回のままである。

@@ -128,7 +128,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
     use dagq::domain::{AskKind, NewAsk, SessionRole};
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, "commit work; receipt \"$(git rev-parse HEAD)\"");
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
     let run_id = outcome["runs"][0]["id"].as_str().unwrap().to_owned();
@@ -244,7 +244,7 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
 #[test]
 fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
     use dagq::domain::{AskKind, NewAsk, SessionRole};
-    let (_dir, _repo, db, run) = awaiting_run();
+    let (_dir, _repo, db, run) = awaiting_run_retrying();
     let mut queue = SqliteQueue::open(&db).unwrap();
     // The ask of the failed stand-in review, closed unanswered: the run
     // falls back to a review by hand (task 328).
@@ -414,7 +414,7 @@ fn spawn_watch(db: &Path, after: Option<i64>) -> thread::JoinHandle<Value> {
 
 #[test]
 fn attention_events_are_read_past_a_cursor_and_wake_watch() {
-    let (_dir, repo, db, run) = awaiting_run();
+    let (_dir, repo, db, run) = awaiting_run_retrying();
     let queue = SqliteQueue::open(&db).unwrap();
     let latest = queue.latest_event_id().unwrap().as_i64();
 

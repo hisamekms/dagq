@@ -1719,6 +1719,24 @@ pub fn supervise_with(
     backend: &TestWorkspace,
     options: &SuperviseOptions,
 ) -> Result<Value> {
+    let mut options = options.clone();
+    options.retry_unreadable_review = false;
+    supervise_retrying_with(db, repo, backend, &options)
+}
+
+/// Keep the production retry for tests of unreadable reviews and their asks.
+/// Other tests use [`supervise`] / [`supervise_with`] to skip that extra job.
+pub fn supervise_retrying(db: &Path, repo: &Path, backend: &TestWorkspace) -> Result<Value> {
+    supervise_retrying_with(db, repo, backend, &supervise_options(4, true))
+}
+
+/// Like [`supervise_with`], retaining the caller's review retry policy.
+pub fn supervise_retrying_with(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    options: &SuperviseOptions,
+) -> Result<Value> {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
     let _diagnostics = supervise_diagnostics(db);
     runtime::supervise(
@@ -1915,10 +1933,20 @@ pub fn run_agent_with(
     script: &str,
     close_fail: bool,
 ) -> (Fixture, PathBuf, dagq::domain::TaskDetail) {
+    run_agent_with_review_retry(script, close_fail, false)
+}
+
+fn run_agent_with_review_retry(
+    script: &str,
+    close_fail: bool,
+    retry: bool,
+) -> (Fixture, PathBuf, dagq::domain::TaskDetail) {
     let (dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, script);
     backend.close_fail = close_fail;
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let mut options = supervise_options(4, true);
+    options.retry_unreadable_review = retry;
+    let outcome = supervise_retrying_with(&db, &repo, &backend, &options).unwrap();
     // These scripts exit on their own, like a person's /exit; nothing was requested.
     assert_eq!(backend.exits_sent.load(Ordering::SeqCst), 0);
     backend.join();
@@ -2302,7 +2330,16 @@ pub fn assert_landed(repo: &Path, run: &TaskRun, task_title: &str, expected_pare
 
 /// A validated run plus a ready dependent task, before any landing.
 pub fn awaiting_run() -> (Fixture, PathBuf, PathBuf, TaskRun) {
-    let (dir, db, detail) = run_agent(VALID_AGENT);
+    awaiting_run_with_review_retry(false)
+}
+
+/// An awaiting run made with the production unreadable-review retry.
+pub fn awaiting_run_retrying() -> (Fixture, PathBuf, PathBuf, TaskRun) {
+    awaiting_run_with_review_retry(true)
+}
+
+fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, TaskRun) {
+    let (dir, db, detail) = run_agent_with_review_retry(VALID_AGENT, false, retry);
     let run = detail.runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     let mut queue = SqliteQueue::open(&db).unwrap();

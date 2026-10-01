@@ -455,7 +455,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
         "await_message; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
     let cursor = queue.latest_event_id().unwrap().as_i64();
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(outcome["runs"][0]["status"], "awaiting_integration");
@@ -681,7 +681,7 @@ fn an_unapproved_run_resolved_by_an_earlier_resume_is_validated_without_a_sessio
     write_receipt(&run, &resolved, "succeeded", "resolved");
 
     let mut queue = SqliteQueue::open(&db).unwrap();
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
 
     let detail = queue.show(TaskId::new(2)).unwrap();
@@ -1730,7 +1730,7 @@ fn a_resumed_session_that_ignores_exit_is_let_go() {
     let exit_timeout = backend.exit_timeout;
     backend.exit_timeout = Duration::from_millis(500);
     backend.resume_script_for(2, &format!("await_message; idle; {HOLD}"));
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     let finished = payloads(&detail, "resume_finished");
@@ -1763,7 +1763,7 @@ fn a_resumed_session_that_ignores_exit_is_let_go() {
     );
     // A pass while the session still runs neither resumes the run nor asks
     // again, nor closes the ask.
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["runs"], json!([]), "{outcome}");
     assert_eq!(other_asks(&mut queue, false).len(), 1);
     assert!(queue.read_ask(ask.id).unwrap().is_open());
@@ -1780,7 +1780,7 @@ fn a_resumed_session_that_ignores_exit_is_let_go() {
         2,
         "await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
     );
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert!(backend.closed().contains(&kept));

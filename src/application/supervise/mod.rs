@@ -205,6 +205,8 @@ impl ObserveMode {
 pub struct LoopSettings {
     /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
     pub no_claude: bool,
+    /// Retry an unreadable review once; tests may disable the retry.
+    pub retry_unreadable_review: bool,
     /// Upper bound on runs executing at once (`parallel`), on the runs
     /// waiting for a person outside the slots (`max_waiting`, ADR-0062
     /// decision 7; zero keeps every run in its slot), and on the planners
@@ -730,6 +732,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         disk_config: settings.disk,
         resume_config: settings.resume,
         exit_config: settings.exit.clone(),
+        retry_unreadable_review: settings.retry_unreadable_review,
         free_space: ports.free_space,
         scratchpad_roots: ports.scratchpad_roots.clone(),
         disk: disk::DiskWatch::default(),
@@ -961,6 +964,7 @@ struct Supervisor<'a> {
     /// `[exit]`: the retries of a `/exit` a session held back (ADR-0047
     /// decision 25).
     exit_config: crate::domain::exit::ExitConfig,
+    retry_unreadable_review: bool,
     /// Reads the free bytes of the file system of a path.
     free_space: fn(&Path) -> Option<u64>,
     /// Lists the directories of the Claude Code scratchpads (task 1100).
@@ -2532,7 +2536,9 @@ impl Supervisor<'_> {
                             sv.act_on_verdict(&run, session, verdict, &job)
                         })?
                     }
-                    ReviewEnd::Unreadable(error) if !watch.retried => {
+                    ReviewEnd::Unreadable(error)
+                        if self.retry_unreadable_review && !watch.retried =>
+                    {
                         self.retry_review(&run, session, attempt, &error)?
                     }
                     ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) => {

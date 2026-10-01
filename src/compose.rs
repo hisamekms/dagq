@@ -227,6 +227,10 @@ pub struct ReleaseUpdateJob {
 pub struct SuperviseOptions {
     /// Explicit operator policy: never start Claude; unsupported roles wait for manual handling.
     pub no_claude: bool,
+    /// Retry an unreadable review once (the production default). Tests
+    /// unrelated to review retries can skip the second headless job.
+    /// No CLI or repository setting overrides this policy.
+    pub retry_unreadable_review: bool,
     /// Upper bound on runs executing at once (`supervise --parallel`);
     /// `None` follows `[supervisor] parallel` of the main checkout's
     /// `dagq.toml`, read again each pass, else 4 (task 698).
@@ -490,6 +494,7 @@ impl SuperviseOptions {
     pub fn new(parallel: usize, once: bool) -> Self {
         Self {
             no_claude: false,
+            retry_unreadable_review: true,
             parallel: Some(parallel),
             max_waiting: None,
             once,
@@ -563,6 +568,7 @@ impl SuperviseOptions {
     ) -> LoopSettings {
         LoopSettings {
             no_claude: self.no_claude,
+            retry_unreadable_review: self.retry_unreadable_review,
             limits,
             slot_flags: self.slot_flags(),
             once: self.once,

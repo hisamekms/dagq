@@ -680,7 +680,7 @@ fn fresh_leases_dead_wrappers_early_runs_leaseless_and_integrating_runs_are_not_
 /// is left awaiting integration for that ask.
 #[test]
 fn integrating_run_with_a_stale_lease_is_not_adopted() {
-    let (_dir, repo, db, run) = awaiting_run();
+    let (_dir, repo, db, run) = awaiting_run_retrying();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let main = git_out(&repo, &["rev-parse", "main"]);
     queue
@@ -692,7 +692,7 @@ fn integrating_run_with_a_stale_lease_is_not_adopted() {
         .unwrap();
     assert!(queue.candidates().unwrap().is_empty()); // The dependent still waits.
     let backend = TestWorkspace::new(&db, true, VALID_AGENT);
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let outcome = supervise_retrying(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["runs"], json!([]), "{outcome}");
     assert_eq!(outcome["errors"], json!([]));
     assert_eq!(
@@ -1083,7 +1083,7 @@ fn adopted_run_does_not_record_an_exit_timeout_twice() {
     let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+        thread::spawn(move || supervise_retrying_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
@@ -1178,7 +1178,7 @@ fn adopted_run_does_not_ask_about_its_exit_twice() {
     let passes = options.passes.clone();
     let supervisor = {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
-        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+        thread::spawn(move || supervise_retrying_with(&db, &repo, &backend, &options))
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
