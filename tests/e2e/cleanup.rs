@@ -125,25 +125,82 @@ fn find_workspace(workspaces: &[Value], id: &str) -> Option<Value> {
 
 /// The workspace's entry in the listing of every window, while it is listed.
 pub(crate) fn listed_workspace(cmux: &Path, id: &str) -> Option<Value> {
-    let workspaces = all_workspaces(cmux).unwrap_or_else(|error| panic!("{error:#}"));
-    find_workspace(&workspaces, id)
+    try_listed_workspace(cmux, id).unwrap_or_else(|error| panic!("{error:#}"))
+}
+
+/// [`listed_workspace`], or why the listing failed: a wait takes a failed
+/// listing (cmux answering `Command timed out` under load) as "not yet"
+/// rather than failing the test on it.
+pub(crate) fn try_listed_workspace(cmux: &Path, id: &str) -> anyhow::Result<Option<Value>> {
+    Ok(find_workspace(&all_workspaces(cmux)?, id))
 }
 
 pub(crate) fn workspace_listed(cmux: &Path, id: &str) -> bool {
     listed_workspace(cmux, id).is_some()
 }
 
-/// cmux confirms a `workspace close` before the workspace leaves its
-/// listing, so "gone" is waited for rather than asserted on the first look.
-pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
+/// Wait until the workspace is listed and `accept` holds of its entry, and
+/// return the entry. A failed listing or a workspace not listed yet is "not
+/// yet"; past [`crate::WAIT_LIMIT`] the test fails with `what` and the last
+/// entry or failure.
+pub(crate) fn wait_for_listed(
+    cmux: &Path,
+    id: &str,
+    what: &str,
+    accept: impl Fn(&Value) -> bool,
+) -> Value {
     let deadline = Instant::now() + crate::WAIT_LIMIT;
-    while workspace_listed(cmux, id) {
+    loop {
+        let last = match try_listed_workspace(cmux, id) {
+            Ok(Some(listed)) if accept(&listed) => return listed,
+            Ok(Some(listed)) => listed.to_string(),
+            Ok(None) => "not listed".to_owned(),
+            Err(error) => format!("listing failed: {error:#}"),
+        };
         assert!(
             Instant::now() < deadline,
-            "workspace {id} is still listed {:?} after it was closed",
+            "workspace {id}: {what} within {:?}; last look: {last}",
             crate::WAIT_LIMIT
         );
         thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// cmux confirms a `workspace close` before the workspace leaves its
+/// listing, so "gone" is waited for rather than asserted on the first look.
+/// A failed listing is "not yet", like in [`wait_for_listed`].
+pub(crate) fn wait_until_not_listed(cmux: &Path, id: &str) {
+    let deadline = Instant::now() + crate::WAIT_LIMIT;
+    loop {
+        let last = match try_listed_workspace(cmux, id) {
+            Ok(None) => return,
+            Ok(Some(listed)) => listed.to_string(),
+            Err(error) => format!("listing failed: {error:#}"),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "workspace {id} is still listed {:?} after it was closed; last look: {last}",
+            crate::WAIT_LIMIT
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Run `cmux args` once: what it printed when it succeeded, else the whole
+/// output (status, stdout, stderr) for a wait to retry on and show when its
+/// deadline passes. Under load cmux can fail a call with `Command timed out`.
+pub(crate) fn cmux_attempt(cmux: &Path, args: &[&str]) -> Result<String, String> {
+    match Command::new(cmux).args(args).bounded_output() {
+        Ok(output) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+        Ok(output) => Err(format!(
+            "cmux {args:?} failed ({}): stdout: {} stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) => Err(format!("cmux {args:?} could not run: {error}")),
     }
 }
 

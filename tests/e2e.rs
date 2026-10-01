@@ -37,8 +37,9 @@ mod other_repository;
 mod planner;
 
 use cleanup::{
-    GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_retrying, listed_group,
-    listed_workspace, sweep_abandoned_fixtures, wait_until_not_listed, workspace_listed,
+    GroupGuard, WorkspaceGuard, all_workspaces, claim_fixture_dir, cmux_attempt, cmux_retrying,
+    listed_group, listed_workspace, sweep_abandoned_fixtures, try_listed_workspace,
+    wait_for_listed, wait_until_not_listed, workspace_listed,
 };
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
 use serde_json::{Value, json};
@@ -490,24 +491,27 @@ fn checked(args: &[&str], output: std::process::Output) -> Value {
 /// `cmux list-status` prints it. cmux answers `workspace-action` before its
 /// listing shows the change: with other e2e tests driving cmux, a pin sent
 /// right after an unpin is listed as `pinned: false` for up to ~0.5s (task
-/// 1120), so the look is waited for, not read once.
+/// 1120), so the look is waited for, not read once. A failed listing or
+/// `list-status` (cmux's `Command timed out` under load) is "not yet" too.
 fn assert_look(cmux: &Path, id: &str, color: &str, pill: &str) {
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
-        let listed = listed_workspace(cmux, id).unwrap();
-        let status = Command::new(cmux)
-            .args(["list-status", "--workspace", id])
-            .bounded_output()
-            .unwrap();
-        assert!(status.status.success(), "{status:?}");
-        let status = String::from_utf8_lossy(&status.stdout).into_owned();
-        let listed_ok = listed["pinned"] == true && listed["custom_color"] == color;
-        if listed_ok && status.lines().any(|line| line == pill) {
+        let listed = match try_listed_workspace(cmux, id) {
+            Ok(Some(listed)) => Ok(listed),
+            Ok(None) => Err("not listed".to_owned()),
+            Err(error) => Err(format!("listing failed: {error:#}")),
+        };
+        let status = cmux_attempt(cmux, &["list-status", "--workspace", id]);
+        if let (Ok(listed), Ok(status)) = (&listed, &status)
+            && listed["pinned"] == true
+            && listed["custom_color"] == color
+            && status.lines().any(|line| line == pill)
+        {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "workspace {id} never got its look: {listed}\n{status}"
+            "workspace {id} never got its look: {listed:?}\n{status:?}"
         );
         thread::sleep(Duration::from_millis(200));
     }
@@ -820,7 +824,14 @@ fn supervise_once(
         if workspaces.len() == tasks.len() && !listed_together {
             let entries: Vec<Value> = workspaces
                 .iter()
-                .filter_map(|(_, id)| listed_workspace(&fixture.cmux, id))
+                // A failed listing is "not yet": the loop looks again, and
+                // the failure is left on stderr for a test that times out.
+                .filter_map(|(_, id)| {
+                    try_listed_workspace(&fixture.cmux, id)
+                        .inspect_err(|error| eprintln!("listing {id} failed: {error:#}"))
+                        .ok()
+                        .flatten()
+                })
                 .collect();
             listed_together = entries.len() == workspaces.len();
             if listed_together {
@@ -2181,11 +2192,9 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         .unwrap();
     assert!(unpin.status.success(), "{unpin:?}");
     // The inbox has lost its pin before `up` runs, as cmux lists it.
-    let deadline = Instant::now() + WAIT_LIMIT;
-    while listed_workspace(cmux, &inbox).unwrap()["pinned"] != false {
-        assert!(Instant::now() < deadline, "the unpin never showed up");
-        thread::sleep(Duration::from_millis(200));
-    }
+    wait_for_listed(cmux, &inbox, "the unpin never showed up", |listed| {
+        listed["pinned"] == false
+    });
     let third = dagq_opening(env, &[("HOME", home.as_path())], &up_args, &mut workspaces);
     assert_eq!(third["inbox"]["outcome"], "reused", "{third}");
     assert_eq!(third["warnings"], serde_json::json!([]), "{third}");
@@ -2205,11 +2214,12 @@ fn up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes
         .bounded_output()
         .unwrap();
     assert!(pin.status.success(), "{pin:?}");
-    let deadline = Instant::now() + WAIT_LIMIT;
-    while listed_workspace(cmux, &supervisor_workspace).unwrap()["pinned"] != true {
-        assert!(Instant::now() < deadline, "the pin never showed up");
-        thread::sleep(Duration::from_millis(200));
-    }
+    wait_for_listed(
+        cmux,
+        &supervisor_workspace,
+        "the pin never showed up",
+        |listed| listed["pinned"] == true,
+    );
     let refused = Command::new(cmux)
         .args(["workspace", "close", &supervisor_workspace])
         .bounded_output()
@@ -2663,7 +2673,8 @@ fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
     }
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
-        let in_window: Value = serde_json::from_str(&cmux_ok(
+        // A failed listing is "not yet", like a move not listed yet.
+        let in_window = cmux_attempt(
             cmux,
             &[
                 "--json",
@@ -2674,21 +2685,22 @@ fn move_to_window(cmux: &Path, ids: &[&String], window: &str) {
                 "--window",
                 window,
             ],
-        ))
-        .unwrap();
+        )
+        .and_then(|out| serde_json::from_str::<Value>(&out).map_err(|e| format!("{e}: {out}")));
         let moved = |id: &&String| {
-            in_window["workspaces"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|w| w["id"].as_str().unwrap().eq_ignore_ascii_case(id))
+            in_window.as_ref().is_ok_and(|listing| {
+                listing["workspaces"].as_array().is_some_and(|ws| {
+                    ws.iter()
+                        .any(|w| w["id"].as_str().is_some_and(|w| w.eq_ignore_ascii_case(id)))
+                })
+            })
         };
         if ids.iter().all(moved) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "not moved to window {window}: {in_window}"
+            "not moved to window {window}: {in_window:?}"
         );
         thread::sleep(Duration::from_millis(200));
     }
@@ -2824,18 +2836,9 @@ fn the_sweep_closes_workspaces_left_in_any_window_after_their_fixture_dir_is_gon
     }
     for id in [&left, &live] {
         // As in assert_look, cmux can acknowledge pin before listing it.
-        let deadline = Instant::now() + WAIT_LIMIT;
-        loop {
-            let listed = listed_workspace(cmux, id).expect("the workspace is listed");
-            if listed["pinned"] == true {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "workspace {id} never became pinned: {listed}"
-            );
-            thread::sleep(Duration::from_millis(200));
-        }
+        wait_for_listed(cmux, id, "never became pinned", |listed| {
+            listed["pinned"] == true
+        });
     }
     eprintln!(
         "{} workspaces in {} windows",

@@ -33,7 +33,8 @@ fn send_exit(cmux: &Path, workspace: &str) {
             .args(["read-screen", "--workspace", workspace, "--lines", "40"])
             .bounded_output()
             .unwrap();
-        if !read.status.success() && !workspace_listed(cmux, workspace) {
+        // A failed listing is not "gone": the loop reads the screen again.
+        if !read.status.success() && matches!(try_listed_workspace(cmux, workspace), Ok(None)) {
             return;
         }
         screen = String::from_utf8_lossy(&read.stdout).into_owned();
