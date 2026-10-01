@@ -158,7 +158,47 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
         .unwrap_or_else(|| crate::infrastructure::clock::local_utc_offset(now))
         * 1000;
     let period = window(options.mode, now * 1000, offset_ms);
-    let landings = landings(&queue, &period)?;
+    let mut failure = json!({
+        "mode": options.mode.as_str(),
+        "period": period.label,
+        "outcome": "error",
+        "exit_code": null,
+        "dir": null,
+        "pid": std::process::id(),
+        "parent_pid": std::os::unix::process::parent_id(),
+    });
+    let result = review_period(&mut queue, &db, provider, options, &period, &mut failure);
+    if options.dry_run {
+        return result;
+    }
+    let payload = result.unwrap_or_else(|error| {
+        failure["error"] = json!(format!("{error:#}"));
+        failure
+    });
+    // The only finish write: preparation errors and agent outcomes share
+    // this path. A failed finish write propagates without trying it again.
+    queue.record_queue_event(EventKind::ThroughputReviewFinished, payload.clone())?;
+    tracing::info!(
+        mode = options.mode.as_str(),
+        period = period.label,
+        outcome = payload["outcome"].as_str(),
+        "throughput review ({}) finished: {}",
+        options.mode.as_str(),
+        payload["outcome"]
+    );
+    Ok(payload)
+}
+
+/// Prepare and execute a known period; retain context for preparation errors.
+fn review_period(
+    queue: &mut SqliteQueue,
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &ReviewOptions,
+    period: &Window,
+    failure: &mut Value,
+) -> Result<Value> {
+    let landings = landings(queue, period)?;
     let judgment = match options.mode {
         ReviewMode::Hourly => Some(judge_hourly(&bucket_counts(
             &landings.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
@@ -180,32 +220,33 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
             "pid": std::process::id(),
             "parent_pid": std::os::unix::process::parent_id(),
         });
-        queue.record_queue_event(EventKind::ThroughputReviewFinished, payload.clone())?;
         tracing::info!(
             period = period.label,
             "throughput review (hourly) skipped: no rule met"
         );
         return Ok(payload);
     }
-    let input = gather(&queue, &db, &period, &landings, judgment.as_ref())?;
+    failure["reasons"] = json!(judgment.as_ref().map(|judged| &judged.reasons));
+    let input = gather(queue, db, period, &landings, judgment.as_ref())?;
     let command = shell_join(&[
         "dagq".into(),
         "--db".into(),
         db.to_string_lossy().into_owned(),
     ]);
-    let checkout = crate::compose::bound_checkout(&queue)?;
+    let checkout = crate::compose::bound_checkout(queue)?;
     let language = crate::infrastructure::language::language_for_prompt(
         checkout.as_deref(),
         options.user_config.as_deref(),
     );
     // A dry run makes no directory: its prompt names where one would be.
     let dir = if options.dry_run {
-        reviews_dir(&db).join(format!("{}-{}", period.mode.as_str(), period.label))
+        reviews_dir(db).join(format!("{}-{}", period.mode.as_str(), period.label))
     } else {
-        review_dir(&db, &period)?
+        review_dir(db, period)?
     };
+    failure["dir"] = json!(dir);
     let prompt = crate::domain::language::with_instruction(
-        review_prompt(&period, &command, &input, &dir.join("input.json"))?,
+        review_prompt(period, &command, &input, &dir.join("input.json"))?,
         language.as_ref(),
     );
     if options.dry_run {
@@ -223,6 +264,7 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
         serde_json::to_string_pretty(&input)?,
     )?;
     let session_id = uuid::Uuid::new_v4().to_string();
+    failure["session_id"] = json!(session_id);
     let launch = review_launch(checkout.as_deref());
     let reasons = judgment.as_ref().map(|judged| judged.reasons.clone());
     let started = queue.record_queue_event(
@@ -245,7 +287,7 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
     let clock = Instant::now();
     let ran = run_agent(
         provider,
-        &db,
+        db,
         &dir,
         &prompt,
         &HeadlessAgent {
@@ -282,14 +324,7 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
     if outcome == "succeeded" {
         // A review that could not be saved or reported is a failed one:
         // the event says why, and the loop goes on.
-        match report(
-            &mut queue,
-            provider,
-            &dir,
-            &period,
-            reasons.as_deref(),
-            started,
-        ) {
+        match report(queue, provider, &dir, period, reasons.as_deref(), started) {
             Ok(reported) => {
                 payload["reported_event_id"] = json!(reported.event_id);
                 payload["finding_id"] = json!(reported.finding_id);
@@ -301,15 +336,6 @@ pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) 
             }
         }
     }
-    queue.record_queue_event(EventKind::ThroughputReviewFinished, payload.clone())?;
-    tracing::info!(
-        mode = options.mode.as_str(),
-        period = period.label,
-        outcome = payload["outcome"].as_str(),
-        "throughput review ({}) finished: {}",
-        options.mode.as_str(),
-        payload["outcome"]
-    );
     Ok(payload)
 }
 

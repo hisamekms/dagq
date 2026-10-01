@@ -172,6 +172,10 @@ fn an_hour_a_rule_meets_is_reviewed_saved_and_told_to_the_inbox_and_the_job_only
     let provider = ReviewProvider::new(REVIEWER);
     let done = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
     assert_eq!(done["outcome"], "succeeded", "{done}");
+    assert_eq!(
+        queue_events(&db, "throughput_review_finished"),
+        vec![done.clone()]
+    );
     assert_eq!(done["reasons"], json!(["deviation"]));
     let dir = PathBuf::from(done["dir"].as_str().unwrap());
     let reviews = db
@@ -334,6 +338,57 @@ fn attentions(db: &Path) -> Vec<Value> {
 }
 
 #[test]
+fn a_preparation_failure_is_finished_once_and_told_to_the_inbox() {
+    let (_dir, _repo, db) = fixture();
+    let root = dagq::throughput_review::reviews_dir(&db.canonicalize().unwrap());
+    fs::create_dir_all(root.parent().unwrap()).unwrap();
+    // A file where the reviews directory belongs fails deterministically,
+    // including when the test user could override directory permissions.
+    fs::write(&root, "not a directory").unwrap();
+    let provider = ReviewProvider::new("exit 9");
+    let mut opts = options(ReviewMode::Daily);
+    opts.dry_run = true;
+    assert_eq!(review(&db, &provider, &opts).unwrap()["dry_run"], true);
+    assert!(queue_events(&db, "throughput_review_finished").is_empty());
+    opts.dry_run = false;
+    let done = review(&db, &provider, &opts).unwrap();
+    assert_eq!(done["outcome"], "error", "{done}");
+    assert_eq!(done["mode"], "daily");
+    assert_eq!(done["period"], "2026-09-28");
+    assert_eq!(done["exit_code"], Value::Null);
+    assert_eq!(done["pid"], json!(std::process::id()));
+    assert_eq!(
+        done["parent_pid"],
+        json!(std::os::unix::process::parent_id())
+    );
+    let error = done["error"].as_str().unwrap();
+    assert!(
+        error.contains(&format!("create {}:", root.display())),
+        "{error}"
+    );
+    assert_eq!(
+        queue_events(&db, "throughput_review_finished"),
+        vec![done.clone()]
+    );
+    assert!(queue_events(&db, "throughput_review_started").is_empty());
+    assert!(queue_events(&db, "throughput_review_reported").is_empty());
+    let notices: Vec<_> = attentions(&db)
+        .into_iter()
+        .filter(|event| event["kind"] == "throughput_review_finished")
+        .collect();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0]["next"], "check the failed review");
+    assert_eq!(notices[0]["reason"], done["error"]);
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .asks(dagq::infrastructure::asks::AskQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     let (_dir, _repo, db) = fixture();
     let provider = ReviewProvider::new("echo broken >&2; exit 2");
@@ -364,6 +419,10 @@ fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     assert!(
         error["error"].as_str().unwrap().contains("start"),
         "{error}"
+    );
+    assert_eq!(
+        queue_events(&db, "throughput_review_finished"),
+        vec![failed, error]
     );
     // Both reach the inbox as notices that ask nothing (task 1099).
     let notices: Vec<Value> = attentions(&db)
