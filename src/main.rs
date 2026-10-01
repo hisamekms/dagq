@@ -1135,6 +1135,9 @@ enum Command {
         /// Also split the runs by these attributes of the claim.
         #[arg(long, value_parser = ["change", "area", "build", "parallel", "slot", "load", "toolchain", "claude", "provider", "route", "codex", "group", "model", "effort", "nature"])]
         by: Vec<String>,
+        /// Add cross strata of --by axes and selected --area / --change values.
+        #[arg(long)]
+        cross: bool,
         /// A mark's event id or a time to compare before and after, or two windows A..B,C..D.
         #[arg(long)]
         compare: Option<dagq::domain::kpi::CompareSpec>,
@@ -3200,6 +3203,7 @@ fn execute(cli: Cli) -> Result<Value> {
             changes,
             areas,
             by,
+            cross,
             compare,
             window,
             goal_id,
@@ -3219,6 +3223,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     .map(|axis| axis.parse())
                     .collect::<Result<_, String>>()
                     .map_err(anyhow::Error::msg)?,
+                cross,
                 compare,
                 window_days: window,
                 goal_id: goal_id.map(GoalId::new),

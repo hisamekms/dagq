@@ -736,3 +736,104 @@ fn the_throughput_review_jobs_reach_stats_and_kpi_per_mode() {
     assert_eq!(strata["mode=hourly"]["after"]["value"], 2.0, "{strata}");
     assert_eq!(strata["mode=hourly"]["before"]["value"], 0.0, "{strata}");
 }
+
+#[test]
+fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    for args in [
+        vec!["add", "codex", "--provider", "codex", "--change", "fix"],
+        vec!["add", "claude headless", "--headless", "--change", "fix"],
+        vec!["add", "claude interactive", "--change", "fix"],
+        vec!["add", "different change", "--headless", "--change", "test"],
+    ] {
+        ok(&db, &args);
+    }
+    for id in ["1", "2", "3", "4"] {
+        ok(&db, &["ready", id, "--bypass-review"]);
+    }
+    let mark = ok(&db, &["mark", "cross comparison"])["id"].to_string();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    for _ in 0..4 {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor_in_order(
+                &base,
+                &LeaseToken::new("t"),
+                &[],
+                None,
+                &dagq::domain::worker_model::WorkerTrial::default(),
+                &dagq::domain::provider_switch::WorkerRoute::direct(
+                    &dagq::domain::worker::Worker::ALL,
+                ),
+            )
+            .unwrap()
+        else {
+            panic!("nothing to claim");
+        };
+        for (kind, payload) in [
+            (EventKind::ReceiptObserved, json!({})),
+            (
+                EventKind::ValidationFinished,
+                json!({"status": "awaiting_integration"}),
+            ),
+            (EventKind::RunIntegrated, json!({"status": "integrated"})),
+        ] {
+            queue.record_runtime_event(run.id(), kind, payload).unwrap();
+        }
+    }
+    let args = [
+        "--last",
+        "1",
+        "--change",
+        "fix",
+        "--by",
+        "route",
+        "--by",
+        "provider",
+        "--compare",
+        &mark,
+    ];
+    let plain = kpi_ok(&db, &config, &args);
+    let mut cross_args = args.to_vec();
+    cross_args.push("--cross");
+    let crossed = kpi_ok(&db, &config, &cross_args);
+    let keys = [
+        "cross:change=fix|provider=codex|route=headless",
+        "cross:change=fix|provider=claude|route=headless",
+        "cross:change=fix|provider=claude|route=interactive",
+    ];
+    for key in keys {
+        assert_eq!(
+            crossed["periods"][0]["kpis"]["landings"][key],
+            json!({"n": 1, "value": 1.0})
+        );
+        assert_eq!(
+            crossed["compare"]["strata"]["landings"][key]["after"],
+            json!({"n": 1, "value": 1.0})
+        );
+        assert!(plain["periods"][0]["kpis"]["landings"].get(key).is_none());
+        assert!(plain["compare"]["strata"]["landings"].get(key).is_none());
+    }
+    for key in [
+        "all",
+        "change=fix",
+        "provider=claude",
+        "provider=codex",
+        "route=headless",
+        "route=interactive",
+    ] {
+        assert_eq!(
+            crossed["periods"][0]["kpis"]["landings"][key],
+            plain["periods"][0]["kpis"]["landings"][key]
+        );
+        assert_eq!(
+            crossed["compare"]["strata"]["landings"][key],
+            plain["compare"]["strata"]["landings"][key]
+        );
+    }
+    assert_eq!(
+        crossed["periods"][0]["kpis"]["landings"]["route=headless"]["n"],
+        3
+    );
+}

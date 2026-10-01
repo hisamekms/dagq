@@ -303,6 +303,8 @@ pub struct KpiQuery {
     pub areas: Vec<String>,
     /// The axes the periods are split by besides the change and the area.
     pub by: Vec<Axis>,
+    /// Add intersections of the explicitly selected axes and change/area filters.
+    pub cross: bool,
     pub compare: Option<CompareSpec>,
     /// Each side of a comparison across a mark, in days.
     pub window_days: i64,
@@ -321,6 +323,7 @@ impl Default for KpiQuery {
             changes: Vec::new(),
             areas: Vec::new(),
             by: Vec::new(),
+            cross: false,
             compare: None,
             window_days: DEFAULT_WINDOW_DAYS,
             goal_id: None,
@@ -716,7 +719,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
         return Err("--last must be at least 1".into());
     }
     let config = input.config;
-    let context = Context::new(input, query.goal_id);
+    let context = Context::new(input, query);
     let now_ms = input.now * 1000;
     let offset_ms = input.utc_offset_secs * 1000;
     let mut axes = vec![Axis::Change, Axis::Area];

@@ -4,8 +4,8 @@ type: design
 title: "`kpi`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-09-30 # task 1202: --cross
+last_verified: 2026-09-30 # task 1202: --cross
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -29,7 +29,7 @@ related:
 
 # `kpi`
 
-`dagq kpi [--period day|week] [--last N] [--at <cursor>] [--since <cursor>] [--until <cursor>] [--change CHANGE]... [--area AREA]... [--by AXIS]... [--compare <mark|cursor|A..B,C..D>] [--window DAYS] [--goal ID]`は、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定1〜9・14〜19の実装（task 430）。KPIを決まった規則でrun_eventsから再導出し、日（hostのlocal timezoneの0時から）かISO週（月曜0時から）ごとに並べ、taskが宣言した変更の種類（change）、着地したcommitの変更の対象（area）とclaim時の属性で層別し、前の期間と比べ、目標で判定し、変更の印の前後を比べる読むだけのコマンドで、JSONを返す。KPIの表は持たない。
+`dagq kpi [--period day|week] [--last N] [--at <cursor>] [--since <cursor>] [--until <cursor>] [--change CHANGE]... [--area AREA]... [--by AXIS]... [--cross] [--compare <mark|cursor|A..B,C..D>] [--window DAYS] [--goal ID]`は、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定1〜9・14〜19の実装（task 430）。KPIを決まった規則でrun_eventsから再導出し、日（hostのlocal timezoneの0時から）かISO週（月曜0時から）ごとに並べ、taskが宣言した変更の種類（change）、着地したcommitの変更の対象（area）とclaim時の属性で層別し、前の期間と比べ、目標で判定し、変更の印の前後を比べる読むだけのコマンドで、JSONを返す。KPIの表は持たない。
 
 - 集計は`domain::kpi::kpi`（events、task→goal、task→change、今の時刻、UTCからのoffset、hostの論理コア数、`[kpi]`の設定を受ける純粋関数）が行う。期間ごとの窓は`domain::stats::stats`をその窓（`--since`/`--until`と同じcursorの`(start, end]`）で`full`に呼んで得るので、runの区間（`startup`・`work`・`validate`・`wait_to_land`）、`land_phases`、`retries`、runごとのsession、askの数、`backend_failures`、`auto_repairs`、sessionのkindごとの窓の値は[stats](stats.md)と同じ関数から出る。KPIのために足したのは、`stats`の中の同じ走査を使う読み口`stats::asks::human_waits`（人が答えたaskの`ask_opened`→`ask_answered`と→適用の秒。`runtime_closed`は除く）と`stats::measures::verification_durations`（`integrate`の検証コマンドごとの秒の並び。`verification_commands`と同じeventの選び方を共有する）だけ。
 - `application::kpi::kpi`が`Queue`の`all_events`・`task_goals`・`task_changes`と、`AreaReader`（下の[area](#area)）が求めたrunのareaを読み、`src/compose.rs`の`OneShot::kpi_of(queue, db, query)`が今の時刻、timezone（`infrastructure::clock::local_utc_offset`。`TZ`、無ければsystemのzoneで、今の時刻のoffsetを全期間に使う。夏時間の切り替えをまたぐ期間は1時間ずれる）、コア数（`available_parallelism`）、設定を渡す。
@@ -68,6 +68,21 @@ task 872。各期間（`periods[]`。`--since` / `--until`の窓を含む）と`
 ## KPIと層
 
 `kpis`はKPIの名前→層→値。層は`all`、`change=<label>`（taskが宣言した`change`のlabelをそのまま。常に出す。runtimeは値の集合を持たない（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)の決定4）。`change`がnullのtaskは差分やpathsから推さずに`unknown`（決定7）。`--by change`は常に出す層を重ねて選ぶだけ）、`area=<名前>`（`[areas]`のあるqueueで常に出す。runは持つ全てのareaの層に入り（1つのrunが複数の層に数えられる）、areaの無いrunは`unknown`、どのareaにも当たらないファイルは`other`。上の[area](#area)）と、`--by`の軸`build=`（build識別子）・`parallel=`・`slot=`（claim時の使用中のslot ÷ `parallel`が`low` <0.5 / `mid` <1 / `full`）・`load=`（claim時のload average ÷ hostの論理コア数が`low` <1 / `mid` <2 / `high` <4 / `extreme`。コア数はclaim時に記録されていないので計算時のhostの値）・`toolchain=`（`rustc`のreleaseとhost。cargo専用の計測なので、queueのrepositoryがdagqのソースでなければ`--by toolchain`でも層を出さない（`[areas]`の無いqueueの`area=`と同じ）。判定はKPIを出すたびに`report_setup`がmain checkoutの`Cargo.toml`で行い、`application::kpi::Host::dagq_source`から`KpiInput::dagq_source`に渡す。[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)の(d)、[Source repository](source-repository.md)）・`claude=`（Claude Codeのversion。Codexで作業したrun（claimでも途中の切り替えでも）は`none`で、hostのClaude Codeのversionに数えない。task 892）・`provider=`（workerのprovider。`claude` / `codex`）・`route=`（workerの経路。`interactive` / `headless`）・`codex=`（Codexのversion）・`group=`（workerのmodelの試しの群。`control` / `treatment`、試しの外のrunは`none`）・`model=`（workerのmodel）・`effort=`（workerのeffort）・`nature=`（taskの重さの予測の`nature`）。`provider=`はrunの作業を最後にしたprovider（actual。`stats`の`runs`の`actual_provider`: 最後の`provider_switched`の`to`、無ければclaimの`provider`）で、途中で切り替えたrunは最後のproviderの層に入り、切り替えの無いrunはclaimの`provider`のまま（task 898）。`route=`・`codex=`はclaimの`worker_mode` / `codex_version`で、切り替えで変えない（ADR-t813-2の決定7）。`group=`・`model=`・`effort=`はrunの最初の`run_claimed`の`group` / `model` / `effort`（[Worker model](worker-model.md)。resumeとreviseのsessionで段上げしても層はclaimの値）で、`group`がnullでもsession（`effort`）を記録したclaimは試しの外なので`none`、どれも無いclaim（task 576より前）は`unknown`。Codexで作業したrun（Codexでclaimしたrunと、ADR-t813-2のフォールバックで途中からCodexに移ったrun。[stats](stats.md)の`worker_model`と同じ判定）は、`model=`がCodexが実際に使ったmodel（`model`を持つ最初のCodexのturnの`turn_finished`の値。読めなければ`unknown`）、`group=`が`none`になり、claimのClaudeのmodelの層にも試しの群にも数えない（task 892）。`nature=`は`stats`の`runs`の`prediction`（そのrunの最初のeventより前に記録された、そのtaskの最後の`task_weight_predicted`。[stats](stats.md#重さの予測と実績)）の`nature`で、予測の無いtaskは`unknown`（ADR-0079の決定2・6、task 740）。これらはどれもrunのclaim時の属性なので、`build=`などと同じく`--by`で選ぶ軸にし、常には出さない（`--by`によらず全部を出すのは、runの層を持たない答え合わせと計画の層だけ）。`model=`・`effort=`は計画の層（`plan.*`）の同名の層とKPIの名前で分かれ、`plan.*`ではplan reviewのsessionを、runの層のKPIではworkerのsessionを指す。記録の無い属性は`unknown`。値は`n`（標本数）と、値のKPIは`value`、分布のKPIは`median`・`p90`・`min`・`max`（中央値とp90は`stats`と同じ規則）。記録の無い値はnullで、0と区別する。
+
+### 軸を掛け合わせる `--cross`（task 1202）
+
+```sh
+dagq kpi --since 2026-09-29T12:00:00Z --area runtime --by provider --by route --cross
+dagq kpi --compare <mark> --area runtime --change fix --by provider --by route --cross
+```
+
+`--cross` は明示した `--by` の全軸と、`--area` / `--change` が指定された軸を掛け合わせ、**runの層を持つKPIだけ**に交差層を追加する。例えば `cross:area=runtime|provider=claude|route=headless` は runtime に当たる非対話の Claude の run だけで、Codex や対話の Claude は含まない。change も指定すれば `cross:area=runtime|change=fix|provider=claude|route=headless` になる。各軸の意味は単独層と同じ（provider は最後の actual、route は claim 時）。複数の `--area` / `--change` はその軸の候補を選び、軸どうしは AND。同じ run が複数の area を持つ場合は、当たる area の各組に 1 回ずつ数える。
+
+- 名前は `cross:` の後に軸名の辞書順で `軸=値` を `|` でつなぐ。値の `%`・`|`・`=` はそれぞれ `%25`・`%7C`・`%3D` に escape する。指定順・軸の重複で名前や件数は変わらない。
+- `--by area` / `--by change` を明示すれば、filter がなくてもその軸を掛け合わせる。明示しない既定の change・area や compare の build・parallel・load は組に足さない。異なる軸が 2 つ未満なら交差層は足さない。
+- 観測された組だけを出す。標本の無い組は作らない。欠損値は単独層と同じ `unknown` 等。`[areas]` の無い queue の area や、dagq のソース以外の toolchain のように軸自体が出ない場合、その軸を含む交差層も出ない。
+- `periods[].kpis`・期間ごとの `comparison` と `--compare` の `strata` に同じ層が出る。`n` と値・分布、標本数による比較の判定は既存と同じ。`change_summary` / `area_summary` は単独層のまま。
+- `--cross` の有無で `all`・`change=`・`area=`・`--by` の単独層は変わらない。`--area` / `--change` は交差層の run を絞るが、既存の別軸の単独層を絞らない。run 以外の KPI（ask・job・forecast など）には交差層を足さない。`[kpi.targets]` は交差層を縛らず、既存の目標判定も変わらない。
 
 | KPI | 規則 | 層 |
 | --- | --- | --- |

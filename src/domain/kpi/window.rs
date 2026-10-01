@@ -71,6 +71,8 @@ pub(super) struct Context<'a> {
     /// The landed runs' areas; `None` without `[areas]`.
     areas: Option<&'a RunAreas>,
     goal_id: Option<GoalId>,
+    /// Explicit cross axes, with optional allowed values; independent of comparison defaults.
+    cross: Vec<(Axis, Vec<String>)>,
     /// What `stats` reads besides the events: only the drafts' origins.
     live: LiveSnapshot,
     /// Unix seconds.
@@ -186,7 +188,28 @@ fn supervisor_lives(
 }
 
 impl<'a> Context<'a> {
-    pub fn new(input: &KpiInput<'a>, goal_id: Option<GoalId>) -> Self {
+    pub fn new(input: &KpiInput<'a>, query: &super::KpiQuery) -> Self {
+        let goal_id = query.goal_id;
+        let mut cross = Vec::new();
+        if query.cross {
+            let mut axes = query.by.clone();
+            if !query.areas.is_empty() {
+                axes.push(Axis::Area);
+            }
+            if !query.changes.is_empty() {
+                axes.push(Axis::Change);
+            }
+            axes.sort_unstable_by_key(|axis| axis.as_str());
+            axes.dedup();
+            for axis in axes {
+                let values = match axis {
+                    Axis::Area => query.areas.clone(),
+                    Axis::Change => query.changes.clone(),
+                    _ => Vec::new(),
+                };
+                cross.push((axis, values));
+            }
+        }
         let events = input.events;
         let now_ms = input.now * 1000;
         let mut first_ready = HashMap::new();
@@ -273,6 +296,7 @@ impl<'a> Context<'a> {
             changes: input.changes,
             areas: input.areas,
             goal_id,
+            cross,
             live: LiveSnapshot {
                 draft_origins: input.draft_origins.clone(),
                 utc_offset_secs: input.utc_offset_secs,
@@ -359,6 +383,35 @@ impl<'a> Context<'a> {
             Some(areas) if areas.is_empty() => vec![UNKNOWN.to_owned()],
             Some(areas) => areas.clone(),
         }
+    }
+
+    /// Build only observed intersections. Multi-area runs contribute once to
+    /// each matching area; an unavailable axis yields no cross stratum.
+    fn cross_keys(&self, run: &RunStats) -> Vec<String> {
+        if self.cross.len() < 2 {
+            return Vec::new();
+        }
+        let mut keys = vec!["cross:".to_owned()];
+        for (axis, allowed) in &self.cross {
+            let mut values = self.axis_values(run, *axis);
+            values.retain(|value| allowed.is_empty() || allowed.contains(value));
+            values.sort_unstable();
+            values.dedup();
+            keys = keys
+                .into_iter()
+                .flat_map(|key| {
+                    values.iter().map(move |value| {
+                        let escaped = value
+                            .replace('%', "%25")
+                            .replace('|', "%7C")
+                            .replace('=', "%3D");
+                        let separator = if key == "cross:" { "" } else { "|" };
+                        format!("{key}{separator}{}={escaped}", axis.as_str())
+                    })
+                })
+                .collect();
+        }
+        keys
     }
 
     /// The value of `axis` for `run`.
@@ -527,6 +580,9 @@ impl<'a> Context<'a> {
         groups.insert(ALL.to_owned(), Vec::new());
         for run in &stats.runs {
             groups.entry(ALL.to_owned()).or_default().push(run);
+            for key in self.cross_keys(run) {
+                groups.entry(key).or_default().push(run);
+            }
             for &axis in axes {
                 for value in self.axis_values(run, axis) {
                     let key = format!("{}={value}", axis.as_str());

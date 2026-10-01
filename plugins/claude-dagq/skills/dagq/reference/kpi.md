@@ -20,6 +20,19 @@ The KPIs are derived from the queue's events by fixed rules, never by a model: n
 - **`comparison`**: per KPI and stratum, `previous`, `delta`, `ratio`, a day's `baseline_7d` (the median of the 7 days before), `judged` with `reason` (`partial`, `small_sample` below `[kpi] min_samples`, `no_value`) and `verdict` (`improved` / `worsened` / `unchanged`). Do not read a trend from an unjudged period.
 - **`targets`**: per target, `state` (`ok`, `missed`: off target but not yet long enough, `breach`: off target `breach_periods` days (default 3) or `breach_weeks` weeks (default 2) in a row, `not_judged`), `streak`, `breach_since`, `source` (`repository` / `host`) and the judged `values`. Targets are `[kpi.targets."<KPI>"]` (one of `change` or `area` to bind a stratum, none for `all`; the old key `kind` is refused; `stat`, `min` / `max`; another stratum's target in `[kpi.targets."<KPI>".<label>]`) in the main checkout's `dagq.toml` and in `host.toml` (below); host wins, except `[kpi] max_improvement_proposals` (dagq.toml only). There is no default target. Old binaries reject a `[kpi]` table in `dagq.toml`, so add it only once the fixed binary knows it.
 
+## Intersect worker axes with `--cross`
+
+```sh
+"$DAGQ" kpi --area runtime --by provider --by route --cross
+"$DAGQ" kpi --compare <mark> --area runtime --change fix --by provider --by route --cross
+```
+
+Read `cross:area=runtime|provider=claude|route=headless` for only runtime runs on headless Claude (excluding Codex and interactive Claude). With `--change fix`, the key is `cross:area=runtime|change=fix|provider=claude|route=headless`. The keys appear in run KPIs, period `comparison`, and `--compare`'s `strata`; `n`, values, distributions and sample-size judgments use only matching runs. Provider is the final actual provider and route is the claim's route, just as in single-axis strata.
+
+`--cross` intersects all explicit `--by` axes and any axis selected by `--area` / `--change`. Repeated filter values are alternatives within that axis; different axes must all match. Multi-area runs count once in each matching combination. `--by area` or `--by change` includes that axis without filtering its values. Implicit default axes (including comparison's build/load/parallel) are not added. Fewer than two distinct selected axes adds nothing.
+
+Names start with `cross:`, then `axis=value` parts in alphabetical axis order, joined by `|`; `%`, `|` and `=` in values are escaped as `%25`, `%7C` and `%3D`. Only observed combinations appear; missing values follow the single-axis `unknown`/`none` rules. An unavailable axis (area without `[areas]`, toolchain outside dagq's source) yields no combinations containing it. Existing single-axis strata, summaries and targets stay unchanged. No intersections for queue/job/ask/forecast KPIs; `[kpi.targets]` cannot bind a cross stratum. Without `--cross`, `--area` and `--change` still do not filter provider/route strata.
+
 ## Before and after a change: `mark`, `marks`, `kpi --compare`
 
 - **Record a change** the KPIs cannot see by themselves (a setting, the operation, the host): `"$DAGQ" mark '<label>' --note '<what and why>'`, with `--at <cursor>` when it took effect earlier (never a future time). A mistaken one: `"$DAGQ" mark --retract <id>` (only `dagq mark` and `[run.env]` marks, once). Inbox, planners and people may mark; the observer and jobs may not.
