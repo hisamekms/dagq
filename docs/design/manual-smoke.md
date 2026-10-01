@@ -4,8 +4,8 @@ type: design
 title: Manual smoke of the paths that include real Claude and Codex
 status: current
 created: 2026-09-25
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: operations
 related:
   - adr-0036
@@ -14,6 +14,7 @@ related:
   - adr-t813-1
   - adr-t813-2
   - adr-t813-3
+  - adr-t1233-2
 ---
 
 # Manual smoke of the paths that include real Claude and Codex
@@ -35,7 +36,7 @@ related:
 
 本番 queue と固定バイナリ `~/.local/bin/dagq` を汚さないため、すべてを scratch directory に閉じる。
 
-このスモークは人か inbox が行う。worker（dagq の run の session）は使い捨ての queue を作れず操作もできない（authorization の policy は worker に `queue.admin` を与えず、worker の状態を変えるコマンドは自分の run と task にしか効かない。[Authorization](authorization.md)、ADR-t728-1。task 983 で `dagq init` が `authorization_denied` になり、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回せず、実バイナリでの確認は integration test（`tests/it` の fixture）か e2e（`tests/e2e.rs`）に書き、実 queue での手の確認が要るものは receipt の `follow_ups` にして人か inbox に任せる。
+このスモークは人か inbox が行う。worker（dagq の run の session）は使い捨ての queue を作れず操作もできない（authorization の policy は worker に `queue.admin` を与えず、worker の状態を変えるコマンドは自分の run と task にしか効かない。[Authorization](authorization.md)、ADR-t728-1。task 983 で `dagq init` が `authorization_denied` になり、ask 195 で人が policy を変えないと決めた）。worker は env を外して迂回せず、実バイナリでの確認は integration test（`tests/it` の fixture）か e2e（`tests/e2e.rs`）に書き（e2e は worker が流さず、要る run には review の pass の後に runtime が host で流す。[ADR-t1233-2](../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](supervisor-lifecycle/review.md#着地の前のe2e)）、実 queue での手の確認が要るものは receipt の `follow_ups` にして人か inbox に任せる。
 
 - **バイナリ**: 確かめたい commit で `cargo build --locked` したものを scratch にコピーして使う。`target/` のバイナリで本番 queue を開かない（開いただけでは migrate しなくなった（ADR-0045 決定 5）が、状態を変えるコマンドで未着地の遷移を本番に持ち込まない。緩める範囲は ADR-0045 決定 18）。
 - **repository**: `git init` した使い捨て repository。ディレクトリ名は `dagq-smoke` にする（task 710）。runtime は queue の cmux の workspace group を `[<repository のディレクトリ名>]`（例 `[dagq-smoke]`）、workspace の title を `[<ディレクトリ名>]worker#...` などと名付けるので、残った group がどのスモークのものか名前で分かる（`tests/e2e.rs` の fixture は `dagq-e2e` で、group は `[dagq-e2e]`）。`repo` のような汎用の名前にしない。`seed.txt`（検証コマンドが見る）、3 行の `shared.txt`（衝突用）、`CLAUDE.md`、`.claude/settings.json`（`permissions.defaultMode: auto`）を commit しておく。scratch に置いた bare repository を `origin` にする（supervisor の着地は push まで行い、`origin` が無いと `push_failed` の attention になる。手で `integrate` するときは `--no-push` でもよい）。
@@ -48,6 +49,7 @@ related:
 - **stub**（`tests/e2e.rs` の `STUB` を拡張した shell script）で runtime の状態遷移を見るシナリオ（2〜5）を流す。token を使わず、時間を制御できる。拡張の例: title の `[break]` で `seed.txt` を消して commit し検証を壊す、`[hang]` で commit も receipt も書かずに待つ、`delay=N` で N 秒待ってから commit する。
 - **実 Claude**（`--claude` に実体の path）で、Claude 自身の終了と resume が絡むシナリオ（1、6）を流す。cmux の terminal の PATH では session ごとの shim が先に解決されるので、`--claude ~/.local/bin/claude` のように実体を渡す（AGENTS.md の「起動と停止」と同じ理由）。
 - stub は headless の review / triage（`claude -p`）にも使われる。`tests/e2e.rs` の stub は本文に `E2E-REVIEW-PASS` を含む task の review だけを pass にし、それ以外は失敗するので、stub のシナリオでは review が `review by hand`、triage が失敗の attention になるのが期待どおり。review と triage の verdict まで見たいシナリオは実 Claude で流す。検証は `integrate` の 1 回だけなので、review で止まった run は検証まで進まない。stub で着地まで流すシナリオ（2〜5）は task の description に `E2E-REVIEW-PASS` を入れて review を pass させるか、`review by hand` になった run に人が `integrate ID` を打つ。
+- e2e: worker（stub も実 Claude も実 Codex も）は e2e を流さず、receipt の `e2e` は理由つきの `not_applicable` になる。e2e が要る run（`validation_finished` の `e2e_requirement.required` が true）には、review の pass の後、着地の前に supervisor が host で e2e を流す（[Review](supervisor-lifecycle/review.md#着地の前のe2e)）。使い捨て repository は dagq のソースでないので runtime の知る e2e が無く、要る run は `run_e2e_finished`（`outcome: not_configured`）を記録して着地へ進む。`dagq.toml` を置かない使い捨て repository では `[e2e] paths` が無く、`--evidence e2e` を付けない task は e2e が要らない。この工程そのもの（host での実行・1 本ずつの lock・落ちたときの `needs_session` と resume・流せないときの流し直しと `check the e2e host`）は `tests/it/runtime_e2e.rs` が stub のコマンドで確かめる。本番の固定バイナリの入れ替えの前には、自動更新と `install` の関門が全部の e2e を流す（[Auto-update](supervisor-lifecycle/auto-update.md)・[install](supervisor-lifecycle/install.md)）。
 
 ### シナリオ
 
@@ -380,7 +382,7 @@ dagq のソースでない repository で使えること（goal 52）は、stub 
    - `master` に 1 つの squash commit が乗り、checkout が追従して clean。`main` の branch は作られていない。
    - `tq events --run RUN --full`: `push_skipped`（`remote: origin`・`branch: master`・`reason: the repository has no remote origin`）があり、`push_failed` の attention が inbox に出ていない。`migration_renumbered` と `migration_number_taken` が無い。
    - `tq stats` と `tq kpi` が止まらずに出て、cargo 専用の計測（`work_breakdown` の `llvm_cov` など、`kpi --by toolchain`）が無い。
-   - worker・review・plan review の prompt（run dir と proposal の dir）に、dagq の repository に固有の規則（cargo・llvm-cov・e2e の推奨、ADR の番号、`AGENTS.md` を名指すこと）が載っていない。
+   - worker・review・plan review の prompt（run dir と proposal の dir）に、dagq の repository に固有の規則（cargo・llvm-cov・e2e の推奨、ADR の番号、`AGENTS.md` を名指すこと）が載っていない。`[e2e] paths` が無く task が `e2e` を要らないので、worker の prompt に e2e の行（「E2E: do not run the e2e」）が無く、run に `run_e2e_*` の event が無い。
 8. [故障経路のスモーク](#シナリオ)の後始末と同じく `tq down --wait` で supervisor を止め、inbox と planner の workspace を閉じ、`cmux workspace-group delete '[dagq-smoke]' --close-workspaces` で group を消す。`claude plugin uninstall claude-dagq@dagq --scope local` で入れた plugin を外す。
 
 ### 結果
