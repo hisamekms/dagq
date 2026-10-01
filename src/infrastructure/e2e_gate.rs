@@ -17,7 +17,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -320,12 +320,11 @@ fn pass(
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() >= deadline => {
                 timed_out = true;
-                stop_group(child.id());
-                break child.wait().ok();
+                break stop_group(&mut child, STOP_GRACE);
             }
             Ok(None) => thread::sleep(Duration::from_millis(200)),
             Err(_) => {
-                stop_group(child.id());
+                stop_group(&mut child, STOP_GRACE);
                 break None;
             }
         }
@@ -480,15 +479,29 @@ fn signal_group(leader: u32, signal: i32) {
     }
 }
 
-/// Stop the process group `leader` leads: SIGTERM, then SIGKILL after
-/// [`STOP_GRACE`].
-fn stop_group(leader: u32) {
-    signal_group(leader, libc::SIGTERM);
-    let deadline = Instant::now() + STOP_GRACE;
-    while alive(leader) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
+/// Stop the process group `leader` leads: SIGTERM, then SIGKILL to the
+/// group once the leader has ended or `grace` has passed. The leader is
+/// reaped as it is watched, so one that ends on SIGTERM is not mistaken for
+/// a live one while it is a zombie; it is waited for after the SIGKILL when
+/// it ignored the SIGTERM. The rest of the group gets no grace of its
+/// own: what is left once the leader ends is killed. Its exit status is returned when it could be
+/// read.
+fn stop_group(leader: &mut Child, grace: Duration) -> Option<ExitStatus> {
+    signal_group(leader.id(), libc::SIGTERM);
+    let deadline = Instant::now() + grace;
+    let mut ended = None;
+    while Instant::now() < deadline {
+        match leader.try_wait() {
+            Ok(Some(status)) => {
+                ended = Some(status);
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(_) => break,
+        }
     }
-    signal_group(leader, libc::SIGKILL);
+    signal_group(leader.id(), libc::SIGKILL);
+    ended.or_else(|| leader.wait().ok())
 }
 
 /// The pid of the gate that made `dir` (`<unix time>-<pid>`).
@@ -648,6 +661,93 @@ mod tests {
 test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
         assert_eq!(failed_tests(output), ["a::two", "b"]);
         assert!(failed_tests("test a ... ok\n").is_empty());
+    }
+
+    /// A `sh -c script` in a process group of its own, as the gate starts
+    /// the e2e.
+    fn group_leader(script: &str) -> Child {
+        Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    /// Wait (with a limit) until `path` holds a pid.
+    fn pid_in(path: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(pid) = fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "no pid in {}", path.display());
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_group_whose_leader_ends_on_sigterm_is_stopped_without_waiting_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let mut leader = group_leader(&format!(
+            "echo $$ > '{}'; while :; do sleep 1; done",
+            ready.display()
+        ));
+        pid_in(&ready);
+        let started = Instant::now();
+        let status = stop_group(&mut leader, STOP_GRACE);
+        let took = started.elapsed();
+        // The leader ended on the SIGTERM and was reaped; a zombie leader
+        // read as alive would hold this for the whole grace.
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status.unwrap()),
+            Some(libc::SIGTERM)
+        );
+        assert!(took < STOP_GRACE / 2, "stop_group took {took:?}");
+    }
+
+    #[test]
+    fn a_leader_ignoring_sigterm_is_killed_after_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let mut leader = group_leader(&format!(
+            "trap '' TERM; echo $$ > '{}'; while :; do sleep 1; done",
+            ready.display()
+        ));
+        pid_in(&ready);
+        let grace = Duration::from_secs(1);
+        let started = Instant::now();
+        let status = stop_group(&mut leader, grace);
+        assert!(started.elapsed() >= grace);
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status.unwrap()),
+            Some(libc::SIGKILL)
+        );
+    }
+
+    #[test]
+    fn what_the_group_keeps_after_its_leader_ends_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        // The leader ends on SIGTERM; the child it leaves in the group
+        // ignores it.
+        let mut leader = group_leader(&format!(
+            "sh -c 'trap \"\" TERM; echo $$ > \"{}\"; while :; do sleep 1; done' & wait",
+            left.display()
+        ));
+        let child = pid_in(&left);
+        let started = Instant::now();
+        stop_group(&mut leader, STOP_GRACE);
+        assert!(started.elapsed() < STOP_GRACE / 2);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while alive(child) {
+            assert!(Instant::now() < deadline, "{child} outlived its group");
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// A fake cmux that answers `ping`, lists one group of the queue hash
