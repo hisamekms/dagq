@@ -52,7 +52,7 @@ impl SqliteQueue {
                 run_row(&self.runs_dir),
             )
             .optional()?
-            .with_context(|| format!("run {id} does not exist"))
+            .ok_or_else(|| crate::application::RunNotFound(id.clone()).into())
     }
 
     pub fn record_runtime_event(

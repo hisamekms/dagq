@@ -471,9 +471,10 @@ impl Supervisor<'_> {
         };
         let now = u64::try_from(self.generators.clock.now()).unwrap_or(0);
         for token in held {
-            let run = RunId::new(&token.run_id)
-                .ok()
-                .and_then(|id| self.queue.run(&id).ok());
+            let run = match self.broker_sweep_run(&token.run_id) {
+                Ok(run) => run,
+                Err(_) => continue,
+            };
             let Some(run) = run else {
                 warn!(
                     jti = token.jti,
@@ -557,9 +558,10 @@ impl Supervisor<'_> {
         runs.dedup();
         for run_id in runs {
             let id = RunId::new(&run_id).ok();
-            match id.as_ref().and_then(|id| self.queue.run(id).ok()) {
-                Some(run) => self.broker_revoke(tokens, &run, MODE_DISABLED),
-                None => {
+            match self.broker_sweep_run(&run_id) {
+                Err(_) => continue,
+                Ok(Some(run)) => self.broker_revoke(tokens, &run, MODE_DISABLED),
+                Ok(None) => {
                     warn!(
                         run = run_id,
                         "a broker token names no run of the queue: retired"
@@ -577,6 +579,21 @@ impl Supervisor<'_> {
                         warn!(error = %format_args!("{error:#}"), "a broker token could not be retired: {error:#}");
                     }
                 }
+            }
+        }
+    }
+
+    /// A failed read must leave all credentials in place for the next pass.
+    fn broker_sweep_run(&self, run_id: &str) -> Result<Option<TaskRun>> {
+        let Ok(id) = RunId::new(run_id) else {
+            return Ok(None);
+        };
+        match self.queue.run(&id) {
+            Ok(run) => Ok(Some(run)),
+            Err(error) if error.is::<crate::application::RunNotFound>() => Ok(None),
+            Err(error) => {
+                warn!(run_id, error = %format_args!("{error:#}"), "a broker token's run could not be read; skipped until the next pass: {error:#}");
+                Err(error)
             }
         }
     }

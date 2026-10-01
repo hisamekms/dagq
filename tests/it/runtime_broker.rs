@@ -1214,3 +1214,103 @@ fn a_disabled_supervisor_resumes_a_run_without_the_tools_left_to_it() {
     assert!(!queue.join("broker/tokens").join(run.id().as_str()).exists());
     assert!(tokens.held().unwrap().is_empty());
 }
+
+/// A row decoding error is a failed read, not evidence that the run is
+/// absent. Both sweeps must retry without touching any credential.
+fn sweep_retries_a_failed_run_read(mode: &str) {
+    use dagq::application::broker_run::{Grant, RunTokens};
+
+    let (fixture, repo, db) = fixture();
+    let podman = FakePodman::new(RUNNING);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let outcome =
+        supervise_with(&db, &repo, &backend, &options_with(&podman, &repo, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let raw = Connection::open(&db).unwrap();
+    raw.execute(
+        "UPDATE task_runs SET status='succeeded' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    broker_mode(&repo, mode);
+    let tokens = dagq::infrastructure::broker_token::QueueRunTokens {
+        queue_dir: queue_dir(&db),
+    };
+    let issued = tokens
+        .issue(
+            &run,
+            &Grant {
+                client: fixture.dir.path().join("dagq-broker-client"),
+                port: 8750,
+            },
+            1,
+        )
+        .unwrap();
+    let paths = [
+        queue_dir(&db).join("broker/active").join(&issued.jti),
+        queue_dir(&db).join("broker/tokens").join(run.id().as_str()),
+        Path::new(run.run_dir().unwrap()).join("broker/mcp.json"),
+    ];
+    let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    // A separate unknown run must still be retired, even in a pass that
+    // cannot read this run. No event can be attached to the unknown run.
+    let orphan_mark = queue_dir(&db).join("broker/active/orphan-jti");
+    let orphan_token = queue_dir(&db).join("broker/tokens/orphan-run");
+    fs::write(&orphan_mark, "orphan-run").unwrap();
+    fs::write(&orphan_token, "old token").unwrap();
+    let missing = queue.run(&RunId::new("orphan-run").unwrap()).unwrap_err();
+    assert!(missing.is::<dagq::application::RunNotFound>());
+
+    raw.execute(
+        "UPDATE task_runs SET requested_provider='unreadable-provider' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    let error = queue.run(run.id()).unwrap_err();
+    assert!(!error.is::<dagq::application::RunNotFound>());
+    let calls = podman.calls().len();
+    let options = options_with(&podman, &repo, true);
+    // Other supervisor reads also encounter the malformed row. Its final
+    // sweep still runs, and the orphan below proves it reached the marks.
+    let error = supervise_with(&db, &repo, &backend, &options).unwrap_err();
+    assert!(format!("{error:#}").contains("unreadable-provider"));
+    for (path, bytes) in paths.iter().zip(&before) {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+    assert!(kinds(&db, "broker_token_revoked").is_empty());
+    assert!(!orphan_mark.exists());
+    assert!(!orphan_token.exists());
+
+    raw.execute(
+        "UPDATE task_runs SET requested_provider='claude' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Succeeded);
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(paths.iter().all(|path| !path.exists()));
+    let reason = if mode == "disabled" {
+        assert_eq!(podman.calls().len(), calls, "disabled calls no podman");
+        "mode_disabled"
+    } else {
+        "succeeded"
+    };
+    assert_eq!(
+        events_of(&db, run.id(), "broker_token_revoked"),
+        [json!({"jti": issued.jti, "reason": reason})]
+    );
+}
+
+#[test]
+fn a_preferred_sweep_retries_a_failed_run_read() {
+    sweep_retries_a_failed_run_read("preferred");
+}
+
+#[test]
+fn a_disabled_sweep_retries_a_failed_run_read() {
+    sweep_retries_a_failed_run_read("disabled");
+}

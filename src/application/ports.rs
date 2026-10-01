@@ -1823,6 +1823,18 @@ pub trait SessionRegistry {
     fn close_review_session(&self, id: &RunId) -> Result<usize>;
 }
 
+/// A successful lookup found no run; storage/read errors remain distinct.
+#[derive(Debug)]
+pub struct RunNotFound(pub RunId);
+
+impl fmt::Display for RunNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "run {} does not exist", self.0)
+    }
+}
+
+impl std::error::Error for RunNotFound {}
+
 /// Runs and their events as read (ADR-0032's third kind), and the events
 /// recorded outside a run transition.
 pub trait RunLog {
@@ -1836,6 +1848,7 @@ pub trait RunLog {
     fn all_events(&self) -> Result<Vec<RunEvent>>;
     /// Per task, its newest event of one of `kinds` (ADR-0069).
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
+    /// Returns [`RunNotFound`] only when the lookup succeeded with no row.
     fn run(&self, id: &RunId) -> Result<TaskRun>;
     fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>>;
     /// The run awaiting integration longest, by validation time.
