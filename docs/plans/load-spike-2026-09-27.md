@@ -4,7 +4,7 @@ type: plan
 title: 2026-09-27 04:00〜06:30 JSTのloadの山とcmuxのcaptureの時間切れの出どころ
 status: completed
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-09-30
 owners:
   - hisamekms
 tags:
@@ -218,3 +218,97 @@ cmuxの時間切れは、CPUが飽和して、cmuxのCLIと本体の応答が30�
 4. **e2eの繰り返しを1本ずつにする**: `tests/e2e.rs`を変えるtaskでe2eを何回も続けて流すと、本物のcmuxとCPUを長く使う。繰り返すときの回数とtest threadの数の目安を決める。
 5. **`metrics.csv`にtestの子processを数える**: sample.shの分類に、`target/*/debug/dagq`と`llvm-cov-target`のbinary、git、shを足すか、loadが閾値を超えたときに`ps`の上位を`sampler.log`に残す。今回特定できなかった内訳が次は取れる（hostの作業なので`ops`）。
 6. **6の期間の測り直しで分けて読む**: nextest-test-threadsの8.2節の測り直しで、`backend_call_failed`とload1を、integrateの段の中・workerの手元の重いtestの重なりの中・どちらでもないの3つに分けて数える。
+
+## 6. 並列度6の期間を1030の着地で分けた（task 1034）
+
+### 6.1 範囲と数え方
+
+**1030の後も、integrateのllvm-covの外でworkerの重いtestと重なる山は残った**。ただし、この表は時刻の重なりであり、workerだけがそのloadを作ったという因果の判定ではない。既存の1〜5章の数字は変更していない。
+
+| 境界・条件 | 今回の値（時刻はすべてUTC） |
+| --- | --- |
+| 始まり（含む） | event **39197**、2026-09-28T20:26:41.048Z。task 930の`run_env_changed` |
+| 前後の境界 | event **45410**、2026-09-29T18:24:34.798Z。task 1030の`run_integrated`、commit `32f5102dca644d33a72ff5656f23bea60b1960e0` |
+| 終わり（含む） | event **49728**、2026-09-30T06:20:47.739Z。取得時のcursorを固定。以後のeventは含めない |
+| 時間と着地数 | 前21.965時間、後11.937時間。1030自身を除く着地は前55、後**50 run**（後の最後の着地は49353）。「後10 run以上」を満たす |
+| `--parallel` | 3。期間内の47件の`supervisor_started`と121件の`run_claimed`、219件の`backend_call_failed`で確認 |
+| `[run.env]` | 始まりで`RUST_TEST_THREADS`と`NEXTEST_TEST_THREADS`が8→6。以後の`run_env_changed`は0件。`CARGO_BUILD_JOBS=4`、sccacheの設定は継続 |
+| toolchain・provider | `run_claimed`のRustは全121件で1.98.1 / aarch64-apple-darwin、Codexは0.155.1。Rustの変更は観測されない。Claudeは2.1.283を基本に、event 42983（09-29 09:03:35.040）の1件が2.1.284、次のclaim 43118（13:33:30.626）は2.1.283。claim間の未観測の切替時刻は断定しない。後にはCodex workerも含む |
+
+本番queueには固定バイナリの読み取り専用の`events`だけを使った。全10532 eventを次の取得結果から49728までに固定した（`--after`は指定IDを含まない）。task 932・1030のreceiptも読んだ。
+
+```sh
+~/.local/bin/dagq events --after 39196 --all --full --limit 100000
+```
+
+load1はqueueの`host/metrics-20260928.csv`・`metrics-20260929.csv`・`metrics-20260930.csv`の`unix`と`load1`を使い、上の時刻窓にある数値の行2544標本を数えた。外部の`~/.local/share/dagq-hostmetrics`は使わず、変更もしていない。平均は標本の算術平均、中央値は標本の中央値で、時間で重みを付けず、欠測は埋めない。最大の欠測は09-29 04:16:00〜09:03:24の17244秒、次は09-30 03:31:36〜05:13:52の6136秒。したがって「30以上の数」は時間の長さでも期間全体の山の総数でもない。
+
+分類は次の排他的な3つ（境界は開始・終了とも含む）で、前後は1030の着地時刻で分ける。
+
+- **(a)** integrateのllvm-covの区間。`phase=integration`の`verification_command`97件の`created_at - duration_secs`〜`created_at`。失敗した試行も含む。workerと重なったときも(a)を優先する。
+- **(b)** (a)の外で、workerの手元の重いtestの区間と重なるもの。Claude Codeのsession JSONLのBash `tool_use`〜対応する`tool_result`、backgroundは`task-notification`の時刻までとした（4.1節と同じ方法）。Codexの8区間はrollout JSONLの`exec_command`〜同じsession IDの`write_stdin`が終了を返す記録で補った。複合shellは分解できないため、前後のbuild・clippy・小さなtestも含めたtool呼び出し全体の区間である。
+- **(c)** (a)(b)のいずれにも入らないもの。終了時刻不明のworker、少数moduleのtest・stress、build、runtimeの自動更新のe2e、hostのほかの仕事もここに入りうる。「testが無かった」という意味ではない。
+
+(b)の種類は`E2E`（`--test e2e`、名前で絞った実行も含む）、`LLVMCOV`（手元のllvm-cov、計測用scriptの呼び出しも含む）、`IT-wide`とした。`IT-wide`は無filter、`runtime_`・`lifecycle_`・`cli_`などmoduleの境を持たない広いprefix、または1つの呼び出しで**8 module以上**を並べるもの（loopを含む）。8は今回の集計上の線引きで、許容するtest範囲の規則ではない。1 moduleも数えた4.1節の表とはこの点が違う。単なる引用・receiptやscriptの定義だけ・`--version`・`--no-run`・testが0件の呼び出し・承認拒否は実行区間に入れない。少数testのstressは高負荷でもこの3種類には足さない。
+
+全区間を[区間一覧CSV](load-spike-1034-intervals.csv)に残した。`run_id`は省略なし、`task_id`、UTCの開始・終了、コマンドの種類と抜粋、根拠のevent IDまたはtool call IDを持つ。`group=worker_end_missing`の22件（前18・後4）はbackgroundの終了が記録から取れず、4.1節と同じく集計から除外した。未観測の区間は(c)に残りうるので、(b)は捕捉できた区間の値である。一方、複合shellや通知の遅れは(b)を長く見積もりうる。
+
+### 6.2 load1とbackendの失敗
+
+`backend_call_failed`はretryの試行ごとに1件で、全部が`code=backend_timeout`（ほかのcodeは0件）だった。`exhausted`は`stats`と同じく`retry_after_ms`がnullまたは欠落のeventであり、`attempt == max_attempts`だけでは判定しない。たとえば39663の`send_exit`は1/3でもretryなしなのでexhaustedである。「retryあり」は次の試行を予定した件数で、後で回復したことの保証ではない。
+
+| 1030 | 区分 | load標本 | 平均 | 中央値 | 最大 | 30以上 | backend失敗 | うちexhausted |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 前 | (a) | 549 | 17.18 | 13.69 | 59.27 | 83 | 112 | 35 |
+| 前 | (b) | 168 | 12.46 | 8.68 | 39.59 | 14 | 5 | 0 |
+| 前 | (c) | 931 | 7.64 | 2.22 | 80.02 | 52 | 52 | 23 |
+| 後 | (a) | 546 | 13.80 | 12.77 | 73.00 | 8 | 15 | 3 |
+| 後 | (b) | 74 | 15.16 | 9.40 | 123.21 | 8 | 18 | 9 |
+| 後 | (c) | 276 | 11.62 | 6.64 | 283.62 | 16 | 17 | 6 |
+
+(a)にはworkerと重なる標本が前137・後118ある。この重なりを(b)にも足してはいない。前後の時間も標本数も異なるので、件数だけを1030の効果の大小とは読まない。
+
+op別の内訳。各セルは **retryあり / exhausted**、codeは全セルで`backend_timeout`。opのない組み合わせは0/0。
+
+| op | 前(a) | 前(b) | 前(c) | 後(a) | 後(b) | 後(c) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `capture` | 51 / 12 | 4 / 0 | 22 / 8 | 8 / 1 | 8 / 3 | 9 / 3 |
+| `create` | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 |
+| `exists` | 26 / 9 | 1 / 0 | 7 / 2 | 4 / 0 | 1 / 0 | 2 / 0 |
+| `listed_workspace_ids` | 0 / 13 | 0 / 0 | 0 / 11 | 0 / 2 | 0 / 6 | 0 / 3 |
+| `send_exit` | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| `workspaces_described` | 0 / 0 | 0 / 0 | 0 / 1 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+照合: 前169件（retryあり111 / exhausted58）、後50件（32 / 18）、全体219件（143 / 76）。load標本は前1648・後896で2544件。どちらも3区分の和が窓全体と一致する。
+
+### 6.3 workerの区間の内訳と1030後の山
+
+CSVの開始時刻で前後を分けたtool呼び出しの件数（cargoの起動回数ではない）。境界をまたぐ呼び出しは無かった。各行は(a)との重なりを除く前のworker区間で、負荷の表ではその重なりを(a)へ渡す。
+
+| コマンドの種類 | 前 | 後 |
+| --- | ---: | ---: |
+| E2E | 76 | 42 |
+| IT-wide | 15 | 5 |
+| LLVMCOV | 3 | 1 |
+| E2E+IT-wide | 3 | 1 |
+
+終了が取れたのは計146区間、65 run。複合の`E2E+IT-wide`は1区間として数えた。全runのIDと全開始・終了はCSVを参照。1030後の(b)の30以上8標本とexhausted9件は、次の区間に集中した。
+
+| run（task） | UTCの区間 | コマンド | (b)の30以上 / 最大 | (b)のexhausted |
+| --- | --- | --- | --- | --- |
+| `2d1f5abd-0c40-4cd7-8073-9f0ce058ae9a`（1050） | 09-30 01:06:09.083〜01:09:38.283 | `cargo test --locked --test it $m::`、`runtime_stall`から`runtime_headless`まで11 moduleのloop（104 test）。同runは後で13 moduleのloopを2回実行 | 3 / 44.62 | 5（capture 3、listed_workspace_ids 2）。event 48395・48398・48399・48401・48404 |
+| `1930d5ff-17cc-4ef0-b1fd-efb9fd550920`（1079） | 09-30 05:48:36.466〜06:03:16.669 | `cargo test --locked --test e2e -- --ignored` | 5 / 123.21 | 4（listed_workspace_ids）。event 49559〜49562 |
+| `0f073ce0-14c0-4a45-9f0d-2b7fd34de559`（1022） | 09-30 05:51:07.220〜05:57:29.866 | 少数testのstress・fmtの後に全体e2eを実行する複合shell | 上の5のうち2 / 123.21 | 上の4と同じevent（重複計上しない） |
+
+後の手元のllvm-covはrun `314a9d7b-dae7-4d17-8afe-bfeebbb436a8`（1162）の09-30 00:18:03.070〜00:28:17.169だった。47950の`resume_started`は`escalation_reason=verification_failed`で、1030が残した再現の例外に当たる。重い区間があることだけで規則違反とはしない。同様に上の11 moduleのloopは測定の`IT-wide`に入るが、この計測だけでは個々のmoduleの必要性までは裁定しない。
+
+### 6.4 見立てと次の判断
+
+**1030後も(b)にload1 30以上とexhaustedの両方が残るため、取り下げた1031・1032を再検討する材料はある**。workerの広いtest範囲の明確化だけで段の外の山が消えた、とは言えない。全体e2eが2 runで重なる区間もある。手元のtestの並列度をintegrateから分ける案（1031）と、重いtestを始める時点で調整する案（1032）をreceiptの`decision`に残す。taskの登録・設定の変更はしていない。
+
+ただし、この結果から「直ちにworkerの並列度を4にする」「高loadでは全testを待たせる」とは決めない。
+
+- 後の01:07前後には別run `c6ef5297`（1058）が、少数testのstressと12本の`yes`で負荷を作るコマンドを01:04:12.125に開始していた。これは(b)の定義外で、backgroundの終了通知も取れなかった。1050の広いtestだけに山を帰属させられない。
+- 後の最大283.62（09-30 06:07:57）は(c)である。(b)の外にも大きな山があり、少数test・build・終了不明の処理・hostのほかの負荷を区別する追加の観測が必要。runtimeの自動更新のe2eもworkerの区間には入れていない。
+- Rustは同じでも、前後には多数のtestの改善の着地、providerの違い、欠測、終了不明の区間がある。(a)の標本平均17.18→13.80と30以上83→8も、1030や並列度6だけの効果とは切り離せない。並列度6自体の判断はtask 1028の担当で、このtaskはその文書を変更しない。
+- 1031・1032を選び直す際は、例外として必要な検証失敗の再現、最後の全体e2e、意図したstressの負荷を分け、終了不明の区間と(c)の山も先に確認する。AGENTS.mdのstressの「負荷が下がるのを待たない」はこの計測では変更しない。
