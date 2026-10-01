@@ -95,3 +95,79 @@ jobs:
           else
             echo "no nextest output to summarise"
           fi
+
+  # Linux (ubuntu): cargo build and the whole test suite, the first step of
+  # goal 83 (docs/design/linux-ci.md). The job may fail while the tests that
+  # only hold on macOS are split out: continue-on-error keeps a Linux failure
+  # from failing the workflow, and the names of the failed tests go to the job
+  # summary. Coverage, fmt, clippy and the scripts' checks stay in the macOS
+  # job above.
+  linux:
+    name: linux build / test
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        # rust-toolchain.toml pins the channel and components; rustup installs
+        # the host's (x86_64-unknown-linux-gnu) std besides the targets it
+        # lists, so the file needs no Linux target.
+        run: |
+          set -euo pipefail
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --locked
+
+      # The same test binaries as the macOS job's cargo llvm-cov nextest, with
+      # the e2e tests left #[ignore]d. .config/nextest.toml has fail-fast off,
+      # so one run lists every failed test. shell: bash runs with -o pipefail,
+      # so the step fails exactly when nextest fails.
+      - name: cargo nextest run
+        shell: bash
+        run: cargo nextest run --locked --color never 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+
+      # The failed tests, one "<binary id> <test name>" per row, in the job
+      # summary, for the task that splits them out to read. FLKY-FL is a test
+      # that failed and then passed on its retry.
+      - name: Failed tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/nextest.log"
+          {
+            echo "## Linux: failed tests"
+            echo
+            if [ ! -s "$log" ] || ! grep -qE '^ +Summary \[' "$log"; then
+              echo "no nextest summary (the build or the setup failed; see the log)"
+            else
+              # The rows after the last "Summary [" line, e.g.
+              #   FLKY-FL 2/2 [   0.015s] (2/3) dagq::it module::name
+              #   TRY 2 FAIL [   0.015s] (3/3) dagq::it module::name
+              failed=$(awk '/^ +Summary \[/ { n = NR } { line[NR] = $0 }
+                END { for (i = n + 1; i <= NR; i++) print line[i] }' "$log" |
+                grep -E '^ +(TRY [0-9]+ )?(FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL|FLKY-FL)( [0-9]+/[0-9]+)? +\[' |
+                awk '{ print $(NF - 1), $NF }' | sort -u || true)
+              if [ -z "$failed" ]; then
+                echo "none"
+              else
+                echo "$(printf '%s\n' "$failed" | wc -l | tr -d ' ') failed:"
+                echo
+                echo '```'
+                printf '%s\n' "$failed"
+                echo '```'
+              fi
+              echo
+              grep -E '^ +Summary \[' "$log" | tail -n 1 || true
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
