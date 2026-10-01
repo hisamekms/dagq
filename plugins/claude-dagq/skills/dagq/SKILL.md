@@ -61,7 +61,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 
 ## 3. Inspect
 
-`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID]` (waits, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went; a run's `requested_provider`, `actual_provider`, `worker_mode` and `provider_switched` also in `show`), `observe --history`, `notes` / `note`, `stats` (time per run, goal and session kind, `alerts`), `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
+`goal list`, `goal show ID`, `list` (unfinished tasks, paged by `--before NEXT`), `show ID`, `graph [--goal ID] [--format json|d2|svg] [--out PATH]` (waits, `critical`, claim order), `search` / `related`, `findings`, `events` (`--full`, filters), `timeline RUN` (where a run's time went; a run's `requested_provider`, `actual_provider`, `worker_mode` and `provider_switched` also in `show`), `observe --history`, `notes` / `note`, `stats` (time per run, goal and session kind, `alerts`), `kpi` / `mark` / `marks` / `forecast` / `report` (`reference/kpi.md`). `show`, `goal show` and `doctor` cut long texts; `--full` gives them whole. Flags, fields and statuses: `reference/inspect.md`.
 
 ## 4. Report results
 

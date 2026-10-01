@@ -106,6 +106,8 @@ When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal
 3. When one task blocks many (goal 8 had five tasks waiting on one), consider splitting it or removing a dependency that is not real (`dependency remove`) so more tasks run in parallel.
 4. `candidates` is the order the supervisor will claim in, so there is no need to register or submit tasks in a particular order to get the releasing ones first. To put a task ahead of the others, give it a priority (below).
 
+`graph [--goal ID] [--format json|d2|svg] [--out PATH]` keeps `json` as the default and returns the same dependency graph as before. `d2` writes D2 source and `svg` writes the rendered SVG directly; with `--out` (only for `d2` / `svg`) it writes the file and returns its format, path and drawn task IDs as JSON. The diagram selects tasks that are in progress, have effective priority `high` or above, or lie on `critical`, plus one level of their unfinished task or goal prerequisites. With `--goal`, those first two roots stay inside the goal, while its critical chain and prerequisites may cross goal boundaries. D2 source needs no host tool; SVG needs executable `d2` and `d2plugin-tala` on PATH and fails with the reason if either is missing. `doctor`'s `d2` field shows both resolved paths. Full selection and rendering rules: [the dependency-diagram design](../../../../../docs/design/supervisor-lifecycle/dependency-diagram.md).
+
 ## Priority and claim order
 
 Every task has one of five priorities. Pick it by what waiting costs, not by how much the task matters in general:

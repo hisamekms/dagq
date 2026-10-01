@@ -82,6 +82,8 @@ The supervisor (`supervise --report-daily`, on by default) writes, once per loca
 
 The **forecast error** section scores the targets that finished in the report's period: sample, with-marks and excluded counts, then per stratum (`all`, `target=`, `change=`, `band=`, `marks=`, `method=`) `n`, the signed median error (+ late), the median |error|, the median ratio, p90 hit, late / early, the bias (the larger of late and early, or `even`) and the worst state of any `forecast.*` target. No samples, no table. Read a bias only with enough `n`, and `marks=0` before `marks=1+`. Push content has no forecast.
 
+The HTML's **Near-term dependencies** section draws the queue as it is when the report is generated, using the same selection and SVG renderer as `graph --format svg`; a backfilled report therefore does not reconstruct the old queue. It needs executable `d2` and `d2plugin-tala` on the report process's PATH. If there are no selected tasks or drawing fails, the section gives the reason and the rest of the report is still written. The JSON has the drawn task IDs, D2 source and an optional reason, but not the SVG. Details: [the report design](../../../../../docs/design/supervisor-lifecycle/report.md#当面の依存図).
+
 ## Push to a person away from the screen
 
 `host.toml`, never the committed `dagq.toml`, holds the push command: `<queue dir>/host.toml` (this queue) or `$XDG_CONFIG_HOME/dagq/host.toml` (default `~/.config/dagq/host.toml`, every queue of the host); the queue's `[push]` replaces the host-wide one as a whole, and `command = []` turns it off for that queue.
