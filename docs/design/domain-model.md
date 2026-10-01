@@ -400,7 +400,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `migration_number_taken` | runが足したmigrationの番号がmainで埋まっていて、機械的に振り直せない（runが足したmigrationが2つ以上か、番号をrunの他の変更が含むか、振り直しのcommitをGitが拒んだ。[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3） | `migrations`、`taken`、`next_number`、（番号を含むファイルがあれば）`referring`、（振り直しのcommitをGitが拒んだら）`commit_error` |
 | `verification_failed` | rebaseの後の検証コマンドが非0で終わった（landing recheckの`[recheck] command`がmainに載せた木で非0で終わったときも） | `index`（1始まり）、（`command` / `exit_code`は既存） |
 | `verification_environment` | 検証コマンドがhostの分類（`disk_full`・`killed`・`timeout`）で落ち、1回のやり直しでも落ちた（`disk_full`で空きが着地の閾値に足りずやり直さなかったときも）。resumeせず人に知らせる（task 639、ADR-t639-1） | `index`（1始まり） |
-| `verification_flaky` | 検証コマンドで落ちたtestが全て、nextestが流し直して通ったtest（`flaky`の分類）で、resumeせずに着地をもう1回やり直した（runごとに1回。task 768、ADR-t768-1） | `index`（1始まり） |
+| `verification_flaky` | 検証コマンドで落ちたtestが全て、nextestが流し直して通ったtest（`flaky`の分類）で、resumeせずに着地をもう1回やり直した（着地の試行ごとに1回、やり直しはFLAKYを成功として記録する。task 1039、ADR-t1039-1） | `index`（1始まり） |
 | `backend_timeout` | cmuxの呼び出しがtimeoutした（adapterの`did not finish within`、cmuxの`Command timed out`） | `op`（`backend_call_failed`は既存の`op`） |
 | `backend_failed` | cmuxの呼び出しが失敗した | `op` |
 | `job_failed` | headlessのreviewかtriageのjobが失敗した | |

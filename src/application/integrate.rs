@@ -1207,7 +1207,7 @@ fn land(
     // The task's verification commands run here, once per commit, on the
     // rebased tree: validation only checks the receipt (ADR-0023 decision 1).
     let commands = task.verification_commands();
-    let run_env = if commands.is_empty() {
+    let mut run_env = if commands.is_empty() {
         Vec::new()
     } else {
         // A program [run.env] names that cannot be executed would fail
@@ -1221,6 +1221,7 @@ fn land(
     // The landing's verification, done once more when only flaky tests
     // failed (task 768, ADR-t768-1): a new attempt of every command on the
     // same rebased head, in the slot it holds (main does not move meanwhile).
+    let mut flaky_retried = false;
     'verify: loop {
         // Each attempt keeps its own logs, so a second integrate of the run does
         // not overwrite why the first one failed.
@@ -1297,10 +1298,8 @@ fn land(
             }
             let failure = last.failure.as_ref().unwrap_or(&first_failure);
             // Every failed test passed on nextest's retry: the landing is done
-            // once more instead of a resume, once per run (task 768).
-            if failure.class == verify_failure::FailureClass::Flaky
-                && !queue.has_run_event(run.id(), event_kind::INTEGRATION_RETRIED)?
-            {
+            // once more instead of a resume, once per landing (task 1039).
+            if failure.class == verify_failure::FailureClass::Flaky && !flaky_retried {
                 let reason = format!(
                     "verification command {command:?} failed after the rebase onto {main} only on tests that passed when run again ({}); see {}. Verifying it once more instead of resuming the session",
                     last.flaky_tests.join(", "),
@@ -1316,6 +1315,7 @@ fn land(
                             "main": main,
                             "head": rebased,
                             "attempt": attempt,
+                            "flaky_result": "pass",
                             "command": command,
                             "exit_code": last.exit_code,
                             "failure": failure.to_json(),
@@ -1325,6 +1325,9 @@ fn land(
                             "reason": reason,
                         })),
                 )?;
+                flaky_retried = true;
+                run_env.retain(|(key, _)| key != "NEXTEST_FLAKY_RESULT");
+                run_env.push(("NEXTEST_FLAKY_RESULT".into(), "pass".into()));
                 continue 'verify;
             }
             return defer(
@@ -1505,7 +1508,7 @@ impl VerifyStep<'_> {
         };
         // The tests it names as failed, when tests failed or ran out of
         // time (task 515).
-        let failed_tests = failure
+        let mut failed_tests = failure
             .as_ref()
             .filter(|failure| {
                 matches!(
@@ -1516,6 +1519,16 @@ impl VerifyStep<'_> {
                 )
             })
             .map(|_| verify_failure::failed_tests(&output));
+        // A successful retry still records FLAKY tests, including nextest's
+        // summary-only output. Keep the same name limit as failed commands.
+        if failure.is_none() {
+            let mut names = verify_failure::flaky_tests(&output);
+            if !names.is_empty() {
+                let omitted = names.len().saturating_sub(verify_failure::MAX_FAILED_TESTS);
+                names.truncate(verify_failure::MAX_FAILED_TESTS);
+                failed_tests = Some(verify_failure::FailedTests { names, omitted });
+            }
+        }
         // The failed tests that passed on nextest's retry: the mark `stats`
         // counts them flaky by (task 768).
         let flaky_tests = match &failed_tests {

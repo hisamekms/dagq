@@ -1,10 +1,6 @@
-//! Runtime tests: a verification command of `integrate` whose failed tests
-//! all passed when nextest ran them again (`FLKY-FL`, `retries = 1` and
-//! `flaky-result = "fail"`) is still a failure, but the landing is done
-//! once more instead of resuming the worker, once per run; a second
-//! failure and a failure that is not flaky are resumed as before (task
-//! 768, ADR-t768-1). The commands print nextest's output as 0.9.146 does.
+//! Flaky-only verification retries once per landing with nextest flaky-result=pass.
 use crate::runtime_support;
+use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
@@ -62,15 +58,13 @@ fn nextest_log(broken: bool) -> String {
 }
 
 /// A command that prints `log` and exits 100 as nextest does, or passes
-/// once `pass_after` exists (it is created on the first run).
+/// with a FLAKY summary when the retry explicitly allows flakes.
 fn nextest_command(dir: &Path, name: &str, log: &str, pass_after: bool) -> String {
     let output = dir.join(format!("{name}.log"));
     fs::write(&output, log).unwrap();
-    let marker = dir.join(format!("{name}.ran"));
     if pass_after {
         format!(
-            "if [ -f '{0}' ]; then exit 0; fi; touch '{0}'; cat '{1}'; exit 100",
-            marker.display(),
+            "if [ \"$NEXTEST_FLAKY_RESULT\" = pass ]; then echo ' FLAKY 2/2 [ 0.007s] dagq::it runtime_x::retry_flaky'; exit 0; fi; cat '{}'; exit 100",
             output.display()
         )
     } else {
@@ -110,7 +104,6 @@ fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
     for again in &verifications[2..] {
         assert_eq!(again["attempt"], 2);
         assert_eq!(again["exit_code"], 0);
-        assert_eq!(again["flaky_tests"], json!([]));
     }
     assert!(
         verifications[3]["log_path"]
@@ -118,10 +111,19 @@ fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
             .unwrap()
             .ends_with("integrate-2-verify-2.log")
     );
+    assert_eq!(
+        verifications[3]["flaky_tests"],
+        json!(["runtime_x::retry_flaky"])
+    );
+    assert_eq!(
+        verifications[3]["failed_tests"],
+        json!(["runtime_x::retry_flaky"])
+    );
     let retried = payloads(&detail, "integration_retried");
     assert_eq!(retried.len(), 1, "{:?}", event_kinds(&detail));
     let retried = retried[0];
     assert_eq!(retried["code"], "verification_flaky");
+    assert_eq!(retried["flaky_result"], "pass");
     assert_eq!(retried["index"], 2);
     assert_eq!(retried["attempt"], 1);
     assert_eq!(retried["failure"], first["failure"]);
@@ -147,59 +149,114 @@ fn only_flaky_tests_failing_lands_the_run_once_more_without_a_resume() {
         "{stats}"
     );
     let candidates = &stats["failed_tests"]["flaky_candidates"];
-    assert_eq!(candidates.as_array().unwrap().len(), 1, "{stats}");
+    assert_eq!(candidates.as_array().unwrap().len(), 2, "{stats}");
     assert_eq!(candidates[0]["name"], "runtime_x::flaky");
     assert_eq!(candidates[0]["flaky"], 1);
     assert_eq!(candidates[0]["integrate_runs"], 1);
+    assert_eq!(candidates[1]["name"], "runtime_x::retry_flaky");
+    assert_eq!(candidates[1]["flaky"], 1);
 }
 
-/// The landing is done once more once per run: flaky again, the run is
-/// parked for a resume as before, and a later landing of the same run is
-/// not done again either.
+/// A real code failure on the retry needs a resume. Once resolved, a new
+/// landing gets its own retry even though this run has already used one.
 #[test]
-fn a_second_flaky_failure_is_resumed() {
+fn a_failed_retry_resumes_and_a_later_landing_can_retry_again() {
     let (dir, db, repo) = awaiting();
+    let flaky = nextest_command(dir.path(), "flaky", &nextest_log(false), false);
+    let broken = nextest_command(dir.path(), "broken", &nextest_log(true), false);
     set_commands(
         &db,
-        json!([nextest_command(
-            dir.path(),
-            "flaky",
-            &nextest_log(false),
-            false
+        json!([format!(
+            "if [ \"$NEXTEST_FLAKY_RESULT\" = pass ]; then {broken}; else {flaky}; fi"
         )]),
     );
     let outcome = integrate(&db, 1, &repo).unwrap();
     assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
     let detail = show(&db);
-    let verifications = integration_verifications(&detail);
-    assert_eq!(verifications.len(), 2, "{verifications:?}");
+    assert_eq!(integration_verifications(&detail).len(), 2);
     assert_eq!(payloads(&detail, "integration_retried").len(), 1);
     let deferred = payloads(&detail, "integration_deferred");
     assert_eq!(deferred.len(), 1);
     assert_eq!(deferred[0]["code"], "verification_failed");
-    assert_eq!(deferred[0]["failure"]["class"], "flaky");
-    assert_eq!(deferred[0]["flaky_tests"], json!(["runtime_x::flaky"]));
-    assert!(
-        deferred[0]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("integrate-2-verify-1.log"),
-        "{}",
-        deferred[0]
-    );
+    assert_eq!(deferred[0]["failure"]["class"], "test_failure");
 
-    let outcome = integrate(&db, 1, &repo).unwrap();
-    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
-    let detail = show(&db);
-    assert_eq!(integration_verifications(&detail).len(), 3);
-    assert_eq!(payloads(&detail, "integration_retried").len(), 1);
-    assert_eq!(payloads(&detail, "integration_deferred").len(), 2);
-    let stats = runtime::stats(&db, &Default::default()).unwrap();
-    assert_eq!(
-        stats["verification_failures"],
-        json!([{"class": "flaky", "count": 3, "runs": 1, "retried": 1, "retry_passed": 0, "retry_failed": 1}]),
-        "{stats}"
+    let run = &detail.runs[0];
+    let token = LeaseToken::new("resolved-code-failure");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .begin_resume(
+            run.id(),
+            &token,
+            &sha(deferred[0]["main"].as_str().unwrap()),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    queue
+        .finish_resume(
+            run.id(),
+            &token,
+            Some(RunStatus::AwaitingIntegration),
+            None,
+            false,
+            json!({"attempt": 1, "outcome": "resolved"}),
+        )
+        .unwrap();
+    drop(queue);
+    set_commands(
+        &db,
+        json!([nextest_command(
+            dir.path(),
+            "resolved",
+            &nextest_log(false),
+            true
+        )]),
     );
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    let detail = show(&db);
+    assert_eq!(integration_verifications(&detail).len(), 4);
+    assert_eq!(payloads(&detail, "integration_retried").len(), 2);
+    assert_eq!(payloads(&detail, "integration_deferred").len(), 1);
+    assert_eq!(payloads(&detail, "resume_started").len(), 1);
+    let stats = runtime::stats(&db, &Default::default()).unwrap();
+    let flaky = stats["verification_failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["class"] == "flaky")
+        .unwrap();
+    assert_eq!(flaky["retried"], 2);
+    assert_eq!(flaky["retry_passed"], 1);
+    assert_eq!(flaky["retry_failed"], 1);
+}
+
+/// Permitting FLAKY does not bypass the coverage gate or host handling.
+#[test]
+fn a_flaky_retry_keeps_coverage_and_host_failures() {
+    for (log, class, outcome_name) in [
+        ("TOTAL 70%", "coverage_below", "needs_session"),
+        ("No space left on device", "disk_full", "held"),
+    ] {
+        let (dir, db, repo) = awaiting();
+        let flaky = nextest_command(dir.path(), "flaky", &nextest_log(false), false);
+        // Include the coverage flag in the shell comment, as in the real command.
+        set_commands(
+            &db,
+            json!([format!(
+                "if [ \"$NEXTEST_FLAKY_RESULT\" = pass ]; then echo ' FLAKY 2/2 [ 0.007s] dagq::it runtime_x::flaky'; echo '{log}'; exit 1; else {flaky}; fi # --fail-under-lines 80"
+            )]),
+        );
+        let outcome = integrate(&db, 1, &repo).unwrap();
+        assert_eq!(outcome["outcome"], outcome_name, "{outcome}");
+        let detail = show(&db);
+        let verifications = integration_verifications(&detail);
+        assert_eq!(verifications.last().unwrap()["failure"]["class"], class);
+        assert_eq!(payloads(&detail, "integration_retried").len(), 1);
+        assert!(payloads(&detail, "run_integrated").is_empty());
+        assert!(payloads(&detail, "resume_started").is_empty());
+    }
 }
 
 /// A test that failed its retry too is not flaky: the run is resumed at

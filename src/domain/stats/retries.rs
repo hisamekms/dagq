@@ -148,6 +148,7 @@ struct Deferral {
     main: String,
     code: String,
     command: Option<String>,
+    flaky: bool,
     failed_tests: Vec<String>,
 }
 
@@ -227,6 +228,7 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                         main,
                         code: code().to_owned(),
                         command: text(&event.payload["command"]),
+                        flaky: event.payload["failure"]["class"] == "flaky",
                         failed_tests: event.payload["failed_tests"]
                             .as_array()
                             .map(|names| names.iter().filter_map(text).collect())
@@ -326,14 +328,15 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
             {
                 continue;
             }
-            // The landing passed the command that failed here: the failure
-            // is this run's change or its meeting with main, not the landing's.
-            let passed = code == "verification_failed"
-                && deferral
-                    .command
-                    .as_ref()
-                    .is_some_and(|command| landed.passed.contains(command));
-            if passed {
+            // Flaky tests do not implicate the landing, including old events.
+            // Neither does a command the landing itself passed.
+            let not_blameable = code == "verification_failed"
+                && (deferral.flaky
+                    || deferral
+                        .command
+                        .as_ref()
+                        .is_some_and(|command| landed.passed.contains(command)));
+            if not_blameable {
                 if !retries
                     .rebased_onto
                     .iter()
@@ -674,6 +677,34 @@ mod tests {
         assert_eq!(b.rebased_onto[0].run_id, RunId::new(A).unwrap());
         assert!(b.rebased_onto[0].failed_tests.is_empty());
         assert_eq!(all[&RunId::new(A).unwrap()].broke_runs, 0);
+    }
+
+    /// Old flaky deferrals do not blame a landing, even with no command or gate.
+    #[test]
+    fn flaky_deferrals_keep_the_target_without_blame() {
+        for command in [None, Some("test")] {
+            let events = [
+                event(1, A, 1, "run_integrated", json!({"result_commit": "m1"}), 1),
+                event(2, B, 2, "integration_started", json!({"main": "m1"}), 2),
+                event(
+                    3,
+                    B,
+                    2,
+                    "integration_deferred",
+                    json!({
+                        "code": "verification_failed", "command": command,
+                        "failure": {"class": "flaky"}, "failed_tests": ["a::flaky"]
+                    }),
+                    3,
+                ),
+            ];
+            let all = retries(&events);
+            let b = &all[&RunId::new(B).unwrap()];
+            assert!(b.broken_by.is_empty());
+            assert_eq!(b.rebased_onto.len(), 1);
+            assert_eq!(b.rebased_onto[0].failed_tests, ["a::flaky"]);
+            assert_eq!(all[&RunId::new(A).unwrap()].broke_runs, 0);
+        }
     }
 
     #[test]

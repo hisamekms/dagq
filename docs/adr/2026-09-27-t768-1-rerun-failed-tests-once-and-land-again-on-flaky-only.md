@@ -6,6 +6,8 @@ status: accepted
 created: 2026-09-27
 updated: 2026-09-27
 accepted_on: 2026-09-27
+amended_by:
+  - adr-t1039-1
 amends:
   - adr-0076 decision 2
 owners:
