@@ -54,6 +54,10 @@ string_enum!(Capability {
     AskAnswer => "ask.answer",
     AskClose => "ask.close",
     PlannerOpen => "planner.open",
+    // A session's screen read and keys or an answer typed into it, by
+    // its run or planner id (ADR-t1228-1 decisions 4 and 5).
+    ScreenRead => "screen.read",
+    ScreenSend => "screen.send",
     // Scheduler transitions and the service.
     Supervise => "scheduler.supervise",
     RunRecover => "run.recover",
@@ -72,7 +76,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 44] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -103,6 +107,8 @@ impl Capability {
         Self::AskAnswer,
         Self::AskClose,
         Self::PlannerOpen,
+        Self::ScreenRead,
+        Self::ScreenSend,
         Self::Supervise,
         Self::RunRecover,
         Self::ServiceLifecycle,
@@ -329,6 +335,8 @@ const USER: &[Capability] = &[
     C::AskAnswer,
     C::AskClose,
     C::PlannerOpen,
+    C::ScreenRead,
+    C::ScreenSend,
     C::Supervise,
     C::RunRecover,
     C::ServiceLifecycle,

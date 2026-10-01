@@ -26,6 +26,7 @@ mod cli_operations;
 mod cli_proposals;
 mod cli_read;
 mod cli_roles;
+mod cli_screen;
 mod cli_stats;
 mod cli_tasks;
 mod cli_version;

@@ -37,6 +37,7 @@ pub mod recording;
 pub mod release_update;
 pub mod report;
 pub mod review;
+pub mod screen;
 pub mod screen_idle;
 pub mod session;
 pub mod stats;

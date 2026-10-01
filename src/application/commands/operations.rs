@@ -7,7 +7,8 @@
 //! apart by the record) run them all, the planner the service and the
 //! queue at a person's word, the supervisor what it starts for itself; the
 //! workers, the four jobs and the observer none of them but a worker's
-//! own session. The operations themselves stay where they are; this is
+//! own session; `run screen` / `send` and `planner screen` / `send`
+//! (ADR-t1228-1) are the user's and the inbox's alone. The operations themselves stay where they are; this is
 //! their entry. The policy is the [`crate::domain::StaticPolicy`]'s
 //! (`docs/design/authorization.md`).
 
@@ -61,6 +62,13 @@ pub enum Operation {
     Session(Option<RunId>),
     PlannerSession(PlannerId),
     SessionEvent(HookSession),
+    /// `run screen` and `planner screen` (ADR-t1228-1 decision 4): the run,
+    /// task or planner it names ([`Resource::Unresolved`] for one that
+    /// cannot be read).
+    ReadScreen(Resource),
+    /// `run send` and `planner send` (ADR-t1228-1 decision 5), on what it
+    /// names as for [`Self::ReadScreen`].
+    SendToScreen(Resource),
 }
 
 fn run_or_unresolved(run: Option<&RunId>) -> Resource {
@@ -88,6 +96,8 @@ impl Operation {
             Self::Review(task) => (C::PrepareReview, Resource::task(*task)),
             Self::Session(run) => (C::SessionRun, run_or_unresolved(run.as_ref())),
             Self::PlannerSession(planner) => (C::SessionRun, Resource::Planner(*planner)),
+            Self::ReadScreen(resource) => (C::ScreenRead, resource.clone()),
+            Self::SendToScreen(resource) => (C::ScreenSend, resource.clone()),
             Self::SessionEvent(session) => (
                 C::SessionRecord,
                 match session {
@@ -159,6 +169,57 @@ mod tests {
             Operation::Recover(Some(run("r1"))),
             Operation::Review(TaskId::new(1)),
         ]
+    }
+
+    /// A session's screen read and sent to, by its run, task or planner.
+    fn screen_operations() -> Vec<Operation> {
+        let mut all = Vec::new();
+        for resource in [
+            Resource::run(run("r1")),
+            Resource::task(TaskId::new(1)),
+            Resource::Planner(PlannerId::new(7)),
+            Resource::Unresolved,
+        ] {
+            all.push(Operation::ReadScreen(resource.clone()));
+            all.push(Operation::SendToScreen(resource));
+        }
+        all
+    }
+
+    #[test]
+    fn only_the_user_and_the_inbox_read_and_send_to_a_sessions_screen() {
+        for actor in [
+            ActorContext::user(),
+            ActorContext::instance(ActorRole::Inbox, "inbox"),
+        ] {
+            for operation in screen_operations() {
+                assert!(allowed(&actor, &operation), "{actor:?} {operation:?}");
+            }
+        }
+        // Not even a planner its own session, nor the supervisor, which
+        // types by its own path; each refusal is recorded.
+        let mut others: Vec<ActorContext> = ActorRole::ALL
+            .into_iter()
+            .filter(|role| !matches!(role, ActorRole::User | ActorRole::Inbox))
+            .map(|role| ActorContext::instance(role, 7))
+            .collect();
+        others.push(ActorContext::worker(&run("r1"), TaskId::new(1)));
+        for actor in others {
+            for operation in screen_operations() {
+                let log = Log::default();
+                let error = authorize(&actor, &StaticPolicy, &log, &operation).unwrap_err();
+                let error = error.downcast_ref::<AuthorizationError>().unwrap();
+                assert_eq!(
+                    error.reason,
+                    crate::domain::authorization::DenyReason::NotGranted
+                );
+                assert_eq!(log.0.borrow().len(), 1, "{actor:?} {operation:?}");
+            }
+        }
+        assert_eq!(
+            Operation::SendToScreen(Resource::Planner(PlannerId::new(7))).request(),
+            (Capability::ScreenSend, Resource::Planner(PlannerId::new(7)))
+        );
     }
 
     #[test]

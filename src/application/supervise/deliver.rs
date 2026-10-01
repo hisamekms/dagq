@@ -13,7 +13,7 @@ use crate::domain::EventKind;
 
 /// What the supervisor types into a session.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Input<'a> {
+pub(crate) enum Input<'a> {
     /// A request or an answer, typed and submitted with Enter.
     Text(&'a str),
     /// `/exit`, never typed twice: a second one could pick a dialog's
@@ -38,11 +38,11 @@ impl Input<'_> {
 }
 
 /// Enter is sent again at most this many times after a submit.
-pub(super) const SUBMIT_RETRIES: usize = 3;
+pub(crate) const SUBMIT_RETRIES: usize = 3;
 
 /// Where a submit ended, with the last screen read.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum Submission {
+pub(crate) enum Submission {
     /// The input left the input box; `None` when the screen could not be
     /// read, which is not held against the send.
     Submitted(Option<String>),
@@ -60,7 +60,7 @@ pub(super) enum Submission {
 
 impl Submission {
     /// The screen read after the submit, if any.
-    pub(super) fn screen(&self) -> Option<&str> {
+    pub(crate) fn screen(&self) -> Option<&str> {
         match self {
             Submission::Submitted(screen) => screen.as_deref(),
             Submission::Dialog(screen) | Submission::Stuck(screen) => Some(screen),
@@ -73,7 +73,7 @@ impl Submission {
 /// 29): whether keys were sent to it; a screen without one gets nothing.
 /// The supervisor's closes the Settings panel ([`answer_send_dialog`]),
 /// which is no dialog to [`AgentSignals::detect_prompt`].
-pub(super) type DialogAnswerer<'b> = &'b mut dyn FnMut(&str) -> bool;
+pub(crate) type DialogAnswerer<'b> = &'b mut dyn FnMut(&str) -> bool;
 
 /// Type `input` into the session in `workspace` and read the screen
 /// every `submit_check_interval`: while the input box still holds it (and
@@ -87,7 +87,7 @@ pub(super) type DialogAnswerer<'b> = &'b mut dyn FnMut(&str) -> bool;
 /// only while the screen shows the input box ready with no trace of it
 /// (task 354); one that timed out on every attempt that way is
 /// [`Submission::Unsent`].
-pub(super) fn submit_input(
+pub(crate) fn submit_input(
     cmux: &dyn WorkspaceBackend,
     signals: &dyn AgentSignals,
     workspace: &str,
@@ -102,7 +102,7 @@ pub(super) fn submit_input(
 /// after which the input is confirmed as before (Enter alone while it is in
 /// the box; a `/exit` is never typed again). A dialog `answer` sends
 /// nothing to is [`Submission::Dialog`], as without it.
-pub(super) fn submit_input_answering(
+pub(crate) fn submit_input_answering(
     cmux: &dyn WorkspaceBackend,
     signals: &dyn AgentSignals,
     workspace: &str,
@@ -155,7 +155,7 @@ pub(super) fn submit_input_answering(
 /// [`SUBMIT_RETRIES`] times. The screens are given to `answer` until it
 /// sends keys once, after which the reads go on; a dialog it did not
 /// answer is [`Submission::Dialog`].
-pub(super) fn confirm_input(
+pub(crate) fn confirm_input(
     cmux: &dyn WorkspaceBackend,
     signals: &dyn AgentSignals,
     workspace: &str,

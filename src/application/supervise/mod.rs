@@ -144,6 +144,7 @@ mod update;
 mod waiting;
 
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
+pub(crate) use self::deliver::{Input, Submission, submit_input};
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub use self::host_metrics::HostMetricsPort;

@@ -208,6 +208,8 @@ event_kinds! {
     ScopeViolation => "scope_violation",
     ScratchpadRemoved => "scratchpad_removed",
     ScreenCaptureFailed => "screen_capture_failed",
+    ScreenInputSent => "screen_input_sent",
+    ScreenRead => "screen_read",
     SessionClosed => "session_closed",
     SessionExited => "session_exited",
     SessionGoneParked => "session_gone_parked",
@@ -319,6 +321,10 @@ impl EventKind {
                 // A planner's screen inferred idle without its idle marker
                 // (ADR-t803-1).
                 | IdleInferred
+                // A person's read of and send to a planner's session
+                // (ADR-t1228-1 decisions 4 and 5).
+                | ScreenRead
+                | ScreenInputSent
                 // A planner of the runtime's nothing was seen of within the
                 // planner timeout (task 805); the revise's is on its
                 // proposal's task.
@@ -892,6 +898,8 @@ mod tests {
             (EventKind::ScopeViolation, "scope_violation"),
             (EventKind::ScratchpadRemoved, "scratchpad_removed"),
             (EventKind::ScreenCaptureFailed, "screen_capture_failed"),
+            (EventKind::ScreenInputSent, "screen_input_sent"),
+            (EventKind::ScreenRead, "screen_read"),
             (EventKind::SessionClosed, "session_closed"),
             (EventKind::SessionExited, "session_exited"),
             (EventKind::SessionGoneParked, "session_gone_parked"),

@@ -11,6 +11,7 @@ related:
   - adr-t728-1
   - adr-t728-2
   - adr-t728-3
+  - adr-t1228-1
   - design-supervisor-lifecycle-roles
   - design-security
 ---
@@ -56,6 +57,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | | `observe.run` | `observe`（`--history`を除く） |
 | 人との対話 | `ask.answer` / `ask.close` | `answer` / `ask close` |
 | | `planner.open` | `plan` |
+| | `screen.read` / `screen.send` | `run screen` `planner screen` / `run send` `planner send`（sessionの画面を読む・送る。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)、[sessionへの送信と確認](supervisor-lifecycle/session-send.md#人とinboxの画面の読み取りと送信)） |
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
 | | `run.recover` | `recover` |
 | | `service.lifecycle` | `up` `down` `broker start` `broker stop` |
@@ -165,11 +167,14 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 | `review ID` | `review.prepare` | task |
 | `session --run RUN` | `session.run` | run（読めないidは`Unresolved`） |
 | `planner-session --planner ID` | `session.run` | planner |
+| `run screen RUN` / `run send RUN` | `screen.read` / `screen.send` | run（数字はtask。読めないidは`Unresolved`） |
+| `planner screen ID` / `planner send ID` | `screen.read` / `screen.send` | planner |
 | `session-event open/close` | `session.record` | hookが記録するspan: inboxのspanはqueue、plannerのspanは`DAGQ_PLANNER_ID`のplanner（無いか、`DAGQ_ACTOR_ID`より前に開いたworkspaceならqueue）、spanの無いsession（run）は`--run`、無ければ`DAGQ_RUN_ID`のrun（どちらも無ければ`Unresolved`） |
 
 結果（上のPolicyの表から決まる）:
 
 - userとinboxは全てを打てる（inboxは人の言葉での代行で、dagq-recoverの手作業の`integrate`・`recover`・`review`を含む。区別は記録のactorが持つ）
+- `run screen` / `run send` / `planner screen` / `planner send`はuserとinboxだけ（ADR-t1228-1の決定7）。plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
 - plannerは人に頼まれた`up`・`down`・`install`と、`init`・`migrate`・`rebind`・`plan`、自分のplannerの`planner-session`と`session-event`を打てる（ADR-t728-1の決定7のとおり今の権限のまま）。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む
 - worker・4つのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
 - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。errorの形は計画系と同じ
@@ -206,7 +211,7 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 
 多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（task 738。`src/application/execution.rs`の`permission_deny(role)`）。
 
-- `DAGQ_COMMANDS`は状態を変える`dagq`のsubcommandと、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit test（`the_denied_commands_need_what_the_table_says`）が確かめる。clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り（`broker status`・`broker logs`・`broker audit`を含む）、`watch`、ファイルを書き出す`report`、読み取りの形を持つ`graph`・`observe`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`、task 851）が確かめ、どちらにも無いsubcommandを足すと落ちる。状態を変えるsubcommandを足したら表に入れる（task 851の列挙で、隠しcommandの`release-update`（`service.install`）を足した）。
+- `DAGQ_COMMANDS`は状態を変える`dagq`のsubcommandと、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`・`run screen`・`run send`・`planner screen`・`planner send`）。読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。表と`src/main.rs`の`requests`が食い違わないことはunit test（`the_denied_commands_need_what_the_table_says`）が確かめる。clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り（`broker status`・`broker logs`・`broker audit`を含む）、`watch`、ファイルを書き出す`report`、読み取りの形を持つ`graph`・`observe`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`、task 851）が確かめ、どちらにも無いsubcommandを足すと落ちる。状態を変えるsubcommandを足したら表に入れる（task 851の列挙で、隠しcommandの`release-update`（`service.install`）を足した）。
 - actorを名指す変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`）の書き換え（`<名前>=...`・`export`・`env <名前>=`・`env -u`・`unset`）も全roleで拒む。
 - 順は`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後。
 

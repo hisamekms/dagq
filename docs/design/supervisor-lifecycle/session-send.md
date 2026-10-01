@@ -4,11 +4,13 @@ type: design
 title: "sessionへの送信と確認"
 status: current
 created: 2026-09-26
-updated: 2026-09-28
-last_verified: 2026-09-28
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
+  - design-authorization
+  - adr-t1228-1
 ---
 
 # sessionへの送信と確認
@@ -21,3 +23,20 @@ task 285。supervisorが生きているsessionに打つもの（resumeの解消�
 4. **待ち時間の既定値**: `resume_prompt_delay` 5秒、`registration_timeout` 45秒、`submit_check_interval` 1秒（いずれも`WorkspaceBackend`の既定メソッド）。作業の兆候を待つ時間は`WorkspaceBackend`の`start_wait`をやめて`[stall].send_confirm_secs`にした（task 409。`stats`の`stall_thresholds`が送信の検知を集計する値と同じ）。追加したrun_eventsのkindは`input_not_ready`、`submit_retried`、`submit_unconfirmed`、`submit_resent`、`submit_not_started`で、どれもattentionにはしない（人に届くのは下の6の`stalled`のask）。
 5. **入力のmarker**（ADR-0043の決定2、task 409）: Claude adapterはrunごとの`claude-settings.json`に`Stop` hookと並べて`UserPromptSubmit` hookを書く。hookはsessionが入力を受けるたびに、そのstdinのJSONをidle markerの隣の`prompt-submit.json`（`application::stats::PROMPT_SUBMIT_MARKER`）へ一時ファイル + renameで書き、何も出力せず（`UserPromptSubmit` hookの出力はagentのcontextに入る）、失敗しても0で終わる（入力を止めない）。runtimeが立てるplannerの設定も同じhookを持つ。markerの中身は`AgentSignals::input_source`が読み、入力の出どころを`Typed`（打たれた文。人かsupervisorかは時刻で分ける）・`Agent`（agentが自分で差し込んだもの）・`Unknown`（markerが言わない）で返す。Claude Code 2.1.283のhookの入力は`session_id`・`transcript_path`・`cwd`・`prompt_id`・`permission_mode`・`hook_event_name`・`prompt`で、出どころを示すfieldは無い。backgroundの処理の完了の通知でもhookは発火し、`prompt`が`<task-notification>`で始まるので、それを`Agent`とする。`prompt`の無い入力は`Unknown`。markerを書かないproviderでは、処理された印はidle markerとreceiptだけになる。入力のmarkerは、この確認のほかに次の3つで最後の入力に数える（task 409・672）。(a) [receiptの無いidleの検知](idle-without-receipt.md#receiptの無いidleの検知)（`StallWatch`）。(b) resumeとrevise・衝突の依頼の段の終わり（`ResumeWatch`・`ReviseWatch`）: idle markerより新しい入力のmarker（出どころを問わない）があれば、そのturnが終わるidle markerまで段を終えず`/exit`も送らない（[Needs session](needs-session.md#needs-session)の4、[Review](review.md#review-supervisor)の4）。(c) 復旧jobの`send_instruction`の前提（`SessionWatch::at_prompt`）: idle markerが入力のmarkerより新しいこと、またはEscで中断されたturn（[復旧jobの適用](background-recovery-job.md#適用)の`send_instruction`）。
 6. **処理されなかった送信の復旧job**（ADR-0047の決定31・39・40、task 442、`application::supervise::stall_recovery`の`SessionWatch::watch_sends`）: 最初のsession（`SessionWatch`）、reviseのsession（`ReviseWatch`）、resumeのsession（`ResumeWatch`）は、pollごとにそのsessionの最新の文面の`submit_unconfirmed`か`submit_not_started`（`resume_started`より後）を読み、askを開かずに[復旧job](background-recovery-job.md#生きているsessionの復旧job)を`stalled`のalert（`reason: send_unconfirmed`、`send_event`と`evidence`はそのevent ID）で起動する。送信の後にidle marker・入力のmarker（`Agent`を除く）・receiptのどれかが書かれていれば（動いた）起動せず、走っているjobは止め、jobに渡した送信なら`stall_resolved`（`detection: recovery`、`threshold: send_confirm_secs`、`send_event`、`attempt`、`outcome`は修正を適用していれば`resolved_by_recovery`、それ以外は`resolved_by_itself`）を記録する。closeされていない`stalled`のask、記録済みの`prompt_waiting`（ダイアログはその経路）、closeされていない`worker_question`があれば待ち、走っているjobは止める（`alert_cleared`）。1つの送信にjobは1回で（修正の後はsessionが動くのを待ち、escalateと失敗は`stalled`のaskで人が見る）、`wait`だけの修正の再確認と、supervisorと一緒に消えたか止めたjob（`session_ended` / `session_moved` / `alert_cleared`）のときだけもう一度起動し、そのとき前のjobの検知を`escalated`で終える。sessionが終わるかreviseかresumeの段が終われば、jobを止めて検知を`run_ended`で終える。receiptの後に送るreceiptの書き直しの依頼は対象にせず、その依頼の時間切れに任せる。jobが直さなければ`stalled`のask（`wait` / `intervene`にjobの`options`、jobの`reason_category`か`recovery_failed`）を開き、`stall_resolved`（`escalated`）を記録して、askを`StallWatch`に渡す（sessionが動けば閉じる。reviseとresumeのsessionでは段の終わりにも閉じる）。jobが打った指示は、その段の最後の入力として扱い、同じ`StartCheck`で処理を確かめる。状態はrun_eventsだけから読むので、adoptしたsupervisorも同じ送信を2回jobに渡さず、2回askにしない。以前の`answer_prompt`のask（`ask_unsubmitted`）は、resumeのsessionの入力欄が準備できないとき（`input_not_ready`）だけに残る。
+
+## 人とinboxの画面の読み取りと送信
+
+[ADR-t1228-1](../../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定4・5・7・8、task 1230。人とinboxは`cmux read-screen` / `send` / `send-key`を打たず、次のCLIでrunとplannerのsessionの画面を読み、送る（実装は`src/application/screen.rs`、CLIは`src/main.rs`の`run`と`planner`の群。隠しサブコマンド`session`とは別の名前）。宛先はrunのID（数字ならtaskのIDで、そのtaskの最新のrun）かplannerのIDで、workspaceのUUIDは引数に取らずqueueの記録（runの`workspace_id`、plannerの`workspace_id`）から引く。
+
+| コマンド | すること |
+| --- | --- |
+| `run screen RUN [--lines N]` / `planner screen ID [--lines N]` | 画面（cmuxの`read-screen`）の末尾のN行（末尾の空行を除く）を返す。既定40行、最大200行で、超える指定は200に切る（`lines_requested`・`lines_limit`・`lines`・`truncated`・`screen`） |
+| `run send RUN --key K [--key K ...]` / `planner send ID --key K ...` | 決めたキーの集合だけを順に送る（cmuxの`send-key`）。集合は`enter`・`escape`・`up`・`down`・`1`〜`9`（ダイアログの番号）・`exit`。1回に10個まで。`exit`は単独でだけ送れ、`/exit`をsupervisorと同じ`submit_input`（`Input::Exit`。打ち直さない）で打つ |
+| `run send RUN --answer ASK` | 答えられたaskの答えを、supervisorが答えを届けるときと同じ`answer to ask <id>: <answer>`の形で、この文書の1・2の送信と確認（`submit_input`。入力欄に残ればEnterだけを3回まで送り直す）で打つ。askはそのrunのもの（`run_id`が一致）で答えがあること。開いたままのask・別のrunのaskは拒む。`worker_question`で閉じていなければ、supervisorが届けたときと同じく`ask_delivered`を記録してaskを閉じ、supervisorが同じ答えをもう一度打たないようにする |
+| `planner send ID --answer ASK` | 答えられた`planner_question`のうち、答えがそのplannerに届くもの（`planner_answer_route`が同じplanner）の答えを同じ形で打つ。supervisorと同じく先に`claim_planner_answer`（`planner_answer_claimed`）で打つ権利を取り（取れなければ拒む）、打った後に`ask_delivered`を記録してaskを閉じる。ほかのaskは拒む |
+
+- 自由な文・集合の外のキー・`--key`と`--answer`の両方・どちらも無い送信は、cmuxを呼ぶ前に拒む。`stalled`の`intervene`の指示のような人の文は、先にaskの答えとして記録してから`--answer`で送る
+- 非対話のrun（`worker_mode: headless`）は画面を持たない。`run screen`は`screen: null`とturnの出力の場所（run dirの`turns/`）を返し（何も読まないので`screen_read`は残さない）、`run send`は拒む（答えは今までどおり`answer`で、supervisorが次のturnとして送る）。workspaceが閉じたrun（`workspace_closed_at`）・workspaceの無いrun、閉じたplanner（`closed_at`）・workspaceの無いplannerは拒む
+- 記録: 読むと`screen_read`、送ると`screen_input_sent`を残す。runはそのrunのevent、plannerはqueueのevent（`planner_id`）で、どちらもeventのactor（呼び出し元のroleとid）を持つ。payloadは`target`（`run` / `planner`）・`workspace_id`と、読み取りは行数、送信は`input`（`keys` / `answer`）・`keys`か`ask_id`・`outcome`（キーは`sent`、打った文と`/exit`は`submitted` / `dialog` / `stuck` / `unsent`）・`retries`。画面の中身はeventに載せない。どちらもattentionにはしない
+- 判定: capabilityは`screen.read`・`screen.send`で、userとinboxだけが持つ（[Authorization](../authorization.md)）。`Operation`の入口で判定し、拒めば`authorization_denied`を残す。読むこともeventを残すので、どちらも状態を変えるコマンドとしてqueueを書き込みで開く（本番queueでは固定バイナリで打つ）
+- 送信の判定（`AgentSignals`）はClaude Codeの画面のもの（`ClaudeCode`）を使う。画面を持つsessionはClaude Codeだけのため

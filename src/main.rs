@@ -906,6 +906,21 @@ enum Command {
         #[arg(long, default_value = "cmux")]
         cmux: PathBuf,
     },
+    /// A run's session, named by its run id or its task id (the task's
+    /// latest run): read its screen, or send it a key of a fixed set or the
+    /// answer of an answered ask (ADR-t1228-1). Each is recorded with its
+    /// actor.
+    Run {
+        #[command(subcommand)]
+        command: RunCommand,
+    },
+    /// A planner's session, named by its planner id: read its screen, or
+    /// send it a key of a fixed set or the answer of an answered
+    /// `planner_question` (ADR-t1228-1). Each is recorded with its actor.
+    Planner {
+        #[command(subcommand)]
+        command: PlannerCommand,
+    },
     /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal and close the workspace of an in-cmux one. Leaves the inbox and planner workspaces open.
     Down {
         /// Wait until the supervisor's registration is gone or its process exited.
@@ -1450,6 +1465,72 @@ enum BrokerCommand {
 }
 
 #[derive(Subcommand)]
+enum RunCommand {
+    /// Print the last lines of the screen of the run's session (at most
+    /// 200), recorded as `screen_read` without its text. A headless run has
+    /// no screen: the reply names its turns' directory instead.
+    Screen {
+        /// Run ID, or a task ID for the task's latest run.
+        run: String,
+        /// How many lines, from the bottom; more than 200 is cut to 200.
+        #[arg(long, default_value_t = dagq::application::screen::DEFAULT_LINES)]
+        lines: usize,
+        /// cmux executable.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
+    /// Type into the run's session one or more keys of the set (enter,
+    /// escape, up, down, 1-9, or exit alone for `/exit`), or the answer of
+    /// an answered ask on that run as `answer to ask <id>: <answer>`; no
+    /// other text. Recorded as `screen_input_sent`. A headless run is
+    /// refused.
+    Send {
+        /// Run ID, or a task ID for the task's latest run.
+        run: String,
+        /// A key to send; repeat for several, sent in order.
+        #[arg(long = "key", conflicts_with = "answer")]
+        keys: Vec<String>,
+        /// The answered ask whose answer is typed.
+        #[arg(long)]
+        answer: Option<i64>,
+        /// cmux executable.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlannerCommand {
+    /// Print the last lines of the screen of the planner's session (at
+    /// most 200), recorded as `screen_read` without its text.
+    Screen {
+        planner: i64,
+        /// How many lines, from the bottom; more than 200 is cut to 200.
+        #[arg(long, default_value_t = dagq::application::screen::DEFAULT_LINES)]
+        lines: usize,
+        /// cmux executable.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
+    /// Type into the planner's session one or more keys of the set (enter,
+    /// escape, up, down, 1-9, or exit alone for `/exit`), or the answer of
+    /// an answered `planner_question` that goes to this planner; no other
+    /// text. Recorded as `screen_input_sent`.
+    Send {
+        planner: i64,
+        /// A key to send; repeat for several, sent in order.
+        #[arg(long = "key", conflicts_with = "answer")]
+        keys: Vec<String>,
+        /// The answered ask whose answer is typed.
+        #[arg(long)]
+        answer: Option<i64>,
+        /// cmux executable.
+        #[arg(long, default_value = "cmux")]
+        cmux: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum AskCommand {
     /// Mark an answered ask read. An open ask is withdrawn by answering it first.
     Close { id: i64 },
@@ -1633,7 +1714,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Recover { .. }
         | Command::Session { .. }
         | Command::PlannerSession { .. }
-        | Command::SessionEvent { .. } => operation(command, |name| env::var(name).ok())
+        | Command::SessionEvent { .. }
+        | Command::Run { .. }
+        | Command::Planner { .. } => operation(command, |name| env::var(name).ok())
             .map(|operation| operation.request())
             .into_iter()
             .collect(),
@@ -1801,6 +1884,24 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
         Command::PlannerSession { planner, .. } => {
             Operation::PlannerSession(PlannerId::new(*planner))
         }
+        Command::Run { command } => {
+            let (RunCommand::Screen { run: target, .. } | RunCommand::Send { run: target, .. }) =
+                command;
+            let resource = dagq::application::screen::RunTarget::parse(target)
+                .map_or(Resource::Unresolved, |target| target.resource());
+            match command {
+                RunCommand::Screen { .. } => Operation::ReadScreen(resource),
+                RunCommand::Send { .. } => Operation::SendToScreen(resource),
+            }
+        }
+        Command::Planner { command } => match command {
+            PlannerCommand::Screen { planner, .. } => {
+                Operation::ReadScreen(Resource::Planner(PlannerId::new(*planner)))
+            }
+            PlannerCommand::Send { planner, .. } => {
+                Operation::SendToScreen(Resource::Planner(PlannerId::new(*planner)))
+            }
+        },
         // The span the hook would record decides; a session with none is
         // a run's.
         Command::SessionEvent { run: named, .. } => Operation::SessionEvent(
@@ -3221,6 +3322,81 @@ fn execute(cli: Cli) -> Result<Value> {
                 all,
             )?
         }
+        Command::Run { command } => {
+            use dagq::application::screen::{self, RunTarget, ScreenPorts, Sending};
+            use dagq::infrastructure::adapters::{ClaudeCode, Cmux, executable};
+            match command {
+                RunCommand::Screen { run, lines, cmux } => screen::run_screen(
+                    &mut queue,
+                    &Cmux {
+                        executable: executable(&cmux)?,
+                    },
+                    &RunTarget::parse(&run)?,
+                    lines,
+                )?,
+                RunCommand::Send {
+                    run,
+                    keys,
+                    answer,
+                    cmux,
+                } => {
+                    let sending = Sending::parse(&keys, answer)?;
+                    screen::run_send(
+                        &mut queue,
+                        &ScreenPorts {
+                            cmux: &Cmux {
+                                executable: executable(&cmux)?,
+                            },
+                            // Only Claude Code has a session with a screen.
+                            signals: &ClaudeCode {
+                                executable: PathBuf::from("claude"),
+                            },
+                        },
+                        &RunTarget::parse(&run)?,
+                        &sending,
+                    )?
+                }
+            }
+        }
+        Command::Planner { command } => {
+            use dagq::application::screen::{self, ScreenPorts, Sending};
+            use dagq::infrastructure::adapters::{ClaudeCode, Cmux, executable};
+            match command {
+                PlannerCommand::Screen {
+                    planner,
+                    lines,
+                    cmux,
+                } => screen::planner_screen(
+                    &mut queue,
+                    &Cmux {
+                        executable: executable(&cmux)?,
+                    },
+                    PlannerId::new(planner),
+                    lines,
+                )?,
+                PlannerCommand::Send {
+                    planner,
+                    keys,
+                    answer,
+                    cmux,
+                } => {
+                    let sending = Sending::parse(&keys, answer)?;
+                    screen::planner_send(
+                        &mut queue,
+                        &ScreenPorts {
+                            cmux: &Cmux {
+                                executable: executable(&cmux)?,
+                            },
+                            signals: &ClaudeCode {
+                                executable: PathBuf::from("claude"),
+                            },
+                        },
+                        PlannerId::new(planner),
+                        &sending,
+                    )?
+                }
+            }
+        }
         Command::Down { wait, force, cmux } => {
             use dagq::application::lifecycle::DownOptions;
             use dagq::infrastructure::{
@@ -3817,6 +3993,10 @@ mod tests {
             ),
             ("planner-session", &["--planner", "1", "--claude", "/c"]),
             ("session-event", &["open"]),
+            ("run screen", &["r1"]),
+            ("run send", &["1", "--key", "enter"]),
+            ("planner screen", &["1"]),
+            ("planner send", &["1", "--answer", "2"]),
             ("add", &["t"]),
             ("draft", &["1"]),
             ("edit", &["1", "--title", "t"]),

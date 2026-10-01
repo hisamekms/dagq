@@ -64,6 +64,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 - observerの`queue.export`（`graph --out`・`report`）は—。4つのjob・worker・wrapper・integratorは`watch`も`queue.export`も持たず、状態を変えないコマンド（`watch`・`graph --out`・`report`）も全roleで`StaticPolicy`が判定するので（下の「判定の場所」）拒まれる（task 859）。読み取り（`queue.read`）は全roleが持つ
 - user・inboxの計画権限には、最新runが終了し生きているrunの無い`in_progress` taskの`--verify` / `--no-verify`だけを直す`task.verify_edit`も含む（ADR-t883-1）。planner・worker・jobは持たない。
 - plannerの行は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定7のとおり、この段で運用の権限を変えていない（`dagq-planner` skillの「Where your authority ends」とAGENTS.mdのplannerの項はこの行と一致させる）
+- sessionの画面を読む・送る`screen.read`・`screen.send`（`run screen` / `run send`、`planner screen` / `planner send`。[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。表のsessionの列のplannerの△とsupervisorの○はこれを含まない（plannerは自分のplannerのものも拒まれ、supervisorは自分の送信の経路を使う）
 - 予約のcapability（`reserved.filesystem_read`・`reserved.filesystem_write`・`reserved.network`・`reserved.secret_read`）は誰にも与えない。sandboxのbackendが強制するときの名前
 
 この表と`StaticPolicy`は全roleのallowとdenyをunit test（`src/domain/authorization.rs`）が網羅する。表を変えるときは先にコードを変え、この表と[Authorization](authorization.md#policy)の表を合わせる。
@@ -81,7 +82,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
 
 - worker: `integrate`・`answer`・`ask close`・`ready`・`cancel`・計画系の全て・`recover`・`review`・`supervise`・`observe`・`plan`・`up`・`down`・`install`・`auto-update`・`init`・`migrate`・`rebind`・`finding`・`mark`、自分のrun以外への`ask`・`note`・`session`・`session-event`
-- planner: `ready`（`--bypass-review`を含む）・`goal ready`・`goal review`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、他のplannerのproposalの取り下げ
+- planner: `ready`（`--bypass-review`を含む）・`goal ready`・`goal review`・`integrate`・`review`・`recover`・`supervise`・`observe`・`answer`・`ask close`・`finding record`・`run screen`・`run send`・`planner screen`・`planner send`、runの`session`・`session-event`、runに紐づく`ask`、in_progress以降のtaskの変更、他のplannerのproposalの取り下げ
 - 4つのjob: 状態を変える全て（`reviewer may not change queue state`）
 - observer: `finding record`・`finding resolve`・findingに紐づく`blocked`のask以外の全て（`observer may not change queue state`）
 - inbox: 人（user）と同じで、拒まれるのは誰にも与えない着地の実行・pushと予約だけ
