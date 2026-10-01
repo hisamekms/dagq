@@ -4,8 +4,8 @@ type: design
 title: "Draft planners (supervisor)"
 status: current
 created: 2026-09-26
-updated: 2026-10-01
-last_verified: 2026-10-01
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -32,7 +32,7 @@ related:
 8. **記録と読み方**（ADR-t807-1）: plannerの行が閉じるとき（`close_planner`）、束のdraftごとの結末（`submitted`（proposal）、`canceled`、`duplicate`（重複先）、`keep_draft`、`undecided`）を`draft_bundle_members`に書き、draftに`draft_planner_settled`を記録する。出どころのあるdraftの`draft_planner_opened`・`draft_planner_settled`・`follow_up_adopted` / `draft_adopted`・`draft`からのcancelの`task_status_changed`は、束の鍵（`bundle_key`）と出どころの欄（`source_task_id`・`source_run_id`・`index`・`category`・`goal_review_id`・`reviewed_proposal_id`のうち材料にあるもの）を載せ、`events --task ID`と、payloadの`source_run_id`も見る`events --run RUN`で、元のrunから各draftの結末まで引ける。`dagq show ID`（`--full`でなくても）はtaskの`origin`（種類、material、元のtaskとrun、receiptの`follow_ups`の何番目か、束の鍵、そのdraftを持った束ごとのplannerと他のdraftと結末。人が`add`したtaskとobserverのdraft goalのtaskはnull。導入前のdraftも`draft_origins`の行があれば出す）と、元のtaskなら`follow_up_drafts`（そのrunのreceiptが出したdraftのIDと今の状態）を出す。`dagq planners`はruntimeのplannerの`bundle`（鍵とdraftと結末）を出す。`dagq stats`の`draft_flow`は窓の中の`bundles`（`draft_planner_opened`の`planner_id`の数）と`bundle_sizes`（draftの数ごとの束の数）を出す。
 9. **test**: `tests/it/plan_review.rs`がcmuxのdoubleで、follow_upとgoal_gapのdraftに上限の中で古い順にplannerが立ち、人のdraftには立たないこと、promptの中身、決めたplannerの`/exit`、決めずに終わったplannerの後に次のplannerが立ち3回で`draft_planner_exhausted`とattentionになること、`planner_question`のanswerが生きているplannerに打ち込まれ（`planner_answer_claimed`が1件）、別のsupervisorがclaimしたanswerは2回目のclaimが拒まれて打ち込まれず、古くなったclaimは引き継がれて1回だけ打ち込まれ、plannerの居ないdraftでは新しいplannerがanswerを持って立ち、`keep_draft`は閉じられること、を確かめる。`tests/it/planner_slots.rs`は、answerを打ち込んだ後でaskのcloseより前にidleになったplannerが`/exit`されて行が閉じ、打ち込みより前のidleのplannerは残ることを確かめる（task 884）。`tests/it/draft_bundles.rs`は束（ADR-t807-1）を確かめる: 1つのrunのfollow_ups 3件にplannerが1つだけ立ちpromptに3件と元のtaskが1回載ること、別のrunのfollow_upとgoal_gapが別の束になること、作業中に増えた同じrunのfollow_upが待つこと、一部だけ決めて終わった束の結末（`duplicate`・`submitted`・`undecided`）と残りと増えた分で次の束が立ちdraftごとに3回目の後に`draft_planner_exhausted`になること、深さ3のdraftは束の中でも人の`adopt`無しにsubmitできないこと、`show`の`origin`・`follow_up_drafts`、`planners`の`bundle`、`events --run`、`stats`の`bundles` / `bundle_sizes`、束の2件目のdraftへの`planner_question`のanswerが束のplannerに打ち込まれること。`src/domain/follow_up.rs`のunit testが鍵の分け方を、`src/domain/stats/drafts.rs`のunit testが束の数え方を確かめる。`tests/it/runtime_ask.rs`は`register_follow_ups`の出どころ、runtimeのplannerのsubmitの上限と人の`adopt`の後のsubmit、`status`の表示を、`tests/it/queue_migration.rs`は導入前のfollow_upのdraftがmigrationで対象になることを確かめる。reopenedは、`src/infrastructure/draft_planners.rs`のunit testがwithdrawでreopenのmemberにだけ出どころが付き他のmemberには付かないこと、`tests/it/plan_review.rs`の`a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason`がplan reviewのreopen・withdrawの後にplannerが立ち、promptにreasonと3択が載り、readyにならないことを確かめる。
 
-## follow_upの種類と判断の集計
+## follow_upの種類と判断の集計<a id="follow_upの種類と判断の集計未実装"></a>
 
 [ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定（task 954で実装）。新しいeventは足さず、既存のeventから引く。
 

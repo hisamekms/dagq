@@ -4,8 +4,8 @@ type: design
 title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -27,7 +27,7 @@ related:
 - `dagq ask close ASK_ID`は回答済みのaskに`closed_at`を書き、`ask_closed`（`ask_id`、`kind`）を記録する。inboxが回答を読んで従った印（supervisorが答えを適用して閉じるときも同じ`close_ask`）で、`stats`の`asks.times`は回答の適用として読む（task 468）。runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`）も同じ`ask_closed`をcloseと同じトランザクションで書く（task 568）。attentionではない。未回答のaskはcloseできず（error）、取り下げは`answer`で取り下げた旨を書いてからcloseする。run_eventsでaskを終えるのは`ask_answered`だけで（`worker_question`の送信の`ask_delivered` / `ask_delivery_failed`は後から足したkindで、`stats`の対には使わない）、`stats`はこの2つを`ask_id`で対にして未回答のaskを数えるため、closeだけで閉じたaskが`stats`に残り続けないようにする。回答した時点で同じ（task、run、kind）の新しいaskを登録できる。
 - `dagq asks [--open] [--role <role>] [--all]`はaskを古い順に`{asks}`で返す。既定はcloseされていないもの、`--all`はcloseされたものも、`--open`は未回答のものだけ、`--role`はそのroleが今動かすもの（`Ask::waits_for`: 未回答も回答済みでcloseされていないものもinbox、plannerは無し）。
 
-## worker_questionの分類コード
+## worker_questionの分類コード<a id="worker_questionの分類コード未実装"></a>
 
 [ADR-t947-2](../../adr/2026-09-28-t947-2-worker-questions-carry-topic-codes.md)の決定（task 953で実装）。一覧と定義は`domain::worker_question::WORKER_QUESTION_TOPICS`（重い順）が持ち、workerのprompt（`application::prompt`の`worker_question_topics_line`）とCLIの`ask --topic`のhelpがそのまま載せる。一覧はtask 950の分析（[worker-question-topics](../../plans/worker-question-topics.md#ラベル)）を元に、runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題の名前を揃えた。
 

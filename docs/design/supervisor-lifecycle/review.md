@@ -53,7 +53,7 @@ related:
 - **見え方**: `stats`の`land_phases`に`e2e_wait`（`run_e2e_waiting`から）と`e2e`（`run_e2e_started`から`run_e2e_finished`まで。`run_e2e_failed`は`resume`に移る）の工程（[Stats](stats.md)）、`timeline`の空白の理由に`waiting_e2e`と`e2e`（[Timeline](timeline.md)）。
 - **test**: `tests/it/runtime_e2e.rs`（通って着地・要らないrunとe2eの無いrepository・落ちてresumeと直したcommitの着地・mainの印で通る・1本ずつ・上限切れと流し直しの上限切れは流し直して3回目でattention）、`tests/it/runtime_headless.rs`の`a_parked_run_is_resumed_with_a_turn_of_the_same_session`、`src/infrastructure/e2e_gate.rs`の`e2e_that_take_the_host_lock_run_one_at_a_time`、`src/domain/run_e2e.rs`。
 
-## 差し戻しの分類コード
+## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
 
 [ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)の決定（task 948で実装）。一覧と定義は`domain::review_reason::REVIEW_CODES`が持ち、reviewのpromptがそのまま載せる（`application::prompt`の`reason_codes_section`）。一覧はtask 945の分析（[review-sendback-reasons](../../plans/review-sendback-reasons.md#ラベルの定義案)）を元に、workerの問い（[ask](ask.md#worker_questionの分類コード)）とfollow_up（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)）の集合と同じ種類の問題の名前を揃えた。
 
