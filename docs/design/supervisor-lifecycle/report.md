@@ -4,8 +4,8 @@ type: design
 title: "KPIのレポート（`report`）"
 status: current
 created: 2026-09-27
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -37,7 +37,7 @@ related:
 
 ## 場所と保持
 
-- `<queue dir>/reports/`の`daily/YYYY-MM-DD.{json,html}`と`weekly/YYYY-Www.{json,html}`、`index.html`。同じ`reports/`の下の`reviews/`は[スループットの見直し](throughput-review.md)のjobが1回ごとのディレクトリ（`<mode>-<期間>/`の`review.md`・`review.json`・`prompt.md`・`input.json`・`output.log`）を書く場所で、レポートの保持はこれを消さない（名前の形がレポートでないため）。まだ終わっていない今日・今週のレポート（`partial`）は`YYYY-MM-DD.partial.*`と名前を分け、完結した日のファイルを上書きしない。各ファイルは同じディレクトリの一時ファイル（`.<名前>.<pid>.tmp`）に書いてからrenameする（`application::report::write`）。
+- `<queue dir>/reports/`の`daily/YYYY-MM-DD.{json,html}`と`weekly/YYYY-Www.{json,html}`、`index.html`。同じ`reports/`の下の`reviews/`は[スループットの見直し](throughput-review.md)のjobが1回ごとのディレクトリ（`<mode>-<期間>/`の`review.md`・`review.json`・`prompt.md`・`input.json`・`output.out`・`output.err`）を書く場所で、レポートの保持はこれを消さない（名前の形がレポートでないため）。まだ終わっていない今日・今週のレポート（`partial`）は`YYYY-MM-DD.partial.*`と名前を分け、完結した日のファイルを上書きしない。各ファイルは同じディレクトリの一時ファイル（`.<名前>.<pid>.tmp`）に書いてからrenameする（`application::report::write`）。
 - 保持は書くたびに適用する: 日は今日より前の`keep_daily_days`日（既定90）、週は今週より前の`keep_weekly_weeks`週（既定104）を残し、それより古いものと、同じ期間の完結したレポートがある`partial`のレポートを消す（`domain::kpi::report::expired`）。レポートの名前の形でないファイルは触らない。ただし書き手が途中で終わって残した一時ファイル（`.`で始まり`.tmp`で終わる）は、1時間より古ければ消す（引き継ぎのexecはjobを待たないため）。日数はhost.tomlの`[report]`（`<queue dir>/host.toml`が`$XDG_CONFIG_HOME/dagq/host.toml`（無ければ`~/.config/dagq/host.toml`）にキーごとに優先。`infrastructure::report_config`）:
 
   ```toml

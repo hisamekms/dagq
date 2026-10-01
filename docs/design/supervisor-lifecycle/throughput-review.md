@@ -4,8 +4,8 @@ type: design
 title: "スループットの見直し（`throughput-review`）"
 status: current
 created: 2026-09-29
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -46,13 +46,15 @@ related:
 1. 期間を`--at`（無ければqueueの時計の今）と`--utc-offset`（無ければhostの時間帯）で決め、着地を読む。毎時は判定し、当たらなければ上のとおりskippedで終わる（`--dry-run`は判定に関わらずpromptを返す）
 2. 入力（`input.json`）: `period`、`landings`（期間の合計、前の同じ長さの期間の合計、毎時は判定と同じ26時間・日次は24時間の`by_hour`・週次は7日の`by_day`、期間の`run_integrated`の最大200件）、`hourly`（毎時の判定）、`kpi`（毎時は日の2期間、日次は日の8期間、週次は週の5期間。`at`は期間の終わりの直前）、`stats`（毎時は直前6時間、日次・週次は期間）、`claim_deferred`（`stats`と同じ範囲の`claim_deferred`の`reason`ごとの件数）、`asks`（同じ範囲で開いたaskの`kind`ごとの件数と、今開いているaskの`kind`ごとの件数）、`timelines`（期間に着地したrunのうち最初のeventから着地までが長い3件の`timeline`、gapは300秒以上）。読めない部分は`{"error": ...}`。promptにはこの全体ではなく、下の「promptの入力」の要約だけを載せる
 3. `<queue dir>/reports/reviews/<mode>-<period>/`（あれば`-1`…を付ける）を作り、`prompt.md`・`input.json`（入力の全体）を書き、`throughput_review_started`（`mode`・`period`・`reasons`・`dir`・`session_id`・`launch`。`launch`は`provider`を含む。[Actor model](actor-model.md)）を記録する
-4. agentはactor executorの`HeadlessProgram::Job`（権限の意図`ACCESS`は`queue_cli`で、Claude Codeは`--allowedTools Bash(dagq:*)`に訳す。MCPを読まない。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で`DAGQ_ROLE=throughput-review-job`・`DAGQ_ACTOR_ID=throughput-review-job:<mode>:<period>`として起動し、stdoutとstderrを`output.log`に書く（結果はproviderの`job_reply`が`output.log`から取り出した返答から読む）。時間の上限は`--timeout`（既定1800秒）で、過ぎたら子孫ごとkillする。model / effortは`dagq.toml`の`[roles.throughput_review]`（無ければproviderの既定）
-5. 成功したら`output.log`を`parse_output`で読む: `## Conclusion`の見出しの下の行（無ければ先頭の行）を最大5行（`MAX_CONCLUSION_LINES`）の結論にし、`next_move`でfenceしたJSON（`summary`・`detail`・`why`）を次の一手として外した残りを全文として`review.md`に、結論・次の一手・読めなかった理由（`next_move_error`）・findingのIDを`review.json`に書く
+4. agentはactor executorの`HeadlessProgram::Job`（権限の意図`ACCESS`は`queue_cli`で、Claude Codeは`--allowedTools Bash(dagq:*)`に訳す。MCPを読まない。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で`DAGQ_ROLE=throughput-review-job`・`DAGQ_ACTOR_ID=throughput-review-job:<mode>:<period>`として起動し、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`。結果はproviderの`job_reply`が`output.out`だけから取り出した返答から読み、stderrは混ぜない）。時間の上限は`--timeout`（既定1800秒）で、過ぎたら子孫ごとkillする。model / effortは`dagq.toml`の`[roles.throughput_review]`（無ければproviderの既定）
+5. 成功したら`output.out`に`job_reply`を当てた返答を`parse_output`で読む: `## Conclusion`の見出しの下の行（無ければ先頭の行）を最大5行（`MAX_CONCLUSION_LINES`）の結論にし、`next_move`でfenceしたJSON（`summary`・`detail`・`why`）を次の一手として外した残りを全文として`review.md`に、結論・次の一手・読めなかった理由（`next_move_error`）・findingのIDを`review.json`に書く
 6. 週次だけ、次の一手をfindingにする: kind `throughput`、対象queue、subject `weekly/<period>`、summaryは`summary`、detailは`detail`と`Why:`、根拠は`throughput_review_started`のevent、`propose`（proposalを求める印）の理由は`why`、記録者は`supervisor`。runtimeのplannerの既存の経路（[Finding planners](finding-planners.md)）でproposalになり、`[kpi] max_improvement_proposals`に従う。毎時・日次の出力にblockがあっても記録しない
 7. `throughput_review_reported`（`mode`・`period`・`reasons`・`conclusion`・`path`（`review.md`）・`dir`・`finding_id`・`next_move_error`）を記録する。これがinbox宛ての知らせるだけのattention（`report the review`）
 8. `throughput_review_finished`（`mode`・`period`・`outcome`（`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗））・`exit_code`・`error`・`reasons`・`dir`・`session_id`（startと同じ。区間を閉じる鍵、task 1086。skippedには無い）・`duration_secs`、成功なら`reported_event_id`・`finding_id`・`path`）を記録する。`outcome`が`error`か`failed`のもの（modeを問わない）はinbox宛ての知らせるだけのattention（`check the failed review`、task 1099）になり、askにはならず、claimと着地を止めない。失敗した期間はやり直さない（上の「期限」）。skippedと`succeeded`はattentionではない。attentionなので、KPIの`attentions_per_landing`（queueのeventのattentionも数える）にも加わる
 
 手順8のfinishは、期間が決まった後の処理の出口で1回だけ記録する（task 1111）。agentの起動前の着地の読み取り・入力の収集・checkoutの解決・dirの作成・promptと入力の保存・startedの記録の失敗も、`outcome: error`・`exit_code: null`・原因を含む失敗の文（`{:#}`）の`error`を持つpayloadとして記録して返す。分かれば`dir`・`session_id`も残し、`pid`・`parent_pid`は常に残す。dirの作成前なら`dir`はnullで、ログもまだ無い。queueを開く前・期間が決まる前（DBのcanonicalize・open）の失敗は、記録先や期間が無いので対象外でErrを返す。finish自体を記録できないときもErrを返し、記録を再試行しない。supervisorは子の非0終了からfinishを補わない。`--dry-run`は失敗時もeventを記録しない。
+
+過去の見直しの`output.log`はそのまま残す。runtimeは完了した見直しの出力を再parseせず、保存した`review.md` / `review.json`とeventを読むため、移行や古い名前へのfallbackは要らない。
 
 ## sessionの区間（task 1086）
 
@@ -80,7 +82,7 @@ Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（[
 
 ## event
 
-`throughput_review_started` / `throughput_review_finished` / `throughput_review_reported`はqueueのevent（task・goal・runを持たない）。attentionは`throughput_review_reported`（`report the review`）と、`outcome`が`error` / `failed`の`throughput_review_finished`（`check the failed review`。task 1099）の2つで、どちらも知らせるだけ（[Events and watch](events-watch.md)）。`events`・`watch`のcompact形は`throughput_review_reported`に`mode`・`period`・`reasons`・`conclusion`・`path`・`finding_id`を、`throughput_review_finished`に`mode`・`period`・`outcome`・`dir`（`output.log`のあるdir）と`exit_code`・`reason`（payloadの`error`）を載せる。
+`throughput_review_started` / `throughput_review_finished` / `throughput_review_reported`はqueueのevent（task・goal・runを持たない）。attentionは`throughput_review_reported`（`report the review`）と、`outcome`が`error` / `failed`の`throughput_review_finished`（`check the failed review`。task 1099）の2つで、どちらも知らせるだけ（[Events and watch](events-watch.md)）。`events`・`watch`のcompact形は`throughput_review_reported`に`mode`・`period`・`reasons`・`conclusion`・`path`・`finding_id`を、`throughput_review_finished`に`mode`・`period`・`outcome`・`dir`（`output.out` / `output.err`のあるdir）と`exit_code`・`reason`（payloadの`error`）を載せる。
 
 ## test
 

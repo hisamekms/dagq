@@ -358,7 +358,7 @@ fn report(
     reasons: Option<&[crate::domain::throughput_review::HourlyReason]>,
     started: EventId,
 ) -> Result<Reported> {
-    let output = fs::read_to_string(dir.join("output.log")).context("read the review's output")?;
+    let output = fs::read_to_string(dir.join("output.out")).context("read the review's output")?;
     // The reply its provider reads out of the output (ADR-t1063-1 decision
     // 2), whatever the provider.
     let output = provider.job_reply(&output);

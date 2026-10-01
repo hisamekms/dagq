@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use crate::{
     application::{
-        AgentProvider, ProcessControl, Streams, TaskStore,
+        AgentProvider, AgentSignals, ProcessControl, Streams, TaskStore,
         actor_executor::{
             ActorExecutionSpec, ActorExecutor, ActorProgram, HeadlessProgram, HostActorExecutor,
             WorkspaceAccess,
@@ -107,7 +107,13 @@ fn write_cursor(db: &Path, cursor: EventId) -> Result<()> {
 /// Run one observation: gather the inputs, start the agent headless with
 /// `DAGQ_ROLE=observer`, wait for it, then record `observe_finished` with
 /// what it wrote and, for a succeeded hourly one, save the new cursor.
-pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions) -> Result<Value> {
+/// `signals` must belong to the provider that starts this observation.
+pub fn observe(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    signals: &dyn AgentSignals,
+    options: &ObserveOptions,
+) -> Result<Value> {
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
@@ -244,10 +250,11 @@ pub fn observe(db: &Path, provider: &dyn AgentProvider, options: &ObserveOptions
     let wall = if outcome == "succeeded" {
         None
     } else {
-        let output = fs::read_to_string(dir.join("output.log")).unwrap_or_default();
-        // The observer's provider is Claude's until a role may choose
-        // another (goal 73); its adapter reads the shared failure classes.
-        crate::infrastructure::claude::job_failure(&output).wall()
+        // Read both streams as before, with a line boundary so stderr
+        // diagnostics cannot be joined onto a partial stdout line.
+        let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
+        let stderr = fs::read_to_string(dir.join("output.err")).unwrap_or_default();
+        signals.job_failure(&format!("{stdout}\n{stderr}")).wall()
     };
     // A hold that could not be written is logged: the observation's
     // finish is recorded either way.
@@ -561,9 +568,10 @@ pub(crate) struct HeadlessAgent<'a> {
     pub access: JobAccess,
 }
 
-/// Start the agent in `dir` with its output in `output.log`, and wait for
-/// it up to the timeout (then kill it and what it started, so no Bash
-/// child of the agent outlives it: an error). The exit code, or `None`
+/// Start the agent in `dir` with stdout in `output.out` and stderr in
+/// `output.err`, and wait for it up to the timeout (then kill it and what
+/// it started, so no Bash child of the agent outlives it: an error).
+/// The exit code, or `None`
 /// when a signal ended it.
 pub(crate) fn run_agent(
     provider: &dyn AgentProvider,
@@ -572,7 +580,8 @@ pub(crate) fn run_agent(
     prompt: &str,
     agent: &HeadlessAgent<'_>,
 ) -> Result<Option<i32>> {
-    let log = dir.join("output.log");
+    let stdout = dir.join("output.out");
+    let stderr = dir.join("output.err");
     let mut path = std::env::var_os("PATH").unwrap_or_default();
     if let Some(bin) = agent.dagq.parent() {
         let mut paths = vec![bin.to_path_buf()];
@@ -599,7 +608,10 @@ pub(crate) fn run_agent(
                     launch: Some(agent.launch),
                     without_mcp: true,
                     env: vec![("PATH".to_owned(), path)],
-                    streams: Streams::Log(&log),
+                    streams: Streams::Files {
+                        stdout: &stdout,
+                        stderr: &stderr,
+                    },
                 },
             )
             .with_timeout(agent.timeout),

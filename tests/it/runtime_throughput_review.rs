@@ -52,6 +52,18 @@ impl AgentProvider for ReviewProvider {
             .arg(prompt);
         Ok(command)
     }
+    fn job_reply(&self, stdout: &str) -> String {
+        if stdout.starts_with('{') {
+            // A structured provider must receive stdout alone: diagnostics
+            // on stderr would make this JSON invalid.
+            serde_json::from_str::<Value>(stdout).unwrap()["reply"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            stdout.to_owned()
+        }
+    }
     /// The script's `$0`, which it writes to `mcp.txt`.
     fn without_mcp(&self, command: &mut CommandSpec) {
         command.option_args(["no-mcp"]);
@@ -398,7 +410,7 @@ fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     assert_eq!(failed["period"], "2026-09-28");
     let dir = PathBuf::from(failed["dir"].as_str().unwrap());
     assert!(
-        fs::read_to_string(dir.join("output.log"))
+        fs::read_to_string(dir.join("output.err"))
             .unwrap()
             .contains("broken")
     );
@@ -740,4 +752,37 @@ fn a_failing_review_stops_no_claim_nor_landing() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn the_reply_uses_only_stdout_for_text_and_structured_providers() {
+    let reply = "## Conclusion\n- unchanged\n\n## Details\nOnly the reply.";
+    for output in [reply.to_owned(), json!({"reply": reply}).to_string()] {
+        let (_dir, _repo, db) = fixture();
+        let script = format!("cat <<'REPLY'\n{output}\nREPLY\necho 'stderr diagnostic' >&2");
+        let done = review(
+            &db,
+            &ReviewProvider::new(&script),
+            &options(ReviewMode::Daily),
+        )
+        .unwrap();
+        assert_eq!(done["outcome"], "succeeded", "{done}");
+        let dir = PathBuf::from(done["dir"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(dir.join("output.out")).unwrap(),
+            format!("{output}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("output.err")).unwrap(),
+            "stderr diagnostic\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("review.md")).unwrap(),
+            format!("{reply}\n")
+        );
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("review.json")).unwrap()).unwrap();
+        assert_eq!(saved["conclusion"], json!(["- unchanged"]));
+        assert!(!dir.join("output.log").exists());
+    }
 }

@@ -4,8 +4,8 @@ type: design
 title: Agent provider lifecycle
 status: current
 created: 2026-09-21
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: provider
 related:
   - adr-0004
@@ -53,7 +53,7 @@ providerのメソッドはapplicationのユースケースが直接呼ばず、`
 
 `AgentSignals`はsupervisorが生きているsessionのagentについて読むもの（画面とidle marker）で、形式がagent固有なのでproviderのadapterが実装する（Claude Codeは`src/infrastructure/claude.rs`）。applicationはkindの名前・画面の抜粋・background workの有無（idle markerからと画面から）だけを受け取り、それがrunにとって何を意味するか（askにする、`/exit`を待つ）を決める。
 
-コマンドを返すメソッドは`std::process::Command`ではなくapplicationの`CommandSpec`（program、引数、環境変数の設定と削除、cwdだけを持つ値。`Command`と同じ名前のbuilderを持つ）を返す。起動はapplicationの`Spawner` portが行い、標準入出力の行き先（wrapperの端末を継承、null、`<run-dir>`のファイル）は呼び出す側が`Streams`で決める。実装は`infrastructure::process::LocalSpawner`で、`CommandSpec`を`Command`に変えて子プロセスとして起動する（`infrastructure::process::command`）。observerのagentも`LocalSpawner`で起動し、stdoutとstderrを1つの`output.log`に書く（`Streams::Log`）。こうしてsupervisorとsession wrapperのユースケース（`application::supervise` / `application::session`）はプロセスを直接扱わない（[supervisor-lifecycle](supervisor-lifecycle/supervise.md#supervise)）。
+コマンドを返すメソッドは`std::process::Command`ではなくapplicationの`CommandSpec`（program、引数、環境変数の設定と削除、cwdだけを持つ値。`Command`と同じ名前のbuilderを持つ）を返す。起動はapplicationの`Spawner` portが行い、標準入出力の行き先（wrapperの端末を継承、null、`<run-dir>`のファイル）は呼び出す側が`Streams`で決める。実装は`infrastructure::process::LocalSpawner`で、`CommandSpec`を`Command`に変えて子プロセスとして起動する（`infrastructure::process::command`）。observerとスループットの見直しのagentも`LocalSpawner`で起動し、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`、入力はnull）。`Streams::Log`は両streamを1つのファイルに書く行き先として残る。こうしてsupervisorとsession wrapperのユースケース（`application::supervise` / `application::session`）はプロセスを直接扱わない（[supervisor-lifecycle](supervisor-lifecycle/supervise.md#supervise)）。
 
 Claude Code adapter（`src/infrastructure/adapters.rs`）はworktreeをcwdにし、`--session-id`にrun IDを渡し、`--debug-file`をrun管理領域に置き、`--add-dir`でrun管理領域への書き込みを許可し、promptを位置引数で渡す。workerとresumeのsessionには、session wrapperがclaimの決めたmodelとeffortを`--model` / `--effort`で明示して足す（`AgentProvider::select_model`、既定は`claude-opus-5-5`・`medium`。[Worker model](supervisor-lifecycle/worker-model.md)、ADR-0079の決定3）。stdin/stdout/stderrはwrapperのTTYを継承する。permission modeは上書きしない。
 
@@ -79,9 +79,11 @@ headlessのjob（review・triage・plan review・goal review・observer）のses
 
   Claude Codeの訳は`claude_tools(access)`（ファイルを読むなら`Read`・`Grep`・`Glob`、CLIを打てるなら`Bash(dagq:*)`）で、reviewはそれを`,`でつないで`--allowedTools`に、`Edit`・`Write`・`NotebookEdit`（CLIを打てなければ`Bash`も）を`--disallowedTools`に渡す。訳の結果はtask 1064より前の道具名の一覧と同じで、`src/infrastructure/adapters.rs`のunit test（`each_jobs_intent_starts_claude_with_the_tools_it_had`・`the_review_starts_claude_with_the_tools_it_had`）と`tests/e2e.rs`のreviewのstubが引数を確かめる。Codexはどの意図も読み取りだけのsandbox（`--sandbox read-only`）に訳す（[Codexのheadless job](#codexのheadless-job)）。
 
-- **最終の返答のtext**（`AgentProvider::job_reply(stdout)`）: jobはverdictや結果を、providerの実装が出力から取り出した最終の返答のtextから読む（`HeadlessJob::poll`がjobを起動したprovider（`HeadlessJob::provider`の`Supervisor::job_agent`。Claudeはsupervisorの`reviewer`、Codexは`codex_jobs`）の`job_reply`を通し、スループットの見直しは`output.log`を通す）。既定とClaude Codeは`claude -p`がtextの出力で最終の返答だけを印字するので、stdoutをそのまま返す（今までと同じ結果）。スループットの見直しの`output.log`はstdoutとstderrを合わせたもの（`Streams::Log`）なので、出力をJSONLで読むproviderをこのjobに乗せるtaskは、stdoutを分けて書くよう直す。verdictの検査と適用はproviderによらず同じ。
+- **最終の返答のtext**（`AgentProvider::job_reply(stdout)`）: jobはverdictや結果を、providerの実装が出力から取り出した最終の返答のtextから読む（`HeadlessJob::poll`がjobを起動したprovider（`HeadlessJob::provider`の`Supervisor::job_agent`。Claudeはsupervisorの`reviewer`、Codexは`codex_jobs`）の`job_reply`を通し、スループットの見直しはstdoutだけの`output.out`を通す）。既定とClaude Codeは`claude -p`がtextの出力で最終の返答だけを印字するので、stdoutをそのまま返す（今までと同じ結果）。stderr（`output.err`）は`job_reply`に渡さず、結果には混ざらない。observerは返答をparseせず、queueに書いたfindingとaskを結果として集める。verdictの検査と適用はproviderによらず同じ。
 
 - **失敗の共通の分類**（`domain::headless_job::JobFailure`）: `executable_missing`（実行ファイルが無い）、`launch_failed`（起動できない）、`authentication`（loginが切れた）、`usage_limit`（利用上限・rate limit）、`other`（非0の終了、時間切れ、読めないverdictなどの一般の失敗）。最初の4つはworkerの`SwitchReason`（[domain-model](domain-model.md#providerの切り替えの理由switchreason)、task 818）と同じ値で、`JobFailure::switch_reason`で写せる。`other`はproviderを切り替えない。起動のerrorは`application::job_start_failure`が分類する（errorの連なりに`NotFound`のio errorがあれば`executable_missing`、他は`launch_failed`。goal reviewの起動の失敗が使う）。失敗したjobの出力（stdoutとstderr）はprovider（`Supervisor::job_failure`）が分類する: Claude Codeは`AgentSignals::job_failure`（`infrastructure::claude::job_failure`。`job_wall`の壁を`authentication` / `usage_limit`に、それ以外を`other`に）、Codexは`AgentProvider::job_failure`（JSONLをworkerのturnと同じ`CodexTurnReader`で読み、`codex_turns::classify`の`authentication` / `usage_limit`をそのまま、`launch`を`launch_failed`に、他を`other`に）。人しか動かせない壁（[Queue hold](supervisor-lifecycle/queue-hold.md)）は`JobFailure::wall`で読む。
+
+  observerの失敗は、起動したproviderと組の`AgentSignals`をcomposition（`main`）から`observe`に渡して分類する。失敗時だけ`output.out`と`output.err`の両方を読み、改行でつないで`job_failure`に渡す。Claudeの認証・利用上限の診断はどちらのstreamにあっても従来どおり控えになる。両streamの書き込み順序は保存しない。observerとスループットの見直しのCodex対応はこの変更には含まない。
 
 - **settings**: jobにhookや`permissions.deny`を持たせるかはproviderの実装が決める。Claude Codeはreviewにだけreviewのsettings（hookなし、roleの`permissions.deny`）を書き、他のjobにはdagqのsettingsを書かない（`AgentSettings::None`。道具は`--allowedTools`が絞る）。読み取りだけのsandboxで動くproviderのjobには代わりを作らない（ADR-t1063-1の決定3）。CodexのjobはClaudeのhookもprojectのrules（workerの`.codex/rules/dagq-deny.rules`）も持たない: 書き込みと他のprocessへのsignalは読み取りだけのsandboxが拒む。
 

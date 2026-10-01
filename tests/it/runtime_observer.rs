@@ -2,6 +2,7 @@
 use crate::{common, runtime_support};
 use dagq::domain::EventKind;
 use dagq::domain::headless_job::JobAccess;
+use dagq::infrastructure::adapters::ClaudeCode;
 
 use runtime_support::*;
 
@@ -41,6 +42,23 @@ impl AgentProvider for ObserverProvider {
     }
 }
 
+// The composition supplies the signals of the same provider that starts
+// the job. These shell doubles emit Claude's diagnostics.
+fn observe(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &dagq::observer::ObserveOptions,
+) -> Result<Value> {
+    dagq::observer::observe(
+        db,
+        provider,
+        &ClaudeCode {
+            executable: "/unused".into(),
+        },
+        options,
+    )
+}
+
 fn observe_options(mode: dagq::observer::ObserveMode) -> dagq::observer::ObserveOptions {
     dagq::observer::ObserveOptions {
         mode,
@@ -70,7 +88,7 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
 /// 7).
 #[test]
 fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, repo, db) = fixture();
     let provider = ObserverProvider {
         script: r#"printf '%s' "${MODEL-none}" > model.txt"#.into(),
@@ -116,7 +134,7 @@ fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
 
 #[test]
 fn observe_records_findings_and_a_blocked_ask_and_advances_the_cursor() {
-    use dagq::observer::{ObserveMode, observe, read_cursor};
+    use dagq::observer::{ObserveMode, read_cursor};
     let (_dir, _repo, db) = fixture();
     // `dagq` is first on PATH and the queue is in DAGQ_QUEUE; the state
     // changes the prompt forbids are refused by the CLI itself.
@@ -137,6 +155,7 @@ if q goal ready 1 2> goal.err; then exit 5; fi
 if q note --task 1 --text 'seen' 2> note.err; then exit 6; fi
 if q goal add --draft 'claim faster' 2> draft.err; then exit 7; fi
 echo 'recorded 2 findings, updated 1, wrote 1 ask'
+echo 'observer diagnostic' >&2
 "#
         .into(),
     };
@@ -179,7 +198,7 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
         );
     }
     assert!(
-        fs::read_to_string(dir.join("output.log"))
+        fs::read_to_string(dir.join("output.out"))
             .unwrap()
             .contains("recorded 2 findings")
     );
@@ -188,6 +207,11 @@ echo 'recorded 2 findings, updated 1, wrote 1 ask'
             .unwrap()
             .contains("\"stats\"")
     );
+    assert_eq!(
+        fs::read_to_string(dir.join("output.err")).unwrap(),
+        "observer diagnostic\n"
+    );
+    assert!(!dir.join("output.log").exists());
     // Nothing changed state: the task is still ready and no goal was added.
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert_eq!(
@@ -431,7 +455,7 @@ fn gone(pid: u32) -> bool {
 /// one changes nothing.
 #[test]
 fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let logged_out = ObserverProvider {
         script: "printf 'Invalid API key \u{b7} Please run /login\\n'; exit 1".into(),
@@ -475,7 +499,7 @@ fn an_observer_at_a_login_that_ran_out_joins_the_authentication_ask() {
 /// child does not outlive the observation (task 245).
 #[test]
 fn observe_kills_an_agent_past_its_timeout_with_its_children() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let child_pid = db.parent().unwrap().join("child.pid");
     let slow = ObserverProvider {
@@ -655,7 +679,7 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
 
 #[test]
 fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     // Someone else's note lands after the input was read, before the finish.
     let noting = ObserverProvider {
@@ -693,7 +717,7 @@ fn observe_reads_again_what_others_wrote_while_its_agent_ran() {
 #[test]
 fn observe_starts_again_for_an_alert_that_time_alone_raised() {
     use dagq::domain::{AskKind, AskReason, NewAsk};
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
@@ -777,7 +801,7 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
 /// stays one `kpi` finding.
 #[test]
 fn observe_reads_the_kpis_and_the_improvements_and_keeps_one_kpi_finding_per_subject() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, repo, db) = fixture();
     fs::write(
         repo.join("dagq.toml"),
@@ -907,7 +931,7 @@ impl AgentProvider for BreachRecorder {
 /// finding, not a `kpi` one.
 #[test]
 fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, repo, db) = fixture();
     SqliteQueue::open(&db)
         .unwrap()
@@ -1007,7 +1031,7 @@ fn observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_fi
 #[test]
 fn observe_counts_the_findings_the_observer_closed_and_no_other_close() {
     use dagq::domain::{FindingStatus, FindingTarget, NewFinding};
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     let (_dir, _repo, db) = fixture();
     let record = |queue: &mut SqliteQueue, subject: &str| {
         queue
@@ -1199,7 +1223,7 @@ fn a_handoff_leaves_no_observer_process() {
 
 #[test]
 fn observe_uses_only_the_selected_cmux_for_workspace_listing() {
-    use dagq::observer::{ObserveMode, observe};
+    use dagq::observer::ObserveMode;
     use std::os::unix::fs::PermissionsExt;
     let (_dir, _repo, db) = fixture();
     let cmux = db.parent().unwrap().join("selected-cmux");
@@ -1268,4 +1292,73 @@ esac
             .unwrap()
             .contains("workspace list")
     );
+}
+
+#[test]
+fn observer_walls_read_both_streams_and_ignore_successful_output() {
+    use dagq::observer::ObserveMode;
+    for (diagnostic, wall) in [
+        ("Invalid API key · Please run /login", "authentication"),
+        ("You've hit your limit · resets 5pm", "usage_limit"),
+    ] {
+        for redirect in ["", " >&2"] {
+            let (_dir, _repo, db) = fixture();
+            let provider = ObserverProvider {
+                script: format!("cat <<'DIAGNOSTIC'{redirect}\n{diagnostic}\nDIAGNOSTIC\nexit 1"),
+            };
+            let done = observe(&db, &provider, &observe_options(ObserveMode::Daily)).unwrap();
+            assert_eq!(done["wall"], wall, "{done}");
+            assert!(done["hold_ask_id"].is_number(), "{done}");
+            let provider = ObserverProvider {
+                script: provider.script.replace("exit 1", "exit 0"),
+            };
+            let done = observe(&db, &provider, &observe_options(ObserveMode::Daily)).unwrap();
+            assert_eq!(done["outcome"], "succeeded");
+            assert_eq!(done["wall"], Value::Null);
+        }
+    }
+}
+
+#[test]
+fn observer_uses_the_supplied_providers_failure_signals() {
+    use dagq::application::{AgentSignals, IdleHook};
+    use dagq::domain::headless_job::JobFailure;
+    struct Signals;
+    impl AgentSignals for Signals {
+        fn job_failure(&self, output: &str) -> JobFailure {
+            assert_eq!(output, "provider stdout\nprovider stderr");
+            JobFailure::UsageLimit
+        }
+        fn detect_prompt(&self, _: &str) -> Option<&'static str> {
+            unreachable!()
+        }
+        fn screen_excerpt(&self, _: &str) -> String {
+            unreachable!()
+        }
+        fn idle_hook(&self, _: &[u8]) -> IdleHook {
+            unreachable!()
+        }
+        fn input_ready(&self, _: &str) -> bool {
+            unreachable!()
+        }
+        fn input_pending(&self, _: &str, _: &str) -> bool {
+            unreachable!()
+        }
+        fn working(&self, _: &str) -> bool {
+            unreachable!()
+        }
+    }
+    let (_dir, _repo, db) = fixture();
+    let provider = ObserverProvider {
+        script: "printf 'provider stdout'; printf 'provider stderr' >&2; exit 1".into(),
+    };
+    let done = dagq::observer::observe(
+        &db,
+        &provider,
+        &Signals,
+        &observe_options(dagq::observer::ObserveMode::Daily),
+    )
+    .unwrap();
+    assert_eq!(done["wall"], "usage_limit", "{done}");
+    assert!(done["hold_ask_id"].is_number());
 }

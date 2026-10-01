@@ -3306,9 +3306,11 @@ fn execute(cli: Cli) -> Result<Value> {
             } else {
                 executable(&claude)?
             };
+            let provider = ClaudeCode { executable };
             dagq::observer::observe(
                 &db,
-                &ClaudeCode { executable },
+                &provider,
+                &provider,
                 &ObserveOptions {
                     mode: if daily {
                         ObserveMode::Daily

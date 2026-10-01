@@ -242,7 +242,7 @@ pub enum Streams<'a> {
     /// No input; stdout and stderr to these files, created or truncated.
     Files { stdout: &'a Path, stderr: &'a Path },
     /// No input; stdout and stderr both to this one file, created or
-    /// truncated (the observer's `output.log`).
+    /// truncated.
     Log(&'a Path),
 }
 

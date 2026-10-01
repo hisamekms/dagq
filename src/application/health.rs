@@ -772,8 +772,8 @@ pub fn compact_event(event: &RunEvent) -> Value {
         }
     }
     if event.kind == crate::domain::event_kind::THROUGHPUT_REVIEW_FINISHED {
-        // Which review ended how, and the directory whose `output.log`
-        // says why a failed one did (task 1099).
+        // Which review ended how, and the directory whose `output.out`
+        // and `output.err` say why a failed one did (task 1099).
         for key in ["mode", "period", "outcome", "dir"] {
             if let Some(value) = payload.get(key) {
                 object.insert(key.into(), value.clone());
