@@ -275,9 +275,10 @@ esac"#
     }
 }
 
-/// Acceptance (2): a run parked `needs_session` (its receipt lacks the
-/// required evidence) is resumed in a workspace of its own whose wrapper
-/// takes the resolution request as a resume of the same session.
+/// Acceptance (2): a run parked `needs_session` (the e2e the runtime ran
+/// after its review failed, ADR-t1233-2) is resumed in a workspace of its
+/// own whose wrapper takes the resolution request as a resume of the same
+/// session.
 #[test]
 fn a_parked_run_is_resumed_with_a_turn_of_the_same_session() {
     let (dir, repo, db, backend) = headless_fixture(&[EvidenceCheck::E2e]);
@@ -285,12 +286,23 @@ fn a_parked_run_is_resumed_with_a_turn_of_the_same_session() {
         dir.path(),
         r#"case "$MODE" in
 start) commit work; receipt "$(git rev-parse HEAD)"; say finished ;;
-resume) receipt "$(git rev-parse HEAD)" succeeded passed; say evidence ;;
+resume) printf 'fixed\n' > fixed.txt; git add fixed.txt; git commit -q -m fix; receipt "$(git rev-parse HEAD)"; say fixed ;;
 esac"#,
     );
     let base = git_out(&repo, &["rev-parse", "main"]);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
-    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    let options = SuperviseOptions {
+        run_e2e: runtime::RunE2eOptions {
+            command: Some(
+                "if [ -f fixed.txt ]; then echo 'test result: ok. 1 passed'; exit 0; fi; \
+                 echo 'test a_test ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed'; exit 101"
+                    .into(),
+            ),
+            ..Default::default()
+        },
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(
         outcome["runs"].as_array().unwrap().last().unwrap()["status"],
@@ -313,7 +325,11 @@ esac"#,
     );
     let requested = payloads(&detail, "turn_requested");
     assert_eq!(requested[0]["what"], "resolution request", "{requested:?}");
-    assert!(event_kinds(&detail).contains(&"evidence_missing"));
+    assert!(event_kinds(&detail).contains(&"run_e2e_failed"));
+    assert_eq!(
+        payloads(&detail, "run_e2e_finished")[0]["outcome"],
+        "passed"
+    );
 }
 
 /// The quiet period after the stub signals readiness. Resume turns keep

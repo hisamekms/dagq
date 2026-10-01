@@ -54,6 +54,11 @@ pub fn run(
         .context("read the [run.env] the e2e runs with")?,
         None => Vec::new(),
     };
+    // The host's one e2e at a time (ADR-t1233-2 decision 4), held until
+    // this returns.
+    let waiting = Instant::now();
+    let _lock = settings.lock.as_deref().map(hold_lock).transpose()?;
+    let lock_wait_secs = waiting.elapsed().as_secs();
     if let Some(cmux) = &settings.cmux {
         ping(cmux)?;
     }
@@ -144,7 +149,30 @@ pub fn run(
         skipped,
         rerun,
         quarantine: read_quarantine(checkout),
+        lock_wait_secs,
     })
+}
+
+/// Wait for the host's e2e lock at `path` and hold it while the file stays
+/// open (`flock`, released when it closes or the process ends).
+fn hold_lock(path: &Path) -> Result<fs::File> {
+    use std::os::fd::AsRawFd;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    // SAFETY: flock on a descriptor this function owns; it blocks until the
+    // lock is free and is released when the file closes.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("lock {}", path.display()));
+    }
+    Ok(file)
 }
 
 /// The marks of `checkout`'s `.config/e2e-quarantine.toml` (ADR-t1165-1).
@@ -657,6 +685,7 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             log: dir.join("logs").join("e2e.log"),
             podman: None,
             utc_offset_secs: 0,
+            lock: None,
         }
     }
 
@@ -747,6 +776,50 @@ exit 125"
         failing.podman = Some(fake_podman(dir, true));
         let outcome = run(dir, None, &failing).unwrap();
         assert!(!outcome.passed && outcome.skipped.is_some(), "{outcome:?}");
+    }
+
+    /// Two e2e that take the same host lock (ADR-t1233-2 decision 4) run
+    /// one after the other: the second waits for the first, and says how
+    /// long it waited.
+    #[test]
+    fn e2e_that_take_the_host_lock_run_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let busy = dir.join("busy");
+        let order = dir.join("order");
+        let command = format!(
+            "if mkdir '{busy}'; then echo start >> '{order}'; sleep 1.5; echo end >> '{order}'; rmdir '{busy}'; else echo overlap >> '{order}'; fi",
+            busy = busy.display(),
+            order = order.display(),
+        );
+        let lock = dir.join("data").join("e2e.lock");
+        let gates: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                let mut settings = settings(dir, &command, Duration::from_secs(60));
+                settings.cmux = None;
+                settings.lock = Some(lock.clone());
+                settings.scratch = dir.join(format!("scratch-{name}"));
+                settings.log = dir.join(format!("{name}.log"));
+                let dir = dir.to_path_buf();
+                thread::spawn(move || run(&dir, None, &settings).unwrap())
+            })
+            .collect();
+        let outcomes: Vec<E2eOutcome> = gates.into_iter().map(|g| g.join().unwrap()).collect();
+        assert!(outcomes.iter().all(|o| o.passed), "{outcomes:?}");
+        assert_eq!(
+            fs::read_to_string(&order).unwrap(),
+            "start\nend\nstart\nend\n"
+        );
+        assert!(
+            outcomes.iter().map(|o| o.lock_wait_secs).max() >= Some(1),
+            "{outcomes:?}"
+        );
+        assert!(lock.exists());
+        assert_eq!(
+            crate::application::install::e2e_lock_path(Path::new("/data/dagq/abc")),
+            Some(PathBuf::from("/data/dagq/e2e.lock"))
+        );
     }
 
     /// The e2e runs with the `[run.env]`, the cmux and a `TMPDIR` of its

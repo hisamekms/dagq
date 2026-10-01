@@ -4,9 +4,9 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::domain::e2e_quarantine;
 use crate::domain::exit::CAUSE_EXIT_TIMEOUT;
 use crate::domain::language::with_instruction;
-use crate::domain::{e2e_quarantine, host_metrics};
 
 impl Supervisor<'_> {
     /// Start the validation of `run` on a thread (see [`spawn_validation`]).
@@ -29,27 +29,24 @@ impl Supervisor<'_> {
             Vec::new()
         })
     }
-    /// Marks in the landing branch's committed tree, read afresh for each
-    /// prompt and resume. Neither a worker's edits nor uncommitted main
-    /// checkout edits may grant an exception (ADR-t1165-1 decision 6).
-    pub(super) fn e2e_marks(&self, run: &TaskRun) -> Vec<e2e_quarantine::Mark> {
+    /// The marks of `.config/e2e-quarantine.toml` in the landing branch's
+    /// committed tree, read afresh for each e2e of a run (ADR-t1233-2
+    /// decision 5, ADR-t1165-1 decision 6): neither a worker's edits nor
+    /// uncommitted main checkout edits may grant an exception (task 1198).
+    /// A file that cannot be read holds no mark.
+    pub(super) fn main_quarantine(&self, run: &TaskRun) -> e2e_quarantine::QuarantineFile {
         let text = self
             .repository
             .main_head()
             .and_then(|head| self.repository.file_in(head.as_str(), e2e_quarantine::FILE));
-        let file = match text {
+        match text {
             Ok(Some(text)) => e2e_quarantine::QuarantineFile::of(&text),
-            Ok(None) => return Vec::new(),
+            Ok(None) => e2e_quarantine::QuarantineFile::Absent,
             Err(error) => {
                 warn!(run_id = %run.id(), "{} in the landing branch's committed tree could not be read, so no e2e mark holds for the run: {error:#}", e2e_quarantine::FILE);
-                return Vec::new();
+                e2e_quarantine::QuarantineFile::Unreadable(format!("{error:#}"))
             }
-        };
-        if let Some(error) = file.error() {
-            warn!(run_id = %run.id(), "no e2e mark holds for the run: {error}");
         }
-        let now = self.generators.clock.now();
-        e2e_quarantine::holding(&file, host_metrics::local_day(now, (self.utc_offset)(now)))
     }
     /// The executor every AI actor the supervisor starts goes through: its
     /// workspaces through cmux, its agents through the review provider and
@@ -148,7 +145,6 @@ so the run workspace opens outside it: {error:#}", self.layout.queue_hash);
             &siblings,
             inherited.as_ref(),
             &self.e2e_paths(),
-            &self.e2e_marks(run),
         )?;
         // A Claude worker the supervisor gave the broker's tools is told of
         // them (ADR-t827-4 decision 1).

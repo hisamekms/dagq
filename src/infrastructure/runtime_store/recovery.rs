@@ -156,6 +156,21 @@ impl SqliteQueue {
     /// review`) is recorded. `Ok(None)` means another process took it or it
     /// changed meanwhile.
     pub fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        self.lease_awaiting(id, token, "review")
+    }
+
+    /// [`Self::lease_for_review`] for the e2e of a run queued to land
+    /// (ADR-t1233-2), recorded with `reason: e2e`.
+    pub fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        self.lease_awaiting(id, token, "e2e")
+    }
+
+    fn lease_awaiting(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+    ) -> Result<Option<TaskRun>> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -190,7 +205,7 @@ impl SqliteQueue {
             &tx,
             id,
             EventKind::LeaseAcquired,
-            json!({"pid": std::process::id(), "reason": "review", "previous_token": lease.map(|l| l.token)}),
+            json!({"pid": std::process::id(), "reason": reason, "previous_token": lease.map(|l| l.token)}),
         )?;
         let run = stored_run(&tx, id)?.unwrap_or(run);
         tx.commit()?;
@@ -959,6 +974,9 @@ impl RunRecovery for SqliteQueue {
     }
     fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         SqliteQueue::lease_for_review(self, id, token)
+    }
+    fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+        SqliteQueue::lease_for_e2e(self, id, token)
     }
     fn runs_to_triage(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::runs_to_triage(self)

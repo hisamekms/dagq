@@ -530,7 +530,8 @@ mod stats {
                 // Goal 36: the wait to land by phase, from the events.
                 "land_phases": {
                     "exit": 1080, "review": 0, "revise": 0, "conflict": 0, "ask": 0,
-                    "resume": 0, "landing_queue": 0, "rebase": 120, "verify": 0,
+                    "resume": 0, "landing_queue": 0, "e2e_wait": 0, "e2e": 0,
+                    "rebase": 120, "verify": 0,
                     "push": null,
                     // Task 509: no verification command was recorded.
                     "verify_commands": [],

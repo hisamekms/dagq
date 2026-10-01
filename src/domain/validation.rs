@@ -5,106 +5,16 @@
 //! and asks again, so no Git call is made for a check an earlier rejection
 //! already settled. [`Validation`] is the outcome the store records.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::{
-    CommitSha, DomainError, EvidenceCheck, Provider, ReasonCode, Receipt, RunId,
-    evidence_missing_reason,
+    CommitSha, DomainError, EvidenceCheck, ReasonCode, Receipt, RunId, evidence_missing_reason,
     measure::LoadSummary,
     scope::{glob_matches, out_of_scope, scope_violation_reason},
 };
 
-/// The only host-permission-dependent tests a Codex worker may omit. The
-/// install and auto-update gate does not use this list and runs every test.
-pub const CODEX_WORKER_E2E_EXCLUSIONS: &[(&str, &str)] = &[
-    (
-        "broker::a_preferred_worker_does_its_task_through_the_broker_and_lands",
-        "Podman machine is outside the Codex workspace-write sandbox",
-    ),
-    (
-        "killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands",
-        "checks the liveness of a supervisor process outside the sandbox",
-    ),
-    (
-        "up_in_cmux_starts_a_supervisor_in_a_workspace_that_down_wait_stops_and_closes",
-        "checks the liveness of a cmux-started supervisor outside the sandbox",
-    ),
-    (
-        "install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands",
-        "signals a supervisor process across the sandbox boundary",
-    ),
-    (
-        "auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands",
-        "signals a supervisor process across the sandbox boundary",
-    ),
-];
-
-/// A Codex worker's structured claim within `e2e.evidence_or_reason`.
-/// The command is checked against the named exclusions, rather than treating
-/// a nonempty string as proof that an arbitrary subset was run.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexE2eEvidence {
-    command: String,
-    result: String,
-    excluded: Vec<CodexE2eExclusion>,
-    #[serde(default)]
-    marked: Vec<CodexE2eMarked>,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexE2eExclusion {
-    name: String,
-    reason: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexE2eMarked {
-    name: String,
-    rerun: String,
-    mark: String,
-}
-
-fn codex_e2e_evidence_valid(text: &str) -> bool {
-    let Ok(evidence) = serde_json::from_str::<CodexE2eEvidence>(text) else {
-        return false;
-    };
-    if evidence.result != "passed" {
-        return false;
-    }
-    if evidence
-        .note
-        .as_ref()
-        .is_some_and(|note| note.trim().is_empty())
-    {
-        return false;
-    }
-    if evidence.marked.iter().any(|test| {
-        test.name.trim().is_empty() || test.rerun.trim().is_empty() || test.mark.trim().is_empty()
-    }) {
-        return false;
-    }
-    let mut command = "cargo test --locked --test e2e -- --ignored".to_owned();
-    let mut seen = std::collections::HashSet::new();
-    for excluded in &evidence.excluded {
-        if !seen.insert(excluded.name.as_str())
-            || !CODEX_WORKER_E2E_EXCLUSIONS
-                .iter()
-                .any(|(name, reason)| *name == excluded.name && *reason == excluded.reason)
-        {
-            return false;
-        }
-        command.push_str(" --skip ");
-        command.push_str(&excluded.name);
-    }
-    evidence.command == command
-}
-
-/// Why validation requires `e2e` of a run (ADR-t963-1 decision 2).
+/// Why a run needs the runtime's e2e (ADR-t963-1 decision 2, ADR-t1233-2
+/// decision 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum E2eSource {
@@ -123,9 +33,10 @@ impl E2eSource {
     }
 }
 
-/// Whether validation requires `e2e` of a run, and why: recorded with
-/// `validation_finished` (as `e2e_requirement`) and `evidence_missing`, and
-/// read by `stats`.
+/// Whether a run needs the e2e, and why: recorded with
+/// `validation_finished` (as `e2e_requirement`), read by the runtime's e2e
+/// after the review (ADR-t1233-2) and by `stats`. The worker's receipt
+/// never backs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct E2eRequirement {
     pub required: bool,
@@ -138,11 +49,11 @@ pub struct E2eRequirement {
 }
 
 impl E2eRequirement {
-    /// `required` holds `e2e` when the task asks for it; otherwise the run
+    /// `task` holds `e2e` when the task asks for it; otherwise the run
     /// needs it when a path of `changes` matches a glob of `globs`. No
     /// globs, no requirement from the diff.
-    pub fn of(required: &[EvidenceCheck], globs: &[String], changes: &[String]) -> Self {
-        if required.contains(&EvidenceCheck::E2e) {
+    pub fn of(task: bool, globs: &[String], changes: &[String]) -> Self {
+        if task {
             return Self {
                 required: true,
                 source: Some(E2eSource::Task),
@@ -159,16 +70,6 @@ impl E2eRequirement {
             source: (!paths.is_empty()).then_some(E2eSource::Paths),
             paths,
         }
-    }
-
-    /// `required` with `e2e` added when this requires it and the task did
-    /// not.
-    pub fn checks(&self, required: &[EvidenceCheck]) -> Vec<EvidenceCheck> {
-        let mut checks = required.to_vec();
-        if self.required && !checks.contains(&EvidenceCheck::E2e) {
-            checks.push(EvidenceCheck::E2e);
-        }
-        checks
     }
 }
 
@@ -262,14 +163,17 @@ pub enum Fact {
 
 /// What the application gathered so far for one validation, and what it
 /// knew up front: the run, its base commit, the task's required evidence
-/// and paths, the repository's `[e2e] paths` (ADR-t963-1 decision 2), and
-/// where the receipt should be.
+/// and paths, whether the task asks for the e2e and the repository's `[e2e]
+/// paths` (ADR-t963-1 decision 2), and where the receipt should be.
 #[derive(Debug)]
 pub struct ReceiptFacts<'a> {
     pub run_id: &'a RunId,
     pub base: &'a CommitSha,
+    /// The checks the receipt must back ([`super::required_of`]): never
+    /// `e2e`, which the runtime runs itself (ADR-t1233-2 decision 1).
     pub required: &'a [EvidenceCheck],
-    pub provider: Provider,
+    /// The task asks for the e2e (`add --evidence e2e`).
+    pub task_e2e: bool,
     pub paths: &'a [String],
     pub e2e_paths: &'a [String],
     pub receipt_path: &'a str,
@@ -294,7 +198,7 @@ impl<'a> ReceiptFacts<'a> {
             run_id,
             base,
             required,
-            provider: Provider::Claude,
+            task_e2e: false,
             paths,
             e2e_paths: &[],
             receipt_path,
@@ -313,15 +217,16 @@ impl<'a> ReceiptFacts<'a> {
         self
     }
 
-    pub fn with_provider(mut self, provider: Provider) -> Self {
-        self.provider = provider;
+    /// With whether the task asks for the e2e (`add --evidence e2e`).
+    pub fn with_task_e2e(mut self, task_e2e: bool) -> Self {
+        self.task_e2e = task_e2e;
         self
     }
 
     /// Whether the diff decides `e2e`: the repository names paths and the
     /// task does not require it anyway.
     fn diff_decides_e2e(&self) -> bool {
-        !self.e2e_paths.is_empty() && !self.required.contains(&EvidenceCheck::E2e)
+        !self.e2e_paths.is_empty() && !self.task_e2e
     }
 
     /// Whether `e2e` is required and why, once the facts tell; `None`
@@ -329,9 +234,9 @@ impl<'a> ReceiptFacts<'a> {
     pub fn e2e_requirement(&self) -> Option<E2eRequirement> {
         if self.diff_decides_e2e() {
             let changes = self.changes.as_deref()?;
-            Some(E2eRequirement::of(self.required, self.e2e_paths, changes))
+            Some(E2eRequirement::of(self.task_e2e, self.e2e_paths, changes))
         } else {
-            Some(E2eRequirement::of(self.required, &[], &[]))
+            Some(E2eRequirement::of(self.task_e2e, &[], &[]))
         }
     }
 
@@ -385,9 +290,10 @@ fn reject(code: ReasonCode, reason: String, commit: Option<&CommitSha>) -> Judge
 /// base; the worktree is clean; the diff stays in the task's paths; the
 /// required evidence is there. Only a run sound in everything else waits
 /// for a session over its paths or its evidence (ADR-0029, ADR-0019
-/// decision 5). The evidence required is the task's, and `e2e` when the
-/// diff touches the repository's `[e2e] paths` (ADR-t963-1 decision 2):
-/// until the diff is read, a reported `e2e` is held to that only then.
+/// decision 5). The evidence required is the task's but `e2e`, which the
+/// runtime runs itself after the review (ADR-t1233-2 decision 1); whether
+/// the run needs it is read from the task and, when the repository names
+/// `[e2e] paths`, from the diff, and recorded with the verdict.
 pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
     let receipt = match &facts.receipt {
         None => return Judgement::Need(Fact::Receipt),
@@ -407,19 +313,7 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
         }
         Some(ReceiptFile::Parsed(receipt)) => receipt,
     };
-    // Until the diff tells whether `e2e` is required, its report is
-    // checked as a required one's, and again below once it is known.
-    let lenient = if facts.diff_decides_e2e() {
-        E2eRequirement {
-            required: true,
-            source: None,
-            paths: Vec::new(),
-        }
-        .checks(facts.required)
-    } else {
-        facts.required.to_vec()
-    };
-    if let Err(error) = receipt.check_requiring(facts.run_id, &lenient) {
+    if let Err(error) = receipt.check_requiring(facts.run_id, facts.required) {
         return reject(
             ReasonCode::of_receipt_error(&error),
             format!("{error:#}"),
@@ -500,36 +394,7 @@ pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
             });
         }
     }
-    let required = match facts.e2e_requirement() {
-        Some(e2e) => e2e.checks(facts.required),
-        None => facts.required.to_vec(),
-    };
-    // An `e2e` the diff did not require is held to what any check that is
-    // not required is: not `failed`, and explained.
-    if facts.diff_decides_e2e()
-        && let Err(error) = receipt.check_requiring(facts.run_id, &required)
-    {
-        return reject(
-            ReasonCode::of_receipt_error(&error),
-            format!("{error:#}"),
-            Some(head),
-        );
-    }
-    let mut missing = receipt.missing_evidence(&required);
-    if facts.provider == Provider::Codex
-        && required.contains(&EvidenceCheck::E2e)
-        && !missing.contains(&EvidenceCheck::E2e)
-        && !codex_e2e_evidence_valid(receipt.e2e().evidence_or_reason())
-    {
-        missing.push(EvidenceCheck::E2e);
-    }
-    if facts.provider != Provider::Codex
-        && required.contains(&EvidenceCheck::E2e)
-        && !missing.contains(&EvidenceCheck::E2e)
-        && receipt.e2e().evidence_or_reason().contains("--skip")
-    {
-        missing.push(EvidenceCheck::E2e);
-    }
+    let missing = receipt.missing_evidence(facts.required);
     if !missing.is_empty() {
         return Judgement::Reject(Rejection {
             reason: evidence_missing_reason(&missing),
@@ -601,21 +466,14 @@ mod tests {
         paths: &[String],
         e2e_paths: &[String],
     ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
-        run_with_e2e_and_provider(world, required, paths, e2e_paths, Provider::Claude)
-    }
-
-    fn run_with_e2e_and_provider(
-        world: &World,
-        required: &[EvidenceCheck],
-        paths: &[String],
-        e2e_paths: &[String],
-        provider: Provider,
-    ) -> ((Vec<Fact>, Judgement), Option<E2eRequirement>) {
         let id = RunId::new("r1").unwrap();
         let base = sha(BASE);
-        let mut facts = ReceiptFacts::new(&id, &base, required, paths, "/runs/r1/receipt.json")
+        // As the supervisor gives them: the receipt backs the task's checks
+        // but `e2e`, which only says whether the run needs the e2e.
+        let checks = super::super::required_of(required, crate::domain::Provider::Claude);
+        let mut facts = ReceiptFacts::new(&id, &base, &checks, paths, "/runs/r1/receipt.json")
             .with_e2e_paths(e2e_paths)
-            .with_provider(provider);
+            .with_task_e2e(required.contains(&EvidenceCheck::E2e));
         let mut asked = Vec::new();
         loop {
             match judge(&facts) {
@@ -844,17 +702,13 @@ mod tests {
 
     #[test]
     fn missing_required_evidence_is_rejected_last() {
-        let world = World {
-            receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
-            ..sound()
-        };
         let paths = ["src/**".to_owned()];
-        let (asked, verdict) = run(&world, &[EvidenceCheck::E2e], &paths);
+        let (asked, verdict) = run(&sound(), &[EvidenceCheck::SubagentReview], &paths);
         assert_eq!(asked, ALL);
         let rejection = rejection(verdict);
         assert_eq!(rejection.code, ReasonCode::EvidenceMissing);
-        assert_eq!(rejection.evidence_missing, [EvidenceCheck::E2e]);
-        assert_eq!(rejection.reason, "evidence missing: e2e");
+        assert_eq!(rejection.evidence_missing, [EvidenceCheck::SubagentReview]);
+        assert_eq!(rejection.reason, "evidence missing: subagent_review");
         assert!(rejection.scope_violation.is_empty());
     }
 
@@ -899,86 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_e2e_exclusions_name_tests_in_the_e2e_suite() {
-        let root = include_str!("../../tests/e2e.rs");
-        let broker = include_str!("../../tests/e2e/broker.rs");
-        for (name, _) in CODEX_WORKER_E2E_EXCLUSIONS {
-            let (source, function) = match name.strip_prefix("broker::") {
-                Some(function) => (broker, function),
-                None => (root, *name),
-            };
-            assert!(source.contains(&format!("fn {function}()")), "{name}");
-        }
-    }
-
-    #[test]
-    fn codex_e2e_accepts_only_reported_approved_exclusions_when_required() {
-        let paths = globs(&["tests/e2e.rs"]);
-        let mut world = sound();
-        world.changes = paths.clone();
-        let exclusions = CODEX_WORKER_E2E_EXCLUSIONS
-            .iter()
-            .map(|(name, reason)| serde_json::json!({"name": name, "reason": reason}))
-            .collect::<Vec<_>>();
-        let command = CODEX_WORKER_E2E_EXCLUSIONS.iter().fold(
-            "cargo test --locked --test e2e -- --ignored".to_owned(),
-            |mut command, (name, _)| {
-                command.push_str(&format!(" --skip {name}"));
-                command
-            },
-        );
-        let mut accepted = |evidence: serde_json::Value, provider| {
-            let mut receipt: serde_json::Value =
-                serde_json::from_str(&receipt_text("r1", "succeeded", "passed")).unwrap();
-            receipt["e2e"]["evidence_or_reason"] = evidence.to_string().into();
-            world.receipt = Some(receipt.to_string());
-            run_with_e2e_and_provider(&world, &[], &[], &paths, provider)
-                .0
-                .1
-        };
-        let good =
-            serde_json::json!({"command": command, "result": "passed", "excluded": exclusions});
-        assert_eq!(
-            accepted(good.clone(), Provider::Codex),
-            Judgement::Accept(sha(HEAD))
-        );
-        let full = serde_json::json!({"command": "cargo test --locked --test e2e -- --ignored", "result": "passed", "excluded": []});
-        assert_eq!(
-            accepted(full, Provider::Codex),
-            Judgement::Accept(sha(HEAD))
-        );
-        let one = serde_json::json!({
-            "command": format!("cargo test --locked --test e2e -- --ignored --skip {}", CODEX_WORKER_E2E_EXCLUSIONS[0].0),
-            "result": "passed",
-            "excluded": [{"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": CODEX_WORKER_E2E_EXCLUSIONS[0].1}]
-        });
-        assert_eq!(accepted(one, Provider::Codex), Judgement::Accept(sha(HEAD)));
-        for bad in [
-            serde_json::json!({"command": command, "result": "passed", "excluded": []}),
-            serde_json::json!({"command": "cargo test --locked --test e2e -- --ignored --skip unrelated", "result": "passed", "excluded": [{"name": "unrelated", "reason": "host"}]}),
-            serde_json::json!({"command": command, "result": "passed", "excluded": [{"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": "other"}]}),
-            serde_json::json!({"command": command, "result": "failed", "excluded": exclusions}),
-            serde_json::json!({"command": format!("cargo test --locked --test e2e -- --ignored --skip {0} --skip {0}", CODEX_WORKER_E2E_EXCLUSIONS[0].0), "result": "passed", "excluded": [{"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": CODEX_WORKER_E2E_EXCLUSIONS[0].1}, {"name": CODEX_WORKER_E2E_EXCLUSIONS[0].0, "reason": CODEX_WORKER_E2E_EXCLUSIONS[0].1}]}),
-        ] {
-            let refused = rejection(accepted(bad, Provider::Codex));
-            assert_eq!(refused.code, ReasonCode::EvidenceMissing);
-            assert_eq!(refused.evidence_missing, [EvidenceCheck::E2e]);
-        }
-        assert_eq!(
-            accepted(
-                serde_json::json!("ordinary Claude evidence"),
-                Provider::Claude
-            ),
-            Judgement::Accept(sha(HEAD)),
-        );
-        assert_eq!(
-            rejection(accepted(good, Provider::Claude)).evidence_missing,
-            [EvidenceCheck::E2e]
-        );
-    }
-
-    #[test]
-    fn a_diff_touching_the_e2e_paths_requires_e2e() {
+    fn a_diff_touching_the_e2e_paths_needs_the_e2e_but_no_evidence() {
         let world = World {
             receipt: Some(receipt_text("r1", "succeeded", "not_applicable")),
             changes: vec!["docs/a.md".into(), "src/infrastructure/process.rs".into()],
@@ -987,21 +762,22 @@ mod tests {
         let e2e = globs(&["src/infrastructure/process.rs", "tests/e2e.rs"]);
         let ((asked, verdict), requirement) = run_with_e2e(&world, &[], &[], &e2e);
         assert_eq!(asked, ALL);
-        let refused = rejection(verdict);
-        assert_eq!(refused.code, ReasonCode::EvidenceMissing);
-        assert_eq!(refused.evidence_missing, [EvidenceCheck::E2e]);
+        // The runtime runs the e2e after the review (ADR-t1233-2).
+        assert_eq!(verdict, Judgement::Accept(sha(HEAD)));
         let requirement = requirement.unwrap();
         assert!(requirement.required);
         assert_eq!(requirement.source, Some(E2eSource::Paths));
         assert_eq!(requirement.paths, ["src/infrastructure/process.rs"]);
 
-        // A failed e2e the diff requires waits for a session too.
+        // A receipt's `e2e` is held to what any check that is not required
+        // is: not `failed`, and explained.
         let world = World {
             receipt: Some(receipt_text("r1", "succeeded", "failed")),
             ..world
         };
-        let ((_, verdict), _) = run_with_e2e(&world, &[], &[], &e2e);
-        assert_eq!(rejection(verdict).code, ReasonCode::EvidenceMissing);
+        let ((asked, verdict), _) = run_with_e2e(&world, &[], &[], &e2e);
+        assert_eq!(asked, [Fact::Receipt]);
+        assert_eq!(rejection(verdict).code, ReasonCode::EvidenceFailed);
     }
 
     #[test]
@@ -1023,16 +799,6 @@ mod tests {
                 paths: Vec::new(),
             })
         );
-
-        // An e2e that is not required still may not fail.
-        let world = World {
-            receipt: Some(receipt_text("r1", "succeeded", "failed")),
-            ..world
-        };
-        let ((_, verdict), _) = run_with_e2e(&world, &[], &[], &e2e);
-        let refused = rejection(verdict);
-        assert_eq!(refused.code, ReasonCode::EvidenceFailed);
-        assert_eq!(refused.commit, Some(sha(HEAD)));
     }
 
     #[test]
@@ -1045,9 +811,10 @@ mod tests {
         let e2e = globs(&["src/**"]);
         let ((asked, verdict), requirement) =
             run_with_e2e(&world, &[EvidenceCheck::E2e], &[], &e2e);
-        // The task decides, so a task without paths does not read the diff.
+        // The task decides, so a task without paths does not read the diff,
+        // and the receipt backs no e2e.
         assert_eq!(asked, ALL[..5]);
-        assert_eq!(rejection(verdict).evidence_missing, [EvidenceCheck::E2e]);
+        assert_eq!(verdict, Judgement::Accept(sha(HEAD)));
         assert_eq!(requirement.unwrap().source, Some(E2eSource::Task));
     }
 
@@ -1064,14 +831,8 @@ mod tests {
     }
 
     #[test]
-    fn the_requirement_adds_e2e_to_the_task_checks_once() {
-        let paths = E2eRequirement::of(&[], &globs(&["src/*.rs"]), &globs(&["src/a.rs"]));
-        assert_eq!(
-            paths.checks(&[EvidenceCheck::Tests]),
-            [EvidenceCheck::Tests, EvidenceCheck::E2e]
-        );
-        let task = E2eRequirement::of(&[EvidenceCheck::E2e], &[], &[]);
-        assert_eq!(task.checks(&[EvidenceCheck::E2e]), [EvidenceCheck::E2e]);
+    fn the_requirement_names_its_source_and_paths() {
+        let paths = E2eRequirement::of(false, &globs(&["src/*.rs"]), &globs(&["src/a.rs"]));
         assert_eq!(E2eSource::Paths.as_str(), "paths");
         assert_eq!(E2eSource::Task.as_str(), "task");
         assert_eq!(
@@ -1079,7 +840,11 @@ mod tests {
             serde_json::json!({"required": true, "source": "paths", "paths": ["src/a.rs"]})
         );
         assert_eq!(
-            serde_json::to_value(E2eRequirement::of(&[], &[], &[])).unwrap(),
+            serde_json::to_value(E2eRequirement::of(true, &[], &globs(&["src/a.rs"]))).unwrap(),
+            serde_json::json!({"required": true, "source": "task"})
+        );
+        assert_eq!(
+            serde_json::to_value(E2eRequirement::of(false, &[], &[])).unwrap(),
             serde_json::json!({"required": false})
         );
     }

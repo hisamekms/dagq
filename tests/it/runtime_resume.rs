@@ -1015,7 +1015,7 @@ fn a_run_missing_the_required_evidence_is_resumed() {
             Connection::open(db)
                 .unwrap()
                 .execute(
-                    "UPDATE tasks SET required_evidence='[\"e2e\"]' WHERE id=?1",
+                    "UPDATE tasks SET required_evidence='[\"subagent_review\"]' WHERE id=?1",
                     [run.task_id()],
                 )
                 .unwrap();

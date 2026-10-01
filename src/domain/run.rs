@@ -21,9 +21,9 @@ pub use history::{
     ReviseDecision, RunHistory, after_validation, decide_conflict, decide_revise, run_attention_of,
 };
 pub use recorded::{
-    NewRunEvent, Recorded, end_session, finish_validation, record_exhausted_resumes,
-    record_gone_session_park, record_landing_decision, record_live_park, record_recheck_park,
-    resume_finished,
+    NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,
+    record_exhausted_resumes, record_gone_session_park, record_landing_decision, record_live_park,
+    record_recheck_park, resume_finished,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no
@@ -413,6 +413,20 @@ pub fn park_gone_session(mut run: TaskRun, reason: String) -> Result<TaskRun, Do
         &run,
         &[RunStatus::AwaitingIntegration],
         "park after its session's workspace is gone",
+    )?;
+    run.status = RunStatus::NeedsSession;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
+/// `awaiting_integration` → `needs_session`: the e2e the runtime ran on
+/// the host after the review failed (ADR-t1233-2 decision 3), with
+/// `reason` as `last_error`.
+pub fn park_after_e2e(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[RunStatus::AwaitingIntegration],
+        "park after a failed e2e",
     )?;
     run.status = RunStatus::NeedsSession;
     run.last_error = Some(reason);

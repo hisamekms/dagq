@@ -192,6 +192,10 @@ event_kinds! {
     ReviseUnsent => "revise_unsent",
     RunAdopted => "run_adopted",
     RunClaimed => "run_claimed",
+    RunE2eFailed => "run_e2e_failed",
+    RunE2eFinished => "run_e2e_finished",
+    RunE2eStarted => "run_e2e_started",
+    RunE2eWaiting => "run_e2e_waiting",
     RunEnvChanged => "run_env_changed",
     RunEnvProgramFound => "run_env_program_found",
     RunEnvProgramMissing => "run_env_program_missing",
@@ -615,6 +619,15 @@ pub const REVISE_UNSENT: &str = EventKind::ReviseUnsent.as_str();
 pub const RUNTIME_ERROR: &str = EventKind::RuntimeError.as_str();
 pub const RUN_ADOPTED: &str = EventKind::RunAdopted.as_str();
 pub const RUN_CLAIMED: &str = EventKind::RunClaimed.as_str();
+/// The runtime's e2e of a run after its review (ADR-t1233-2): it failed
+/// and parked the run for a resume (`needs_session`).
+pub const RUN_E2E_FAILED: &str = EventKind::RunE2eFailed.as_str();
+/// The runtime's e2e of a run ended without parking it: `outcome`
+/// `passed`, `unavailable` (it could not run) or `not_configured`.
+pub const RUN_E2E_FINISHED: &str = EventKind::RunE2eFinished.as_str();
+pub const RUN_E2E_STARTED: &str = EventKind::RunE2eStarted.as_str();
+/// The run waits for the host's one e2e at a time (ADR-t1233-2 decision 4).
+pub const RUN_E2E_WAITING: &str = EventKind::RunE2eWaiting.as_str();
 pub const RUN_INHERITED: &str = EventKind::RunInherited.as_str();
 pub const RUN_INTEGRATED: &str = EventKind::RunIntegrated.as_str();
 pub const RUN_PLANNED: &str = EventKind::RunPlanned.as_str();
@@ -882,6 +895,10 @@ mod tests {
             (EventKind::ReviseUnsent, "revise_unsent"),
             (EventKind::RunAdopted, "run_adopted"),
             (EventKind::RunClaimed, "run_claimed"),
+            (EventKind::RunE2eFailed, "run_e2e_failed"),
+            (EventKind::RunE2eFinished, "run_e2e_finished"),
+            (EventKind::RunE2eStarted, "run_e2e_started"),
+            (EventKind::RunE2eWaiting, "run_e2e_waiting"),
             (EventKind::RunEnvChanged, "run_env_changed"),
             (EventKind::RunEnvProgramFound, "run_env_program_found"),
             (EventKind::RunEnvProgramMissing, "run_env_program_missing"),

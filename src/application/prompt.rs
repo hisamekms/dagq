@@ -6,7 +6,6 @@
 //! triage, and the requests it types into a live session (a resume, a
 //! revise, a receipt that does not match).
 
-use crate::domain::e2e_quarantine::{self, Mark};
 use crate::domain::event_kind;
 use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
 use crate::domain::headless_job::JobAccess;
@@ -23,7 +22,6 @@ use super::{
     integrate::{integrate_logs, log_names},
     or_none, tail,
 };
-use crate::domain::validation::CODEX_WORKER_E2E_EXCLUSIONS;
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
     Ask, BundleKey, CommitSha, DraftOrigin, DraftTarget, EvidenceCheck, FindingView, Goal, GoalId,
@@ -348,10 +346,10 @@ fn headless_provider_line(provider: Provider) -> &'static str {
 fn review_line(route: Route) -> &'static str {
     match route {
         Route::Headless(Provider::Codex) => {
-            "Perform applicable unit tests and E2E. You have no subagent to review your change: before the receipt, read your own diff (git diff <base commit>..HEAD) against the acceptance criteria and fix what you find, then write subagent_review as not_applicable with the reason `codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit` and what the self-review found. Record evidence or an explicit reason when not applicable.\n"
+            "Perform applicable unit tests. You have no subagent to review your change: before the receipt, read your own diff (git diff <base commit>..HEAD) against the acceptance criteria and fix what you find, then write subagent_review as not_applicable with the reason `codex worker: no subagent review; self-reviewed the diff, the supervisor's review job reviews the commit` and what the self-review found. Record evidence or an explicit reason when not applicable.\n"
         }
         _ => {
-            "Perform applicable unit tests, E2E, and subagent review. Record evidence or an explicit reason when not applicable.\n"
+            "Perform applicable unit tests and subagent review. Record evidence or an explicit reason when not applicable.\n"
         }
     }
 }
@@ -434,7 +432,6 @@ pub fn prompt(
     siblings: &[Task],
     inherited: Option<&Inheritance>,
     e2e_paths: &[String],
-    e2e_marks: &[Mark],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let inherited = inherited.map(Inheritance::section).unwrap_or_default();
@@ -521,15 +518,7 @@ pub fn prompt(
             names.join(", ")
         )
     };
-    evidence.push_str(&e2e_expectation(&required, task.paths(), e2e_paths));
-    // A worker runs e2e only when its task requires it or its diff may
-    // touch `[e2e] paths`; the marks matter only then.
-    if required.contains(&EvidenceCheck::E2e) || !e2e_paths.is_empty() {
-        evidence.push_str(&e2e_marks_line(task, e2e_marks));
-        if route == Route::Headless(Provider::Codex) {
-            evidence.push_str(&codex_worker_e2e_line());
-        }
-    }
+    evidence.push_str(&e2e_line(task, e2e_paths));
     // The declared scope (ADR-0029): changing anything else parks the run.
     let paths = if task.paths().is_empty() {
         String::new()
@@ -600,78 +589,15 @@ pub fn prompt(
     ))
 }
 
-/// The fixed subset a sandboxed Codex worker can omit. This instruction is
-/// only in Codex worker requests; the install/auto-update gate sees none of
-/// these exclusions.
-fn codex_worker_e2e_line() -> String {
-    let mut command = "cargo test --locked --test e2e -- --ignored".to_owned();
-    for (name, _) in CODEX_WORKER_E2E_EXCLUSIONS {
-        command.push_str(&format!(" --skip {name}"));
-    }
-    let reasons = CODEX_WORKER_E2E_EXCLUSIONS
-        .iter()
-        .map(|(name, reason)| format!("{name}: {reason}"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    format!(
-        "Codex worker E2E: if this run owes E2E evidence, after the last change run `{command}`. Only these named host-permission cases may be excluded: {reasons}. Run all other ignored E2E tests. In the receipt set `e2e.evidence_or_reason` to a JSON string with `command` (the exact command run), `result` (`passed`), and `excluded` (an array of objects with `name` and the exact `reason` above, in command order). A full suite run may use the command without `--skip` and an empty `excluded` array. If an E2E mark permits a failed test after its named rerun, add a `marked` array with objects containing its `name`, `rerun` result, and `mark` reason. If a selected E2E returns early under its own documented condition, add a `note` explaining it. Do not report the excluded tests as passed. A missing or unapproved exclusion, a command that differs from the report, or a failed result is not accepted as E2E evidence. The install and auto-update supervisor gates run the full suite without these exclusions.\n"
-    )
-}
-
-/// Whether the run owes `e2e` when its task does not require it
-/// (ADR-t963-1 decision 2): the repository's `[e2e] paths` decide from the
-/// diff at validation. Before the diff is made, the expectation reads the
-/// task's own `paths`: none of them can touch an e2e path when each is a
-/// plain path no e2e glob matches. Empty when the task requires `e2e`
-/// (the Required evidence line says so) or the repository names no paths.
-fn e2e_expectation(required: &[EvidenceCheck], paths: &[String], e2e_paths: &[String]) -> String {
-    if e2e_paths.is_empty() || required.contains(&EvidenceCheck::E2e) {
+/// What the worker's prompt says of the e2e (ADR-t1233-2 decision 1): the
+/// runtime runs it on the host after the review passes, so the worker does
+/// not. Only when the run may need it (the task asks for it, or the
+/// repository names `[e2e] paths` its diff may touch); empty otherwise.
+fn e2e_line(task: &Task, e2e_paths: &[String]) -> String {
+    if e2e_paths.is_empty() && !task.required_evidence().contains(&EvidenceCheck::E2e) {
         return String::new();
     }
-    let outside = !paths.is_empty()
-        && paths.iter().all(|path| {
-            !path.contains(['*', '?'])
-                && !e2e_paths
-                    .iter()
-                    .any(|glob| crate::domain::scope::glob_matches(glob, path))
-        });
-    let expected = if outside {
-        "Expected for this task: not required (its paths touch none of them)"
-    } else {
-        "Expected for this task: required only if your diff touches one of them"
-    };
-    format!(
-        "E2E evidence is decided by your diff: validation requires `e2e` (passed with evidence in the receipt, or the run waits for a session to add it) when the change from the base commit touches any of these paths from the repository's dagq.toml [e2e] paths: {}. {expected}; when it touches none, report `e2e` as not_applicable with that reason.\n",
-        e2e_paths.join(", ")
-    )
-}
-
-/// What a worker's local e2e may pass under (ADR-t1165-1 decision 6): the
-/// marks of `.config/e2e-quarantine.toml` in the landing branch's committed
-/// tree (read by `Supervisor::e2e_marks`, never from the run's worktree)
-/// that hold now ([`e2e_quarantine::holding`]), the one rerun by name of a
-/// failed e2e, how the receipt's `e2e` reads when a mark passes it, and
-/// when a mark does not. Empty without such marks, which leaves the prompt
-/// as before.
-pub(crate) fn e2e_marks_line(task: &Task, marks: &[Mark]) -> String {
-    if marks.is_empty() {
-        return String::new();
-    }
-    let list: Vec<String> = marks
-        .iter()
-        .map(|mark| {
-            format!(
-                "{} (fixed by task {}, until {}: {})",
-                mark.name, mark.task, mark.until, mark.reason
-            )
-        })
-        .collect();
-    format!(
-        "E2E marks that hold now ({file} in the landing branch's committed tree): {list}. When you run the required e2e and tests fail, rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more. A test that passes its rerun is flaky: name it in the e2e evidence. If every test that fails its rerun too is one of the marked tests above, your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/), and this task (task {task}) is not the task that fixes it, report `e2e` as passed and write in its evidence the tests passed under a mark and the result of their rerun. Otherwise, as without marks: fix the failure, or write the receipt with result failed.\n",
-        file = e2e_quarantine::FILE,
-        list = list.join("; "),
-        task = task.id(),
-    )
+    "E2E: do not run the e2e (tests/e2e.rs) yourself. When the run needs it (the task asks for it, or the diff touches the repository's dagq.toml [e2e] paths), the runtime runs it on the host after the review passes, before the run lands, and sends the run back to a session if it fails. Report `e2e` in the receipt as not_applicable with that reason.\n".to_owned()
 }
 
 /// What the worker's prompt says of a worker_question's `--topic`
@@ -1269,6 +1195,10 @@ pub(crate) enum ResumeKind {
     /// stood (task 960): do what the reason says holds it, and rewrite the
     /// receipt, which validation and review check again.
     SessionGone,
+    /// The e2e the runtime ran on the host after the review failed
+    /// (ADR-t1233-2 decision 3): fix the failed tests the reason names,
+    /// and the run is validated, reviewed and its e2e run again.
+    E2e,
 }
 
 /// The fixed resolution request the supervisor types into a resumed
@@ -1280,7 +1210,6 @@ pub(crate) fn resume_request(
     run: &TaskRun,
     request: &ResumeRequest,
     landed: &[PredecessorSummary],
-    e2e_marks: &[Mark],
 ) -> Result<String> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let route = Route::of(run);
@@ -1322,6 +1251,11 @@ pub(crate) fn resume_request(
             run.id(),
             task.id(),
             request.branch
+        ),
+        ResumeKind::E2e => format!(
+            "dagq: run {} (task {}) passed its review, but the e2e the runtime ran on the host before landing it failed, so the run is needs_session and is validated, reviewed and its e2e run again after this session.",
+            run.id(),
+            task.id()
         ),
         ResumeKind::SessionGone => format!(
             "dagq: run {} (task {}) passed its review, but its session's workspace was gone before the run could land, and the run cannot land as it stands, so the run is needs_session and is validated and reviewed again after this session.",
@@ -1373,6 +1307,12 @@ pub(crate) fn resume_request(
             request.main
         ));
         lines.push(format!("2. {checks}"));
+    } else if request.kind == ResumeKind::E2e {
+        lines.push(format!(
+            "1. Read the logs the reason names and fix the e2e tests that failed (each failed once more on its rerun by name) and commit; if {branch} moved, git rebase {} first. You may run a failed test by name to reproduce it (cargo test --locked --test e2e -- --ignored --exact <name>), but not the whole e2e: the runtime runs it again after the review.",
+            request.main
+        ));
+        lines.push(format!("2. {checks}"));
     } else if request.kind == ResumeKind::SessionGone {
         lines.push(format!(
             "1. Settle what the reason says holds the run in this worktree (finish or abort a rebase in progress, wait for the answer to an open worker_question, or commit the work the head holds) and commit; if {branch} moved, git rebase {} first.",
@@ -1396,13 +1336,6 @@ pub(crate) fn resume_request(
             _ => "",
         };
         lines.push(format!("2. {checks}{reproduce} Commit the result."));
-    }
-    let marks = e2e_marks_line(task, e2e_marks);
-    if !marks.is_empty() {
-        lines.push(format!("If you run the e2e: {}", marks.trim_end()));
-    }
-    if route == Route::Headless(Provider::Codex) {
-        lines.push(codex_worker_e2e_line());
     }
     lines.push("3. Keep the worktree clean.".to_owned());
     lines.push(format!("4. {}", route.stop()));
@@ -2566,7 +2499,6 @@ mod tests {
             &[],
             None,
             &[],
-            &[],
         )
         .unwrap();
         assert!(
@@ -2578,143 +2510,59 @@ mod tests {
             )),
             "{text}"
         );
-        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap();
+        let alone = prompt(&waiting, &own_run, None, &[], &[], &[], None, &[]).unwrap();
         assert!(alone.contains("Predecessor tasks: none\n"));
         assert!(!alone.contains("Carried over from run"));
     }
 
-    /// With `[e2e] paths` (ADR-t963-1 decision 2) the worker prompt says
-    /// the diff decides e2e and what it expects before the diff is made; a
-    /// task that requires e2e keeps its Required evidence line alone.
+    /// The worker and resume prompts tell the worker not to run the e2e,
+    /// which the runtime runs after the review (ADR-t1233-2): no command,
+    /// no marks and no exclusions for any provider. A run that cannot need
+    /// it reads nothing of the e2e.
     #[test]
-    fn the_worker_prompt_says_whether_its_diff_is_expected_to_owe_e2e() {
-        let own_run = run(7, RunStatus::Claimed, None);
-        let e2e = [
-            "src/infrastructure/**".to_owned(),
-            "tests/e2e.rs".to_owned(),
-        ];
-        let decided = "E2E evidence is decided by your diff";
-        let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let text = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &[]).unwrap();
-        assert!(text.contains(decided), "{text}");
-        assert!(
-            text.contains("src/infrastructure/**, tests/e2e.rs"),
-            "{text}"
-        );
-        assert!(text.contains("required only if your diff touches one of them"));
-        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap();
-        assert!(!none.contains(decided), "{none}");
-
-        assert_eq!(
-            e2e_expectation(&[], &["docs/**".to_owned()], &e2e),
-            e2e_expectation(&[], &[], &e2e),
-            "a glob of the task may touch anything"
-        );
-        assert!(
-            e2e_expectation(&[], &["src/domain/stats.rs".to_owned()], &e2e)
-                .contains("not required (its paths touch none of them)")
-        );
-        assert!(
-            e2e_expectation(&[], &["tests/e2e.rs".to_owned()], &e2e).contains("required only if")
-        );
-        assert_eq!(e2e_expectation(&[EvidenceCheck::E2e], &[], &e2e), "");
-    }
-
-    #[test]
-    fn only_codex_worker_prompts_name_the_host_permission_e2e_exclusions() {
-        let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let paths = ["tests/e2e.rs".to_owned()];
-        let codex = run_on(Provider::Codex, WorkerMode::Headless);
-        let codex_prompt = prompt(&task, &codex, None, &[], &[], &[], None, &paths, &[]).unwrap();
-        let line = codex_worker_e2e_line();
-        assert!(codex_prompt.contains(&line));
-        for (name, reason) in CODEX_WORKER_E2E_EXCLUSIONS {
-            assert!(line.contains(&format!("--skip {name}")));
-            assert!(line.contains(&format!("{name}: {reason}")));
-        }
-        let claude = run_on(Provider::Claude, WorkerMode::Headless);
-        let claude_prompt = prompt(&task, &claude, None, &[], &[], &[], None, &paths, &[]).unwrap();
-        assert!(!claude_prompt.contains("Codex worker E2E:"));
-        assert!(!claude_prompt.contains("--skip broker::"));
-        let request = ResumeRequest {
-            main: CommitSha::try_from(SHA).unwrap(),
-            branch: "main".into(),
-            reason: "evidence missing: e2e".into(),
-            kind: ResumeKind::EvidenceMissing,
-        };
-        assert!(
-            resume_request(&task, &codex, &request, &[], &[])
-                .unwrap()
-                .contains(&line)
-        );
-        assert!(
-            !resume_request(&task, &claude, &request, &[], &[])
-                .unwrap()
-                .contains("Codex worker E2E:")
-        );
-    }
-
-    /// The e2e marks that hold (ADR-t1165-1 decision 6) are named in the
-    /// worker prompt of a run that may owe e2e and in the resume request,
-    /// with the one rerun, how a mark passes `e2e` and when it does not;
-    /// without marks, or when the run owes no e2e, the prompt is as before.
-    #[test]
-    fn the_worker_and_resume_prompts_name_the_e2e_marks_that_hold() {
+    fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
         let own_run = run(7, RunStatus::Claimed, None);
         let e2e = ["tests/e2e.rs".to_owned()];
         let open = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
-        let marks = e2e_quarantine::parse(
-            "[[test]]\nname = \"broker::lands\"\nreason = \"flaky\"\ntask = 41\nuntil = 2026-10-15\n",
-        )
-        .unwrap();
-        let named = "broker::lands (fixed by task 41, until 2026-10-15: flaky)";
-        let marked = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &marks).unwrap();
-        for part in [
-            named,
-            ".config/e2e-quarantine.toml in the landing branch's committed tree",
-            "rerun each failed test once by name (cargo test --locked --test e2e -- --ignored --exact <name>), not more",
-            "your diff does not change that test (its function in tests/e2e.rs or under tests/e2e/)",
-            "this task (task 7) is not the task that fixes it, report `e2e` as passed",
-            "the tests passed under a mark and the result of their rerun",
-        ] {
-            assert!(marked.contains(part), "{part}: {marked}");
+        let line = "E2E: do not run the e2e (tests/e2e.rs) yourself.";
+        let codex = run_on(Provider::Codex, WorkerMode::Headless);
+        for worker in [&own_run, &codex] {
+            let text = prompt(&open, worker, None, &[], &[], &[], None, &e2e).unwrap();
+            assert!(text.contains(line), "{text}");
+            for gone in [
+                "E2E evidence is decided by your diff",
+                "E2E marks",
+                "Codex worker E2E",
+                "--skip",
+                "cargo test --locked --test e2e",
+            ] {
+                assert!(!text.contains(gone), "{gone}: {text}");
+            }
         }
-        let plain = prompt(&open, &own_run, None, &[], &[], &[], None, &e2e, &[]).unwrap();
-        assert_eq!(marked.replace(&e2e_marks_line(&open, &marks), ""), plain);
-        assert!(!plain.contains("E2E marks"), "{plain}");
-        let owes_none = prompt(&open, &own_run, None, &[], &[], &[], None, &[], &marks).unwrap();
-        assert_eq!(
-            owes_none,
-            prompt(&open, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap()
-        );
+        let none = prompt(&open, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        assert!(!none.contains("E2E"), "{none}");
         let required = task_with_evidence(8, vec![EvidenceCheck::E2e]);
-        assert!(
-            prompt(&required, &own_run, None, &[], &[], &[], None, &[], &marks)
-                .unwrap()
-                .contains(named)
-        );
+        let text = prompt(&required, &own_run, None, &[], &[], &[], None, &[]).unwrap();
+        assert!(text.contains(line), "{text}");
+        assert!(!text.contains("Required evidence"), "{text}");
 
         let request = ResumeRequest {
             main: CommitSha::try_from(SHA).unwrap(),
             branch: "main".into(),
-            reason: "why".into(),
-            kind: ResumeKind::EvidenceMissing,
+            reason: "the e2e failed: a; see /runs/r/e2e-1.log".into(),
+            kind: ResumeKind::E2e,
         };
-        let resumed = resume_request(&open, &own_run, &request, &[], &marks).unwrap();
-        assert!(
-            resumed.contains("If you run the e2e: E2E marks"),
-            "{resumed}"
-        );
-        assert!(resumed.contains(named), "{resumed}");
-        let without = resume_request(&open, &own_run, &request, &[], &[]).unwrap();
-        assert!(!without.contains("E2E marks"), "{without}");
-        let precheck = ResumeRequest {
-            kind: ResumeKind::Precheck,
-            ..request
-        };
-        let resumed = resume_request(&open, &own_run, &precheck, &[], &marks).unwrap();
-        assert!(resumed.contains(named), "{resumed}");
-        assert_eq!(e2e_marks_line(&open, &[]), "");
+        for worker in [&own_run, &codex] {
+            let resumed = resume_request(&open, worker, &request, &[]).unwrap();
+            assert!(
+                resumed.contains("the e2e the runtime ran on the host before landing it failed"),
+                "{resumed}"
+            );
+            assert!(resumed.contains("Reason: the e2e failed: a; see /runs/r/e2e-1.log"));
+            assert!(resumed.contains("--exact <name>"), "{resumed}");
+            assert!(!resumed.contains("Codex worker E2E"), "{resumed}");
+            assert!(!resumed.contains("E2E marks"), "{resumed}");
+        }
     }
 
     /// The worker, resume and revise prompts show the verification commands
@@ -2727,7 +2575,7 @@ mod tests {
         let own_run = run(7, RunStatus::Claimed, None);
         let checks = "the repository's instructions (AGENTS.md or CLAUDE.md) ask a worker to run";
 
-        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[], &[]).unwrap();
+        let worker = prompt(&verified, &own_run, None, &[], &[], &[], None, &[]).unwrap();
         assert!(worker.contains(
             "Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n[\n  \"make gate\"\n]\n"
         ));
@@ -2756,7 +2604,6 @@ mod tests {
             &[],
             Some(&inheritance),
             &[],
-            &[],
         )
         .unwrap();
         let (before, carried) = retried.split_once("Carried over from run").unwrap();
@@ -2780,7 +2627,7 @@ mod tests {
                 reason: "why".into(),
                 kind,
             };
-            let text = resume_request(&verified, &own_run, &request, &[], &[]).unwrap();
+            let text = resume_request(&verified, &own_run, &request, &[]).unwrap();
             assert!(text.contains(checks), "{kind:?}: {text}");
             assert!(text.contains(default), "{kind:?}: {text}");
             assert!(!text.contains("Rerun the verification commands"), "{text}");
@@ -3083,7 +2930,7 @@ mod tests {
     /// request, the revise, the receipt mismatch, the stale receipt, the
     /// nudge, an answer and a recovery job's instruction.
     fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
-        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None, &[], &[]).unwrap()];
+        let mut texts = vec![prompt(task, run, None, &[], &[], &[], None, &[]).unwrap()];
         for kind in [
             ResumeKind::Landing,
             ResumeKind::EvidenceMissing,
@@ -3093,6 +2940,7 @@ mod tests {
             ResumeKind::Triage,
             ResumeKind::Recheck,
             ResumeKind::SessionGone,
+            ResumeKind::E2e,
         ] {
             let request = ResumeRequest {
                 main: CommitSha::try_from(SHA).unwrap(),
@@ -3100,7 +2948,7 @@ mod tests {
                 reason: "why".into(),
                 kind,
             };
-            texts.push(resume_request(task, run, &request, &[], &[]).unwrap());
+            texts.push(resume_request(task, run, &request, &[]).unwrap());
         }
         texts.push(revise_request(task, run, 1, &["fix it".into()]).unwrap());
         texts.push(revise_mismatch_request(run, "the revise", "stale").unwrap());
@@ -3165,7 +3013,7 @@ mod tests {
                     "{provider:?}: {text}"
                 );
             }
-            for request in &texts[1..12] {
+            for request in &texts[1..13] {
                 assert!(request.starts_with(HEADLESS_NEXT_TURN), "{request}");
                 assert!(request.contains(HEADLESS_STOP), "{request}");
                 assert!(request.contains("pkill"), "{request}");
@@ -3176,25 +3024,22 @@ mod tests {
                 );
                 assert!(request.contains("and end the turn"), "{request}");
             }
-            assert!(texts[15].ends_with(HEADLESS_GO_ON));
-            assert!(texts[12].starts_with(HEADLESS_NEXT_TURN));
-            assert!(texts[12].contains("dagq: the previous turn of run"));
-            assert!(texts[13].starts_with("answer to ask 3: blue\n\n"));
-            assert!(texts[13].ends_with(HEADLESS_GO_ON));
-            assert!(texts[14].starts_with("dagq: the supervisor's recovery job for run"));
+            assert!(texts[16].ends_with(HEADLESS_GO_ON));
+            assert!(texts[13].starts_with(HEADLESS_NEXT_TURN));
+            assert!(texts[13].contains("dagq: the previous turn of run"));
+            assert!(texts[14].starts_with("answer to ask 3: blue\n\n"));
             assert!(texts[14].ends_with(HEADLESS_GO_ON));
+            assert!(texts[15].starts_with("dagq: the supervisor's recovery job for run"));
+            assert!(texts[15].ends_with(HEADLESS_GO_ON));
         }
         // Codex reviews its own diff and does not owe subagent_review.
         let codex = session_texts(&task, &run_on(Provider::Codex, WorkerMode::Headless));
         assert!(codex[0].contains("You have no subagent to review your change"));
-        assert!(
-            codex[0].contains("Required evidence: e2e (each"),
-            "{}",
-            codex[0]
-        );
+        // No worker backs e2e (ADR-t1233-2).
+        assert!(!codex[0].contains("Required evidence"), "{}", codex[0]);
         let claude = session_texts(&task, &run_on(Provider::Claude, WorkerMode::Headless));
         assert!(claude[0].contains("and subagent review."));
-        assert!(claude[0].contains("Required evidence: e2e, subagent_review (each"));
+        assert!(claude[0].contains("Required evidence: subagent_review (each"));
     }
 
     /// Task 978: a task that needs a path outside its declared paths ends
@@ -3282,9 +3127,9 @@ mod tests {
         assert!(first.contains(
             "After submitting, report the outcome briefly and stop; do not run /exit yourself."
         ));
-        assert!(first.contains("Perform applicable unit tests, E2E, and subagent review."));
+        assert!(first.contains("Perform applicable unit tests and subagent review."));
         assert!(!first.contains(HEADLESS_WORKER));
-        for request in &texts[1..12] {
+        for request in &texts[1..13] {
             assert!(request.starts_with("dagq: "), "{request}");
             assert!(request.contains(STOP_BACKGROUND), "{request}");
             assert!(
@@ -3293,12 +3138,12 @@ mod tests {
                 "{request}"
             );
         }
-        assert!(texts[12].starts_with(
+        assert!(texts[13].starts_with(
             "dagq: run 00000000-0000-4000-8000-000000000001 has been idle for 10 minutes"
         ));
-        assert_eq!(texts[13], "answer to ask 3: blue");
+        assert_eq!(texts[14], "answer to ask 3: blue");
         assert_eq!(
-            texts[14],
+            texts[15],
             format!(
                 "dagq: the supervisor's recovery job for run {RUN} (alert stalled) asks: write the receipt"
             )

@@ -63,7 +63,8 @@ impl Phase {
     /// slot, or for its session's `/exit` before it lands.
     fn waits_to_land(&self) -> bool {
         match self {
-            Phase::AwaitingSlot => true,
+            // Its e2e (ADR-t1233-2) comes before the slot.
+            Phase::AwaitingSlot | Phase::AwaitingE2e | Phase::E2e(_) => true,
             Phase::Exiting(watch) => matches!(watch.then, AfterExit::Land),
             _ => false,
         }

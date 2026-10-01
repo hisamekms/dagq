@@ -4,8 +4,8 @@ type: design
 title: "`stats`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - adr-t639-1
@@ -132,7 +132,9 @@ related:
 | `conflict` | `requested: true`の`conflict_precheck` | merge-treeの事前判定が見つけた衝突を、生きているsessionが解消する間 |
 | `ask` | `ask_opened`（そのrunのask。observerの`blocked`と`planner_question`はrunを止めないので除く。timelineの`holds_the_run`と同じ）、`review_failed`、`integration_error`、`integration_held` | 人の答えを待つ間（`approve_landing`、`worker_question`、`stalled`など）。`integration_error`と`integration_held`（検証のhostの失敗がやり直しでも落ちた。task 639）の後のrunはleaseを外されて`awaiting_integration`に戻り、人の`review and integrate`を待つ |
 | `resume` | payloadの`status`が`needs_session`のイベント（`integration_deferred`、`landing_decided`の`send_back`、evidenceの不足など） | `needs_session`で待つ間とresumeしたsessionの作業 |
-| `landing_queue` | `landing_queued`、runtimeが適用する`approve_landing`の`ask_answered` | 着地slotの順番待ち（他のrunの`integrate`が終わるのを待つ。`land`の答えで承認されたrunは空きslotも待つ） |
+| `landing_queue` | `landing_queued`、runtimeが適用する`approve_landing`の`ask_answered`、`run_e2e_finished` | 着地slotの順番待ち（他のrunの`integrate`が終わるのを待つ。`land`の答えで承認されたrunは空きslotも待つ）。e2eが流せず（`outcome: unavailable`）流し直しを待つ間もここ |
+| `e2e_wait` | `run_e2e_waiting` | 着地の前のe2e（[Review](review.md#着地の前のe2e)、ADR-t1233-2）を、同じsupervisorの他のrunのe2eが終わるまで待つ間 |
+| `e2e` | `run_e2e_started` | 着地の前のe2eをhostで流す間（hostのlockを待つ秒も含む。それだけの秒は`run_e2e_finished`の`lock_wait_secs`）。落ちた`run_e2e_failed`は`status: needs_session`なので`resume`に移る |
 | `rebase` | `integration_started` | `integrate`のreceiptの照合とrebase |
 | `verify` | `integration_rebased` | `integrate`の範囲の検査、`verification_commands`、mainへのcommit |
 

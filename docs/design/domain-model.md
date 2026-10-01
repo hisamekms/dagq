@@ -4,8 +4,8 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: domain
 related:
   - adr-t946-1
@@ -242,6 +242,7 @@ storeの保存は「`stored_run`で読む → domainのコマンド → `save_ru
 | `record_landing_decision(run, to, reason, payload)` | `decide_landing` | `landing_decided`（payloadにstatusとreason） |
 | `record_live_park(run, reason, payload)` | `park_live` | `recovery_parked`（payloadにstatusとreason） |
 | `record_gone_session_park(run, reason, payload)` | `park_gone_session` | `session_gone_parked`（payloadにcode `session_gone`、statusとreason。task 960） |
+| `record_e2e_park(run, reason, payload)` | `park_e2e_failed` | `run_e2e_failed`（payloadにcode `e2e_failed`、statusとreason。reviewのpassの後にruntimeが流したe2eが落ちた`awaiting_integration`のrunを`needs_session`にする。ADR-t1233-2、[Review](supervisor-lifecycle/review.md#着地の前のe2e)） |
 | `record_recheck_park(run, reason, payload)` | `park_after_recheck` | `landing_recheck_failed`（payloadに`action: resumed`とstatusとreason） |
 | `record_exhausted_resumes(run, reason, &Exhaustion, resumes, &events)` | `exhaust_resumes` | `Exhaustion::Recover`は`recovery_requested`（`alert: resume_exhausted`、次のattempt、最後の`resume_finished`をevidence）、`Exhaustion::Inherit`は`auto_repaired`（`repair: inherit_retry`）と`triage_finished`（`action: retry_inherit`） |
 
@@ -408,6 +409,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `triage_resume` | triage（かその`decide`のaskへの人の回答）がrunをsessionに戻した | |
 | `resume_exhausted` | 最後のresumeの後もsessionが要る | |
 | `session_gone` | 引き継いだsupervisorが、`/exit`が届かなかったrunのworkspaceがもう無いのを見つけたが、runがそのsessionなしでは着地できなかった（HEADがreviewしたcommitでない・`worker_question`が開いている・rebaseの途中）ので、着地せずにresumeを待つ（task 960） | |
+| `e2e_failed` | reviewのpassの後にruntimeがhostで流したe2eが落ち、上限の内に終わり、名前で流し直しても落ちたtestが印で通らなかった（上限切れと、流し直しの上限切れ・始められない流し直しは含めない。それらは`run_e2e_finished`の`unavailable`で流し直す）ので、着地せずにresumeを待つ（ADR-t1233-2、task 1239） | |
 | `orphaned` | runの登録processが死んでいて`recover`された | |
 | `push_failed` | 着地したmainのpushが失敗した | |
 | `git_failed` | runtimeのGitコマンドが失敗した（着地したworktreeの削除） | |
@@ -440,6 +442,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `triage_decided` | 復旧jobの`decide`のaskに`resume`と答えた | `triage_resume`。`retry` / `cancel`は持たない |
 | `landing_decided` | `approve_landing`のaskの`send_back` / `cancel` | `sent_back` / `cancelled` |
 | `session_gone_parked` | 引き継いだsupervisorが、workspaceの無い`/exit`の届かなかったrunを着地させずに`needs_session`にした（task 960。[Receipt and session exit](supervisor-lifecycle/receipt-and-session-exit.md)） | `session_gone` |
+| `run_e2e_failed` | reviewのpassの後にruntimeが流したe2eが落ち、runを着地させずに`needs_session`にした（ADR-t1233-2。[Review](supervisor-lifecycle/review.md#着地の前のe2e)） | `e2e_failed` |
 | `cleanup_failed` | workspaceのclose（受理後、resume workspace、triage）の失敗 | `backend_*`（triageは、なければ`other`。triageのものは`by: triage`を持ち`last_error`を変えない） |
 | `cleanup_failed` | 着地したworktreeとbranchの削除の失敗 | `git_failed` |
 | `exit_request_timed_out` | `/exit`の応答なし | `exit_timeout` |

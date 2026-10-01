@@ -444,7 +444,7 @@ fn e2e_gate(
     };
     // The gates before this one, for a marked test failing in a row
     // (ADR-t1165-1).
-    let history = queue.update_events(super::e2e_verdict::HISTORY)?;
+    let history = queue.e2e_gate_events(super::e2e_verdict::HISTORY)?;
     let verdict = super::e2e_verdict::judge(&outcome, settings, &history, ports.clock.now());
     if let Some(failure) = &verdict.failure {
         let error = anyhow::anyhow!("{failure}");

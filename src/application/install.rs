@@ -145,6 +145,19 @@ pub struct E2eSettings {
     /// The host's offset from UTC in seconds, for the local date a mark's
     /// `until` is read against (ADR-t1165-1).
     pub utc_offset_secs: i64,
+    /// The host's one e2e at a time (ADR-t1233-2 decision 4): the file the
+    /// e2e holds a lock on while it runs, waiting for it first. The
+    /// automatic update's gate, `install`'s and the runtime's e2e of the
+    /// runs take the same one ([`e2e_lock_path`]); `None` takes none.
+    pub lock: Option<PathBuf>,
+}
+
+/// The host's e2e lock of the queues under `queue_dir`'s parent, dagq's
+/// data directory (`<data dir>/e2e.lock`): every queue of the host takes
+/// the same, and an e2e's throwaway queues, made under a data directory of
+/// their own, do not take the one of the e2e that runs them.
+pub fn e2e_lock_path(queue_dir: &Path) -> Option<PathBuf> {
+    queue_dir.parent().map(|data| data.join("e2e.lock"))
 }
 
 impl E2eSettings {
@@ -219,6 +232,9 @@ pub struct E2eOutcome {
     pub rerun: Option<E2eRerun>,
     /// The marks the gate found in the checkout (ADR-t1165-1).
     pub quarantine: crate::domain::e2e_quarantine::QuarantineFile,
+    /// How long it waited for the host's e2e lock before it started
+    /// ([`E2eSettings::lock`], ADR-t1233-2 decision 4).
+    pub lock_wait_secs: u64,
 }
 
 /// How the rerun of the tests the e2e failed went (ADR-t1165-1): the same
@@ -570,7 +586,7 @@ may pass --skip-e2e to install without it)",
                     let history = db
                         .filter(|db| files.is_file(db))
                         .and_then(|db| (ports.queues)(db).open().ok())
-                        .and_then(|queue| queue.update_events(super::e2e_verdict::HISTORY).ok())
+                        .and_then(|queue| queue.e2e_gate_events(super::e2e_verdict::HISTORY).ok())
                         .unwrap_or_default();
                     let verdict =
                         super::e2e_verdict::judge(&outcome, settings, &history, ports.clock.now());

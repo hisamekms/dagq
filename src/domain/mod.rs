@@ -733,6 +733,7 @@ pub mod release_update;
 pub mod resume;
 pub mod review_reason;
 pub mod run;
+pub mod run_e2e;
 pub mod run_env;
 pub mod scope;
 pub mod search;
@@ -1577,6 +1578,13 @@ pub enum AttentionNext {
     /// decision 3): a person reads `dagq service status` and the service's
     /// log, and runs `up` again. It ends once the service runs again.
     QueueServiceStatus,
+    /// The runtime's e2e of a run after its review could not run several
+    /// times in a row (cmux not answering, a `[run.env]` that cannot be
+    /// read: `run_e2e_finished` with `outcome: unavailable` and
+    /// `attention: true`, ADR-t1233-2 decision 3): a person reads its error
+    /// and log and fixes the host. The supervisor keeps trying; it ends
+    /// once the run's e2e runs.
+    CheckE2e,
     /// The supervisor gave up on a run whose session it kept open through
     /// validation, review, revise or its `/exit`, and could not send that
     /// session `/exit` (a `runtime_error` with `lease_released` and
@@ -1634,6 +1642,7 @@ impl fmt::Display for AttentionNext {
             Self::FixPush => f.write_str("fix the push command"),
             Self::BrokerStatus => f.write_str("dagq broker status"),
             Self::QueueServiceStatus => f.write_str("dagq service status"),
+            Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
         }
     }
@@ -2924,6 +2933,7 @@ mod attention_tests {
         assert_eq!(ExitSession.to_string(), "exit the session");
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(InstallTool.to_string(), "install tool");
+        assert_eq!(CheckE2e.to_string(), "check the e2e host");
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(ReportReview.to_string(), "report the review");
         assert_eq!(CheckReview.to_string(), "check the failed review");

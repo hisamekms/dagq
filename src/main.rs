@@ -2306,6 +2306,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     utc_offset_secs: dagq::infrastructure::clock::local_utc_offset(
                         generators.clock.now(),
                     ),
+                    lock: dagq::application::install::e2e_lock_path(&location.queue_dir),
                 })
             }
             Source::Checkout(_) if skip_e2e => E2eGate::Skip,

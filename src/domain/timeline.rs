@@ -11,6 +11,10 @@
 //! - `waiting_ask`: an ask of the run that holds it (every kind but the
 //!   observer's `blocked` and the planner's `planner_question`) is open.
 //! - `integrating`: `integrate` is rebasing and verifying the run.
+//! - `e2e` / `waiting_e2e`: the runtime runs the run's e2e on the host
+//!   after its review, or the run waits for another run's to end
+//!   (`run_e2e_started` / `run_e2e_waiting` until `run_e2e_finished` or
+//!   `run_e2e_failed`, ADR-t1233-2).
 //! - In a session the supervisor watches (the worker's own after
 //!   `agent_started`, a `resume_started`, a `revise_requested`, a
 //!   `conflict_precheck` sent to the session), until `session_exited`:
@@ -100,6 +104,9 @@ struct State {
     receipt: bool,
     accepted: bool,
     integrating: bool,
+    /// The runtime's e2e after the review (ADR-t1233-2): `e2e` while it
+    /// runs, `waiting_e2e` while it waits for another run's.
+    e2e: Option<&'static str>,
     open_asks: BTreeSet<i64>,
 }
 
@@ -152,6 +159,9 @@ impl State {
             "session_exited" => self.phase = None,
             "validation_finished" => self.accepted = payload["accepted"] == true,
             "integration_started" => self.integrating = true,
+            "run_e2e_waiting" => self.e2e = Some("waiting_e2e"),
+            "run_e2e_started" => self.e2e = Some("e2e"),
+            "run_e2e_finished" | "run_e2e_failed" => self.e2e = None,
             "ask_opened" if holds_the_run(payload) => {
                 if let Some(id) = ask_id(payload) {
                     self.open_asks.insert(id);
@@ -177,6 +187,7 @@ impl State {
                 | "resume_started"
         ) {
             self.integrating = false;
+            self.e2e = None;
         }
     }
 
@@ -189,6 +200,8 @@ impl State {
             gap.ask_ids = self.open_asks.iter().copied().collect();
         } else if self.integrating {
             gap.reason = "integrating";
+        } else if let Some(e2e) = self.e2e {
+            gap.reason = e2e;
         } else if let Some(phase) = self.phase {
             gap.phase = Some(phase);
             gap.reason = if self.idle == Some(true) {
@@ -504,6 +517,26 @@ mod tests {
             (Some("resume"), None, None)
         );
         assert_eq!(last.secs, 3600);
+    }
+
+    /// The runtime's e2e after the review (ADR-t1233-2) and the wait for
+    /// another run's are gaps of their own.
+    #[test]
+    fn the_e2e_after_the_review_and_its_wait_have_their_reasons() {
+        let run = events(&[
+            ("validation_finished", json!({"accepted": true}), "00:00:00"),
+            ("session_exited", json!({}), "00:00:01"),
+            ("run_e2e_waiting", json!({}), "00:00:02"),
+            ("run_e2e_started", json!({}), "00:20:00"),
+            ("run_e2e_finished", json!({"outcome": "passed"}), "00:50:00"),
+            ("integration_started", json!({}), "01:00:00"),
+            ("run_integrated", json!({}), "01:00:30"),
+        ]);
+        let found = gaps(&run, 60, None);
+        assert_eq!(
+            reasons(&found),
+            [(3, "waiting_e2e"), (4, "e2e"), (5, "waiting_integration")]
+        );
     }
 
     #[test]

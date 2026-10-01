@@ -25,6 +25,33 @@ impl SqliteQueue {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The latest `limit` events of the e2e gates, newest first (see
+    /// [`crate::application::RunLog::e2e_gate_events`]).
+    pub fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        use crate::domain::event_kind::{RUN_E2E_FAILED, RUN_E2E_FINISHED};
+        let kinds = [
+            crate::domain::UPDATE_E2E_PASSED,
+            crate::domain::UPDATE_FAILED,
+            RUN_E2E_FINISHED,
+            RUN_E2E_FAILED,
+        ];
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT * FROM run_events
+                 WHERE kind IN (SELECT value FROM json_each(?1))
+                 ORDER BY id DESC LIMIT ?2",
+            )?
+            .query_map(
+                params![
+                    serde_json::to_string(&kinds)?,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                event_row,
+            )?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Whether the run has recorded at least one event of `kind`; an
     /// adopter rebuilds what the previous supervisor already did from these.
     pub fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
@@ -661,6 +688,9 @@ impl SqliteQueue {
 impl RunLog for SqliteQueue {
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         SqliteQueue::update_events(self, limit)
+    }
+    fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        SqliteQueue::e2e_gate_events(self, limit)
     }
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::active_runs(self)

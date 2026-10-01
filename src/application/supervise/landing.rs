@@ -606,7 +606,7 @@ impl Supervisor<'_> {
                     kind: ResumeKind::Precheck,
                 };
                 let message = with_instruction(
-                    resume_request(&task, run, &request, &landed, &self.e2e_marks(run))?,
+                    resume_request(&task, run, &request, &landed)?,
                     self.verifier.language().as_ref(),
                 );
                 let run_dir = Path::new(run.run_dir().context("missing run directory")?);
@@ -868,6 +868,15 @@ impl Supervisor<'_> {
         let Some((_, run)) = queued.into_iter().next() else {
             return Ok(());
         };
+        // A run that still needs its e2e (ADR-t1233-2) runs it in a slot
+        // of its own first, and lands from there.
+        if self.e2e_due(&run)?.is_some() {
+            if let Some(run) = self.queue.lease_for_e2e(run.id(), &self.token)? {
+                info!(run_id = %run.id(), "run {} runs its e2e before it lands as queued", run.id());
+                self.slots.push(Slot::new(run, Phase::AwaitingSlot));
+            }
+            return Ok(());
+        }
         let main = self.repository.main_head()?;
         let landing = self.queue.begin_integration(run.id(), &self.token, &main)?;
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());

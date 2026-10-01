@@ -1558,6 +1558,17 @@ pub trait RunTransitions {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
+    /// Park a run awaiting integration leased to `token` whose e2e after
+    /// its review failed (ADR-t1233-2 decision 3): it becomes
+    /// `needs_session` with `reason`, recorded as `run_e2e_failed` with
+    /// `payload`; the lease stays until the supervisor gives it back.
+    fn park_e2e_failed(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// Park a run awaiting integration that the landing recheck found no
     /// longer landing on main (ADR-0068 decision 3), leased to `token` or
     /// to nobody; `None` when it is not so any more.
@@ -1602,6 +1613,9 @@ pub trait RunRecovery {
     /// is stale) to `token` for its review; `None` when another process
     /// took it or it changed meanwhile.
     fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
+    /// [`Self::lease_for_review`] for the e2e a run queued to land runs
+    /// first (ADR-t1233-2).
+    fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
     /// Recover an orphaned run whose `checked_processes` registered
     /// processes the caller found dead.
     fn recover_run(
@@ -1860,6 +1874,13 @@ pub trait RunLog {
     /// The latest `limit` steps of the automatic update (its `update_*`
     /// queue events), newest first.
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
+    /// The latest `limit` events of the e2e gates, newest first: the
+    /// automatic update's (`update_e2e_passed`, `update_failed`) and the
+    /// runtime's e2e of the runs (`run_e2e_finished`, `run_e2e_failed`,
+    /// ADR-t1233-2 decision 5), for a marked test failing in a row.
+    fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
+        self.update_events(limit)
+    }
     fn active_runs(&self) -> Result<Vec<TaskRun>>;
     /// Every run of the queue, oldest first.
     fn all_runs(&self) -> Result<Vec<TaskRun>>;

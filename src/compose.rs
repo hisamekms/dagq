@@ -297,6 +297,8 @@ pub struct SuperviseOptions {
     /// The automatic update of the supervisor's binary (ADR-0045 decision
     /// 17): off unless `supervise --auto-update`.
     pub update: UpdateSettings,
+    /// The e2e the supervisor runs of a run after its review (ADR-t1233-2).
+    pub run_e2e: RunE2eOptions,
     /// `supervise --max-load` (task 327): no new run is claimed while the
     /// 1-minute load average is above it; `None` (the default here) holds
     /// for no load.
@@ -510,6 +512,7 @@ impl SuperviseOptions {
             handoff_token: None,
             mode: None,
             update: UpdateSettings::default(),
+            run_e2e: RunE2eOptions::default(),
             // The CLI's `--max-load` has a default; a caller of the library
             // (the tests) holds for no load unless it asks to.
             max_load: None,
@@ -586,6 +589,32 @@ impl SuperviseOptions {
             passes: self.passes.clone(),
         }
     }
+}
+
+/// How the supervisor runs the e2e of a run after its review (ADR-t1233-2):
+/// in dagq's source `cargo test --locked --test e2e -- --ignored` in the
+/// run's worktree, with the cmux the supervisor uses, the `[run.env]` of
+/// the main checkout, podman checked for the broker's tests, the host's e2e
+/// lock and [`installation::E2E_TIMEOUT`]. Elsewhere there is none unless
+/// `command` gives one.
+#[derive(Debug, Clone, Default)]
+pub struct RunE2eOptions {
+    /// A shell command in place of the e2e (tests): it runs in any
+    /// repository, with no cmux to ping and no podman to check unless
+    /// `cmux` names one.
+    pub command: Option<String>,
+    /// How long it may run; `None` is [`installation::E2E_TIMEOUT`].
+    pub timeout: Option<Duration>,
+    /// The cmux it pings and cleans up after, in place of the supervisor's.
+    pub cmux: Option<PathBuf>,
+    /// How long a run waits before its e2e that could not run is tried
+    /// again; `None` is [`crate::domain::run_e2e::RETRY_SECS`] (tests
+    /// shorten it).
+    pub retry: Option<Duration>,
+    /// The host's e2e lock it takes, in place of
+    /// [`installation::e2e_lock_path`] of the queue (which a `command`
+    /// does not take unless it is given here).
+    pub lock: Option<PathBuf>,
 }
 
 /// Run and monitor tasks until the loop ends (see
@@ -960,6 +989,56 @@ pub fn supervise_with_reviewer(
             }
         }
     };
+    let run_e2e = {
+        let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let command = options.run_e2e.command.clone();
+        let stub = command.is_some();
+        if stub || crate::infrastructure::adapters::is_dagq_source(&main_checkout) {
+            Some(crate::application::supervise::RunE2ePort {
+                settings: installation::E2eSettings {
+                    command,
+                    timeout: options.run_e2e.timeout.unwrap_or(installation::E2E_TIMEOUT),
+                    cmux: options
+                        .run_e2e
+                        .cmux
+                        .clone()
+                        .or_else(|| (!stub).then(|| layout.cmux.clone())),
+                    run_env_root: Some(main_checkout.clone()),
+                    queue_dir: Some(queue_dir.clone()),
+                    scratch: queue_dir.join("e2e"),
+                    // The run's, set for each e2e.
+                    log: queue_dir.join("e2e.log"),
+                    // The broker's e2e, as the automatic update's gate
+                    // checks it (ADR-t1162-1); a command in place of the
+                    // e2e has none.
+                    podman: if stub {
+                        None
+                    } else {
+                        Some(installation::PodmanCheck {
+                            executable: None,
+                            lock_home: crate::infrastructure::broker_podman::machine_lock_home()?,
+                            reconnect: crate::application::broker::RECONNECT,
+                        })
+                    },
+                    utc_offset_secs: 0,
+                    lock: options.run_e2e.lock.clone().or_else(|| {
+                        (!stub)
+                            .then(|| installation::e2e_lock_path(&queue_dir))
+                            .flatten()
+                    }),
+                },
+                run: Arc::new(|worktree, settings| {
+                    crate::infrastructure::e2e_gate::run(worktree, None, settings)
+                }),
+                retry: options
+                    .run_e2e
+                    .retry
+                    .unwrap_or(Duration::from_secs(crate::domain::run_e2e::RETRY_SECS)),
+            })
+        } else {
+            None
+        }
+    };
     let ports = Ports {
         // The supervisor's own transitions (ADR-t728-1 decision 4).
         queues: Arc::new(SqliteOpener {
@@ -1037,6 +1116,7 @@ pub fn supervise_with_reviewer(
                 start_timeout: settings.start_timeout,
             }
         }),
+        run_e2e,
         layout,
     };
     supervisor::supervise(
@@ -1826,6 +1906,7 @@ same in one step",
                 }),
             },
             utc_offset_secs: clock::local_utc_offset(self.generators.clock.now()),
+            lock: installation::e2e_lock_path(&location.queue_dir),
         };
         update::run(
             &update::JobPorts {

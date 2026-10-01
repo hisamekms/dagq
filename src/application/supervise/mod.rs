@@ -108,6 +108,7 @@ mod deliver;
 mod dialog;
 mod disk;
 mod draft_planner;
+mod e2e;
 mod exit;
 mod exit_retry;
 mod file_time;
@@ -145,6 +146,7 @@ mod waiting;
 
 pub use self::broker::{BROKER_FAILURES, BROKER_HEALTH_INTERVAL, BrokerPort};
 pub(crate) use self::deliver::{Input, Submission, submit_input};
+pub use self::e2e::RunE2ePort;
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub use self::host_metrics::HostMetricsPort;
@@ -401,6 +403,10 @@ pub struct Ports<'a> {
     /// Keeps the queue's service running (ADR-t1233-4 decision 2); `None`
     /// keeps none and holds nothing for it (a `--once` pass, the tests).
     pub queue_service: Option<QueueServicePort>,
+    /// Runs the e2e of a run that needs it after its review (ADR-t1233-2);
+    /// `None` when the repository has no e2e the runtime knows, and such a
+    /// run lands without one (`not_configured`).
+    pub run_e2e: Option<RunE2ePort>,
     pub layout: Layout,
 }
 
@@ -729,6 +735,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         disk: disk::DiskWatch::default(),
         free: None,
         cleanup: cleanup::CleanupWatch::default(),
+        run_e2e: ports.run_e2e.clone(),
+        e2e: e2e::E2eWaits::default(),
     };
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
@@ -963,6 +971,11 @@ struct Supervisor<'a> {
     free: Option<u64>,
     /// The cleanup of ended runs' worktrees off the loop (task 405).
     cleanup: cleanup::CleanupWatch,
+    /// Runs the e2e of the runs after their review (ADR-t1233-2).
+    run_e2e: Option<RunE2ePort>,
+    /// The runs waiting for the e2e, and when one that could not run is
+    /// tried again.
+    e2e: e2e::E2eWaits,
 }
 
 /// One executing run between provisioning and rest.
@@ -1004,6 +1017,15 @@ enum Phase {
     /// A run to land (a passed review, or an approved resolved resume)
     /// waits for the single integration slot, keeping its lease.
     AwaitingSlot,
+    /// A passed run waits for its e2e to start (ADR-t1233-2): another
+    /// run's e2e runs, one that could not run waits to be tried again, or a
+    /// handoff starts none. Unlike `AwaitingSlot` nothing is about to start,
+    /// so a handoff need not wait for it: the next process rebuilds the run
+    /// as an adopted one, which waits for the slot again.
+    AwaitingE2e,
+    /// The e2e of a passed run runs on the host off the loop before it
+    /// lands (ADR-t1233-2); the run keeps its lease and slot.
+    E2e(e2e::E2eWatch),
     /// The run lands off the loop, like validation; the landing releases
     /// the lease itself.
     Landing(Option<thread::JoinHandle<Result<IntegrationOutcome>>>),
@@ -2238,6 +2260,30 @@ impl Supervisor<'_> {
                     self.queue.release_lease(slot.run.id(), &self.token)?;
                     return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
                 }
+                // An e2e that could not run waits to be tried again; a
+                // supervisor that stops cannot wait for it, and leaves the
+                // run awaiting integration as above (one that hands off
+                // leaves it to the next process, `AwaitingE2e`).
+                if self.draining && self.handoff.is_none() && self.e2e_retry_pending(&slot.run) {
+                    warn!(run_id = %slot.run.id(), "run {} is left awaiting integration: its e2e could not run and this supervisor stops", slot.run.id());
+                    self.queue.release_lease(slot.run.id(), &self.token)?;
+                    return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
+                }
+                // The e2e a passed run needs runs before it lands
+                // (ADR-t1233-2), whatever the integration slot; a head the
+                // landing recheck found not landing is parked first, as
+                // below, rather than tested.
+                if self.e2e_due(&slot.run)?.is_some() {
+                    let current = self.queue.run(slot.run.id())?;
+                    let main = self.repository.main_head()?;
+                    if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
+                        return Ok(Step::Done(Box::new(parked)));
+                    }
+                }
+                if let Some(phase) = self.e2e_before_landing(&slot.run)? {
+                    slot.phase = phase;
+                    return Ok(Step::Continue);
+                }
                 if !self
                     .queue
                     .runs_with_status(RunStatus::Integrating)?
@@ -2274,6 +2320,21 @@ impl Supervisor<'_> {
                     Phase::Landing(Some(self.spawn_landing(run.clone(), previous, main)?));
                 slot.run = run;
                 Ok(Step::Continue)
+            }
+            // Decided again as a run awaiting the slot.
+            Phase::AwaitingE2e => {
+                slot.phase = Phase::AwaitingSlot;
+                Ok(Step::Continue)
+            }
+            Phase::E2e(watch) => {
+                if !watch.finished() {
+                    return Ok(Step::Continue);
+                }
+                let Phase::E2e(watch) = std::mem::replace(&mut slot.phase, Phase::AwaitingSlot)
+                else {
+                    unreachable!("matched above")
+                };
+                self.finish_e2e(slot, watch)
             }
             Phase::Landing(_) => unreachable!("joined above"),
             Phase::Recovery(watch) => {

@@ -4,8 +4,8 @@ type: design
 title: "`needs_session`"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - adr-t639-1
@@ -26,6 +26,8 @@ related:
 衝突（4）と再検証の失敗（5。宣言外のパスを含む）は`defer_integration`でrunを`needs_session`にし、理由を`last_error`、詳細（衝突ファイル、Gitの出力の末尾、rebase後のheadなど）を`integration_deferred`イベントに書いて、lease行を消しスロットを空ける。worktreeは衝突なら検証済みhead、再検証の失敗ならrebase済みのheadに置いたまま残す。検証コマンドの失敗のうちhostの分類（`disk_full`・`killed`・`timeout`）は`needs_session`にせず、integrateが同じ試行で1回やり直し、なお落ちればrunを`awaiting_integration`に戻して（`integration_held`）inboxに知らせる（task 639。[`integrate`](integrate.md#integrate)の5）。resumeの回数は使わない。runはTaskを占有し続け、`ready`/`cancel`はできない。
 
 引き継いだsupervisorが、`/exit`がcmuxの時間切れで届かなかった（`exit_unsent`の`close_and_land`）runを判定し直し、workspaceがもう無いのに、integrateの検査しない理由（HEADがreviewしたcommitでない・`worker_question`が開いている・rebaseの途中など）で着地できないときも`needs_session`になる（task 960。[Receipt and session exit](receipt-and-session-exit.md)）。parkのイベントは`session_gone_parked`（code `session_gone`、payloadの`status: needs_session`）で、resumeの依頼文は`ResumeKind::SessionGone`（理由の示すものを片付けてcommitし、receiptを書き直す）、試行は上限に数える。resumeが解消すればvalidatingとreviewをやり直す。
+
+reviewがpassしたrunのうちe2eが要るものは、着地の前にruntimeがhostで流したe2eが落ちると（上限の内に終わり、名前で流し直しても落ちたtestが印で通らないとき。上限切れと流し直しの上限切れ・始められない流し直しは変更のせいとせず、runを`needs_session`にせずに流し直す）`needs_session`になる（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](review.md#着地の前のe2e)）。parkのイベントは`run_e2e_failed`（code `e2e_failed`、payloadの`status: needs_session`、落ちたtestと流し直しの結果とlogの場所）で、resumeの依頼文は`ResumeKind::E2e`（reasonのlogを読んで落ちたtestを直してcommitし、再現は名前で絞った1本だけ）、試行は上限に数え、modelは上げない。resumeが解消すれば、`integrate`が呼ばれていないrunはvalidatingとreviewをやり直し、着地の前に新しいcommitのe2eをもう一度流す。
 
 着地待ちのrun（`awaiting_integration`）は、着地の後のlanding recheck（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)）でも`needs_session`になる。parkのイベントは`action: resumed`の`landing_recheck_failed`（code `rebase_conflict`か`verification_failed`、payloadの`status: needs_session`）で、resumeの依頼文は`ResumeKind::Recheck`、試行の数え方ではcode `rebase_conflict`ならreviewのverdictを問わず衝突だけのresumeになる（下の「試行の数え方」。使い切ったときの引き継ぐretryはreviewがpassしたかapproveされたrunだけ）。resumeが解決したrunに閉じていない`approve_landing`のaskがあれば、`validating`の後にreviewをやり直さず、sessionを閉じて答えを待つ。
 

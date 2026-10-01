@@ -80,6 +80,7 @@ mod runtime_cleanup;
 mod runtime_codex;
 mod runtime_codex_ask;
 mod runtime_disk;
+mod runtime_e2e;
 mod runtime_evidence;
 mod runtime_exit_retry;
 mod runtime_forecast;

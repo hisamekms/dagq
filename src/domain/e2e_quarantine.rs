@@ -180,21 +180,6 @@ pub fn judge(
     }
 }
 
-/// The marks of `file` that hold on the local day `today` for a test that
-/// failed its rerun, judged as the gate judges them but with no gate before
-/// counted: what a worker's local e2e may pass under (ADR-t1165-1 decision
-/// 6), which keeps no count of failures in a row. None when the file has
-/// more than [`LIMIT`] marks or cannot be read.
-pub fn holding(file: &QuarantineFile, today: i64) -> Vec<Mark> {
-    let names: Vec<String> = file.marks().iter().map(|mark| mark.name.clone()).collect();
-    let judged = judge(file, &names, today, &|_| 0);
-    file.marks()
-        .iter()
-        .filter(|mark| judged.quarantined.contains(&mark.name))
-        .cloned()
-        .collect()
-}
-
 /// The marks of the file's `text`, or why it cannot be read.
 pub fn parse(text: &str) -> Result<Vec<Mark>, String> {
     #[derive(Default)]
@@ -368,7 +353,8 @@ fn date(text: &str) -> Option<i64> {
 }
 
 /// How many gates right before this one (`history`, newest first) `test`
-/// failed its rerun in, in a row. A gate that passed without a rerun, or
+/// failed its rerun in, in a row: the automatic update's and `install`'s
+/// gates and the runtime's e2e of the runs alike (ADR-t1233-2 decision 5). A gate that passed without a rerun, or
 /// whose rerun `test` passed or was not in, ends the row; one that told
 /// nothing of its tests (it or its rerun ran past its timeout or could not
 /// start, or an older runtime recorded no rerun) is passed over.
@@ -376,8 +362,12 @@ fn date(text: &str) -> Option<i64> {
 pub fn failures_in_a_row<'a>(history: impl IntoIterator<Item = &'a RunEvent>, test: &str) -> usize {
     let mut count = 0;
     for event in history {
-        let gate = event.kind == UPDATE_E2E_PASSED
-            || (event.kind == UPDATE_FAILED && event.payload["stage"] == "e2e");
+        let run_passed = event.kind == super::event_kind::RUN_E2E_FINISHED
+            && event.payload["outcome"] == "passed";
+        let passed = event.kind == UPDATE_E2E_PASSED || run_passed;
+        let gate = passed
+            || (event.kind == UPDATE_FAILED && event.payload["stage"] == "e2e")
+            || event.kind == super::event_kind::RUN_E2E_FAILED;
         if !gate {
             continue;
         }
@@ -394,7 +384,7 @@ pub fn failures_in_a_row<'a>(history: impl IntoIterator<Item = &'a RunEvent>, te
                 }
                 count += 1;
             }
-            None if event.kind == UPDATE_E2E_PASSED => break,
+            None if passed => break,
             None => {}
         }
     }
@@ -544,29 +534,40 @@ name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
         assert!(judged.ignored.is_empty());
     }
 
+    /// The runtime's e2e of the runs (ADR-t1233-2 decision 5) counts with
+    /// the automatic update's gates: a run's passed e2e without a rerun
+    /// ends the row, one that could not run tells nothing of its tests.
     #[test]
-    fn the_marks_a_worker_passes_under_are_those_in_date_and_within_the_limit() {
-        let today = date("2026-10-01").unwrap();
-        let file = QuarantineFile::of(&format!(
-            "{}{}{}",
-            mark("held", "2026-10-01"),
-            mark("expired", "2026-09-30"),
-            mark("later", "2026-12-31")
-        ));
-        let names: Vec<String> = holding(&file, today)
-            .into_iter()
-            .map(|mark| mark.name)
-            .collect();
-        assert_eq!(names, ["held", "later"]);
-        let over = QuarantineFile::of(&format!(
-            "{}{}{}{}",
-            mark("a", "2026-12-31"),
-            mark("b", "2026-12-31"),
-            mark("c", "2026-12-31"),
-            mark("d", "2026-12-31")
-        ));
-        assert!(holding(&over, today).is_empty());
-        assert!(holding(&QuarantineFile::of("[x]"), today).is_empty());
-        assert!(holding(&QuarantineFile::Absent, today).is_empty());
+    fn the_runtime_e2e_of_the_runs_counts_with_the_gates() {
+        let event = |kind: &str, payload: Value| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        use super::super::event_kind::{RUN_E2E_FAILED, RUN_E2E_FINISHED};
+        let history = [
+            event(
+                RUN_E2E_FINISHED,
+                json!({"outcome": "unavailable", "error": "no cmux"}),
+            ),
+            event(RUN_E2E_FAILED, json!({"rerun": {"failed": ["b"]}})),
+            event(
+                RUN_E2E_FINISHED,
+                json!({"outcome": "passed", "rerun": {"failed": ["b"]}}),
+            ),
+            event(
+                UPDATE_FAILED,
+                json!({"stage": "e2e", "rerun": {"failed": ["b"]}}),
+            ),
+            event(RUN_E2E_FINISHED, json!({"outcome": "passed"})),
+            event(RUN_E2E_FAILED, json!({"rerun": {"failed": ["b"]}})),
+        ];
+        assert_eq!(failures_in_a_row(&history, "b"), 3);
+        assert_eq!(failures_in_a_row(&history, "c"), 0);
     }
 }

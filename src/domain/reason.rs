@@ -70,6 +70,7 @@ reason_codes! {
     VerificationFailed => "verification_failed": "a verification command exited non-zero after the rebase (or the landing recheck's command on main with the run merged in)",
     VerificationEnvironment => "verification_environment": "a verification command failed on the host (a full disk, a kill, a timeout) and again when retried once, so the run waits for a person instead of a resume",
     VerificationFlaky => "verification_flaky": "every test a verification command named as failed passed when nextest ran it again, so the landing is done once more instead of a resume (once per run)",
+    E2eFailed => "e2e_failed": "the e2e the runtime ran on the host after the review failed, and the tests that failed again on their rerun by name passed under no e2e mark, so the run waits for a resume to fix them",
     BackendTimeout => "backend_timeout": "a cmux call timed out",
     BackendFailed => "backend_failed": "a cmux call failed",
     JobFailed => "job_failed": "a headless review or triage job failed",
@@ -209,7 +210,8 @@ pub(crate) fn explains_last_error(event: &RunEvent) -> bool {
         | "integration_held"
         | "runtime_error"
         | "landing_decided"
-        | "session_gone_parked" => true,
+        | "session_gone_parked"
+        | "run_e2e_failed" => true,
         // Recovery only interrupts; one mid-integration goes back to
         // `awaiting_integration` with the `last_error` it had.
         "run_recovered" => status == Some("interrupted"),

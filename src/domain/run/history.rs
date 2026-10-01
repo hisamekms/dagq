@@ -22,8 +22,9 @@ pub struct RunHistory<'a> {
 
 /// The events that park a run for a session with a reason of their own
 /// (the landing or validation, or a person's `send_back`), the triage's
-/// resume, and an adopter's park of a run whose workspace was gone.
-const PARKING: [&str; 9] = [
+/// resume, an adopter's park of a run whose workspace was gone, and the
+/// runtime's e2e that failed after the review (ADR-t1233-2).
+const PARKING: [&str; 10] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -33,17 +34,20 @@ const PARKING: [&str; 9] = [
     event_kind::TRIAGE_DECIDED,
     event_kind::RECOVERY_PARKED,
     event_kind::SESSION_GONE_PARKED,
+    event_kind::RUN_E2E_FAILED,
 ];
 
-/// The first five of [`PARKING`] and any landing recheck failure: what
-/// parks a run that a resumed session may have resolved already.
-const RESOLVABLE_PARKING: [&str; 6] = [
+/// The first five of [`PARKING`], any landing recheck failure and the
+/// runtime's failed e2e: what parks a run that a resumed session may have
+/// resolved already.
+const RESOLVABLE_PARKING: [&str; 7] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
     event_kind::SCOPE_VIOLATION,
     event_kind::LANDING_DECIDED,
     event_kind::LANDING_RECHECK_FAILED,
+    event_kind::RUN_E2E_FAILED,
 ];
 
 const RESUMES: [&str; 3] = [
@@ -72,6 +76,9 @@ pub enum ParkCause {
     /// An adopter found the workspace of its session gone while it could
     /// not land without that session (task 960).
     SessionGone,
+    /// The e2e the runtime ran on the host after the review failed
+    /// (ADR-t1233-2 decision 3).
+    E2e,
 }
 
 /// Why a run waits for a session, from its latest parking event.
@@ -453,6 +460,8 @@ impl<'a> RunHistory<'a> {
             ParkCause::Recheck
         } else if event.kind == event_kind::SESSION_GONE_PARKED {
             ParkCause::SessionGone
+        } else if event.kind == event_kind::RUN_E2E_FAILED {
+            ParkCause::E2e
         } else {
             ParkCause::Landing
         };

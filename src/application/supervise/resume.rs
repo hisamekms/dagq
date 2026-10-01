@@ -10,20 +10,10 @@ use crate::domain::{
     run::{RunWorkspace, run_workspaces},
 };
 
-/// The checks a resumed session's receipt must back: the task's, and
-/// `e2e` when the run's latest validation required it from its diff
-/// (ADR-t963-1 decision 2).
-fn resume_required(task: &Task, run: &TaskRun, events: &[RunEvent]) -> Vec<EvidenceCheck> {
-    let mut required = required_of(task.required_evidence(), run.actual_provider());
-    let by_diff = events
-        .iter()
-        .rev()
-        .find(|e| e.kind == event_kind::VALIDATION_FINISHED)
-        .is_some_and(|e| e.payload["e2e_requirement"]["required"] == true);
-    if by_diff && !required.contains(&EvidenceCheck::E2e) {
-        required.push(EvidenceCheck::E2e);
-    }
-    required
+/// The checks a resumed session's receipt must back: the task's but
+/// `e2e`, which the runtime runs itself after the review (ADR-t1233-2).
+fn resume_required(task: &Task, run: &TaskRun) -> Vec<EvidenceCheck> {
+    required_of(task.required_evidence(), run.actual_provider())
 }
 
 impl Supervisor<'_> {
@@ -181,11 +171,7 @@ impl Supervisor<'_> {
         if receipt.run_id() != run.id().as_str()
             || receipt.result() != ReceiptResult::Succeeded
             || !receipt
-                .missing_evidence(&resume_required(
-                    &task,
-                    run,
-                    &self.queue.run_events(run.id())?,
-                ))
+                .missing_evidence(&resume_required(&task, run))
                 .is_empty()
         {
             return Ok(None);
@@ -389,7 +375,7 @@ impl Supervisor<'_> {
             &request.main,
         )?;
         let message = with_instruction(
-            resume_request(&task, run, request, &landed, &self.e2e_marks(run))?,
+            resume_request(&task, run, request, &landed)?,
             self.verifier.language().as_ref(),
         );
         self.files.write(
@@ -475,7 +461,7 @@ impl Supervisor<'_> {
             exit_typed: false,
             exit_timed_out: false,
             retry: ExitRetry::default(),
-            required_evidence: resume_required(&task, run, &self.queue.run_events(run.id())?),
+            required_evidence: resume_required(&task, run),
             approved: self
                 .queue
                 .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
@@ -607,7 +593,7 @@ impl Supervisor<'_> {
             exit_typed: false,
             exit_timed_out,
             retry,
-            required_evidence: resume_required(&task, run, &events),
+            required_evidence: resume_required(&task, run),
             approved,
             silent: false,
             exit_for_silence,
@@ -841,6 +827,7 @@ pub(super) fn resume_reason(
         Some(ParkCause::Triage) => ResumeKind::Triage,
         Some(ParkCause::Recheck) => ResumeKind::Recheck,
         Some(ParkCause::SessionGone) => ResumeKind::SessionGone,
+        Some(ParkCause::E2e) => ResumeKind::E2e,
         Some(ParkCause::Landing) | None => ResumeKind::Landing,
     };
     Ok((reason, kind))

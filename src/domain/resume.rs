@@ -55,7 +55,7 @@ pub const RETRY_INHERIT: &str = "retry_inherit";
 
 /// The events that park a run for a session, or decide what it resumes
 /// with: the latest of them before a resume is why it was resumed.
-const PARKING: [&str; 8] = [
+const PARKING: [&str; 9] = [
     "integration_deferred",
     "integration_error",
     "evidence_missing",
@@ -64,6 +64,7 @@ const PARKING: [&str; 8] = [
     "triage_finished",
     "triage_decided",
     "session_gone_parked",
+    "run_e2e_failed",
 ];
 
 /// What the events so far say about the run: whether its landing was

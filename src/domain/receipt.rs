@@ -229,15 +229,19 @@ impl Receipt {
 }
 
 /// The checks of a task's `required` evidence that a run whose worker is
-/// `provider` must back. A Codex worker has no subagent to review its
-/// change, so a required `subagent_review` does not hold its run: its
-/// receipt reports the check `not_applicable` with a reason, as for any
-/// check that is not required, and the supervisor's review job reviews the
-/// commit before it lands. Claude's workers keep every required check.
+/// `provider` must back in its receipt. No worker backs `e2e`: the runtime
+/// runs it on the host after the review (ADR-t1233-2 decision 1), and the
+/// task's `e2e` only says that the run needs it. A Codex worker has no
+/// subagent to review its change, so a required `subagent_review` does not
+/// hold its run either: its receipt reports the check `not_applicable` with
+/// a reason, as for any check that is not required, and the supervisor's
+/// review job reviews the commit before it lands. Claude's workers keep
+/// every other required check.
 pub fn required_of(required: &[EvidenceCheck], provider: Provider) -> Vec<EvidenceCheck> {
     required
         .iter()
         .copied()
+        .filter(|check| *check != EvidenceCheck::E2e)
         .filter(|check| provider != Provider::Codex || *check != EvidenceCheck::SubagentReview)
         .collect()
 }
@@ -318,17 +322,17 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_run_does_not_back_a_required_subagent_review() {
+    fn no_run_backs_e2e_and_a_codex_run_no_subagent_review() {
         let all = [
             EvidenceCheck::Tests,
             EvidenceCheck::E2e,
             EvidenceCheck::SubagentReview,
         ];
-        assert_eq!(required_of(&all, Provider::Claude), all);
         assert_eq!(
-            required_of(&all, Provider::Codex),
-            [EvidenceCheck::Tests, EvidenceCheck::E2e]
+            required_of(&all, Provider::Claude),
+            [EvidenceCheck::Tests, EvidenceCheck::SubagentReview]
         );
+        assert_eq!(required_of(&all, Provider::Codex), [EvidenceCheck::Tests]);
         // A Codex receipt reports it not_applicable with its reason, and
         // passes with the task's required subagent_review.
         let receipt = receipt(

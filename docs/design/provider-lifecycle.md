@@ -125,7 +125,7 @@ runtimeが起動するClaude sessionは、kindごとの区間（`session_opened`
   - **推定で閉じる**: supervisorは取り込みのたび（既定10分ごとと、observerの起動前）に、hookが記録した開いている区間のworkspaceが`cmux workspace list`（`listed_workspace_ids`）に居るかを見て、居なければ`inferred`で閉じる（`SessionRegistry::close_gone_sessions`）。区間は一覧を取る前に読むので、その後に開いた区間を消えたものと取り違えない。時刻はtranscriptの最後のレコード（読めなければ閉じた時刻）。workspaceを持たない区間と、一覧を取れなかったときは閉じない。失敗はlogだけ。
 - queueのeventとして`session_opened` / `session_closed` / `session_turns`を書けるよう、migration 0035がrun_eventsのCHECKにこの3つを足した（breaking）。このADRが入る前のrunには区間が無く、埋め直さない。
 
-Claude providerはcmux内の通常セッションを起動し、実装、unit test、E2E、subagent review、完了レポートを実行させる。Codex providerはCodexの対応するセッション方式を使う。provider capabilityとしてinteractive、subagents、stream events、structured resultを表現する。
+Claude providerはcmux内の通常セッションを起動し、実装、unit test、subagent review、完了レポートを実行させる。e2eはどのproviderのworkerも流さず、e2eが要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[Review](supervisor-lifecycle/review.md#着地の前のe2e)）。Codexのworkspace-writeのsandboxで走らないe2eを名前で除外する規則（ADR-t963-1決定5、task 1206）は無くなった。Codex providerはCodexの対応するセッション方式を使う。provider capabilityとしてinteractive、subagents、stream events、structured resultを表現する。
 
 requested providerとactual providerと経路をTaskRunに保存する（下の[workerのproviderと経路](#workerのproviderと経路)）。
 

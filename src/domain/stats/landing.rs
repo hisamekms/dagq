@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::{RunEvent, Summary, median, payload_status};
 
 /// The phases, in the order a landing goes through them.
-pub const PHASES: [&str; 9] = [
+pub const PHASES: [&str; 11] = [
     // The session's exit and the hand-offs between phases (from
     // `validation_finished`, `review_finished`, a precheck that asks
     // nothing): what is left until the run waits for the slot.
@@ -38,6 +38,13 @@ pub const PHASES: [&str; 9] = [
     // Waiting for the single integration slot while another run lands
     // (`landing_queued`, an `approve_landing` answer the runtime applies).
     "landing_queue",
+    // Waiting for the e2e of another run before its own (`run_e2e_waiting`,
+    // ADR-t1233-2).
+    "e2e_wait",
+    // The runtime's e2e on the host after the review (`run_e2e_started`,
+    // up to its `run_e2e_finished`, after which the run waits for the slot
+    // again; a `run_e2e_failed` parks it for `resume`).
+    "e2e",
     // `integrate` up to its rebase: the receipt checks and the rebase
     // (`integration_started`).
     "rebase",
@@ -57,8 +64,10 @@ const LANDING_QUEUE: usize = 6;
 const APPROVE_VIA: &str = "approve";
 /// The `via` of a `landing_queued` recorded without one.
 const UNKNOWN_VIA: &str = "unknown";
-const REBASE: usize = 7;
-const VERIFY: usize = 8;
+const E2E_WAIT: usize = 7;
+const E2E: usize = 8;
+const REBASE: usize = 9;
+const VERIFY: usize = 10;
 
 /// The seconds a run spent in each phase of its wait to land, and in the
 /// push after it (null when no push was recorded).
@@ -354,6 +363,9 @@ impl LandClock {
                 "conflict_precheck" if event.payload["requested"] == true => Some(CONFLICT),
                 "conflict_precheck" => Some(EXIT),
                 "landing_queued" => Some(LANDING_QUEUE),
+                "run_e2e_waiting" => Some(E2E_WAIT),
+                "run_e2e_started" => Some(E2E),
+                "run_e2e_finished" => Some(LANDING_QUEUE),
                 // The landing gave the lease back: the run waits for a
                 // person's `review and integrate`, not for the slot.
                 "integration_error" | "integration_held" => Some(ASK),
@@ -591,6 +603,44 @@ mod tests {
         assert_eq!(phases.secs.iter().sum::<i64>(), 410);
         assert_eq!(phases.push, Some(4));
         assert_eq!(phases.longest(), Some("verify"));
+    }
+
+    /// The runtime's e2e after the review (ADR-t1233-2) is a phase of its
+    /// own, apart from the wait for another run's e2e; a failed one parks
+    /// the run, which counts as `resume`.
+    #[test]
+    fn the_e2e_after_the_review_has_its_own_phases() {
+        let (spent, _) = phases(
+            &[
+                ("landing_queued", json!({"via": "exit"}), 10),
+                ("run_e2e_waiting", json!({}), 12),
+                ("run_e2e_started", json!({}), 40),
+                ("run_e2e_finished", json!({"outcome": "passed"}), 340),
+                ("integration_started", json!({}), 345),
+                ("integration_rebased", json!({}), 350),
+                ("run_integrated", json!({}), 400),
+            ],
+            9999,
+        );
+        assert_eq!(
+            spent,
+            map(&[
+                ("exit", 10),
+                ("landing_queue", 2 + 5),
+                ("e2e_wait", 28),
+                ("e2e", 300),
+                ("rebase", 5),
+                ("verify", 50),
+            ])
+        );
+        let (spent, _) = phases(
+            &[
+                ("run_e2e_started", json!({}), 10),
+                ("run_e2e_failed", json!({"status": "needs_session"}), 100),
+            ],
+            160,
+        );
+        assert_eq!(spent, map(&[("exit", 10), ("e2e", 90), ("resume", 60)]));
     }
 
     #[test]

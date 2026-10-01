@@ -901,6 +901,25 @@ pub fn attention(
                 continue;
             }
         }
+        // A run whose e2e after its review could not run several times in a
+        // row waits on the host (ADR-t1233-2 decision 3) until it runs.
+        if run.status() == RunStatus::AwaitingIntegration
+            && let Some(event) = crate::domain::run_e2e::standing_attention(&events)
+        {
+            attention.push(Attention {
+                run_id: Some(run.id().clone()),
+                task_id: Some(run.task_id()),
+                pid: None,
+                ask_id: None,
+                reason_category: None,
+                status: run.status().as_str().into(),
+                kind: event.kind.clone(),
+                last_error: event.payload["error"].as_str().map(truncate_reason),
+                last_error_code: None,
+                next: AttentionNext::CheckE2e,
+            });
+            continue;
+        }
         // A live session whose recovery job failed under a runtime from
         // before ADR-t609-1 waits for a person to recover it by hand
         // (ADR-0047 decision 40), whatever its status; a failed job opens

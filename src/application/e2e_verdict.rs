@@ -1,5 +1,6 @@
 //! Whether the e2e gate passes (ADR-t963-1 decision 1 as ADR-t1165-1
-//! amends it), for the automatic update's job and `install` alike: an e2e
+//! amends it), for the automatic update's job, `install` and the runtime's
+//! e2e of a run after its review (ADR-t1233-2) alike: an e2e
 //! that passed passes; one whose failed tests all passed their rerun by
 //! name passes with them named `flaky`; one whose tests that failed the
 //! rerun too all have a mark of `.config/e2e-quarantine.toml` that holds
@@ -175,6 +176,7 @@ mod tests {
             log: "/q/logs/update-1-abc.e2e.log".into(),
             podman: None,
             utc_offset_secs: 9 * 3600,
+            lock: None,
         }
     }
 
