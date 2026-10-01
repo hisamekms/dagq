@@ -1730,6 +1730,9 @@ pub trait RunCoordination {
     fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
     /// The binary the supervisor `token` was asked to exec, if any.
     fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>>;
+    /// Atomically take the matching request immediately before an exec.
+    /// A withdrawal or replacement wins if it reached the queue first.
+    fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
     /// Withdraw a request to exec `binary` not taken yet.
     fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
     /// Take `token`'s registration back under `binary_version` after an

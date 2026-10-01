@@ -1211,13 +1211,29 @@ impl Supervisor<'_> {
             // 437), and Codex's hold ends once its time is up (ADR-t813-2).
             self.check_queue_hold(true)?;
             self.check_provider_holds()?;
+            // A request may have been withdrawn while this process drained.
+            // Return to claims on this pass, without waiting for the slots
+            // that had kept the handoff pending.
+            let handoff_withdrawn = if let Some(binary) = &self.handoff {
+                self.queue.handoff_request(&self.token)?.as_deref() != Some(binary)
+            } else {
+                false
+            };
+            if handoff_withdrawn {
+                info!(
+                    "supervisor {} handoff to {} was withdrawn or replaced; resuming normal work",
+                    self.token,
+                    self.handoff.as_deref().unwrap_or_default()
+                );
+                self.handoff = None;
+            }
             self.draining = stopping || !self.claiming || self.handoff.is_some();
             // Before any new work, draining or not: a drain waits for them
             // (ADR-0062 decision 8).
             self.return_waiting_runs();
             // A stop wins over a handoff: the drain goes on as before.
             if !stopping {
-                if self.handoff.is_none() {
+                if self.handoff.is_none() && !handoff_withdrawn {
                     self.handoff = self.queue.handoff_request(&self.token)?;
                     if let Some(binary) = &self.handoff {
                         info!(
@@ -1243,36 +1259,46 @@ impl Supervisor<'_> {
                         && !self.broker.running()
                         && self.slots.iter().all(|slot| slot.phase.rebuildable())
                     {
-                        let runs = self.prepare_handoff();
+                        if self.queue.take_handoff(&self.token, &binary)? {
+                            let runs = self.prepare_handoff();
+                            info!(
+                                "supervisor {} execs {binary}, handing over {runs} run(s)",
+                                self.token
+                            );
+                            self.exec = Some(binary.clone());
+                            return Ok(json!({
+                                "outcome": "handoff",
+                                "binary": binary,
+                                "token": self.token,
+                                "runs": self.finished,
+                                "handed_over": runs,
+                                "errors": self.errors,
+                                "triaged": self.triaged,
+                            }));
+                        }
                         info!(
-                            "supervisor {} execs {binary}, handing over {runs} run(s)",
+                            "supervisor {} handoff to {binary} was withdrawn or replaced before exec; resuming normal work",
                             self.token
                         );
-                        self.exec = Some(binary.clone());
-                        return Ok(json!({
-                            "outcome": "handoff",
-                            "binary": binary,
-                            "token": self.token,
-                            "runs": self.finished,
-                            "handed_over": runs,
-                            "errors": self.errors,
-                            "triaged": self.triaged,
-                        }));
+                        self.handoff = None;
+                        self.draining = !self.claiming;
                     }
-                    self.draining = true;
-                    // A broker job in progress is reaped, none started: an
-                    // exec would orphan its podman command.
-                    self.broker_pass(false);
-                    self.broker_sweep();
-                    self.poll_observer();
-                    self.throughput_review_pass(options, false);
-                    self.report_pass(false);
-                    self.forecast_pass(false);
-                    self.release_pass(false);
-                    self.push_pass(false);
-                    self.tick(true);
-                    thread::sleep(options.tick);
-                    continue;
+                    if self.handoff.is_some() {
+                        self.draining = true;
+                        // A broker job in progress is reaped, none started: an
+                        // exec would orphan its podman command.
+                        self.broker_pass(false);
+                        self.broker_sweep();
+                        self.poll_observer();
+                        self.throughput_review_pass(options, false);
+                        self.report_pass(false);
+                        self.forecast_pass(false);
+                        self.release_pass(false);
+                        self.push_pass(false);
+                        self.tick(true);
+                        thread::sleep(options.tick);
+                        continue;
+                    }
                 }
             }
             // Before the claims, off the loop: the broker made ready or its

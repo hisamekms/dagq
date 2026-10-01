@@ -48,11 +48,127 @@ pub(crate) fn hand_off_when(
     assert_eq!(outcome["outcome"], "handoff", "{outcome}");
     assert_eq!(outcome["binary"], "/next/dagq");
     assert_eq!(outcome["token"], json!(registration.token));
-    // The registration stays for the exec'd process, request and all.
+    // The registration stays for the exec'd process; the request was taken
+    // before the supervisor prepared the exec.
     let kept = only_registration(db);
     assert_eq!(kept.token, registration.token);
-    assert_eq!(kept.handoff_binary.as_deref(), Some("/next/dagq"));
+    assert_eq!(kept.handoff_binary, None);
+    assert_eq!(
+        Connection::open(db)
+            .unwrap()
+            .query_row(
+                "SELECT handoff_requested_at FROM supervisors WHERE token=?1",
+                [&registration.token],
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .unwrap(),
+        None
+    );
+    assert!(
+        !queue
+            .cancel_handoff(&registration.token, "/next/dagq")
+            .unwrap()
+    );
     (outcome, registration.token.into_string())
+}
+
+#[test]
+fn taking_a_handoff_requires_the_same_token_and_binary_and_beats_cancellation() {
+    let (_dir, _repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = LeaseToken::new("handoff-owner");
+    queue
+        .register_supervisor(&token, std::process::id(), 1, "old")
+        .unwrap();
+    queue.accept_handoff(&token).unwrap();
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    assert!(
+        !queue
+            .take_handoff(&LeaseToken::new("other"), "/next/dagq")
+            .unwrap()
+    );
+    assert!(!queue.take_handoff(&token, "/other/dagq").unwrap());
+    assert_eq!(
+        queue.handoff_request(&token).unwrap().as_deref(),
+        Some("/next/dagq")
+    );
+    assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
+    assert!(!queue.take_handoff(&token, "/next/dagq").unwrap());
+
+    assert!(queue.request_handoff(&token, "/replacement/dagq").unwrap());
+    assert!(!queue.take_handoff(&token, "/next/dagq").unwrap());
+    assert!(queue.take_handoff(&token, "/replacement/dagq").unwrap());
+    assert_eq!(queue.handoff_request(&token).unwrap(), None);
+    // Mid-exec, it takes no other request until it registers again.
+    assert!(!only_registration(&db).handoff_accepted);
+    assert!(!queue.request_handoff(&token, "/next/dagq").unwrap());
+    assert_eq!(
+        Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT handoff_requested_at FROM supervisors WHERE token=?1",
+                [&token],
+                |row| row.get::<_, Option<i64>>(0)
+            )
+            .unwrap(),
+        None
+    );
+    assert!(!queue.cancel_handoff(&token, "/replacement/dagq").unwrap());
+    let back = queue
+        .resume_registration(&token, std::process::id(), "new")
+        .unwrap();
+    assert!(back.handoff_accepted);
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+}
+
+/// A supervisor already draining a landing sees a withdrawn request on its
+/// next pass. It keeps its registration and can claim the next task.
+#[test]
+fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
+    let (_dir, repo, db) = fixture();
+    let release = db.with_extension("release");
+    let verification = json!([format!(
+        "while [ ! -f '{}' ]; do sleep 0.05; done",
+        release.display()
+    )]);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verification.to_string()],
+        )
+        .unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "ready to land")]);
+    let options = supervise_options(1, false);
+    let passes = options.passes.clone();
+    let stop = options.stop.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
+    });
+    let token = only_registration(&db).token;
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    assert_eq!(
+        queue.handoff_request(&token).unwrap().as_deref(),
+        Some("/next/dagq")
+    );
+    assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    assert_eq!(only_registration(&db).token, token);
+    add_ready_task(&mut queue, "after cancellation", &[]);
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        !queue.show(TaskId::new(2)).unwrap().runs.is_empty()
+    });
+    std::fs::write(&release, "go").unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "supervisor after the handoff was canceled");
+    assert_ne!(outcome["outcome"], "handoff", "{outcome}");
 }
 
 /// The supervisor the exec'd binary runs: the same token, continued.

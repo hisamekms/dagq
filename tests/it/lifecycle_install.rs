@@ -2107,6 +2107,74 @@ fn a_handoff_looks_again_at_a_supervisor_that_took_it_as_the_wait_ran_out() {
     assert_eq!(request.as_deref(), Some("/opt/bin/dagq"));
 }
 
+/// A supervisor takes its request right before its exec (task 824), so the
+/// request is gone well before the exec'd binary registers again: the
+/// handoff waits through that window instead of reading the old build as a
+/// failed exec. Back under this build, it took the handoff (a); dead before
+/// it registered again (b) or back under its old build (c), it did not.
+#[test]
+fn a_handoff_waits_through_the_exec_of_a_supervisor_that_took_its_request() {
+    let hand_off = |back: Option<&'static str>| {
+        let fixture = fixture();
+        let queue = handoff_supervisor(&fixture, "old", SupervisorMode::InCmux);
+        let registration = queue.supervisors().unwrap().remove(0);
+        let processes = FakeProcesses::default();
+        let handed = thread::scope(|scope| {
+            let (fixture, exec, pid) = (&fixture, &processes, registration.pid);
+            scope.spawn(move || {
+                let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+                let token = LeaseToken::new("old");
+                wait_until(exec, pid, || {
+                    queue.handoff_request(&token).unwrap().is_some()
+                });
+                assert!(queue.take_handoff(&token, "/opt/bin/dagq").unwrap());
+                // Taken: no other request until it registers again.
+                assert!(!queue.request_handoff(&token, "/other/dagq").unwrap());
+                // Several of the handoff's looks happen during the exec.
+                thread::sleep(Duration::from_millis(200));
+                match back {
+                    Some(version) => {
+                        let back = queue.resume_registration(&token, pid, version).unwrap();
+                        assert!(back.handoff_accepted);
+                    }
+                    None => {
+                        exec.dead.lock().unwrap().insert(pid);
+                    }
+                }
+            });
+            dagq::lifecycle::hand_off(
+                &queue,
+                &processes,
+                &dagq::infrastructure::clock::SystemClock,
+                std::slice::from_ref(&registration),
+                Path::new("/opt/bin/dagq"),
+                VERSION,
+                Duration::from_secs(5),
+                Duration::from_millis(20),
+            )
+            .unwrap()
+        });
+        handed.into_iter().next().unwrap()
+    };
+
+    let handed = hand_off(Some(VERSION));
+    assert_eq!(handed.error, None, "{handed:?}");
+    assert_eq!(handed.now.as_ref().map(LeaseToken::as_str), Some("old"));
+
+    let handed = hand_off(None);
+    let error = handed.error.as_deref().unwrap();
+    assert!(
+        error.contains("took the handoff to /opt/bin/dagq but stopped before it registered again"),
+        "{error}"
+    );
+    assert_eq!(handed.now, None);
+
+    let handed = hand_off(Some("0.0.1"));
+    let error = handed.error.as_deref().unwrap();
+    assert!(error.contains("came back as 0.0.1"), "{error}");
+    assert_eq!(handed.now, None);
+}
+
 /// `install` counts a supervisor that took the handoff just as the wait
 /// ran out and came back under the new build as handed over (task 715), so
 /// the binary stays; one that never came back is a failure, and with every

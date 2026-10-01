@@ -163,6 +163,20 @@ impl SqliteQueue {
         )? == 1)
     }
 
+    /// Consume only the request for this token and binary. This competes
+    /// atomically with `cancel_handoff` on the same registration. Until
+    /// the exec'd binary takes the registration back, it accepts no other
+    /// request, which also tells a waiting `hand_off` that the exec is in
+    /// progress rather than over.
+    pub fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL,
+                    handoff_accepted=0
+             WHERE token=?1 AND handoff_binary=?2",
+            params![token, binary],
+        )? == 1)
+    }
+
     /// The binary the supervisor `token` was asked to exec, if any.
     pub fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
         Ok(self
@@ -622,6 +636,9 @@ impl RunCoordination for SqliteQueue {
     }
     fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
         SqliteQueue::handoff_request(self, token)
+    }
+    fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
+        SqliteQueue::take_handoff(self, token, binary)
     }
     fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         SqliteQueue::cancel_handoff(self, token, binary)

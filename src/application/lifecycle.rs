@@ -1517,6 +1517,18 @@ then `down --force` and `up`"
         );
         return Ok(None);
     }
+    // Taken just before its exec (task 824): `resume_registration` accepts
+    // handoffs again once the exec'd binary, or the old one after a failed
+    // exec, has the registration back. A row of its pid under a new token
+    // is a registration after the exec, whatever it accepts yet.
+    if current.token == registration.token && !current.handoff_accepted {
+        ensure!(
+            fresh(current, processes, now),
+            "{name} took the handoff to {binary_text} but stopped before it registered again; see \
+its log, then `down --force` and `up`"
+        );
+        return Ok(None);
+    }
     ensure!(
         current.pid == registration.pid
             && current.binary_version.as_deref() == Some(version)
