@@ -4,6 +4,7 @@
 
 use crate::common;
 pub mod headless;
+mod thread_stacks;
 pub use crate::common::{Bounded, WithoutActor};
 pub use anyhow::{Result, bail, ensure};
 use dagq::domain::LeaseToken;
@@ -1719,16 +1720,7 @@ pub fn supervise_with(
     options: &SuperviseOptions,
 ) -> Result<Value> {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
-    // A supervise past its limit shows what the queue recorded up to then,
-    // so that where it waited can be read from the failure (task 770).
-    let _dump = common::on_timeout(
-        Duration::from_secs(10),
-        format!("print the events of the queue {}", db.display()),
-        {
-            let db = db.to_owned();
-            move || print_queue_events(&db)
-        },
-    );
+    let _diagnostics = supervise_diagnostics(db);
     runtime::supervise(
         db,
         repo,
@@ -1737,6 +1729,24 @@ pub fn supervise_with(
         Path::new(env!("CARGO_BIN_EXE_dagq")),
         options,
     )
+}
+
+/// Keep stacks in a separate hook: a stuck SQLite read or stub registry
+/// lock must not prevent sampling the supervisor. Hooks run newest first,
+/// before the fixture kills its stubs.
+fn supervise_diagnostics(db: &Path) -> (common::Cleanup, common::Cleanup) {
+    let db = db.to_owned();
+    let events = common::on_timeout(
+        Duration::from_secs(10),
+        format!("print the events of the queue {}", db.display()),
+        move || print_queue_events(&db),
+    );
+    let stacks = common::on_timeout(
+        Duration::from_secs(20),
+        "print the test process's thread stacks",
+        thread_stacks::print,
+    );
+    (events, stacks)
 }
 
 /// How many of the latest events [`print_queue_events`] prints.
@@ -1861,14 +1871,7 @@ pub fn finished(
     backend: &TestWorkspace,
     supervisor: thread::JoinHandle<Result<Value>>,
 ) -> Value {
-    let _dump = common::on_timeout(
-        Duration::from_secs(10),
-        format!("print the events of the queue {}", db.display()),
-        {
-            let db = db.to_owned();
-            move || print_queue_events(&db)
-        },
-    );
+    let _diagnostics = supervise_diagnostics(db);
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -2639,6 +2642,7 @@ pub fn supervise_reviewed_with(
     options: &SuperviseOptions,
 ) -> Value {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    let _diagnostics = supervise_diagnostics(db);
     let outcome = runtime::supervise_with_reviewer(
         db,
         repo,

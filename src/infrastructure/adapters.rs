@@ -24,7 +24,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -431,40 +431,47 @@ pub(crate) fn capture_bytes(
     timeout: Duration,
 ) -> Result<(ExitStatus, Vec<u8>, String)> {
     let label = format!("{:?}", command.get_program());
+    let stdout = output_file()?;
+    let stderr = output_file()?;
     let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
         .stdin(Stdio::null())
         .spawn()
         .with_context(|| format!("start {label}"))?;
-    let mut stdout = child.stdout.take().context("stdout unavailable")?;
-    let out = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let err = read_stderr(&mut child)?;
     let status = wait_with_deadline(&mut child, &label, timeout)?;
-    let stdout = out
-        .join()
-        .map_err(|_| anyhow::anyhow!("stdout reader failed"))??;
-    Ok((status, stdout, join_stderr(err)?))
+    let stderr = read_back(stderr)?;
+    Ok((
+        status,
+        read_back(stdout)?,
+        String::from_utf8_lossy(&stderr).into_owned(),
+    ))
 }
 
-type StderrReader = thread::JoinHandle<std::io::Result<Vec<u8>>>;
-
-fn read_stderr(child: &mut Child) -> Result<StderrReader> {
-    let mut stderr = child.stderr.take().context("stderr unavailable")?;
-    Ok(thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    }))
+/// An unlinked file in the temporary directory to take a command's output.
+/// Not a pipe: macOS creates a pipe and marks it close-on-exec in two steps,
+/// so a process another thread spawns in between inherits its write end,
+/// and a pipe read to its end then waits for that process as well. A
+/// long-lived one (a session, an agent) held the supervisor in such a read
+/// forever after the command itself had exited (task 1022). A file is
+/// complete once the command exits, whoever else holds it.
+fn output_file() -> Result<fs::File> {
+    let path = env::temp_dir().join(format!("dagq-output-{}", uuid::Uuid::new_v4()));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("create {}", path.display()))?;
+    fs::remove_file(&path).with_context(|| format!("unlink {}", path.display()))?;
+    Ok(file)
 }
 
-fn join_stderr(reader: StderrReader) -> Result<String> {
-    let stderr = reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr reader failed"))??;
-    Ok(String::from_utf8_lossy(&stderr).into_owned())
+fn read_back(mut file: fs::File) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Deadline of the Git commands that gather a review: a large diff takes far
@@ -487,15 +494,15 @@ fn review_output(command: &mut Command) -> Result<String> {
 /// holding it in memory, under [`REVIEW_TIMEOUT`].
 fn review_output_to(command: &mut Command, file: &fs::File) -> Result<()> {
     let label = format!("{:?}", command.get_program());
+    let stderr = output_file()?;
     let mut child = command
         .stdout(Stdio::from(file.try_clone()?))
-        .stderr(Stdio::piped())
+        .stderr(stderr.try_clone()?)
         .stdin(Stdio::null())
         .spawn()
         .with_context(|| format!("start {label}"))?;
-    let err = read_stderr(&mut child)?;
     let status = wait_with_deadline(&mut child, &label, REVIEW_TIMEOUT)?;
-    let stderr = join_stderr(err)?;
+    let stderr = String::from_utf8_lossy(&read_back(stderr)?).into_owned();
     ensure!(status.success(), "{label} failed ({status}): {stderr}");
     Ok(())
 }
@@ -3447,6 +3454,26 @@ mod tests {
         }
         assert!(!process_alive(u32::MAX));
         assert!(processes.kill(u32::MAX).is_err());
+    }
+
+    /// Another process holding the command's output open (as one spawned
+    /// at the same moment can inherit it, task 1022) does not hold the
+    /// capture past the command's own exit.
+    #[test]
+    fn capture_returns_at_the_exit_though_another_process_holds_the_output() {
+        let started = Instant::now();
+        let (status, stdout, stderr) = capture(
+            Command::new("/bin/sh").args(["-c", "/bin/sleep 60 & echo $!; echo err >&2"]),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let held = started.elapsed();
+        let holder: libc::pid_t = stdout.trim().parse().unwrap();
+        // SAFETY: kill(2) on the pid of the sleep the shell reported.
+        unsafe { libc::kill(holder, libc::SIGKILL) };
+        assert!(status.success());
+        assert_eq!(stderr, "err\n");
+        assert!(held < Duration::from_secs(30), "held for {held:?}");
     }
 
     fn git_in(dir: &Path, args: &[&str]) -> std::process::Output {
