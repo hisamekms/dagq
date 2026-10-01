@@ -824,3 +824,141 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     assert_eq!(status["auto_update"]["state"], "building", "{status}");
     backend.join();
 }
+
+#[test]
+fn a_resume_handoff_preserves_the_exit_for_its_background_dialog() {
+    resumed_background_dialog(true);
+}
+
+#[test]
+fn a_resume_without_a_snapshot_recovers_the_exit_for_its_background_dialog() {
+    resumed_background_dialog(false);
+}
+
+fn resumed_background_dialog(snapshot: bool) {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    backend.exit_timeout = Duration::from_secs(60);
+    let backend = Arc::new(backend);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    backend.resume_script_for(
+        2,
+        &format!("await_message; resolve; receipt \"$(git rev-parse HEAD)\"; idle; {HOLD}"),
+    );
+    let before = backend.exits_sent.load(Ordering::SeqCst);
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "exit_requested")
+            .iter()
+            .any(|p| p["resume_attempt"] == 1)
+    });
+    let path = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["exit_typed"], true);
+    if !snapshot {
+        fs::remove_file(path).unwrap();
+    }
+    backdate_event(&db, &run, "exit_requested", 120);
+    *backend.screen.lock().unwrap() = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel".into();
+    let outcome = supervise_after_handoff(&db, &repo, &backend, &token).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(*backend.keys.lock().unwrap(), ["enter"]);
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst) - before, 1);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    assert!(
+        payloads(&detail, "auto_repaired")
+            .iter()
+            .any(|p| p["repair"] == "dialog_answered"
+                && p["conditions"]["exit_requested"] == true
+                && p["conditions"]["clean"] == true
+                && p["conditions"]["receipt_commit"] == p["conditions"]["head"])
+    );
+    assert!(
+        queue
+            .asks(AskQuery::default())
+            .unwrap()
+            .iter()
+            .all(|a| a.kind != AskKind::StuckExit)
+    );
+}
+
+#[test]
+fn a_resume_handoff_before_exit_does_not_answer_background_work() {
+    resumed_background_dialog_is_not_answered(true, false);
+}
+
+#[test]
+fn an_adopted_resume_before_exit_does_not_answer_background_work() {
+    resumed_background_dialog_is_not_answered(false, false);
+}
+
+#[test]
+fn an_adopted_resume_with_an_unsent_exit_does_not_answer_background_work() {
+    resumed_background_dialog_is_not_answered(false, true);
+}
+
+fn resumed_background_dialog_is_not_answered(snapshot: bool, unsent: bool) {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    backend.exit_timeout = Duration::from_secs(60);
+    let backend = Arc::new(backend);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    backend.resume_script_for(
+        2,
+        &format!("await_message; resolve; receipt \"$(git rev-parse HEAD)\"; {HOLD}"),
+    );
+    let before = backend.exits_sent.load(Ordering::SeqCst);
+    let (_, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"resume_request_sent")
+    });
+    let path = Path::new(run.run_dir().unwrap()).join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["exit_requested"], false);
+    assert_eq!(written["exit_typed"], false);
+    if !snapshot {
+        fs::remove_file(path).unwrap();
+    }
+    if unsent {
+        let queue = SqliteQueue::open(&db).unwrap();
+        for (kind, payload) in [
+            (EventKind::ExitRequested, json!({"resume_attempt": 1})),
+            (
+                EventKind::ExitRequestTimedOut,
+                json!({"resume_attempt": 1, "unsent": true}),
+            ),
+        ] {
+            queue.record_runtime_event(run.id(), kind, payload).unwrap();
+        }
+    }
+    *backend.screen.lock().unwrap() = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel".into();
+    let options = SuperviseOptions {
+        exit: Some(dagq::domain::exit::ExitConfig {
+            retries: 1,
+            intervals: vec![Duration::from_secs(60)],
+        }),
+        ..supervise_options(4, true)
+    };
+    let passes = options.passes.clone();
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff_with(&db, &repo, &backend, &token, options))
+    };
+    await_passes(&passes, SOME_PASSES);
+    assert!(backend.keys.lock().unwrap().is_empty());
+    assert_eq!(backend.exits_sent.load(Ordering::SeqCst), before);
+    SqliteQueue::open(&db)
+        .unwrap()
+        .request_handoff(&LeaseToken::new(token), "/next/dagq")
+        .unwrap();
+    let outcome = joined(next, "negative dialog handoff").unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let restored: Value = serde_json::from_slice(
+        &fs::read(Path::new(run.run_dir().unwrap()).join("handoff.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored["exit_typed"], false);
+    release_held_session(run.run_dir().unwrap());
+    backend.join();
+}

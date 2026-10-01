@@ -58,6 +58,8 @@ enum Snapshot {
         message_sent_at: Option<f64>,
         not_ready_asked: bool,
         exit_requested: bool,
+        #[serde(default)]
+        exit_typed: bool,
         exit_for_silence: bool,
         approved: bool,
     },
@@ -139,6 +141,7 @@ impl Supervisor<'_> {
                     message_sent_at: watch.message_sent.map(|(_, at)| seconds(at)),
                     not_ready_asked: watch.not_ready_asked,
                     exit_requested: watch.exit_requested.is_some(),
+                    exit_typed: watch.exit_typed,
                     exit_for_silence: watch.exit_for_silence,
                     approved: watch.approved,
                 }),
@@ -298,6 +301,7 @@ impl Supervisor<'_> {
                 message_sent_at,
                 not_ready_asked,
                 exit_requested,
+                exit_typed,
                 exit_for_silence,
                 approved,
             } => Phase::Resume(self.rebuilt_resume(
@@ -310,6 +314,7 @@ impl Supervisor<'_> {
                     message_sent_at: message_sent_at.map(time),
                     not_ready_asked,
                     exit_requested,
+                    exit_typed,
                     exit_for_silence,
                     approved,
                 },
@@ -348,5 +353,27 @@ impl Supervisor<'_> {
                 Phase::Exiting(watch)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_resume_snapshot_defaults_exit_typed_to_false() {
+        let mut value = json!({
+            "phase": "resume", "workspace": "w", "attempt": 1,
+            "started_at": 0.0, "message": "resume", "message_sent_at": null,
+            "not_ready_asked": false, "exit_requested": true,
+            "exit_for_silence": false, "approved": true
+        });
+        for expected in [false, true] {
+            let snapshot: Snapshot = serde_json::from_value(value.clone()).unwrap();
+            assert!(
+                matches!(snapshot, Snapshot::Resume { exit_typed, .. } if exit_typed == expected)
+            );
+            value["exit_typed"] = json!(true);
+        }
     }
 }

@@ -499,6 +499,7 @@ impl Supervisor<'_> {
             message_sent_at,
             not_ready_asked,
             exit_requested,
+            exit_typed,
             exit_for_silence,
             approved,
         } = state;
@@ -587,10 +588,9 @@ impl Supervisor<'_> {
             // for an adopted revise request.
             start: None,
             exit_requested,
-            // Whether that /exit was typed is not carried over: its
-            // "Background work is running" dialog is left to the stuck_exit
-            // ask (ADR-0047 decision 29).
-            exit_typed: false,
+            // Preserve the send across exec, or infer it from this attempt
+            // on adoption; the dialog still requires a clean receipt at HEAD.
+            exit_typed,
             exit_timed_out,
             retry,
             required_evidence: resume_required(&task, run),
@@ -630,7 +630,7 @@ impl Supervisor<'_> {
         let exit = since
             .iter()
             .filter(|e| e.kind == event_kind::EXIT_REQUESTED)
-            .find(of_attempt);
+            .rfind(of_attempt);
         // A silent wrapper's `/exit` follows its expiry in the same tick;
         // a silence that ended before an `/exit` for another reason does
         // not make that one a silent exit.
@@ -651,6 +651,7 @@ impl Supervisor<'_> {
                 message_sent_at,
                 not_ready_asked: since.iter().any(|e| e.kind == event_kind::INPUT_NOT_READY),
                 exit_requested: exit.is_some(),
+                exit_typed: adopted_exit_typed(&events, exit.copied()),
                 exit_for_silence,
                 approved: self
                     .queue
@@ -957,6 +958,21 @@ pub(super) fn resume_in_progress(events: &[RunEvent]) -> Option<(EventId, usize,
     Some((started.id, attempt as usize, workspace))
 }
 
+/// Whether the `/exit` of an adopted resume was typed, as ExitWatch reads
+/// it (`requested.is_some() && unsent.is_none()`): the attempt's last
+/// `exit_requested`, not withheld over a dialog, with no unsent
+/// `exit_request_timed_out` after it.
+fn adopted_exit_typed(events: &[RunEvent], requested: Option<&RunEvent>) -> bool {
+    requested.is_some_and(|requested| {
+        requested.payload["exit_typed"] != false
+            && !events.iter().any(|event| {
+                event.id > requested.id
+                    && event.kind == event_kind::EXIT_REQUEST_TIMED_OUT
+                    && event.payload["unsent"] == true
+            })
+    })
+}
+
 /// The run event recording that the resolution request of a resume was
 /// typed (`resume_attempt`, `workspace_id`, `sent_at` on the files' wall clock):
 /// a supervisor that adopts the resume does not send it again.
@@ -972,6 +988,7 @@ pub(super) struct ResumeState {
     pub(super) message_sent_at: Option<SystemTime>,
     pub(super) not_ready_asked: bool,
     pub(super) exit_requested: bool,
+    pub(super) exit_typed: bool,
     pub(super) exit_for_silence: bool,
     pub(super) approved: bool,
 }
@@ -1026,6 +1043,7 @@ impl ResumeWatch {
                 "workspace_id": self.workspace,
                 "timeout_secs": sv.cmux.exit_timeout().as_secs(),
                 "resume_attempt": self.attempt,
+                "exit_typed": typed,
             }),
         )?;
         self.end_live(sv, run)?;
@@ -1749,6 +1767,26 @@ mod tests {
             created_at: format!("t{id}"),
             actor: None,
         }
+    }
+
+    #[test]
+    fn adopted_exit_requires_a_request_without_later_unsent_records() {
+        let requested = event(3, "exit_requested", json!({"resume_attempt": 2}));
+        let mut events = vec![
+            event(1, "exit_requested", json!({"resume_attempt": 1})),
+            event(2, "exit_request_timed_out", json!({"unsent": true})),
+            requested.clone(),
+        ];
+        assert!(!adopted_exit_typed(&events, None));
+        assert!(adopted_exit_typed(&events, Some(&requested)));
+        events.push(event(4, "exit_request_timed_out", json!({})));
+        assert!(adopted_exit_typed(&events, Some(&requested)));
+        events.pop();
+        events.push(event(4, "exit_request_timed_out", json!({"unsent": true})));
+        assert!(!adopted_exit_typed(&events, Some(&requested)));
+        events.pop();
+        let withheld = event(3, "exit_requested", json!({"exit_typed": false}));
+        assert!(!adopted_exit_typed(&events, Some(&withheld)));
     }
 
     /// The resume a run is in needs its `resume_started` to be the last
