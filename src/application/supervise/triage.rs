@@ -11,8 +11,8 @@ use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::language::with_instruction;
 use crate::domain::recovery::{
-    ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, RecoveryAction, attempts,
-    current_alert, pending_request, run_processes,
+    ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, RecoveryAction, VERIFY_FIX_OPTION,
+    attempts, current_alert, pending_request, run_processes, verification_failed, verify_fix_round,
 };
 
 impl Supervisor<'_> {
@@ -246,7 +246,8 @@ impl Supervisor<'_> {
     /// else its status; a round records its own request unless one is
     /// pending. A run someone leases (a
     /// session still asked to exit) waits. An alert that got its
-    /// [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one, and a job
+    /// [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one (but for
+    /// a person's verify fix after an edit, [`verify_fix_round`]), and a job
     /// that cannot even start fails its round right away.
     pub(super) fn triage_runs(&mut self, parallel: usize) -> Result<()> {
         // A login or usage limit that holds the queue starts no recovery
@@ -277,9 +278,15 @@ impl Supervisor<'_> {
             let alert =
                 current_alert(&events).unwrap_or_else(|| RecoveryAlert::of_ended(run.status()));
             let done = attempts(&events, alert);
+            // A person's verify-fix answer after the task's verification
+            // was edited gets its round past the limit (ADR-t883-1).
+            let granted = pending.is_none()
+                && done >= MAX_RECOVERY_ATTEMPTS
+                && verify_fix_round(&events, &self.queue.show(run.task_id())?.events);
+            let used_up = pending.is_none() && done >= MAX_RECOVERY_ATTEMPTS && !granted;
             let (request, attempt) = match pending {
                 Some(_) => (None, done),
-                None if done >= MAX_RECOVERY_ATTEMPTS => (None, done + 1),
+                None if used_up => (None, done + 1),
                 None => {
                     let evidence: Vec<EventId> = events
                         .iter()
@@ -329,7 +336,7 @@ impl Supervisor<'_> {
             let Some((run, round)) = begun else {
                 continue;
             };
-            if attempt > MAX_RECOVERY_ATTEMPTS {
+            if used_up {
                 let used = attempt - 1;
                 if let Err(error) =
                     self.escalate_ended(&run, round, alert, used, Escalation::UsedUp(used), 0)
@@ -412,7 +419,15 @@ impl Supervisor<'_> {
             _ => Err("the run has no worktree".to_owned()),
         };
         let (status, head, receipt) = git_facts(self, run)?;
-        let history = repair_history(self, run)?;
+        let mut history = repair_history(self, run)?;
+        history.extend(
+            detail
+                .events
+                .iter()
+                .filter(|event| event.kind == event_kind::TASK_EDITED)
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         let workspace = run.workspace_id().unwrap_or("none").to_owned();
         let material = RecoveryMaterial {
             alert,
@@ -743,6 +758,20 @@ impl Supervisor<'_> {
                 options.push(option.clone());
             }
         }
+        // Only a run whose `integrate` verification failed is offered the
+        // verify fix (ADR-t883-1).
+        let verify_failed = verification_failed(&self.queue.run_events(run.id())?);
+        if verify_failed && !options.iter().any(|option| option == VERIFY_FIX_OPTION) {
+            options.push(VERIFY_FIX_OPTION.to_owned());
+        }
+        let verify_fix = if verify_failed {
+            format!(
+                " Its integrate verification failed: if the task's verify itself is wrong, user or inbox first runs `dagq edit {task_id} --verify ...` (or `--no-verify`), then answers `{VERIFY_FIX_OPTION}`; the recovery job runs again with the corrected commands, even once its tries are used up, and can carry the committed branch forward with retry_inherit. Answered without that edit, it goes back to the job like any other option.",
+                task_id = run.task_id()
+            )
+        } else {
+            String::new()
+        };
         let resume = if exhausted {
             ""
         } else {
@@ -754,7 +783,7 @@ impl Supervisor<'_> {
             " Any other option goes back to the recovery job, which runs again with your choice."
         };
         let question = format!(
-            "The supervisor's recovery job for run {run_id} (task {task_id}, {status}; alert: {alert}) did not move it on: {why}.\n{text}\nLast error: {last_error}\nretry: make the task ready for a new run from scratch (this run's work is not carried over).{resume} cancel: cancel the task.{others}",
+            "The supervisor's recovery job for run {run_id} (task {task_id}, {status}; alert: {alert}) did not move it on: {why}.\n{text}\nLast error: {last_error}\nretry: make the task ready for a new run from scratch (this run's work is not carried over).{resume} cancel: cancel the task.{verify_fix}{others}",
             run_id = run.id(),
             task_id = run.task_id(),
             status = run.status().as_str(),

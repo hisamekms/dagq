@@ -83,7 +83,9 @@ fn change_is_added_shown_listed_searched_and_edited_without_a_set() {
     ok(&db, &["ready", &id, "--bypass-review"]);
     assert_eq!(
         refused(&db, &["edit", &id, "--change", "feature"]),
-        format!("task {id} is ready; only a draft or submitted task can be edited")
+        format!(
+            "task {id} is ready; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains"
+        )
     );
 }
 

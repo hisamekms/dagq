@@ -313,7 +313,7 @@ impl fmt::Display for DomainError {
             }
             Self::TaskContentNotEditable { task_id, status } => write!(
                 f,
-                "task {task_id} is {}; only a draft or submitted task can be edited",
+                "task {task_id} is {}; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains",
                 status.as_str()
             ),
             Self::SelfDependency => f.write_str("a task cannot depend on itself"),

@@ -352,6 +352,23 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     Ok(task)
 }
 
+/// Replace only verification commands after a run has ended. The store
+/// checks the run history in the same transaction before calling this.
+pub fn edit_ended_verify(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
+    edit.validate()?;
+    require(
+        task.status == TaskStatus::InProgress && edit.verify_only(),
+        || DomainError::TaskContentNotEditable {
+            task_id: task.id,
+            status: task.status,
+        },
+    )?;
+    task.verification_commands = edit
+        .verification_commands
+        .expect("verify_only has commands");
+    Ok(task)
+}
+
 /// A task never depends on itself; checked before either task is read.
 pub fn check_not_self(task_id: TaskId, predecessor_id: TaskId) -> Result<(), DomainError> {
     require(task_id != predecessor_id, || DomainError::SelfDependency)
@@ -819,7 +836,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string(),
-            "task 5 is ready; only a draft or submitted task can be edited"
+            "task 5 is ready; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains"
         );
         let submitted = Task::restore(record(TaskStatus::Submitted)).unwrap();
         let edited = edit(

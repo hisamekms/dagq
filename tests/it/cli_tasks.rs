@@ -509,7 +509,9 @@ fn the_worker_provider_and_mode_are_added_shown_and_edited() {
     ok(&db, &["ready", &id, "--bypass-review"]);
     assert_eq!(
         refused(&db, &["edit", &id, "--provider", "codex"]),
-        format!("task {id} is ready; only a draft or submitted task can be edited")
+        format!(
+            "task {id} is ready; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains"
+        )
     );
 }
 
@@ -710,7 +712,9 @@ fn edit_replaces_fields_of_a_draft_task_only() {
     ok(&db, &["ready", &id, "--bypass-review"]);
     assert_eq!(
         refused(&db, &["edit", &id, "--title", "late"]),
-        format!("task {id} is ready; only a draft or submitted task can be edited")
+        format!(
+            "task {id} is ready; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains"
+        )
     );
     // Back to draft, it can be edited again.
     ok(&db, &["draft", &id]);

@@ -76,7 +76,14 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     }
 
     pub fn edit(&mut self, task: TaskId, edit: TaskEdit) -> Result<Task> {
-        self.authorize_task(Capability::TaskWrite, task)?;
+        self.refuse_ungranted(Capability::TaskWrite, &Resource::task(task))?;
+        let status = self.store.task_status(task)?;
+        let capability = if status == TaskStatus::InProgress && edit.verify_only() {
+            Capability::TaskVerifyEdit
+        } else {
+            Capability::TaskWrite
+        };
+        self.authorize_task(capability, task)?;
         self.store.edit_task(task, edit)
     }
 

@@ -937,7 +937,8 @@ fn spawn_live(
     facts: &Value,
     launch: &ActorLaunch,
 ) -> Result<HeadlessJob> {
-    let task = sv.queue.show(run.task_id())?.task;
+    let detail = sv.queue.show(run.task_id())?;
+    let task = detail.task;
     // A headless session has no screen: its last turns stand in for it.
     let screen = if headless(run) {
         turns_excerpt(sv, run)
@@ -949,7 +950,15 @@ fn spawn_live(
     };
     let listed = own_processes(sv, run).map_err(|error| format!("{error:#}"));
     let (status, head, receipt) = git_facts(sv, run)?;
-    let history = repair_history(sv, run)?;
+    let mut history = repair_history(sv, run)?;
+    history.extend(
+        detail
+            .events
+            .iter()
+            .filter(|event| event.kind == event_kind::TASK_EDITED)
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     let material = RecoveryMaterial {
         alert,
         ended: None,

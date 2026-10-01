@@ -11,6 +11,76 @@ use common::cli::*;
 use serde_json::Value;
 use std::path::Path;
 
+#[test]
+fn ended_run_verify_edit_is_delegated_only_to_user_and_inbox() {
+    use dagq::application::TaskStore;
+    use dagq::infrastructure::sqlite::SqliteQueue;
+    let (_dir, db) = queue();
+    let id = ok(&db, &["add", "verify", "--verify", "false"])["id"]
+        .as_i64()
+        .unwrap();
+    let id_text = id.to_string();
+    ok(&db, &["ready", &id_text, "--bypass-review"]);
+    let mut store = SqliteQueue::open(&db).unwrap();
+    let run = match store.claim(&crate::common::queue::base()).unwrap() {
+        dagq::domain::ClaimOutcome::Claimed { run } => run,
+        other => panic!("unexpected claim: {other:?}"),
+    };
+    assert!(
+        !invoke_as(None, &db, &["edit", &id_text, "--verify", "true"])
+            .status
+            .success()
+    );
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='failed' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM run_leases WHERE run_id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    for role in ["planner", "worker", "recovery-job", "review-job"] {
+        assert!(
+            !invoke_as(Some(role), &db, &["edit", &id_text, "--verify", "true"])
+                .status
+                .success(),
+            "{role}"
+        );
+    }
+    assert!(
+        !invoke_as(None, &db, &["edit", &id_text, "--paths", "src/**"])
+            .status
+            .success()
+    );
+    ok(&db, &["edit", &id_text, "--verify", "true"]);
+    ok_as("inbox", &db, &["edit", &id_text, "--no-verify"]);
+    let edits: Vec<_> = ok(&db, &["show", &id_text, "--full"])["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "task_edited")
+        .cloned()
+        .collect();
+    assert_eq!(edits.len(), 2);
+    assert_eq!(edits[0]["actor"]["role"], "user");
+    assert_eq!(
+        edits[0]["payload"]["from"]["verification_commands"],
+        serde_json::json!(["false"])
+    );
+    assert_eq!(
+        edits[0]["payload"]["to"]["verification_commands"],
+        serde_json::json!(["true"])
+    );
+    assert_eq!(edits[1]["actor"]["role"], "inbox");
+    assert_eq!(
+        edits[1]["payload"]["to"]["verification_commands"],
+        serde_json::json!([])
+    );
+}
+
 fn planner(id: &str) -> [(&'static str, String); 2] {
     [
         ("DAGQ_ROLE", "planner".into()),

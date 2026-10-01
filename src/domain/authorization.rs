@@ -28,6 +28,7 @@ string_enum!(Capability {
     GoalClose => "goal.close",
     GoalReviewRequest => "goal.review_request",
     TaskWrite => "task.write",
+    TaskVerifyEdit => "task.verify_edit",
     TaskCancel => "task.cancel",
     TaskReady => "task.ready",
     TaskReadyBypassReview => "task.ready_bypass_review",
@@ -71,7 +72,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -80,6 +81,7 @@ impl Capability {
         Self::GoalClose,
         Self::GoalReviewRequest,
         Self::TaskWrite,
+        Self::TaskVerifyEdit,
         Self::TaskCancel,
         Self::TaskReady,
         Self::TaskReadyBypassReview,
@@ -307,6 +309,7 @@ const USER: &[Capability] = &[
     C::GoalClose,
     C::GoalReviewRequest,
     C::TaskWrite,
+    C::TaskVerifyEdit,
     C::TaskCancel,
     C::TaskReady,
     C::TaskReadyBypassReview,
@@ -522,6 +525,34 @@ fn planner_permits(actor: &ActorContext, capability: Capability, resource: &Reso
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_user_and_inbox_can_correct_an_ended_tasks_verify() {
+        let task = Resource::Task {
+            id: TaskId::new(1),
+            status: Some(TaskStatus::InProgress),
+        };
+        for role in [ActorRole::User, ActorRole::Inbox] {
+            assert!(allowed(
+                &ActorContext::instance(role, 1),
+                C::TaskVerifyEdit,
+                &task
+            ));
+        }
+        for role in [
+            ActorRole::Planner,
+            ActorRole::Worker,
+            ActorRole::RecoveryJob,
+            ActorRole::ReviewJob,
+            ActorRole::Supervisor,
+        ] {
+            assert!(!allowed(
+                &ActorContext::instance(role, 1),
+                C::TaskVerifyEdit,
+                &task
+            ));
+        }
+    }
 
     fn allowed(actor: &ActorContext, capability: Capability, resource: &Resource) -> bool {
         StaticPolicy.authorize(actor, capability, resource).is_ok()

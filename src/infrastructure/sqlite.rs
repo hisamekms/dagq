@@ -1305,7 +1305,28 @@ impl TaskStore for SqliteQueue {
         let old = read_task(&tx, task_id)?;
         // The event keeps the fields before the edit, which consumes the task.
         let old_json = serde_json::to_value(&old)?;
-        let new = task::edit(old, edit)?;
+        let new = if old.status() == TaskStatus::InProgress {
+            let latest: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+                    [task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                edit.verify_only()
+                    && !has_unfinished_run(&tx, task_id)?
+                    && !tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM run_leases l JOIN task_runs r ON r.id=l.run_id WHERE r.task_id=?1)",
+                        [task_id], |row| row.get::<_, bool>(0),
+                    )?
+                    && matches!(latest.as_deref(), Some("failed" | "interrupted")),
+                "task {task_id} is in_progress; only --verify/--no-verify may be edited by user or inbox after its latest run has ended and no live run remains"
+            );
+            task::edit_ended_verify(old, edit)?
+        } else {
+            task::edit(old, edit)?
+        };
         let new_json = serde_json::to_value(&new)?;
         let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
         for field in EDITABLE_TASK_FIELDS {

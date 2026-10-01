@@ -1271,7 +1271,17 @@ fn resuming_stops_after_three_attempts() {
     assert_eq!(ask.kind, AskKind::Decide);
     assert_eq!(ask.run_id.as_ref(), Some(run.id()));
     assert_eq!(ask.asked_by, "supervisor");
-    assert_eq!(ask.options, ["retry", "cancel", "split the task"]);
+    assert_eq!(
+        ask.options,
+        [
+            "retry",
+            "cancel",
+            "split the task",
+            "edit the task's --verify, then retry_inherit"
+        ]
+    );
+    // Its parks count as failed verifications, so the verify fix is offered.
+    assert!(ask.question.contains("dagq edit"), "{}", ask.question);
     for part in [
         "alert: resume_exhausted",
         "Diagnosis: the conflict needs a decision on the design",

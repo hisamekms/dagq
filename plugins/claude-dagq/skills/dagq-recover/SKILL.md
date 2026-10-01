@@ -33,7 +33,7 @@ The run becomes `interrupted` (an `integrating` one `awaiting_integration`); its
 
 ## 4. Triage by hand, and recover by hand
 
-Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again. A live run's failed recovery job opens that alert's own ask (`stuck_exit`, `answer_prompt`, `stalled`; section 7); `recover by hand` (`recovery_failed`) is one an older runtime recorded, with the session untouched. Before bringing either to the person, read `reference/triage-by-hand.md`: what to read, and `ready ID` / `cancel ID` or section 7 on their answer.
+Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again. A live run's failed recovery job opens that alert's own ask (`stuck_exit`, `answer_prompt`, `stalled`; section 7); `recover by hand` (`recovery_failed`) is one an older runtime recorded, with the session untouched. Before bringing either to the person, read `reference/triage-by-hand.md`: what to read and do; it also keeps a broken verify's work (`edit`, then `retry_inherit`).
 
 ## 5. Start, stop and update the runtime
 

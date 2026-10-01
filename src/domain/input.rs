@@ -166,6 +166,20 @@ pub struct TaskEdit {
 }
 
 impl TaskEdit {
+    /// The one correction allowed after a run ends, before inheriting its work.
+    pub fn verify_only(&self) -> bool {
+        self.verification_commands.is_some()
+            && self.title.is_none()
+            && self.description.is_none()
+            && self.acceptance.is_none()
+            && self.required_evidence.is_none()
+            && self.paths.is_none()
+            && self.context.is_none()
+            && self.change.is_none()
+            && self.provider.is_none()
+            && self.worker_mode.is_none()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.title.is_none()
             && self.description.is_none()

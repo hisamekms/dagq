@@ -188,7 +188,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
             .unwrap_err()
             .to_string(),
         format!(
-            "task {} is ready; only a draft or submitted task can be edited",
+            "task {} is ready; only a draft or submitted task can be edited freely; an in_progress task permits only user or inbox --verify/--no-verify after its latest run ended and no live run remains",
             task.id()
         )
     );
@@ -199,13 +199,120 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
             .unwrap_err()
             .to_string(),
         format!(
-            "task {} is in_progress; only a draft or submitted task can be edited",
+            "task {} is in_progress; only --verify/--no-verify may be edited by user or inbox after its latest run has ended and no live run remains",
             task.id()
         )
     );
     assert_eq!(
         queue.show(task.id()).unwrap().task.description(),
         "A small development task"
+    );
+}
+
+#[test]
+fn ended_run_allows_only_verify_correction_before_inherited_retry() {
+    let (dir, mut queue) = fixture();
+    let task = queue.add(new_task("verify correction")).unwrap();
+    queue
+        .transition(task.id(), TaskAction::BypassReview)
+        .unwrap();
+    let run = match queue.claim(&base()).unwrap() {
+        ClaimOutcome::Claimed { run } => run,
+        other => panic!("unexpected claim: {other:?}"),
+    };
+    let edit = || TaskEdit {
+        verification_commands: Some(vec!["python3.11 check.py".into()]),
+        ..TaskEdit::default()
+    };
+    assert!(
+        queue
+            .edit_task(task.id(), edit())
+            .unwrap_err()
+            .to_string()
+            .contains("no live run remains")
+    );
+    let conn = Connection::open(dir.path().join("queue.db")).unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='failed' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO run_leases(run_id,token,pid) VALUES (?1,'test',1)",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    assert!(
+        queue.edit_task(task.id(), edit()).is_err(),
+        "the ended run still has a lease"
+    );
+    conn.execute(
+        "DELETE FROM run_leases WHERE run_id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    for status in [
+        "running",
+        "awaiting_integration",
+        "integrating",
+        "needs_session",
+    ] {
+        conn.execute(
+            "UPDATE task_runs SET status=?1 WHERE id=?2",
+            rusqlite::params![status, run.id().as_str()],
+        )
+        .unwrap();
+        assert!(queue.edit_task(task.id(), edit()).is_err(), "{status}");
+    }
+    conn.execute(
+        "UPDATE task_runs SET status='failed' WHERE id=?1",
+        [run.id().as_str()],
+    )
+    .unwrap();
+    assert!(
+        queue
+            .edit_task(
+                task.id(),
+                TaskEdit {
+                    paths: Some(vec!["src/**".into()]),
+                    ..TaskEdit::default()
+                }
+            )
+            .is_err()
+    );
+    let edited = queue.edit_task(task.id(), edit()).unwrap();
+    assert_eq!(edited.verification_commands(), ["python3.11 check.py"]);
+    let event = queue
+        .show(task.id())
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|e| e.kind == "task_edited")
+        .unwrap();
+    assert_eq!(
+        event.payload["from"]["verification_commands"],
+        serde_json::json!(["cargo test"])
+    );
+    assert_eq!(
+        event.payload["to"]["verification_commands"],
+        serde_json::json!(["python3.11 check.py"])
+    );
+    queue
+        .edit_task(
+            task.id(),
+            TaskEdit {
+                verification_commands: Some(vec![]),
+                ..TaskEdit::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        queue
+            .show(task.id())
+            .unwrap()
+            .task
+            .verification_commands()
+            .is_empty()
     );
 }
 

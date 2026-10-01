@@ -299,13 +299,12 @@ enum Command {
         #[arg(long)]
         none: bool,
     },
-    /// Replace fields of a draft or submitted task; each given field replaces the old value, and a
-    /// repeatable flag replaces the whole list. Prints the task; `show` lists the change as
-    /// a `task_edited` event with the old and new values. Other statuses are refused: a
-    /// ready task goes back to draft (`draft ID`) first, and a running run keeps its prompt.
+    /// Replace fields of a draft or submitted task. User or inbox may replace only --verify
+    /// on an in_progress task after its latest run ended and no live run remains. Each given
+    /// field replaces the old value; `task_edited` records old and new values and actor.
     #[command(group = clap::ArgGroup::new("field").multiple(true).required(true))]
     Edit {
-        /// Draft or submitted task.
+        /// Draft or submitted task, or an eligible in_progress task for --verify only.
         task: i64,
         #[arg(long, group = "field")]
         title: Option<String>,

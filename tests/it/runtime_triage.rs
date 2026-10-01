@@ -100,6 +100,131 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     assert!(dir.join("recovery-failed-1.out").is_file());
 }
 
+/// Task 572 (ADR-t883-1): a run whose `integrate` verification fails on a
+/// broken verify command, and whose resumed session gives up, goes to the
+/// recovery job. Its `decide` asks offer the verify fix; a person answers
+/// the job's own option until the alert's three jobs are used up, as asks
+/// 154, 159 and 160 went. The used-up ask still offers the fix: the inbox
+/// edits the verify and answers it, the job gets one more round that sees
+/// the corrected commands and the edit, chooses `retry_inherit`, and the
+/// next run lands through the corrected verification with the work kept.
+#[test]
+fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() {
+    let (_dir, repo, db) = fixture();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands='[\"false\"]' WHERE id=1",
+            [],
+        )
+        .unwrap();
+    let marker = db.parent().unwrap().join("first-run-done");
+    let script = format!(
+        "if [ ! -f '{marker}' ]; then : > '{marker}'; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit; exit 0; fi; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+        marker = marker.display()
+    );
+    let backend = TestWorkspace::new(&db, false, &script);
+    backend.resume_script_for(
+        1,
+        "await_message; receipt \"$(git rev-parse HEAD)\" failed 'the verify itself is broken'; idle; await_exit",
+    );
+    let escalate = || {
+        recovery(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "the verify is wrong",
+            "options": ["try again"], "reason_category": "recovery_failed"
+        }))
+    };
+    let option = "edit the task's --verify, then retry_inherit";
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let decide = |queue: &mut SqliteQueue| {
+        other_asks(queue, false)
+            .into_iter()
+            .find(|ask| ask.kind == AskKind::Decide)
+            .unwrap()
+    };
+    // The run, its failed verification, its resume and three job rounds,
+    // each escalated and answered with the job's option.
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[escalate()]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let first = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(
+        first.status(),
+        RunStatus::Failed,
+        "{:?}",
+        first.last_error()
+    );
+    for round in 1..=3 {
+        let ask = decide(&mut queue);
+        assert!(
+            ask.options.contains(&option.to_owned()),
+            "{:?}",
+            ask.options
+        );
+        assert!(
+            ask.question.contains("dagq edit 1 --verify"),
+            "{}",
+            ask.question
+        );
+        queue.answer(ask.id, "try again").unwrap();
+        let triages = if round < 3 { vec![escalate()] } else { vec![] };
+        let reviewer = TestReviewer::new(&[]).with_triages(&triages);
+        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        assert_eq!(
+            reviewer.triage_prompts().len(),
+            triages.len(),
+            "round {round}"
+        );
+    }
+    // The used-up ask still offers the fix; answered after the edit, the
+    // job runs once more.
+    let ask = decide(&mut queue);
+    assert!(ask.question.contains("used"), "{}", ask.question);
+    assert!(
+        ask.options.contains(&option.to_owned()),
+        "{:?}",
+        ask.options
+    );
+    queue
+        .edit_task(
+            TaskId::new(1),
+            dagq::domain::TaskEdit {
+                verification_commands: Some(vec!["test -f seed.txt".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    queue.answer(ask.id, option).unwrap();
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[repair(
+        json!({"action": "retry_inherit"}),
+        "verify corrected",
+    )]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let prompt = &reviewer.triage_prompts()[0].0;
+    assert!(prompt.contains("test -f seed.txt"), "{prompt}");
+    assert!(prompt.contains("task_edited"), "{prompt}");
+    assert!(prompt.contains(option), "{prompt}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 2, "{:?}", event_kinds(&detail));
+    assert_eq!(
+        detail.runs[1].status(),
+        RunStatus::Integrated,
+        "{:?}; last error {:?}",
+        event_kinds(&detail),
+        detail.runs[1].last_error()
+    );
+    let requested = run_payloads(&detail, &first, "recovery_requested");
+    assert_eq!(requested.len(), 4, "{requested:?}");
+    assert_eq!(requested[3]["person_answer"]["answer"], option);
+    let inherited = run_payloads(&detail, &detail.runs[1], "run_inherited");
+    assert_eq!(inherited[0]["inherit_from_run"], json!(first.id()));
+    let verified = run_payloads(&detail, &detail.runs[1], "verification_command");
+    assert_eq!(verified.len(), 1);
+    assert_eq!(verified[0]["command"], "test -f seed.txt");
+}
+
 /// A `retry` of a run whose branch holds commits would throw them away, so
 /// the runtime does not apply it (ADR-0047 decision 40): the whole verdict
 /// becomes the `decide` ask, with the job's diagnosis, its actions as the
@@ -145,6 +270,7 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     assert_eq!(ask.run_id.as_ref(), Some(run.id()));
     assert_eq!(ask.asked_by, "supervisor");
     assert_eq!(ask.options, ["retry", "resume", "cancel", "retry anyway"]);
+    assert!(!ask.question.contains("dagq edit"), "{}", ask.question);
     assert_eq!(ask.reason_category, dagq::domain::AskReason::Discard);
     for part in [
         "alert: failed",

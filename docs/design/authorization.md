@@ -41,6 +41,7 @@ host実行ではこの判定は助言的（advisory）で、sandboxでも隔離�
 | | `goal.close` | `goal close` |
 | | `goal.review_request` | `goal review` |
 | | `task.write` | `add` `edit` `draft` `set-goal` `set-paths` `set-priority` `dependency add/remove` |
+| | `task.verify_edit` | 終了runを持つ`in_progress` taskの`edit --verify` / `edit --no-verify` |
 | | `task.cancel` | `cancel` |
 | | `task.ready` / `task.ready_bypass_review` | `ready` / `ready --bypass-review` |
 | | `proposal.submit` / `proposal.withdraw` | `submit` / `proposal withdraw` |
@@ -102,11 +103,14 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor�
 | --- | --- | --- |
 | `add` | `task.write` | `--goal`のgoal、無ければqueue |
 | `edit` `set-goal` `set-paths` `set-priority` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
+| `edit --verify` / `edit --no-verify`（`in_progress`のみ） | `task.verify_edit` | task（最新runが終了し、生きているrunが無いことをstoreが同一transactionで検査） |
 | `ready` / `ready --bypass-review` | `task.ready` / `task.ready_bypass_review` | task（状態） |
 | `cancel`（`--duplicate-of`を含む） | `task.cancel` | task（状態） |
 | `submit` / `submit --proposal ID` | `proposal.submit` | queue / proposal（持ち主） |
 | `proposal withdraw` | `proposal.withdraw` | proposal（持ち主） |
 | `goal add` / `goal edit` / `goal ready` / `goal close` / `goal review` | `goal.write` / `goal.write` / `goal.ready` / `goal.close` / `goal.review_request` | queue / goal |
+
+終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。planner・worker・jobはこの権限を持たない。`required_evidence`と`paths`は変更できず、`task_edited`の`from`/`to`とactorに修正が残る。
 
 policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・4つのjob・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
 

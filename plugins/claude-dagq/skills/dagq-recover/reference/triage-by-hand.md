@@ -1,6 +1,6 @@
 # Triage by hand, and recover by hand
 
-Read this when the attention `triage by hand` or `recover by hand` reaches the person (the `dagq-recover` skill, section 4). Act only on the person's word.
+Read this when the attention `triage by hand` or `recover by hand` reaches the person (the `dagq-recover` skill, section 4), or when a `decide` ask's run failed on a broken verify with its work committed. Act only on the person's word.
 
 ## `triage by hand`
 
@@ -9,3 +9,7 @@ Attention `triage by hand` (`kind` `triage_failed`): the recovery job of a `fail
 ## `recover by hand`
 
 Attention `recover by hand` (`kind` `recovery_failed`): a live run's recovery job failed under a runtime from before ADR-t609-1 (`last_error` its error); the session is untouched and the job does not retry that alert. The runtime now opens the alert's own ask instead (`stuck_exit`, `answer_prompt`, `stalled`, `reason_category` `recovery_failed`), carried out as that kind's answer. Read the screen with the person and carry out what they decide as in the skill's section 7 (`reference/session.md`, `reference/stalled.md`, `reference/stuck-exit.md`). It clears once the session exits.
+
+## Broken verification command with committed work
+
+For the task 572 / ask 154, 159, 160 case, first read `dagq show ID --full` and the run's `integrate-<attempt>-verify-N.log`. If the failed command itself is wrong (for example, host `python3` lacks `tomllib`), ask the person for the corrected command. User or inbox may run `dagq edit ID --verify 'correct command'` on an `in_progress` task only after its latest run has ended and no live run remains. Repeat `--verify` for every command to keep; `--no-verify` clears all. Check the `task_edited` old/new values and actor with `show --full`, then answer the open `decide` ask with the exact option `edit the task's --verify, then retry_inherit`. The runtime offers it on every `decide` ask of a run whose integrate verification failed, including the ask that opens after the job's three tries are used up (where ask 160 stood). This returns the run to the recovery job, with one more round even past those three tries because the verify was edited since the run began; it reads the corrected verify and chooses `retry_inherit`, retaining the branch's commits for the next integration. If you answer it without editing first, it counts like any other option, and once the tries are used up the same ask opens again: edit, then answer that one. Never use `retry` to discard committed work for this correction. The recovery job itself does not edit tasks.

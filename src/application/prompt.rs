@@ -1905,17 +1905,18 @@ pub fn recovery_prompt(
          Read only: the material below, and the files it names if you need more (the worktree is {worktree}). Do not change any file and do not run commands; the runtime applies your verdict.\n\n\
          Task description:\n{description}\n\n\
          Acceptance criteria:\n{acceptance}\n\n\
+         Current task verification commands (use these, including after a person's correction):\n{verification}\n\n\
          Alert facts:\n{facts}\n\n\
          {ended}\
          {screen_label}\n{screen}\n\n\
          Processes of the run (working directory in the worktree, or under the session's wrapper; the wrapper and the agent themselves are not listed):\n{processes}\n\n\
          Worktree: HEAD {head}, receipt commit {receipt}, git status:\n{status}\n\n\
-         Earlier recovery verdicts and repairs of this run:\n{history}\n\n\
+         Earlier recovery verdicts, repairs, and task_edited events:\n{history}\n\n\
          Allowed actions:\n{actions}\n\
          Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, {never_keys}. If the repair needs any of these, escalate.\n\n\
          Answer with one JSON object and nothing else, matching this schema:\n\
          {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [string, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\"}}\n\
-         diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs. reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
+         diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs. If a broken verification command caused an ended run to fail, offer `edit the task's --verify, then retry_inherit` to the person: user or inbox can edit only verification commands after the run ends; you cannot edit. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
         run_id = run.id(),
         task_id = task.id(),
         title = task.title(),
@@ -1961,6 +1962,7 @@ pub fn recovery_prompt(
         },
         description = or_none(task.description()),
         acceptance = or_none(task.acceptance()),
+        verification = fenced("sh", &task.verification_commands().join("\n")),
         facts = fenced("json", &serde_json::to_string_pretty(material.facts)?),
         screen = fenced("text", or_none(material.screen.trim())),
         head = material.head,

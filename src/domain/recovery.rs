@@ -138,6 +138,48 @@ fn ended_request(event: &RunEvent) -> bool {
             .is_some_and(|alert| alert.ask_kind() == AskKind::Decide)
 }
 
+/// The option the runtime adds to the `decide` ask of a run whose
+/// `integrate` verification failed (ADR-t883-1): a person or the inbox
+/// edits the task's verification commands first, and the answer sends the
+/// run back to the recovery job, which can then choose `retry_inherit`.
+pub const VERIFY_FIX_OPTION: &str = "edit the task's --verify, then retry_inherit";
+
+/// Whether the run's `integrate` verification failed at least once
+/// (`integration_deferred` with `code: verification_failed`): the failure
+/// a broken verification command leaves, for which the `decide` ask offers
+/// [`VERIFY_FIX_OPTION`].
+pub fn verification_failed(run_events: &[RunEvent]) -> bool {
+    run_events.iter().any(|e| {
+        e.kind == super::event_kind::INTEGRATION_DEFERRED
+            && e.payload["code"] == "verification_failed"
+    })
+}
+
+/// Whether the person's latest answer since the last round is
+/// [`VERIFY_FIX_OPTION`] and the task's verification commands were edited
+/// (`task_edited` with `verification_commands`) after the run began: that
+/// answer gets a recovery round even when the alert's
+/// [`MAX_RECOVERY_ATTEMPTS`] are used up, so the job reads the corrected
+/// commands (ADR-t883-1). Without such an edit the answer counts as any
+/// other, and once the attempts are used up the ask opens again.
+pub fn verify_fix_round(run_events: &[RunEvent], task_events: &[RunEvent]) -> bool {
+    let chosen = run_events
+        .iter()
+        .rev()
+        .take_while(|e| e.kind != "triage_started")
+        .find(|e| e.kind == "triage_decided" && e.payload["action"] == super::RECOVER_AGAIN)
+        .is_some_and(|e| e.payload["answer"] == VERIFY_FIX_OPTION);
+    let Some(began) = run_events.first().map(|e| e.id) else {
+        return false;
+    };
+    chosen
+        && task_events.iter().any(|e| {
+            e.kind == super::event_kind::TASK_EDITED
+                && e.id > began
+                && e.payload["to"].get("verification_commands").is_some()
+        })
+}
+
 /// The `recovery_requested` of a run that ended which no round took yet: the
 /// latest one after the latest `triage_started` and `resume_started` (the
 /// runtime records it when a run's resumes are used up). Requests of a
@@ -466,6 +508,70 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    fn numbered(id: i64, kind: &str, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: super::super::EventId::new(id),
+            ..event(kind, payload)
+        }
+    }
+
+    #[test]
+    fn a_verify_fix_answer_after_a_verification_edit_gets_a_round() {
+        let claimed = numbered(10, "run_claimed", serde_json::json!({}));
+        let deferred = numbered(
+            11,
+            "integration_deferred",
+            serde_json::json!({"code": "verification_failed"}),
+        );
+        assert!(!verification_failed(std::slice::from_ref(&claimed)));
+        assert!(verification_failed(&[claimed.clone(), deferred.clone()]));
+        let decided = |answer: &str| {
+            numbered(
+                14,
+                "triage_decided",
+                serde_json::json!({"action": "recover", "answer": answer}),
+            )
+        };
+        let edited = |id: i64, field: &str| {
+            numbered(
+                id,
+                "task_edited",
+                serde_json::json!({"from": {field: []}, "to": {field: ["true"]}}),
+            )
+        };
+        let run = [
+            claimed.clone(),
+            deferred.clone(),
+            decided(VERIFY_FIX_OPTION),
+        ];
+        assert!(verify_fix_round(
+            &run,
+            &[edited(13, "verification_commands")]
+        ));
+        // No edit, an edit of another field, or one from before the run.
+        assert!(!verify_fix_round(&run, &[]));
+        assert!(!verify_fix_round(&run, &[edited(13, "paths")]));
+        assert!(!verify_fix_round(
+            &run,
+            &[edited(5, "verification_commands")]
+        ));
+        // Another answer, or a round already taken since.
+        let other = [claimed.clone(), decided("split the task")];
+        assert!(!verify_fix_round(
+            &other,
+            &[edited(13, "verification_commands")]
+        ));
+        let taken = [
+            claimed,
+            decided(VERIFY_FIX_OPTION),
+            numbered(15, "triage_started", serde_json::json!({})),
+        ];
+        assert!(!verify_fix_round(
+            &taken,
+            &[edited(13, "verification_commands")]
+        ));
     }
 
     #[test]
