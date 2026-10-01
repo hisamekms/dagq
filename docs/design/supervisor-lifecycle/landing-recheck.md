@@ -4,8 +4,8 @@ type: design
 title: "Landing recheck"
 status: current
 created: 2026-09-26
-updated: 2026-09-27
-last_verified: 2026-09-27
+updated: 2026-10-01
+last_verified: 2026-10-01
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -33,7 +33,7 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 2. 衝突が無く、main checkoutの`dagq.toml`の`[recheck] command`（[Run environment](run-environment.md)）があれば、mergeした木を`commit-tree`でmainの上の1 commitにし（refは作らない）、queue dirの`recheck/worktree`に`Repository::checkout_scratch`で出す（worktreeでなければ`git worktree prune`の後に`git worktree add --detach --force`、worktreeなら`checkout --detach --force`と`clean -ffdxq`）。そこで`/bin/sh`でcommandを実行する。envはそのrunの`[run.env]`（`${DAGQ_RUN_DIR}`はそのrunのrun dir）に、`CARGO_TARGET_DIR=<queue dir>/recheck/target`を上書きしたもの。出力はrun dirの`recheck-<mainの先頭12桁>.log`。非0の終了は`verification_failed`で、`command`・`exit_code`・`log_path`・`output_tail`（末尾2000文字）を持つ。
 3. `[recheck]`が無いか、`[run.env]`のprogramが見つからない間（ADR-0049の決定9）は1だけを見る。Gitやcommandが実行できなかったrunは`errors`に数え、runには何も記録しない。
 
-この repositoryの`dagq.toml`には`[recheck] command = "cargo check --locked --all-targets"`を置く予定で、`[recheck]`を知らない旧バイナリは`dagq.toml`を読めなくなるので、固定バイナリを入れ替えた後の別taskで足す（それまではmerge-treeだけ）。target（`recheck/target`）は1つで、recheckは直列なので、同時にそれを使うのは1本だけ。worktreeとtargetはqueue dirの`recheck/`に残り、次のrecheckが使い回す。
+この repositoryの`dagq.toml`には`[recheck]`の`command = "cargo check --locked --all-targets"`がある。task 529が、固定バイナリにtask 462の実装が入った後に足した。target（`recheck/target`）は1つで、recheckは直列なので、同時にそれを使うのは1本だけ。worktreeとtargetはqueue dirの`recheck/`に残り、次のrecheckが使い回す。
 
 ## 見つかったとき
 
