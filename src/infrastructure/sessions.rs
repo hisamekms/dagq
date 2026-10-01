@@ -2665,6 +2665,113 @@ mod tests {
         assert_eq!(closed[2].payload["reason"], JOB_FINISHED);
     }
 
+    #[test]
+    fn handoff_closes_reviews_with_transcript_models_and_no_open_stats() {
+        use crate::application::{GoalReviewStore, PlanReviewStore};
+        use crate::domain::{
+            EventId,
+            stats::sessions::{SessionWindow, by_kind, spans},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (mut queue, task_id, _) = run_queue(dir.path());
+        let goal = queue
+            .add_goal(crate::domain::NewGoal {
+                title: "g".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                draft: false,
+            })
+            .unwrap()
+            .id();
+        queue.set_goal(task_id, Some(goal)).unwrap();
+        assert_eq!(goal.as_i64(), 1);
+        queue
+            .conn
+            .execute_batch(
+                "INSERT INTO proposals(id,status,owner_origin,submitted_at,created_at,updated_at)
+             VALUES (5,'submitted','person','t','t','t');
+             INSERT INTO plan_reviews(id,proposal_id,attempt,supervisor_token,started_at)
+             VALUES (7,5,1,'handoff',0);
+             INSERT INTO goal_reviews(id,goal_id,attempt,supervisor_token,fingerprint,started_at)
+             VALUES (8,1,1,'handoff','tasks',0);",
+            )
+            .unwrap();
+        for (kind, session, payload) in [
+            (
+                EventKind::PlanReviewStarted,
+                "plan",
+                json!({"plan_review_id": 7, "proposal_id": 5}),
+            ),
+            (
+                EventKind::GoalReviewStarted,
+                "goal",
+                json!({"goal_review_id": 8, "goal_id": 1}),
+            ),
+        ] {
+            let mut payload = payload;
+            payload["session_id"] = json!(session);
+            payload["cwd"] = json!("/repo");
+            payload["attempt"] = json!(1);
+            if kind == EventKind::GoalReviewStarted {
+                crate::infrastructure::sqlite::goal_event(&queue.conn, goal, kind, payload)
+                    .unwrap();
+            } else {
+                event(&queue.conn, task_id, None, kind, payload).unwrap();
+            }
+        }
+        let start = retime(&queue.conn, 0, 100);
+        let project = dir.path().join("config/projects/-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        for session in ["plan", "goal"] {
+            let lines = [
+                json!({"type": "user", "timestamp": millis_text(start + 1000),
+                       "sessionId": session, "message": {"content": "go"}}),
+                json!({"type": "assistant", "timestamp": millis_text(start + 2000),
+                       "sessionId": session, "version": "2.1.283", "effort": "high",
+                       "message": {"id": session, "model": "claude-opus-5-5", "content": [],
+                                   "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+            ]
+            .map(|line| line.to_string());
+            std::fs::write(project.join(format!("{session}.jsonl")), lines.join("\n")).unwrap();
+        }
+        let token = LeaseToken::new("handoff");
+        queue.interrupt_plan_reviews_for_handoff(&token).unwrap();
+        queue.interrupt_goal_reviews_for_handoff(&token).unwrap();
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 2);
+        for close in closed {
+            assert_eq!(close.payload["reason"], JOB_FINISHED);
+            assert_eq!(close.payload["active"], "recorded");
+            assert_eq!(close.payload["model"], "claude-opus-5-5");
+            assert_eq!(close.payload["effort"], "high");
+        }
+        let events: Vec<RunEvent> = queue
+            .conn
+            .prepare("SELECT * FROM run_events ORDER BY id")
+            .unwrap()
+            .query_map([], event_row)
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let last = events.last().unwrap();
+        let sessions = by_kind(
+            &spans(&events),
+            &events,
+            SessionWindow {
+                after: EventId::new(0),
+                upto: last.id,
+            },
+            rfc3339_millis(&last.created_at).unwrap(),
+            |_| true,
+        );
+        for kind in [GOAL_REVIEW, PLAN_REVIEW] {
+            assert_eq!(sessions.by_kind[kind].count, 1);
+            assert_eq!(sessions.by_kind[kind].open_now, 0);
+        }
+    }
+
     /// Write the transcript of `session` of a span in `cwd`: two turns,
     /// 5–25 s and 40–50 s after `base`.
     fn transcript_in(dir: &std::path::Path, cwd: &str, session: &str, base: i64) {

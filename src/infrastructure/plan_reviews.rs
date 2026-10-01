@@ -448,6 +448,34 @@ impl SqliteQueue {
 }
 
 impl PlanReviewStore for SqliteQueue {
+    fn interrupt_plan_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()> {
+        let now = self.generators.clock.now();
+        // Read transcripts before taking the write lock, as in begin/finish.
+        let _read = sessions::read_before(&self.conn, sessions::Closing::PlanReviews(None))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let unfinished: Vec<i64> = tx
+            .prepare(
+                "SELECT id FROM plan_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
+            )?
+            .query_map([token], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in unfinished {
+            finish_row(
+                &tx,
+                id,
+                now,
+                PlanReviewOutcome::Interrupted,
+                None,
+                Some("stopped for the supervisor handoff"),
+            )?;
+            sessions::close_plan_review(&tx, id, false)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn plan_review_candidates(&self) -> Result<Vec<PlanReviewCandidate>> {
         candidates(&self.conn)
     }

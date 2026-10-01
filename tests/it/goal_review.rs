@@ -625,3 +625,138 @@ fn a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
         );
     }
 }
+
+/// Simulate the rows left by prepare_handoff, before the same pid/token
+/// enters its first pass. Both review kinds must close without a candidate.
+#[test]
+fn handoff_closes_review_rows_and_spans_without_candidates() {
+    handoff_reviews(false);
+}
+
+#[test]
+fn handoff_reviews_candidates_again_without_counting_interrupted_attempts() {
+    handoff_reviews(true);
+}
+
+fn handoff_reviews(keep_candidates: bool) {
+    use crate::plan_review::{events, submit};
+    use dagq::application::PlanReviewStore;
+    use dagq::domain::{
+        LeaseToken,
+        actor_model::{ActorLaunch, ModelRole},
+    };
+
+    let fx = fixture();
+    let (goal, goal_task) = goal_done(&fx);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(
+        &mut queue,
+        "review this plan",
+        &[TaskId::new(1)],
+        Priority::Normal,
+    );
+    let proposal = submit(&mut queue, &[task], None);
+    let token = LeaseToken::new("handoff-review-owner");
+    queue
+        .register_supervisor(&token, std::process::id(), 2, "previous")
+        .unwrap();
+    let goal_job = queue
+        .begin_goal_review(
+            goal,
+            &token,
+            &fx.repo.join("goal-reviews"),
+            &fx.repo,
+            &ActorLaunch::default_of(ModelRole::GoalReview),
+        )
+        .unwrap()
+        .unwrap();
+    let plan_job = queue
+        .begin_plan_review(
+            proposal,
+            &token,
+            &fx.repo.join("plan-reviews"),
+            &fx.repo,
+            &ActorLaunch::default_of(ModelRole::PlanReview),
+        )
+        .unwrap()
+        .unwrap();
+
+    // Even with an old heartbeat, a different token's handoff cannot
+    // finish these rows. This path never uses the stale-owner heuristic.
+    let conn = Connection::open(&fx.db).unwrap();
+    conn.execute(
+        "UPDATE supervisors SET heartbeat_at=0 WHERE token=?1",
+        [&token],
+    )
+    .unwrap();
+    let other = LeaseToken::new("another-supervisor");
+    queue.interrupt_goal_reviews_for_handoff(&other).unwrap();
+    queue.interrupt_plan_reviews_for_handoff(&other).unwrap();
+    for table in ["goal_reviews", "plan_reviews"] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE finished_at IS NULL"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+    if !keep_candidates {
+        // The goal was closed and the proposal withdrawn while exec ran.
+        conn.execute(
+            "UPDATE goals SET status='closed', closed_at=unixepoch() WHERE id=?1",
+            [goal],
+        )
+        .unwrap();
+        queue.transition(task, TaskAction::Cancel).unwrap();
+        assert!(queue.goal_review_candidates().unwrap().is_empty());
+        assert!(queue.plan_review_candidates().unwrap().is_empty());
+    }
+    let reviewer = StubReviewer::new(&[
+        json!({"verdict": "pass", "reasons": [], "actions": []}),
+        json!({"verdict": "achieved", "criteria": [], "summary": "done"}),
+    ]);
+    let mut opts = options(0, Duration::from_secs(3600));
+    opts.handoff_token = Some(token.clone());
+    supervise_with(&fx, &PlanWorkspace::default(), &reviewer, &opts);
+    for (table, id) in [("goal_reviews", goal_job.id), ("plan_reviews", plan_job.id)] {
+        let (outcome, error, finished): (String, String, bool) = conn
+            .query_row(
+                &format!("SELECT outcome, error, finished_at IS NOT NULL FROM {table} WHERE id=?1"),
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "interrupted");
+        assert_eq!(error, "stopped for the supervisor handoff");
+        assert!(finished);
+        let attempts: Vec<i64> = conn
+            .prepare(&format!("SELECT attempt FROM {table} ORDER BY id"))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(attempts, if keep_candidates { vec![1, 1] } else { vec![1] });
+    }
+    for (anchor, kind) in [(goal_task, "goal_review"), (task, "plan_review")] {
+        let opened = events(&mut queue, anchor, "session_opened");
+        let closed = events(&mut queue, anchor, "session_closed");
+        let opened: Vec<_> = opened.iter().filter(|e| e["kind"] == kind).collect();
+        let closed: Vec<_> = closed.iter().filter(|e| e["kind"] == kind).collect();
+        assert_eq!(closed.len(), opened.len(), "no open {kind} span remains");
+        assert_eq!(closed[0]["reason"], "job_finished");
+    }
+    assert_eq!(
+        reviewer.prompts().len(),
+        if keep_candidates { 2 } else { 0 }
+    );
+    // Cleanup is idempotent, including after the registration was removed.
+    queue.interrupt_goal_reviews_for_handoff(&token).unwrap();
+    queue.interrupt_plan_reviews_for_handoff(&token).unwrap();
+    assert_eq!(
+        events(&mut queue, goal_task, "session_closed").len(),
+        if keep_candidates { 2 } else { 1 }
+    );
+}

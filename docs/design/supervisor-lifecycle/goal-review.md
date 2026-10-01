@@ -4,8 +4,8 @@ type: design
 title: "Goal review (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -18,6 +18,8 @@ related:
 ---
 
 # Goal review (supervisor)
+
+execの[引き継ぎ](handoff.md)で止めたjobは、引き継いだsupervisorが最初のpassに入る前に自分のtokenの未完了行を`interrupted`（error: `stopped for the supervisor handoff`）で閉じる。候補が無くても閉じ、transcriptをtransactionの前に`read_before`で読んで既存のclose経路で区間の`session_closed`（`reason: job_finished`、model / effortを含む）を記録する。他のtokenの行は触らない。候補が残れば以後のpassでreviewをやり直し、interruptedはattemptに数えない（task 1087）。
 
 [ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43（task 375）。所属taskがすべて終わったopenのgoalを、supervisorが起動するheadlessのgoal review jobがacceptanceと照合し、そのverdictと人のanswerをruntimeが適用する。use caseは`src/application/supervise/goal_review.rs`、storeは`src/infrastructure/goal_reviews.rs`（port `GoalReviewStore`）、verdict・answer・起動の条件の型は`src/domain/goal_review.rs`、promptは`prompt::goal_review_prompt`。plan reviewと同じくrun slotは使わず、loopの各passで進める（`goal_review_pass`。`--once`のloopは走っているgoal reviewを待つ）。drain中（`stop`、provisioningの失敗）は新しいgoal reviewを始めない（走っているjobとanswerの適用は続ける）。exec の引き継ぎ（`prepare_handoff`）はjobを止め、未完了の行は次のプロセスが`interrupted`で閉じて取り直す。
 

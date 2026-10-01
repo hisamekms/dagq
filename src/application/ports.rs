@@ -2408,6 +2408,9 @@ pub struct PlanDecided {
 /// takes, its one job at a time, the verdicts and answers the runtime
 /// applies (each in one transaction), and the revises it delivers.
 pub trait PlanReviewStore {
+    /// Close unfinished reviews stopped for an exec handoff, owned only by
+    /// `token`, including their session spans. Call before starting jobs.
+    fn interrupt_plan_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()>;
     /// Submitted proposals plan review may take now: not held, with a
     /// submitted task, and whether one of those has the interrupt priority.
     fn plan_review_candidates(&self) -> Result<Vec<PlanReviewCandidate>>;
@@ -2598,6 +2601,9 @@ pub struct GoalDecided {
 /// ended, its one job at a time, the verdicts and answers the runtime
 /// applies (each in one transaction).
 pub trait GoalReviewStore {
+    /// Close unfinished reviews stopped for an exec handoff, owned only by
+    /// `token`, including their session spans. Call before starting jobs.
+    fn interrupt_goal_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()>;
     /// Open goals a goal review may take now, in ID order: at least one
     /// task, each completed or canceled with one completed, no unclosed
     /// `approve_goal` ask, and tasks that changed since the goal's last

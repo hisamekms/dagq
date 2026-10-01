@@ -95,8 +95,8 @@ impl Supervisor<'_> {
         // own finish; its start keeps the next process from starting it
         // again (a weekly review may take longer than the time between two
         // updates).
-        // Its row stays unfinished under this token; the next process's
-        // first plan review marks it interrupted and reviews again.
+        // Plan and goal review rows stay unfinished under this token; the
+        // next startup interrupts them even without another candidate.
         if let Some(mut watch) = self.plan_review.take() {
             watch.headless.stop();
             info!(
@@ -189,6 +189,10 @@ impl Supervisor<'_> {
     /// `recover`) picks it up; one whose rebuild fails is abandoned like
     /// any other runtime error.
     pub(super) fn rebuild_own_runs(&mut self, previous_version: Option<&str>) -> Result<()> {
+        // The jobs stopped before exec cannot produce a verdict. Close their
+        // rows and spans even if their goal/proposal is no longer a candidate.
+        self.queue.interrupt_plan_reviews_for_handoff(&self.token)?;
+        self.queue.interrupt_goal_reviews_for_handoff(&self.token)?;
         for run in self.queue.runs_leased_by(&self.token)? {
             let snapshot = self.take_snapshot(&run);
             self.queue.record_runtime_event(

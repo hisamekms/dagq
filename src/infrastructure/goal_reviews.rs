@@ -274,6 +274,34 @@ pub(super) fn goal_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> R
 }
 
 impl GoalReviewStore for SqliteQueue {
+    fn interrupt_goal_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()> {
+        let now = self.generators.clock.now();
+        // Read transcripts before taking the write lock, as in begin/finish.
+        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let unfinished: Vec<i64> = tx
+            .prepare(
+                "SELECT id FROM goal_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
+            )?
+            .query_map([token], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in unfinished {
+            finish_row(
+                &tx,
+                id,
+                now,
+                "interrupted",
+                None,
+                Some("stopped for the supervisor handoff"),
+            )?;
+            sessions::close_goal_review(&tx, id, false)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>> {
         candidates(&self.conn)
     }
