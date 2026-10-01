@@ -3904,6 +3904,8 @@ mod tests {
     fn denied_commands_need_what_the_table_says() {
         use dagq::application::execution::DAGQ_COMMANDS;
         let samples: &[(&str, &[&str])] = &[
+            ("watch", &[]),
+            ("report", &[]),
             ("init", &[]),
             ("migrate", &[]),
             ("rebind", &[]),
@@ -4062,10 +4064,6 @@ mod tests {
         "broker logs",
         "broker audit",
         "service status",
-        // Follow the queue's events (`queue.watch`).
-        "watch",
-        // Write a file out of the queue (`queue.export`), not the queue.
-        "report",
         // Forms that read: `graph` without `--out` and `observe --history`.
         "graph",
         "observe",

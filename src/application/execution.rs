@@ -243,14 +243,17 @@ pub fn actor_executions(checks: &[ProviderCheck]) -> Result<Vec<ActorExecution>>
 
 use Capability as C;
 
-/// The `dagq` subcommands that change state, and every capability a form
-/// of each may need (`docs/design/authorization.md`). A role that has none
-/// of them gets the command denied in its Claude settings. A command with a
+/// The `dagq` subcommands a role may be denied (state changes, `watch`
+/// and `report`), and every capability a form of each may need
+/// (`docs/design/authorization.md`). A role that has none of them gets
+/// the command denied in its Claude settings. A command with a
 /// form that only reads (`observe --history`, `graph` without `--out`) is
 /// not listed, as a rule on its name would deny that form too; the CLI
 /// refuses its other form. A test in `main.rs` checks that every
 /// subcommand is here or on its list of the commands left out.
 pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
+    ("watch", &[C::QueueWatch]),
+    ("report", &[C::ExportFile]),
     ("init", &[C::QueueAdmin]),
     ("migrate", &[C::QueueAdmin]),
     ("rebind", &[C::QueueAdmin]),
@@ -496,6 +499,29 @@ mod tests {
             "sandbox",
             "the level a sandbox would report"
         );
+    }
+
+    #[test]
+    fn watch_and_report_rules_preserve_each_roles_access() {
+        for role in ActorRole::ALL {
+            let deny = permission_deny(role);
+            let exports = matches!(
+                role,
+                ActorRole::User | ActorRole::Inbox | ActorRole::Planner | ActorRole::Supervisor
+            );
+            let watches = exports || role == ActorRole::Observer;
+            assert_eq!(
+                deny.contains(&"Bash(dagq watch:*)".to_owned()),
+                !watches,
+                "{role:?}"
+            );
+            assert_eq!(
+                deny.contains(&"Bash(dagq report:*)".to_owned()),
+                !exports,
+                "{role:?}"
+            );
+            assert!(!deny.contains(&"Bash(dagq graph:*)".to_owned()), "{role:?}");
+        }
     }
 
     #[test]
