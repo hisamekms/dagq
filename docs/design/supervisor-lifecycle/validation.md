@@ -4,7 +4,7 @@ type: design
 title: "Validation"
 status: current
 created: 2026-09-26
-updated: 2026-09-30
+updated: 2026-10-02
 last_verified: 2026-09-30
 scope: runtime
 related:
@@ -13,6 +13,7 @@ related:
   - adr-0029
   - adr-t963-1
   - adr-t1165-1
+  - adr-t1233-2
 ---
 
 # Validation
@@ -35,6 +36,8 @@ related:
 ## 差分から決めるe2eのevidence
 
 [ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3（task 965）。8で求めるcheckは、taskの`required_evidence`と、runの差分が`dagq.toml`の`[e2e] paths`に触れたときの`e2e`の和。
+
+[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)（2026-10-02）は、e2eをworkerから外してreviewのpassの後にruntimeがhostで流す工程に移すと決めた（ADR-t963-1決定2・5とADR-t1165-1決定6をamends）。まだ実装されておらず、この節は今の動き（workerが流し、validatingがevidenceを求める）を書く。実装のtaskがこの節を書き直す。
 
 - **設定**: main checkoutの`dagq.toml`の`[e2e]`の`paths`（globの配列。書式は[Run environment](run-environment.md)）。無ければ空で、差分からは何も求めない（今までのtaskの`--evidence`だけの動き）。supervisorはvalidatingを始めるたびとworkerのpromptを作るたびに読み直す（`Verifier::e2e_paths`）。読めなければ警告を出して空として扱う。
 - **判定**（`domain::validation::E2eRequirement`、`ReceiptFacts::e2e_requirement`）: taskの要るevidence（`required_of`で絞ったもの）に`e2e`があれば`source: task`で必須、差分は見ない（`paths`の無いtaskは7の差分も読まない）。無く、`[e2e] paths`があれば、7と同じ差分（merge-baseからreceiptの`commit`まで、`GitRepository::changed_paths`）を読み、どれかのglobに合うpathがあれば`source: paths`で必須、無ければ求めない。差分が決まるまでは、2の検査でreceiptの`e2e`を要るcheckと同じに扱い（`failed`や空のevidenceで`failed`にしない）、8で要否が決まってから、求めない`e2e`をもう一度要らないcheckとして検査する（`failed`か空の理由なら、2と同じく`failed`。`result_commit`は残す）。求めた`e2e`が欠けていれば今までの8と同じく`needs_session`（`evidence_missing`）とresume。範囲の外のrunは、receiptの`e2e`が`not_applicable`（理由つき）でも着地できる。

@@ -4,7 +4,7 @@ type: design
 title: Architecture decision records
 status: current
 created: 2026-09-21
-updated: 2026-09-30
+updated: 2026-10-02
 last_verified: 2026-09-30
 tags:
   - architecture
@@ -124,6 +124,13 @@ ADRは、将来の実装や運用に大きな影響を与える決定の理由�
 | [ADR-t1091-1](2026-09-30-t1091-1-amend-or-replace-by-number-of-decisions.md) | ADRをamendsで直すか丸ごと置き換えるかを、IDの形でなく元のADRの決定の数と変える範囲で決め、決定を複数持つ新しい形のADRもamendsで直せるようにする（ADR-t598-1決定5をamends） | 2026-09-30 |
 | [ADR-t1162-1](2026-09-30-t1162-1-e2e-gate-skips-podman-e2e-only-when-podman-is-unreachable.md) | 固定バイナリを入れ替える前のe2eの関門で、上限つきで待ってもpodmanに繋がらないときだけpodmanに頼るe2eを流さずに残りで判定し、流さなかったことを記録してinboxに届ける（ADR-t963-1決定1をamends） | 2026-09-30 |
 | [ADR-t1165-1](2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md) | 固定バイナリを入れ替える前のe2eの関門で、落ちたe2eを名前で絞って1回だけ流し直してflakyを見分けて通し、repositoryにcommitする印の付いたtestが流し直しでも落ちたときは記録だけにして入れ替えを進め、歯止め（続けての失敗・期限・上限）を置く（ADR-t963-1決定1をamends） | 2026-09-30 |
+| [ADR-t1233-1](2026-10-02-t1233-1-control-and-execution-sides-queue-service-broker-and-client-mode.md) | 制御側（host）と実行側（隔離環境）を分け、queue serviceをqueue DBを開く唯一のプロセスにしてユースケース単位のAPIとservice側の認可を持たせ、hostの呼び出し元はunix socketで使い、brokerを実行側から制御側への唯一の出口にし、dagq CLIはserviceの宛先があればクライアントモードで動く（goal 38の段(1)〜(6)、(1)〜(3)はgoal 82） | 2026-10-02 |
+| [ADR-t1233-2](2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md) | e2eをworkerから外し、e2eが要るrunはreviewがpassした後にruntimeがhostで1本ずつ流す工程にする。落ちたe2eは1回流し直し、印はruntimeが効かせ、残った失敗はneeds_sessionのresumeでworkerに返す（ADR-t963-1決定2・5とADR-t1165-1決定6をamends） | 2026-10-02 |
+| [ADR-t1233-3](2026-10-02-t1233-3-this-repository-passes-on-linux-before-containers.md) | このrepository（dagq自身）は、先にLinuxでbuildとtestを通し、その後に自分のrunの実行側をコンテナで動かす | 2026-10-02 |
+| [ADR-t1233-4](2026-10-02-t1233-4-queue-service-lifecycle-outage-notice-and-principal-tokens.md) | queue serviceはsupervisorと同じ`up`・`down`・引き継ぎで起動・停止し、supervisorが見張って起動し直し、落ちたときの知らせはserviceを通らない経路で届け、brokerより前のhost構成では実行側のprincipalを制御側がrun・jobごとに発行して失効させるtokenで認証する | 2026-10-02 |
+| [ADR-t1233-5](2026-10-02-t1233-5-read-use-cases-read-scope-by-role-and-codex-sandbox-reach.md) | 読み取りのroleのjobとworkerはDBのpathなしでqueue serviceの読み取りのユースケースで読み、roleごとの範囲はservice側のpolicyが決める。goal 82ではworkerを含む全roleに今の`queue.read`と同じ範囲を許し、Codexのsandboxの中からもserviceに届くようにする（ADR-t813-3決定3をamends） | 2026-10-02 |
+
+goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決定の置き場所は次のとおり。制御側と実行側の分け方・queue service・ユースケース単位のAPIとservice側の認可・unix socket・broker・クライアントモード・段の順と置き場所はADR-t1233-1、serviceの起動・停止の責任・落ちたときの知らせ方・brokerより前のprincipalの認証（token）はADR-t1233-4、読み取りのユースケースとroleごとの読める範囲・workerの読める範囲・Codexのsandboxからの到達はADR-t1233-5、e2eをreviewのpassの後のhostの工程に移すことはADR-t1233-2、このrepositoryを先にLinuxで通すことはADR-t1233-3にある。
 
 ## 置き換え・廃止されたADR
 
