@@ -333,6 +333,14 @@ pub trait RunFiles: Send + Sync {
         Ok(all[from..].to_vec())
     }
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
+    /// Take an exclusive lock on `path` (created if missing) without
+    /// waiting, held across processes until the returned guard drops;
+    /// `None` while another holder has it. A store with nothing to share
+    /// between processes always grants it.
+    fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        let _ = path;
+        Ok(Some(Box::new(())))
+    }
     /// When the file was last written.
     fn modified(&self, path: &Path) -> io::Result<SystemTime>;
     /// The modification time and the bytes of one open file, so both

@@ -341,6 +341,25 @@ impl RunFiles for LocalRunFiles {
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }
+    fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        use std::os::fd::AsRawFd;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        // SAFETY: flock on a descriptor this function owns; the lock goes
+        // with the file when the guard drops or the process ends.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(Box::new(file)));
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    }
 }
 
 /// Scan the bounded snapshot through the same file descriptor used for
@@ -375,6 +394,18 @@ mod tests {
             assert_eq!(root.file_name().unwrap().to_str(), Some(name.as_str()));
             assert!(!roots[..i].contains(root));
         }
+    }
+
+    #[test]
+    fn a_lock_is_held_until_its_guard_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = LocalRunFiles;
+        let path = dir.path().join("lock");
+        let guard = files.try_lock(&path).unwrap().expect("a free lock");
+        assert!(files.try_lock(&path).unwrap().is_none());
+        drop(guard);
+        assert!(files.try_lock(&path).unwrap().is_some());
+        assert!(files.try_lock(&dir.path().join("none/lock")).is_err());
     }
 
     #[test]

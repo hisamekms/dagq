@@ -13,8 +13,9 @@ use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId};
 /// holds it; it is parked when it would land).
 pub const LANDING_RECHECK_FAILED: &str = super::event_kind::LANDING_RECHECK_FAILED;
 
-/// One recheck ended, recorded on the run whose landing moved main: the
-/// main it checked against and what it found.
+/// One recheck ended, recorded on the run whose landing moved main (or,
+/// when no dagq landing did, on the first run it checked, ADR-t1310-1):
+/// the main it checked against and what it found.
 pub const LANDING_RECHECK_FINISHED: &str =
     crate::domain::event_kind::EventKind::LandingRecheckFinished.as_str();
 
@@ -57,11 +58,15 @@ impl RecheckFailure {
     }
 
     /// The run's `last_error` once parked, and the reason of its resume.
-    pub fn reason(&self, landed: &Landed, main: &CommitSha) -> String {
-        let after = format!(
-            "after task {} (run {}) landed, the landing recheck found",
-            landed.task_id, landed.run_id
-        );
+    /// `landed` is `None` when main moved without a dagq landing.
+    pub fn reason(&self, landed: Option<&Landed>, main: &CommitSha) -> String {
+        let after = match landed {
+            Some(landed) => format!(
+                "after task {} (run {}) landed, the landing recheck found",
+                landed.task_id, landed.run_id
+            ),
+            None => "after main moved without a dagq landing, the landing recheck found".to_owned(),
+        };
         match self {
             Self::Conflict { paths } => format!(
                 "{after} that main {main} conflicts with the run in {}",
@@ -79,13 +84,15 @@ impl RecheckFailure {
     }
 
     /// The payload of [`LANDING_RECHECK_FAILED`], without its `action`.
-    pub fn payload(&self, landed: &Landed, main: &CommitSha, head: &CommitSha) -> Value {
+    /// `landed_run_id` and `landed_task_id` are null when main moved
+    /// without a dagq landing.
+    pub fn payload(&self, landed: Option<&Landed>, main: &CommitSha, head: &CommitSha) -> Value {
         let mut payload = json!({
             "code": self.code(),
             "main": main,
             "head": head,
-            "landed_run_id": landed.run_id,
-            "landed_task_id": landed.task_id,
+            "landed_run_id": landed.map(|l| &l.run_id),
+            "landed_task_id": landed.map(|l| l.task_id),
         });
         match self {
             Self::Conflict { paths } => payload["conflicts"] = json!(paths),
@@ -168,7 +175,7 @@ mod tests {
             paths: vec!["x.rs".into(), "y.rs".into()],
         };
         assert_eq!(failure.code(), ReasonCode::RebaseConflict);
-        let reason = failure.reason(&landed(), &main);
+        let reason = failure.reason(Some(&landed()), &main);
         assert_eq!(
             reason,
             format!(
@@ -176,7 +183,7 @@ mod tests {
             )
         );
         assert_eq!(
-            failure.payload(&landed(), &main, &head),
+            failure.payload(Some(&landed()), &main, &head),
             json!({
                 "code": "rebase_conflict",
                 "main": main,
@@ -191,6 +198,24 @@ mod tests {
     }
 
     #[test]
+    fn a_main_moved_without_a_landing_names_no_run() {
+        let main = CommitSha::parse("a".repeat(40), "commit").unwrap();
+        let head = CommitSha::parse("b".repeat(40), "commit").unwrap();
+        let failure = RecheckFailure::Conflict {
+            paths: vec!["x.rs".into()],
+        };
+        assert_eq!(
+            failure.reason(None, &main),
+            format!(
+                "after main moved without a dagq landing, the landing recheck found that main {main} conflicts with the run in x.rs"
+            )
+        );
+        let payload = failure.payload(None, &main, &head);
+        assert_eq!(payload["landed_run_id"], Value::Null);
+        assert_eq!(payload["landed_task_id"], Value::Null);
+    }
+
+    #[test]
     fn a_failed_check_names_the_command_and_its_log() {
         let main = CommitSha::parse("a".repeat(40), "commit").unwrap();
         let head = CommitSha::parse("b".repeat(40), "commit").unwrap();
@@ -201,13 +226,13 @@ mod tests {
             output_tail: "error[E0063]".into(),
         };
         assert_eq!(failure.code(), ReasonCode::VerificationFailed);
-        let reason = failure.reason(&landed(), &main);
+        let reason = failure.reason(Some(&landed()), &main);
         assert!(
             reason.contains("\"cargo check\" exits with 101"),
             "{reason}"
         );
         assert!(reason.ends_with("see /r/recheck.log"), "{reason}");
-        let payload = failure.payload(&landed(), &main, &head);
+        let payload = failure.payload(Some(&landed()), &main, &head);
         assert_eq!(payload["code"], "verification_failed");
         assert_eq!(payload["exit_code"], 101);
         assert_eq!(payload["output_tail"], "error[E0063]");

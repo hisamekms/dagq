@@ -1,5 +1,8 @@
-//! The landing recheck (ADR-0068): after this supervisor lands a run, the
-//! runs that wait to land are checked against the new main off the loop,
+//! The landing recheck (ADR-0068): after this supervisor lands a run, or
+//! whenever main differs from the main the last recheck finished against
+//! (a direct `integrate`, a landing before a handoff or a restart, a push
+//! outside dagq; ADR-t1310-1), the runs that wait to land are checked
+//! against the new main off the loop,
 //! one recheck at a time: `git merge-tree` for a conflict, then the
 //! `[recheck] command` of `dagq.toml` on main's tree with the run merged
 //! in, in one scratch worktree with one target directory of the queue's.
@@ -15,6 +18,33 @@ use crate::domain::recheck::{self, HELD, LANDING_RECHECK_FAILED, Landed, Recheck
 /// under the queue's directory.
 const RECHECK_DIR: &str = "recheck";
 
+/// The lock file in [`RECHECK_DIR`] the queue's supervisors share: one
+/// recheck at a time uses the scratch worktree and the target.
+const RECHECK_LOCK: &str = "lock";
+
+/// How many of the latest `landing_recheck_finished` tell who checked a
+/// main already.
+const CHECKED_LOOKBACK: usize = 20;
+
+/// Who checked a main already.
+enum Checked {
+    No,
+    ByThis,
+    ByOther,
+}
+
+/// What came of trying to start a recheck.
+enum Start {
+    Started,
+    /// Nothing to check.
+    Nothing,
+    /// Not now: a run lands, or another supervisor's recheck holds the
+    /// lock (`locked_out`).
+    Later {
+        locked_out: bool,
+    },
+}
+
 /// One waiting run to check: the head it would land and its run directory
 /// (where the command's log goes).
 #[derive(Debug, Clone)]
@@ -22,6 +52,8 @@ pub(super) struct Target {
     run_id: RunId,
     head: CommitSha,
     run_dir: PathBuf,
+    /// Held in a slot of this supervisor to land (not waiting unleased).
+    held: bool,
 }
 
 /// What the recheck found for one run.
@@ -35,26 +67,40 @@ pub(super) enum Finding {
 
 /// A recheck in progress on its thread.
 pub(super) struct RecheckWatch {
-    landed: Landed,
+    /// The dagq landing that moved main; `None` when none did.
+    landed: Option<Landed>,
+    /// Where `landing_recheck_finished` goes: the landed run, or the first
+    /// run checked when no dagq landing moved main.
+    record_on: RunId,
     main: CommitSha,
     command: Option<String>,
     started: Instant,
     handle: Option<thread::JoinHandle<Vec<(Target, Finding)>>>,
+    /// The queue's recheck lock, held until the recheck is recorded.
+    _lock: Box<dyn std::any::Any + Send>,
 }
 
-/// The supervisor's rechecks: the one running and the latest landing that
-/// waits for the next (a landing during a recheck is checked after it,
-/// against the newest main).
+/// The supervisor's rechecks: the one running, whether a landing of this
+/// supervisor's waits for the next (landings during a recheck are checked
+/// after it, against the newest main, once), and what this process knows
+/// already (ADR-t1310-1): a main with a finished recheck, so an unmoved
+/// main costs no query, and a main with nothing to check for the runs that
+/// waited then (`idle`), so a run that starts waiting later is looked at.
 #[derive(Default)]
 pub(super) struct Rechecks {
     running: Option<RecheckWatch>,
-    due: Option<Landed>,
+    due: bool,
+    /// The due recheck waits for another supervisor's to free the lock.
+    locked_out: bool,
+    checked: Option<CommitSha>,
+    idle: Option<(CommitSha, Vec<(RunId, CommitSha)>)>,
 }
 
 impl Rechecks {
-    /// Whether a recheck runs now: the loop waits for it like a job.
+    /// Whether a recheck runs, or a due one waits for the lock another
+    /// supervisor's holds: the loop waits for it like a job.
     pub(super) const fn running(&self) -> bool {
-        self.running.is_some()
+        self.running.is_some() || self.locked_out
     }
 }
 
@@ -73,18 +119,18 @@ impl Phase {
 
 impl Supervisor<'_> {
     /// Note that `run` landed: the waiting runs are checked against the
-    /// main it moved (ADR-0068 decision 1).
+    /// main it moved (ADR-0068 decision 1), named by the landing main is at
+    /// when the recheck starts.
     pub(super) fn note_landed(&mut self, run: &TaskRun) {
-        self.rechecks.due = Some(Landed {
-            run_id: run.id().clone(),
-            task_id: run.task_id(),
-        });
+        tracing::debug!(run_id = %run.id(), "run {} landed: a landing recheck is due", run.id());
+        self.rechecks.due = true;
     }
 
-    /// Apply the recheck that finished, and start the one that is due
-    /// unless this pass drains. An error is logged: the recheck is an aid,
-    /// and the landing checks every run again anyway. Whether a recheck
-    /// was applied: the next pass resumes the runs it parked.
+    /// Apply the recheck that finished, and start one when this
+    /// supervisor's landing is due or main moved since the last recheck
+    /// finished, unless this pass drains. An error is logged: the recheck
+    /// is an aid, and the landing checks every run again anyway. Whether a
+    /// recheck was applied: the next pass resumes the runs it parked.
     pub(super) fn recheck_pass(&mut self) -> bool {
         let mut applied = false;
         if self
@@ -104,19 +150,166 @@ impl Supervisor<'_> {
                     None
                 })
                 .unwrap_or_default();
-            if let Err(error) = self.apply_recheck(&watch, found) {
-                warn!(error = %format_args!("{error:#}"), "the landing recheck against main {} could not be recorded: {error:#}", watch.main);
+            match self.apply_recheck(&watch, found) {
+                Ok(()) => self.rechecks.checked = Some(watch.main.clone()),
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the landing recheck against main {} could not be recorded: {error:#}", watch.main);
+                }
             }
+            // The queue's recheck lock goes with the watch, after its
+            // `landing_recheck_finished` is recorded.
+            drop(watch);
             applied = true;
         }
-        if self.rechecks.running.is_none()
-            && !self.draining
-            && let Some(landed) = self.rechecks.due.take()
-            && let Err(error) = self.start_recheck(landed)
-        {
-            warn!(error = %format_args!("{error:#}"), "the landing recheck could not start: {error:#}");
+        self.rechecks.locked_out = false;
+        if self.rechecks.running.is_none() && !self.draining {
+            let due = std::mem::take(&mut self.rechecks.due);
+            match self.try_recheck(due) {
+                Ok(Start::Started | Start::Nothing) => {}
+                // A landing in progress, or another supervisor's recheck:
+                // the landing's recheck stays due for the next pass.
+                Ok(Start::Later { locked_out }) => {
+                    self.rechecks.due = due;
+                    self.rechecks.locked_out = due && locked_out;
+                }
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the landing recheck could not start: {error:#}");
+                }
+            }
         }
         applied
+    }
+
+    /// Start a recheck after this supervisor's landing (`due`), or, with
+    /// none due, when main differs from the main of the latest
+    /// `landing_recheck_finished` (ADR-t1310-1): main moved by a direct
+    /// `integrate`, by a landing whose recheck a handoff or a restart
+    /// dropped, or outside dagq. Read from the events, so it holds across
+    /// an exec and a restart. The landing is the one main is at, whatever
+    /// made the recheck due. Finding nothing to check holds only for the
+    /// runs that waited then: a run that starts waiting later is looked at
+    /// against the same main. The supervisors of the queue share one lock
+    /// on the recheck (its scratch worktree and target): a recheck starts
+    /// only under it, and who checked the same main already is read under
+    /// it, so it is not checked twice. Another supervisor's recheck of main
+    /// settles only the runs it could see: the runs this one holds to land
+    /// are checked still. Nothing starts while a run lands,
+    /// and the waiting runs whose head already contains main are left out:
+    /// they land as they are.
+    fn try_recheck(&mut self, due: bool) -> Result<Start> {
+        let main = self.repository.main_head()?;
+        if !due && self.rechecks.checked.as_ref() == Some(&main) {
+            return Ok(Start::Nothing);
+        }
+        let mut targets = self.recheck_targets()?;
+        let seen: Vec<(RunId, CommitSha)> = targets
+            .iter()
+            .map(|target| (target.run_id.clone(), target.head.clone()))
+            .collect();
+        // Looked at this main before with nothing to check: of the runs
+        // that wait since, only those nobody leases are looked at. One this
+        // supervisor holds to land had its passed review's conflict
+        // precheck against main as it is (ADR-0027 decision 4).
+        if let Some((idle, before)) = &self.rechecks.idle
+            && *idle == main
+        {
+            targets.retain(|target| {
+                !target.held && !before.contains(&(target.run_id.clone(), target.head.clone()))
+            });
+            if targets.is_empty() {
+                self.rechecks.idle = Some((main, seen));
+                return Ok(Start::Nothing);
+            }
+        }
+        if !due
+            && let Some(event) = self
+                .queue
+                .latest_event_of(recheck::LANDING_RECHECK_FINISHED)?
+            && event.payload["main"] == main.as_str()
+        {
+            // This supervisor checked main as it is.
+            if event.payload["supervisor"] == self.token.as_str() {
+                self.rechecks.checked = Some(main);
+                return Ok(Start::Nothing);
+            }
+            // Another supervisor did: it could not see the runs this one
+            // holds to land, which are checked below (`Checked::ByOther`).
+            if !targets.iter().any(|target| target.held) {
+                self.rechecks.idle = Some((main, seen));
+                return Ok(Start::Nothing);
+            }
+        }
+        let dir = self.recheck_dir()?;
+        self.files.create_dir_all(&dir)?;
+        let Some(lock) = self.files.try_lock(&dir.join(RECHECK_LOCK))? else {
+            return Ok(Start::Later { locked_out: true });
+        };
+        // A landing in progress, this supervisor's or a direct
+        // `integrate`'s, may have moved main before its `run_integrated`:
+        // looked at once it ended, so the recheck names it.
+        if !self
+            .queue
+            .runs_with_status(RunStatus::Integrating)?
+            .is_empty()
+        {
+            return Ok(Start::Later { locked_out: false });
+        }
+        let mut left = Vec::with_capacity(targets.len());
+        for target in targets {
+            if !self
+                .repository
+                .is_ancestor(main.as_str(), target.head.as_str())
+                .unwrap_or(false)
+                && !self.prechecked(&target, &main)?
+            {
+                left.push(target);
+            }
+        }
+        let mut targets = left;
+        match self.checked_against(&main)? {
+            // This supervisor checked it already (a move seen before its
+            // own landing's step was read).
+            Checked::ByThis => targets.clear(),
+            // Another supervisor did: the runs it could not see, those
+            // this one holds in its slots, are left.
+            Checked::ByOther => targets.retain(|target| target.held),
+            Checked::No => {}
+        }
+        if targets.is_empty() {
+            self.rechecks.idle = Some((main, seen));
+            return Ok(Start::Nothing);
+        }
+        let landed = self.landing_at(&main)?;
+        self.start(landed, main, targets, lock)?;
+        Ok(Start::Started)
+    }
+
+    /// The queue's recheck directory: its scratch worktree, its target
+    /// directory and its lock.
+    fn recheck_dir(&self) -> Result<PathBuf> {
+        Ok(self
+            .layout
+            .db
+            .parent()
+            .context("queue database has no directory")?
+            .join(RECHECK_DIR))
+    }
+
+    /// The dagq landing whose commit `main` is: the newest `run_integrated`,
+    /// when it landed that commit.
+    fn landing_at(&self, main: &CommitSha) -> Result<Option<Landed>> {
+        let Some(event) = self
+            .queue
+            .latest_event_of(EventKind::RunIntegrated.as_str())?
+        else {
+            return Ok(None);
+        };
+        let (Some(run_id), Some(task_id)) = (event.run_id, event.task_id) else {
+            return Ok(None);
+        };
+        Ok((event.payload["result_commit"] == main.as_str()
+            || event.payload["commit"] == main.as_str())
+        .then_some(Landed { run_id, task_id }))
     }
 
     /// The runs a recheck looks at (ADR-0068 decision 1): those awaiting
@@ -133,33 +326,72 @@ impl Supervisor<'_> {
             let (Some(head), Some(run_dir)) = (run.result_commit(), run.run_dir()) else {
                 continue;
             };
-            let waiting = match self.queue.run_lease(run.id())? {
-                None => true,
-                Some(lease) => {
-                    lease.token == self.token
-                        && self
-                            .slots
-                            .iter()
-                            .any(|slot| slot.run.id() == run.id() && slot.phase.waits_to_land())
+            let held = match self.queue.run_lease(run.id())? {
+                None => false,
+                Some(lease)
+                    if lease.token == self.token
+                        && self.slots.iter().any(|slot| {
+                            slot.run.id() == run.id() && slot.phase.waits_to_land()
+                        }) =>
+                {
+                    true
                 }
+                Some(_) => continue,
             };
-            if waiting {
-                targets.push(Target {
-                    run_id: run.id().clone(),
-                    head: head.clone(),
-                    run_dir: PathBuf::from(run_dir),
-                });
-            }
+            targets.push(Target {
+                run_id: run.id().clone(),
+                head: head.clone(),
+                run_dir: PathBuf::from(run_dir),
+                held,
+            });
         }
         Ok(targets)
     }
 
-    fn start_recheck(&mut self, landed: Landed) -> Result<()> {
-        let targets = self.recheck_targets()?;
-        if targets.is_empty() {
-            return Ok(());
+    /// Whether the run's head was judged against `main` already: by its
+    /// passed review's conflict precheck (ADR-0027 decision 4), by its
+    /// landing that parked it, or by a recheck. What that found is handled
+    /// (a request to the session, an ask, a resume, or a landing that parks
+    /// the run), and is not judged again.
+    fn prechecked(&self, target: &Target, main: &CommitSha) -> Result<bool> {
+        use crate::domain::event_kind::{CONFLICT_PRECHECK, INTEGRATION_DEFERRED};
+        Ok(self.queue.run_events(&target.run_id)?.iter().any(|event| {
+            matches!(
+                event.kind.as_str(),
+                CONFLICT_PRECHECK | INTEGRATION_DEFERRED | LANDING_RECHECK_FAILED
+            ) && event.payload["main"] == main.as_str()
+                && event.payload["head"] == target.head.as_str()
+        }))
+    }
+
+    /// Who checked `main` already, from the recent `landing_recheck_finished`.
+    fn checked_against(&self, main: &CommitSha) -> Result<Checked> {
+        let mut checked = Checked::No;
+        for event in self
+            .queue
+            .latest_events_of(recheck::LANDING_RECHECK_FINISHED, CHECKED_LOOKBACK)?
+            .into_iter()
+            .filter(|event| event.payload["main"] == main.as_str())
+        {
+            if event.payload["supervisor"] == self.token.as_str() {
+                return Ok(Checked::ByThis);
+            }
+            checked = Checked::ByOther;
         }
-        let main = self.repository.main_head()?;
+        Ok(checked)
+    }
+
+    fn start(
+        &mut self,
+        landed: Option<Landed>,
+        main: CommitSha,
+        targets: Vec<Target>,
+        lock: Box<dyn std::any::Any + Send>,
+    ) -> Result<()> {
+        let record_on = match &landed {
+            Some(landed) => landed.run_id.clone(),
+            None => targets[0].run_id.clone(),
+        };
         // A command whose program [run.env] cannot find would fail on every
         // run (ADR-0049 decision 9): only the merge is checked then.
         let command = if self.run_env_missing {
@@ -167,17 +399,14 @@ impl Supervisor<'_> {
         } else {
             self.verifier.recheck_command()?
         };
-        let dir = self
-            .layout
-            .db
-            .parent()
-            .context("queue database has no directory")?
-            .join(RECHECK_DIR);
+        let dir = self.recheck_dir()?;
         info!(
-            "landing recheck of {} waiting run(s) against main {main} after run {} (task {}) landed{}",
+            "landing recheck of {} waiting run(s) against main {main} after {}{}",
             targets.len(),
-            landed.run_id,
-            landed.task_id,
+            landed.as_ref().map_or_else(
+                || "main moved without a dagq landing".to_owned(),
+                |landed| format!("run {} (task {}) landed", landed.run_id, landed.task_id)
+            ),
             command
                 .as_ref()
                 .map(|c| format!("; command {c:?}"))
@@ -201,17 +430,19 @@ impl Supervisor<'_> {
         });
         self.rechecks.running = Some(RecheckWatch {
             landed,
+            record_on,
             main,
             command,
             started: Instant::now(),
             handle: Some(handle),
+            _lock: lock,
         });
         Ok(())
     }
 
     /// Record what a recheck found: each failure on its run (and its open
     /// asks), and `landing_recheck_finished` with the counts on the run
-    /// whose landing it followed.
+    /// whose landing it followed (or the first run it checked).
     fn apply_recheck(&mut self, watch: &RecheckWatch, found: Vec<(Target, Finding)>) -> Result<()> {
         let mut counts = json!({
             "checked": found.len(),
@@ -262,8 +493,8 @@ impl Supervisor<'_> {
         }
         let mut payload = json!({
             "main": watch.main,
-            "landed_run_id": watch.landed.run_id,
-            "landed_task_id": watch.landed.task_id,
+            "landed_run_id": watch.landed.as_ref().map(|l| &l.run_id),
+            "landed_task_id": watch.landed.as_ref().map(|l| l.task_id),
             "command": watch.command,
             "duration_secs": watch.started.elapsed().as_secs(),
             "failed_runs": failed_runs,
@@ -277,7 +508,7 @@ impl Supervisor<'_> {
             watch.main
         );
         self.queue.record_runtime_event(
-            &watch.landed.run_id,
+            &watch.record_on,
             EventKind::LandingRecheckFinished,
             payload,
         )?;
@@ -302,8 +533,8 @@ impl Supervisor<'_> {
         {
             return Ok(None);
         }
-        let reason = failure.reason(&watch.landed, &watch.main);
-        let mut payload = failure.payload(&watch.landed, &watch.main, &target.head);
+        let reason = failure.reason(watch.landed.as_ref(), &watch.main);
+        let mut payload = failure.payload(watch.landed.as_ref(), &watch.main, &target.head);
         let action = match self.queue.run_lease(run.id())? {
             None => match self
                 .queue

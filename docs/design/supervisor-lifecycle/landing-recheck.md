@@ -4,12 +4,13 @@ type: design
 title: "Landing recheck"
 status: current
 created: 2026-09-26
-updated: 2026-10-01
-last_verified: 2026-10-01
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - design-supervisor-lifecycle
   - adr-0068
+  - adr-t1310-1
   - adr-0027
   - adr-0047
   - adr-0049
@@ -17,12 +18,16 @@ related:
 
 # Landing recheck
 
-supervisorが着地させたrunが`run_integrated`で終わるたびに、着地待ちのrunをその着地の後のmainに対して先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)）。着地しなくなったrunは、askの答えや`integrate`の順番を待たずにresumeへ回る。実装は`src/application/supervise/recheck.rs`（supervisor側）と`src/domain/recheck.rs`（記録の形）。
+supervisorが着地させたrunが`run_integrated`で終わるたびと、mainが最後にrecheckを終えたmainと違うとき（直接の`integrate`、handoffや再起動の間の着地、dagqを通さないpush）に、着地待ちのrunをそのmainに対して先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、きっかけは[ADR-t1310-1](../../adr/2026-10-03-t1310-1-recheck-whenever-main-moves-past-the-last-recheck.md)が広げた）。着地しなくなったrunは、askの答えや`integrate`の順番を待たずにresumeへ回る。実装は`src/application/supervise/recheck.rs`（supervisor側）と`src/domain/recheck.rs`（記録の形）。
 
 ## 対象と起動
 
 - 対象: `awaiting_integration`で`result_commit`を持つrunのうち、leaseの無いもの（`approve_landing`のaskの答えやrecoverを待つもの）と、このsupervisorがslotに着地待ちとして持つもの（`AwaitingSlot`、`AfterExit::Land`の`/exit`を待つもの。`stuck_exit`のaskを含む）。reviewとreviseの途中のrunはpassの時のmerge-treeの判定（ADR-0027の決定4）に任せ、他のprocessがleaseを持つrunは見ない。
-- 起動: slotが`Step::Done`で`integrated`のrunを返したとき（`note_landed`）、そのrunをrecheckの予定にする。loopの各回の`recheck_pass`が、走っているrecheckが終わっていれば結果を記録し、走っていなければ予定のものを始める。同時に走るのは1つで、走っている間の着地は最新の1件にまとまる。drain・handoffの回は新しく始めない。handoffは走っているrecheckが終わるのを待ってからexecする（commandが次のprocessのscratch worktreeで走り続けないように。予定だけのrecheckは捨てる）。handoffやadoptで作り直したrunが、recheckがresumeさせて`approve_landing`の答えを待つrun（最新のparkが`landing_recheck_failed`で、閉じていない`approve_landing`のaskがある）なら、reviewをやり直さずに答えを待つ（`adopt_review`）。対象が無ければ何も記録しない。
+- 起動（supervisorの着地）: slotが`Step::Done`で`integrated`のrunを返したとき（`note_landed`）、recheckを予定にする（`Rechecks::due`）。予定はきっかけだけで、どの着地の後のrecheckかは、始めるときにmainがどの着地のcommitかで決める（下の「着地の名指し」。予定が残る間に直接の`integrate`がmainを動かせば、その着地を名指す）。loopの各回の`recheck_pass`（`try_recheck`）が、走っているrecheckが終わっていれば結果を記録し、走っていなければ予定のものを始める。予定のものも、このsupervisorが今のmainをすでに確かめていれば（下のmainの動きのrecheckが先に見ていれば）始めない（下の排他の項）。同時に走るのは（queueで）1つで、走っている間の着地は最新の1件にまとまる。statusが`integrating`のrunがある間と、lockが取れない間は始めず、予定は残して次の回にやり直す。
+- 起動（mainの動き、ADR-t1310-1）: 予定が無く何も走っていない回に、`try_recheck`がlanding branchの先端（`Repository::main_head`）を読み、最新の`landing_recheck_finished`の`main`と比べる。同じで、それがこのsupervisorのrecheck（payloadの`supervisor`が自分のtoken）なら確かめ済み。同じでもほかのsupervisorのrecheckなら、そのsupervisorから見えなかった、このsupervisorがslotに着地待ちとして持つrunだけをまだ確かめる（下の排他の項の`ByOther`）。違っていれば対象を集め、headがすでに今のmainを含むrun（`is_ancestor(main, head)`。そのまま着地できる）を除き、残りがあれば今の先端に対してrecheckを始める。比べる相手はeventから読むので、execの引き継ぎや起動し直しを越えて残り、止まる前に動いたmainも新しいsupervisorが最初の回で確かめる。processは、このsupervisorがrecheckを終えた先端（`Rechecks::checked`。自分のrecheckを記録したときと、最新の記録が自分のものと読んだとき）を覚え、先端が変わらない間はqueueのeventを読まない。対象が無い（無いか、全部がmainを含む）と分かった先端は、そのとき見た対象のrunとheadの組と一緒に覚え（`Rechecks::idle`）、同じ先端で同じ組なら見直さないが、後からleaseの無い着地待ちになったrun（reviewや`/exit`を終えてleaseを手放したもの）があるか、headが変われば、同じ先端のままでも見直す（対象が無かったことで、そのmainを確かめ済みにはしない）。同じ先端を見直すときは、このsupervisorがslotに着地待ちとして新しく持ったrunは見ない（passしたreviewの衝突のprecheck（ADR-0027の決定4）が今の先端に対して確かめた後なので）。どの起動でも、headをすでにそのmainに対して判定されたrun（同じ`main`と`head`の`conflict_precheck`・`integration_deferred`・`landing_recheck_failed`がある）は除く: 見つかったことは、sessionへの依頼・askか・resume・着地のparkで扱われていて、確かめ直すとaskの答えを待たずにresumeへ回すことになる。statusが`integrating`のrun（このsupervisorの着地でも直接の`integrate`でも）がある間は始めない（mainを動かした後`run_integrated`を記録する前の着地を、着地のrunの無い動きと取り違えないため）。止まったまま`integrating`に残ったrunがあると、それが片付くまでrecheckは始まらない。途中の失敗とlockの空き待ちは、何も覚えずに次の回にやり直す。
+- queueのsupervisorの間の排他（ADR-t1310-1）: recheckはqueue dirの`recheck/lock`の排他の`flock`（`RunFiles::try_lock`。待たずに取る）を取ってからだけ始まり、lockは結果を記録した後（`landing_recheck_finished`の後）に手放す。supervisorの着地の予定もmainの動きも同じlockを取るので、supervisorが複数でもscratch worktreeとtargetを使うrecheckはqueueで同時に1つ。取れなければ始めず、予定は残して次の回にやり直す。予定がlockの空きを待つ間は、slotが空でもloopは終わらない（走っているrecheckと同じ扱い。待つのはほかのsupervisorのrecheckが終わるまで）。lockを取った後に、最近の`landing_recheck_finished`（最新の20件）から同じmainを誰が確かめたかを読む: このsupervisor（payloadの`supervisor`が自分のtoken）なら何もしない。ほかのsupervisorなら、このsupervisorがslotに持つrun（ほかのsupervisorからは見えない）だけを確かめる。だれも確かめていなければ対象の全部を確かめる。mainの動きを見るsupervisorを1つに選ぶことはしない（drainやhandoffのsupervisorはrecheckを始めないので、生きているほかのsupervisorがmainの動きを確かめる）。
+  - 着地の名指し: 始めるときのmainが最新の`run_integrated`の`result_commit`なら、そのrunとtaskを`landed_run_id` / `landed_task_id`にし、`landing_recheck_finished`もそのrunに記録する（予定を作ったのがこのsupervisorの別の着地でも）。そうでなければ着地のrunの無い動きとして扱う（下の項）。
+  - 着地のrunの無いmainの動き（dagqを通さないpushなど）では、`landing_recheck_failed`と`landing_recheck_finished`の`landed_run_id` / `landed_task_id`をnullにし、`reason`を「after main moved without a dagq landing, the landing recheck found ...」にし、`landing_recheck_finished`は確かめた最初のrunに記録する（queue自体のeventは使わない）。`stats`の`landing_rechecks`はその記録のtaskで数える。drain・handoffの回は新しく始めない。handoffは走っているrecheckが終わるのを待ってからexecする（commandが次のprocessのscratch worktreeで走り続けないように。予定だけのrecheckは捨てる）。handoffやadoptで作り直したrunが、recheckがresumeさせて`approve_landing`の答えを待つrun（最新のparkが`landing_recheck_failed`で、閉じていない`approve_landing`のaskがある）なら、reviewをやり直さずに答えを待つ（`adopt_review`）。対象が無ければ何も記録しない。
 - recheckが走っている間と、結果を記録した回は、slotが空でもloopは終わらない（observerやplan reviewと同じ扱い。記録した回の次の回が、parkしたrunをresumeする）。
 
 ## 確かめ方
@@ -47,7 +52,7 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 
 ## 記録
 
-- recheckが終わるたびに、mainを動かした着地のrunに`landing_recheck_finished`（`main`、`landed_run_id`、`landed_task_id`、`command`、`checked`、`clean`、`conflicts`、`check_failed`、`errors`、`resumed`、`held`、`failed_runs`（`run_id`・`code`・`action`）、`duration_secs`、`supervisor`）を記録する。
+- recheckが終わるたびに、mainを動かした着地のrun（着地のrunの無いmainの動きなら確かめた最初のrun）に`landing_recheck_finished`（`main`、`landed_run_id`、`landed_task_id`、`command`、`checked`、`clean`、`conflicts`、`check_failed`、`errors`、`resumed`、`held`、`failed_runs`（`run_id`・`code`・`action`）、`duration_secs`、`supervisor`）を記録する。
 - [`status`](status.md)は最新の`landing_recheck_finished`のpayloadを`landing_recheck`（`at`付き。まだ無ければnull）として出す。
 - [`stats`](stats.md)の`landing_rechecks`は、`backend_failures`と同じ窓の`rechecks`、`runs_checked`、`conflicts`、`check_failures`、`resumed`と、findingごとの`runs`（`task_id`、`run_id`、`code`、`action`、`landed_task_id`）。`repeat`は新しいfindingに数えず、`resumed`には数える。
 - `landing_recheck_failed`はcode（ADR-0034）を持つので、`needs_session`のrunの`last_error_code`にも出る。[Conflict thresholds](conflict-thresholds.md)の`conflict_hotspots`はこのイベントを数えない（着地のrebaseとpassの時のprecheckの衝突だけ）。

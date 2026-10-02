@@ -24,6 +24,13 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     // default windows to register.
     let mut backend = TestWorkspace::new(&db, false, PROMPTED_AGENT);
     backend.registration_timeout = common::STEP_LIMIT;
+    // The independent task changes another file than the first: once the
+    // first lands, the landing recheck finds the waiting second still
+    // landing (ADR-t1310-1), and nothing resumes it.
+    backend.script_for(
+        2,
+        "while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done; printf 'independent\\n' > independent.txt && git add independent.txt && git commit -q -m independent; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
     let backend = Arc::new(backend);
     let options = SuperviseOptions {
         stall: Some(dagq::domain::stall::StallConfig {
@@ -168,16 +175,13 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     closed.sort();
     assert_eq!(closed, [workspace_id(0), workspace_id(1), workspace_id(2)]);
     assert_eq!(runtime::doctor(&db, true).unwrap()["runs"], json!([]));
-    // The independent second run conflicts with the first (same file) and
-    // waits for a session; the dependent, built on the landing, lands cleanly.
-    assert_eq!(
-        integrate(&db, 2, &repo).unwrap()["outcome"],
-        "needs_session"
-    );
+    // The independent second run, on another file, lands on the first; the
+    // dependent, built on the first's landing, lands after it.
+    assert_eq!(integrate(&db, 2, &repo).unwrap()["outcome"], "integrated");
     assert_eq!(integrate(&db, 3, &repo).unwrap()["outcome"], "integrated");
     assert_eq!(
         git_out(&repo, &["rev-list", "--count", &format!("{landed}..main")]),
-        "1"
+        "2"
     );
     drop(dir);
 }
