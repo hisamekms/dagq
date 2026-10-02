@@ -5,6 +5,7 @@ use super::file_time::recorded_at;
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::RunEvent;
+use crate::domain::concern::{ConcernDecision, EscalatedBecause};
 
 impl Supervisor<'_> {
     /// Take over `running` / `validating` runs whose lease went stale under
@@ -325,6 +326,7 @@ impl Supervisor<'_> {
         {
             return Ok(phase);
         }
+        self.backfill_sent_back_concern(run, &history)?;
         let then = match anchor.kind.as_str() {
             event_kind::REVISE_REQUESTED => {
                 if let Some(live) = session.clone()
@@ -393,17 +395,30 @@ impl Supervisor<'_> {
                 passed_before(&history, anchor.id).map(|verdict| AfterExit::Ask {
                     why: anchor.payload["error"].as_str().map(str::to_owned),
                     decision: verdict.verdict,
+                    recommendation: verdict.recommendation,
+                    confidence: verdict.confidence,
+                    reason_category: verdict.reason_category,
                     reasons: verdict.reasons,
                     summary: verdict.summary,
                     requested_by: review_job_before(run, &history, anchor.id),
                 })
             }
             event_kind::REVIEW_FINISHED => {
-                match serde_json::from_value::<ReviewVerdict>(json!({
-                    "verdict": anchor.payload["verdict"],
-                    "reasons": anchor.payload["reasons"],
-                    "summary": anchor.payload["summary"],
-                })) {
+                match verdict_of(anchor) {
+                    // A concern is decided again from its verdict
+                    // (ADR-t451-1 decision 3).
+                    Ok(verdict) if verdict.verdict == ReviewDecision::Concern => {
+                        match self.adopted_concern(
+                            run,
+                            session.clone(),
+                            &history,
+                            anchor,
+                            verdict,
+                        )? {
+                            Ok(phase) => return Ok(phase),
+                            Err(then) => Some(then),
+                        }
+                    }
                     // A pass not yet followed by its /exit is prechecked
                     // (again): main may have moved.
                     Ok(verdict)
@@ -423,6 +438,9 @@ impl Supervisor<'_> {
                             "the revise could not go on when the supervisor was replaced".to_owned()
                         }),
                         decision: verdict.verdict,
+                        recommendation: None,
+                        confidence: None,
+                        reason_category: None,
                         reasons: verdict.reasons,
                         summary: verdict.summary,
                         requested_by: review_job(run, anchor),
@@ -709,6 +727,91 @@ impl Supervisor<'_> {
     /// the request of the review job that passed it (`job`) as the
     /// supervisor it replaced ran it; without a job, as the supervisor's
     /// own step.
+    /// Go on from a `concern` recorded with nothing after it but its
+    /// `concern_decided` and an `/exit` (ADR-t451-1 decision 3): decided
+    /// as the supervisor it replaced did, from the verdict. A `land` goes
+    /// on to land, prechecked again before its `/exit`; a `send_back`,
+    /// whose request was not recorded, asks a person as a `revise` does
+    /// when the supervisor was replaced, and so does a concern the job
+    /// did not decide. `concern_decided` is recorded unless it was. `Ok`
+    /// is the phase of a precheck, `Err` what follows the session's `/exit`.
+    /// Record the `concern_decided` of a concern sent back on the job's
+    /// recommendation when the supervisor died after the request
+    /// (`revise_requested`) and before the record (ADR-t451-1 decision 3):
+    /// the latest review is a concern with no `concern_decided` after it,
+    /// and a revise request followed it, which only an applied `send_back`
+    /// records. A `revise_unsent` after the request records it as `unsent`.
+    fn backfill_sent_back_concern(
+        &mut self,
+        run: &TaskRun,
+        history: &RunHistory<'_>,
+    ) -> Result<()> {
+        let Some(review) = history.last(event_kind::REVIEW_FINISHED) else {
+            return Ok(());
+        };
+        if review.payload["verdict"] != ReviewDecision::Concern.as_str()
+            || history.has_after(review.id, event_kind::CONCERN_DECIDED)
+            || !history.has_after(review.id, event_kind::REVISE_REQUESTED)
+        {
+            return Ok(());
+        }
+        let (Ok(verdict), Some(attempt)) = (verdict_of(review), review.payload["attempt"].as_u64())
+        else {
+            return Ok(());
+        };
+        let escalated = history
+            .has_after(review.id, event_kind::REVISE_UNSENT)
+            .then_some(EscalatedBecause::Unsent);
+        self.for_job(&ActorContext::review_job(run.id(), attempt), |sv| {
+            sv.record_concern_decided(run, attempt as usize, &verdict, escalated)
+        })
+    }
+    fn adopted_concern(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        history: &RunHistory<'_>,
+        anchor: &RunEvent,
+        verdict: ReviewVerdict,
+    ) -> Result<std::result::Result<Phase, AfterExit>> {
+        let job = review_job(run, anchor);
+        let revise_left = decide_revise(history) != ReviseDecision::Ask;
+        let decision = verdict.concern_decision(revise_left);
+        let escalated = match decision {
+            ConcernDecision::Land => None,
+            ConcernDecision::SendBack => Some(EscalatedBecause::Unsent),
+            ConcernDecision::Ask(why) => Some(why),
+        };
+        if !history.has_after(anchor.id, event_kind::CONCERN_DECIDED)
+            && let Some(attempt) = anchor.payload["attempt"].as_u64()
+        {
+            let attempt = attempt as usize;
+            self.for_job(&ActorContext::review_job(run.id(), attempt as u64), |sv| {
+                sv.record_concern_decided(run, attempt, &verdict, escalated)
+            })?;
+        }
+        let exited = history.has_after(anchor.id, event_kind::EXIT_REQUESTED);
+        let then = match escalated {
+            None if !exited => return Ok(Ok(self.adopted_precheck(run, session, verdict, job)?)),
+            None => AfterExit::Land,
+            Some(escalated) => AfterExit::Ask {
+                why: match escalated {
+                    EscalatedBecause::Unsent => Some(
+                        "the send_back could not go on when the supervisor was replaced".to_owned(),
+                    ),
+                    _ => landing::concern_escalation(&verdict, escalated, history),
+                },
+                decision: verdict.verdict,
+                recommendation: verdict.recommendation,
+                confidence: verdict.confidence,
+                reason_category: verdict.reason_category,
+                reasons: verdict.reasons,
+                summary: verdict.summary,
+                requested_by: job,
+            },
+        };
+        Ok(Err(then))
+    }
     fn adopted_precheck(
         &mut self,
         run: &TaskRun,
@@ -753,12 +856,18 @@ fn review_job_before(
 pub(super) fn passed_before(history: &RunHistory<'_>, before: EventId) -> Option<ReviewVerdict> {
     history
         .last_before(before, event_kind::REVIEW_FINISHED)
-        .and_then(|e| {
-            serde_json::from_value(json!({
-                "verdict": e.payload["verdict"],
-                "reasons": e.payload["reasons"],
-                "summary": e.payload["summary"],
-            }))
-            .ok()
-        })
+        .and_then(|e| verdict_of(e).ok())
+}
+
+/// The verdict a `review_finished` recorded, with a concern's
+/// recommendation, confidence and reason when it gave them.
+fn verdict_of(event: &RunEvent) -> serde_json::Result<ReviewVerdict> {
+    serde_json::from_value(json!({
+        "verdict": event.payload["verdict"],
+        "reasons": event.payload["reasons"],
+        "summary": event.payload["summary"],
+        "recommendation": event.payload["recommendation"],
+        "confidence": event.payload["confidence"],
+        "reason_category": event.payload["reason_category"],
+    }))
 }

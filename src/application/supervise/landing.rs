@@ -6,9 +6,13 @@ use super::*;
 use crate::application::job_start_failure;
 use crate::application::prompt::REVIEW_ACCESS;
 use crate::domain::ActorContext;
+use crate::domain::AskConfidence;
 use crate::domain::EventKind;
 use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, JobRoute, ModelRole, job_route};
+use crate::domain::concern::{
+    self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
+};
 use crate::domain::language::with_instruction;
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_reason;
@@ -444,149 +448,211 @@ impl Supervisor<'_> {
     }
     /// Move on from a verdict: `pass` exits the session and lands; `revise`
     /// goes to the live session while revises are left (ADR-0027 decision
-    /// 2); anything else exits the session and asks a person. The ask
-    /// records `job`, the review job that returned `verdict`, as its
-    /// `requested_by` (task 798).
+    /// 2); a `concern` lands or goes back on the job's recommendation when
+    /// it may be applied (ADR-t451-1 decision 3, [`Self::act_on_concern`]);
+    /// anything else exits the session and asks a person. The ask
+    /// records `job`, the review job that returned `verdict` as review
+    /// `attempt`, as its `requested_by` (task 798).
     pub(super) fn act_on_verdict(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
         verdict: ReviewVerdict,
         job: &ActorContext,
+        attempt: usize,
     ) -> Result<Phase> {
-        let ask = |why: Option<String>, verdict: ReviewVerdict, session| {
-            Phase::Exiting(ExitWatch::new(
-                session,
-                AfterExit::Ask {
-                    decision: verdict.verdict,
-                    reasons: verdict.reasons,
-                    summary: verdict.summary,
-                    why,
-                    requested_by: Some(job.clone()),
-                },
-            ))
-        };
         match verdict.verdict {
             ReviewDecision::Pass => self.precheck(run, session, verdict, Some(job.clone())),
-            ReviewDecision::Concern => Ok(ask(None, verdict, session)),
-            ReviewDecision::Revise => {
-                let events = self.queue.run_events(run.id())?;
-                let history = RunHistory::from_events(&events);
-                let (attempt, round) = match decide_revise(&history) {
-                    ReviseDecision::Request { attempt, round } => (attempt, round),
-                    ReviseDecision::Ask => {
+            ReviewDecision::Concern => self.act_on_concern(run, session, verdict, job, attempt),
+            ReviewDecision::Revise => self.send_revise(run, session, verdict, job),
+        }
+    }
+    /// A `concern` (ADR-t451-1 decision 3): with a `high` confidence and
+    /// no reason a person is needed, `land` goes the way of a `pass` (the
+    /// conflict precheck, the session's `/exit` right before the landing,
+    /// the e2e when the run needs it) and `send_back` that of a `revise`
+    /// (counted toward the revise limit); anything else exits the session
+    /// and asks a person with the job's recommendation. `concern_decided`
+    /// records which.
+    fn act_on_concern(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        verdict: ReviewVerdict,
+        job: &ActorContext,
+        attempt: usize,
+    ) -> Result<Phase> {
+        let events = self.queue.run_events(run.id())?;
+        let history = RunHistory::from_events(&events);
+        let revise_left = decide_revise(&history) != ReviseDecision::Ask;
+        let decision = verdict.concern_decision(revise_left);
+        let escalated = match decision {
+            ConcernDecision::Land => {
+                self.record_concern_decided(run, attempt, &verdict, None)?;
+                info!(run_id = %run.id(), "run {} review {attempt}: the concern lands on the review's recommendation", run.id());
+                return self.precheck(run, session, verdict, Some(job.clone()));
+            }
+            ConcernDecision::SendBack => {
+                let phase = self.send_revise(run, session, verdict.clone(), job)?;
+                let unsent =
+                    (!matches!(phase, Phase::Revise(_))).then_some(EscalatedBecause::Unsent);
+                self.record_concern_decided(run, attempt, &verdict, unsent)?;
+                return Ok(phase);
+            }
+            ConcernDecision::Ask(why) => why,
+        };
+        self.record_concern_decided(run, attempt, &verdict, Some(escalated))?;
+        let why = concern_escalation(&verdict, escalated, &history);
+        Ok(landing_ask(why, verdict, session, job, true))
+    }
+    /// Record `concern_decided` for review `attempt`'s concern.
+    pub(super) fn record_concern_decided(
+        &mut self,
+        run: &TaskRun,
+        attempt: usize,
+        verdict: &ReviewVerdict,
+        escalated: Option<EscalatedBecause>,
+    ) -> Result<()> {
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ConcernDecided,
+            concern::decided_payload(
+                attempt,
+                verdict.recommendation,
+                verdict.confidence,
+                verdict.reason_category,
+                escalated,
+            ),
+        )?;
+        Ok(())
+    }
+    /// Send `verdict`'s reasons to the live session as the next revise (a
+    /// `revise`, or a `concern` the job recommends sending back), the
+    /// round's limit already checked; a person is asked when the session
+    /// ended or the request could not be sent.
+    fn send_revise(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        verdict: ReviewVerdict,
+        job: &ActorContext,
+    ) -> Result<Phase> {
+        let carries = verdict.verdict == ReviewDecision::Concern;
+        let ask = |why: String, verdict: ReviewVerdict, session| {
+            landing_ask(Some(why), verdict, session, job, carries)
+        };
+        let events = self.queue.run_events(run.id())?;
+        let history = RunHistory::from_events(&events);
+        let ReviseDecision::Request { attempt, round } = decide_revise(&history) else {
+            let why = format!(
+                "the review still asks for changes after {} revises",
+                history.round_revise_attempts()
+            );
+            return Ok(ask(why, verdict, session));
+        };
+        let Some(live) = session
+            .clone()
+            .filter(|_| session_alive(self, run.id()).unwrap_or(false))
+        else {
+            let why = "the session had ended, so nobody could revise the run".to_owned();
+            return Ok(ask(why, verdict, session));
+        };
+        let task = self.queue.show(run.task_id())?.task;
+        let message = with_instruction(
+            revise_request(&task, run, round, &verdict.reasons)?,
+            self.verifier.language().as_ref(),
+        );
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        self.files.write(
+            &run_dir.join(format!("revise-{attempt}.txt")),
+            message.as_bytes(),
+        )?;
+        // A revise is rework the task caused: the live session is
+        // switched one step up before the request (ADR-0079 decision
+        // 5). One that cannot be switched goes on as it is, and why
+        // is recorded.
+        let current = WorkerSession::current(&events);
+        let (worker, raise, skipped) = match current.raised() {
+            None => (current, None, None),
+            Some(raised) => {
+                match self.switch_live_session(run, &live.workspace, &current, &raised) {
+                    Ok(()) => (
+                        raised,
+                        Some(Escalation {
+                            from: current,
+                            reason: worker_model::REVISE.to_owned(),
+                        }),
+                        None,
+                    ),
+                    Err(Unswitched::Untouched(why)) => {
+                        warn!(run_id = %run.id(), "run {}: the session was not raised to {} for revise {attempt}: {why}", run.id(), raised.label());
+                        (current, None, Some((raised, why)))
+                    }
+                    // Typing the revise now could land it on the
+                    // input left in the box, or in a dialog, and
+                    // the session may run with half a switch: a
+                    // person decides, as for a revise not sent.
+                    Err(Unswitched::Unsettled(why)) => {
                         let why = format!(
-                            "the review still asks for changes after {} revises",
-                            history.round_revise_attempts()
+                            "the session could not be switched to {} before revise {attempt}: {why}",
+                            raised.label()
                         );
-                        return Ok(ask(Some(why), verdict, session));
-                    }
-                };
-                let Some(live) = session
-                    .clone()
-                    .filter(|_| session_alive(self, run.id()).unwrap_or(false))
-                else {
-                    let why = "the session had ended, so nobody could revise the run".to_owned();
-                    return Ok(ask(Some(why), verdict, session));
-                };
-                let task = self.queue.show(run.task_id())?.task;
-                let message = with_instruction(
-                    revise_request(&task, run, round, &verdict.reasons)?,
-                    self.verifier.language().as_ref(),
-                );
-                let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-                self.files.write(
-                    &run_dir.join(format!("revise-{attempt}.txt")),
-                    message.as_bytes(),
-                )?;
-                // A revise is rework the task caused: the live session is
-                // switched one step up before the request (ADR-0079 decision
-                // 5). One that cannot be switched goes on as it is, and why
-                // is recorded.
-                let current = WorkerSession::current(&events);
-                let (worker, raise, skipped) = match current.raised() {
-                    None => (current, None, None),
-                    Some(raised) => {
-                        match self.switch_live_session(run, &live.workspace, &current, &raised) {
-                            Ok(()) => (
-                                raised,
-                                Some(Escalation {
-                                    from: current,
-                                    reason: worker_model::REVISE.to_owned(),
-                                }),
-                                None,
-                            ),
-                            Err(Unswitched::Untouched(why)) => {
-                                warn!(run_id = %run.id(), "run {}: the session was not raised to {} for revise {attempt}: {why}", run.id(), raised.label());
-                                (current, None, Some((raised, why)))
-                            }
-                            // Typing the revise now could land it on the
-                            // input left in the box, or in a dialog, and
-                            // the session may run with half a switch: a
-                            // person decides, as for a revise not sent.
-                            Err(Unswitched::Unsettled(why)) => {
-                                let why = format!(
-                                    "the session could not be switched to {} before revise {attempt}: {why}",
-                                    raised.label()
-                                );
-                                warn!(run_id = %run.id(), "run {}: {why}", run.id());
-                                return Ok(ask(Some(why), verdict, session));
-                            }
-                        }
-                    }
-                };
-                let sent_at = self.files.now();
-                // Recorded before it is typed: a supervisor that stops in
-                // between leaves an adopter that waits for the session
-                // rather than sending the request a second time.
-                let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": super::file_time::request_sent_at(sent_at)});
-                if let Some(requested) = requested.as_object_mut() {
-                    let provider = run.actual_provider();
-                    requested.extend(worker.fields_raised(provider, raise.as_ref()));
-                    if let Some((raised, why)) = skipped {
-                        let mut named = raised.named_on(provider);
-                        named["reason"] = json!(worker_model::REVISE);
-                        named["why"] = json!(why);
-                        requested.insert("escalation_skipped".to_owned(), named);
+                        warn!(run_id = %run.id(), "run {}: {why}", run.id());
+                        return Ok(ask(why, verdict, session));
                     }
                 }
-                self.queue
-                    .record_runtime_event(run.id(), EventKind::ReviseRequested, requested)?;
-                let submission = match submit(
-                    self,
-                    run,
-                    &live.workspace,
-                    Input::Text(&message),
-                    "revise request",
-                ) {
-                    Ok(submission) => submission,
-                    Err(error) => {
-                        let why = format!("the revise request could not be sent: {error:#}");
-                        warn!(run_id = %run.id(), "run {}: {why}", run.id());
-                        self.queue.record_runtime_event(
-                            run.id(),
-                            EventKind::ReviseUnsent,
-                            json!({"attempt": attempt, "error": why}),
-                        )?;
-                        return Ok(ask(Some(why), verdict, session));
-                    }
-                };
-                info!(run_id = %run.id(), "revise {round} of {MAX_REVISE_ATTEMPTS} (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
-                Ok(Phase::Revise(ReviseWatch::new(
-                    run,
-                    live,
-                    attempt,
-                    Fix::Revise(verdict.reasons),
-                    sent_at,
-                    Some(StartCheck::new(
-                        "revise request",
-                        &message,
-                        sent_at,
-                        &submission,
-                    )),
-                )?))
+            }
+        };
+        let sent_at = self.files.now();
+        // Recorded before it is typed: a supervisor that stops in
+        // between leaves an adopter that waits for the session
+        // rather than sending the request a second time.
+        let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": super::file_time::request_sent_at(sent_at)});
+        if let Some(requested) = requested.as_object_mut() {
+            let provider = run.actual_provider();
+            requested.extend(worker.fields_raised(provider, raise.as_ref()));
+            if let Some((raised, why)) = skipped {
+                let mut named = raised.named_on(provider);
+                named["reason"] = json!(worker_model::REVISE);
+                named["why"] = json!(why);
+                requested.insert("escalation_skipped".to_owned(), named);
             }
         }
+        self.queue
+            .record_runtime_event(run.id(), EventKind::ReviseRequested, requested)?;
+        let submission = match submit(
+            self,
+            run,
+            &live.workspace,
+            Input::Text(&message),
+            "revise request",
+        ) {
+            Ok(submission) => submission,
+            Err(error) => {
+                let why = format!("the revise request could not be sent: {error:#}");
+                warn!(run_id = %run.id(), "run {}: {why}", run.id());
+                self.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::ReviseUnsent,
+                    json!({"attempt": attempt, "error": why}),
+                )?;
+                return Ok(ask(why, verdict, session));
+            }
+        };
+        info!(run_id = %run.id(), "revise {round} of {MAX_REVISE_ATTEMPTS} (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
+        Ok(Phase::Revise(ReviseWatch::new(
+            run,
+            live,
+            attempt,
+            Fix::Revise(verdict.reasons),
+            sent_at,
+            Some(StartCheck::new(
+                "revise request",
+                &message,
+                sent_at,
+                &submission,
+            )),
+        )?))
     }
     /// Switch the live session of `run` in `workspace` from `from` to `to`
     /// (ADR-0079 decision 5): the agent's switch inputs, each typed and
@@ -871,6 +937,11 @@ impl Supervisor<'_> {
         reasons: &[String],
         summary: &str,
         why: Option<&str>,
+        (recommendation, confidence, reason_category): (
+            Option<LandingRecommendation>,
+            Option<AskConfidence>,
+            Option<ConcernReason>,
+        ),
     ) -> Result<AskId> {
         let mut question = format!(
             "The supervisor's review of run {} (task {}) returned {}{}: {summary}",
@@ -885,10 +956,26 @@ impl Supervisor<'_> {
         if let Some(run_dir) = &run.run_dir() {
             question.push_str(&format!("\nReview material: {run_dir}/review.md"));
         }
+        if let Some(recommendation) = recommendation {
+            question.push_str(&format!(
+                "\nThe review recommends {} ({} confidence).",
+                recommendation.as_str(),
+                confidence.map_or("no", AskConfidence::as_str)
+            ));
+        }
         question.push_str(
             "\nland: land it as it is. send_back: resume the session with these reasons. cancel: fail the run and cancel the task.",
         );
-        self.ask_approve_landing(run, question)
+        self.ask_approve_landing(
+            run,
+            question,
+            recommendation.map(|r| r.as_str().to_owned()),
+            confidence,
+            match reason_category {
+                Some(ConcernReason::Discard) => AskReason::Discard,
+                _ => AskReason::Scope,
+            },
+        )
     }
     /// Open the `approve_landing` ask of a run whose headless review failed
     /// (task 328), with why and where the review's material and output
@@ -930,9 +1017,19 @@ impl Supervisor<'_> {
         question.push_str(
             "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason. cancel: fail the run and cancel the task.",
         );
-        self.ask_approve_landing(run, question)
+        self.ask_approve_landing(run, question, None, None, AskReason::Scope)
     }
-    fn ask_approve_landing(&mut self, run: &TaskRun, question: String) -> Result<AskId> {
+    /// Open an `approve_landing` ask of `run` carrying the review job's
+    /// `recommendation` and `confidence` when it gave them (ADR-t451-1
+    /// decision 3).
+    fn ask_approve_landing(
+        &mut self,
+        run: &TaskRun,
+        question: String,
+        recommendation: Option<String>,
+        confidence: Option<AskConfidence>,
+        reason_category: AskReason,
+    ) -> Result<AskId> {
         // An earlier ask of the run is about an earlier review (the run was
         // sent back since): it would hold the new one back as a repeat, and
         // its answer no longer fits (task 328, task 425).
@@ -947,15 +1044,15 @@ impl Supervisor<'_> {
             &mut *self.queue,
             &self.layout.main_checkout,
             NewAsk {
-                recommendation: None,
-                confidence: None,
+                recommendation,
+                confidence,
                 kind: AskKind::ApproveLanding,
                 task_id: None,
                 run_id: Some(run.id().clone()),
                 question,
                 options: LANDING_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
                 asked_by: "supervisor".to_owned(),
-                reason_category: AskReason::Scope,
+                reason_category,
                 topics: Vec::new(),
                 finding_id: None,
             },
@@ -1188,7 +1285,8 @@ impl Supervisor<'_> {
     /// the review's findings (ADR-t947-1 decision 4): a `review_outcome`
     /// on the run's latest review, once per ask, when that review gave a
     /// verdict that sent the run back. The ask of a failed review, or of a
-    /// pass whose conflict a person decides, records none.
+    /// pass (or a concern the runtime landed, ADR-t451-1 decision 3) whose
+    /// conflict a person decides, records none.
     fn record_review_outcome(&self, run: &TaskRun, ask_id: AskId, answer: &str) -> Result<()> {
         let Some(outcome) = review_reason::answer_outcome(answer) else {
             return Ok(());
@@ -1206,7 +1304,7 @@ impl Supervisor<'_> {
         let Some(review) = review.filter(|review| {
             !recorded
                 && review.kind == event_kind::REVIEW_FINISHED
-                && review.payload["verdict"] != ReviewDecision::Pass.as_str()
+                && !concern::lets_land(&review.payload)
         }) else {
             return Ok(());
         };
@@ -1238,4 +1336,62 @@ enum Unswitched {
     /// An input may be left in the box or a dialog on the screen, or the
     /// session took part of the switch.
     Unsettled(String),
+}
+
+/// The `approve_landing` ask `verdict` leads to once the session exited,
+/// `why` saying why a person decides; `requested_by` is `job`, the review
+/// job that returned it (task 798). `carries` puts the job's
+/// recommendation and confidence on the ask (a `concern`'s, ADR-t451-1
+/// decision 3).
+fn landing_ask(
+    why: Option<String>,
+    verdict: ReviewVerdict,
+    session: Option<SessionRef>,
+    job: &ActorContext,
+    carries: bool,
+) -> Phase {
+    Phase::Exiting(ExitWatch::new(
+        session,
+        AfterExit::Ask {
+            decision: verdict.verdict,
+            recommendation: verdict.recommendation.filter(|_| carries),
+            confidence: verdict.confidence.filter(|_| carries),
+            reason_category: verdict.reason_category.filter(|_| carries),
+            reasons: verdict.reasons,
+            summary: verdict.summary,
+            why,
+            requested_by: Some(job.clone()),
+        },
+    ))
+}
+
+/// Why a `concern` goes to a person (`escalated`), for its ask; `None` for
+/// a verdict with no recommendation, which asks as it always did.
+pub(super) fn concern_escalation(
+    verdict: &ReviewVerdict,
+    escalated: EscalatedBecause,
+    history: &RunHistory<'_>,
+) -> Option<String> {
+    let recommends = verdict
+        .recommendation
+        .map_or("nothing", |recommendation| recommendation.as_str());
+    match escalated {
+        EscalatedBecause::NoRecommendation => None,
+        EscalatedBecause::LowConfidence => Some(format!(
+            "the review recommends {recommends} without high confidence"
+        )),
+        EscalatedBecause::Scope => Some(format!(
+            "the review recommends {recommends}, but landing it would accept a departure from the acceptance, an ADR or the goal (scope)"
+        )),
+        EscalatedBecause::Discard => Some(format!(
+            "the review recommends {recommends}, but the judgement is whether to throw the work away (discard)"
+        )),
+        EscalatedBecause::ReviseLimit => Some(format!(
+            "the review recommends send_back after {} revises",
+            history.round_revise_attempts()
+        )),
+        EscalatedBecause::Unsent => Some(format!(
+            "the review recommends {recommends}, but it could not be applied"
+        )),
+    }
 }

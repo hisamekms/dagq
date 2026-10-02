@@ -722,9 +722,7 @@ pub(super) fn resumed_closable_without_exit(
 ) -> Option<String> {
     match sv.queue.run_events(run.id()) {
         Ok(events) => {
-            let passed = RunHistory::from_events(&events)
-                .last(event_kind::REVIEW_FINISHED)
-                .is_some_and(|review| review.payload["verdict"] == "pass");
+            let passed = RunHistory::from_events(&events).review_lets_land();
             if !passed {
                 return Some("its latest review did not pass".to_owned());
             }

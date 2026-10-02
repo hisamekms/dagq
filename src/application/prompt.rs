@@ -1477,8 +1477,10 @@ pub(crate) fn stall_nudge(
 }
 
 /// What the headless reviewer is asked (ADR-0023 decision 2, ADR-0027
-/// decision 2): where the material is, the task's acceptance, the verdict
-/// schema and where `revise` ends and `concern` begins.
+/// decision 2 as ADR-t451-1 decision 3 amends it): where the material is,
+/// the task's acceptance, the verdict schema, where `revise` ends and
+/// `concern` begins, and how a concern is judged and when it reaches a
+/// person.
 pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
     format!(
         "You review run {run_id} of dagq task {task_id} ({title}) before it lands.\n\
@@ -1487,18 +1489,28 @@ pub fn review_prompt(task: &Task, run: &TaskRun, review_path: &str) -> String {
          Decide one verdict:\n\
          - pass: the diff meets the acceptance criteria and the task's instructions and nothing needs fixing.\n\
          - revise: findings the worker can fix without a person's judgment: missing tests or evidence, findings of the repository's formatter, linter or other checks, a receipt that disagrees with the diff where fixing the diff settles it, or an obvious gap inside the instructed scope.\n\
-         - concern: findings that need a person's judgment: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call.\n\n\
+         - concern: findings that call for a judgment rather than a mechanical fix: a mismatch with the acceptance criteria, changes the task did not ask for, or a finding that involves a judgment call. A concern does not by itself go to a person: you judge it below, recommending land or send_back with your confidence, and the runtime applies a sure judgment that needs no person (high, reason_category null) itself; only the rest (low, scope, discard) reaches a person.\n\n\
+         {concern}\
          {codes}\
          Answer with one JSON object and nothing else, matching this schema:\n\
-         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string}}\n\
-         reasons lists each finding (empty for pass); summary is one or two sentences.\n",
+         {{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}}\n\
+         reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n",
         run_id = run.id(),
         task_id = task.id(),
         title = task.title(),
         acceptance = or_none(task.acceptance()),
+        concern = CONCERN_RECOMMENDATION,
         codes = reason_codes_section(review_reason::REVIEW_CODES),
     )
 }
+
+/// How a review recommends what to do with its `concern`, and which
+/// judgements it leaves to a person (ADR-t451-1 decisions 1 and 3).
+const CONCERN_RECOMMENDATION: &str = "For a concern, also recommend what to do, and how sure you are:\n\
+- recommendation: land (the run may land as it is: the findings are minor or acceptable within the task and its acceptance) or send_back (the worker should fix the findings in the same run).\n\
+- confidence: high when the task, its acceptance, the repository's decision records and rules settle it and you would bet on a person choosing the same; low when you hesitate, the material is not enough, or a person could reasonably choose otherwise.\n\
+- reason_category: scope when landing would accept a departure from the acceptance criteria, a recorded decision of the repository or the goal's decisions (or meeting them would need a change of scope); discard when the judgement is whether to cancel the task or throw the work away; null otherwise.\n\
+The runtime applies a high recommendation whose reason_category is null without asking: send_back goes to the worker's session like a revise, and land lands the run after its usual checks. Anything else (low, scope, discard) goes to a person with your recommendation. Leave scope and discard to the person rather than deciding them; when in doubt, say low.\n\n";
 
 /// How a review job labels each finding (ADR-t947-1): the codes, their
 /// definitions heaviest first, and how the primary one is chosen.
@@ -2880,6 +2892,19 @@ mod tests {
         assert!(plan_review.contains("reason_category is scope when"));
         assert!(plan_review.contains("\"reason_category\": \"scope\" | \"discard\" | null"));
         assert!(review.contains("findings of the repository's formatter, linter or other checks"));
+        // A concern's recommendation, and what it leaves to a person
+        // (ADR-t451-1 decisions 1 and 3).
+        for part in [
+            "\"recommendation\": \"land\" | \"send_back\" | null",
+            "\"confidence\": \"high\" | \"low\" | null",
+            "\"reason_category\": \"scope\" | \"discard\" | null",
+            "Leave scope and discard to the person rather than deciding them; when in doubt, say low.",
+            "- concern: findings that call for a judgment rather than a mechanical fix",
+            "A concern does not by itself go to a person: you judge it below",
+            "only the rest (low, scope, discard) reaches a person.",
+        ] {
+            assert!(review.contains(part), "{part} in {review}");
+        }
         for text in [
             &plan_review,
             &planner,

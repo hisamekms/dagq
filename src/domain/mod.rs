@@ -368,7 +368,9 @@ string_enum!(PlannerState {
 
 // The verdict of the supervisor's headless review (ADR-0023 decision 2,
 // ADR-0027 decision 2): `pass` lands the run, `revise` goes back to the live
-// worker session, `concern` waits for a person in an `approve_landing` ask.
+// worker session, `concern` lands it or sends it back on the job's
+// recommendation, or waits for a person in an `approve_landing` ask
+// (ADR-t451-1 decision 3, `concern`).
 string_enum!(ReviewDecision {
     Pass => "pass",
     Revise => "revise",
@@ -387,6 +389,18 @@ pub struct ReviewVerdict {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reason_codes: Vec<Vec<String>>,
     pub summary: String,
+    /// What a `concern` recommends (ADR-t451-1 decision 3); `None` for a
+    /// `pass` or `revise`, and for a concern without it or with a value
+    /// this binary does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<concern::LandingRecommendation>,
+    /// How sure the job is of a `concern`'s recommendation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<AskConfidence>,
+    /// Why a person is needed for a `concern`; `None` when neither
+    /// `scope` nor `discard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_category: Option<concern::ConcernReason>,
 }
 
 #[derive(Deserialize)]
@@ -395,16 +409,33 @@ struct PrintedReviewVerdict {
     verdict: ReviewDecision,
     reasons: Vec<review_reason::PrintedReason>,
     summary: String,
+    #[serde(default)]
+    recommendation: Option<String>,
+    #[serde(default)]
+    confidence: Option<String>,
+    #[serde(default)]
+    reason_category: Option<String>,
 }
 
 impl From<PrintedReviewVerdict> for ReviewVerdict {
     fn from(printed: PrintedReviewVerdict) -> Self {
         let (reasons, reason_codes) = review_reason::split(printed.reasons);
+        // Only a concern's are read: a pass or a revise needs none.
+        let concern = printed.verdict == ReviewDecision::Concern;
         Self {
             verdict: printed.verdict,
             reasons,
             reason_codes,
             summary: printed.summary,
+            recommendation: concern
+                .then(|| concern::known(printed.recommendation.as_deref()))
+                .flatten(),
+            confidence: concern
+                .then(|| concern::known(printed.confidence.as_deref()))
+                .flatten(),
+            reason_category: concern
+                .then(|| concern::reason(printed.reason_category.as_deref()))
+                .flatten(),
         }
     }
 }
@@ -421,6 +452,17 @@ impl ReviewVerdict {
     pub fn primary_code(&self) -> Option<String> {
         (self.verdict != ReviewDecision::Pass)
             .then(|| review_reason::primary(&self.recorded_codes()))
+    }
+
+    /// What the runtime does with this `concern` (ADR-t451-1 decision 3),
+    /// `revise_left` saying whether the round has a revise left.
+    pub fn concern_decision(&self, revise_left: bool) -> concern::ConcernDecision {
+        concern::decide(
+            self.recommendation,
+            self.confidence,
+            self.reason_category,
+            revise_left,
+        )
     }
 
     /// The verdict in the review's stdout: the whole text, or else the
@@ -720,6 +762,7 @@ pub mod broker;
 pub mod change;
 pub mod claim_defer;
 pub mod claim_hold;
+pub mod concern;
 pub mod disk;
 pub mod e2e_quarantine;
 mod error;

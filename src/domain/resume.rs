@@ -4,7 +4,7 @@
 //! run's events alone.
 
 use super::{
-    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, ReviewDecision, RunEvent, event_kind,
+    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent, event_kind,
     reason::{event_code, explains_last_error},
     recheck,
 };
@@ -90,7 +90,7 @@ impl History {
         match event.kind.as_str() {
             "integration_approved" => self.approved = true,
             "review_finished" => {
-                self.passed = event.payload["verdict"] == ReviewDecision::Pass.as_str();
+                self.passed = super::concern::lets_land(&event.payload);
             }
             kind if PARKING.contains(&kind) || recheck::parks(event) => {
                 self.conflict = matches!(

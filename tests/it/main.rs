@@ -117,6 +117,7 @@ mod runtime_resume_exit_retry;
 mod runtime_review;
 mod runtime_review_adopt;
 mod runtime_review_background;
+mod runtime_review_concern;
 mod runtime_review_conflict;
 mod runtime_review_exit;
 mod runtime_review_questions;

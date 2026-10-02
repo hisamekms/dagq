@@ -69,13 +69,20 @@ impl Fix {
                 reasons: reasons.clone(),
                 summary,
                 why: Some(why),
+                recommendation: None,
+                confidence: None,
+                reason_category: None,
                 requested_by,
             },
+            // The ask is about the conflict, not a concern's recommendation.
             Fix::Conflict(verdict) => AfterExit::Ask {
                 decision: verdict.verdict,
                 reasons: verdict.reasons.clone(),
                 summary: verdict.summary.clone(),
                 why: Some(why),
+                recommendation: None,
+                confidence: None,
+                reason_category: None,
                 requested_by,
             },
         }

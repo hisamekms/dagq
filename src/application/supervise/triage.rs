@@ -169,9 +169,7 @@ impl Supervisor<'_> {
                         "supervisor_pid": leased,
                         "worktree_processes": 0,
                         "stopped_processes": stopped.unwrap_or(0),
-                        "review_passed": history
-                            .last(event_kind::REVIEW_FINISHED)
-                            .is_some_and(|review| review.payload["verdict"] == "pass"),
+                        "review_passed": history.review_lets_land(),
                         "approved": history.approved(),
                     },
                     "detail": {"then": then, "status": recovered.status().as_str()},

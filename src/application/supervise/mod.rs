@@ -1217,6 +1217,12 @@ enum AfterExit {
         summary: String,
         /// Why a `revise` verdict became a question for a person.
         why: Option<String>,
+        /// The review job's recommendation, confidence and reason the ask
+        /// carries (ADR-t451-1 decision 3): those of a `concern` it did not
+        /// apply. A `discard` asks for that reason rather than `scope`.
+        recommendation: Option<crate::domain::concern::LandingRecommendation>,
+        confidence: Option<crate::domain::AskConfidence>,
+        reason_category: Option<crate::domain::concern::ConcernReason>,
         /// The review job whose verdict this ask acts on (a `concern`, a
         /// `revise` that cannot be sent back, the conflict a `pass` ran
         /// into): the ask's events record it as `requested_by` (task 798).
@@ -2723,10 +2729,13 @@ impl Supervisor<'_> {
                                     "summary": verdict.summary,
                                     "duration_secs": duration_secs,
                                     "attempt": attempt,
+                                    "recommendation": verdict.recommendation,
+                                    "confidence": verdict.confidence,
+                                    "reason_category": verdict.reason_category,
                                 }),
                             )?;
                             info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
-                            sv.act_on_verdict(&run, session, verdict, &job)
+                            sv.act_on_verdict(&run, session, verdict, &job, attempt)
                         })?
                     }
                     ReviewEnd::Unreadable(error) if retry_unreadable => {
@@ -2857,10 +2866,20 @@ impl Supervisor<'_> {
                         reasons,
                         summary,
                         why,
+                        recommendation,
+                        confidence,
+                        reason_category,
                         requested_by,
                     } => {
                         let open = |sv: &mut Self| {
-                            sv.open_landing_ask(&run, decision, &reasons, &summary, why.as_deref())
+                            sv.open_landing_ask(
+                                &run,
+                                decision,
+                                &reasons,
+                                &summary,
+                                why.as_deref(),
+                                (recommendation, confidence, reason_category),
+                            )
                         };
                         // Only the ask's own events carry the job: the
                         // lease given back after it is the supervisor's.

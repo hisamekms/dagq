@@ -64,6 +64,14 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         ask_kind: "approve_plan",
         applies: |payload| payload["applied"].as_bool() == Some(true),
     },
+    DecidedWithoutAsk {
+        // A review's concern the runtime landed or sent back on the job's
+        // recommendation (ADR-t451-1 decision 3); one asked of a person
+        // records `applied: false`.
+        event: crate::domain::event_kind::CONCERN_DECIDED,
+        ask_kind: "approve_landing",
+        applies: |payload| payload["applied"].as_bool() == Some(true),
+    },
 ];
 
 /// Count the asks answered and the decisions recorded with `after < id <=
@@ -251,6 +259,32 @@ mod tests {
         assert_eq!(
             stats.decided_without_ask,
             BTreeMap::from([("approve_plan".to_owned(), 2)])
+        );
+    }
+
+    #[test]
+    fn a_concern_the_runtime_applied_counts_as_decided_without_an_approve_landing() {
+        let events = vec![
+            event(
+                1,
+                "concern_decided",
+                json!({"applied": true, "recommendation": "land"}),
+            ),
+            event(
+                2,
+                "concern_decided",
+                json!({"applied": true, "recommendation": "send_back"}),
+            ),
+            event(
+                3,
+                "concern_decided",
+                json!({"applied": false, "escalated_because": "scope"}),
+            ),
+        ];
+        let stats = recommendations(&events, EventId::new(0), EventId::new(3), |_| true);
+        assert_eq!(
+            stats.decided_without_ask,
+            BTreeMap::from([("approve_landing".to_owned(), 2)])
         );
     }
 }

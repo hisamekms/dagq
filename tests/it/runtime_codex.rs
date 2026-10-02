@@ -230,6 +230,92 @@ fn no_claude_codex_review_concern_records_reasons_and_asks() {
     assert!(payloads(&detail, "review_failed").is_empty());
 }
 
+/// A Codex review's concern carries its recommendation like Claude's
+/// (ADR-t451-1 decision 3): a `land` of high confidence and no reason
+/// lands the run without an ask.
+#[test]
+fn no_claude_codex_review_concern_with_a_high_land_lands_it() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    let verdict = json!({"verdict":"concern","reasons":["minor"],"summary":"fine to land",
+                         "recommendation":"land","confidence":"high","reason_category":null});
+    codex_review_reply(dir.path(), 1, verdict);
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+    let detail = detail(&db);
+    assert_eq!(
+        payloads(&detail, "review_started")[0]["launch"]["provider"],
+        "codex"
+    );
+    let decided = payloads(&detail, "concern_decided");
+    assert_eq!(decided.len(), 1);
+    assert_eq!(decided[0]["applied"], true);
+    assert_eq!(decided[0]["recommendation"], "land");
+    assert!(payloads(&detail, "ask_opened").is_empty());
+}
+
+/// Under `--no-claude` with the review left on Claude, no review agent
+/// runs (`provider_disabled`): a person is asked as before, with no
+/// recommendation and no `concern_decided`.
+#[test]
+fn no_claude_review_with_no_provider_asks_without_a_recommendation() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    set_turns(dir.path(), FINISH);
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "awaiting_integration");
+    let detail = detail(&db);
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["code"], "provider_disabled");
+    assert!(payloads(&detail, "concern_decided").is_empty());
+    let asks = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].kind, AskKind::ApproveLanding);
+    assert!(
+        asks[0].question.contains("No review agent ran"),
+        "{}",
+        asks[0].question
+    );
+    assert_eq!(asks[0].recommendation, None);
+    assert_eq!(asks[0].confidence, None);
+}
+
 #[test]
 fn no_claude_codex_review_revise_reaches_the_worker_and_passes() {
     let (dir, repo, db, backend, codex) = codex_fixture();

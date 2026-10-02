@@ -119,10 +119,11 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
     for expected in [
         format!("Read the review material at {}", review_md.display()),
         "Acceptance criteria of the task:\nworks".to_owned(),
-        r#"{"verdict": "pass" | "revise" | "concern", "reasons": [{"text": string, "codes": [string]}], "summary": string}"#
+        r#"{"verdict": "pass" | "revise" | "concern", "reasons": [{"text": string, "codes": [string]}], "summary": string, "recommendation": "land" | "send_back" | null, "confidence": "high" | "low" | null, "reason_category": "scope" | "discard" | null}"#
             .to_owned(),
         "- revise: findings the worker can fix without a person's judgment".to_owned(),
-        "- concern: findings that need a person's judgment".to_owned(),
+        "- concern: findings that call for a judgment rather than a mechanical fix".to_owned(),
+        "the runtime applies a sure judgment that needs no person (high, reason_category null) itself".to_owned(),
     ] {
         assert!(
             prompts[0].contains(&expected),

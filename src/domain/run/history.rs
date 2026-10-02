@@ -251,12 +251,18 @@ impl<'a> RunHistory<'a> {
     }
 
     /// Whether the Integrator lands the run at a request (ADR-t728-2
-    /// decision 3): it was approved to land, or passed its latest review.
+    /// decision 3): it was approved to land, or its latest review passed
+    /// or recommended to land in a way the runtime applies (ADR-t451-1
+    /// decision 3).
     pub fn landable(&self) -> bool {
-        self.approved()
-            || self
-                .last(event_kind::REVIEW_FINISHED)
-                .is_some_and(|review| review.payload["verdict"] == "pass")
+        self.approved() || self.review_lets_land()
+    }
+
+    /// Whether the latest review lets the run land without a person
+    /// ([`crate::domain::concern::lets_land`]).
+    pub fn review_lets_land(&self) -> bool {
+        self.last(event_kind::REVIEW_FINISHED)
+            .is_some_and(|review| crate::domain::concern::lets_land(&review.payload))
     }
 
     /// Whether `integration_approved` was recorded for the answer of ask
