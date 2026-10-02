@@ -224,11 +224,22 @@ fn background_work_holds_the_revise_until_it_ends() {
             (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
         thread::spawn(move || supervise_reviewed(&db, &repo, &backend, &reviewer))
     };
-    wait_until(&db, Duration::from_secs(30), |queue| {
+    // The revise follows the claim, worker session, receipt, validation and
+    // review job, so reaching it grows with the host's load without testing
+    // a runtime limit. Bound the wait by the test's limit, and also stop if
+    // the supervisor returns without requesting a revise.
+    wait_until(&db, common::STEP_LIMIT, |queue| {
         event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"revise_requested")
+            || supervisor.is_finished()
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
-    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let kinds = event_kinds(&detail);
+    assert!(
+        kinds.contains(&"revise_requested"),
+        "supervisor returned without requesting a revise: {kinds:?}"
+    );
+    let run = detail.runs[0].clone();
     wait_for_background(&run);
     thread::sleep(HOLD_PERIOD);
     let detail = queue.show(TaskId::new(1)).unwrap();
