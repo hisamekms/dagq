@@ -407,14 +407,7 @@ fn closed_value(
 ) -> Result<Option<(Value, Value)>> {
     let found: Option<(Value, Value)> = conn
         .query_row(
-            &format!(
-                "SELECT c.payload, o.payload FROM run_events c
-                   JOIN run_events o ON o.id=json_extract(c.payload,'$.opened_event_id')
-                 WHERE c.run_id=?1 AND c.kind='{SESSION_CLOSED}' AND o.id>?3
-                   AND json_extract(c.payload,'$.kind')=?2
-                   AND json_extract(c.payload,?4) IS NOT NULL
-                 ORDER BY c.id DESC LIMIT 1"
-            ),
+            &closed_value_sql(),
             params![run_id, kind, after, format!("$.{key}")],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
@@ -426,6 +419,19 @@ fn closed_value(
             )
         });
     Ok(found.map(|(closed, opened)| (closed[key].clone(), opened)))
+}
+
+/// The query of [`closed_value`]: the run's `session_closed` by
+/// `events_by_kind`, each joined to its `session_opened` by the key.
+fn closed_value_sql() -> String {
+    format!(
+        "SELECT c.payload, o.payload FROM run_events c
+           JOIN run_events o ON o.id=json_extract(c.payload,'$.opened_event_id')
+         WHERE c.run_id=?1 AND c.kind='{SESSION_CLOSED}' AND o.id>?3
+           AND json_extract(c.payload,'$.kind')=?2
+           AND json_extract(c.payload,?4) IS NOT NULL
+         ORDER BY c.id DESC LIMIT 1"
+    )
 }
 
 /// `work` with the kind and attempt of its span, as the session's exit and
@@ -838,13 +844,33 @@ fn times(conn: &Connection, span: &OpenSpan, now: &str) -> Result<Option<(i64, i
         .map(|(start, now)| (start, now.max(start))))
 }
 
+/// The query of the `session_turns` of the span opened by `?1`, by
+/// `events_by_opened_event` (task 1333).
+fn recorded_turns_sql() -> String {
+    format!(
+        "SELECT payload FROM run_events WHERE kind='{SESSION_TURNS}'
+           AND json_extract(payload,'$.opened_event_id')=?1 ORDER BY id"
+    )
+}
+
+/// The query of whether the span opened by `?1` is closed, by
+/// `events_by_opened_event`.
+fn span_closed_sql() -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_CLOSED}'
+           AND json_extract(payload,'$.opened_event_id')=?1)"
+    )
+}
+
+/// Whether the span opened by `opened` is closed.
+fn span_closed(conn: &Connection, opened: EventId) -> Result<bool> {
+    Ok(conn.query_row(&span_closed_sql(), [opened], |r| r.get(0))?)
+}
+
 /// The turns of the span opened by `opened` recorded so far.
 fn recorded_turns(conn: &Connection, opened: EventId) -> Result<Vec<Turn>> {
     let payloads: Vec<Value> = conn
-        .prepare(&format!(
-            "SELECT payload FROM run_events WHERE kind='{SESSION_TURNS}'
-               AND json_extract(payload,'$.opened_event_id')=?1 ORDER BY id"
-        ))?
+        .prepare(&recorded_turns_sql())?
         .query_map([opened], |r| json_col(r, "payload"))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(payloads
@@ -907,15 +933,7 @@ pub(super) fn record_open_turns(conn: &Connection) -> Result<usize> {
             }
         };
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        let closed: bool = tx.query_row(
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_CLOSED}'
-                   AND json_extract(payload,'$.opened_event_id')=?1)"
-            ),
-            [span.opened_event_id],
-            |r| r.get(0),
-        )?;
-        if closed {
+        if span_closed(&tx, span.opened_event_id)? {
             continue;
         }
         let now = now(&tx)?;
@@ -1158,10 +1176,14 @@ pub(super) fn close_gone_hook_spans(conn: &Connection, gone: &[EventId]) -> Resu
     }
     let _read = read_before(conn, Closing::Spans(&spans))?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let open = open_hook_spans(&tx)?;
     let now = now(&tx)?;
     let mut closed = 0;
-    for span in spans.iter().filter(|span| open.contains(span)) {
+    // Found outside the write lock; checked again under it one by one, so a
+    // span another process closed meanwhile is not closed twice.
+    for span in &spans {
+        if span_closed(&tx, span.opened_event_id)? {
+            continue;
+        }
         let task = span_task(&tx, span)?;
         close(&tx, &now, task, None, span, INFERRED)?;
         closed += 1;
@@ -1195,16 +1217,8 @@ fn open_spans(
     closed: &str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<OpenSpan>> {
-    let sql = format!(
-        "SELECT o.id, o.payload, o.created_at FROM run_events o
-         WHERE o.kind='{SESSION_OPENED}' AND {opened}
-           AND NOT EXISTS (SELECT 1 FROM run_events c
-                           WHERE c.kind='{SESSION_CLOSED}' AND {closed}
-                             AND json_extract(c.payload,'$.opened_event_id')=o.id)
-         ORDER BY o.id"
-    );
     Ok(conn
-        .prepare(&sql)?
+        .prepare(&open_spans_sql(opened, closed))?
         .query_map(params, |r| {
             Ok(OpenSpan {
                 opened_event_id: r.get("id")?,
@@ -1213,6 +1227,21 @@ fn open_spans(
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The query of [`open_spans`]. Its `NOT EXISTS` finds the `session_closed`
+/// by `events_by_opened_event` (task 1333): `+o.id` drops the column's
+/// INTEGER affinity, which, applied to the expression, kept the index from
+/// being used and walked every `session_closed` once per span.
+fn open_spans_sql(opened: &str, closed: &str) -> String {
+    format!(
+        "SELECT o.id, o.payload, o.created_at FROM run_events o
+         WHERE o.kind='{SESSION_OPENED}' AND {opened}
+           AND NOT EXISTS (SELECT 1 FROM run_events c
+                           WHERE c.kind='{SESSION_CLOSED}' AND {closed}
+                             AND json_extract(c.payload,'$.opened_event_id')=+o.id)
+         ORDER BY o.id"
+    )
 }
 
 fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
@@ -1329,6 +1358,76 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    /// The plan of `sql`, one line per step, its parameters NULL.
+    fn plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
+        statement
+            .query_map(rusqlite::params_from_iter(nulls), |r| {
+                r.get::<_, String>("detail")
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// The searches of a span's `session_closed` and `session_turns` by
+    /// the `session_opened` they name use `events_by_opened_event`, not a
+    /// walk of every row of their kind (task 1333).
+    #[test]
+    fn the_searches_by_the_opened_event_use_its_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &queue.conn;
+        let by_index = "INDEX events_by_opened_event (kind=? AND <expr>=?)";
+        let uses = |sql: &str| {
+            let plan = plan(conn, sql);
+            assert!(
+                plan.iter().any(|step| step.contains(by_index)),
+                "{sql}\n{plan:#?}"
+            );
+            plan
+        };
+        uses(&recorded_turns_sql());
+        uses(&span_closed_sql());
+        // Every `closed` condition its callers give open_spans.
+        for (opened, closed) in [
+            ("1=1", "1=1"),
+            ("o.run_id=?1", "c.run_id=?1"),
+            (
+                "o.task_id=?1 AND o.run_id=?2",
+                "c.task_id=?1 AND c.run_id=?2",
+            ),
+            (
+                "o.task_id=?1 AND o.run_id IS NULL",
+                "c.task_id=?1 AND c.run_id IS NULL",
+            ),
+            ("o.run_id IS NULL", "c.run_id IS NULL"),
+            (
+                "o.task_id IS NULL AND o.goal_id IS NULL",
+                "c.task_id IS NULL AND c.goal_id IS NULL",
+            ),
+        ] {
+            let plan = uses(&open_spans_sql(opened, closed));
+            let subquery = plan
+                .iter()
+                .skip_while(|step| !step.contains("CORRELATED"))
+                .collect::<Vec<_>>();
+            assert!(
+                subquery.iter().any(|step| step.contains(by_index))
+                    && !subquery.iter().any(|step| step.contains("events_by_kind")),
+                "{plan:#?}"
+            );
+        }
+        // closed_value joins the `session_opened` by its key and walks the
+        // run's `session_closed` by the kind, never the whole table.
+        let plan = plan(conn, &closed_value_sql());
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN")),
+            "{plan:#?}"
+        );
     }
 
     /// The events of a run, a plan review and the observer write their
