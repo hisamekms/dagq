@@ -196,7 +196,8 @@ fn skills_point_at_their_reference_files() {
 /// ADR-0024: the roles are the supervisor, the worker, the planner, the
 /// inbox and the observer. Every attention reaches the person through the
 /// inbox, which decides nothing and acts only on the person's word through
-/// `dagq-recover`; registering and closing goals and tasks is the planner's.
+/// `dagq-recover`; registering goals and tasks is the planner's, and a goal
+/// review job, not the planner, judges and closes a finished goal.
 #[test]
 fn skills_split_the_roles_of_inbox_planner_and_recover() {
     let read = |name: &str| {
@@ -280,10 +281,29 @@ fn skills_split_the_roles_of_inbox_planner_and_recover() {
     assert!(planner.contains("skills/dagq/reference/observer.md"));
     assert!(planner.contains("skills/dagq-recover/SKILL.md"));
     assert!(planner.contains("follow_ups"));
-    assert!(planner.contains("\"$DAGQ\" goal close ID --verdict achieved"));
     assert!(planner.contains("Never: `integrate`, `review`, `answer`"));
+    // A goal review job, not the planner, judges and closes a finished goal
+    // (ADR-0047 decisions 16 and 43).
+    let finished_goal = planner
+        .split("## 5. A finished goal")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("dagq-planner lacks ## 5. A finished goal");
+    for duty in ["**goal review** job", "`approve_goal`", "`goal_gap`"] {
+        assert!(
+            finished_goal.contains(duty),
+            "dagq-planner section 5 lacks {duty}"
+        );
+    }
+    assert!(inbox.contains("`goal review by hand`"));
+    assert!(recover.contains("reference/goal-review-by-hand.md"));
+    assert!(
+        plugin_root()
+            .join("skills/dagq-recover/reference/goal-review-by-hand.md")
+            .is_file()
+    );
     let dagq = read("dagq");
-    assert!(dagq.contains("A goal is closed once, by the planner"));
+    assert!(dagq.contains("judged by the supervisor's goal review job"));
 }
 
 /// The runtime resumes `needs_session` runs (ADR-0019): no skill or
