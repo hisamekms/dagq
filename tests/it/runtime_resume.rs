@@ -549,7 +549,7 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
 /// Stand in for an earlier resume the supervisor judged `unresolved`
 /// (task 122): one `resume_started` / `resume_finished` pair under another
 /// token after the run was parked.
-fn unresolved_attempt(db: &Path, run: &TaskRun, main: &str) {
+pub(crate) fn unresolved_attempt(db: &Path, run: &TaskRun, main: &str) {
     let mut queue = SqliteQueue::open(db).unwrap();
     let (_, attempt) = queue
         .begin_resume(
@@ -576,7 +576,7 @@ fn unresolved_attempt(db: &Path, run: &TaskRun, main: &str) {
 
 /// Resolve the parked conflict in the run's worktree on top of `main` as
 /// that session did, and return the new head.
-fn resolve_in_worktree(run: &TaskRun, main: &str) -> String {
+pub(crate) fn resolve_in_worktree(run: &TaskRun, main: &str) -> String {
     let worktree = Path::new(run.worktree_path().unwrap());
     let rebase = Command::new(git_executable().expect("git executable"))
         .arg("-C")
