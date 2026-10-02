@@ -828,7 +828,9 @@ pub fn supervise_with_reviewer(
         db: db.clone(),
     };
     let review_db = db.clone();
-    let review_material = move |task_id: TaskId| review(&review_db, task_id);
+    let review_material = move |task_id: TaskId, range: Option<&reviewing::ReviewRange>| {
+        review_in(&review_db, task_id, range)
+    };
     let reports = options.report_daily.then(|| {
         let (db, checkout) = (db.clone(), main_checkout.clone());
         let host_wide = options
@@ -3055,6 +3057,16 @@ fn run_session(
 /// `review`: see [`reviewing::review`]. The run's checkout is opened as a
 /// Git repository.
 pub fn review(db: &Path, task_id: TaskId) -> Result<Value> {
+    review_in(db, task_id, None)
+}
+
+/// [`review`] over `range` when it is given: the range a review attempt
+/// fixed when it selected its required agents.
+pub fn review_in(
+    db: &Path,
+    task_id: TaskId,
+    range: Option<&reviewing::ReviewRange>,
+) -> Result<Value> {
     let mut queue = SqliteQueue::open(db)?;
     let open_repository = |checkout: &Path| -> Result<Box<dyn Repository>> {
         Ok(Box::new(GitRepository::inspect(checkout)?))
@@ -3067,6 +3079,7 @@ pub fn review(db: &Path, task_id: TaskId) -> Result<Value> {
             pid: std::process::id(),
         },
         task_id,
+        range,
     )
 }
 

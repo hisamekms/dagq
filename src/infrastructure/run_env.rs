@@ -45,6 +45,7 @@ use crate::{
         kpi::KpiSettings,
         landing_branch::RepositoryConfig,
         resume::ResumeConfig,
+        review_subagents::{self, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
         scope::{dedup_globs, validate_path_globs},
         slot_limits::SupervisorConfig,
@@ -102,6 +103,14 @@ const E2E_PATHS: &str = "paths";
 /// `[broker]`: the resource broker's mode and limits (ADR-t827-4
 /// decision 4).
 const BROKER_TABLE: &str = "broker";
+/// `[review.subagents.<agent>]`: the globs that make a review's subagent
+/// required (ADR-t1453-1 decision 1), one table per agent.
+const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
+/// What [`parse_config`] calls the current table while in a
+/// `[review.subagents.*]`.
+const REVIEW_SUBAGENTS_TABLE: &str = "review.subagents";
+/// The one key of `[review.subagents.<agent>]`.
+const REVIEW_SUBAGENT_PATHS: &str = "paths";
 const TABLES: [&str; 15] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
@@ -187,6 +196,9 @@ pub struct Config {
     /// `[broker]` (ADR-t827-4 decision 4), the defaults (mode `disabled`)
     /// for the keys it does not set.
     pub broker: BrokerConfig,
+    /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
+    /// 1); empty without any.
+    pub review_subagents: Vec<ReviewSubagent>,
 }
 
 /// Parse the whole file.
@@ -208,6 +220,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut kpi = KpiTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
+    // The line of the `[review.subagents.<agent>]` header whose `paths`
+    // is not read yet.
+    let mut subagent_open: Option<usize> = None;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -220,6 +235,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 .strip_suffix(']')
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: unclosed table header"))?
                 .trim();
+            // Any next table ends a `[review.subagents.<agent>]`, which
+            // must have had its paths.
+            if let Some(line) = subagent_open.take() {
+                bail!(
+                    "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
+                    config.review_subagents.last().expect("an open agent").name
+                );
+            }
             if kpi
                 .header(name)
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
@@ -244,9 +267,36 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(ROLES_TABLE);
                 continue;
             }
+            if name == REVIEW_SUBAGENTS_TABLE || name.starts_with(REVIEW_SUBAGENTS_PREFIX) {
+                let agent = name
+                    .strip_prefix(REVIEW_SUBAGENTS_PREFIX)
+                    .map(|agent| parse_key(agent.trim()))
+                    .transpose()
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
+                    .unwrap_or_default();
+                ensure!(
+                    !agent.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] names no agent; write [{REVIEW_SUBAGENTS_PREFIX}<agent>]"
+                );
+                ensure!(
+                    review_subagents::valid_agent_name(&agent),
+                    "{CONFIG_FILE_NAME}:{number}: agent {agent:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
+                );
+                ensure!(
+                    config.review_subagents.iter().all(|a| a.name != agent),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                );
+                config.review_subagents.push(ReviewSubagent {
+                    name: agent,
+                    paths: Vec::new(),
+                });
+                subagent_open = Some(number);
+                table = Some(REVIEW_SUBAGENTS_TABLE);
+                continue;
+            }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{E2E_TABLE}], [{BROKER_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -268,6 +318,30 @@ pub fn parse_config(text: &str) -> Result<Config> {
             .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: expected KEY = value"))?;
         let key = key.trim();
         match table {
+            Some(REVIEW_SUBAGENTS_TABLE) => {
+                let agent = config
+                    .review_subagents
+                    .last_mut()
+                    .expect("a [review.subagents.*] table names its agent");
+                ensure!(
+                    key == REVIEW_SUBAGENT_PATHS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_SUBAGENTS_PREFIX}{}]; the key is {REVIEW_SUBAGENT_PATHS}",
+                    agent.name
+                );
+                ensure!(
+                    subagent_open.take().is_some(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let globs = parse_string_array(rest.trim()).with_context(with)?;
+                ensure!(
+                    !globs.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} of [{REVIEW_SUBAGENTS_PREFIX}{}] names no glob",
+                    agent.name
+                );
+                validate_path_globs(&globs).with_context(with)?;
+                agent.paths = dedup_globs(&globs);
+            }
             Some(AREAS_TABLE) => {
                 let with = || format!("{CONFIG_FILE_NAME}:{number}");
                 let name = parse_key(key).with_context(with)?;
@@ -602,6 +676,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{BROKER_TABLE}] or [{KPI_TABLE}]"
             ),
         }
+    }
+    if let Some(line) = subagent_open {
+        bail!(
+            "{CONFIG_FILE_NAME}:{line}: [{REVIEW_SUBAGENTS_PREFIX}{}] has no {REVIEW_SUBAGENT_PATHS}",
+            config.review_subagents.last().expect("an open agent").name
+        );
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
     // A provider is checked against its role once the table is read whole
@@ -1234,6 +1314,9 @@ impl Verifier for ShellVerifier {
     fn e2e_paths(&self) -> Result<Vec<String>> {
         load_e2e_paths(&self.checkout)
     }
+    fn review_subagents_in(&self, text: &str) -> Result<Vec<ReviewSubagent>> {
+        Ok(parse_config(text)?.review_subagents)
+    }
     fn role_models(&self) -> Result<RoleModels> {
         load_role_models(&self.checkout)
     }
@@ -1339,6 +1422,114 @@ mod tests {
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[areas]\nX = [\"a\"]\n").unwrap();
         assert!(load_area_map(dir.path()).is_err());
+    }
+
+    /// `[review.subagents.<agent>] paths` names the globs that make a
+    /// review's subagent required (ADR-t1453-1 decision 1); a mistake in
+    /// it is refused with its line.
+    #[test]
+    fn parses_the_review_subagents() {
+        let config = parse_config(
+            "[review.subagents.design-consistency]\npaths = [\"src/**\", 'docs/design/**', \"src/**\"] # design\n\
+             [run.env]\nA = \"1\"\n\
+             [review.subagents.\"migrations\"]\npaths = [\"migrations/*.sql\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.review_subagents,
+            [
+                ReviewSubagent {
+                    name: "design-consistency".into(),
+                    paths: vec!["src/**".into(), "docs/design/**".into()],
+                },
+                ReviewSubagent {
+                    name: "migrations".into(),
+                    paths: vec!["migrations/*.sql".into()],
+                },
+            ]
+        );
+        assert_eq!(config.run_env, [("A".to_owned(), "1".to_owned())]);
+        assert!(parse_config("").unwrap().review_subagents.is_empty());
+        for (text, expected) in [
+            (
+                "[review.subagents.a]\nglobs = [\"a\"]\n",
+                "dagq.toml:2: unknown key globs in [review.subagents.a]; the key is paths",
+            ),
+            (
+                "[review.subagents.a]\npaths = [\"a\"]\npaths = [\"b\"]\n",
+                "dagq.toml:3: paths is defined twice",
+            ),
+            (
+                "[review.subagents.a]\npaths = \"src/**\"\n",
+                "dagq.toml:2: value of paths",
+            ),
+            (
+                "[review.subagents.a]\npaths = [\"/src/**\"]\n",
+                "dagq.toml:2: value of paths: invalid --paths glob \"/src/**\"",
+            ),
+            (
+                "[review.subagents.a]\npaths = [\"docs//a\"]\n",
+                "dagq.toml:2: value of paths",
+            ),
+            (
+                "[review.subagents.a]\npaths = []\n",
+                "dagq.toml:2: paths of [review.subagents.a] names no glob",
+            ),
+            (
+                "[review.subagents]\n",
+                "dagq.toml:1: [review.subagents] names no agent",
+            ),
+            (
+                "[review.subagents.]\npaths = [\"a\"]\n",
+                "dagq.toml:1: [review.subagents.] names no agent",
+            ),
+            (
+                "[review.subagents.Design]\n",
+                "dagq.toml:1: agent \"Design\" of [review.subagents.Design] is not kebab-case",
+            ),
+            (
+                "[review.subagents.a]\npaths = [\"a\"]\n[review.subagents.a]\npaths = [\"b\"]\n",
+                "dagq.toml:3: [review.subagents.a] is defined twice",
+            ),
+            (
+                "[review.subagents.a]\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+            (
+                "[review.subagents.a]\n[review.subagents.b]\npaths = [\"a\"]\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+            (
+                "[review.subagents.a]\n[run.env]\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+            (
+                "[review.subagents.a]\n[roles.review]\nnot_a_key = \"x\"\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+            (
+                "[review.subagents.a]\n[kpi]\nnot_a_key = 1\n",
+                "dagq.toml:1: [review.subagents.a] has no paths",
+            ),
+            ("[review]\n", "dagq.toml:1: unknown table [review]"),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let verifier = ShellVerifier {
+            checkout: PathBuf::from("/nonexistent"),
+            db: PathBuf::from("/nonexistent/queue.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            verifier
+                .review_subagents_in("[review.subagents.a]\npaths = [\"x\"]\n")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(verifier.review_subagents_in("[nope]\n").is_err());
     }
 
     /// `[e2e] paths` names the globs whose change requires e2e

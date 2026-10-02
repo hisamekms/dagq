@@ -368,7 +368,10 @@ pub struct Ports<'a> {
     pub processes: Arc<dyn ProcessControl + Send + Sync>,
     pub generators: Generators,
     /// Writes a task's review material (`review`) and reports its path.
-    pub review_material: &'a dyn Fn(TaskId) -> Result<Value>,
+    /// `review.md` of a task's run, over the attempt's range when one is
+    /// fixed already.
+    pub review_material:
+        &'a dyn Fn(TaskId, Option<&crate::application::review::ReviewRange>) -> Result<Value>,
     /// The log of this start, given the registration's `started_at`.
     /// The 1-minute load average recorded with a failed cmux call, at a
     /// claim and over each interval of a run.
@@ -939,7 +942,8 @@ struct Supervisor<'a> {
     service_access: &'a dyn super::queue_service::ServiceAccess,
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,
-    review_material: &'a dyn Fn(TaskId) -> Result<Value>,
+    review_material:
+        &'a dyn Fn(TaskId, Option<&crate::application::review::ReviewRange>) -> Result<Value>,
     token: LeaseToken,
     heartbeat: Heartbeat,
     slots: Vec<Slot>,

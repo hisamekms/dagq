@@ -812,6 +812,7 @@ pub mod related;
 pub mod release_update;
 pub mod resume;
 pub mod review_reason;
+pub mod review_subagents;
 pub mod run;
 pub mod run_e2e;
 pub mod run_env;

@@ -3174,6 +3174,16 @@ pub trait Verifier {
     fn e2e_paths(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+    /// The review's subagents (`[review.subagents.<agent>]`, ADR-t1453-1
+    /// decision 1) of `text`, a whole `dagq.toml` as committed; `Err`
+    /// when it cannot be parsed. None by default.
+    fn review_subagents_in(
+        &self,
+        text: &str,
+    ) -> Result<Vec<crate::domain::review_subagents::ReviewSubagent>> {
+        let _ = text;
+        Ok(Vec::new())
+    }
     /// The model and effort of the roles other than the worker
     /// (`[roles.<role>]` of `dagq.toml`, ADR-0079 decision 7); none by
     /// default, which starts every role as before.

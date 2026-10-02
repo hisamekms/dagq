@@ -5,6 +5,9 @@
 use super::*;
 use crate::application::job_start_failure;
 use crate::application::prompt::REVIEW_ACCESS;
+use crate::application::review::{
+    SubagentSnapshot, review_range_at, review_subagents_prompt, snapshot_subagents,
+};
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
 use crate::domain::EventKind;
@@ -277,7 +280,7 @@ impl Supervisor<'_> {
                 return Ok(Phase::ReviewHeld(session));
             }
             ReviewRoute::Manual(error) => {
-                (self.review_material)(run.task_id())?;
+                (self.review_material)(run.task_id(), None)?;
                 return Ok(Phase::Exiting(ExitWatch::new(
                     session,
                     AfterExit::ReviewFailed {
@@ -289,20 +292,48 @@ impl Supervisor<'_> {
                 )));
             }
         };
+        // The required subagents, from the landing branch's commit
+        // (ADR-t1453-1 decisions 3 and 4). When they cannot be known the
+        // review cannot pass: it fails to the person with why.
+        let subagents = match self.review_subagents(run) {
+            Ok(subagents) => subagents,
+            Err(snapshot) => {
+                let error =
+                    format!("the review's required subagents could not be read: {snapshot:#}");
+                warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
+                // For the person; a material that cannot be written (a
+                // receipt that cannot be read fails both) still fails the
+                // review rather than the supervisor's pass.
+                if let Err(material) = (self.review_material)(run.task_id(), None) {
+                    warn!(run_id = %run.id(), "run {}: its review material could not be written: {material:#}", run.id());
+                }
+                return Ok(Phase::Exiting(ExitWatch::new(
+                    session,
+                    AfterExit::ReviewFailed {
+                        attempt,
+                        error,
+                        duration_secs: 0,
+                        output: unstarted_review_output(retried, attempt),
+                    },
+                )));
+            }
+        };
         // The job's Claude session id (ADR-0048 decision 4).
         let session_id = self.generators.ids.uuid();
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::ReviewStarted,
-            json!({
-                "attempt": attempt,
-                "workspace_id": session.as_ref().map(|s| s.workspace.clone()),
-                "session_live": live,
-                "session_id": session_id,
-                "launch": launch.to_value(),
-            }),
-        )?;
-        let error = match self.spawn_review(run, attempt, &session_id, &launch) {
+        let mut started = json!({
+            "attempt": attempt,
+            "workspace_id": session.as_ref().map(|s| s.workspace.clone()),
+            "session_live": live,
+            "session_id": session_id,
+            "launch": launch.to_value(),
+        });
+        if let Some(subagents) = &subagents {
+            started["subagents"] = subagents.event_value();
+        }
+        self.queue
+            .record_runtime_event(run.id(), EventKind::ReviewStarted, started)?;
+        let error = match self.spawn_review(run, attempt, &session_id, &launch, subagents.as_ref())
+        {
             Ok(Ok((child, stdout, stderr))) => {
                 info!(run_id = %run.id(), "run {} review {attempt} started on {} (session {})", run.id(), launch.provider.as_str(), if live { "kept open" } else { "ended" });
                 let mut job = self.headless_job(
@@ -365,6 +396,26 @@ impl Supervisor<'_> {
             },
         )))
     }
+    /// The review's required subagents from the landing branch's commit
+    /// ([`snapshot_subagents`]); the range is the receipt's, read only when
+    /// agents are configured.
+    pub(super) fn review_subagents(&self, run: &TaskRun) -> Result<Option<SubagentSnapshot>> {
+        let range = |main: &CommitSha| {
+            let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
+            let receipt = Receipt::parse(
+                &self
+                    .files
+                    .read_to_string(receipt_path)
+                    .with_context(|| format!("read receipt {}", receipt_path.display()))?,
+            )?;
+            review_range_at(&*self.repository, run, &receipt, main)
+        };
+        snapshot_subagents(
+            &*self.repository,
+            &|text| self.verifier.review_subagents_in(text),
+            &range,
+        )
+    }
     /// Write the review's material and prompt, then start its job on
     /// `launch`'s provider. The outer error is the review's own preparation,
     /// the inner one the start of its provider's process: only the latter
@@ -375,18 +426,30 @@ impl Supervisor<'_> {
         attempt: usize,
         session_id: &str,
         launch: &ActorLaunch,
+        subagents: Option<&SubagentSnapshot>,
     ) -> Result<Result<StartedReview>> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
-        let material = (self.review_material)(run.task_id())?;
+        // The attempt's range as its agents were selected from it, so that
+        // review.md shows the diff that selected them even when main moved
+        // since (none without agents configured: review.md finds its own).
+        let material = (self.review_material)(run.task_id(), subagents.map(|s| &s.range))?;
         let path = material["path"]
             .as_str()
             .context("review wrote no path")?
             .to_owned();
         let task = self.queue.show(run.task_id())?.task;
-        let prompt = with_instruction(
-            review_prompt(&task, run, &path),
-            self.verifier.language().as_ref(),
-        );
+        let mut prompt = review_prompt(&task, run, &path);
+        // The selected agents and their definitions go to the job beside
+        // review.md; a review that needs none reads as before.
+        if let Some(snapshot) = subagents.filter(|s| !s.agents.is_empty()) {
+            let input = run_dir.join(format!("review-subagents-{attempt}.json"));
+            self.files.write(
+                &input,
+                serde_json::to_string_pretty(&snapshot.job_input())?.as_bytes(),
+            )?;
+            prompt.push_str(&review_subagents_prompt(snapshot, &input));
+        }
+        let prompt = with_instruction(prompt, self.verifier.language().as_ref());
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             prompt.as_bytes(),

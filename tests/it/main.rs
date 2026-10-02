@@ -71,6 +71,7 @@ mod queue_service_findings;
 mod queue_service_reads;
 mod queue_tasks;
 mod related;
+mod review_subagents;
 mod runtime_abandon;
 mod runtime_actor_env;
 mod runtime_adopt;

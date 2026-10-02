@@ -9,7 +9,9 @@ use std::path::Path;
 use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
-use crate::domain::{Goal, Receipt, RunStatus, Task, TaskId, TaskRun};
+use crate::domain::review_subagents::{self, ReviewSubagent};
+use crate::domain::{CommitSha, Goal, Receipt, RunStatus, Task, TaskId, TaskRun};
+use sha2::{Digest, Sha256};
 
 /// What `review` reads and writes through.
 pub struct Review<'a> {
@@ -29,8 +31,11 @@ pub struct Review<'a> {
 /// receipt's commit. When a session already rebased `head` onto the current
 /// `main`, `base` is that `main` instead, so the review does not repeat
 /// what other tasks landed meanwhile. The diff itself is never returned, so the caller
-/// hands the path to a subagent instead of reading it.
-pub fn review(ports: Review<'_>, task_id: TaskId) -> Result<Value> {
+/// hands the path to a subagent instead of reading it. `range`, when
+/// given, is the attempt's range already fixed ([`SubagentSnapshot::range`])
+/// and is used as it is, so that the material shows the diff its required
+/// agents were selected from even when `main` moved since.
+pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -> Result<Value> {
     let Review {
         queue,
         files,
@@ -71,12 +76,17 @@ pub fn review(ports: Review<'_>, task_id: TaskId) -> Result<Value> {
         .or(run.worktree_path())
         .context("run has no repository path")?;
     let repository = open_repository(Path::new(checkout))?;
-    let head = receipt.commit().to_ascii_lowercase();
-    let main = repository.main_head()?;
-    let base = if main != *run.base_commit() && repository.is_ancestor(main.as_str(), &head)? {
-        main.into_string()
-    } else {
-        run.base_commit().to_string()
+    let ReviewRange { base, head } = match range {
+        Some(range) => {
+            anyhow::ensure!(
+                range.head.eq_ignore_ascii_case(receipt.commit()),
+                "the review's range ends at {}, not at the receipt's commit {}",
+                range.head,
+                receipt.commit()
+            );
+            range.clone()
+        }
+        None => review_range(&*repository, &run, &receipt)?,
     };
     let log = repository.log_oneline(&base, &head)?;
     let stat = repository.diff_stat(&base, &head)?;
@@ -116,6 +126,187 @@ pub fn review(ports: Review<'_>, task_id: TaskId) -> Result<Value> {
         "insertions": numbers.insertions,
         "deletions": numbers.deletions,
     }))
+}
+
+/// The range `<base>...<head>` a review of `run` reads (see [`review`]):
+/// `head` is the receipt's commit, `base` the run's base commit, or the
+/// current `main` when a session already rebased `head` onto it.
+pub fn review_range(
+    repository: &dyn Repository,
+    run: &TaskRun,
+    receipt: &Receipt,
+) -> Result<ReviewRange> {
+    let main = repository.main_head()?;
+    review_range_at(repository, run, receipt, &main)
+}
+
+/// [`review_range`] with `main`, the landing branch's commit, read
+/// already.
+pub fn review_range_at(
+    repository: &dyn Repository,
+    run: &TaskRun,
+    receipt: &Receipt,
+    main: &CommitSha,
+) -> Result<ReviewRange> {
+    let head = receipt.commit().to_ascii_lowercase();
+    let base = if main != run.base_commit() && repository.is_ancestor(main.as_str(), &head)? {
+        main.to_string()
+    } else {
+        run.base_commit().to_string()
+    };
+    Ok(ReviewRange { base, head })
+}
+
+/// The range `<base>...<head>` of one review attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRange {
+    pub base: String,
+    pub head: String,
+}
+
+/// The configuration file whose `[review.subagents.<agent>]` a review
+/// reads from the landing branch's committed tree.
+pub const CONFIG_FILE: &str = "dagq.toml";
+
+/// One required agent of a review as the snapshot holds it: its name,
+/// the changed paths that selected it, and its definition as committed on
+/// the landing branch with the definition's SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotAgent {
+    pub name: String,
+    pub matched: Vec<String>,
+    pub definition_path: String,
+    pub definition: String,
+    pub digest: String,
+}
+
+/// The review's subagents read from the landing branch's commit `commit`
+/// when a review starts (ADR-t1453-1 decisions 3 and 4): the agents its
+/// range requires, none when the range touches no configured glob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentSnapshot {
+    pub commit: String,
+    /// The range the agents were selected from, fixed with `commit`; the
+    /// attempt's review.md shows the same range.
+    pub range: ReviewRange,
+    pub agents: Vec<SnapshotAgent>,
+}
+
+impl SubagentSnapshot {
+    /// What `review_started` records: the commit, and each agent with its
+    /// matched paths and the digest of its definition.
+    pub fn event_value(&self) -> Value {
+        json!({
+            "commit": self.commit,
+            "base": self.range.base,
+            "head": self.range.head,
+            "agents": self.agents.iter().map(|agent| json!({
+                "agent": agent.name,
+                "paths": agent.matched,
+                "definition": agent.definition_path,
+                "digest": agent.digest,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// What the review job reads (`review-subagents-<attempt>.json`): the
+    /// event's value with each definition's text.
+    pub fn job_input(&self) -> Value {
+        json!({
+            "commit": self.commit,
+            "base": self.range.base,
+            "head": self.range.head,
+            "agents": self.agents.iter().map(|agent| json!({
+                "agent": agent.name,
+                "paths": agent.matched,
+                "definition": agent.definition_path,
+                "digest": agent.digest,
+                "text": agent.definition,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Read the review's subagents from the landing branch's committed tree,
+/// never from a worktree or the main checkout's files (ADR-t1453-1
+/// decision 4), and select those the paths `<base>...<head>` changes
+/// require (decision 3). `Ok(None)` when the landing branch has no
+/// `dagq.toml` or one without `[review.subagents.*]`: the review goes as
+/// before. `Err` when the file cannot be read or parsed or a selected
+/// agent's definition is not in the tree: the required checks are not
+/// known, so the review must not pass.
+/// `range` gives `<base>` and `<head>` for the landing branch's commit it
+/// is given ([`review_range_at`]), the one the configuration is read
+/// from, and is called only when agents are configured: the landing
+/// branch is read once per attempt.
+pub fn snapshot_subagents(
+    repository: &dyn Repository,
+    parse: &dyn Fn(&str) -> Result<Vec<ReviewSubagent>>,
+    range: &dyn Fn(&CommitSha) -> Result<ReviewRange>,
+) -> Result<Option<SubagentSnapshot>> {
+    let main = repository.main_head()?;
+    let commit = main.to_string();
+    let Some(text) = repository
+        .file_in(&commit, CONFIG_FILE)
+        .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
+    else {
+        return Ok(None);
+    };
+    let configured = parse(&text)
+        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))?;
+    if configured.is_empty() {
+        return Ok(None);
+    }
+    let range = range(&main)?;
+    // `<base>...<head>`: from their merge base, as review.md's diff.
+    let from = repository
+        .merge_base(&range.base, &range.head)?
+        .map_or_else(|| range.base.clone(), CommitSha::into_string);
+    let changed = repository.changed_paths(&from, &range.head)?;
+    let mut agents = Vec::new();
+    for selected in review_subagents::select(&configured, &changed) {
+        let definition_path = review_subagents::definition_path(&selected.name);
+        let definition = repository
+            .file_in(&commit, &definition_path)
+            .with_context(|| format!("read {definition_path} in the landing branch's commit {commit}"))?
+            .with_context(|| {
+                format!(
+                    "the review subagent {} that {CONFIG_FILE} names has no definition {definition_path} in the landing branch's commit {commit}",
+                    selected.name
+                )
+            })?;
+        agents.push(SnapshotAgent {
+            digest: format!("{:x}", Sha256::digest(definition.as_bytes())),
+            name: selected.name,
+            matched: selected.matched,
+            definition_path,
+            definition,
+        });
+    }
+    Ok(Some(SubagentSnapshot {
+        commit,
+        range,
+        agents,
+    }))
+}
+
+/// What the review's prompt adds when its range requires agents: the
+/// agents, the paths that selected each, and where their definitions as
+/// committed on the landing branch are (`input`).
+pub fn review_subagents_prompt(snapshot: &SubagentSnapshot, input: &Path) -> String {
+    let mut out = format!(
+        "\nRequired review subagents: the changes of this review require the agents below. Their definitions, as committed on the landing branch at {commit}, are in {input} (one entry per agent, its text under \"text\").\n",
+        commit = snapshot.commit,
+        input = input.display(),
+    );
+    for agent in &snapshot.agents {
+        out.push_str(&format!(
+            "- {name} (changed: {paths})\n",
+            name = agent.name,
+            paths = agent.matched.join(", "),
+        ));
+    }
+    out
 }
 
 /// Write `text` and then the full diff `<base>...<head>` as a fenced block to

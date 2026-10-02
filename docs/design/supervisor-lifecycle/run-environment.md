@@ -4,8 +4,8 @@ type: design
 title: "Run environment"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - adr-t963-1
@@ -14,6 +14,7 @@ related:
   - design-supervisor-lifecycle-language
   - adr-0040
   - adr-0076
+  - adr-t1453-1
   - adr-0049
   - adr-0079
   - adr-t1215-1
@@ -25,7 +26,7 @@ related:
 
 repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
 
-- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[e2e]`・`[broker]`（[Broker](../broker.md#mode-と設定)）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
+- 書式はTOMLの部分集合: 表は`[run.env]`・`[stall]`・`[conflicts]`・`[recheck]`・`[disk]`・`[resume]`・`[exit]`・`[repository]`（[Landing branch](landing-branch.md)）・`[worker.trial]`・`[roles.<role>]`・`[language]`・`[supervisor]`・`[areas]`・`[tasks]`・`[e2e]`・`[broker]`（[Broker](../broker.md#mode-と設定)）・`[review.subagents.<agent>]`（下の項）・`[kpi]`（と`[kpi.targets."<KPI>"]`）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、[Language](language.md)の読み手が検査する。誤りでclaimや着地を止めないため）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。`#`以降はcomment。ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
 - 値の`${DAGQ_QUEUE_DIR}`はqueue directory（DBのある directory）、`${DAGQ_RUN_DIR}`はそのrunのrun directoryに展開する。ほかの`$`は書いたまま残す（shellの展開はしない）。`${DAGQ_RUN_DIR}`はtask 91で加えた（ADR-0040の決定3、ADR-0049の決定3が引き継ぐ）。
 - 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む。検証コマンドが1件も無ければ読まない。
 - 渡し先: (a) `provision`がworkerのworkspaceを作るとき、`DAGQ_ROLE`ほかのworkerの変数の後ろに`--env KEY=VALUE`で並べる（ADR-0026の仕組み）。worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、workspaceは開かずsupervisorはclaimを止める。(b) `integrate`の`verification_commands`を`Command`のenvに足す（validatingは検証コマンドを実行しない）。読めないファイルは着地処理のエラーで、runは元の状態に戻る。(c) reviewのheadless実行（ADR-0049の決定2）のコマンドのenvに足す。(d) `needs_session`のresumeが開くworkspaceに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる（task 303）。resumeのsessionはworkerと同じ手元の検証（fmt・clippy・関係するtest・e2e）を回すので、workerと同じ`[run.env]`（sccache、buildとtestの並列度）が要るため。ADR-0049の決定3（ADR-0040の決定3を引き継ぐ）は渡し先をworkerのworkspace・`integrate`の検証・reviewの3つと書くが、resumeのsessionはrunのworkerのsessionの続きで、その「workerのworkspace」に含まれると読む。値は`begin_resume`の前に読み（`start_resume`に渡す）、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。`[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
@@ -35,6 +36,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - testの並列度はbuildと分けて考え、`[run.env]`に`RUST_TEST_THREADS = "6"`（1つのtest binaryの中のtestのthread数）を置く（task 427ではbuildと合わせて4に絞り、2026-09-26に人がplannerと8に上げると決め（task 566）、task 930で6に下げた）。8に上げた理由: testは待ちが中心でCPUをあまり使わない（task 537の測定でtestのprocess 4本のCPUは0.1〜0.4コア、coverageの関門のtest段はper-testの時間の合計 ÷ 並列数で律速する。[nextest の測定](../../plans/nextest-measurement.md)）ので、並列度を上げれば`integrate`のtest段が縮む。6に下げた理由: task 563が8の期間（69 run）を測ると、test段は縮んだが、戻す目安の悪化の印（captureの時間切れ17件と`backend_call_failed`のexhausted 7件、llvm-covの段のload1の平均の中央値13.5（目安12前後）、時間の上限と競合による`verification_failed` 5件）がそろって当たった（[NEXTEST_TEST_THREADS の測定](../../plans/nextest-test-threads.md)の7章・8章）。着地後の本番のload・cmuxのcaptureのtimeout・時間の上限を持つtestの失敗はplannerがstatsで前後を見て、6でも悪化が4の期間の水準に戻らなければ、4に戻す前にhostのほかのloadを先に見る。
 - 同じ考え方で`[run.env]`に`NEXTEST_TEST_THREADS = "6"`を置き、coverageの関門（`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`）でcargo-nextestが同時に走らせるtestのprocess数を決める（[ADR-0076](../../adr/0076-run-the-coverage-gate-tests-with-nextest.md)の決定2、task 518で4、task 566で8、task 930で6）。nextestは`RUST_TEST_THREADS`を読まず、既定ではCPU数だけ走らせるため。`.config/nextest.toml`には並列度を書かず（CIと人の手元のnextestまで絞られるため）、60秒を超えたtestを`SLOW`と出す`slow-timeout`だけを置く。cargo-nextestはsccacheと同じく人が`mise use -g cargo:cargo-nextest`で入れて`~/.local/bin/cargo-nextest`にmiseのshimへのlinkを置くが、`[run.env]`が名指すプログラムではないので決定9の検査の対象ではなく、無いhostでは`integrate`の検証の失敗になる（ADR-0076の決定3）。
 - `[recheck]`は`command`（文字列。空白だけは拒否）の1 keyだけを持ち、着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査になる（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2。`load_recheck_command`、`Verifier::recheck_command`）。表が無ければmerge-treeだけを見る。commandには`[run.env]`と、queue dirの`recheck/target`を指す`CARGO_TARGET_DIR`が渡る。この repositoryの`dagq.toml`には`command = "cargo check --locked --all-targets"`がある。task 529が、固定バイナリにtask 462の実装が入った後に足した。
+
+- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（文字列の配列。1つ以上。`--paths`・`[e2e] paths`と同じglobの規則で`domain::scope::validate_path_globs`が検査し、重複を除く）の1 keyだけを持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1、`Config::review_subagents`）。`<agent>`はkebab-case（小文字の英字と数字を1つの`-`でつなぐ。`"..."`で囲んでもよい）で、定義のファイル`.dagq/review-agents/<agent>.md`の名前になる。agentの名前の無い`[review.subagents]`、kebab-caseでない名前、同じagentの表の重複、`paths`の無い表、知らないkeyはエラーにする。読むのはmain checkoutの作業ファイルではなく、reviewを始めるときのlanding branchのcommitのtreeの`dagq.toml`（`Verifier::review_subagents_in`で解釈する）で、選び方とsnapshotは[Review](review.md#reviewのsubagent)。旧バイナリは知らない表を含む`dagq.toml`全体を読めなくなるので、固定バイナリが対応してから足す。この repositoryの`dagq.toml`はまだ持たない
 
 - `[disk]`はclaimと着地の検証の前に確かめる空き容量の閾値で、`sample_runs`（正の整数、既定20）、`claim_factor`（正の数、既定2）、`integrate_factor`（正の数、既定1.5）、`min_free_bytes`（正の整数、既定なし）を持つ（[空き容量を確かめる](disk-space.md)、ADR-0047の決定44、task 377。`load_disk_config`）。supervisorが起動時に読み、読めなければ既定値で動く。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[disk]`を知るものに入れ替えてから足す
 
