@@ -43,7 +43,7 @@ worker以外のアクターのsessionのmodelとeffortの設定と、provider・
 - **あるとき**: 表の`model`と`effort`を`AgentProvider::apply_launch`が`AgentProvider::select_model`（task 576の仕組み。Claude Codeでは`--model <model> --effort <effort>`をoptionの末尾、`--`の前）で渡す。片方だけ書いたときは、もう片方は既定（`claude-opus-5-5` / `medium`）を明示して渡す
 - **読めないとき**: supervisorとobserverはwarnをlogに出して今までと同じ起動にする（壊れた`dagq.toml`はprovisioningがerrorにする）。`dagq plan`は結果の`warnings`に足して今までと同じ起動でplannerを開く（`[roles]`の外の誤りや新しいバイナリだけが知る表で、人のplannerを開けなくしない）
 - 設定は読む時点ごとに読み直すので、supervisorの再起動なしに次のjobから効く
-- この repositoryの`dagq.toml`の役割の表は`[roles.goal_review]`（task 1067、goal 73）と`[roles.review]`（task 1208、goal 80）の`provider = "codex"`だけで（下の[provider](#provider)）、どの役割にも`model` / `effort`は置かない（highに上げるのは基準値がたまってから人とplannerが決める。ADR-0079の決定7の(d)）。旧バイナリは`[roles.*]`を未知の表として拒み、`provider`を知らないバイナリも、その役割を`CODEX_ROLES`に持たないバイナリの`codex`も拒むので、足すのはそれを知るバイナリ（goal_reviewはtask 1065、reviewはtask 1207）に固定バイナリが入れ替わった後にした。`[roles.plan_review]`の`provider = "codex"`は、固定バイナリがtask 1218を含んでから別のtaskが足す
+- この repositoryの`dagq.toml`の役割の表は`[roles.goal_review]`（task 1067、goal 73）と`[roles.review]`（task 1208、goal 80）と`[roles.plan_review]`（task 1219、goal 80）の`provider = "codex"`だけで（下の[provider](#provider)）、どの役割にも`model` / `effort`は置かない（highに上げるのは基準値がたまってから人とplannerが決める。ADR-0079の決定7の(d)）。旧バイナリは`[roles.*]`を未知の表として拒み、`provider`を知らないバイナリも、その役割を`CODEX_ROLES`に持たないバイナリの`codex`も拒むので、足すのはそれを知るバイナリ（goal_reviewはtask 1065、reviewはtask 1207、plan_reviewはtask 1218）に固定バイナリが入れ替わった後にした（plan_reviewはtask 1219のverifyの関門が、固定バイナリのbuild識別子のcommitがtask 1218の着地commitを含むことを確かめてから着地させた）
 
 ## provider
 
