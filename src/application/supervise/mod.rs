@@ -307,6 +307,9 @@ pub struct Layout {
     /// The `codex` a Codex worker starts (`supervise --codex`), resolved
     /// when it was found.
     pub codex: PathBuf,
+    /// Codex's home given to the supervisor (tests), passed on to the
+    /// throughput review's command; `None` is Codex's own.
+    pub codex_home: Option<PathBuf>,
     /// Each provider's executable as resolved at the start, recorded on
     /// the registration for `status` and `doctor`.
     pub providers: Vec<crate::domain::worker::ProviderCheck>,
@@ -1486,16 +1489,12 @@ impl Supervisor<'_> {
             // for their answers. The watcher's changes are recorded either
             // way (task 1021).
             self.inbox_nudge_pass(!self.no_claude);
-            // Reaped on every pass, started only by a supervisor at work that
-            // no login or usage limit holds.
-            self.throughput_review_pass(
-                options,
-                !self.no_claude
-                    && !stopping
-                    && self.claiming
-                    && self.queue_hold.is_none()
-                    && self.service_up,
-            );
+            // Reaped on every pass, started only by a supervisor at work.
+            // Its route decides on `--no-claude` and the hold: a login or
+            // usage limit that holds Claude starts no Claude review, but
+            // one whose role names its provider may run on Codex
+            // (ADR-t1063-1 decision 5, ADR-t1204-1, task 1220).
+            self.throughput_review_pass(options, !stopping && self.claiming && self.service_up);
             if !stopping && self.claiming {
                 if !self.no_claude && self.queue_hold.is_none() && self.service_up {
                     self.start_observer_when_due(options);

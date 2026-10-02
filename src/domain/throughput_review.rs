@@ -105,24 +105,39 @@ pub fn window(mode: ReviewMode, now_ms: i64, offset_ms: i64) -> Window {
 
 /// Whether a review of `mode` for `period` finished already among `events`
 /// (the newest `throughput_review_finished`, whatever its outcome: a failed
-/// review is not tried again for its period).
+/// review is not tried again for its period), but for one whose provider
+/// could not be used (`provider_unusable`), which is started again on the
+/// other provider (ADR-t1063-1 decision 4, task 1220).
 pub fn reviewed(events: &[RunEvent], mode: ReviewMode, period: &str) -> bool {
     events.iter().any(|event| {
         event.kind == THROUGHPUT_REVIEW_FINISHED
             && event.payload["mode"] == mode.as_str()
             && event.payload["period"] == period
+            && event.payload.get("provider_unusable").is_none()
     })
 }
 
 /// Whether a review of `mode` for `period` started less than
 /// [`RUNNING_MS`] before `now_ms` among `started` (the newest
-/// `throughput_review_started`): it is still running somewhere.
-pub fn running(started: &[RunEvent], mode: ReviewMode, period: &str, now_ms: i64) -> bool {
+/// `throughput_review_started`) and has no finish of its directory among
+/// `finished`: it is still running somewhere.
+pub fn running(
+    started: &[RunEvent],
+    finished: &[RunEvent],
+    mode: ReviewMode,
+    period: &str,
+    now_ms: i64,
+) -> bool {
     started.iter().any(|event| {
         event.kind == THROUGHPUT_REVIEW_STARTED
             && event.payload["mode"] == mode.as_str()
             && event.payload["period"] == period
             && timestamp_millis(&event.created_at).is_some_and(|at| now_ms - at < RUNNING_MS)
+            && !finished.iter().any(|end| {
+                end.kind == THROUGHPUT_REVIEW_FINISHED
+                    && event.payload["dir"].is_string()
+                    && end.payload["dir"] == event.payload["dir"]
+            })
     })
 }
 
@@ -501,27 +516,55 @@ mod tests {
         assert!(reviewed(&events, ReviewMode::Hourly, "2026-09-29T12"));
         assert!(!reviewed(&events, ReviewMode::Hourly, "2026-09-29T11"));
         assert!(!reviewed(&events, ReviewMode::Daily, "2026-09-28"));
+        // One whose provider could not be used is reviewed again (task
+        // 1220).
+        let unusable = RunEvent {
+            payload: serde_json::json!({"mode": "hourly", "period": "2026-09-29T11", "dir": "/r/a",
+                "provider_unusable": {"provider": "codex", "reason": "usage_limit"}}),
+            ..event(THROUGHPUT_REVIEW_FINISHED, "", "")
+        };
+        assert!(!reviewed(
+            std::slice::from_ref(&unusable),
+            ReviewMode::Hourly,
+            "2026-09-29T11"
+        ));
         let started = |created_at: &str| RunEvent {
             kind: THROUGHPUT_REVIEW_STARTED.into(),
             created_at: created_at.into(),
+            payload: serde_json::json!({"mode": "daily", "period": "2026-09-28", "dir": "/r/d"}),
             ..event("", "daily", "2026-09-28")
         };
         let now = timestamp_millis("2026-09-29T01:00:00.000Z").unwrap();
         assert!(running(
             &[started("2026-09-29T00:40:00.000Z")],
+            &[unusable],
             ReviewMode::Daily,
             "2026-09-28",
             now
         ));
         assert!(!running(
             &[started("2026-09-29T00:20:00.000Z")],
+            &[],
             ReviewMode::Daily,
             "2026-09-28",
             now
         ));
         assert!(!running(
             &[started("2026-09-29T00:40:00.000Z")],
+            &[],
             ReviewMode::Weekly,
+            "2026-09-28",
+            now
+        ));
+        // A start whose directory has a finish ran already.
+        let ended = RunEvent {
+            payload: serde_json::json!({"mode": "daily", "period": "2026-09-28", "dir": "/r/d"}),
+            ..event(THROUGHPUT_REVIEW_FINISHED, "", "")
+        };
+        assert!(!running(
+            &[started("2026-09-29T00:40:00.000Z")],
+            &[ended],
+            ReviewMode::Daily,
             "2026-09-28",
             now
         ));

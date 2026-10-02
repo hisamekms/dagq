@@ -774,6 +774,7 @@ pub fn supervise_with_reviewer(
         claude: claude.into(),
         cmux: options.update.cmux.clone().unwrap_or_else(|| "cmux".into()),
         codex: codex.clone(),
+        codex_home: options.codex_home.clone(),
         providers,
         runner: runner.into(),
         pid,

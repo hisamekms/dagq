@@ -375,7 +375,8 @@ pub fn changes(
         // running, another supervisor's), so a start closes only the span
         // of its own period (a review of it that died, started again) and
         // the spans open past their time; a finish closes its own span,
-        // by the session id, and the spans open past their time.
+        // by the session id or its directory, and the spans open past
+        // their time.
         "throughput_review_started" | "throughput_review_finished" => {
             let started = kind == "throughput_review_started";
             let own = |span: &OpenSpan| {
@@ -383,8 +384,12 @@ pub fn changes(
                     span.payload["mode"] == payload["mode"]
                         && span.payload["period"] == payload["period"]
                 } else {
-                    payload["session_id"].is_string()
-                        && span.payload["session_id"] == payload["session_id"]
+                    // Codex names its thread itself (ADR-t1063-1 decision
+                    // 6): its start has no session id, and its finish
+                    // closes the span of its directory.
+                    (payload["session_id"].is_string()
+                        && span.payload["session_id"] == payload["session_id"])
+                        || (payload["dir"].is_string() && span.payload["cwd"] == payload["dir"])
                 }
             };
             let stale = |span: &OpenSpan| {

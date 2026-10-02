@@ -1573,7 +1573,9 @@ pub enum AttentionNext {
     /// `failed` (its agent exited non-zero) (`throughput_review_finished`,
     /// task 1099): a notice the inbox shows the person with the review's
     /// directory, whose log says why. The period is not reviewed again,
-    /// and nothing waits on it.
+    /// and nothing waits on it. A finish whose Codex could not be used
+    /// (`provider_unusable`) is none: its period is reviewed again on the
+    /// other provider (task 1220).
     CheckReview,
     /// The host's KPI push command failed on a message three times and the
     /// message was given up (`kpi_push_abandoned`, ADR-0051 decision 23):
@@ -1890,7 +1892,14 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // A throughput review's conclusion is a notice too (ADR-t996-1).
         (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => Some(AttentionNext::ReportReview),
         // One that did not reach its conclusion is a notice as well (task
-        // 1099); a skipped hour and a success are none.
+        // 1099); a skipped hour and a success are none, and so is one whose
+        // provider could not be used, which starts again on the other one
+        // (ADR-t1063-1 decision 4, task 1220).
+        (event_kind::THROUGHPUT_REVIEW_FINISHED, _)
+            if payload.get("provider_unusable").is_some() =>
+        {
+            None
+        }
         (event_kind::THROUGHPUT_REVIEW_FINISHED, _)
             if matches!(
                 payload.get("outcome").and_then(serde_json::Value::as_str),
@@ -2904,6 +2913,12 @@ mod attention_tests {
                 "throughput_review_finished",
                 json!({"outcome": "failed", "exit_code": 1}),
                 Some(CheckReview),
+            ),
+            // Its provider could not be used: it starts again by itself.
+            (
+                "throughput_review_finished",
+                json!({"outcome": "failed", "provider_unusable": {"provider": "codex", "reason": "usage_limit"}}),
+                None,
             ),
             ("update_started", json!({"commit": "abc"}), None),
             (

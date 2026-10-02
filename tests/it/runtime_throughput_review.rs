@@ -7,7 +7,11 @@ use runtime_support::*;
 
 /// `review` with the queue's service running, which the job's `dagq`
 /// reaches in client mode (goal 82's stage (3)); the fixture stops it.
-fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) -> Result<Value> {
+pub(crate) fn review(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &ReviewOptions,
+) -> Result<Value> {
     common::service::serve(db);
     dagq::throughput_review::review(db, provider, options)
 }
@@ -83,11 +87,11 @@ impl AgentProvider for ReviewProvider {
 /// 2026-09-29T04:25:00Z: the hours, days and weeks are UTC's here.
 const AT: i64 = 1_790_655_900;
 
-fn utc(_: i64) -> i64 {
+pub(crate) fn utc(_: i64) -> i64 {
     0
 }
 
-fn options(mode: ReviewMode) -> ReviewOptions {
+pub(crate) fn options(mode: ReviewMode) -> ReviewOptions {
     ReviewOptions {
         mode,
         at: Some(AT),
@@ -96,10 +100,13 @@ fn options(mode: ReviewMode) -> ReviewOptions {
         dagq: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
         user_config: None,
         utc_offset: Some(0),
+        launch: None,
+        switchable: false,
+        unavailable: None,
     }
 }
 
-fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
     Connection::open(db)
         .unwrap()
         .prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
@@ -112,7 +119,7 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
 
 /// Record `per_hour[i]` landings of task 1 in each of the hours that end at
 /// the last whole hour before [`AT`], the last hour last.
-fn land(db: &Path, per_hour: &[usize]) {
+pub(crate) fn land(db: &Path, per_hour: &[usize]) {
     let end = window(ReviewMode::Hourly, AT * 1000, 0).end_ms;
     let connection = Connection::open(db).unwrap();
     for (index, count) in per_hour.iter().enumerate() {
@@ -353,7 +360,7 @@ fn the_weekly_review_records_its_next_move_as_a_finding_marked_for_a_proposal() 
 }
 
 /// The inbox's attention events: the compact form `watch` reads.
-fn attentions(db: &Path) -> Vec<Value> {
+pub(crate) fn attentions(db: &Path) -> Vec<Value> {
     dagq::watch::events(db, EventId::new(0), 100, false).unwrap()["events"]
         .as_array()
         .unwrap()
@@ -534,7 +541,7 @@ fn the_daily_and_weekly_reviews_of_inputs_of_mbs_start_their_agent_with_a_small_
 /// A Claude Code stand-in for the supervisor's review: `--version` for the
 /// preflight, and in print mode (`-p`) the review, or a failure when
 /// `fail` is set.
-fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
+pub(crate) fn review_claude_stub(db: &Path, fail: bool) -> PathBuf {
     let stub = db.parent().unwrap().join("claude-review-stub");
     let review = if fail {
         "exit 1"

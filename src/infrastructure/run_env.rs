@@ -1496,7 +1496,8 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[roles.review]\n[roles.review]", "is defined twice"),
             ("[roles.review]\nprovider = 'gemini'", "provider"),
-            // Codex runs goal, normal run and plan reviews (ADR-t1207-1).
+            // Codex runs goal, normal run, plan and throughput reviews
+            // (ADR-t1207-1, tasks 1218 and 1220).
             (
                 "[roles.recovery]\nprovider = 'codex'",
                 "[roles.recovery]: provider codex cannot run the recovery role",
@@ -1529,6 +1530,12 @@ LITERAL = 'no \n escapes # here'
         let config = parse_config("[roles.plan_review]\nprovider = 'codex'\n").unwrap();
         assert_eq!(
             config.roles.provider(ModelRole::PlanReview).0,
+            crate::domain::Provider::Codex
+        );
+        // And the throughput review (task 1220).
+        let config = parse_config("[roles.throughput_review]\nprovider = 'codex'\n").unwrap();
+        assert_eq!(
+            config.roles.provider(ModelRole::ThroughputReview).0,
             crate::domain::Provider::Codex
         );
         let dir = tempfile::tempdir().unwrap();

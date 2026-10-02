@@ -132,14 +132,18 @@ fn start_of(event: &RunEvent) -> Option<(&'static str, String)> {
 }
 
 /// The throughput review a start or end is of: its mode and period, and its
-/// session id when it has one (reviews of one period may run side by side).
+/// directory (reviews of one period may run side by side), else its session
+/// id. The directory, not the session id, ties a Codex review's end to its
+/// start: Codex names its thread itself, which only the end records.
 fn review_key(event: &RunEvent) -> Option<String> {
     let payload = &event.payload;
     Some(format!(
         "{}/{}/{}",
         text(payload, "mode")?,
         text(payload, "period")?,
-        text(payload, "session_id").unwrap_or_default()
+        text(payload, "dir")
+            .or_else(|| text(payload, "session_id"))
+            .unwrap_or_default()
     ))
 }
 
@@ -640,6 +644,43 @@ mod tests {
         assert_eq!(json["count"], 0);
         assert!(json.get("secs_values").is_none());
         assert_eq!(json["by_provider"], json!({}));
+    }
+
+    /// A Codex throughput review (task 1220): its start names no session
+    /// (Codex names its thread itself) and its end the thread and the model;
+    /// the directory ties them, so it counts under Codex and its model.
+    #[test]
+    fn a_codex_throughput_review_is_counted_under_codex_and_its_model() {
+        let payload = |extra: Value| {
+            let mut payload = json!({"mode": "weekly", "period": "2026-W39", "dir": "/q/reviews/weekly-2026-W39"});
+            if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+                payload.extend(extra);
+            }
+            payload
+        };
+        let events = [
+            event(
+                1,
+                event_kind::THROUGHPUT_REVIEW_STARTED,
+                None,
+                payload(json!({"session_id": null, "launch": {"provider": "codex"}})),
+            ),
+            event(
+                2,
+                event_kind::THROUGHPUT_REVIEW_FINISHED,
+                None,
+                payload(
+                    json!({"session_id": "codex-thread-1", "model": "gpt-6-astra",
+                               "outcome": "succeeded", "duration_secs": 70}),
+                ),
+            ),
+        ];
+        let stats = jobs(&events, EventId::new(0), EventId::new(2), |_| true);
+        let reviews = &stats["throughput_review"];
+        assert_eq!(reviews.by_provider["codex"].count, 1);
+        assert!(!reviews.by_provider.contains_key("claude"));
+        assert_eq!(reviews.by_model["gpt-6-astra"].count, 1);
+        assert_eq!(reviews.by_mode["weekly"].secs.total, 70);
     }
 
     /// The throughput review pairs its end with its start by mode, period

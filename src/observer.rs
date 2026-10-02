@@ -228,7 +228,7 @@ pub fn observe(
         &prompt,
         &HeadlessAgent {
             actor: observer_actor(&session_id),
-            session_id: &session_id,
+            session_id: Some(&session_id),
             launch: &launch,
             dagq: &options.dagq,
             timeout: options.timeout,
@@ -552,7 +552,10 @@ fn observer_actor(session_id: &str) -> ActorContext {
 /// runs as and how.
 pub(crate) struct HeadlessAgent<'a> {
     pub actor: ActorContext,
-    pub session_id: &'a str,
+    /// The session id the runtime gives the job (Claude Code's, ADR-0048
+    /// decision 4); `None` for a provider that names its session itself
+    /// (Codex's thread, which the job's end records).
+    pub session_id: Option<&'a str>,
     pub launch: &'a ActorLaunch,
     /// The `dagq` binary the agent calls; its directory goes first on PATH.
     pub dagq: &'a Path,
@@ -601,7 +604,7 @@ pub(crate) fn run_agent(
                         prompt,
                         access: agent.access,
                     },
-                    session_id: Some(agent.session_id),
+                    session_id: agent.session_id,
                     launch: Some(agent.launch),
                     without_mcp: true,
                     env: vec![("PATH".to_owned(), path)],

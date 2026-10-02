@@ -5,14 +5,19 @@
 //! ([`crate::domain::throughput_review::judge_hourly`]); an hour no rule
 //! hit starts no agent and records a skipped `throughput_review_finished`.
 //! Otherwise a headless agent (`DAGQ_ROLE=throughput-review-job`, which the
-//! queue lets read only, without MCP) reads the landings, `kpi`, `stats`,
+//! queue lets read only, without MCP), on the provider of its launch (Claude
+//! by default, Codex when `[roles.throughput_review]` names it, task 1220),
+//! reads the landings, `kpi`, `stats`,
 //! the claim deferrals, the asks and the timelines of the longest runs, and
 //! follows the weekly review of the dagq skill's `reference/kpi.md` for its
 //! cadence. The command, not the agent, saves the review under
 //! `<queue dir>/reports/reviews/`, records the weekly next move as a
 //! finding marked for a proposal, and records `throughput_review_reported`,
 //! the inbox's notice. A failed job leaves its log and a failed
-//! `throughput_review_finished`, itself a notice to the inbox (task 1099).
+//! `throughput_review_finished`, itself a notice to the inbox (task 1099),
+//! but for a Codex job that found Codex unusable: its finish says so
+//! (`provider_unusable`), is no notice, and the supervisor reviews its
+//! period again on the other provider.
 //! The prompt carries a summary of the inputs within [`PROMPT_LIMIT`]
 //! ([`prompt_input`]); the whole is the job directory's `input.json`.
 use std::{
@@ -27,7 +32,8 @@ use serde_json::{Value, json};
 use crate::{
     application::AgentProvider,
     domain::{
-        ActorContext, EventFilter, EventId, EventKind, FindingTarget, NewFinding, RunEvent, RunId,
+        ActorContext, EventFilter, EventId, EventKind, FindingTarget, NewFinding, Provider,
+        RunEvent, RunId,
         actor_model::{ActorLaunch, ModelRole},
         event_kind::{ASK_OPENED, RUN_INTEGRATED},
         headless_job::JobAccess,
@@ -122,6 +128,20 @@ pub struct ReviewOptions {
     /// UTC; the host's without (the supervisor passes the one it found the
     /// review due in).
     pub utc_offset: Option<i64>,
+    /// What the job starts with: the provider the supervisor routed it to
+    /// (ADR-t1063-1 decisions 1 and 4, task 1220), the provider of
+    /// `provider`; `None` reads `[roles.throughput_review]` of the bound
+    /// checkout's `dagq.toml` ([`configured_launch`]).
+    pub launch: Option<ActorLaunch>,
+    /// Whether `[roles.throughput_review]` names its provider, so that a
+    /// Codex job that stopped at a wall (a login, the usage limit, a launch
+    /// that failed) records `provider_unusable` and is started again on the
+    /// other provider (ADR-t1063-1 decision 4).
+    pub switchable: bool,
+    /// Why no provider can run the job (`--no-claude` with Codex not
+    /// usable, ADR-t1204-1): a period that needs a review records its
+    /// failure with this reason instead of starting the agent.
+    pub unavailable: Option<String>,
 }
 
 /// `<queue dir>/reports/reviews`: one directory per review.
@@ -145,8 +165,21 @@ pub fn procedure() -> &'static str {
     rest[..end].trim()
 }
 
+/// What the job starts with when no supervisor routed it: the launch of
+/// `[roles.throughput_review]` of the queue's bound checkout's `dagq.toml`
+/// (the provider's default without one).
+pub fn configured_launch(db: &Path) -> Result<ActorLaunch> {
+    let queue = SqliteQueue::open(
+        &db.canonicalize()
+            .context("queue must already be initialized")?,
+    )?;
+    let checkout = crate::compose::bound_checkout(&queue)?;
+    Ok(review_launch(checkout.as_deref()))
+}
+
 /// Run one review: judge the hour (hourly), gather the inputs, start the
-/// agent headless, save what it printed and tell the inbox.
+/// agent headless on `provider` (the provider of the launch), save what it
+/// printed and tell the inbox.
 pub fn review(db: &Path, provider: &dyn AgentProvider, options: &ReviewOptions) -> Result<Value> {
     let db = db
         .canonicalize()
@@ -227,6 +260,13 @@ fn review_period(
         return Ok(payload);
     }
     failure["reasons"] = json!(judgment.as_ref().map(|judged| &judged.reasons));
+    // No provider can run it (`--no-claude`, Codex not usable): the period
+    // that needs a review fails with why, for a person (ADR-t1204-1).
+    if !options.dry_run
+        && let Some(why) = &options.unavailable
+    {
+        anyhow::bail!("the throughput review could not start: {why}");
+    }
     let input = gather(queue, db, period, &landings, judgment.as_ref())?;
     // The job's `dagq` goes to the queue service in client mode: the
     // prompt, an argument of the agent, names no queue path (goal 82's
@@ -262,9 +302,15 @@ fn review_period(
         dir.join("input.json"),
         serde_json::to_string_pretty(&input)?,
     )?;
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let launch = options
+        .launch
+        .clone()
+        .unwrap_or_else(|| review_launch(checkout.as_deref()));
+    // The job's Claude session id (ADR-0048 decision 4); Codex names its
+    // thread itself, which the finish records (ADR-t1063-1 decision 6).
+    let session_id =
+        (launch.provider == Provider::Claude).then(|| uuid::Uuid::new_v4().to_string());
     failure["session_id"] = json!(session_id);
-    let launch = review_launch(checkout.as_deref());
     let reasons = judgment.as_ref().map(|judged| judged.reasons.clone());
     let started = queue.record_queue_event(
         EventKind::ThroughputReviewStarted,
@@ -284,6 +330,10 @@ fn review_period(
         options.mode.as_str()
     );
     let clock = Instant::now();
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok());
     let ran = run_agent(
         provider,
         db,
@@ -291,7 +341,7 @@ fn review_period(
         &prompt,
         &HeadlessAgent {
             actor: ActorContext::throughput_review_job(options.mode.as_str(), &period.label),
-            session_id: &session_id,
+            session_id: session_id.as_deref(),
             launch: &launch,
             dagq: &options.dagq,
             timeout: options.timeout,
@@ -299,10 +349,18 @@ fn review_period(
             access: ACCESS,
         },
     );
+    // An agent that did not start at all (its executable gone, say) left
+    // no output to read why: its start's error says.
+    let mut start_failure = None;
     let (outcome, exit_code, error) = match ran {
         Ok(Some(0)) => ("succeeded", Some(0), None),
         Ok(code) => ("failed", code, None),
-        Err(error) => ("error", None, Some(format!("{error:#}"))),
+        Err(error) => {
+            if error.to_string() == "start the throughput review's agent" {
+                start_failure = Some(crate::application::job_start_failure(&error));
+            }
+            ("error", None, Some(format!("{error:#}")))
+        }
     };
     let mut payload = json!({
         "mode": options.mode.as_str(),
@@ -320,6 +378,24 @@ fn review_period(
         "pid": std::process::id(),
         "parent_pid": std::os::unix::process::parent_id(),
     });
+    let stdout = fs::read_to_string(dir.join("output.out")).unwrap_or_default();
+    // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6):
+    // the id that closes its span and the model `stats` reads.
+    if let Some(session) = provider.job_session(&stdout, started_ms) {
+        session.record(&mut payload);
+    }
+    // A Codex job that stopped where Codex cannot be used starts again on
+    // the other provider (ADR-t1063-1 decision 4): the supervisor holds
+    // Codex and starts the period again. Under `--no-claude` it finds no
+    // provider and records why, so Claude is never started.
+    if outcome != "succeeded" && options.switchable && launch.provider == Provider::Codex {
+        let stderr = fs::read_to_string(dir.join("output.err")).unwrap_or_default();
+        let failure = start_failure.unwrap_or_else(|| provider.job_failure(&stdout, &stderr));
+        if let Some(reason) = failure.switch_reason() {
+            payload["provider_unusable"] =
+                json!({"provider": launch.provider.as_str(), "reason": reason.as_str()});
+        }
+    }
     if outcome == "succeeded" {
         // A review that could not be saved or reported is a failed one:
         // the event says why, and the loop goes on.

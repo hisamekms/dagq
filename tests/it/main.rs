@@ -139,6 +139,7 @@ mod runtime_waiting_stages;
 mod runtime_workspace_cleanup;
 mod source_repository;
 mod test_actor_env;
+mod throughput_review_codex;
 mod worker_escalation;
 mod worker_model;
 

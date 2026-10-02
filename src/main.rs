@@ -786,14 +786,17 @@ enum Command {
     },
     /// Run the throughput review once (ADR-t996-1): for the last whole hour (--mode hourly), yesterday
     /// (daily) or the ISO week before this one (weekly). An hour the runtime's rules find unremarkable starts
-    /// no agent and records throughput_review_finished with outcome skipped. Otherwise headless Claude under
-    /// DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq skill's
-    /// reference/kpi.md; the review is saved under <queue dir>/reports/reviews/ and its conclusion reaches
-    /// the inbox as throughput_review_reported (next: report the review). A weekly next move becomes a
-    /// finding marked for a proposal. A review that fails or cannot start reaches the inbox as its
-    /// throughput_review_finished (next: check the failed review). The prompt carries a summary of the
-    /// inputs; the whole is input.json in the review's directory. The agent loads no MCP server; the
-    /// supervisor starts this on its timer.
+    /// no agent and records throughput_review_finished with outcome skipped. Otherwise a headless agent
+    /// under DAGQ_ROLE=throughput-review-job, which may only read, follows the weekly review of the dagq
+    /// skill's reference/kpi.md: on Claude by default, or on Codex in its read-only sandbox when
+    /// [roles.throughput_review] of dagq.toml says provider = "codex" (the supervisor passes the
+    /// provider it routed the review to). The review is saved under <queue dir>/reports/reviews/ and its
+    /// conclusion reaches the inbox as throughput_review_reported (next: report the review). A weekly
+    /// next move becomes a finding marked for a proposal. A review that fails or cannot start reaches the
+    /// inbox as its throughput_review_finished (next: check the failed review), except one whose Codex
+    /// could not be used (provider_unusable), which the supervisor reviews again on the other provider.
+    /// The prompt carries a summary of the inputs; the whole is input.json in the review's directory.
+    /// The agent loads no MCP server; the supervisor starts this on its timer.
     ThroughputReview {
         #[arg(long, default_value = "hourly", value_parser = ["hourly", "daily", "weekly"])]
         mode: String,
@@ -810,9 +813,28 @@ enum Command {
         /// Seconds the agent may run before it is killed.
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
-        /// Claude Code executable; a bare name is resolved on PATH.
+        /// Claude Code executable, for a review on Claude; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
+        /// Codex CLI executable, for `[roles.throughput_review]`'s `provider = "codex"`; a bare
+        /// name is resolved on PATH outside cmux's shims.
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
+        /// What the job starts with, as the supervisor routed it (an actor launch as JSON);
+        /// `[roles.throughput_review]` of dagq.toml without.
+        #[arg(long, hide = true)]
+        launch: Option<String>,
+        /// Codex's home, whose rollouts name the model (tests); Codex's own without.
+        #[arg(long, hide = true)]
+        codex_home: Option<PathBuf>,
+        /// The role names its provider: a Codex job that cannot use Codex records
+        /// provider_unusable for the supervisor to start it again on the other provider.
+        #[arg(long, hide = true)]
+        switchable: bool,
+        /// No provider can run the job (--no-claude, Codex not usable): a period that needs a
+        /// review records its failure with this reason.
+        #[arg(long, hide = true)]
+        unavailable: Option<String>,
     },
     /// Start the queue's runtime: a launchd-resident supervisor and the inbox's cmux workspace. Idempotent; a live supervisor of another build is handed over to this binary without waiting for its sessions (or drained when it cannot take a handoff), after the queue's compatible migrations. Opens no planner (`plan` does) and forgets the resident planner's record.
     Up {
@@ -3698,17 +3720,49 @@ fn execute(cli: Cli) -> Result<Value> {
             dry_run,
             timeout,
             claude,
+            codex,
+            launch,
+            codex_home,
+            switchable,
+            unavailable,
         } => {
-            use dagq::infrastructure::adapters::{ClaudeCode, executable};
-            // A dry run starts nothing, so it needs no Claude Code.
-            let executable = if dry_run {
-                claude
-            } else {
-                executable(&claude)?
+            use dagq::domain::{Provider, actor_model::ActorLaunch};
+            use dagq::infrastructure::{
+                adapters::{ClaudeCode, executable},
+                codex::Codex,
+            };
+            let launch: ActorLaunch = match launch {
+                Some(launch) => serde_json::from_str(&launch).context("parse --launch")?,
+                None => dagq::throughput_review::configured_launch(&db)?,
+            };
+            // A dry run starts nothing, so it needs no executable; nor does a
+            // review no provider can run. One that cannot be resolved (gone
+            // since the supervisor found it) is kept as given: the review
+            // records its finish, whose start error says the provider
+            // cannot be used (task 1220), rather than this command failing
+            // with no record of the period.
+            let resolve = !dry_run && unavailable.is_none();
+            let resolved = |path: PathBuf, find: fn(&std::path::Path) -> Result<PathBuf>| {
+                if !resolve {
+                    return path;
+                }
+                find(&path).unwrap_or_else(|error| {
+                    tracing::warn!(error = %format_args!("{error:#}"), "{} could not be resolved: {error:#}", path.display());
+                    path
+                })
+            };
+            let provider: Box<dyn dagq::application::AgentProvider> = match launch.provider {
+                Provider::Claude => Box::new(ClaudeCode {
+                    executable: resolved(claude, executable),
+                }),
+                Provider::Codex => Box::new(Codex {
+                    executable: resolved(codex, dagq::infrastructure::codex::executable),
+                    home: codex_home,
+                }),
             };
             dagq::throughput_review::review(
                 &db,
-                &ClaudeCode { executable },
+                provider.as_ref(),
                 &dagq::throughput_review::ReviewOptions {
                     mode: mode.parse()?,
                     at,
@@ -3717,6 +3771,9 @@ fn execute(cli: Cli) -> Result<Value> {
                     dagq: env::current_exe()?,
                     user_config: dagq::infrastructure::language::user_config_file(),
                     utc_offset,
+                    launch: Some(launch),
+                    switchable,
+                    unavailable,
                 },
             )?
         }
