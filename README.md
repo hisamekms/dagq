@@ -2,396 +2,207 @@
 
 dagq is a dependency DAG queue: a Rust task orchestrator for running dependency-aware development tasks in cmux workspaces and isolated Git worktrees. The name is the shape of the work — tasks form a dependency DAG, and the queue runs the ones whose predecessors have landed. (It is unrelated to DAQ, data acquisition.)
 
-**It runs on macOS on Apple Silicon (`aarch64-apple-darwin`) only.** No other platform is built, released, or tested. It also needs cmux, which hosts a workspace per run, and an authenticated Claude Code on PATH, because every run is a Claude Code session.
+You describe a problem to a planner session, which writes it down as a goal and tasks. A headless plan review checks the plan and makes the tasks ready. A resident supervisor runs each ready task as a Claude Code (or Codex) worker in its own Git worktree, has a headless review check the result, and lands it on your default branch as one squash commit. Everything that needs a person reaches one resident inbox session.
 
-The runtime is distributed as a binary from [GitHub Releases](https://github.com/hisamekms/dagq/releases), and the same version is published to [crates.io](https://crates.io/crates/dagq) for `cargo install dagq`, which builds it from source. The Claude Code integration is distributed as a plugin that invokes that binary, and this repository is also its marketplace. Claude Code is the only provider today; a Codex plugin is planned but does not exist yet.
+## Requirements
 
-## Getting started
+- **macOS on Apple Silicon (`aarch64-apple-darwin`).** No other platform is built, released, or tested.
+- **cmux.** The inbox, planners and workers each get a cmux workspace.
+- **Claude Code**, signed in, on PATH. The inbox, the planners and the headless jobs (plan review, run review, recovery, goal review, observer) are Claude Code sessions, and workers are too unless a task asks for Codex. The Codex CLI is optional (`up --codex`, `add --provider codex`).
+- **Git.** The repository needs at least one commit on the branch dagq lands on ([Landing branch, remote and push](#landing-branch-remote-and-push)).
+- **Rust and a C compiler** for `cargo install` (the crate's `rust-version`, now 1.98; the C compiler builds the bundled SQLite). The release update also runs `cargo install` ([Update](#update)).
 
-How to start using dagq in a repository of your own. Each step links to the section that covers it in full.
+## Install
 
-**1. Download the release.** Put `dagq-v<version>-aarch64-apple-darwin.tar.gz` and `SHA256SUMS` from the [latest release](https://github.com/hisamekms/dagq/releases/latest) in the same directory.
-
-```sh
-VERSION=0.2.0
-gh release download "v$VERSION" --repo hisamekms/dagq
-```
-
-**2. Verify the checksum.**
-
-```sh
-shasum -a 256 -c SHA256SUMS
-```
-
-Do not unpack an archive that does not print `OK`.
-
-**3. Install the binary into `~/.local/bin` and check your PATH.** The archive holds `dagq`, `LICENSE` and `README.md` at its top level.
-
-```sh
-tar -xzf "dagq-v$VERSION-aarch64-apple-darwin.tar.gz"
-mkdir -p ~/.local/bin
-install -m 755 dagq ~/.local/bin/dagq
-command -v dagq   # expect the ~/.local/bin one, printed expanded
-```
-
-**Or build it with `cargo install`.** The same version is on crates.io; `cargo install` builds it from source into `~/.cargo/bin/dagq`. It needs Rust 1.98 or newer and a C compiler (for bundled SQLite), and the result still runs on macOS on Apple Silicon only. Use it instead of steps 1–3, not beside them: keep a single `dagq` on PATH, since the plugin's launcher and `up` take whichever one PATH resolves first.
+**1. The binary.** dagq is published to [crates.io](https://crates.io/crates/dagq):
 
 ```sh
 cargo install --locked dagq
 command -v dagq   # expect ~/.cargo/bin/dagq
 ```
 
-One installed file is enough to serve the queue: it is what you type, what the plugin's launcher resolves ([Use from Claude Code](#use-from-claude-code)), and what the resident supervisor runs, since `up` starts `supervise` from the absolute path of the binary it was invoked as rather than from PATH.
+Keep one `dagq` on PATH. The plugin's launcher and `up` take the first one PATH resolves, and the resident supervisor runs the absolute path of the binary `up` was run as.
 
-**4. Install the Claude Code plugin.** It carries the skills that drive the binary and the launcher they call, and nothing else; the binary is the one you just installed.
+**2. The Claude Code plugin.** This repository is the plugin's marketplace. Install it with Claude Code's own plugin commands:
 
 ```sh
 claude plugin marketplace add hisamekms/dagq
 claude plugin install claude-dagq@dagq
 ```
 
-See [Use from Claude Code](#use-from-claude-code) for what each skill covers.
+The plugin holds the skills the inbox and planner sessions follow, the launcher `bin/dagq` the skills call, and hooks for the inbox and planner sessions (`SessionStart`, `Stop`, `SessionEnd`). It does not hold the binary. From release v0.4.0 the marketplace entry points at the latest release tag, so the plugin you install has the same `X.Y.Z` as the release on crates.io. Until then the marketplace serves the plugin on `main` ([ADR-t617-1](docs/adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)). When the skills resolve the binary (`bin/dagq --resolve`) and the plugin and binary differ in major.minor, the launcher writes one `{"warning": ...}` line to stderr and carries on. Update whichever is older ([Update](#update)).
 
-**5. Save a cmux socket password in cmux's Settings.** The supervisor runs under launchd, and cmux refuses a connection from outside its own terminals unless a socket password admits it, so `up` stops before it writes anything without one. Set `automation.socketControlMode: "password"` and `automation.socketPassword` in `~/.config/cmux/cmux.json`, then `cmux reload-config` ([Prerequisite: cmux must accept a connection from outside its terminals](#start-the-runtime-with-up)). Where that is not possible, `up --in-cmux` runs the supervisor inside a cmux workspace instead, without launchd and without an automatic restart.
+`up` and `plan` open their sessions with the installed plugin. Do not pass `--plugin-dir`, which is only for developing the plugin itself ([ADR-t617-2](docs/adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)). Without `--plugin-dir`, `up` and `plan` stop before opening a session if `claude plugin list --json` does not show `claude-dagq` installed and enabled, and they print the two commands above.
 
-**6. Trust the repository in Claude Code once.** Claude's folder-trust prompt is decided by the repository root, not the worktree, so run `claude` in the repository root and accept it once; every run worktree then starts without it ([Trust prompt](docs/design/provider-lifecycle.md#trust-prompt)).
+**3. Let cmux accept the supervisor.** By default `up` keeps the supervisor resident as a launchd LaunchAgent. cmux refuses a connection from outside its own terminals unless a socket password admits it. Save one in cmux's Settings (`automation.socketControlMode: "password"` and `automation.socketPassword` in `~/.config/cmux/cmux.json`, then `cmux reload-config`). If you skip this, `up` stops before starting the supervisor. Without a socket password, run the supervisor inside cmux with `up --in-cmux`. Nothing restarts it there if it stops.
 
-**7. Create the queue.** Each Git repository has one, resolved from wherever you run the binary inside it.
+**4. Trust the repository in Claude Code once.** Claude Code asks for folder trust by repository root, not by worktree. Run `claude` once in the repository root and accept the prompt; every run worktree then starts without asking. `up` checks this and stops with instructions while the repository is not trusted ([Trust prompt](docs/design/provider-lifecycle.md#trust-prompt)).
 
-```sh
-cd /path/to/your/repository
-dagq init
-```
+**5. Decide what workers may do, in Claude Code's settings.** dagq has no permission policy of its own for workers. It adds only a few deny rules to each run: no signalling processes by name (`pkill`, `killall`), no `dagq` commands outside the worker's role, and no setting or unsetting the variables that name the worker's role and queue (`DAGQ_ROLE` and the like). Everything else comes from Claude Code:
 
-`locate` shows the queue a directory resolves to without creating anything ([The queue and its commands](#the-queue-and-its-commands)).
+- A Claude worker runs headless by default, one `claude -p` call per turn, in Claude Code's auto mode (`--permission-mode auto`). Auto mode and your `permissions` rules (`allow` / `deny` in `~/.claude/settings.json` or the repository's `.claude/settings.json`) decide what a worker may do without a person. If the session does not start in auto mode (for example, a model that does not support it), dagq stops the turn as a launch failure instead of running it in another mode.
+- A task added with `--interactive` runs Claude's interactive session in its cmux workspace. dagq does not override the permission mode there, so the session starts in the mode your Claude Code settings give it (`permissions.defaultMode`). Its permission prompts wait in that workspace.
 
-**8. Start the runtime.**
+Codex workers run in Codex's own sandbox ([provider lifecycle](docs/design/provider-lifecycle.md)). Set these up before the first run.
 
-```sh
-dagq up --parallel 4 --plugin-dir /path/to/dagq/plugins/claude-dagq
-```
+## Start
 
-This keeps the supervisor resident as a launchd LaunchAgent (or, with `--in-cmux`, in the cmux workspace `[<repo>]supervisor`) and opens the inbox's Claude Code session in `[<repo>]inbox`. Running it again changes nothing ([Start the runtime with `up`](#start-the-runtime-with-up)). Open a planner session whenever you want to plan, as many at once as you like:
+From anywhere inside the repository:
 
 ```sh
-dagq plan --plugin-dir /path/to/dagq/plugins/claude-dagq
+dagq init   # create the queue for this repository
+dagq up     # start the supervisor and open the inbox
 ```
 
-**9. Tell a planner session what you want done.** It registers the goal and its tasks with you and makes them ready. The supervisor then runs them, reviews each finished run with a headless Claude job and lands it on `main` when the review passes, resumes a run whose landing conflicts, and triages a failed run ([Run tasks with the supervisor](#run-tasks-with-the-supervisor), [Land a run on main](#land-a-run-on-main)).
+Each Git repository has one queue, at `~/.local/share/dagq/<hash>/queue.db` (`$XDG_DATA_HOME/dagq/<hash>/`). `<hash>` comes from the repository's Git common directory, so every worktree of the repository shares the queue. `dagq locate` shows where a directory's queue is without creating anything. `--db PATH` before the subcommand uses another queue file.
 
-**10. Answer in the inbox session.** Everything that waits for you reaches the inbox: questions from workers, the supervisor and the observer (asks), a stopped supervisor, a review or triage that failed. It shows each one, writes your answer back, and does only what you tell it.
+`up` is idempotent. It checks cmux, Claude Code, the plugin, folder trust, the landing branch, `dagq.toml`, and the programs `[run.env]` names. Then it starts one supervisor (launchd, or `--in-cmux`) and opens the inbox session in the cmux workspace `[<repo>]inbox`. Run it again and it reuses what is already running. It hands a supervisor of another build over to its own binary without stopping the runs in flight. `dagq down` stops the supervisor after it drains (`--wait` waits for that); it leaves the inbox and planner sessions open.
 
-## Upgrade
-
-A new release is installed exactly like the first one: download the tarball and `SHA256SUMS`, check them with `shasum -a 256 -c SHA256SUMS`, and `install -m 755 dagq ~/.local/bin/dagq` over the old file. Then, from the repository:
+Open a planner whenever you have something to plan. Each call opens another session, `[<repo>]planner#<id>`:
 
 ```sh
-dagq up
+dagq plan
 ```
 
-If you installed with `cargo install`, update by building the new version over the old one, then run the same `dagq up`:
+The number of runs at once comes from `[supervisor] parallel` in `dagq.toml` (default 4). Give `up` `--parallel` only to override it.
+
+## How work flows
+
+1. **Plan.** Tell a planner session what you want done. It registers a goal (`goal add`) and draft tasks (`add`). Each task has a description, acceptance criteria, verification commands (`--verify`), dependencies (`--depends-on`), and optionally the paths it may change (`--paths`). The planner checks the plan with `lint` and submits it as one proposal with `submit`. A planner does not make tasks ready.
+2. **Plan review.** The supervisor runs a headless plan review on each submitted proposal. `pass` makes its tasks ready. `revise` sends it back to its planner, which fixes it and submits it again with `submit --proposal ID`. A `concern` carries the review's recommendation (`ready`, `send_back` or `cancel`) and how sure it is. The runtime applies a `ready` or `send_back` recommendation itself when the review is sure (`high` confidence) and names no reason a person is needed; a `send_back` also needs the proposal to have a revise left. Otherwise you get an `approve_plan` ask in the inbox (`ready`, `send_back` or `cancel`). That covers a recommendation to cancel, low confidence, a scope or discard reason, a missing recommendation, and a `send_back` past the revise limit ([ADR-t451-1](docs/adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)). Only a person makes a task ready without plan review: `dagq ready ID --bypass-review`.
+3. **Run.** The supervisor claims ready tasks whose dependencies have landed, in priority order, up to `parallel` at once. Each run gets a branch `dagq/<run-id>`, a worktree, and a worker. The worker commits and writes a completion receipt. The supervisor validates the receipt against Git (and the declared `--paths`). It does not run the verification commands at this stage.
+4. **Review.** A headless review checks each validated run. On `pass` the run lands. On `revise` the findings go back to the same worker session. A `concern` carries the review's recommendation (`land` or `send_back`) and how sure it is. The runtime lands the run, or sends the findings back, when the review is sure (`high` confidence) and names no reason a person is needed, while the run has a revise left for `send_back`. Otherwise you get an `approve_landing` ask in the inbox (`land`, `send_back` or `cancel`). That covers low confidence, a scope or discard reason, a missing recommendation, and a `send_back` past the revise limit.
+5. **Land.** Landing rebases the run onto the landing branch and runs the task's verification commands once on the result. It squashes the run into one commit with `Dagq-Task` / `Dagq-Run` trailers, completes the task, and pushes. A conflict or a failing verification sends the run back to its worker to fix (`needs_session`), and the dependent tasks start from the new commit.
+6. **Close the goal.** When every task of a goal has completed or been canceled, a headless goal review checks the receipts against the goal's acceptance. It closes the goal, adds draft tasks for what is missing, or asks you.
+7. **Answer.** Questions from workers, planners and jobs reach the inbox as asks, together with every other thing that waits for a person: a stopped supervisor, a failed review or recovery, a failed push. The inbox shows each one, writes your answer with `answer`, and does only what you tell it. A failed or stuck run first goes to a headless recovery job; the inbox asks you only when that job cannot decide.
+
+You can also do the planner's part by hand:
 
 ```sh
-cargo install --locked dagq
-dagq up
+dagq goal add "Faster CI" --acceptance "CI finishes in under 10 minutes"
+dagq add "Cache dependencies in CI" --goal 1 \
+  --description "Cache the package manager's downloads between CI runs" \
+  --acceptance "A second CI run downloads no dependencies" \
+  --verify "make test" --paths '.github/**'
+dagq lint 1
+dagq submit --goal 1
 ```
 
-Nothing has to be stopped first. `up` reuses a live supervisor only while its `binary_version` matches its own, so once the file is replaced it hands the running supervisor over to the new binary without waiting for its sessions — the supervisor execs the new file under its own pid and goes on with the runs it holds (`{"outcome": "restarted", "handoff": true, ...}`); a supervisor of a binary that predates the handoff is drained and replaced instead ([Updating the binary](#start-the-runtime-with-up)). `dagq install` builds, replaces and hands over in one step and keeps the old binary for `--rollback`.
+## Configure the repository: `dagq.toml`
 
-Update the plugin with Claude Code:
+A `dagq.toml` at the repository root holds the settings committed with the repository. The runtime reads the file from the main checkout, not from a run's worktree, so a change takes effect once it is in the main checkout. With no file, every setting has its default. An unknown table or key is an error: `up` stops on it, and an older binary rejects tables it does not know yet. The values can appear in process arguments, so keep secrets out of the file. The full list of tables is in [Run environment](docs/design/supervisor-lifecycle/run-environment.md).
 
-```sh
-claude plugin marketplace update dagq
-claude plugin update claude-dagq@dagq
+### Landing branch, remote and push
+
+```toml
+[repository]
+branch = "master"    # default: the push remote's HEAD, else main, else master
+remote = "upstream"  # default: origin
+push = false         # default: true
 ```
 
-The two are versioned together. When a session resolves the binary (`dagq --resolve`, which the skills run first), the launcher compares the plugin's version with the binary's and, when they differ in major.minor, writes one `{"warning": ...}` line to stderr and carries on — stdout and the exit status are untouched, so the command still works. Read it as "one of these two is out of date": update whichever is older, the plugin with `claude plugin update` and the binary from the releases page (or `cargo install --locked dagq`). A session that sees the warning passes it on rather than stopping.
+Without `branch`, dagq picks the first local branch among the push remote's HEAD, `main` and `master`. It works this out each time and does not store the result. Without `remote`, dagq pushes to `origin`; if there is no `origin`, landing skips the push (`push_skipped`). A `remote` you name must exist. `push = false` never pushes. `up` and `doctor` show the branch, remote and push dagq resolved and where each came from ([Landing branch](docs/design/supervisor-lifecycle/landing-branch.md), [ADR-t615-1](docs/adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)). A failed push keeps the landing and reaches the inbox.
 
-## Current status
+### Language
 
-The Rust/SQLite queue and a parallel supervisor are implemented. Tasks, dependencies, state transitions, candidate selection, run reservation, per-run supervisor leases, process heartbeats, and events are persisted locally. `supervise` is a resident loop: it claims dependency-ready tasks up to `--parallel N` (default 4), creates a Git worktree and a cmux workspace for each, starts an interactive Claude Code session through a wrapper, records each session's exit, validates each completion receipt against Git, and closes the workspace of an accepted run. `integrate` is the merge queue: it lands one validated run at a time on `main` by rebasing its worktree onto the current `main`, re-validating it, and squashing it into a single commit, and the supervisor picks up the tasks that unblocks.
-
-A validated run is `awaiting_integration`, and the supervisor reviews it with a headless `claude -p` while the run's session stays open: on `pass` it sends `/exit`, closes the workspace and lands the run itself (the same landing as `integrate`, push included); on `revise` it types the findings into the live session, which fixes them and rewrites its receipt for another review (at most twice); on `concern`, or a third review that does not pass, it closes the session and opens an `approve_landing` ask whose `land`, `send_back` or `cancel` answer it applies; a review that fails leaves the run to `integrate` by hand (attention `review by hand`). A run whose rebase conflicts, or whose verification fails after the rebase, waits as `needs_session` while the supervisor resumes its Claude session to fix it, and lands it once `integrate` was called for it. One run's failure never touches another: each run has its own lease, and `doctor` / `recover` judge and release one run at a time. A supervisor that dies while a run's session is still alive does not lose the run: the next supervisor with a free slot adopts the stale lease and finishes the run; every other stale lease waits for `recover`.
-
-## The queue and its commands
-
-Each Git repository has one queue. Run the binary from anywhere inside the repository (any worktree, including a task worktree) and it resolves the queue to `$XDG_DATA_HOME/dagq/<hash>/queue.db`, by default `~/.local/share/dagq/<hash>/queue.db`, where `<hash>` is the first 16 hex digits of the SHA-256 of the repository's canonical Git common directory. `locate` prints that resolution without opening anything; `init` creates the directory and the queue.
-
-The examples assume the installed `dagq` is on PATH ([Getting started](#getting-started)); a source build is `target/debug/dagq` ([Development](#development)).
-
-```sh
-dagq_demo=$(mktemp -d) && git -C "$dagq_demo" init -q -b main && cd "$dagq_demo"
-export XDG_DATA_HOME="$dagq_demo/data"   # keep the demo out of ~/.local/share
-dagq locate
-dagq init
-dagq add "Improve setup docs" \
-  --description "Explain the local setup procedure" \
-  --acceptance "A new contributor can follow the documented commands" \
-  --verify "git diff --check"
-dagq add "Check setup examples" --depends-on 1
-dagq ready 1
-dagq ready 2
-dagq candidates
-dagq show 2
+```toml
+[language]
+tag = "ja"   # a BCP 47 tag: "en", "ja", "pt-BR", ...
 ```
 
-The fresh queue assigns task IDs 1 and 2. Only task 1 is a candidate; task 2 remains blocked until task 1 is completed. Every shell inside the same repository sees the same queue. Only `init` creates a database. `--db PATH` before the subcommand uses an explicit queue file instead, for disposable repositories and tests; `init` creates its directory as well.
+This sets the language the AI uses for text people read: replies, asks, task and goal texts, notes, receipt summaries, and landing commit messages. Code, identifiers and CLI flags are not translated. The repository's tag wins. Without it, dagq uses `[language] tag` from your own `~/.config/dagq/config.toml` (`$XDG_CONFIG_HOME/dagq/config.toml`). With neither, dagq gives no instruction. `doctor` shows the tag in effect and where it came from ([Language](docs/design/supervisor-lifecycle/language.md)).
 
-Commands return JSON on stdout. Runtime errors return JSON on stderr with a nonzero exit status; argument errors and help use the standard CLI format. Outside a repository, every command except `--db` usage fails with an error that says so.
-
-| Command | Effect |
-| --- | --- |
-| `locate` | Show the queue this directory resolves to: `db`, `queue_dir`, `runs_dir`, `log_dir`, `label` and `launch_agent` (the supervisor's launchd label and plist path, whether or not `up` has written it), `source` (`repository` or `db_flag`), `git_common_dir`, `db_exists` |
-| `init` | Create the queue and bind it to this repository. On an existing queue it only checks the schema, like every other command, and never migrates it |
-| `migrate [--check]` | Apply the migrations this binary knows and the queue lacks. Opening a queue never migrates it: every other command stops with a pointer to `migrate` while the queue is older than the binary, and accepts a newer queue as long as its floor (the last breaking migration) is not newer than the binary (ADR-0045). A breaking migration is refused while a live supervisor, an unfinished run or a live run wrapper uses the queue, and the database is first copied to `backups/queue-<version>-<unix seconds>.sqlite3` in the queue directory. `--check` reports `schema_version`, `binary_schema_version`, `floor`, `pending` and `opens` without changing anything |
-| `add TITLE [--description TEXT] [--acceptance TEXT] [--verify COMMAND] [--depends-on ID] [--goal ID] [--context TEXT] [--evidence CHECK] [--paths GLOB]` | Register a draft; `--verify`, `--depends-on`, `--evidence` and `--paths` can be repeated. `--goal` joins an open goal, `--context` records why the task exists and what to read first. `--paths` declares the paths a run may change (globs from the repository root; `*` stays in one directory, a `**` segment spans any depth): a run that changes any other path is parked as `needs_session` (`scope_violation`) by validation and refused by `integrate` after its rebase (ADR-0029). Without it nothing is limited |
-| `list` | One page of tasks as `{"tasks", "next", "total"}`: unfinished ones (not `completed` / `canceled`) newest first, at most 20, each with `id`, `status`, `title`, `goal_id`, `dependencies` and `latest_run` (`id` and `status` of its newest run, or null). `--status a,b` (any of them), `--all` (terminal ones too) and `--goal ID` filter with AND; `--limit N` sets the page size; `next` is null on the last page, otherwise pass it to `--before` for the next one; `total` counts every match. `--full` adds `description`, `acceptance`, `context`, `verification_commands`, `required_evidence`, `paths`, `created_at`, `updated_at`. An unknown `--status` exits 1 |
-| `show ID [--events N] [--full]` | Inspect one task: the task (with `goal_id` and `context`), dependencies, its latest run (`id`, `status`, `branch`, `result_commit`, `last_error`, `worktree_path`, `workspace_id`) with that run's processes, and its latest 10 events (`--events N`) with only `status` / `reason` / `last_error` / `from` / `to` of their payload. Long texts are cut to 300 characters ending in `…` and marked `truncated: true`. `--full` prints every run, event and process in full |
-| `ready ID` / `draft ID` | Move between draft and ready; also allowed from `in_progress` once every run has failed or been interrupted |
-| `cancel ID` | Cancel a draft, ready, or retryable in-progress task; does not satisfy its dependents |
-| `dependency add TASK PREDECESSOR` / `dependency remove TASK PREDECESSOR` | Change prerequisites of a draft or ready task |
-| `candidates` | List dependency-ready tasks in registration order without reserving them |
-| `graph [--goal ID]` | Show unfinished tasks' dependencies, how many tasks each releases (`unblocks`), candidates in the supervisor's claim order and the critical chain |
-| `goal add TITLE [--description TEXT] [--acceptance TEXT] [--constraints TEXT] [--doc PATH]` | Register a goal: the higher-level problem a group of tasks solves. A goal has no state machine and no verification commands |
-| `goal list` / `goal show ID` | `list` gives each goal's `closed`, `verdict` and task counts by status; `show` adds the goal's tasks (id, title, status) and the `kind` and `created_at` of its latest 10 events, with long texts cut like `show`; `goal show ID --full` prints the goal and every event in full |
-| `goal edit ID [--title TEXT] [--description TEXT] [--acceptance TEXT] [--constraints TEXT] [--doc PATH]` | Replace fields (an empty `--doc` clears it); the old and new goal go into a `goal_updated` event. Runs already started keep their prompt snapshot |
-| `goal close ID --verdict achieved\|abandoned` | Record the verdict once. `achieved` is refused while a task is neither completed nor canceled; `abandoned` while a task is in progress. A closed goal accepts no more tasks |
-| `set-goal TASK GOAL` / `set-goal TASK --none` | Move a draft or ready task into an open goal, or out of its goal (same rule as dependency changes) |
-| `set-paths TASK --paths GLOB...` / `set-paths TASK --none` | Replace the `--paths` of a draft or ready task, or remove the limit; a change records `task_paths_changed` |
-| `up [--parallel N] [--in-cmux] [--no-wait] [--handoff-timeout SECS] [--plugin-dir PATH] [--repo PATH] [--cmux EXE] [--claude EXE]` | Start the queue's runtime, idempotently: prune supervisor registrations whose process is gone, keep the supervisor resident as a launchd LaunchAgent (started only when no live one of this binary's version is registered), and open the inbox's Claude Code session in the cmux workspace `[<repo>]inbox` (skipped inside that session itself, reused if open). It opens no planner (`plan` does) and forgets the record of the resident planner older versions opened. A live supervisor of another build is handed over to this binary without waiting for its sessions, after the queue's compatible migrations (`--handoff-timeout SECS` bounds the wait); one that cannot take a handoff is drained and replaced (`--no-wait` refuses that instead whenever a run is in flight). `--in-cmux` runs the supervisor in the cmux workspace `[<repo>]supervisor` instead, with no launchd and no automatic restart. Reports what needs attention: unfinished runs, runs awaiting integration, runs that need a session |
-| `install [--from PATH] [--to PATH] [--rollback] [--allow-breaking] [--handoff-timeout SECS] [--cmux EXE] [--claude EXE] [--plugin-dir PATH]` | Replace this binary (or `--to`) with a build of the main checkout (or `--from` a checkout or a built binary) after checking its `--version` and a start on a throwaway queue, apply the queue's compatible migrations, keep the old file as `<name>.previous`, and hand the live supervisor over to the new binary without waiting for its sessions; a failed handoff puts the old binary back. `--rollback` swaps `<name>.previous` back. A breaking migration needs `--allow-breaking`, which drains, migrates with a backup and runs the new binary's `up` |
-| `plan [--plugin-dir PATH] [--repo PATH] [--cmux EXE] [--claude EXE]` | Open a new planner session in its own cmux workspace `[<repo>]planner#<id>`, next to any planner already open. Each planner is recorded in the queue with its workspace UUID |
-| `planners [--all] [--cmux EXE]` | List the planner sessions not closed (`--all`: every one), each with its `state` (`opening`, `working`, `idle`, `exited`, `lost`, `closed`), `alive` and `idle_since`, judged like a worker's session: its workspace, its wrapper's pid and heartbeat, and the idle marker its agent's `Stop` hook writes |
-| `down [--wait] [--force] [--cmux EXE]` | Stop the supervisor: unload its LaunchAgent so it drains its runs and is not restarted, or, for an in-cmux one, SIGINT it and close its workspace once it is gone. `--wait` blocks until it has deregistered or exited, `--force` kills it and drops its registration. The inbox and planner workspaces stay open |
-| `supervise [--parallel N] [--once] [--repo PATH] [--cmux EXE] [--claude EXE] [--log-dir DIR]` | Resident loop: claim dependency-ready tasks up to `N` (default 4), run each in its own cmux workspace, request exit once its receipt is in and Claude is idle, validate the receipt, close the workspace on success, and keep polling for new candidates (including tasks unblocked by `integrate`). `--once` exits when nothing is active or claimable. Its progress goes to stderr and to a JSON Lines log, `supervise-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, in `--log-dir` if given, otherwise in the queue's `logs/`. The checkout is the working directory unless `--repo` says otherwise; `up` runs it under launchd with the queue's `logs/` directory |
-| `integrate ID` / `integrate --next` `[--repo PATH]` | Land a validated run on `main`: rebase its worktree onto the current `main`, re-validate, squash into one commit with `Dagq-Task` / `Dagq-Run` trailers, mark the task `completed`, remove the worktree. `--next` takes the oldest awaiting run; `ID` also resumes a `needs_session` run. Lands in the working directory's repository unless `--repo` says otherwise |
-| `review ID` | Write the review material of the task's run awaiting integration or a session to `<run_dir>/review.md` (task, goal, receipt, `git log`, diffstat and the full `git diff <base>...<head>`) and print only its path, `base`, `head` and the diff's `files_changed` / `insertions` / `deletions` |
-| `status` | List every registered supervisor (PID, liveness, heartbeat age, `mode` and `workspace_id`, `binary_version`, `parallel`, the runs it holds), any other lease holder such as an `integrate` process, and the unfinished runs with their worktree paths and leases |
-| `doctor [--full]` | Report the same supervisors and every unfinished run without changing state, one line's worth each (`run_id`, `task_id`, `status`, `lease_stale`, `recoverable`, `blocker_count`, `workspace_id`, `worktree_path`). `--full` adds each run's lease, wrapper/agent processes, heartbeats, paths, and recovery blockers |
-| `rebind [--repo PATH]` | Bind the queue to the repository containing the working directory (or `--repo`) after that repository moved: the only command that changes the binding, and the only one that accepts a repository-resolved queue bound elsewhere. Refused while a registered supervisor or an `integrate` is alive. Prints the previous and new `git_common_dir`, `move_to` (where the repository now resolves its queue, when that is not where this one is), and `worktrees` (each remaining run worktree, repaired with `git worktree repair`); a change is appended to `<queue dir>/logs/rebind.jsonl`. See [Move the repository or the queue](#move-the-repository-or-the-queue) |
-| `recover RUN_ID` | Mark one unfinished run `interrupted` and drop its lease once its processes and supervisor are gone; keeps its worktree and workspace, and leaves other runs alone |
-
-Verification commands are shell lines that `integrate` runs once in the worktree (`/bin/sh -c`) after rebasing the run onto `main`; the agent is asked to run them too. Task descriptions and acceptance criteria are optional during registration.
-
-## Start the runtime with `up`
-
-Five roles share a queue (ADR-0044): the **supervisor** is the resident `supervise` process that runs, reviews, resumes, triages and lands tasks (its review and triage are headless `claude -p` jobs); a **worker** is the Claude session of one run; a **planner** is a Claude Code session you open on demand with `dagq plan` (as many at once as you like) to write goals and tasks and submit them for plan review; the **inbox** is the resident Claude Code session where everything that waits for you arrives (asks and other attention) and where you answer; and the **observer** is a periodic headless job the supervisor starts to record notes, `blocked` asks and draft goals. `up` starts the supervisor and the inbox from a shell whose PATH has `dagq`, `cmux` and `claude`:
-
-```sh
-dagq up --parallel 4 --plugin-dir /path/to/dagq/plugins/claude-dagq
-```
-
-`up` checks cmux (`ping`), Claude (`--version`) and the queue (`init` first), deletes supervisor registrations whose process is dead (`pruned_supervisors`), and then keeps one supervisor resident as a launchd LaunchAgent. Before it writes anything it proves that cmux will admit that supervisor (see the prerequisite below): it runs `cmux ping` the way the supervisor will run, outside cmux's process tree (orphaned, so launchd is its parent) and with the environment the agent will carry and none of the `CMUX_*` variables of the terminal it runs in, and fails with the remedies if cmux refuses. Then it writes `~/Library/LaunchAgents/com.dagq.<queue hash>.plist` (`locate` shows the path as `launch_agent`) whose `ProgramArguments` run this binary's `supervise --parallel N --log-dir <queue dir>/logs` from the repository root with your shell's PATH, `KeepAlive` and `RunAtLoad` so it restarts after any exit, and stdout/stderr in `<queue dir>/logs/launchd.log`; loads it with `launchctl bootstrap gui/<uid>`; and waits for the supervisor to register itself (`{"supervisor": {"outcome": "started", "mode": "launchd", "pid": ...}}`). A supervisor that is already registered, alive, heartbeating **and running this binary's own version** is reused and neither the plist nor launchd is touched (`"reused"`, with whichever `mode` started it, and its `version`); one of any other version is replaced instead (see below). Then it opens the inbox session in a cmux workspace named `[<repo>]inbox` (`<repo>` is the repository directory's name) created with `DAGQ_ROLE=inbox` and `DAGQ_QUEUE=<db>` in the workspace's own environment (`cmux workspace env <id> --json`; every shell of the workspace inherits them), a one-line description `dagq role=<role> queue=<queue hash>`, and membership in the queue's workspace group `[<repo>]` (external ID: the queue hash; a group cmux cannot make is reported under `warnings` and the workspace opens outside it), whose command starts `claude` with `--plugin-dir` if given and a generated prompt that names the queue and points at the plugin's `dagq-inbox` skill. `up` records each workspace's UUID in the queue and never looks workspaces up by title (ADR-0026): it is `"reused"` while cmux still lists that UUID, whatever the workspace is called now, opened again when it is gone, and `"skipped"` when `up` runs inside that very session (the plugin skill calls it), so running `up` twice changes nothing the second time. A workspace the queue recorded for a role `up` no longer opens (the resident planner among them) is forgotten (close it yourself); `retired_sessions` counts them. Planners are opened by `plan` instead, each in `[<repo>]planner#<id>` with `DAGQ_ROLE=planner` and the planner's origin and ID in its environment, running a session wrapper that starts `claude` with a prompt pointing at the plugin's `dagq-planner` skill. The result ends with a `doctor` summary: unfinished runs (with `lease_stale`), runs `awaiting_integration`, and runs in `needs_session`.
-
-**Prerequisite: cmux must accept a connection from outside its terminals.** cmux decides by process ancestry, not by environment: a client that descends from one of its terminals is admitted whatever its variables, and one under launchd is refused (`only processes started inside cmux can connect`, cmux 0.64.25 in its default `cmuxOnly` mode) unless a socket password admits it (`cmux --help`, Socket Auth: `--password`, then `CMUX_SOCKET_PASSWORD`, then the password saved in cmux's Settings, which its CLI uses on its own). Save a socket password in cmux's Settings once (`automation.socketControlMode: "password"` and `automation.socketPassword` in `~/.config/cmux/cmux.json`, then `cmux reload-config`), or export `CMUX_SOCKET_PASSWORD` in the shell that runs `up`; in that case, and only then, `up` stores it in the plist's `EnvironmentVariables` next to PATH (the plist is written mode 0600), so prefer the Settings-saved password. Without either, `up` stops before the plist exists: `cmux refused a connection from outside its own terminals ... save a socket password in cmux Settings ... or export CMUX_SOCKET_PASSWORD ...`, followed by cmux's own error. (A ping that cannot be run or does not answer within 60 seconds is reported as `cmux could not be asked ...` instead; that is not a password problem.) A supervisor that is already registered and alive (one you started by hand in a cmux terminal, below) is reused without this check. Where no socket password is configured, `up --in-cmux` is the fallback.
-
-**Fallback: `up --in-cmux`.** `--in-cmux` skips launchd entirely and runs the supervisor inside a cmux workspace of its own, so it is a child of a cmux terminal like any other client and needs no socket password. Nothing about launchd is touched: no plist is written, `launchctl` is not called, and the out-of-cmux ping is not run.
-
-```sh
-dagq up --in-cmux --parallel 4 --plugin-dir /path/to/dagq/plugins/claude-dagq
-```
-
-`up` opens a workspace named `[<repo>]supervisor` whose command is this binary's `supervise --parallel N --log-dir <queue dir>/logs`, waits for the supervisor to register itself, and reports `{"supervisor": {"outcome": "started", "mode": "in_cmux", "workspace_id": "...", "name": "[<repo>]supervisor", "plist": null}}`. Everything else is the same as the launchd mode: dead registrations are pruned first, the inbox and planner workspaces follow, and a live supervisor is reused.
-
-**There is no automatic restart in this mode.** launchd's `KeepAlive` is what brings a launchd-mode supervisor back after a crash, a `down`-less exit or a reboot; an in-cmux supervisor has nothing watching it. If it stops — including when you quit cmux, which takes its workspace with it — no work is claimed until you run `up --in-cmux` again. cmux keeps a workspace open after its command exits, so a crashed supervisor leaves `[<repo>]supervisor` behind with its output on screen; `up` recorded that workspace's UUID in the queue, and while cmux still lists it `up --in-cmux` will not open a second one and instead tells you to read that workspace and close it (`cmux workspace close <id>`). The same holds for a supervisor that is alive but no longer heartbeating, which `up` neither reuses nor kills.
-
-`status` and `doctor` show which mode is running: each entry under `supervisors` carries `mode` (`launchd`, `in_cmux`, or `null` for one you started by hand) and, for `in_cmux`, the `workspace_id` it runs in. `up` records this on the registration when the supervisor it started comes up, so it lives and dies with that registration. Each entry also carries `binary_version`, the `dagq` version of the process itself, which the supervisor writes when it registers (`null` for a lease holder without a registration, or for a supervisor that registered before the column existed).
-
-**Updating the binary: `dagq install`, or `up --auto-update` on each runtime landing.** Do not overwrite the file in place (on macOS that can kill the processes running it); if it was replaced some other way, `up` still hands over. `up` reuses a live supervisor only while its `binary_version` matches its own. When it does not, it replaces the supervisor without waiting for its sessions ([ADR-0073](docs/adr/0073-kind-additions-are-compatible.md)): it first applies the queue's pending migrations when all of them are compatible, then asks the supervisor to hand off, and the supervisor — at its next pause between short steps, after a validation or landing in progress — execs the new binary under its own pid and token. Its registration, its leases, its cmux workspace or LaunchAgent and the sessions of its runs stay as they were; the continued process picks every run up where it was. The result is `{"supervisor": {"outcome": "restarted", "handoff": true, "version": "...", "previous_version": "...", "replaced": [...], ...}, "migrated": ...}`, and `--handoff-timeout SECS` (default 1800) bounds the wait. A supervisor of a binary from before ADR-0045 cannot take a handoff, and a launchd one whose agent starts another path would go back to it at its next restart; those are drained instead, the old way: the stop is exactly `down --wait`'s (the LaunchAgent is unloaded, an in-cmux supervisor gets SIGINT, a supervisor launchd did not signal gets SIGTERM), `up` waits with no timeout until the supervisor has finished the runs it holds, closes an in-cmux supervisor's workspace, and starts one of its own in the mode you asked this `up` for. When the replacement will run under launchd, the out-of-cmux connection is proved *before* the drain. A pending migration that would break the running binary stops `up` before anything is touched: stop the supervisor (`down --wait`), run `dagq migrate`, then `up`, or let `dagq install --allow-breaking` do it.
-
-`dagq install` does the whole update in one command and keeps the old binary: it builds the main checkout (`cargo build --release --locked`; `--from` takes another checkout or a built binary), checks the build's `--version` and a start on a throwaway queue, applies the queue's compatible migrations, puts the build in place of this binary (`--to` names another) by a rename that keeps the old file as `<name>.previous` — a running process keeps the file it started from, so nothing is overwritten under it — and asks the live supervisor to hand off. If the handoff fails, the old binary is put back. `dagq install --rollback` swaps `<name>.previous` back the same way. With a breaking migration it replaces nothing unless given `--allow-breaking`, which drains the supervisor, migrates (with a backup) and starts it again with the new binary's `up`.
-
-```sh
-dagq install              # build main, replace this binary, hand the supervisor over
-dagq install --rollback   # back to the binary the last install replaced
-dagq up --no-wait         # refuse rather than sit through a drain
-```
-
-`--no-wait` only matters for a drain: if any run is in flight (`claimed`, `starting`, `running`, `validating` or `integrating`) it stops with an error naming how many and which, and nothing is signalled, unloaded or opened — the old supervisor keeps serving the queue exactly as before. With no run in flight the replacement goes ahead, and the drain itself is bounded too (30 seconds): a supervisor can fail to stop even with nothing to finish — a loop wedged on a hung `cmux` or `git` call keeps its registration while its heartbeat thread runs on — so `up --no-wait` gives up with what is still registered rather than waiting forever. It has already asked that supervisor to stop and unloaded its agent by then, so run `up` again once `status` shows it gone. The flag does nothing when the versions already match or the supervisor takes a handoff.
-
-Two limits are worth knowing. `up` only replaces supervisors it considers live — alive **and** heartbeating within 30 seconds. A supervisor that is alive but silent is one `up` neither reuses nor kills (that predates this and is deliberate), so an old-binary one in that state is not replaced either: `up` starts a new supervisor beside it and `status` shows the old row as `stale`, for you to stop with `down --force`. And `binary_version` is the build identifier `dagq --version` prints: `X.Y.Z` for a release, `X.Y.Z-dev+<commit>` (with `.dirty` when the worktree had uncommitted changes) for a build of main, whose version is the next release's with `-dev`. `up` compares the whole string, so a rebuild from another commit is replaced even though the version did not change. A build of main from a worktree edit that `build.rs` did not see (only docs changed, say) keeps its identifier; binaries before 0.4.0-dev name themselves by the version alone, so swapping in or out of one of those without a version bump still needs `down --wait`.
-
-```sh
-dagq down          # unload the agent; the supervisor drains and exits
-dagq down --wait   # ... and wait until it has deregistered
-dagq down --force  # ... then SIGKILL it and drop its registration
-```
-
-`down` unloads the LaunchAgent (`launchctl bootout`) and removes the plist, so the supervisor receives SIGTERM, stops claiming, waits for its active runs, deregisters and exits without being restarted or coming back at the next login; a signal alone would only make launchd restart it. It unloads the agent whatever mode is running, which also clears one left behind by a queue that has since moved to `--in-cmux`. A supervisor started by hand (one that is not the agent's process) gets the SIGTERM from `down` itself. An in-cmux supervisor has no service manager to signal it, so `down` sends it SIGINT — the signal Ctrl-C in its terminal would send, which the runtime drains on exactly like SIGTERM — and closes its workspace whenever it has seen the stop through: after the drain with `--wait`, after the kill with `--force`, and when nothing was running to begin with. It does not consult the PID there, because a PID outlives the stop: `kill(2)` returns before the target is reaped, so a `kill -0` right after SIGKILL still succeeds, and a supervisor that has drained removes its registration before it exits. The workspace is never closed while the supervisor may still be draining, because that would cut the drain short: the default `down` returns immediately and reports its workspace as `left_open` with `down --wait` as the remedy. The `supervisor_workspaces` field lists what happened to each one (`closed`, `left_open`, or `close_failed` with cmux's message). `--force` also drops the registrations of supervisors that were already dead, so no row is left pointing at a workspace the same call just closed. Without a live registration `down` reports `not_running` (still unloading a lingering agent, and with `--force` also dropping dead registrations). It never closes the inbox or planner workspace. `supervise`, `integrate`, `observe` and the session wrapper each write their own JSON Lines log, `<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, under `<queue dir>/logs`. Each line is one record with `timestamp` (UTC), `level`, `target`, `message`, `fields` (such as `run_id`, `task_id`, `op` and `error`) and `spans`, so `jq 'select(.fields.run_id == "<run-id>")'` follows one run. A supervisor's file has its token, PID, `--parallel`, queue and repository, the progress messages that also go to stderr, the landings and pushes it ran, and its final result. The messages printed on stderr are unchanged. Nothing rotates these files. `supervisor-<started_at>-<pid>.log` text files written by older binaries are left in place and not read.
-
-## Run tasks with the supervisor
-
-`up` is the normal way to start the supervisor. You can also run it yourself in a dedicated terminal inside the repository, with cmux and an authenticated Claude Code on PATH (or `--cmux` / `--claude`); it stays resident and runs dependency-ready tasks as they appear, up to `--parallel` at once.
-
-```sh
-dagq supervise --parallel 4
-```
-
-The supervisor registers itself in the queue when it starts (its PID, `--parallel`, and start time), refreshes that registration with its leases every 2 seconds, and removes it whenever it exits: after Ctrl-C drained its runs, after `--once` ran out of work, after a provisioning failure drained them, or on an error such as an unreadable `main`. Only a heartbeat failure keeps the row, since the database may be unreachable. `status` and `doctor` list it under `supervisors` from its first second, holding runs or not, so you can tell whether a resident loop exists before starting another. A supervisor that was killed or hangs leaves its row behind: it is shown with `alive: false` or a growing `heartbeat_age_secs` and `stale: true`; the next `up` removes the rows whose process is dead and reports them as `pruned_supervisors`, and nothing else removes them.
-
-Its runs are not lost. Before claiming, whenever it has a free slot, a supervisor looks for `running` or `validating` runs whose lease belongs to another supervisor and is stale (its PID is dead, or its heartbeat is older than 30 seconds) while the run's session wrapper is still alive and heartbeating, or has already recorded its exit. It adopts such a run in one transaction: the lease and the run's `supervisor_token` move to the adopter and a `run_adopted` event records the previous token and PID, how old the heartbeat was, and the wrapper's state. The adopter then watches the run like one it claimed, without repeating an `/exit` that was already requested, and restarts validation for a `validating` run. So after `up` replaces a killed supervisor (a binary update, a `down --force`), the runs in flight simply continue under the new one. Nothing else is adopted: a `claimed` or `starting` run, a run whose wrapper is dead or silent, a run without a lease (given up by its supervisor) and an `integrating` run are left for `recover`. Two supervisors that find the same stale lease adopt it exactly once, and a supervisor whose lease was taken from it stops watching that run without writing anything more about it.
-
-Every few seconds the supervisor looks for candidates and claims them until `--parallel` runs (default 4) are active. Each claim reads `refs/heads/main` again and uses it as the run's base commit, whichever worktree you start from, so a task released by `integrate` starts from the `main` that contains its predecessor's landing; pass `--repo PATH` to use a checkout other than the working directory. Each run gets its own lease (`lease_acquired` / `lease_released` events), a cmux workspace named `[<repo>]worker#<task-id> - <task title>` (ADR-0028) whose description is `dagq role=worker queue=<queue hash> run=<run-id> task=<id>`, with `DAGQ_ROLE=worker` and `DAGQ_QUEUE=<db>` in its environment and in the queue's workspace group (ADR-0026), and a worktree, and goes through the same state machine independently of the others. Runtime files live next to the database in `runs/<run-id>/` (see `locate`'s `runs_dir`); their paths are resolved from the run ID and the queue's current directory on every read, so a queue directory moved as a whole (after `down --wait`) keeps its unfinished and awaiting runs (`integrate` runs `git worktree repair` on the run's worktree; do not `git worktree prune` before landing them, see ADR-0017): the prompt, a snapshot of the runtime binary, the worktree on branch `dagq/<run-id>`, Claude's per-run settings and debug log, the idle marker, the receipt, and the final terminal screen. The prompt also names the task's direct predecessors (each with the commit `integrate` landed and its receipt summary) and the other tasks in progress at claim time, so a dependent run knows what it builds on and what runs beside it. The workspace command starts a hidden `session` wrapper that launches Claude with the run ID as its session ID and reports heartbeats and the exit code.
-
-The loop ends in three ways. Ctrl-C (or SIGTERM) once stops claiming and waits for the active runs to finish; a second Ctrl-C terminates the process immediately and its leases go stale after 30 seconds. `--once` exits as soon as no run is active and no task is claimable, which suits a single batch or a test. A provisioning failure (worktree or workspace creation) is treated as an environment problem: the supervisor gives that run up, stops claiming, waits for its other runs, and exits with an error. The final JSON lists the runs that came to rest under `runs` and the runs it gave up under `errors`.
-
-Claude stops at its folder-trust prompt in a run's workspace only when the repository itself has never been trusted: the prompt is decided by the repository root, not by the worktree path, so run `claude` once in the repository root and accept the prompt before the first `supervise` on a repository, and every run worktree starts without it (see [Trust prompt](docs/design/provider-lifecycle.md#trust-prompt)). Permission prompts can still appear in each workspace; answer them there. When a session has run for 90 seconds with neither a receipt nor an idle marker, the supervisor reads its screen (at most every 10 seconds) and records a dialog it finds there (a trust question, a `❯`-marked numbered choice, an `Enter to confirm` / `Esc to cancel` footer) once as `prompt_waiting` with the last 15 lines of the screen and opens an `answer_prompt` ask for the inbox with that excerpt; `prompt_cleared` is recorded once the dialog is gone, and the ask then closes itself. The supervisor sends no key to a dialog: you answer it in the workspace, or tell the inbox what to send. A receipt does not end the session. Claude is started with a per-run `--settings` file whose `Stop` hook writes `<run-dir>/idle.json` each time a response finishes; once that marker is newer than the receipt, the supervisor records `session_idle_observed` and sends `/exit` to the workspace once (`exit_requested`). You can still send `/exit` yourself at any time, and you must if the hook is disabled or Claude is waiting on a prompt. If the session has not exited 120 seconds after the request, the supervisor records `exit_request_timed_out` once and keeps the run and its lease: it does not resend `/exit` (a dialog may be holding it back), `status` shows the attention `send /exit`, and once you deal with the dialog and send `/exit`, the run is validated as usual while the other runs continue. A nonzero exit code marks the run `failed` with `session exited with code N` in `last_error`. With exit code 0 the supervisor validates the receipt: it must name this run, report `succeeded`, give evidence for passed checks and a reason for `not_applicable` ones, and its commit must be the clean head of the run branch on top of the base commit. The supervisor does not run the task's verification commands here: `integrate` runs them once, after its rebase (ADR-0040). A run that passes becomes `awaiting_integration` with its `result_commit` recorded; anything else becomes `failed` with the reason in `last_error`, except a run that passed everything but lacks evidence the task requires (`add --evidence e2e`: that check must be `passed` with evidence; `failed`, `not_applicable` or a blank evidence counts as missing). It becomes `needs_session` with `evidence missing: e2e` in `last_error` and an `evidence_missing` event, and the supervisor resumes its session to run the check and rewrite the receipt. Only an accepted run has its cmux workspace closed (`workspace_closed_at` is set once cmux confirms); its worktree and branch stay until integration. If the close fails, the run stays `awaiting_integration` with a `cleanup_failed` event and the error in `last_error`, and `workspace_closed_at` stays null so the workspace is not treated as cleaned. A failed run keeps its workspace, worktree, and branch. A run that reached `awaiting_integration` or `failed` releases its lease.
-
-If something goes wrong around a run rather than in it (its wrapper stops heartbeating, validation itself errors, or the close cannot be recorded), the supervisor gives that one run up: it records the cause in `last_error` and a `runtime_error` event, deletes the run's lease, and leaves its status, processes, workspace, and worktree untouched, then keeps serving the other runs. Such a run shows up in `doctor` without a lease. Nothing is rerun automatically.
-
-A run's `last_error` (in `show` — cut to 300 characters unless `--full` —, `doctor --full`, and the supervisor's final `errors`) holds only the latest of these messages; `integrate` clears it when the run lands, and the full history is in the run's events. A nonzero session exit writes `session exited with code N` (128 for a session killed by a signal) as the run becomes `failed`. A rejected receipt writes the first failed check verbatim as the run becomes `failed`: `receipt was not submitted at <path>`, the parse or `run_id` error for a malformed receipt, `no commit was made on top of base <sha>`, `worktree is on <ref> instead of refs/heads/<branch>`, `receipt commit <sha> is not the head of <branch> (<head>)`, `commit <sha> does not descend from base <sha>`, `worktree is not clean:` followed by the `git status` output. A runtime or provisioning error writes the error text as-is next to a `runtime_error` event without changing the status: `run <run-id> provisioning failed: ...` when the worktree or workspace could not be created, `wrapper heartbeat expired; session may still be alive`, or the Git or database error from validation itself. A cleanup failure writes `workspace <workspace-id> could not be closed: ...` (the run stays `awaiting_integration`) or, after landing, `landed worktree <path> could not be removed: ...` next to a `cleanup_failed` event. `integrate` writes it too: `needs_session` carries the rebase or re-validation reason, an error before `main` moves puts the run back with `integration stopped before main moved: ...`, and a rewritten `failed` receipt marks the run `failed` with the receipt's reason (see [Land a run on main](#land-a-run-on-main)). Read it together with the status and the last event: `failed` means a nonzero exit, a rejected receipt, or a failed receipt at integration; `claimed`, `starting`, `running`, or `validating` with a `last_error` means the supervisor gave the run up; `awaiting_integration` with a `last_error` means the close failed (`cleanup_failed`, `workspace_closed_at` null) or an `integrate` attempt stopped before `main` moved (`integration_error`); `needs_session` means `integrate` parked it.
-
-## Configure runs with `dagq.toml`
-
-A `dagq.toml` at the repository root sets environment variables for every run. It has one table, `[run.env]`; each key is a variable name and each value a quoted string (`'literal'` or `"basic"` with `\\`, `\"`, `\n` and `\t` escapes). No file means no extra variables.
+### Run environment
 
 ```toml
 [run.env]
 RUST_LOG = 'info'
+CACHE_DIR = '${DAGQ_QUEUE_DIR}/cache'
 ```
 
-`${DAGQ_QUEUE_DIR}` expands to the queue directory and `${DAGQ_RUN_DIR}` to the run's directory; any other `$` text is kept as written. The supervisor passes the variables to the worker's workspace (after its own `DAGQ_ROLE` and `DAGQ_QUEUE`, which `[run.env]` cannot set: keys starting with `DAGQ_` are rejected) and to the verification commands of validation and `integrate`. The file is read from the repository's main checkout, not from the run's worktree. A file that does not parse stops the supervisor at the next claim, before a workspace opens, and stops validation or `integrate` with an error that leaves the run where it was.
+The supervisor passes these variables to every worker and to the verification commands landing runs. `${DAGQ_QUEUE_DIR}` expands to the queue directory and `${DAGQ_RUN_DIR}` to the run's directory; any other `$` is kept as written. Keys starting with `DAGQ_` are refused. A program a variable names (such as `RUSTC_WRAPPER`) must be found on the supervisor's PATH. While it is missing, `up` does not start the supervisor, claims and landings wait, and the inbox gets `install tool`.
 
-`dagq.toml` is committed with the repository and its values appear in the argv of the `cmux` command that opens the workspace, so do not put secrets in it.
+### Landing recheck
 
-This repository does not share `CARGO_TARGET_DIR` between runs and has no `dagq.toml`. Cargo's lock serializes only the build, not the test run that follows. Tests that exec `CARGO_BIN_EXE_dagq` could run a `target/debug/dagq` that a concurrent run's build just overwrote. Concurrent `cargo llvm-cov` runs would also delete and mix each other's profraw files in the shared `llvm-cov-target`, so the coverage gate would be wrong. Sharing the build safely, for example with sccache, is left for later.
-
-## Recover an interrupted run
-
-A run is orphaned when its supervisor gave it up, or was killed or lost its heartbeat while no supervisor with a free slot could adopt it (its session wrapper was dead or silent too, or it had not reached `running`). The task stays `in_progress` and the run keeps its resources; other runs, and a supervisor still running them, are unaffected. Inspect first:
-
-```sh
-dagq doctor --full
+```toml
+[recheck]
+command = "cargo check --locked --all-targets"
 ```
 
-`doctor --full` lists the supervisors under `supervisors`: every registered `supervise` process (`registered: true`, with `pid`, `alive` from `kill -0`, `parallel`, `started_at`, `heartbeat_at`, `heartbeat_age_secs`, the `run_ids` it holds, and `stale` when the PID is dead or the heartbeat is older than 30 seconds) and any other process that holds a lease without a registration, such as a running `integrate` (`registered: false`). A stale registration is reported, never deleted; `recover` and `integrate` do not touch it. Then every run in `claimed`, `starting`, `running`, `validating`, or `integrating` with its workspace ID, whether its worktree and run directory exist, its own lease (or `null`), and each registered wrapper/agent process with its PID, liveness (`kill -0`), and heartbeat age. `blockers` names what would stop a recovery of that run, considering only its own lease and processes; `recoverable` is true when the list is empty. Stop the listed processes yourself, for example by exiting the session in its workspace.
+After each landing, the supervisor checks the runs still waiting to land against the new tip of the landing branch. Without `[recheck]` it checks only for Git conflicts (`git merge-tree`). With it, it also runs `command` on the merged tree in a scratch worktree under the queue directory. A run that conflicts or fails the command goes back to its worker before it tries to land ([Landing recheck](docs/design/supervisor-lifecycle/landing-recheck.md)).
 
-```sh
-dagq recover <run id>
-```
+### Supervisor and the rest
 
-`recover` refuses while any process registered for that run is still alive, its lease heartbeat is fresh, or its lease's supervisor PID is alive. Otherwise it marks the run `interrupted`, records a `run_recovered` event with the state it checked, and deletes that run's lease only. The worktree, branch, and workspace are kept for inspection, and the task stays `in_progress`. To retry, make the task ready again with `ready ID` (or `draft ID` to edit it first); a running supervisor (or the next one) creates a new run with its own worktree. The same applies to a task whose last run `failed`.
+`[supervisor]` sets `parallel` (runs at once, default 4), `max_waiting` (runs waiting for a person's answer outside the slots, default 4), and `runtime_planners` (planners the runtime opens at once, default 1). The supervisor rereads them on every pass. Other tables cover task labels (`[tasks] changes`), areas for statistics (`[areas]`), KPI targets (`[kpi]`), which roles run on Codex (`[roles.<role>]`), and thresholds. See [Run environment](docs/design/supervisor-lifecycle/run-environment.md).
 
-The runtime never closes the cmux workspace of a failed or interrupted run. Once you are done inspecting it, close it yourself with `cmux workspace close <workspace_id>`; the workspace ID is the run's `workspace_id` in `show ID` (`doctor` lists only unfinished runs, so a failed or interrupted run is not there). If you instead resolved the run in a `claude --resume <run-id>` session (see below), exit that session with `/exit` before running `integrate ID`, because landing removes the worktree the session is working in.
+Settings for the host, not the repository, go in `host.toml`: the queue's `<queue dir>/host.toml`, or `~/.config/dagq/host.toml` for every queue on the host. These include the release update (`[update]`) and where reports are pushed (`[push]`).
 
-The receipt is JSON at `<run-dir>/receipt.json`, written by atomic rename:
+## Commands
 
-```json
-{"run_id": "<run id>", "result": "succeeded", "commit": "<full SHA>",
- "tests": {"status": "passed", "evidence_or_reason": "cargo test: 15 passed"},
- "e2e": {"status": "not_applicable", "evidence_or_reason": "library change"},
- "subagent_review": {"status": "passed", "evidence_or_reason": "no findings"},
- "summary": "..."}
-```
+Every command prints JSON on stdout (except `graph --format d2|svg`); a runtime error prints JSON on stderr and exits nonzero. `dagq <command> --help` lists every flag. The plugin's skills run these commands for you; the table is for reading what they do.
 
-`status` is `passed`, `failed`, or `not_applicable`; `result` is `succeeded` or `failed`. The receipt's claims never make a run succeed on their own.
-
-## Land a run on main
-
-Review the run branch `dagq/<run-id>`: `dagq review 1` writes the task, the receipt, the commits and the full diff to `review.md` in the run directory and prints only its path and the diff's size, so the session reviewing by hand hands the file to a subagent instead of reading the diff itself. The verification commands run only when `integrate` lands the run; each `integrate` attempt writes its own `integrate-<attempt>-verify-N.log` files in the same directory, so a second attempt does not overwrite the first one's. Do not merge it yourself; landing is the runtime's job, one run at a time:
-
-```sh
-dagq integrate 1        # the task's run
-dagq integrate --next   # the oldest run awaiting integration
-```
-
-`integrate` marks the run `integrating` (holding the queue's single integration slot with a lease of its own), rebases the run's worktree onto the current `refs/heads/main`, and re-validates it: the receipt must name the worktree's head and report `succeeded`, the rebased head must sit on `main` with a clean tree, and the task's verification commands run (`<run-dir>/integrate-<attempt>-verify-N.log`, one set per attempt, `verification_command` events with `phase: integration` and the `attempt`). This is their only run for the commit: validation does not run them, and they run even when the rebase was a no-op, so `"verification_skipped"` is always `false`. A failing command parks the run as `needs_session`. It then squashes the rebased tree into **one** commit on top of `main` whose message is the task title, the receipt's summary, and the trailers `Dagq-Task: <id>` and `Dagq-Run: <run-id>`. Where `main` is checked out the commit is fast-forwarded through that checkout so its files move too; otherwise the ref is updated directly. No merge commit and no fast-forward of the run branch: `main` stays a straight line with one commit per task, and the landed tree equals the validated worktree's tree. The run becomes `integrated` with the landed commit as its `result_commit`, the task becomes `completed` (`run_integrated` and `task_status_changed` events), the run's own history is kept under `refs/dagq/runs/<run-id>`, and the worktree and branch are removed. Dependent tasks then appear in `candidates`; a running supervisor claims them on its next poll with the landed `main` as their base. `--next` lands runs in the order their validation finished and prints `{"outcome": "no_run_awaiting"}` when none is left.
-
-If the rebase conflicts, `integrate` aborts it, leaves the worktree on its validated head, and parks the run as `needs_session` with the conflicting files in `last_error` (`{"outcome": "needs_session", "main": ..., "reason": ...}`). If the rebase applies but a verification command fails on the result, the run is parked the same way with the rebased tree left in place. Nothing reaches `main`. The supervisor then resumes the run's own Claude session (ADR-0019): it opens a workspace in the worktree, titled like the run's worker with the description `run <run-id> resume`, with the worker's wrapper and settings (`claude --resume <run-id>`), types a fixed request (the reason, the `main` to rebase onto, the tasks landed since the run's base, and the steps: rebase, resolve, rerun the verification commands, commit, rewrite `receipt.json` with the new head, or write `"result": "failed"` if the change is no longer needed), sends `/exit` once the receipt names the worktree head and the session is idle, and closes the workspace (`resume_started` / `resume_finished` events). Because calling `integrate` approved the run (`integration_approved`), the supervisor lands it with the same steps as `integrate`; a run nobody integrated goes back to `awaiting_integration`, and a failed receipt marks it `failed` so the task can be retried with `ready ID` or dropped with `cancel ID`. A landing that conflicts again starts the next resume; after three resumes that did not resolve it the supervisor marks the run `failed` and opens a `decide` ask for the inbox (`retry` makes the task ready again, `cancel` drops it), which it applies once answered. Until then `status` shows `resuming (runtime)`. `integrate ID` also takes a `needs_session` run; `--next` never picks one. A parked or awaiting run keeps its task `in_progress`. The supervisor triages a failed or interrupted run and then closes its cmux workspace; only after a triage that failed (`triage by hand`) do you close it yourself with `cmux workspace close <workspace_id>` (the ID is the run's `workspace_id` in `show ID`; `doctor` does not list finished runs).
-
-An error before `main` moves (a missing worktree, a `main` checkout with local changes that collide with the landing, a Git failure) puts the run back where it was with the message in `last_error` and an `integration_error` event; fix the cause and run `integrate` again. An `integrate` process that dies leaves its run `integrating` with a stale lease: `doctor` lists it, and `recover RUN_ID` returns it to `awaiting_integration` once the process is gone. A task with no run awaiting integration or a session is an error, so a task cannot be landed twice.
-
-The landing happens in the working directory's repository; pass `--repo PATH` to name another checkout, for example when using `--db` from elsewhere. Either way it must be the repository the queue is bound to: a queue resolved from the working directory is bound by `init`, a `--db` queue by its first `supervise`, and a mismatch is an error. After landing, `integrate` pushes `main` to `origin` (`push` in its output: `pushed`, `skipped` when there is no `origin` or with `--no-push`, or `failed`). A failed push keeps the landing, is recorded as `push_failed` and shows in `status` as the attention `push main`; fix the cause and run `git push origin main`.
-
-## Move the repository or the queue
-
-The queue directory can be moved as a whole on its own: stop the supervisor with `down --wait`, land or resolve `needs_session` runs, move `queue.db` with its WAL files, `runs/`, `logs/` and `repository` together, and point `--db` (or `DAGQ_DB`) at the new place; run paths are resolved from where the queue is opened, and `integrate` repairs each worktree's Git record (ADR-0017). Do not `git worktree prune` before those runs have landed.
-
-Moving the repository (a directory move, or a GitHub rename that moves a ghq checkout) changes its Git common directory, so the checkout resolves to a new, empty queue location, and the old queue is still bound to the old path: once it sits where the new checkout resolves, every command fails with `queue is bound to another Git repository`, and through `--db` `supervise` and `integrate` do; `init` does not rebind it. `rebind` does, explicitly (ADR-0020). In this order:
-
-1. In the old checkout, `dagq down --wait`: the supervisor drains its runs and its LaunchAgent (named after the old queue hash) is removed. Resolve and land `needs_session` runs; runs awaiting integration survive the move.
-2. Move the repository. Do not run `init` in the new checkout: it would create an empty queue where the old one has to go.
-3. From the new checkout, rebind the old queue in place: `dagq --db <old queue dir>/queue.db rebind` (with the plugin launcher, `DAGQ_DB=<old queue dir>/queue.db`). It prints `previous_git_common_dir` and `git_common_dir`, repairs the Git link of each run worktree still on disk, and names the new location as `move_to`. A running supervisor or `integrate` makes it fail before anything changed.
-4. Move the old queue directory to `move_to` as a whole, e.g. `mv <old queue dir> <move_to>`. `move_to` must not exist yet; if it does (an `init` ran in the new checkout), check that it holds no tasks and remove it first, or `mv` puts the old queue inside it.
-5. From the new checkout, `dagq list` and `dagq status` work without flags; start the runtime again with `up`.
-
-If the repository was already moved without step 1, the old checkout is gone: stop an in-cmux supervisor with `dagq --db <old queue dir>/queue.db down --wait`, but the LaunchAgent is named after the old repository's hash, not the `--db` path, so remove it by hand with `launchctl bootout gui/$(id -u)/com.dagq.<old hash>` and delete its plist under `~/Library/LaunchAgents` (the old hash is the old queue directory's name).
-
-The reverse order also works: move the queue directory to `dagq locate`'s `queue_dir` first, then run `dagq rebind` without `--db` (every other command, `init` included, refuses the queue until then). Rebinding first is preferred because the step that can be refused happens before anything was moved, and `move_to` says where to go. `rebind` from the repository the queue is already bound to reports `unchanged`. The database is never edited by hand for any of this.
-
-## Use from Claude Code
-
-`plugins/claude-dagq` is a Claude Code plugin whose skills drive the binary, plus one `SessionStart` hook that prints `status --role <role>` into an inbox or planner session after compaction or `/clear`; it never opens the queue database itself. This repository is also its marketplace (`.claude-plugin/marketplace.json`), so installing it takes two commands:
-
-```sh
-claude plugin marketplace add hisamekms/dagq
-claude plugin install claude-dagq@dagq
-```
-
-The plugin does not carry the binary: install that separately from a [release](https://github.com/hisamekms/dagq/releases) into `~/.local/bin` ([Getting started](#getting-started)), or build it here. To work on the plugin itself, load it from the checkout for a session instead of installing it:
-
-```sh
-cargo build --locked
-export DAGQ_BIN="$PWD/target/debug/dagq"   # or put it on PATH
-claude --plugin-dir "$PWD/plugins/claude-dagq"
-```
-
-The queue is the one of the repository you run Claude Code in, resolved by the binary as described above and shared by all of its worktrees; set `DAGQ_DB=/path/to/queue.db` to use another file, which the launcher passes as `--db`. The plugin's launcher `bin/dagq` resolves the binary and forwards any command from the current directory (`bin/dagq --resolve` shows the binary, its `binary_version`, the plugin's `plugin_version`, and `locate`'s output; when the two versions differ in major.minor it also writes a `{"warning": ...}` to stderr and still exits 0).
-
-| Skill | Covers |
+| Area | Commands |
 | --- | --- |
-| `/claude-dagq:dagq` | Locate the binary and queue, `init`, register a goal with `goal add` and decompose it into tasks with `add --goal` (description, acceptance, `--verify`, `--depends-on`, `--context`), `ready`, `list` / `show` / `candidates` / `locate` / `status` / `doctor`, how to read run states, close a goal |
-| `/claude-dagq:dagq-planner` | The planner session: register the person's problems as goals and tasks (through `dagq`), make them ready, follow a goal, decide the draft tasks from receipts' `follow_ups` and the observer's draft goals with the person, close a goal |
-| `/claude-dagq:dagq-inbox` | The inbox session: `status --role inbox`, `watch --role inbox` in the background, show each open ask with its options to the person and write their answer with `answer`, report every other attention (an answered ask, a stopped supervisor, a failed review or triage, a failed push), and do only what the person says through `dagq-recover`; it decides nothing itself |
-| `/claude-dagq:dagq-recover` | What a person does by hand, from the inbox or planner session: `up` / `down` and replacing the binary, `doctor` and `recover RUN_ID` when no supervisor serves the queue, deciding a run whose triage failed, reviewing and integrating a run whose headless review failed, pushing `main` after a failed push, and carrying out a `stuck_exit` or `answer_prompt` answer in a run's workspace |
+| Queue and runtime | `locate`, `init`, `migrate [--check]`, `up`, `down [--wait\|--force]`, `plan`, `planners`, `install`, `rebind` |
+| Goals | `goal add`, `goal list`, `goal show`, `goal edit`, `goal ready` (open a draft goal), `goal close --verdict achieved\|abandoned`, `goal review` |
+| Tasks | `add`, `edit`, `list`, `show`, `search`, `related`, `draft`, `cancel`, `dependency add\|remove`, `set-goal`, `set-paths`, `set-priority` |
+| Plans | `lint`, `submit`, `proposal list\|show\|withdraw`, `ready ID --bypass-review` (a person only) |
+| Watching | `status [--role inbox]`, `doctor [--full]`, `watch [--role inbox] [--until-attention]`, `events`, `timeline RUN`, `candidates`, `graph`, `run screen\|send`, `planner screen\|send` |
+| Asks and notes | `asks [--open]`, `ask`, `answer ID --text TEXT`, `ask close`, `note`, `notes`, `findings`, `finding` |
+| Landing and recovery | `review ID`, `integrate ID\|--next`, `recover RUN_ID`, `run close-workspaces` |
+| Measuring | `stats`, `kpi`, `forecast`, `report`, `mark`, `marks` |
 
-Claude picks the skill from the request ("queue a task to …", "start the runtime", "did task 3 finish?", "the supervisor died"). Each skill keeps its field lists and state tables in its own `reference/` directory, read only when needed. `up` opens the inbox and planner sessions with this plugin loaded when it is given `--plugin-dir`. The plugin's `SessionStart` hook (on `compact` and `clear`) prints `dagq status --role <role>` into a session started with `DAGQ_ROLE` set to `inbox` or `planner`, so it re-orients itself after compaction or `/clear`; every other session gets no output. `claude plugin validate plugins/claude-dagq` checks the manifest and skills; `tests/plugin.rs` checks them and the launcher in `cargo test`.
+The supervisor and its jobs run some of these for you (`supervise`, `observe`, `throughput-review`); you do not need to run them by hand.
 
-## Development
+## Update
 
-Building from source is for working on dagq itself; to use it, install the released binary or `cargo install --locked dagq` ([Getting started](#getting-started)). Requires Rust 1.98 (`rust-toolchain.toml` pins 1.98.1 with rustfmt, clippy and llvm-tools-preview; rustup installs it on the first `cargo` run) and a C compiler for bundled SQLite; no separate SQLite installation is needed.
+**Automatic, with your answer.** A supervisor running a release build (`dagq --version` prints a plain `X.Y.Z`) checks crates.io once a day and at start ([ADR-t618-1](docs/adr/2026-09-27-t618-1-release-update-by-ask-from-crates-io.md), [Release update](docs/design/supervisor-lifecycle/release-update.md)). When there is a newer release, the inbox gets an `approve_release` ask. Answer `install` to update, or `skip` to skip that version.
 
-```sh
-cargo build --locked   # target/debug/dagq
+On `install`, the supervisor runs `cargo install --locked dagq@<version>` into the queue directory. It checks the new binary's `--version` and that it starts on a throwaway queue, and applies compatible migrations. It then replaces the running binary by a rename (the old one stays as `dagq.previous`) and hands the supervisor over without stopping the runs in flight. After that it updates the installed plugin to the same release with `claude plugin marketplace update dagq` and `claude plugin update claude-dagq@dagq` ([ADR-t618-2](docs/adr/2026-09-27-t618-2-plugin-follows-the-release-update.md)). The open inbox and planner sessions load the new plugin when you restart them. If a check fails, nothing is replaced (or the old binary is put back), and the inbox gets an `update_failed` ask (`retry` / `skip`). A release with a breaking migration is never installed automatically. It opens an `approve_update` ask instead, because the supervisor must drain first. The ask names the `dagq install ... --allow-breaking` command for the release it built. That command waits for the runs in flight, backs up the queue, migrates it, and starts the supervisor again. Run it only after you have answered the open asks.
+
+Choose the behavior in `host.toml`:
+
+```toml
+[update]
+release = "ask"   # "ask" (default), "auto" (no ask; breaking migrations still ask), or "off"
 ```
 
-Every change runs these four:
+A failed check, for example while offline, is recorded as an event only and is tried again later.
+
+**By hand.**
 
 ```sh
+dagq install --release          # the newest release (or --release 0.4.0); same checks, swap and handoff
+dagq install --rollback         # put dagq.previous back
+```
+
+`cargo install --locked dagq` followed by `dagq up` also works: `up` hands the supervisor over to the new binary. It skips the checks and keeps no `.previous`. Update the plugin with `claude plugin update claude-dagq@dagq` either way.
+
+Do not copy a new binary over the running one: on macOS that can kill the processes running it.
+
+## When something goes wrong
+
+Ask the inbox; the `dagq-recover` skill has the procedures (`up` / `down`, `doctor` and `recover` when no supervisor serves the queue, reviewing a run by hand, pushing after a failed push). The design documents explain each state: [Recover](docs/design/supervisor-lifecycle/recover.md), [Needs session](docs/design/supervisor-lifecycle/needs-session.md), [Integrate](docs/design/supervisor-lifecycle/integrate.md), [Rebind](docs/design/supervisor-lifecycle/rebind.md) (after moving the repository).
+
+## Developing dagq
+
+This section is for working on dagq itself. [AGENTS.md](AGENTS.md) has the rules for this repository: the fixed binary in `~/.local/bin`, `dagq install` from the source checkout, `up --auto-update`, and the checks every change passes. This repository also runs its own development through dagq.
+
+```sh
+cargo build --locked   # target/debug/dagq; rust-toolchain.toml pins the toolchain
 cargo fmt --all --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
-cargo llvm-cov nextest --locked --workspace --fail-under-lines 80
 ```
 
-GitHub Actions runs the same checks on a macOS runner for every push to `main` and every pull request ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), without a separate `cargo test` step: `cargo llvm-cov nextest` runs the same test binaries (the unit tests in `src/lib.rs`, the integration tests in the one binary `tests/it`, and `tests/e2e.rs` and `tests/plugin.rs` ([ADR-0078](docs/adr/0078-one-integration-test-binary.md)); the crate has no doctests), each test in its own process and in parallel across binaries, and fails if any test fails, so running both would only run every test twice ([ADR-0076](docs/adr/0076-run-the-coverage-gate-tests-with-nextest.md); `.config/nextest.toml` only marks tests over 60 seconds as slow). For the same reason, a task whose `verification_commands` include the coverage gate does not also list `cargo test --locked`.
-
-The tests use temporary databases and repositories, point `XDG_DATA_HOME` at temporary directories, and do not require cmux, Claude Code, or network access after dependencies have been fetched. Line coverage must stay at or above 80% (`cargo install cargo-llvm-cov cargo-nextest`). The end-to-end paths in `tests/e2e.rs` drive the real binary through cmux with a stub agent, resolving the queue from the disposable repository's working directory, and are ignored by default; run them with `cargo test --locked --test e2e -- --ignored` where cmux is available. They are: one task landed by `integrate`; two tasks in parallel followed by a dependent one, with a conflicting run parked as `needs_session` and landed after the test resolves it; one that kills a `supervise` process while its stub worker runs and checks that the next `supervise --once` adopts and lands the run; and `up` → `status` → `down --wait` once per supervisor mode, with the plist under a disposable `HOME`. The launchd `up` / `down` test is temporarily off by default, even under `--ignored`: no project runs the launchd mode now, and it needs cmux to accept the launchd-run supervisor's connection (a socket password in cmux's Settings), without which `up`'s preflight always stops it. It prints why and passes without running unless `DAGQ_E2E_LAUNCHD=1` is set. The `up --in-cmux` one always runs, needs no socket password, and asserts that no plist is written and that launchd has no agent for the queue. The `tests/it/lifecycle_*.rs` files (one per area: `up`, `up --in-cmux`, `down`, the cmux adapter, replacement, planners and `install`, with the shared fakes in `tests/common/lifecycle.rs`) cover those areas, `up` and `down` in both modes, against fakes for launchd, cmux and process signals, including the version-mismatch replacement (drain and restart in each mode, the `--no-wait` refusal with a run in flight, and the reuse of a supervisor of this binary's own version).
-
-## Release
-
-A release is cut by a tag. Between releases `main` carries the next version with a `-dev` pre-release (now `0.4.0-dev`), and its builds name the commit they came from (`dagq --version` prints `0.4.0-dev+<commit>`). To release, drop `-dev` from `version` in `Cargo.toml` (and in `plugins/claude-dagq/.claude-plugin/plugin.json`, which is versioned with it), land that on `main`, then push the matching tag:
-
-```sh
-git tag v0.4.0
-git push origin v0.4.0
-```
-
-Once the release is out, raise `main` to the next development version (`0.5.0-dev`, say) the same way.
-
-[`.github/workflows/release.yml`](.github/workflows/release.yml) checks that the tag is `v` plus the `Cargo.toml` version, builds the `aarch64-apple-darwin` binary, attaches the tarball and `SHA256SUMS` to the GitHub Release, and then publishes the same version to crates.io. The publish authenticates with crates.io Trusted Publishing (a short-lived token from the job's OIDC identity; no registry secret is stored) and is skipped when crates.io already has that version, so rerunning the workflow is safe ([ADR-0030](docs/adr/0030-publish-to-crates-io-on-tag-push-with-trusted-publishing.md)). `cargo publish --dry-run --locked` checks the package locally; the package holds only `build.rs`, `src/`, `migrations/`, `Cargo.toml`, `Cargo.lock`, `README.md` and `LICENSE`.
-
-Trusted Publishing can only be configured for a crate that exists, so the first publish is done once by hand, as ADR-0030 describes: verify your email address in crates.io Account Settings (an unverified account cannot publish), create a short-lived crates.io API token with the `publish-new` scope, `cargo login` with it and `cargo publish --locked` from a clean checkout of `main`, revoke the token and `cargo logout`; then in the crate's Settings → Trusted Publishing on crates.io add a GitHub publisher with owner `hisamekms`, repository `dagq`, workflow `release.yml` and no environment. From the next tag on, crates.io gets the new version automatically.
-
-The step-by-step procedure for a release, including how to confirm the first automatic crates.io publish, is the repository's release skill [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md).
+To use the plugin from the checkout instead of the installed one, pass `--plugin-dir <repository>/plugins/claude-dagq` to `up` and `plan` (or `claude --plugin-dir`). It overrides an installed plugin of the same name. Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release and publishes the crate to crates.io.
 
 ## Documentation
 
 - [Documentation guide](docs/README.md)
 - [Current design](docs/design/overview.md)
-- [Active plan](docs/plans/current.md)
 - [Architecture decisions](docs/adr/README.md)
-- [Agent instructions](AGENTS.md)
+- [Plugin integration](docs/design/plugin-integration.md)
 
 ## License
 
