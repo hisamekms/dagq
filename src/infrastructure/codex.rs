@@ -293,8 +293,17 @@ impl AgentProvider for Codex {
     fn resume_command(&self, _: &TaskRun) -> Result<CommandSpec> {
         bail!("Codex runs headless only: it has no interactive session")
     }
-    fn review_command(&self, _: &TaskRun, _: &str, _: JobAccess) -> Result<CommandSpec> {
-        bail!("Codex does not review: the review jobs stay Claude's")
+    fn review_command(
+        &self,
+        run: &TaskRun,
+        prompt: &str,
+        access: JobAccess,
+    ) -> Result<CommandSpec> {
+        self.headless_command(
+            Path::new(run.worktree_path().context("missing worktree")?),
+            prompt,
+            access,
+        )
     }
     /// `-m <model>` for a model of Codex's (a claim's Claude model is left
     /// to Codex's default) and `-c model_reasoning_effort="<effort>"`.
@@ -790,10 +799,22 @@ mod tests {
         );
         assert!(codex.command(&run, "p").is_err());
         assert!(codex.resume_command(&run).is_err());
-        assert!(
-            codex
-                .review_command(&run, "p", JobAccess::ReadFiles)
-                .is_err()
+        let review = codex
+            .review_command(&run, "p", JobAccess::ReadFiles)
+            .unwrap();
+        assert_eq!(review.get_current_dir(), Some(worktree.as_path()));
+        assert_eq!(
+            args(&review),
+            [
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "-C",
+                worktree_text.as_str(),
+                "--",
+                "p"
+            ]
         );
         assert!(codex.turn_session_from_output());
         assert!(codex.turn_reader().is_ok());

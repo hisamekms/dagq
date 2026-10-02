@@ -240,9 +240,13 @@ impl Supervisor<'_> {
 
     /// The wall only a person moves (a login that ran out, the usage
     /// limit) that the output of a headless job that failed shows it
-    /// stopped at (ADR-0047 decision 42, task 438).
+    /// stopped at (ADR-0047 decision 42, task 438). Only Claude's walls
+    /// hold the queue: a Codex job that stopped at one fails, and its
+    /// failure takes the job's own manual path (ADR-t1207-1).
     pub(super) fn job_wall(&self, job: &HeadlessJob) -> Option<Wall> {
-        self.job_failure(job).wall()
+        self.job_failure(job)
+            .wall()
+            .filter(|_| job.provider == Provider::Claude)
     }
 
     /// Raise a headless job that failed at `wall` (task 438): the job joins
@@ -462,6 +466,9 @@ pub(super) struct ReviewWatch {
     /// Whether this review is the retry of one whose stdout held no
     /// readable verdict: another unreadable one is not retried again.
     pub(super) retried: bool,
+    /// Whether `[roles.review]` names its provider: a provider that cannot
+    /// be used then moves the review to the other (ADR-t1207-1).
+    pub(super) switchable: bool,
     pub(super) job: HeadlessJob,
 }
 

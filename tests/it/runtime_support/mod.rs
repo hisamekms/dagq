@@ -1484,7 +1484,7 @@ pub fn headless_codex(dir: &Path, db: &Path) -> PathBuf {
     let stub = dir.join("codex-headless");
     let script = format!(
         r#"#!/bin/sh
-MODE=start; THREAD=; PROMPT=; ROOTS=
+MODE=start; THREAD=; PROMPT=; ROOTS=; REVIEW=
 ARGS=
 for arg in "$@"; do ARGS="$ARGS $arg|"; done
 [ "$1" = --version ] && {{ echo "codex-cli 0.46.0"; exit 0; }}
@@ -1494,12 +1494,30 @@ if [ "$1" = resume ]; then MODE=resume; shift; fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -c) case "$2" in sandbox_workspace_write.writable_roots=*) ROOTS=$2 ;; esac; shift 2 ;;
+    --sandbox) [ "$2" = read-only ] && REVIEW=1; shift 2 ;;
     -C|-m) shift 2 ;;
     --) shift; break ;;
     *) shift ;;
   esac
 done
 if [ "$MODE" = resume ]; then THREAD=$1; PROMPT=$2; else PROMPT=$1; fi
+if [ -n "$REVIEW" ]; then
+  printf '%s\n' "$ARGS" >> {dir}/codex-review-args.log
+  printf '%s %s\n' "$DAGQ_ROLE" "$DAGQ_ACTOR_ID" >> {dir}/codex-review-actors.log
+  REVIEW_CALL=$(wc -l < {dir}/codex-review-actors.log | tr -d ' ')
+  printf '{{"type":"thread.started","thread_id":"codex-review-thread"}}\n{{"type":"turn.started"}}\n'
+  if [ -f {dir}/codex-review-failure.jsonl ]; then
+    cat {dir}/codex-review-failure.jsonl
+    exit 1
+  fi
+  if [ -f {dir}/codex-review-$REVIEW_CALL.jsonl ]; then
+    cat {dir}/codex-review-$REVIEW_CALL.jsonl
+  else
+    printf '{{"type":"item.completed","item":{{"id":"review","type":"agent_message","text":"{{\\"verdict\\":\\"pass\\",\\"reasons\\":[],\\"summary\\":\\"codex passed\\"}}"}}}}\n'
+  fi
+  printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}}}}\n'
+  exit 0
+fi
 RUN_DIR=$(printf '%s' "${{ROOTS#*=}}" | tr -d '[]' | tr ',' '
 ' | sed -n 5p | tr -d '"')
 DAGQ={dagq}
@@ -1562,6 +1580,7 @@ fi
         turns = "\"${0%/*}/turn.sh\"",
         model = "\"${0%/*}/codex-model\"",
         home = "\"${0%/*}/codex-home\"",
+        dir = "\"${0%/*}\"",
     );
     crate::common::template::script_env(&stub, script, &[("STUB_DB", db.to_str().unwrap())]);
 

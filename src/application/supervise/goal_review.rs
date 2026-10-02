@@ -95,7 +95,7 @@ impl Supervisor<'_> {
 
     /// Why a headless job cannot start on `provider` now: this supervisor
     /// has no agent for it (no Codex found that runs), or it is held.
-    fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
+    pub(super) fn job_unusable(&self, provider: Provider) -> Option<SwitchReason> {
         if let Some(reason) = self.provider_held(provider) {
             return Some(reason);
         }
@@ -181,7 +181,7 @@ impl Supervisor<'_> {
     /// the job moves to the other provider (ADR-t1063-1 decision 4).
     /// `error` is the job's failure, `said` it with the job's output,
     /// which may say when a usage limit resets.
-    fn job_provider_failed(
+    pub(super) fn job_provider_failed(
         &mut self,
         provider: Provider,
         failure: JobFailure,

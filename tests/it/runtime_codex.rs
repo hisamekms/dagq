@@ -125,6 +125,508 @@ fn codex_config() -> Option<Vec<u8>> {
     fs::read(Path::new(&home).join(".codex/config.toml")).ok()
 }
 
+/// What a Codex review job at its usage limit prints.
+const USAGE_LIMIT_REVIEW: &str = "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again at 3pm.\"}\n";
+
+fn select_codex_review(repo: &Path) {
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.review]\nprovider = 'codex'\n",
+    )
+    .unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    git(repo, &["commit", "-m", "select Codex for review"]);
+}
+
+fn codex_review_reply(dir: &Path, call: usize, verdict: Value) {
+    let reply = json!({"type":"item.completed","item":{"id":"review","type":"agent_message","text":verdict.to_string()}});
+    fs::write(
+        dir.join(format!("codex-review-{call}.jsonl")),
+        format!("{reply}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn no_claude_run_uses_a_read_only_codex_review_and_lands() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    let detail = detail(&db);
+    assert_eq!(
+        result["runs"][0]["status"],
+        "integrated",
+        "{result}; review failed: {:?}",
+        payloads(&detail, "review_failed")
+    );
+    assert_eq!(
+        payloads(&detail, "review_started")[0]["launch"]["provider"],
+        "codex"
+    );
+    assert_eq!(payloads(&detail, "review_finished")[0]["verdict"], "pass");
+    assert!(payloads(&detail, "review_failed").is_empty());
+    let args = fs::read_to_string(dir.path().join("codex-review-args.log")).unwrap();
+    assert!(args.contains("--sandbox| read-only|"), "{args}");
+    let actors = fs::read_to_string(dir.path().join("codex-review-actors.log")).unwrap();
+    assert!(actors.contains("review-job review-job:"), "{actors}");
+}
+
+#[test]
+fn no_claude_codex_review_concern_records_reasons_and_asks() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    let verdict = json!({"verdict":"concern","reasons":[{"text":"scope changed","codes":["out_of_scope_change"]}],"summary":"ask a person"});
+    codex_review_reply(dir.path(), 1, verdict);
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "awaiting_integration");
+    let detail = detail(&db);
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["verdict"], "concern");
+    assert_eq!(finished[0]["reasons"], json!(["scope changed"]));
+    assert_eq!(finished[0]["primary_code"], "out_of_scope_change");
+    assert_eq!(payloads(&detail, "ask_opened").len(), 1);
+    assert!(payloads(&detail, "review_failed").is_empty());
+}
+
+#[test]
+fn no_claude_codex_review_revise_reaches_the_worker_and_passes() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(
+        dir.path(),
+        "case \"$TURN\" in 1) commit work; receipt \"$(git rev-parse HEAD)\"; say first ;; *) commit fixed; receipt \"$(git rev-parse HEAD)\"; say fixed ;; esac",
+    );
+    codex_review_reply(
+        dir.path(),
+        1,
+        json!({"verdict":"revise","reasons":[{"text":"fix the detail","codes":["code_defect"]}],"summary":"revise"}),
+    );
+    codex_review_reply(
+        dir.path(),
+        2,
+        json!({"verdict":"pass","reasons":[],"summary":"fixed"}),
+    );
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+    let detail = detail(&db);
+    let finished = payloads(&detail, "review_finished");
+    assert_eq!(finished.len(), 2, "{finished:?}");
+    assert_eq!(finished[0]["verdict"], "revise");
+    assert_eq!(finished[0]["primary_code"], "code_defect");
+    assert_eq!(finished[1]["verdict"], "pass");
+    assert_eq!(payloads(&detail, "revise_requested").len(), 1);
+    assert!(payloads(&detail, "review_failed").is_empty());
+}
+
+#[test]
+fn no_claude_codex_review_failure_asks_without_starting_claude() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-review-failure.jsonl"),
+        "{\"type\":\"turn.failed\",\"error\":{\"message\":\"review crashed\"}}\n",
+    )
+    .unwrap();
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "awaiting_integration");
+    let detail = detail(&db);
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["code"], "job_failed");
+    assert!(!failed[0]["error"].as_str().unwrap().contains("Claude"));
+    assert_eq!(
+        payloads(&detail, "review_started")[0]["launch"]["provider"],
+        "codex"
+    );
+    assert_eq!(payloads(&detail, "ask_opened").len(), 1);
+    assert!(payloads(&detail, "review_finished").is_empty());
+}
+
+/// Claude's hold ask holds only what runs on Claude: a review set to Codex
+/// starts while the ask is open, like the goal review on Codex, and the run
+/// lands with the ask left for the person (ADR-t1207-1).
+#[test]
+fn a_codex_review_starts_while_claudes_hold_ask_is_open() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    let hold = open_hold_ask(&db, AskReason::Authentication, None);
+    set_turns(dir.path(), FINISH);
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &backend,
+            &claude_stub(&db),
+            &reviewer,
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &options,
+        )
+        .unwrap()
+    };
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+    assert!(reviewer.prompts().is_empty(), "Claude reviewed the run");
+    let detail = detail(&db);
+    assert_eq!(
+        payloads(&detail, "review_started")[0]["launch"]["provider"],
+        "codex"
+    );
+    assert_eq!(payloads(&detail, "review_finished")[0]["verdict"], "pass");
+    let asks = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap();
+    let still = asks.iter().find(|ask| ask.id == hold.id).unwrap();
+    assert_eq!(still.answer, None, "the hold ask is still open");
+}
+
+/// `[roles.review]` names Codex on a supervisor where no Codex runs, and
+/// Claude may run: the review moves to Claude (ADR-t1063-1 decision 4,
+/// `executable_missing`, ADR-t1207-1) and the run lands.
+#[test]
+fn a_codex_review_without_codex_moves_to_claude_and_lands() {
+    let (dir, repo, db) = fixture();
+    select_codex_review(&repo);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
+    let options = SuperviseOptions {
+        codex: dir.path().join("no-such-codex"),
+        ..supervise_options(1, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert_eq!(reviewer.prompts().len(), 1, "Claude reviewed the run");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let started = payloads(&detail, "review_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "claude");
+    assert_eq!(started[0]["launch"]["switched_from"], "codex");
+    assert_eq!(started[0]["launch"]["switch_reason"], "executable_missing");
+    assert_eq!(payloads(&detail, "review_finished")[0]["verdict"], "pass");
+    assert!(payloads(&detail, "review_failed").is_empty());
+}
+
+/// A Codex that passed the supervisor's preflight but does not start for
+/// the review, while Claude may run: Codex is held and the review starts
+/// again on Claude (ADR-t1063-1 decisions 4 and 5); the run lands.
+#[test]
+fn a_codex_review_whose_codex_does_not_start_moves_to_claude() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, repo, db) = fixture();
+    select_codex_review(&repo);
+    let codex = dir.path().join("codex-gone");
+    fs::write(
+        &codex,
+        "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'codex-cli 0.46.0'; exit 0; }\nexit 2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let options = SuperviseOptions {
+        codex: codex.clone(),
+        ..supervise_options(1, true)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
+            let outcome = runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            );
+            (outcome, reviewer.prompts().len())
+        })
+    };
+    // Codex passed the preflight before the claim; it is gone by the review.
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !queue.show(TaskId::new(1)).unwrap().runs.is_empty()
+    });
+    fs::remove_file(&codex).unwrap();
+    let (outcome, prompts) = joined(supervisor, "the supervisor thread to return");
+    backend.join();
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    assert_eq!(prompts, 1, "Claude reviewed the run");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let started = payloads(&detail, "review_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "codex");
+    assert_eq!(started[1]["launch"]["provider"], "claude");
+    assert_eq!(started[1]["launch"]["switch_reason"], "executable_missing");
+    let retried = payloads(&detail, "review_retried");
+    assert_eq!(retried.len(), 1, "{retried:?}");
+    assert_eq!(retried[0]["provider"], "codex");
+    assert!(payloads(&detail, "review_failed").is_empty());
+    let held = queue_events(&db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "codex");
+}
+
+/// The queue's events of `kind` (a provider's hold is the queue's).
+fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+    SqliteQueue::open(db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| event.payload)
+        .collect()
+}
+
+/// A Codex review at its usage limit, while Claude may run: Codex is held
+/// without an ask (ADR-t1063-1 decision 5), and the review starts again
+/// on Claude (decision 4), recorded as `review_retried`; the run lands.
+#[test]
+fn a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-review-failure.jsonl"),
+        USAGE_LIMIT_REVIEW,
+    )
+    .unwrap();
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
+    let result = {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &backend,
+            &claude_stub(&db),
+            &reviewer,
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &options,
+        )
+        .unwrap()
+    };
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "integrated", "{result}");
+    assert_eq!(reviewer.prompts().len(), 1, "Claude reviewed the run");
+    let detail = detail(&db);
+    let started = payloads(&detail, "review_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "codex");
+    assert_eq!(started[1]["launch"]["provider"], "claude");
+    assert_eq!(started[1]["launch"]["switched_from"], "codex");
+    assert_eq!(started[1]["launch"]["switch_reason"], "usage_limit");
+    let retried = payloads(&detail, "review_retried");
+    assert_eq!(retried.len(), 1, "{retried:?}");
+    assert_eq!(retried[0]["provider"], "codex");
+    assert_eq!(retried[0]["switch_reason"], "usage_limit");
+    assert!(payloads(&detail, "review_failed").is_empty());
+    let held = queue_events(&db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "codex");
+    assert_eq!(held[0]["reason"], "usage_limit");
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .asks(AskQuery::default())
+            .unwrap()
+            .is_empty(),
+        "Codex's hold opened no ask"
+    );
+}
+
+/// A Codex review at its usage limit under `--no-claude`: Codex is held
+/// without an ask (ADR-t1063-1 decision 5) and joins no queue hold (only
+/// Claude's walls do); with no provider left, the review fails to the
+/// person (`approve_landing`, ADR-t1207-1), and Claude never reviews it.
+#[test]
+fn no_claude_codex_review_at_its_usage_limit_holds_codex_and_asks_a_person() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-review-failure.jsonl"),
+        USAGE_LIMIT_REVIEW,
+    )
+    .unwrap();
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "awaiting_integration");
+    let detail = detail(&db);
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["code"], "job_failed");
+    assert!(payloads(&detail, "usage_limited").is_empty());
+    assert!(payloads(&detail, "review_retried").is_empty());
+    assert!(reviewer.prompts().is_empty(), "Claude reviewed the run");
+    let held = queue_events(&db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "codex");
+    let asks = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(
+        asks.iter()
+            .all(|ask| ask.reason_category != AskReason::Cost)
+    );
+}
+
+/// Under `--no-claude`, a Codex review that printed no readable verdict
+/// but shows its usage limit: Codex is held, no provider is left to review
+/// it again, so it fails as it is (`job_failed`), its output named, rather
+/// than as a review no agent ran (ADR-t1207-1).
+#[test]
+fn no_claude_unreadable_codex_review_at_its_limit_fails_with_its_output() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    let said = json!({"type":"item.completed","item":{"id":"review","type":"agent_message","text":"no verdict here"}});
+    fs::write(
+        dir.path().join("codex-review-1.jsonl"),
+        format!("{}{said}\n", USAGE_LIMIT_REVIEW),
+    )
+    .unwrap();
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.no_claude = true;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[]);
+    let result = runtime::supervise_with_reviewer(
+        &db,
+        &repo,
+        &backend,
+        &claude_stub(&db),
+        &reviewer,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        &options,
+    )
+    .unwrap();
+    backend.join();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["runs"][0]["status"], "awaiting_integration");
+    let detail = detail(&db);
+    assert!(payloads(&detail, "review_retried").is_empty());
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0]["code"], "job_failed");
+    assert_eq!(failed[0]["attempt"], 1);
+    let asks = SqliteQueue::open(&db)
+        .unwrap()
+        .asks(AskQuery::default())
+        .unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(
+        asks[0].question.contains("review-1.out"),
+        "{}",
+        asks[0].question
+    );
+    assert!(!asks[0].question.contains("No review agent ran"));
+    assert_eq!(queue_events(&db, "provider_held").len(), 1);
+}
+
 /// Acceptance (1) to (4): the first turn is `codex exec --json -C
 /// <worktree>` with the sandbox of ADR-t813-3 as `-c`; its thread is
 /// recorded on the run; the worker's question is answered and the

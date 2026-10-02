@@ -1496,10 +1496,10 @@ LITERAL = 'no \n escapes # here'
             ),
             ("[roles.review]\n[roles.review]", "is defined twice"),
             ("[roles.review]\nprovider = 'gemini'", "provider"),
-            // Codex runs only the goal review (ADR-t1063-1 decision 1).
+            // Codex runs goal and normal run reviews (ADR-t1207-1).
             (
-                "[roles.review]\nprovider = 'codex'",
-                "[roles.review]: provider codex cannot run the review role",
+                "[roles.plan_review]\nprovider = 'codex'",
+                "[roles.plan_review]: provider codex cannot run the plan_review role",
             ),
             (
                 "[roles.goal_review]\nmodel = 'claude-opus-5-5'\nprovider = 'codex'",

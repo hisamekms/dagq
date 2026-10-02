@@ -28,6 +28,7 @@ related:
 - [作業の内訳のスモーク](#作業の内訳のスモーク): 使い捨て repository で実 Claude Code の worker に background のコマンド・async の subagent・つないだコマンドをさせ、作業の内訳（task 514）の記録を transcript と突き合わせる。
 - [非対話の worker のスモーク](#非対話の-worker-のスモーク): 使い捨て repository で実 Codex と実 Claude の非対話の worker を 1 本ずつ着地させ、turn の記録と provider・経路の記録を確かめる。
 - [Codex の goal review のスモーク](#codex-の-goal-review-のスモーク): 使い捨て repository で goal review を実 Codex で動かし、launch と sandbox と記録を確かめる。
+- [Codex の run review のスモーク](#codex-の-run-review-のスモーク): 使い捨て repository で通常 run の review を実 Codex で動かし、verdict から着地まで確かめる。
 - [他の repository のスモーク](#他の-repository-のスモーク): dagq のソースでない使い捨て repository（default branch が `master`、`origin` なし、`Cargo.toml` も `AGENTS.md` も無い）で、`cargo install` したバイナリと公式の手順で入れた plugin を使い、`up`・`plan` から着地までを通す。
 
 ## 故障経路のスモーク
@@ -439,6 +440,17 @@ file は Python の `pathlib.Path.read_text()` と `json.loads()` で JSONL を�
 - 書き込みの拒否: 人か inbox が使い捨て queue の read-only job に無害な file の書き込みを試させ、拒否の出力を採取する必要がある。今回の成功した読み取りだけでは拒否の挙動は分からない。
 - argv と config の前後比較: 人か inbox が使い捨て queue の job の実行中に `ps` で引数を採取し、`~/.codex/config.toml` の更新時刻を起動前・終了後に控える必要がある。rollout の read-only 設定は argv の全体や config の不変性の代わりにはならない。
 - 手順 7 の使い捨て queue の後始末は今回は対象外（作成していない）。次に手作業のスモークを行った場合は手順どおりに行う。
+
+## Codex の run review のスモーク
+
+`[roles.review] provider = "codex"` の通常 run review（[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)）は、使い捨て repository の `dagq.toml` に設定して確かめる。人か inbox が行い、本番 queue と固定バイナリには開発中のビルドを使わない。
+
+1. [非対話の worker のスモーク](#非対話の-worker-のスモーク)の隔離に従い、`dagq-smoke` と bare の `origin`、開発中のバイナリのコピー、専用 queue を作る。`dagq.toml` に `[roles.review] provider = "codex"` を書いて commit する。
+2. Codex の headless task を 1 件、簡単なファイルの追加とその存在を確認する verify で登録し、使い捨て queue だけで `ready --bypass-review` にする。`supervise --no-claude --parallel 1 --once --codex <実体の path>` で流す。
+3. `events --run RUN --full` の `review_started.launch.provider` が `codex`、`review_finished.verdict` が `pass` で、`show ID` の task が `completed`、run が `integrated`、`origin/main` が進んだことを確かめる。run の dir の `review-<N>.out` は `codex exec --json` の JSONL で、起動引数は `--sandbox read-only` を含む。実 Codex が使えない権限環境では `review_failed` と `approve_landing` ask を確認し、権限を直して別 task で再試験する。
+4. supervisor の終了と試験用 group の削除を確認する。group は `cmux workspace-group delete <group> --close-workspaces` で anchor ごと消す。
+
+2026-10-01 の結果: 別 queue で実 Codex 0.159.2 の worker と review を実行し、task 2 の review が `pass`、run `ca586e69-4833-43c2-a269-f7d90fa2152f` が `908060719bbc3f599cbb061fe1e130827472595e` として main に着地・push した。最初の task 1 は実行側のホスト権限制約で Codex review の app-server 初期化が拒まれ、`review_failed` と ask になった。権限付きでの再試験は成功し、試験用の cmux group は削除した。
 
 ## 他の repository のスモーク
 

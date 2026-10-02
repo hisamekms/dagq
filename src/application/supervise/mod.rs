@@ -2486,7 +2486,7 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::ReviewHeld(session) => {
-                if self.queue_hold.is_none() {
+                if !matches!(self.review_route(), landing::ReviewRoute::Wait(_)) {
                     let session = session.take();
                     let run = self.queue.run(slot.run.id())?;
                     slot.phase = self.start_review(&run, session)?;
@@ -2495,7 +2495,10 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::Review(watch) => {
-                let Some(outcome) = watch.poll(&*self.files, self.reviewer)? else {
+                let provider = self.job_agent(watch.job.provider).with_context(|| {
+                    format!("no {} runs on this supervisor", watch.job.provider.as_str())
+                })?;
+                let Some(outcome) = watch.poll(&*self.files, provider)? else {
                     return Ok(Step::Continue);
                 };
                 let attempt = watch.attempt;
@@ -2515,6 +2518,44 @@ impl Supervisor<'_> {
                     slot.run = run;
                     return Ok(Step::Continue);
                 }
+                // Another provider that cannot be used (Codex's login, usage
+                // limit or start) is held, and a review whose role names its
+                // provider starts again where the route sends it: on Claude
+                // when Claude may run (ADR-t1063-1 decisions 4 and 5). Under
+                // `--no-claude` it fails to the person below (ADR-t1207-1).
+                let retried = watch.retried;
+                let mut session = session;
+                if let ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) = &outcome
+                    && watch.job.provider != Provider::Claude
+                {
+                    let stdout = self
+                        .files
+                        .read_to_string(&watch.job.stdout)
+                        .unwrap_or_default();
+                    let said = format!("{error}\n{stdout}");
+                    let failure = self.job_failure(&watch.job);
+                    if let Some(unusable) = self.job_provider_failed(
+                        watch.job.provider,
+                        failure,
+                        (error, &said),
+                        &HoldJob::Review(run.id().clone()),
+                        watch.switchable,
+                    ) {
+                        match self.move_review(&run, session, attempt, error, unusable, retried)? {
+                            Ok(phase) => {
+                                slot.phase = phase;
+                                slot.run = run;
+                                return Ok(Step::Continue);
+                            }
+                            Err(back) => session = back,
+                        }
+                    }
+                }
+                // With no provider left to review it again (`--no-claude`),
+                // an unreadable verdict fails as it is, its output named.
+                let retry_unreadable = self.retry_unreadable_review
+                    && !retried
+                    && !matches!(self.review_route(), landing::ReviewRoute::Manual(_));
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
                         let job = ActorContext::review_job(run.id(), attempt);
@@ -2536,9 +2577,7 @@ impl Supervisor<'_> {
                             sv.act_on_verdict(&run, session, verdict, &job)
                         })?
                     }
-                    ReviewEnd::Unreadable(error)
-                        if self.retry_unreadable_review && !watch.retried =>
-                    {
+                    ReviewEnd::Unreadable(error) if retry_unreadable => {
                         self.retry_review(&run, session, attempt, &error)?
                     }
                     ReviewEnd::Unreadable(error) | ReviewEnd::Failed(error) => {
@@ -2702,7 +2741,11 @@ impl Supervisor<'_> {
                             }
                         };
                         let mut payload = json!({
-                            "code": if self.no_claude { "provider_disabled" } else { ReasonCode::JobFailed.as_str() },
+                            "code": if error.starts_with(landing::REVIEW_PROVIDER_DISABLED) {
+                                "provider_disabled"
+                            } else {
+                                ReasonCode::JobFailed.as_str()
+                            },
                             "attempt": attempt,
                             "error": error,
                             "duration_secs": duration_secs,

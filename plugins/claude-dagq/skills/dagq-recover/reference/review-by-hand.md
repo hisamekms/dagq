@@ -2,7 +2,7 @@
 
 Read this for attention `review by hand` (`kind` `review_failed`), `review and integrate`, or `push main` (the `dagq-recover` skill, section 6). Everything here is done on the person's word. Never merge, rebase, cherry-pick or fast-forward a run's branch yourself: landing is the runtime's job, and it keeps `main` linear with one squash commit per task. Never read the full diff in the inbox or a planner session.
 
-A review in `--no-claude` mode also comes here: `review_failed` has `code: provider_disabled`, the material exists, and no review agent ran. Its lease is released for the same manual review and integration below.
+A review in `--no-claude` mode also comes here: `review_failed` has `code: provider_disabled`, the material exists, and no review agent ran. Its lease is released for the same manual review and integration below. A run review set to Codex (`[roles.review] provider = "codex"`) whose job failed for a general reason (no readable verdict, a non-zero exit, its time limit) comes here like any failed review, with `code: job_failed` and the job's output in `review-N.out` / `.err`. One whose Codex could not be used moved to Claude instead (`review_retried`), unless `--no-claude` left it no provider (above).
 
 ## The supervisor reviews first
 

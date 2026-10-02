@@ -4,8 +4,8 @@ type: design
 title: "Actor model"
 status: current
 created: 2026-09-27
-updated: 2026-09-30
-last_verified: 2026-09-30
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -57,9 +57,9 @@ effort = "high"         # 省けばmedium
 ```
 
 - **既定**: `provider`を書かない役割はClaude（`domain::actor_model::ROLE_PROVIDER`）で、起動も失敗のときの振る舞い（Claudeの控えのaskで待つ）も今までと同じ
-- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`（今は`goal_review`だけ。`runs_on(role, provider)`）。それ以外の役割に`codex`を書くと、`dagq.toml`を読むときの検査（`RoleModels::check`、`parse_config`の最後）がエラーにする（`dagq.toml: [roles.review]: provider codex cannot run the review role; Codex runs only goal_review`）。warnを出してClaudeで起動する形にしなかったのは、ADR-t1063-1の決定1が「起動せずに設定の誤りとして知らせる」と決めたため。エラーの間は他の`dagq.toml`の誤りと同じく、supervisorとobserverは全ての役割を今までと同じ起動にし（`Supervisor::role_models`のwarn）、`doctor`の`roles.error`に出る。`codex`の表にClaudeのmodel（`claude`で始まる名前）を書いてもエラーにする（modelはproviderごとの名前で、CodexにClaudeのmodelを渡さない）
+- **Codexで動ける役割**: `domain::actor_model::CODEX_ROLES`（`goal_review`と`review`。`runs_on(role, provider)`）。それ以外の役割に`codex`を書くと、`dagq.toml`を読むときの検査（`RoleModels::check`、`parse_config`の最後）がエラーにする（`dagq.toml: [roles.plan_review]: provider codex cannot run the plan_review role; Codex runs only goal_review, review`）。warnを出してClaudeで起動する形にしなかったのは、ADR-t1063-1の決定1が「起動せずに設定の誤りとして知らせる」と決めたため。エラーの間は他の`dagq.toml`の誤りと同じく、supervisorとobserverは全ての役割を今までと同じ起動にし（`Supervisor::role_models`のwarn）、`doctor`の`roles.error`に出る。`codex`の表にClaudeのmodel（`claude`で始まる名前）を書いてもエラーにする（modelはproviderごとの名前で、CodexにClaudeのmodelを渡さない）
 - **launch**（`RoleModels::launch`）: Claudeの表は今までどおり（省いたmodel / effortは`claude-opus-5-5` / `medium`を明示）。Codexの表はmodelを省けば`null`（Codexの既定。`-m`を渡さない）、effortを省けば`medium`（`-c model_reasoning_effort`に渡す）。どちらも`source`は`dagq.toml`
-- **切り替え**（`RoleModels::switchable`・`domain::actor_model::job_route`）: `provider`を書いた役割のjobは、そのproviderが使えない（supervisorにagentが無い＝`executable_missing`、または控えられている）とき、もう一方のproviderがその役割を動かせて使えれば、そのproviderの既定の起動（modelとeffortはproviderごとの名前なので渡さない。`ActorLaunch::switched`）で起動し、launchに`switched_from`（元のprovider）と`switch_reason`（`SwitchReason`の値）を残す。どちらも使えなければ起動せずに待つ。今これを使うのはgoal reviewだけ（[Goal review](goal-review.md)の3と6）で、他の役割は`provider = "claude"`を書いても今までどおりの起動と控え
+- **切り替え**（`RoleModels::switchable`・`domain::actor_model::job_route`）: `provider`を書いた役割のjobは、そのproviderが使えない（supervisorにagentが無い＝`executable_missing`、または控えられている）とき、もう一方のproviderがその役割を動かせて使えれば、そのproviderの既定の起動（modelとeffortはproviderごとの名前なので渡さない。`ActorLaunch::switched`）で起動し、launchに`switched_from`（元のprovider）と`switch_reason`（`SwitchReason`の値）を残す。どちらも使えなければ起動せずに待つ。今これを使うのはgoal review（[Goal review](goal-review.md)の3と6）とrunのreview（`Supervisor::review_route`。[Review](review.md)、[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)。`--no-claude`で切り替え先が無ければ待たずに手動reviewに渡す）で、他の役割は`provider = "claude"`を書いても今までどおりの起動と控え
 - **見え方**: `dagq doctor`の`roles`が役割ごとに`provider`・`source`（`dagq.toml` / `default`）・`model`・`effort`を出す（queueが束縛されたmain checkoutの`dagq.toml`。読めなければ`roles.error`に理由を足し、全ての役割は既定で出る。`compose::doctor_roles`）。jobごとに実際に動いたproviderは開始のeventの`launch.provider`と`headless_jobs.provider`
 
 ## 差し戻しで開き直すplannerの段上げ

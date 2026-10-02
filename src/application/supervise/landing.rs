@@ -3,12 +3,14 @@
 //! landing itself (ADR-0023, ADR-0027).
 
 use super::*;
+use crate::application::job_start_failure;
 use crate::application::prompt::REVIEW_ACCESS;
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::RecoveredLanding;
-use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::actor_model::{ActorLaunch, JobRoute, ModelRole, job_route};
 use crate::domain::language::with_instruction;
+use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_reason;
 use crate::domain::worker_model::{self, Escalation};
 
@@ -17,6 +19,28 @@ use crate::domain::worker_model::{self, Escalation};
 /// (task 328) or did not pass (task 425).
 const STALE_LANDING_ASK_CLOSED: &str =
     "a later review of the run asks again; closed by the runtime";
+
+/// How the error of a review no agent ran begins when `--no-claude`
+/// leaves no provider for it: `review_failed` records it as
+/// `provider_disabled` and its ask says no review agent ran.
+pub(super) const REVIEW_PROVIDER_DISABLED: &str =
+    "provider_disabled: Claude is disabled by --no-claude";
+
+/// A review job that started: its process and its stdout and stderr.
+type StartedReview = (Box<dyn Spawned>, PathBuf, PathBuf);
+
+/// Where the next review of a run goes (ADR-t1063-1 decisions 4 and 5,
+/// ADR-t1207-1).
+pub(super) enum ReviewRoute {
+    /// Start on this launch; `true` when `[roles.review]` names its
+    /// provider, so a provider that cannot be used moves it to the other.
+    Start(ActorLaunch, bool),
+    /// Wait with the session open until a provider can be used; why.
+    Wait(String),
+    /// Under `--no-claude` no provider can review it: the person does,
+    /// told why (`review_failed` and the `approve_landing` ask).
+    Manual(String),
+}
 
 impl Supervisor<'_> {
     /// Record `landing_queued` as `run` starts to wait for the integration
@@ -112,14 +136,101 @@ impl Supervisor<'_> {
         }
         self.begin_review(run, session, false)
     }
-    /// Whether an authentication or usage-limit ask holds the queue's jobs
-    /// (task 437): the review waits for it with the session open.
+    /// Where the next review goes (ADR-t1207-1). A `[roles.review]` that
+    /// names no provider reviews on Claude as before: under `--no-claude`
+    /// the person reviews it, and it waits while the queue's hold ask
+    /// holds Claude (task 437). One that names its provider goes like the
+    /// goal review (ADR-t1063-1 decisions 4 and 5): to its provider when
+    /// it can be used, else to the other provider when that one can, else
+    /// it waits, or, under `--no-claude`, goes to the person.
+    pub(super) fn review_route(&self) -> ReviewRoute {
+        let role = ModelRole::Review;
+        let models = self.role_models(role);
+        let launch = models.launch(role);
+        if !models.switchable(role) {
+            if self.no_claude {
+                return ReviewRoute::Manual(REVIEW_PROVIDER_DISABLED.to_owned());
+            }
+            return match self.queue_hold {
+                Some(hold) => ReviewRoute::Wait(format!(
+                    "ask {} ({}) holds the headless jobs",
+                    hold.ask_id,
+                    hold.reason.as_str()
+                )),
+                None => ReviewRoute::Start(launch, false),
+            };
+        }
+        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
+            JobRoute::Start(launch) => ReviewRoute::Start(launch, true),
+            JobRoute::Wait { .. } if self.no_claude => {
+                let codex = self
+                    .job_unusable(crate::domain::Provider::Codex)
+                    .map_or("unknown", |reason| reason.as_str());
+                ReviewRoute::Manual(format!(
+                    "{REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex})"
+                ))
+            }
+            JobRoute::Wait { provider, reason } => ReviewRoute::Wait(format!(
+                "{} cannot be used ({}), nor can the other provider",
+                provider.as_str(),
+                reason.as_str()
+            )),
+        }
+    }
+    /// Whether the review waits with the session open (`review_route`).
     fn review_held(&self, run: &TaskRun) -> bool {
-        let Some(hold) = self.queue_hold else {
+        let ReviewRoute::Wait(why) = self.review_route() else {
             return false;
         };
-        info!(run_id = %run.id(), "run {}: its review waits for ask {} ({}), which holds the headless jobs", run.id(), hold.ask_id, hold.reason.as_str());
+        info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
         true
+    }
+    /// Move review `attempt` off `unusable`, the provider that could not
+    /// run it and is held now (ADR-t1063-1 decisions 4 and 5): record
+    /// `review_retried` with the provider and why, then start the review
+    /// on the other provider, or wait with the session open while neither
+    /// can be used. `Err` gives the session back when the review does not
+    /// move: under `--no-claude` with no provider left, or when the route
+    /// still sends it to the same provider (its hold was not written), so
+    /// that it fails to the person instead of starting there again.
+    pub(super) fn move_review(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        attempt: usize,
+        error: &str,
+        (provider, reason): (Provider, SwitchReason),
+        retried: bool,
+    ) -> Result<std::result::Result<Phase, Option<SessionRef>>> {
+        let route = self.review_route();
+        let moves = match &route {
+            ReviewRoute::Start(next, _) => next.provider != provider,
+            ReviewRoute::Wait(_) => true,
+            ReviewRoute::Manual(_) => false,
+        };
+        if !moves {
+            return Ok(Err(session));
+        }
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ReviewRetried,
+            json!({
+                "attempt": attempt,
+                "error": error,
+                "provider": provider.as_str(),
+                "switch_reason": reason.as_str(),
+            }),
+        )?;
+        Ok(Ok(match route {
+            ReviewRoute::Wait(why) => {
+                warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); the review waits: {why}", run.id(), provider.as_str(), reason.as_str());
+                Phase::ReviewHeld(session)
+            }
+            _ => {
+                warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}); reviewing it on the other provider", run.id(), provider.as_str(), reason.as_str());
+                self.begin_review(run, session, retried)?
+            }
+        }))
     }
     /// Review the run once more with the same input after review `attempt`
     /// printed no readable verdict (task 328): record `review_retried` with
@@ -143,10 +254,10 @@ impl Supervisor<'_> {
         warn!(run_id = %run.id(), error = %error, "run {} review {attempt} printed no readable verdict: {error}; reviewing it once more", run.id());
         self.begin_review(run, session, true)
     }
-    fn begin_review(
+    pub(super) fn begin_review(
         &mut self,
         run: &TaskRun,
-        session: Option<SessionRef>,
+        mut session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
         let attempt =
@@ -155,22 +266,27 @@ impl Supervisor<'_> {
             Some(_) => session_alive(self, run.id())?,
             None => false,
         };
-        if self.no_claude {
-            (self.review_material)(run.task_id())?;
-            return Ok(Phase::Exiting(ExitWatch::new(
-                session,
-                AfterExit::ReviewFailed {
-                    attempt,
-                    error: "provider_disabled: Claude is disabled by --no-claude; review manually"
-                        .into(),
-                    duration_secs: 0,
-                    output: None,
-                },
-            )));
-        }
+        let (launch, switchable) = match self.review_route() {
+            ReviewRoute::Start(launch, switchable) => (launch, switchable),
+            ReviewRoute::Wait(why) => {
+                info!(run_id = %run.id(), "run {}: its review waits: {why}", run.id());
+                return Ok(Phase::ReviewHeld(session));
+            }
+            ReviewRoute::Manual(error) => {
+                (self.review_material)(run.task_id())?;
+                return Ok(Phase::Exiting(ExitWatch::new(
+                    session,
+                    AfterExit::ReviewFailed {
+                        attempt,
+                        error,
+                        duration_secs: 0,
+                        output: None,
+                    },
+                )));
+            }
+        };
         // The job's Claude session id (ADR-0048 decision 4).
         let session_id = self.generators.ids.uuid();
-        let launch = self.actor_launch(ModelRole::Review);
         self.queue.record_runtime_event(
             run.id(),
             EventKind::ReviewStarted,
@@ -182,51 +298,80 @@ impl Supervisor<'_> {
                 "launch": launch.to_value(),
             }),
         )?;
-        Ok(
-            match self.spawn_review(run, attempt, &session_id, &launch) {
-                Ok((child, stdout, stderr)) => {
-                    info!(run_id = %run.id(), "run {} review {attempt} started (session {})", run.id(), if live { "kept open" } else { "ended" });
-                    let job = self.headless_job(
-                        "review",
-                        child,
-                        stdout,
-                        stderr,
-                        JobSubject::run(headless_job::REVIEW, run.id(), attempt),
-                    );
-                    Phase::Review(ReviewWatch {
-                        session,
-                        attempt,
-                        retried,
-                        job,
-                    })
+        let error = match self.spawn_review(run, attempt, &session_id, &launch) {
+            Ok(Ok((child, stdout, stderr))) => {
+                info!(run_id = %run.id(), "run {} review {attempt} started on {} (session {})", run.id(), launch.provider.as_str(), if live { "kept open" } else { "ended" });
+                let mut job = self.headless_job(
+                    "review",
+                    child,
+                    stdout,
+                    stderr,
+                    JobSubject {
+                        provider: launch.provider,
+                        ..JobSubject::run(headless_job::REVIEW, run.id(), attempt)
+                    },
+                );
+                // The provider that runs the review bounds it.
+                if let Some(agent) = self.job_agent(launch.provider) {
+                    job.timeout = agent.review_timeout();
                 }
-                Err(error) => {
-                    let error = format!("the headless review could not start: {error:#}");
-                    warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
-                    self.close_review_session(run);
-                    Phase::Exiting(ExitWatch::new(
-                        session,
-                        AfterExit::ReviewFailed {
-                            attempt,
-                            error,
-                            duration_secs: 0,
-                            // No job ran, so this attempt wrote no output; a
-                            // retry follows a job that ran and printed an
-                            // unreadable verdict (task 426).
-                            output: retried.then(|| attempt - 1),
-                        },
-                    ))
+                return Ok(Phase::Review(ReviewWatch {
+                    session,
+                    attempt,
+                    retried,
+                    switchable,
+                    job,
+                }));
+            }
+            // Its provider did not start: one that `[roles.review]` names
+            // is held, and the review starts again where the route sends it
+            // (ADR-t1063-1 decisions 4 and 5); under `--no-claude` with no
+            // provider left, it fails to the person below.
+            Ok(Err(started)) => {
+                let error = format!("the headless review could not start: {started:#}");
+                if let Some(unusable) = self.job_provider_failed(
+                    launch.provider,
+                    job_start_failure(&started),
+                    (&error, &error),
+                    &HoldJob::Review(run.id().clone()),
+                    switchable,
+                ) {
+                    match self.move_review(run, session, attempt, &error, unusable, retried)? {
+                        Ok(phase) => return Ok(phase),
+                        Err(back) => session = back,
+                    }
                 }
+                error
+            }
+            // Its own preparation failed: no provider was tried.
+            Err(prepared) => format!("the headless review could not start: {prepared:#}"),
+        };
+        warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
+        self.close_review_session(run);
+        Ok(Phase::Exiting(ExitWatch::new(
+            session,
+            AfterExit::ReviewFailed {
+                attempt,
+                error,
+                duration_secs: 0,
+                // No job ran, so this attempt wrote no output; a retry
+                // follows a job that ran and printed an unreadable verdict
+                // (task 426).
+                output: retried.then(|| attempt - 1),
             },
-        )
+        )))
     }
+    /// Write the review's material and prompt, then start its job on
+    /// `launch`'s provider. The outer error is the review's own preparation,
+    /// the inner one the start of its provider's process: only the latter
+    /// says whether the provider can be used (ADR-t1063-1 decision 4).
     pub(super) fn spawn_review(
         &mut self,
         run: &TaskRun,
         attempt: usize,
         session_id: &str,
         launch: &ActorLaunch,
-    ) -> Result<(Box<dyn Spawned>, PathBuf, PathBuf)> {
+    ) -> Result<Result<StartedReview>> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let material = (self.review_material)(run.task_id())?;
         let path = material["path"]
@@ -244,39 +389,50 @@ impl Supervisor<'_> {
         )?;
         let stdout = run_dir.join(format!("review-{attempt}.out"));
         let stderr = run_dir.join(format!("review-{attempt}.err"));
-        // Like the observer's job: the CLI knows the review by its role and
-        // allows it only reads of this queue.
-        let child = self
-            .actors()
-            .spawn(
-                ActorExecutionSpec::new(
-                    ActorContext::review_job(run.id(), attempt),
-                    WorkspaceAccess::Read(PathBuf::from(
-                        run.worktree_path().context("missing worktree")?,
-                    )),
-                    ActorProgram::Headless {
-                        program: HeadlessProgram::Review {
-                            run,
-                            prompt: &prompt,
-                            access: REVIEW_ACCESS,
+        let worktree = PathBuf::from(run.worktree_path().context("missing worktree")?);
+        // A worktree that is gone is the run's, not its provider's: its
+        // spawn would read as a missing executable.
+        anyhow::ensure!(
+            self.files.is_dir(&worktree),
+            "the run's worktree {} is gone",
+            worktree.display()
+        );
+        // The repository's [run.env] reaches the review too (ADR-0023
+        // decision 3).
+        let env = self.verifier.run_env(&run_dir)?;
+        let started = (|| {
+            let agent = self.job_agent(launch.provider).with_context(|| {
+                format!("no {} runs on this supervisor", launch.provider.as_str())
+            })?;
+            // Like the observer's job: the CLI knows the review by its role
+            // and allows it only reads of this queue.
+            self.actors_on(agent)
+                .spawn(
+                    ActorExecutionSpec::new(
+                        ActorContext::review_job(run.id(), attempt),
+                        WorkspaceAccess::Read(worktree),
+                        ActorProgram::Headless {
+                            program: HeadlessProgram::Review {
+                                run,
+                                prompt: &prompt,
+                                access: REVIEW_ACCESS,
+                            },
+                            session_id: Some(session_id),
+                            launch: Some(launch),
+                            without_mcp: false,
+                            env,
+                            streams: Streams::Files {
+                                stdout: &stdout,
+                                stderr: &stderr,
+                            },
                         },
-                        session_id: Some(session_id),
-                        launch: Some(launch),
-                        without_mcp: false,
-                        // The repository's [run.env] reaches the review too
-                        // (ADR-0023 decision 3).
-                        env: self.verifier.run_env(&run_dir)?,
-                        streams: Streams::Files {
-                            stdout: &stdout,
-                            stderr: &stderr,
-                        },
-                    },
+                    )
+                    .with_timeout(agent.review_timeout()),
                 )
-                .with_timeout(self.reviewer.review_timeout()),
-            )
-            .context("start the review")?
-            .process()?;
-        Ok((child, stdout, stderr))
+                .context("start the review")?
+                .process()
+        })();
+        Ok(started.map(|child| (child, stdout, stderr)))
     }
     /// Move on from a verdict: `pass` exits the session and lands; `revise`
     /// goes to the live session while revises are left (ADR-0027 decision
@@ -744,9 +900,9 @@ impl Supervisor<'_> {
             run.id(),
             run.task_id(),
         );
-        if self.no_claude {
+        if error.starts_with(REVIEW_PROVIDER_DISABLED) {
             question = format!(
-                "provider_disabled: Claude is disabled by --no-claude. No review agent ran for run {} (task {}); review it manually.",
+                "{error}. No review agent ran for run {} (task {}); review it manually.",
                 run.id(),
                 run.task_id()
             );
