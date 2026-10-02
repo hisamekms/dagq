@@ -669,24 +669,41 @@ impl SqliteQueue {
     /// (`integrated`, `succeeded`, `failed`, `interrupted`; a stale lease,
     /// [`lease_is_stale`], counts as none, as in
     /// [`Self::ended_run_workspaces`]), or of any status and no lease at
-    /// all once their task is `completed` or `canceled`, by run; each is
-    /// where the run's worktree lives under the run directory, whether or
-    /// not it is still there.
+    /// all once their task is `completed` or `canceled`
+    /// ([`WorktreeCleanup::Ended`]), by run; each is where the run's
+    /// worktree lives under the run directory, whether or not it is still
+    /// there. With them, the `awaiting_integration` and `needs_session`
+    /// runs of a task that goes on with no lease at all and no session
+    /// heartbeating (task 1289): [`WorktreeCleanup::AwaitingAnswer`] when
+    /// an ask of the run is open and unanswered, else
+    /// [`WorktreeCleanup::Idle`].
     pub fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
         let mut statement = self.conn.prepare(
-            "SELECT r.id, r.task_id, r.status AS run_status, t.status AS task_status, r.branch
+            "SELECT r.id, r.task_id, r.status AS run_status, t.status AS task_status, r.branch,
+                    (r.status IN ('integrated','succeeded','failed','interrupted')
+                     OR t.status IN ('completed','canceled')) AS ended,
+                    (SELECT min(a.id) FROM asks a
+                     WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL) AS ask_id
              FROM task_runs r
              JOIN tasks t ON t.id=r.task_id
              WHERE r.worktree_path IS NOT NULL
-             AND (r.status IN ('integrated','succeeded','failed','interrupted')
-                  OR t.status IN ('completed','canceled'))
-             AND (r.status IN ('integrated','succeeded','failed','interrupted')
-                  OR NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id))
+             AND (((r.status IN ('integrated','succeeded','failed','interrupted')
+                    OR t.status IN ('completed','canceled'))
+                   AND (r.status IN ('integrated','succeeded','failed','interrupted')
+                        OR NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)))
+                  OR (r.status IN ('awaiting_integration','needs_session')
+                      AND t.status NOT IN ('completed','canceled')
+                      AND NOT EXISTS (SELECT 1 FROM run_leases l WHERE l.run_id=r.id)
+                      AND NOT EXISTS (SELECT 1 FROM run_processes p WHERE p.run_id=r.id
+                                      AND p.exited_at IS NULL AND p.heartbeat_at >= ?1-?2)))
              ORDER BY r.rowid",
         )?;
         let live = self.live_leased_runs()?;
-        let rows = statement.query_map([], |row| {
+        let now = self.generators.clock.now();
+        let rows = statement.query_map(params![now, HEARTBEAT_TIMEOUT_SECS], |row| {
             let run_id: RunId = row.get(0)?;
+            let ended: bool = row.get(5)?;
+            let ask: Option<i64> = row.get(6)?;
             Ok(EndedRunWorktree {
                 worktree: RunPaths::new(&self.runs_dir, &run_id)
                     .worktree
@@ -697,6 +714,11 @@ impl SqliteQueue {
                 status: enum_col(row, "run_status")?,
                 task_status: enum_col(row, "task_status")?,
                 branch: row.get(4)?,
+                cleanup: match (ended, ask) {
+                    (true, _) => WorktreeCleanup::Ended,
+                    (false, Some(ask)) => WorktreeCleanup::AwaitingAnswer(AskId::new(ask)),
+                    (false, None) => WorktreeCleanup::Idle,
+                },
             })
         })?;
         let mut worktrees = Vec::new();

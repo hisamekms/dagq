@@ -208,10 +208,19 @@ impl Supervisor<'_> {
         let approved = self
             .queue
             .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?;
-        let Some(run) = self
+        // Not while the cleanup job clears the run's build outputs (task
+        // 1289): it lands or is validated from its worktree.
+        let cleaning = self.cleanup.cleaning();
+        let guard = cleanup::lock_cleaning(&cleaning);
+        if guard.contains(run.id()) {
+            self.cleanup.deferred = true;
+            return Ok(());
+        }
+        let skipped = self
             .queue
-            .skip_resume(run.id(), &self.token, head, main, approved)?
-        else {
+            .skip_resume(run.id(), &self.token, head, main, approved)?;
+        drop(guard);
+        let Some(run) = skipped else {
             return Ok(());
         };
         info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} was already resolved at {head} on main {main}; {} without a resume", run.id(), run.task_id(), if approved {

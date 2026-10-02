@@ -1411,7 +1411,8 @@ pub struct EndedRunWorkspace {
 
 /// The worktree of a run that nobody leases and that either ended or
 /// belongs to a task that is over, for the supervisor's clean-up of the
-/// disk (task 376).
+/// disk (task 376), or of a run left in the middle that nobody works on
+/// (task 1289, [`WorktreeCleanup`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndedRunWorktree {
     pub run_id: RunId,
@@ -1420,6 +1421,24 @@ pub struct EndedRunWorktree {
     pub task_status: TaskStatus,
     pub worktree: String,
     pub branch: Option<String>,
+    pub cleanup: WorktreeCleanup,
+}
+
+/// Why a run's worktree is a candidate for the cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeCleanup {
+    /// The run ended (`integrated`, `succeeded`, `failed`, `interrupted`)
+    /// or its task is over (task 376).
+    Ended,
+    /// An `awaiting_integration` or `needs_session` run of a task that goes
+    /// on, with no lease and no live session, waiting for a person's
+    /// answer to this ask, its oldest one open and unanswered (task 1289):
+    /// its build outputs go on every cleanup.
+    AwaitingAnswer(AskId),
+    /// Such a run with no ask waiting for an answer (queued to land, or
+    /// waiting for a resume): its build outputs go only in a cleanup for
+    /// disk space (task 1289).
+    Idle,
 }
 
 /// A `needs_session` run as the supervisor judges it for a resume.

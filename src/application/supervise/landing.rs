@@ -1034,17 +1034,33 @@ impl Supervisor<'_> {
         let Some((_, run)) = queued.into_iter().next() else {
             return Ok(());
         };
+        let e2e = self.e2e_due(&run)?.is_some();
+        let main = if e2e {
+            None
+        } else {
+            Some(self.repository.main_head()?)
+        };
+        // Not while the cleanup job clears the run's build outputs (task
+        // 1289): the landing builds them again once it has passed.
+        let cleaning = self.cleanup.cleaning();
+        let guard = cleanup::lock_cleaning(&cleaning);
+        if guard.contains(run.id()) {
+            self.cleanup.deferred = true;
+            return Ok(());
+        }
         // A run that still needs its e2e (ADR-t1233-2) runs it in a slot
         // of its own first, and lands from there.
-        if self.e2e_due(&run)?.is_some() {
-            if let Some(run) = self.queue.lease_for_e2e(run.id(), &self.token)? {
+        let Some(main) = main else {
+            let leased = self.queue.lease_for_e2e(run.id(), &self.token)?;
+            drop(guard);
+            if let Some(run) = leased {
                 info!(run_id = %run.id(), "run {} runs its e2e before it lands as queued", run.id());
                 self.slots.push(Slot::new(run, Phase::AwaitingSlot));
             }
             return Ok(());
-        }
-        let main = self.repository.main_head()?;
+        };
         let landing = self.queue.begin_integration(run.id(), &self.token, &main)?;
+        drop(guard);
         info!(run_id = %run.id(), "run {} lands onto main {main} as queued", run.id());
         let handle = self.spawn_landing(landing.clone(), RunStatus::AwaitingIntegration, main)?;
         self.slots
@@ -1076,7 +1092,17 @@ impl Supervisor<'_> {
             {
                 continue;
             }
-            let Some(run) = self.queue.lease_for_review(run.id(), &self.token)? else {
+            // Not while the cleanup job clears the run's build outputs
+            // (task 1289).
+            let cleaning = self.cleanup.cleaning();
+            let guard = cleanup::lock_cleaning(&cleaning);
+            if guard.contains(run.id()) {
+                self.cleanup.deferred = true;
+                continue;
+            }
+            let leased = self.queue.lease_for_review(run.id(), &self.token)?;
+            drop(guard);
+            let Some(run) = leased else {
                 continue;
             };
             info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} is reviewed again: its landing was given up before it was approved or passed", run.id(), run.task_id());

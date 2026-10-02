@@ -4,8 +4,8 @@ type: design
 title: "Run worktrees"
 status: current
 created: 2026-09-26
-updated: 2026-09-29
-last_verified: 2026-09-29
+updated: 2026-10-02
+last_verified: 2026-10-02
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -18,7 +18,18 @@ related:
 - **taskが`completed` / `canceled`**: worktreeとbranchを消す（`git worktree remove --force`、branchがあれば`git branch -D`）。`worktree_removed`（`path`、`branch`、`bytes`、`by: supervisor`、`reason`: `task_completed` / `task_canceled`）を記録する。前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。run_dirとその記録、着地したcommitの`refs/dagq/runs/<run-id>`は残す
   - `git worktree remove`が失敗したら（queueの`rebind`の後などで、worktreeの`.git`が古いcommon dirを指している）、`git worktree repair <worktree>`で直してからもう一度removeする。そうして消せたら`worktree_removed`に`repaired: true`を足す。repairか2回目のremoveも失敗すれば、最初の失敗と合わせて`cleanup_failed`にする（task 405）
   - worktreeのディレクトリがもう無いのにbranch `dagq/<run-id>`が残っていれば、`git worktree prune`（Gitはpruneするまで消えたworktreeを覚えていて、そこにcheckoutされたbranchを消させない）の後に`git branch -D`で消し、`worktree_removed`（`bytes: 0`、`worktree_missing: true`、他の欄は同じ）を記録する。branchが無ければ何もしない（task 405。branchの一覧は1回の掃除で1回だけ読む）
-- **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物（`target/`と`llvm-cov-target/`。`cargo llvm-cov`は既定で`target/llvm-cov-target`に作る）だけを消す。Gitがその下のfileをtrackしていれば消さず、linkはたどらない。`build_outputs_removed`（`paths`、`bytes`、`by: supervisor`）を記録する。ソース、commit、run_dirは残る。triageを待つrunも対象で、resumeされたら作り直す。worktreeが無ければ何もしない
+- **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物（`target/`と`llvm-cov-target/`。`cargo llvm-cov`は既定で`target/llvm-cov-target`に作る）だけを消す。Gitがその下のfileをtrackしていれば消さず、linkはたどらない。`build_outputs_removed`（`paths`、`bytes`、`by: supervisor`、`reason: run_ended`）を記録する。ソース、commit、run_dirは残る。triageを待つrunも対象で、resumeされたら作り直す。worktreeが無ければ何もしない
+
+## 終わっていないrunのビルド成果物
+
+2026-10-01〜02の夜、人の答えを待つrun（`approve_landing`を待つもの13件など）がleaseを返したまま`target/`（1 runあたり5〜13GiB）を持ち続け、空き容量が数時間おきに尽きて`queue_hold`（`cost`）でclaimと着地が止まった（task 1289）。そこで同じjobが、終わっていないrunのうち誰も作業していないものの、上の「それ以外」と同じビルド成果物も消す。
+
+- 対象: run（`awaiting_integration`か`needs_session`）のtaskが`completed` / `canceled`でなく、slotに無く、leaseが1つも無く（staleなleaseも有るものとして扱い、触らない）、生きているsession（`run_processes`の`exited_at`がnullで`heartbeat_at`が`HEARTBEAT_TIMEOUT_SECS`より新しい行）が無いもの（`ended_run_worktrees`が`cleanup`の`AwaitingAnswer` / `Idle`として返す）。着地の列に並んだrun、`approve_landing`を待つrun、resumeを待つ`needs_session`のrun、`integration_held`で人を待つrunなど
+- **人の答えを待つrun**（`AwaitingAnswer`）: runに開いていて答えの無いask（`approve_landing`・`decide`など。いちばん古いもの）がある。答えまで何時間も待つので（task 1059のrunはask 250で16時間待った）、空きの多少によらず、jobの通常の周回（上の契機のどれでも）で消す。`build_outputs_removed`の`reason`は`awaiting_answer`で、`ask_id`を足す
+- **それ以外**（`Idle`）: すぐ使われうるので通常は残し、空き容量のための掃除（[空き容量を確かめる](disk-space.md)の「判定と掃除」）のjobのときだけ消す。`reason`は`disk_space`で、そのjobの`auto_repaired`（`disk_cleanup`）の`bytes`と`runs`に数える
+- 消さないもの: leaseかslotを持つrun（作業中・validating・review・resume・integrate・着地の前のe2e）と、ADR-0071の待ちのrun（leaseとsessionを持ったまま答えを待つ）。worktree・branch・commit・receipt・run_dir・未commitの変更（ソース）は残し、`runner`も消さない（上の`runner`の項は終わったrunだけ）
+- 消している最中: jobが通り過ぎるまでrunは予約され、loopはleaseを取る前（resumeの`begin_resume`とresumeの要らないrunを進める`skip_resume`、着地の列からの`begin_integration`と着地の前のe2eの`lease_for_e2e`、着地をやり直せないrunのreviewの`lease_for_review`）に予約のlockを取り、予約されたrunはその周回は取らない（次の節）。消した後に着地やresumeが始まれば、検証とworkerがsccacheでビルドし直して進む。人が打つ`integrate`はこの予約を見ない
+- 空きの見積もり（直近の`build_outputs_removed`の`bytes`の最大値）は、`reason`を問わずどの記録も数える（どれも1 runのビルドの大きさなので）
 
 - **runの`runner`**（task 696、goal 54の(3)）: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し。1個約9MB）を消す。対象のrunはslotに無く生きているleaseも無いので、そのsessionのwrapperを走らせるものは居ない。resumeはleaseを取ってから写し直すので、消した後のresumeも動く。jobが通り過ぎるまでrunは予約されているので、loopがその間にleaseを取って写した`runner`を消すことはない。`needs_session`でresumeを待つrun（taskがまだ終わっていないもの）は対象外で、`runner`は残る。eventは記録せず（logの1行だけ）、`bytes`にも数えない。失敗はlogだけで、次の掃除で再び試す。worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す
 
@@ -37,10 +48,10 @@ related:
 
 数GBの`target/`の計測（`tree_size`）と削除はloopの外のthread（掃除のjob）が行い、loopは完了を待たない（task 405。入れ替え後の最初の掃除が過去のrunを全部歩いてloopが長く止まり、生きているrunのidle・receipt・stallの検知が遅れたため）。周回ごとの予算で区切る方式にしなかったのは、1つのworktreeの`target/`の削除だけで数十秒かかりうり、件数や時間の予算では1件の途中で止められないから。
 
-- 下の契機は掃除を頼むだけ（`request_cleanup`）。jobが無ければloopがその場で候補（`ended_run_worktrees`からslotのrunを除いたもの、taskの指定があればそのtaskのrun）を選んでjobを起こし、jobが走っていれば頼みを溜めて（全runか、taskの集合）、jobが終わった後の周回で次のjobにする。jobは同時に1つだけなので、同じworktreeを二重に掃除しない
-- jobが選んだrunは、jobがそのrunを通り過ぎるまで予約される。loopは終わったrunにleaseを取る前（triageの`begin_triage`、resumeの`begin_resume`）に予約のlockを取り、予約されたrunはその周回は取らない（loopの中で同期に掃除していたときと同じく、掃除がtriageより先になる）。そうして取らなかったrunがあれば、loopはそのjobをrunと同じく待つ（`supervise --once`がjobの後にtriageやresumeをしてから終わるように）。jobは候補ごとに、同じlockの中で消す前にqueueを読み直し（自分の接続で`ended_run_worktrees`）、選ばれたときと同じ状態で候補に残っているものだけを掃除する。選ばれた後にleaseが付いた（別のsupervisorがclaimした）run、状態が変わったrunやtaskは飛ばし、次の掃除が選び直す。どちらが先でも、掃除中のworktreeのrunがclaimされることはない
+- 下の契機は掃除を頼むだけ（`request_cleanup`）。jobが無ければloopがその場で候補（`ended_run_worktrees`からslotのrunを除いたもの、taskの指定があればそのtaskのrun。`Idle`のrunは空き容量のための掃除のときだけ）を選んでjobを起こし、jobが走っていれば頼みを溜めて（全runか、taskの集合）、jobが終わった後の周回で次のjobにする。jobは同時に1つだけなので、同じworktreeを二重に掃除しない
+- jobが選んだrunは、jobがそのrunを通り過ぎるまで予約される。loopはleaseの無いrunにleaseを取る前（triageの`begin_triage`、resumeの`begin_resume`と`skip_resume`、着地の列の`begin_integration`と`lease_for_e2e`、reviewし直しの`lease_for_review`）に予約のlockを取り、予約されたrunはその周回は取らない（loopの中で同期に掃除していたときと同じく、掃除がtriageより先になる）。そうして取らなかったrunがあれば、loopはそのjobをrunと同じく待つ（`supervise --once`がjobの後にtriageやresumeをしてから終わるように）。jobは候補ごとに、同じlockの中で消す前にqueueを読み直し（自分の接続で`ended_run_worktrees`）、選ばれたときと同じ状態で候補に残っているものだけを掃除する。選ばれた後にleaseが付いた（別のsupervisorがclaimした）run、状態が変わったrunやtaskは飛ばし、次の掃除が選び直す。どちらが先でも、掃除中のworktreeのrunがclaimされることはない
 - eventはloopが記録する。loopは周回の最初にjobが終わっていればjoinし、jobが返した結果から`build_outputs_removed`・`worktree_removed`・`scratchpad_removed`・`cleanup_failed`をtask 376（scratchpadはtask 1100）と同じpayloadで記録する（`cleanup_failed`はプロセスごとにworktreeあたり1回）
-- 空き容量のための掃除（[空き容量を確かめる](disk-space.md)）も同じjobに乗る。そのjobは最後に`git worktree prune`を行い、終わった周回で空きを読み直して`auto_repaired`を記録する。空きが足りずにそのjobを待つあいだ、claimと着地は控えるが`claim_held` / `landing_held`もaskも記録せず、終わった後の周回で読み直した空きで判定する。loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。空き容量のための掃除を頼んだときに別のjobが走っていれば、そのjobを空き容量のための掃除として扱い（claimと着地はそのjobだけを待ち、消した分を`auto_repaired`に数える）、残り（そのjobが選ばなかったrunと`git worktree prune`）は控えずに次のjobで行う
+- 空き容量のための掃除（[空き容量を確かめる](disk-space.md)）も同じjobに乗る。そのjobは最後に`git worktree prune`を行い、終わった周回で空きを読み直して`auto_repaired`を記録する。空きが足りずにそのjobを待つあいだ、claimと着地は控えるが`claim_held` / `landing_held`もaskも記録せず、終わった後の周回で読み直した空きで判定する。loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。空き容量のための掃除を頼んだときに別のjobが走っていれば、そのjobを空き容量のための掃除として扱い（claimと着地はそのjobだけを待ち、消した分を`auto_repaired`に数える）、残り（そのjobが選ばなかったrunと`git worktree prune`。走っていたjobが選ばない`Idle`のrunのビルド成果物もここで消す）は控えずに次のjobで行い、その残りのjobが消した分も（claimと着地はそれを待たないが）`auto_repaired`に数える
 - stopかhandoffでは、jobは今のworktreeを終えたところで止まり、溜めた頼みは捨てる（残りは次のsupervisorの最初の掃除が拾う）。handoffのexecはjobの終わりを待つ。loopが終わるときは、走っているjobと溜めた頼みのjobを待ってeventを記録する（errorで終わったときは、jobは今のworktreeを終えたところで止まり、それを待って記録する）
 
 消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`、workspaceを閉じた後、全runを見直す）。手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。失敗は`cleanup_failed`（`path`、`message`、`by: supervisor`）にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。

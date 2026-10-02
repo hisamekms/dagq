@@ -1,13 +1,15 @@
 //! Runtime tests: the cleanup of ended runs' worktrees off the supervisor's
 //! loop, the branches of worktrees already gone, and worktrees a rebind
-//! left pointing at an old repository (task 405), and the runners of
-//! ended runs (task 696).
+//! left pointing at an old repository (task 405), the runners of ended
+//! runs (task 696), and the build outputs of the runs left waiting for an
+//! answer, a landing or a resume (task 1289).
 use crate::{common, runtime_support};
 use dagq::infrastructure::git_binary::git_executable;
 
+use dagq::domain::disk::DiskConfig;
 use dagq::{application::RunFiles, runtime::RunFilesPort};
 use runtime_support::*;
-use std::{io, sync::Condvar};
+use std::{io, sync::Condvar, sync::atomic::AtomicBool};
 
 /// A worker script that commits, leaves build outputs in its worktree and
 /// fails.
@@ -219,7 +221,7 @@ fn a_slow_cleanup_does_not_hold_up_the_loop() {
     assert_eq!(
         removed,
         [
-            json!({"paths": [held.to_string_lossy()], "bytes": removed[0]["bytes"], "by": "supervisor"})
+            json!({"paths": [held.to_string_lossy()], "bytes": removed[0]["bytes"], "by": "supervisor", "reason": "run_ended"})
         ]
     );
     assert!(removed[0]["bytes"].as_u64().unwrap() >= 65536);
@@ -531,5 +533,259 @@ fn a_scratchpad_gone_meanwhile_is_no_failure_and_one_failing_root_keeps_the_othe
     assert_eq!(
         removed[1]["paths"],
         json!([scratchpads[1].to_string_lossy()])
+    );
+}
+
+/// A run whose review returned `concern`: `awaiting_integration` with no
+/// lease and no live session, its `approve_landing` ask open. Its worktree
+/// then gets build outputs, and an uncommitted source with `uncommitted`;
+/// returns the run and the ask.
+fn run_awaiting_an_answer(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    uncommitted: bool,
+) -> (TaskRun, dagq::domain::Ask) {
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "first")]);
+    let outcome = supervise_reviewed(db, repo, backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let ask = queue.asks(Default::default()).unwrap()[0].clone();
+    assert_eq!(ask.kind, AskKind::ApproveLanding);
+    let worktree = Path::new(run.worktree_path().unwrap());
+    for dir in ["target/debug", "llvm-cov-target/debug"] {
+        fs::create_dir_all(worktree.join(dir)).unwrap();
+        fs::write(worktree.join(dir).join("big"), vec![0u8; 65536]).unwrap();
+    }
+    if uncommitted {
+        fs::write(worktree.join("uncommitted.rs"), "fn main() {}\n").unwrap();
+    }
+    (run, ask)
+}
+
+/// What a cleanup must leave of a run whose build outputs it removed.
+fn assert_kept_but_the_build_outputs(repo: &Path, run: &TaskRun) {
+    let worktree = Path::new(run.worktree_path().unwrap());
+    assert!(!worktree.join("target").exists());
+    assert!(!worktree.join("llvm-cov-target").exists());
+    assert!(worktree.join("uncommitted.rs").is_file());
+    assert!(worktree.join("change.txt").is_file());
+    assert!(branch_exists(repo, run.branch().unwrap()));
+    let run_dir = Path::new(run.run_dir().unwrap());
+    assert!(run_dir.join("receipt.json").is_file());
+}
+
+/// Task 1289: the build outputs of a run waiting for a person's answer go
+/// on the cleanup's usual sweep, whatever the free space, recorded as
+/// `build_outputs_removed` with the reason `awaiting_answer` and the ask;
+/// not while a live lease or a live session holds the run. The worktree,
+/// its branch and uncommitted source, the receipt and the runner stay, and
+/// no `auto_repaired` is recorded.
+#[test]
+fn the_build_outputs_of_a_run_waiting_for_an_answer_go_on_the_sweep() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+    let queue = SqliteQueue::open(&db).unwrap();
+    let raw = Connection::open(&db).unwrap();
+    let candidate = |queue: &SqliteQueue| {
+        queue
+            .ended_run_worktrees()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.run_id == *run.id())
+            .map(|w| w.cleanup)
+    };
+    assert_eq!(
+        candidate(&queue),
+        Some(dagq::application::WorktreeCleanup::AwaitingAnswer(ask.id))
+    );
+    // A live lease (a supervisor working on it, or a run waiting in its
+    // session, ADR-0071) or a live session keeps it out.
+    raw.execute(
+        "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'live',?2,unixepoch()+100000)",
+        rusqlite::params![run.id(), std::process::id()],
+    )
+    .unwrap();
+    assert_eq!(candidate(&queue), None);
+    raw.execute("DELETE FROM run_leases WHERE run_id=?1", [run.id()])
+        .unwrap();
+    raw.execute(
+        "INSERT OR REPLACE INTO run_processes(run_id,role,pid,heartbeat_at,exited_at) VALUES (?1,'agent',?2,unixepoch()+100000,NULL)",
+        rusqlite::params![run.id(), std::process::id()],
+    )
+    .unwrap();
+    assert_eq!(candidate(&queue), None);
+    raw.execute(
+        "UPDATE run_processes SET exited_at=unixepoch() WHERE run_id=?1 AND role='agent'",
+        [run.id()],
+    )
+    .unwrap();
+    let runner = Path::new(run.run_dir().unwrap()).join("runner");
+    fs::write(&runner, "binary").unwrap();
+
+    let outcome = supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_kept_but_the_build_outputs(&repo, &run);
+    assert!(runner.is_file());
+    let removed = payloads_of(&queue, &run, "build_outputs_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "awaiting_answer");
+    assert_eq!(removed[0]["ask_id"], json!(ask.id));
+    assert_eq!(removed[0]["paths"].as_array().unwrap().len(), 2);
+    assert!(removed[0]["bytes"].as_u64().unwrap() >= 2 * 65536);
+    assert!(
+        queue
+            .all_events()
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "auto_repaired")
+    );
+    assert!(queue.read_ask(ask.id).unwrap().is_open());
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
+}
+
+/// Task 1289: an answer that comes while the cleanup clears the run's
+/// build outputs is applied, but the landing waits until the job has
+/// passed the run; then the run lands.
+#[test]
+fn a_landing_waits_for_the_cleanup_of_its_build_outputs() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    // Nothing uncommitted: the landing would defer a dirty worktree.
+    let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, false);
+    let files = GatedFiles::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = files.options(SuperviseOptions {
+        stop: stop.clone(),
+        ..SuperviseOptions {
+            sweep_interval: Duration::ZERO,
+            ..supervise_options(4, false)
+        }
+    });
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            supervise_reviewed_with(&db, &repo, &backend, &TestReviewer::new(&[]), &options)
+        })
+    };
+    let held = files.held();
+    assert_eq!(held, Path::new(run.worktree_path().unwrap()).join("target"));
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask.id, "land").unwrap();
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue.read_ask(ask.id).unwrap().closed_at.is_some()
+    });
+    await_passes(&passes, SOME_PASSES);
+    assert!(payloads_of(&queue, &run, "landing_queued").len() == 1);
+    assert!(payloads_of(&queue, &run, "integration_started").is_empty());
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
+    );
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+
+    files.open();
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue.run(run.id()).unwrap().status() == RunStatus::Integrated
+    });
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to finish");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The landing began once the job had passed the run (the event is
+    // recorded when the loop joins the job, which may come after).
+    assert!(!held.exists());
+    let removed = payloads_of(&queue, &run, "build_outputs_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "awaiting_answer");
+}
+
+const GIB: u64 = 1 << 30;
+
+/// The build outputs whose presence makes the idle-run test's disk short.
+static IDLE_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
+static IDLE_SHORT: AtomicBool = AtomicBool::new(false);
+
+fn short_while_idle_target(_: &Path) -> Option<u64> {
+    let target = IDLE_TARGET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Some(
+        if IDLE_SHORT.load(Ordering::SeqCst) && target.as_ref().is_some_and(|dir| dir.exists()) {
+            1
+        } else {
+            4 * GIB
+        },
+    )
+}
+
+/// Task 1289: the build outputs of a run nobody works on that waits for no
+/// answer (here its ask closed unanswered) stay while there is room, and
+/// go only in a cleanup for disk space: `build_outputs_removed` with the
+/// reason `disk_space`, counted in `auto_repaired` (`disk_cleanup`).
+#[test]
+fn the_build_outputs_of_an_idle_run_go_only_for_disk_space() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask.id, "withdrawn").unwrap();
+    queue.close_ask(ask.id).unwrap();
+    let target = Path::new(run.worktree_path().unwrap()).join("target");
+    *IDLE_TARGET.lock().unwrap() = Some(target.clone());
+    assert_eq!(
+        queue
+            .ended_run_worktrees()
+            .unwrap()
+            .iter()
+            .find(|w| w.run_id == *run.id())
+            .map(|w| w.cleanup),
+        Some(dagq::application::WorktreeCleanup::Idle)
+    );
+    let options = SuperviseOptions {
+        disk: Some(DiskConfig {
+            min_free_bytes: Some(GIB),
+            ..DiskConfig::default()
+        }),
+        free_space: short_while_idle_target,
+        ..sweeping_options()
+    };
+    // Room: they stay.
+    IDLE_SHORT.store(false, Ordering::SeqCst);
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(target.join("debug/big").is_file());
+    assert!(payloads_of(&queue, &run, "build_outputs_removed").is_empty());
+
+    // Short: they go, for disk space.
+    IDLE_SHORT.store(true, Ordering::SeqCst);
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_kept_but_the_build_outputs(&repo, &run);
+    let removed = payloads_of(&queue, &run, "build_outputs_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "disk_space");
+    assert!(removed[0].get("ask_id").is_none());
+    let repaired: Vec<Value> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "auto_repaired")
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(repaired.len(), 1, "{repaired:?}");
+    assert_eq!(repaired[0]["repair"], "disk_cleanup");
+    assert_eq!(repaired[0]["bytes"], removed[0]["bytes"]);
+    assert_eq!(repaired[0]["detail"]["runs"], json!([run.id().as_str()]));
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::AwaitingIntegration
     );
 }

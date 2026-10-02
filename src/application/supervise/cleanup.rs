@@ -20,9 +20,15 @@
 //! The job also removes what an ended run whose task is over left outside
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
 //! [`scratchpad_dir_name`]).
+//!
+//! Beside the ended runs, it removes the build outputs of the runs left in
+//! the middle with no lease and no live session (task 1289,
+//! [`WorktreeCleanup`]): of one waiting for a person's answer on every
+//! cleanup, of any other only in a cleanup for disk space. The loop leaves
+//! such a run reserved by the job before it lands, reviews or resumes it.
 
 use super::*;
-use crate::application::EndedRunWorktree;
+use crate::application::{EndedRunWorktree, WorktreeCleanup};
 use crate::domain::EventKind;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -46,6 +52,13 @@ struct Request {
     disk: Option<DiskRequest>,
     /// `git worktree prune` after the worktrees (for disk space).
     prune: bool,
+    /// The build outputs of the runs nobody works on that wait for no
+    /// answer ([`WorktreeCleanup::Idle`]) go too (for disk space).
+    idle: bool,
+    /// What is removed counts for room as `auto_repaired`, though the
+    /// claims and landings do not wait for it: the rest of a cleanup for
+    /// room that another job took on.
+    counted: Option<DiskRequest>,
 }
 
 impl Request {
@@ -58,6 +71,7 @@ impl Request {
         if disk.is_some() {
             self.all = true;
             self.prune = true;
+            self.idle = true;
             // The first reading is the one the shortage was found at.
             self.disk = self.disk.or(disk);
         }
@@ -66,7 +80,8 @@ impl Request {
         !self.all && self.tasks.is_empty()
     }
     fn wants(&self, candidate: &EndedRunWorktree) -> bool {
-        self.all || self.tasks.contains(&candidate.task_id)
+        (self.all || self.tasks.contains(&candidate.task_id))
+            && (self.idle || candidate.cleanup != WorktreeCleanup::Idle)
     }
 }
 
@@ -88,6 +103,8 @@ pub(super) struct CleanupWatch {
 struct Job {
     handle: thread::JoinHandle<Vec<Outcome>>,
     disk: Option<DiskRequest>,
+    /// [`Request::counted`].
+    counted: Option<DiskRequest>,
 }
 
 impl CleanupWatch {
@@ -113,10 +130,12 @@ pub(super) fn lock_cleaning(cleaning: &Mutex<Vec<RunId>>) -> MutexGuard<'_, Vec<
 
 /// What the job did to one worktree.
 enum Outcome {
-    /// The build outputs of a run whose task goes on.
+    /// The build outputs of a run whose task goes on, and why
+    /// ([`WorktreeCleanup`]).
     BuildOutputs {
         run_id: RunId,
         status: RunStatus,
+        cleanup: WorktreeCleanup,
         paths: Vec<String>,
         bytes: u64,
     },
@@ -149,6 +168,16 @@ enum Outcome {
         error: anyhow::Error,
     },
 }
+
+/// `build_outputs_removed`'s `reason`: the run ended
+/// ([`WorktreeCleanup::Ended`]).
+const BUILD_OUTPUTS_RUN_ENDED: &str = "run_ended";
+/// The run waits for a person's answer to the ask `ask_id` names
+/// ([`WorktreeCleanup::AwaitingAnswer`]).
+const BUILD_OUTPUTS_AWAITING_ANSWER: &str = "awaiting_answer";
+/// The run waits for nobody's answer, and the free disk space ran short
+/// ([`WorktreeCleanup::Idle`]).
+const BUILD_OUTPUTS_DISK_SPACE: &str = "disk_space";
 
 /// The longest name Claude Code gives a project's directory whole; it
 /// shortens a longer one with a hash, which is not looked for.
@@ -193,13 +222,18 @@ impl Supervisor<'_> {
         }
         // For room while another job runs: that job counts for it, so the
         // claims wait only for it, and the rest (the runs it did not pick,
-        // and the prune) follows without holding them.
+        // and the prune) follows without holding them. The build outputs
+        // of the runs nobody works on that wait for no answer (task 1289),
+        // which only a cleanup for room removes, go in that rest, which
+        // counts what it removes for room too.
         if let (Some(request), Some(job)) = (disk, self.cleanup.job.as_mut())
             && job.disk.is_none()
         {
             job.disk = Some(request);
             self.cleanup.pending.add(None, None);
             self.cleanup.pending.prune = true;
+            self.cleanup.pending.idle = true;
+            self.cleanup.pending.counted = self.cleanup.pending.counted.or(Some(request));
             return;
         }
         self.cleanup.pending.add(task, disk);
@@ -225,7 +259,7 @@ impl Supervisor<'_> {
         lock_cleaning(&self.cleanup.cleaning).clear();
         self.cleanup.deferred = false;
         let cleaned = self.record_cleanup(outcomes);
-        if let Some(disk) = job.disk {
+        if let Some(disk) = job.disk.or(job.counted) {
             self.cleaned_for_disk(disk, &cleaned);
         }
         self.start_cleanup();
@@ -279,6 +313,7 @@ impl Supervisor<'_> {
         self.cleanup.job = Some(Job {
             handle,
             disk: request.disk,
+            counted: request.counted,
         });
     }
     /// Record the events of what the job did; what it removed.
@@ -289,15 +324,30 @@ impl Supervisor<'_> {
                 Outcome::BuildOutputs {
                     run_id,
                     status,
+                    cleanup,
                     paths,
                     bytes,
                 } => {
-                    info!(run_id = %run_id, "run {run_id} is {}; removed the build outputs of its worktree ({bytes} bytes)", status.as_str());
+                    let (reason, why) = match cleanup {
+                        WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
+                        WorktreeCleanup::AwaitingAnswer(ask) => (
+                            BUILD_OUTPUTS_AWAITING_ANSWER,
+                            format!(", waiting for the answer to ask {ask}"),
+                        ),
+                        WorktreeCleanup::Idle => {
+                            (BUILD_OUTPUTS_DISK_SPACE, ", for disk space".to_owned())
+                        }
+                    };
+                    info!(run_id = %run_id, "run {run_id} is {}{why}; removed the build outputs of its worktree ({bytes} bytes)", status.as_str());
                     cleaned.add(&run_id, bytes);
+                    let mut payload = json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": reason});
+                    if let WorktreeCleanup::AwaitingAnswer(ask) = cleanup {
+                        payload["ask_id"] = json!(ask);
+                    }
                     self.queue.record_runtime_event(
                         &run_id,
                         EventKind::BuildOutputsRemoved,
-                        json!({"paths": paths, "bytes": bytes, "by": "supervisor"}),
+                        payload,
                     )
                 }
                 Outcome::Worktree {
@@ -398,7 +448,9 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
             }
         };
         if still {
-            remove_run_runner(ports, &candidate);
+            if candidate.cleanup == WorktreeCleanup::Ended {
+                remove_run_runner(ports, &candidate);
+            }
             match clean_worktree(ports, &candidate, &mut branches, &mut pruned) {
                 Ok(Some(outcome)) => outcomes.push(outcome),
                 Ok(None) => {}
@@ -568,12 +620,6 @@ fn clean_worktree(
         let repaired = remove_worktree(&*ports.repository, worktree, branch)?;
         return Ok(Some(removed(bytes, false, repaired, branch)));
     }
-    if !matches!(
-        candidate.status,
-        RunStatus::Integrated | RunStatus::Succeeded | RunStatus::Failed | RunStatus::Interrupted
-    ) {
-        return Ok(None);
-    }
     let mut paths = Vec::new();
     let mut bytes = 0;
     for name in BUILD_OUTPUT_DIRS {
@@ -601,6 +647,7 @@ fn clean_worktree(
     Ok(Some(Outcome::BuildOutputs {
         run_id: candidate.run_id.clone(),
         status: candidate.status,
+        cleanup: candidate.cleanup,
         paths,
         bytes,
     }))

@@ -264,7 +264,14 @@ impl Supervisor<'_> {
     /// - otherwise (the task may run it again, or retry it on a new run):
     ///   only the build outputs ([`BUILD_OUTPUT_DIRS`]) go, and the sources,
     ///   commits and run directory stay; recorded as
-    ///   `build_outputs_removed` (`paths`, `bytes`, `by: supervisor`).
+    ///   `build_outputs_removed` (`paths`, `bytes`, `by: supervisor`,
+    ///   `reason: run_ended`).
+    ///
+    /// The build outputs of an `awaiting_integration` or `needs_session`
+    /// run of a task that goes on, with no lease and no live session, go
+    /// too (task 1289): on every cleanup while an ask of it waits for an
+    /// answer (`reason: awaiting_answer`, with its `ask_id`), else only in
+    /// a cleanup for disk space (`reason: disk_space`).
     ///
     /// `bytes` is what the removed files took on disk. Only a worktree
     /// under the run directory is touched, never the checkout the

@@ -43,7 +43,7 @@ use crate::domain::{provider_switch::WorkerRoute, worker::Worker};
 
 pub use crate::application::{
     EndedRunWorkspace, EndedRunWorktree, Exhaustion, Landing, LeasedRun, ResumeCandidate,
-    TRIAGE_ASKER, TriageAction, Validation,
+    TRIAGE_ASKER, TriageAction, Validation, WorktreeCleanup,
 };
 pub use crate::domain::{HEARTBEAT_TIMEOUT_SECS, RunPlan};
 
