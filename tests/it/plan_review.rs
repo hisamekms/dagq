@@ -1671,7 +1671,7 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
         format!("dagq cancel {follow_up} --duplicate-of <that task>"),
         format!("dagq ask --task {follow_up} --kind planner_question --because scope"),
         "`follow-up draft (proposed by the receipt of run ".to_owned(),
-        "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, ask a person with a `planner_question` ask".to_owned(),
+        "in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask as below only when that material cannot settle them".to_owned(),
     ] {
         assert!(prompt.contains(&expected), "{expected}\n{prompt}");
     }

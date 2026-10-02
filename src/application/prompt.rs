@@ -658,8 +658,10 @@ pub(crate) fn repository_rules(ask: &str) -> String {
 }
 
 /// The last step of [`repository_rules`] for a planner the runtime opens:
-/// no person watches it, so it asks the inbox.
-const RUNTIME_PLANNER_ASK: &str = "ask a person with a `planner_question` ask as below";
+/// it decides from the rest of its material as the Basic policy says
+/// (ADR-t451-1 decision 5), and asks the inbox, since no person watches
+/// it, only what that leaves to a person or to a low confidence.
+const RUNTIME_PLANNER_ASK: &str = "decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask as below only when that material cannot settle them and the decision is a person's (`scope` or `discard`) or your confidence in it is low";
 
 /// The initial prompt of a planner session a person opens with `dagq plan`
 /// (ADR-0041 decisions 1, 6): it turns the person's problems into goals and
@@ -781,6 +783,12 @@ fn follow_up_category_line(target: &DraftTarget) -> String {
         "\nCategory (the worker's; keep it as it is, and judge the draft on its merits): {category}{meaning}\n"
     )
 }
+
+/// The Basic policy of the dagq-planner skill (ADR-t451-1 decision 5) as
+/// the planners the runtime opens for a draft or a finding read it: what
+/// they can recommend they decide themselves and record why; only what
+/// they cannot settle goes to a person.
+const DECIDE_YOURSELF: &str = "decide what you can recommend yourself and go on, asking no one, and leave why in the record (a task's `--context`, a `note`, a `--reason`); raise to a person, with your recommendation and its confidence, only what step Ask below names.";
 
 /// The initial prompt of a planner the runtime opens for a bundle of drafts
 /// the runtime or a job registered (ADR-0041 decision 16, ADR-t807-1): the
@@ -991,12 +999,12 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Strin
     };
     out.push_str(&format!(
         "\n## What to do\n\n\
-         Follow the dagq-planner skill of the dagq plugin. {rules} Look for tasks that already cover the {drafts} or code that already does {it} (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. {RECORD_READING}\n\
+         Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} {rules} Look for tasks that already cover the {drafts} or code that already does {it} (`dagq search '<words>'`, `dagq show ID`, the source) before you decide. {RECORD_READING}\n\
          {each}Then do exactly one of these three{with_each}:\n\
-         1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {t}` and submit it with `dagq submit {t}`. Plan review checks it before it becomes ready.\n\
-         2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {t} --duplicate-of <that task>` instead, so the queue records which task it duplicates.\n\
-         3. Ask: when you cannot decide without a person (the plan's intent, its scope, whether it belongs to this goal or a new one, or verification, paths or evidence the repository does not settle; then say in the question what you propose, so the person's adopt applies it), run `dagq ask --task {t} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option adopt --option cancel --option keep_draft`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is and stop.\n\
-         The runtime refuses your submit of a follow_up draft whose goal is closed or that is {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement unless a person answered adopt: ask then.\n\
+         1. Adopt: {adopt} add its dependencies with `dagq dependency add`, check it with `dagq lint {t}` and submit it with `dagq submit {t}`. Say in its `--context` why you adopted it. Plan review checks it before it becomes ready.\n\
+         2. Drop: when it is already done, duplicated or not worth doing, cancel it with `dagq cancel {t}` and record why with `dagq note --task {t} --text '<why>'`. When another task already covers it (a duplicate, or a completed task that already did it), cancel it with `dagq cancel {t} --duplicate-of <that task>` instead, so the queue records which task it duplicates, and still note why.\n\
+         3. Ask: only for a draft you cannot decide yourself: (a) it needs a person's judgement, `scope` (the acceptance, the scope or a goal's decision would change with their intent) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; (b) your confidence in the decision is low; or (c) it is a follow_up draft past the runtime's follow_up limit, {FOLLOW_UP_ASK_DEPTH} or more follow-ups from a person's judgement or with no goal or a closed goal. Run `dagq ask --task {t} --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option adopt --option cancel --option keep_draft` (`--because discard` when the question is whether to throw work away; for (c), recommend what you would do on your own), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: on adopt do 1, on cancel do 2 (the note names the ask), on keep_draft leave the draft as it is, record why with `dagq note --task {t} --text '<why>'` (naming the ask) and stop.\n\
+         The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt: ask then, as (c) says.\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but {this}. Never open the queue database directly; use the dagq CLI only.\n",
         drafts = if single { "draft" } else { "drafts" },
         it = if single { "it" } else { "them" },
@@ -1129,13 +1137,13 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<S
     }
     out.push_str(&format!(
         "\n## What to do\n\n\
-         Follow the dagq-planner skill of the dagq plugin. {rules} Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`). Then do exactly one of these:\n\
-         1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `from finding {id} ({kind})`), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
+         Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} {rules} Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`). Then do exactly one of these:\n\
+         1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `from finding {id} ({kind})` and saying why you chose this remedy), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
          2. A new goal: when no open goal covers it, write a draft goal (`dagq goal add --draft ...`) and its draft tasks, lint them and submit with `dagq submit --goal GOAL --finding {id}`.\n\
          Either way the submission makes finding {id} proposed with the proposal, and plan review checks it before it becomes ready; you need no person's approval for it, even for a new goal. \
          An improvement's tasks are `--priority normal` (the default) or `low`, never higher: plan review lowers a higher one to normal.\n\
-         3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`.\n\
-         4. Ask: only when a person must decide (the plan's intent or scope, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise, a change that is large and hard to undo, or verification, paths or evidence the repository does not settle; then say in the question what you propose, so the person's propose applies it), run `dagq ask --finding {id} --kind planner_question --because scope --question '<everything the person needs, with your recommendation>' --option propose --option dismiss`, report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
+         3. Dismiss: when a task already remedies it (name the task), it no longer occurs, or it is not worth remedying, run `dagq finding dismiss {id} --reason '<why>'`, the reason saying why you decided so.\n\
+         4. Ask: only when you cannot decide it yourself: (a) it needs a person's judgement, `scope` (the plan's intent, an acceptance, a contradiction with a goal's constraints or a decision the repository records, a precedent a person answered otherwise) or `discard` (whether to throw work away), that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle; or (b) your confidence in the decision is low. Run `dagq ask --finding {id} --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low> --question '<everything the person needs, with your recommendation and why>' --option propose --option dismiss` (`--because discard` when the question is whether to throw work away), report briefly and stop. The answer arrives in this terminal as `answer to ask <id>: ...`: follow it (propose: do 1 or 2; dismiss: do 3).\n\
          When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n",
         kind = finding.kind,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
@@ -2922,7 +2930,7 @@ mod tests {
         );
         assert!(
             revise.contains(&format!(
-                "{order}ask a person with a `planner_question` ask"
+                "{order}decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask"
             )),
             "{revise}"
         );
@@ -3454,5 +3462,126 @@ mod tests {
         ] {
             assert!(named.contains(read), "no prompt names {read}: {named:?}");
         }
+    }
+
+    /// The draft planner decides what it can recommend and records why;
+    /// only what it cannot settle, a low confidence and a follow_up past
+    /// ADR-t808-1's limit go to a person, with a recommendation and its
+    /// confidence (ADR-t451-1 decision 5).
+    #[test]
+    fn the_draft_planner_decides_what_it_can_recommend() {
+        let material = json!({"source_run_id": RUN, "source_task_id": 3, "index": 0});
+        let draft = task(9, "follow", TaskStatus::Draft);
+        let key = BundleKey::of(DraftOrigin::FollowUp, &material, draft.id());
+        let members = [(
+            DraftTarget {
+                task: draft,
+                origin: DraftOrigin::FollowUp,
+                material,
+                planners: 0,
+            },
+            1,
+        )];
+        let prompt = draft_planner_prompt(&DraftPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            key: &key,
+            members: &members,
+            source: None,
+            receipt: None,
+            goals: &[],
+            answer: None,
+        })
+        .unwrap();
+        for part in [
+            "its Basic policy above all: decide what you can recommend yourself and go on, asking no one, and leave why in the record",
+            "Say in its `--context` why you adopted it.",
+            "record why with `dagq note --task 9 --text '<why>'`",
+            "3. Ask: only for a draft you cannot decide yourself:",
+            "that the queue, the repository (its code and the decisions it records) and a person's precedents cannot settle",
+            "(b) your confidence in the decision is low; or (c)",
+            "when none of them settles it, decide them yourself from the source, the decisions the repository records and a person's precedents, and ask a person with a `planner_question` ask as below only when that material cannot settle them and the decision is a person's (`scope` or `discard`) or your confidence in it is low.",
+            "(c) it is a follow_up draft past the runtime's follow_up limit, 3 or more follow-ups from a person's judgement or with no goal or a closed goal",
+            "dagq ask --task 9 --kind planner_question --because scope --recommend <adopt|cancel|keep_draft> --confidence <high|low>",
+            "on keep_draft leave the draft as it is, record why with `dagq note --task 9",
+            "The runtime refuses your submit of a follow_up draft past that limit unless a person answered adopt",
+        ] {
+            assert!(prompt.contains(part), "{part} in {prompt}");
+        }
+        assert!(
+            !prompt.contains("when you cannot decide without a person"),
+            "{prompt}"
+        );
+        // The runtime's prompts carry no rules of dagq's own repository.
+        assert!(!prompt.contains("ADR"), "{prompt}");
+    }
+
+    /// The finding planner proposes or dismisses on its own and records
+    /// why; it asks only what it cannot settle or holds with low
+    /// confidence, with a recommendation (ADR-t451-1 decision 5).
+    #[test]
+    fn the_finding_planner_decides_what_it_can_recommend() {
+        use crate::domain::{
+            FindingId,
+            finding::{Finding, FindingStatus, Impact},
+        };
+        let view = FindingView {
+            finding: Finding {
+                id: FindingId::new(4),
+                kind: "conflict".into(),
+                target: "queue".into(),
+                task_id: None,
+                run_id: None,
+                goal_id: None,
+                subject: String::new(),
+                summary: "it conflicts".into(),
+                detail: String::new(),
+                impact: Impact::Normal,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                occurrences: 1,
+                evidence: Vec::new(),
+                status: FindingStatus::Open,
+                status_reason: None,
+                proposal_id: None,
+                propose_reason: None,
+                propose_requested_at: None,
+                recorded_by: "observer".into(),
+                updated_at: 0,
+            },
+            proposal_status: None,
+            open_asks: Vec::new(),
+            evidence_events: None,
+        };
+        let prompt = finding_planner_prompt(&FindingPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            finding: &view,
+            attempt: 1,
+            asks: &[],
+            goal: None,
+            goal_closed: false,
+            siblings: &[],
+            answer: None,
+        })
+        .unwrap();
+        for part in [
+            "its Basic policy above all: decide what you can recommend yourself and go on, asking no one",
+            "`from finding 4 (conflict)` and saying why you chose this remedy",
+            "`dagq finding dismiss 4 --reason '<why>'`, the reason saying why you decided so",
+            "4. Ask: only when you cannot decide it yourself:",
+            "(b) your confidence in the decision is low",
+            "dagq ask --finding 4 --kind planner_question --because scope --recommend <propose|dismiss> --confidence <high|low>",
+        ] {
+            assert!(prompt.contains(part), "{part} in {prompt}");
+        }
+        assert!(
+            !prompt.contains("a change that is large and hard to undo"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("only when that material cannot settle them and the decision is a person's (`scope` or `discard`) or your confidence in it is low."),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("rules above do not settle"), "{prompt}");
+        assert!(!prompt.contains("ADR"), "{prompt}");
     }
 }
