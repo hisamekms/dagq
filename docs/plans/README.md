@@ -20,6 +20,7 @@ tags:
 - [cargo llvm-cov nextestへの切り替え前後のintegrateのverifyの所要時間と遅いtest](nextest-measurement.md)（ADR-0076決定6の測定）
 - [cargo llvm-cov nextestのtest段の後（一覧・profrawのmerge・report）の内訳](nextest-post-test-stage.md)（task 564）
 - [着地の検証でcoverageの計測をやめたときの短縮の見積もり](coverage-at-landing.md)（task 967）
+- [着地中にworkerのrunのCPUの優先度を下げたときの着地の検証の時間・workerの遅れ・loadの測定と、着地の枠を分ける効果の見積もり直し](landing-lane-cpu-share.md)（goal 65、task 961）
 - [sccache導入前後のintegrateのllvm-covの所要時間とhit率](sccache-measurement.md)（ADR-0049決定10の導入後の測定、task 460）
 - [NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方](nextest-test-threads.md)（task 566の前後の比較）
 - [遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり](slow-test-waits.md)（goal 68、task 975）
