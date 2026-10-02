@@ -153,13 +153,17 @@ jobs:
             if [ ! -s "$log" ] || ! grep -qE '^ +Summary \[' "$log"; then
               echo "no nextest summary (the build or the setup failed; see the log)"
             else
-              # The rows after the last "Summary [" line, e.g.
+              # The rows after the last "Summary [" line whose status is in
+              # the explicit set of docs/design/linux-ci.md (the same as
+              # src/domain/verify_failure.rs and scripts/stress-recent-tests.sh
+              # read), e.g.
               #   FLKY-FL 2/2 [   0.015s] (2/3) dagq::it module::name
-              #   TRY 2 FAIL [   0.015s] (3/3) dagq::it module::name
+              #    TRY 2 FL+LK [   0.015s] (3/3) dagq::it module::name
+              #   ABORT SIG 64 [   0.015s] (3/3) dagq::it module::name
               failed=$(awk '/^ +Summary \[/ { n = NR } { line[NR] = $0 }
                 END { for (i = n + 1; i <= NR; i++) print line[i] }' "$log" |
-                grep -E '^ +(TRY [0-9]+ )?(FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL|FLKY-FL)( [0-9]+/[0-9]+)? +\[' |
-                awk '{ print $(NF - 1), $NF }' | sort -u || true)
+                grep -E '^ *(FAIL|FAIL \+ LEAK|XFAIL|LEAK-FAIL|TIMEOUT|ABORT|SIG(HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM)|ABORT SIG [0-9]+|TRY [0-9]+ (FAIL|FL\+LK|XFAIL|LKFAIL|TMT|ABORT|HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM|SIG [0-9]+)|FLKY-FL [0-9]+/[0-9]+|FLAKY [0-9]+/[0-9]+) \[' |
+                awk '$NF !~ /[])]$/ { print $(NF - 1), $NF }' | sort -u || true)
               if [ -z "$failed" ]; then
                 echo "none"
               else

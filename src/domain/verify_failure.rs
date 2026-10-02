@@ -171,12 +171,18 @@ pub fn classify(
     if let Some(evidence) = all_flaky(&text) {
         return found(FailureClass::Flaky, evidence);
     }
+    // nextest's kill under its retries (`TRY n KILL [`), after the flaky:
+    // a test killed once and passed on its retry is flaky, as any other.
+    if let Some(at) = first(&|line| nextest_failed_as(line, NextestStatus::Killed)) {
+        return found(FailureClass::Killed, lines[at]);
+    }
     if let Some(at) = first(&|line| {
         // `tests/common`'s `within` starts its own line with the test.
         (line.starts_with("test ")
             && line.contains(" timed out: ")
             && line.contains("did not happen within"))
             || line.starts_with("TIMEOUT [")
+            || nextest_failed_as(line, NextestStatus::TimedOut)
     }) {
         return found(FailureClass::Timeout, lines[at]);
     }
@@ -209,8 +215,9 @@ pub fn classify(
         return found(FailureClass::BuildError, lines[at]);
     }
     if let Some(at) = first(&|line| {
-        // `TRY n FAIL [` under nextest's retries.
-        line.starts_with("FAIL [") || (line.starts_with("TRY ") && line.contains(" FAIL ["))
+        // nextest's failures but a kill and a timeout (above), also
+        // after `TRY n` under its retries.
+        line.starts_with("FAIL [") || nextest_failed_as(line, NextestStatus::Failed)
     })
     .or_else(|| {
         first(&|line| {
@@ -265,7 +272,7 @@ impl FailedTests {
 /// The tests `log` names as failed, from the marks of cargo test
 /// (`test <name> ... FAILED`, `---- <name> stdout ----`, the list under
 /// `failures:`, a test thread's `thread '<name>' panicked`), of nextest
-/// (`FAIL [`, `TIMEOUT [`, `SIG… [` with the test last) and of
+/// (the failed statuses of [`NextestStatus`], with the test last) and of
 /// `tests/common`'s `within` (`test <name> timed out: …`). A failure that
 /// names no test (a panic outside a test, `error: test failed` alone)
 /// gives none.
@@ -301,9 +308,8 @@ pub fn failed_tests(log: &str) -> FailedTests {
             rest.split_once("' panicked")
                 .map(|(name, _)| name)
                 .filter(|name| name.contains("::"))
-        } else if nextest_failure(line) {
-            line.split_once(']')
-                .and_then(|(_, rest)| rest.split_whitespace().last())
+        } else if let Some((status, test)) = nextest_line(line) {
+            (status != NextestStatus::Flaky).then_some(test)
         } else {
             None
         };
@@ -339,22 +345,10 @@ pub fn flaky_tests(log: &str) -> Vec<String> {
 
 /// The test of a nextest status line that says it passed on a retry.
 fn flaky_line(line: &str) -> Option<&str> {
-    let (status, rest) = line.split_once(" [")?;
-    let flaky = match status.split_whitespace().collect::<Vec<_>>()[..] {
-        ["FLKY-FL" | "FLAKY", count] => count.contains('/'),
-        ["TRY", n, "PASS"] => n.chars().all(|c| c.is_ascii_digit()),
-        _ => false,
-    };
-    if !flaky {
-        return None;
+    match nextest_line(line)? {
+        (NextestStatus::Flaky, test) => Some(test),
+        _ => None,
     }
-    let (_, after) = rest.split_once(']')?;
-    let words: Vec<&str> = after
-        .split_whitespace()
-        .filter(|word| !word.starts_with('(') && !word.ends_with(')'))
-        .collect();
-    // A binary and a test.
-    (words.len() >= 2).then(|| words[words.len() - 1])
 }
 
 /// The line that shows the failure flaky when every test `text` names as
@@ -379,31 +373,83 @@ fn all_flaky(text: &str) -> Option<&str> {
         .or_else(|| lines().find(|line| flaky_line(line).is_some()))
 }
 
-/// A nextest status line of a failed test: `FAIL [`, `TRY 2 FAIL [`,
-/// `TIMEOUT [`, `SIGKILL [` and the other signals.
-fn nextest_failure(line: &str) -> bool {
-    let Some((status, rest)) = line.split_once(" [") else {
-        return false;
+/// The names nextest gives the signals that end a test (its
+/// `signal_str`): `SIG<name>` in the status of a first attempt, the bare
+/// name after `TRY n`. Any other signal is `ABORT SIG <n>` / `TRY n SIG <n>`.
+const NEXTEST_SIGNALS: [&str; 12] = [
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "FPE", "KILL", "SEGV", "PIPE", "ALRM", "TERM",
+];
+
+/// What a nextest status line says of its test (task 1272). The set is
+/// the explicit one of docs/design/supervisor-lifecycle/integrate.md, which
+/// scripts/stress-recent-tests.sh and the Linux job of ci.yml match too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextestStatus {
+    /// The test failed: `FAIL`, `FAIL + LEAK`, `XFAIL`, `LEAK-FAIL`,
+    /// `ABORT`, a signal other than a kill, and after `TRY n` their short
+    /// forms (`FAIL`, `FL+LK`, `XFAIL`, `LKFAIL`, `ABORT`).
+    Failed,
+    /// The test ran out of time: `TIMEOUT`, `TRY n TMT`.
+    TimedOut,
+    /// A kill ended the test: `SIGKILL`, `SIGTERM`, `TRY n KILL`, `TRY n
+    /// TERM`.
+    Killed,
+    /// The test passed on a retry: `FLKY-FL n/m`, `FLAKY n/m`, `TRY n PASS`.
+    Flaky,
+}
+
+/// The status of a nextest status line (the words before ` [`), or `None`
+/// for a status that does not fail a test (`PASS`, `LEAK`, `SLOW`,
+/// `TRY n SLOW`, `START`, `TERMINATING`, `DELAY n/m`, `SKIP`, …).
+fn nextest_status(words: &[&str]) -> Option<NextestStatus> {
+    use NextestStatus::*;
+    let number = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit());
+    let signal = |name: &str| match name {
+        "KILL" | "TERM" => Some(Killed),
+        _ if NEXTEST_SIGNALS.contains(&name) => Some(Failed),
+        _ => None,
     };
-    // The status starts the line (`TRY n` may come first), and a binary
-    // and a test follow the time: not a line that only says `SIGTERM [`.
-    let status = match status.split_whitespace().collect::<Vec<_>>()[..] {
-        [status] => status,
-        ["TRY", n, status] if n.chars().all(|c| c.is_ascii_digit()) => status,
-        _ => return false,
-    };
-    let after: Vec<&str> = rest
-        .split_once(']')
-        .map(|(_, after)| after.split_whitespace().collect())
-        .unwrap_or_default();
-    let words = after
-        .iter()
-        .filter(|word| !word.starts_with('(') && !word.ends_with(')'));
-    let is_status = matches!(status, "FAIL" | "LEAK-FAIL" | "TIMEOUT" | "ABORT")
-        || (status.len() > 3
-            && status.starts_with("SIG")
-            && status[3..].chars().all(|c| c.is_ascii_uppercase()));
-    is_status && words.count() >= 2
+    match words {
+        ["FAIL"] | ["FAIL", "+", "LEAK"] | ["XFAIL"] | ["LEAK-FAIL"] | ["ABORT"] => Some(Failed),
+        ["TIMEOUT"] => Some(TimedOut),
+        [status] => signal(status.strip_prefix("SIG")?),
+        ["ABORT", "SIG", n] if number(n) => Some(Failed),
+        ["FLKY-FL" | "FLAKY", count] => {
+            let (attempt, total) = count.split_once('/')?;
+            (number(attempt) && number(total)).then_some(Flaky)
+        }
+        ["TRY", n, rest @ ..] if number(n) => match rest {
+            ["FAIL" | "FL+LK" | "XFAIL" | "LKFAIL" | "ABORT"] => Some(Failed),
+            ["TMT"] => Some(TimedOut),
+            ["PASS"] => Some(Flaky),
+            ["SIG", n] if number(n) => Some(Failed),
+            [name] => signal(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The status and the test of a nextest status line of a test that failed
+/// or passed on a retry: the status starts the line, and a binary and a
+/// test follow the time (not a line that only says `SIGTERM [`). The test
+/// is the last word, so a status of several words (`FAIL + LEAK`, `ABORT
+/// SIG 64`, `TRY 2 SIG 64`) does not move it.
+fn nextest_line(line: &str) -> Option<(NextestStatus, &str)> {
+    let (status, rest) = line.split_once(" [")?;
+    let status = nextest_status(&status.split_whitespace().collect::<Vec<_>>())?;
+    let (_, after) = rest.split_once(']')?;
+    let words: Vec<&str> = after
+        .split_whitespace()
+        .filter(|word| !word.starts_with('(') && !word.ends_with(')'))
+        .collect();
+    // A binary and a test.
+    (words.len() >= 2).then(|| (status, words[words.len() - 1]))
+}
+
+/// A nextest status line of a test that failed as `status` says.
+fn nextest_failed_as(line: &str, status: NextestStatus) -> bool {
+    nextest_line(line).is_some_and(|(found, _)| found == status)
 }
 
 /// `text` when it looks like a test's name (a Rust path).
@@ -856,6 +902,158 @@ TOTAL  1000  100  90.00%  20000  4100  79.50%\n";
             "TRY 2 PASS [ 0.1s dagq::it a::b",
         ] {
             assert!(flaky_tests(line).is_empty(), "{line}");
+        }
+    }
+
+    /// A nextest status line as its displayer writes it: the status right
+    /// aligned to 12 characters, the time, the counter, the binary and the
+    /// test.
+    fn status_line(status: &str, test: &str) -> String {
+        format!("{status:>12} [   1.000s] (  9/100) dagq::it {test}\n")
+    }
+
+    #[test]
+    fn every_failed_status_of_nextest_names_its_test() {
+        use FailureClass::*;
+        // nextest-runner 0.124.0's status_str (a first attempt, a final
+        // line without retries) and `TRY n` with its short_status_str (a
+        // retry, and the attempt that will be retried).
+        let cases = [
+            ("FAIL", TestFailure),
+            ("FAIL + LEAK", TestFailure),
+            ("XFAIL", TestFailure),
+            ("LEAK-FAIL", TestFailure),
+            ("TIMEOUT", Timeout),
+            ("ABORT", TestFailure),
+            ("SIGKILL", Killed),
+            ("SIGTERM", Killed),
+            ("SIGSEGV", TestFailure),
+            ("SIGABRT", TestFailure),
+            ("SIGHUP", TestFailure),
+            ("ABORT SIG 64", TestFailure),
+            ("TRY 2 FAIL", TestFailure),
+            ("TRY 1 FAIL", TestFailure),
+            ("TRY 2 FL+LK", TestFailure),
+            ("TRY 2 XFAIL", TestFailure),
+            ("TRY 2 LKFAIL", TestFailure),
+            ("TRY 2 TMT", Timeout),
+            ("TRY 2 ABORT", TestFailure),
+            ("TRY 2 KILL", Killed),
+            ("TRY 1 TERM", Killed),
+            ("TRY 1 SEGV", TestFailure),
+            ("TRY 2 ABRT", TestFailure),
+            ("TRY 2 PIPE", TestFailure),
+            ("TRY 2 SIG 64", TestFailure),
+            ("TRY 10 LKFAIL", TestFailure),
+        ];
+        for (status, expected) in cases {
+            let line = status_line(status, "runtime_x::broken");
+            let log = format!("{line}error: test run failed\n");
+            assert_eq!(names(&log), ["runtime_x::broken"], "{status}");
+            assert!(flaky_tests(&log).is_empty(), "{status}");
+            let failure = classify(LLVM_COV, Some(100), None, &log);
+            assert_eq!(failure.class, expected, "{status}");
+            assert_eq!(failure.evidence, line.trim(), "{status}");
+        }
+        // `TRY 2 LKFAIL` fills the 12 characters: no space starts the line.
+        assert!(status_line("TRY 2 LKFAIL", "a::b").starts_with("TRY 2 LKFAIL ["));
+        // The flaky statuses name the test as flaky, not as failed.
+        for status in ["FLKY-FL 2/2", "FLAKY 2/2", "TRY 2 PASS"] {
+            let log = status_line(status, "runtime_x::flaky");
+            assert_eq!(flaky_tests(&log), ["runtime_x::flaky"], "{status}");
+            assert!(names(&log).is_empty(), "{status}");
+        }
+    }
+
+    #[test]
+    fn the_statuses_that_do_not_fail_a_test_name_none() {
+        for status in [
+            "PASS",
+            "LEAK",
+            "TIMEOUT-PASS",
+            "SLOW",
+            "SLOW + LEAK",
+            "SLOW+TMPASS",
+            "TMPASS",
+            "TRY 2 SLOW",
+            "START",
+            "TRY 2 START",
+            "TERMINATING",
+            "TRY 1 TRMNTG",
+            "DELAY 2/2",
+            "SKIP",
+            "SETUP",
+            "TRY 2 LEAK",
+            "TRY 2 TMPASS",
+            // Not nextest's: a signal it has no name for, a bad count.
+            "SIGUSR1",
+            "SIG",
+            "TRY x FAIL",
+            "TRY 2 SIG x",
+            "ABORT SIG",
+            "FLKY-FL 2/x",
+            "FAIL + SLOW",
+        ] {
+            let log = status_line(status, "runtime_x::fine");
+            assert!(failed_tests(&log).is_empty(), "{status}");
+            assert!(flaky_tests(&log).is_empty(), "{status}");
+            assert_eq!(
+                class(LLVM_COV, Some(1), None, &log),
+                FailureClass::Unknown,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_in_a_short_form_beside_a_flaky_test_is_not_all_flaky() {
+        // `runtime_x::flaky` failed and passed on its retry; the other test
+        // failed both times, with a leak or killed. Before task 1272 the
+        // short forms named no test, so the flaky test alone decided.
+        for (first, last, expected) in [
+            ("TRY 1 FL+LK", "TRY 2 FL+LK", FailureClass::TestFailure),
+            ("TRY 1 KILL", "TRY 2 KILL", FailureClass::Killed),
+            ("TRY 1 SIG 64", "TRY 2 SIG 64", FailureClass::TestFailure),
+        ] {
+            let log = [
+                status_line("TRY 1 FAIL", "runtime_x::flaky"),
+                status_line("TRY 2 PASS", "runtime_x::flaky"),
+                status_line(first, "runtime_repair::leaks"),
+                status_line(last, "runtime_repair::leaks"),
+                "     Summary [   0.017s] 2 tests run: 0 passed, 2 failed, 0 skipped\n".to_owned(),
+                status_line(last, "runtime_repair::leaks"),
+                status_line("FLKY-FL 2/2", "runtime_x::flaky"),
+                "error: test run failed\n".to_owned(),
+            ]
+            .concat();
+            assert_eq!(all_flaky(&log), None, "{last}");
+            assert_eq!(
+                names(&log),
+                ["runtime_x::flaky", "runtime_repair::leaks"],
+                "{last}"
+            );
+            assert_eq!(flaky_tests(&log), ["runtime_x::flaky"], "{last}");
+            assert_eq!(class(LLVM_COV, Some(100), None, &log), expected, "{last}");
+        }
+        // Killed, timed out or failed with a leak once and passed on the
+        // retry: flaky, not a kill or a timeout.
+        for first in [
+            "TRY 1 KILL",
+            "TRY 1 TERM",
+            "TRY 1 TMT",
+            "TRY 1 FL+LK",
+            "TRY 1 SIG 64",
+        ] {
+            let log = [
+                status_line(first, "runtime_x::flaky"),
+                status_line("TRY 2 PASS", "runtime_x::flaky"),
+                status_line("FLKY-FL 2/2", "runtime_x::flaky"),
+                "error: test run failed\n".to_owned(),
+            ]
+            .concat();
+            let failure = classify(LLVM_COV, Some(100), None, &log);
+            assert_eq!(failure.class, FailureClass::Flaky, "{first}");
+            assert!(failure.evidence.starts_with("FLKY-FL 2/2 ["), "{first}");
         }
     }
 

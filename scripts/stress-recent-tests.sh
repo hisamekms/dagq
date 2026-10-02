@@ -291,11 +291,21 @@ while [ "$i" -le "$jobs" ]; do
   i=$((i + 1))
 done
 
-# nextest prints a line per failed attempt, for example
-#   FAIL [   0.010s] [2/20] (1/3) dagq::it runtime_abandon::name
-# The last two words are the binary id and the test name.
-grep -hE '^ +(FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL|LEAK|FLAKY) +\[' "$out"/stress-*.log |
-  awk '{ print $(NF - 1), $NF }' | sort -u > "$out/failed-tests.txt" || true
+# nextest prints a line per failed attempt and per test that passed on its
+# retry, for example
+#          FAIL [   0.010s] [2/20] (1/3) dagq::it runtime_abandon::name
+#   TRY 1 FL+LK [   0.010s] [2/20] (───) dagq::it runtime_abandon::name
+#   FLKY-FL 2/2 [   0.010s] [2/20] (1/3) dagq::it runtime_abandon::name
+# The statuses are the explicit set of docs/design/stress-ci.md, the same as
+# src/domain/verify_failure.rs and ci.yml's Linux job read: a test that failed
+# once and passed on its retry is the unstable test this job is for. LEAK (a
+# test that left a process behind and still passed) is not in it: nextest
+# counts it as passed, and a leak that fails is FAIL + LEAK, LEAK-FAIL, FL+LK
+# or LKFAIL. The last two words are the binary id and the test name, also
+# after a status of several words (FAIL + LEAK, ABORT SIG 64, TRY 2 SIG 64).
+failed_status='^ *(FAIL|FAIL \+ LEAK|XFAIL|LEAK-FAIL|TIMEOUT|ABORT|SIG(HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM)|ABORT SIG [0-9]+|TRY [0-9]+ (FAIL|FL\+LK|XFAIL|LKFAIL|TMT|ABORT|HUP|INT|QUIT|ILL|TRAP|ABRT|FPE|KILL|SEGV|PIPE|ALRM|TERM|SIG [0-9]+)|FLKY-FL [0-9]+/[0-9]+|FLAKY [0-9]+/[0-9]+) \['
+grep -hE "$failed_status" "$out"/stress-*.log |
+  awk '$NF !~ /[])]$/ { print $(NF - 1), $NF }' | sort -u > "$out/failed-tests.txt" || true
 
 if [ "$status" -ne 0 ] || [ -s "$out/failed-tests.txt" ]; then
   echo "stress-recent-tests: failed; the tests that failed at least once:"

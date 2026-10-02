@@ -42,7 +42,7 @@ job は `continue-on-error: true` で、Linux の build か test が落ちても
 
 `Failed tests` の step は summary に `## Linux: failed tests` の見出しと次のどれかを書く。
 
-- 落ちた test があるとき: `<N> failed:` と、コードブロックに 1 行 1 本の `<binary id> <test name>`（例 `dagq::it runtime_claim::name`）。log の最後の `Summary [` の行より後の結果の行（`FAIL`・`TRY <n> FAIL`・`TIMEOUT`・`SIG*`・`ABORT`・`LEAK-FAIL`・`FLKY-FL`）から、最後の 2 つの欄を取って重複を除く。`FLKY-FL` は落ちて流し直しで通った test で、これも載る
+- 落ちた test があるとき: `<N> failed:` と、コードブロックに 1 行 1 本の `<binary id> <test name>`（例 `dagq::it runtime_claim::name`）。log の最後の `Summary [` の行より後の結果の行のうち、status が [Integrate](supervisor-lifecycle/integrate.md) の「nextestの失敗のstatusの集合」の (A)(B)(C)（`FAIL`・`FAIL + LEAK`・`XFAIL`・`LEAK-FAIL`・`TIMEOUT`・`ABORT`・`SIG<name>`・`ABORT SIG <n>`、`TRY <n>` の後の `FAIL`・`FL+LK`・`XFAIL`・`LKFAIL`・`TMT`・`ABORT`・signal の名前・`SIG <n>`、`FLKY-FL n/m`・`FLAKY n/m`）の行から、最後の 2 つの欄を取って重複を除く（status が複数語でも最後の 2 語）。`FLKY-FL` は落ちて流し直しで通った test で、これも載る。`LEAK`・`SLOW`・`TRY <n> SLOW` などの失敗でない行は載らない。集合は `src/domain/verify_failure.rs` と `scripts/stress-recent-tests.sh` と同じで、正規表現は stress の script と同じ文字列（task 1272）
 - 落ちた test が無いとき: `none`
 - どちらでも、その後に nextest の `Summary [` の行（流した数・通った数・落ちた数）
 - log が無いか `Summary [` の行が無いとき（build か準備の失敗）: `no nextest summary (the build or the setup failed; see the log)`

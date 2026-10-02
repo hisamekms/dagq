@@ -3,6 +3,7 @@ use crate::runtime_adopt::backdate_event;
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
+use dagq::infrastructure::adapters::shell_quote;
 use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
@@ -128,9 +129,11 @@ fn taking_a_handoff_requires_the_same_token_and_binary_and_beats_cancellation() 
 fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
     let (_dir, repo, db) = fixture();
     let release = db.with_extension("release");
+    // The fixture's directory has an apostrophe (`queue's data`): quoted
+    // whole, or the shell fails at once and the landing ends early.
     let verification = json!([format!(
-        "while [ ! -f '{}' ]; do sleep 0.05; done",
-        release.display()
+        "while [ ! -f {} ]; do sleep 0.05; done",
+        shell_quote(release.to_str().unwrap())
     )]);
     Connection::open(&db)
         .unwrap()
@@ -141,7 +144,9 @@ fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
         .unwrap();
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "ready to land")]);
-    let options = supervise_options(1, false);
+    // Two slots: the landing holds one until the release, and the task
+    // added after the cancellation is claimed in the other.
+    let options = supervise_options(2, false);
     let passes = options.passes.clone();
     let stop = options.stop.clone();
     let supervisor = {
