@@ -257,6 +257,16 @@ impl AskKind {
         )
     }
 
+    /// An ask whose answer may give a reason after the option, as
+    /// `<option>: <reason>` (`send_back: <reason>`), which `stats` counts
+    /// as choosing the option (task 1389): the `approve_plan`, whose
+    /// `send_back: <reason>` the supervisor applies with `PlanAnswer`, and
+    /// the `approve_landing`, whose reasoned answer the supervisor leaves
+    /// to the inbox and `review_reason::answer_outcome` reads.
+    pub fn takes_reasoned_answers(&self) -> bool {
+        matches!(self, Self::ApprovePlan | Self::ApproveLanding)
+    }
+
     /// An ask whose `propose` / `dismiss` answer the runtime applies to a
     /// finding (ADR-0044 decision 19).
     pub fn offers_finding_answers(&self) -> bool {
@@ -1007,6 +1017,23 @@ pub fn option_index(options: &[String], answer: &str) -> Option<i64> {
         .iter()
         .position(|option| option.trim() == answer)
         .and_then(|index| i64::try_from(index).ok())
+}
+
+/// The option an answer `<option>: <reason>` chose, for an ask kind that
+/// takes reasoned answers ([`AskKind::takes_reasoned_answers`]): the
+/// option equal to the trimmed part before the first `:`. `None` for an
+/// answer without `:`, which [`option_index`] reads, for an unknown head
+/// and for every other kind, whose free answers choose no option.
+pub fn reasoned_option<'a>(kind: &AskKind, options: &'a [String], answer: &str) -> Option<&'a str> {
+    if !kind.takes_reasoned_answers() {
+        return None;
+    }
+    let (head, _) = answer.split_once(':')?;
+    let head = head.trim();
+    options
+        .iter()
+        .map(|option| option.trim())
+        .find(|option| *option == head)
 }
 
 impl Ask {
@@ -2308,6 +2335,28 @@ mod attention_tests {
         assert_eq!(option_index(&options, "send_back\n"), Some(1));
         assert_eq!(option_index(&options, "land it"), None);
         assert_eq!(option_index(&[], "land"), None);
+    }
+
+    /// `<option>: <reason>` names its option for the approve_plan and
+    /// approve_landing asks only.
+    #[test]
+    fn a_reasoned_answer_names_its_option_for_the_approvals_that_take_it() {
+        let options = vec!["ready".to_owned(), " send_back ".to_owned()];
+        let plan = AskKind::ApprovePlan;
+        assert_eq!(
+            reasoned_option(&plan, &options, " send_back : split it"),
+            Some("send_back")
+        );
+        assert_eq!(
+            reasoned_option(&AskKind::ApproveLanding, &options, "send_back: a: b"),
+            Some("send_back")
+        );
+        assert_eq!(reasoned_option(&plan, &options, "send_back"), None);
+        assert_eq!(reasoned_option(&plan, &options, "land: why"), None);
+        assert_eq!(
+            reasoned_option(&AskKind::PlannerQuestion, &options, "ready: why"),
+            None
+        );
     }
 
     fn ask_of(kind: AskKind, options: &[&str]) -> Ask {

@@ -499,6 +499,44 @@ fn a_recommendation_reaches_the_ask_status_and_stats() {
     assert_eq!(stats["recommendations"]["decided_without_ask"], json!({}));
 }
 
+/// `send_back: <reason>` to an approve_landing recommending `send_back`
+/// counts as choosing it (task 1389): `answer` records the option before
+/// the reason as `reasoned_option`, leaving `option_index` and `option` to
+/// an exact choice, and `stats` matches it. The same form of a `decide`
+/// answer stays free.
+#[test]
+fn a_send_back_with_a_reason_matches_the_recommendation_in_stats() {
+    let (_dir, db) = queue();
+    ok(&db, &["add", "first"]);
+    let mut landing = ask("approve_landing", &["--task", "1"]);
+    landing.extend(["--option", "send_back", "--recommend", "send_back"].map(str::to_owned));
+    let landing = ok(&db, &strs(&landing))["id"].to_string();
+    let mut decide = ask("decide", &["--task", "1"]);
+    decide.extend(["--recommend", "retry"].map(str::to_owned));
+    let decide = ok(&db, &strs(&decide))["id"].to_string();
+    ok(
+        &db,
+        &["answer", &landing, "--text", " send_back : split it"],
+    );
+    ok(&db, &["answer", &decide, "--text", "retry: once more"]);
+
+    let answered = events(&db, "ask_answered");
+    assert_eq!(answered[0]["payload"]["reasoned_option"], "send_back");
+    assert_eq!(answered[0]["payload"]["option_index"], Value::Null);
+    assert_eq!(answered[0]["payload"]["option"], Value::Null);
+    assert_eq!(answered[1]["payload"]["reasoned_option"], Value::Null);
+    let stats = ok(&db, &["stats", "--full"]);
+    assert_eq!(
+        stats["recommendations"]["by_kind"],
+        json!({
+            "approve_landing": {"answered": 1, "matched": 1, "rate": 1.0},
+            "decide": {"answered": 1, "matched": 0, "rate": 0.0},
+        }),
+        "{}",
+        stats["recommendations"]
+    );
+}
+
 /// A Codex worker's `dagq ask` (ADR-t813-3 decision 3): with its turn's
 /// `DAGQ_ASK_REQUESTS`, an ask the queue's path would open is written there
 /// as a request and no queue is opened; one it would refuse (another run, a

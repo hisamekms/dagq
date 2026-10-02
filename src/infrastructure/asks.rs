@@ -13,7 +13,8 @@ use crate::domain::write_rules::check_run_has_task;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason,
     HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
-    answer_approves, check_ask_kind, check_event_target, option_index, session_takes_answers,
+    answer_approves, check_ask_kind, check_event_target, option_index, reasoned_option,
+    session_takes_answers,
 };
 
 pub use crate::application::AskQuery;
@@ -1071,7 +1072,9 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
 /// whether it approves (task 733), and add them to `payload`, the
 /// `ask_answered` the caller records: `answered_by`, `authority`,
 /// `approval`, and `option_index` with the option's text as `option` (a
-/// free answer has a null index and no `option`).
+/// free answer has a null index and no `option`). A free answer
+/// `<option>: <reason>` to an `approve_plan` or `approve_landing` adds the
+/// option it names as `reasoned_option` (task 1389).
 pub(super) fn write_answer(
     conn: &Connection,
     ask: &Ask,
@@ -1105,6 +1108,10 @@ pub(super) fn write_answer(
         .and_then(|index| ask.options.get(index))
     {
         payload["option"] = json!(option);
+    } else if let Some(option) = reasoned_option(&ask.kind, &ask.options, text) {
+        // `send_back: <reason>` chose `send_back` with a reason; `option`
+        // and `option_index` stay those of an exact choice (task 1389).
+        payload["reasoned_option"] = json!(option);
     }
     Ok(())
 }

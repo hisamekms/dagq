@@ -3,7 +3,8 @@
 //! the answers chose it, and the judgements an AI made itself without
 //! opening that kind of ask. Derived from `run_events` like the rest of
 //! `stats`: the recommendation from `ask_opened`, the chosen option from
-//! `ask_answered`, and the decisions from the events listed in
+//! `ask_answered` (its `option`, or the `reasoned_option` of a
+//! `send_back: <reason>`), and the decisions from the events listed in
 //! [`DECIDED_WITHOUT_ASK`].
 
 use std::collections::{BTreeMap, HashMap};
@@ -107,10 +108,7 @@ pub fn recommendations(
                 let kind = payload["kind"].as_str().unwrap_or(super::asks::UNKNOWN);
                 let entry = stats.by_kind.entry(kind.to_owned()).or_default();
                 entry.answered += 1;
-                if payload["option"]
-                    .as_str()
-                    .is_some_and(|chosen| chosen.trim() == option)
-                {
+                if chosen(payload, kind).is_some_and(|chosen| chosen.trim() == option) {
                     entry.matched += 1;
                 }
             }
@@ -132,6 +130,18 @@ pub fn recommendations(
         entry.rate = super::worker_question_topics::rate(entry.matched, entry.answered);
     }
     stats
+}
+
+/// The option an answer chose: the exact `option`, or for a kind that
+/// takes `<option>: <reason>` the `reasoned_option` (task 1389). A free
+/// answer of another kind chooses none.
+fn chosen<'a>(payload: &'a Value, kind: &str) -> Option<&'a str> {
+    payload["option"].as_str().or_else(|| {
+        crate::domain::AskKind::read(kind)
+            .takes_reasoned_answers()
+            .then(|| payload["reasoned_option"].as_str())
+            .flatten()
+    })
 }
 
 fn ask_id(payload: &Value) -> Option<String> {
@@ -206,6 +216,53 @@ mod tests {
             }
         );
         assert!(stats.decided_without_ask.is_empty());
+    }
+
+    fn reasoned(id: i64, ask: i64, kind: &str, option: &str) -> RunEvent {
+        event(
+            id,
+            "ask_answered",
+            json!({"ask_id": ask, "kind": kind, "option_index": null,
+                   "reasoned_option": option, "answered_by": "inbox"}),
+        )
+    }
+
+    #[test]
+    fn a_send_back_with_a_reason_matches_a_send_back_recommendation() {
+        let events = vec![
+            opened(1, 10, "approve_plan", Some("send_back")),
+            opened(2, 11, "approve_landing", Some("send_back")),
+            opened(3, 12, "approve_landing", Some("land")),
+            opened(4, 13, "planner_question", Some("adopt")),
+            opened(5, 14, "approve_plan", Some("send_back")),
+            opened(6, 15, "approve_plan", Some("ready")),
+            reasoned(7, 10, "approve_plan", "send_back"),
+            reasoned(8, 11, "approve_landing", "send_back"),
+            reasoned(9, 12, "approve_landing", "send_back"),
+            // Another kind's free answer chooses no option, even with a
+            // stray reasoned_option.
+            reasoned(10, 13, "planner_question", "adopt"),
+            answered(11, 14, "approve_plan", Some("send_back"), "inbox"),
+            answered(12, 15, "approve_plan", None, "inbox"),
+        ];
+        let stats = recommendations(&events, EventId::new(0), EventId::new(12), |_| true);
+        assert_eq!(
+            stats.by_kind["approve_plan"],
+            RecommendationMatch {
+                answered: 3,
+                matched: 2,
+                rate: Some(0.667)
+            }
+        );
+        assert_eq!(
+            stats.by_kind["approve_landing"],
+            RecommendationMatch {
+                answered: 2,
+                matched: 1,
+                rate: Some(0.5)
+            }
+        );
+        assert_eq!(stats.by_kind["planner_question"].matched, 0);
     }
 
     #[test]
