@@ -406,10 +406,14 @@ fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
     ];
     let wrapper = vec![("DAGQ_ROLE", "wrapper".to_owned())];
     let integrator = vec![("DAGQ_ROLE", "integrator".to_owned())];
+    let job = vec![("DAGQ_ROLE", "review-job".to_owned())];
+    let before = denials(&db).len();
+    let mut refused = Vec::new();
     for (role, env) in [
         ("worker", &worker),
         ("wrapper", &wrapper),
         ("integrator", &integrator),
+        ("review-job", &job),
     ] {
         for (args, capability) in std::iter::once((watch, "queue.watch"))
             .chain(export.iter().map(|args| (*args, "queue.export")))
@@ -418,19 +422,36 @@ fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
             assert_eq!(error["denied"]["role"], role, "{args:?}: {error}");
             assert_eq!(error["denied"]["capability"], capability, "{error}");
             assert_eq!(error["denied"]["reason"], "not granted", "{error}");
-            assert!(
-                error["error"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with(&format!("{role} may not {capability}")),
-                "{error}"
-            );
+            if role != "review-job" {
+                assert!(
+                    error["error"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(&format!("{role} may not {capability}")),
+                    "{error}"
+                );
+            }
+            refused.push((role, capability));
         }
-        // Reading stays open to every role.
+        // Reading stays open to every role, and writes nothing.
+        let written = event_count(&db);
         for args in [&["status"][..], &["show", "1"], &["list"], &["graph"]] {
             allowed_as(env, &db, args);
         }
+        assert_eq!(event_count(&db), written, "{role}");
     }
+    // Each refusal is recorded as the refused caller (task 1151).
+    let recorded = denials(&db);
+    assert_eq!(recorded.len() - before, refused.len(), "{recorded:?}");
+    for (event, (role, capability)) in recorded[before..].iter().zip(&refused) {
+        assert_eq!(event["actor"]["role"], *role, "{event}");
+        assert_eq!(event["payload"]["role"], *role, "{event}");
+        assert_eq!(event["payload"]["capability"], *capability, "{event}");
+        assert_eq!(event["payload"]["reason"], "not granted", "{event}");
+        assert_eq!(event["payload"]["resource"]["kind"], "queue", "{event}");
+    }
+    assert_eq!(recorded[before]["actor"]["id"], "worker:r1");
+    let events = event_count(&db);
     assert!(!Path::new(graph).exists());
     assert!(!Path::new(reports).exists());
     // The user, the inbox and a planner watch and export as before.
@@ -446,4 +467,27 @@ fn workers_wrappers_and_the_integrator_read_but_do_not_watch_or_export() {
     }
     assert!(Path::new(graph).is_file());
     assert!(Path::new(reports).is_dir());
+    // Allowed watches and exports record nothing.
+    assert_eq!(event_count(&db), events);
+}
+
+fn event_count(db: &Path) -> usize {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM run_events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap() as usize
+}
+
+#[test]
+fn a_refused_watch_with_no_queue_is_refused_unrecorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let env = vec![("DAGQ_ROLE", "worker".to_owned())];
+    let error = denied_as(&env, &db, &["watch", "--after", "0", "--timeout", "1"]);
+    assert_eq!(error["denied"]["role"], "worker", "{error}");
+    assert_eq!(error["denied"]["capability"], "queue.watch", "{error}");
+    assert_eq!(error["denied"]["reason"], "not granted", "{error}");
+    assert!(!db.exists());
 }

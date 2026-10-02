@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::{
         Arc, OnceLock,
@@ -2045,15 +2045,44 @@ fn authorized_in_application(command: &Command) -> bool {
 /// integrator reads but does not watch or export, and the observer and the
 /// supervisor's headless jobs (ADR-0027, each job by its own role and the
 /// legacy `reviewer` as a review job) keep their limits (ADR-0044
-/// decision 4).
-fn check_access(actor: &ActorContext, command: &Command) -> Result<()> {
+/// decision 4). A refusal is recorded as `authorization_denied` on the
+/// queue `db` names, opened only then (task 1151); a command allowed opens
+/// nothing here, and reads keep the queue read-only (ADR-0073 decisions 5,
+/// 7 and 18).
+fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> Result<()> {
     if authorized_in_application(command) {
         return Ok(());
     }
+    let gate = dagq::application::commands::Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    };
+    let log = CommandDenials { db, actor };
     for (capability, resource) in requests(command) {
-        StaticPolicy.authorize(actor, capability, &resource)?;
+        gate.authorize(&log, capability, &resource)?;
     }
     Ok(())
+}
+
+/// The queue a refused command names (`--db` or the repository of the
+/// working directory), resolved only to record the refusal; with no queue
+/// there, or one this binary cannot open, the refusal goes unrecorded and
+/// is still a refusal.
+struct CommandDenials<'a> {
+    db: Option<&'a Path>,
+    actor: &'a ActorContext,
+}
+
+impl dagq::application::commands::DenialLog for CommandDenials<'_> {
+    fn record_denial(&self, payload: Value) -> Result<()> {
+        let cwd = env::current_dir().context("working directory is unavailable")?;
+        let location = QueueLocation::resolve(self.db, &cwd)?;
+        dagq::infrastructure::denials::QueueDenials {
+            db: &location.db,
+            actor: self.actor,
+        }
+        .record_denial(payload)
+    }
 }
 
 /// The error JSON of a failed command. A refusal carries what was refused
@@ -2515,7 +2544,7 @@ fn execute(cli: Cli) -> Result<Value> {
     // Who runs the command (ADR-t728-1 decision 4): no `DAGQ_ROLE` is the
     // user, and a value that is no role stops it before anything is read.
     let actor = ActorContext::from_env(|name| env::var(name).ok())?;
-    check_access(&actor, &cli.command)?;
+    check_access(&actor, &cli.command, cli.db.as_deref())?;
     // A Codex worker's ask is a request in its run directory, which its
     // supervisor opens: its sandbox does not let it write the queue's
     // directory (ADR-t813-3 decision 3), so no queue is opened.

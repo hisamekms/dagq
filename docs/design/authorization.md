@@ -4,8 +4,8 @@ type: design
 title: Authorization
 status: current
 created: 2026-09-27
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 related:
   - adr-t728-1
@@ -208,7 +208,7 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
 
 ### ほかのコマンド（CLIの入口）
 
-上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`）は状態を変えない。これらはroleを問わず（default deny、task 859）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す（記録はしない）。読み取り（`queue.read`）は全roleが持つ。`watch`（`queue.watch`）はuser・inbox・planner・supervisor・observer、`graph --out`と`report`（`queue.export`）はuser・inbox・planner・supervisorだけが持ち、worker・wrapper・integratorと4つのjob（と旧値`reviewer`）のそれらは拒まれる。observerとjobの拒否のerrorの文は以前の`observer_access` / `reviewer_access`のもの（`observer may not change queue state`など）のまま。
+上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`）は状態を変えない。これらはroleを問わず（default deny、task 859）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す。拒んだときだけ、runtimeの操作と同じ`src/infrastructure/denials.rs`の`QueueDenials`（判定の後でだけqueueを開く）で`authorization_denied`を、拒まれた呼び出し元をactorにして記録する（task 1151。payloadは計画系と同じ`role`・`capability`・`reason`・`resource`）。queueが無い・このバイナリが開けないときは記録せず、拒否は拒否のまま返す。通った読み取りは今までどおりqueueを読み取り専用で開き、書かない（ADR-0073決定5・7・18）。読み取り（`queue.read`）は全roleが持つ。`watch`（`queue.watch`）はuser・inbox・planner・supervisor・observer、`graph --out`と`report`（`queue.export`）はuser・inbox・planner・supervisorだけが持ち、worker・wrapper・integratorと4つのjob（と旧値`reviewer`）のそれらは拒まれる。observerとjobの拒否のerrorの文は以前の`observer_access` / `reviewer_access`のもの（`observer may not change queue state`など）のまま。
 
 ## Claudeのpermissions.deny（guardrail）
 

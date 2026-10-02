@@ -4,8 +4,8 @@ type: design
 title: Security
 status: current
 created: 2026-09-28
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: runtime
 tags:
   - security
@@ -76,7 +76,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 - 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。Codexのworkerの`dagq ask`は、クライアントモードでqueue serviceのユースケースとして送られ、serviceがworkerのprincipalで判定する（ADR-t1233-5決定5。[Queue service](queue-service.md#クライアントモード)）。この変更より前に起動したturnの`dagq ask`はqueueを開かずにrun dirへの要求になり（ADR-t813-3の決定3）、supervisorがそのrunのworkerとして同じ`StaticPolicy`の`ask.open`に通してから開く。supervisorはsandboxの外で動くので、workerが書くそのdirとrun dirを`O_NOFOLLOW`で開いた記述子に対してだけ扱い、linkを辿らず、通常のfileでないentryは読みも動かしもしない（`ask-requests/`の取り込みではworkerの代わりにrunのdirの外を読み書きしない。run dirの他のfileも、supervisorと非対話のwrapperの`LocalRunFiles`とprocessの出力のopenが同じ記述子に対する操作を使う。全文の読みは64MiBまで、FIFOとlinkは読まない。詳細は[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「run dirの他のfile」。commandもqueueを要らない同じ検査を先に行い、通らなければすぐに拒む）（policyの拒否は`authorization_denied`（roleは`worker`）と、runの`ask_request_taken`（`refused`）に残る。[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、`{"error": "<role> may not <capability> (<reason>)", "denied": {...}}`を返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
 - queue service（[Queue service](queue-service.md)）は、`ask`・`show`・`note`・findingと読み取りのユースケースを、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。worker（resumeを含む）・headlessのjob・observerのプロセスにはqueue DBのpathを渡さず、socketとtokenのfileを渡すので、その`dagq`はクライアントモードでserviceだけを使い、serviceのユースケースでないコマンドと`--db`は拒まれ、serviceに届かなくてもDBを開かない（goal 82の段(3)、[クライアントモード](queue-service.md#クライアントモード)）。閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
-- 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、eventには記録しない
+- 状態を変えないコマンド（読み取り・`watch`・`graph --out`・`report`）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny、task 859）。拒否は同じ`denied`のJSONを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する（task 1151。queueが無いときは記録せずに拒む）。通った読み取りはqueueに書かない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job）の`permissions.deny`には、roleが持たないcommand（状態を変えるものと`watch`・`report`。`graph`は`--out`なしが読み取りなので除く）の`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
 
 roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説明する）:
