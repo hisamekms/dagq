@@ -72,10 +72,9 @@ changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
 # provider・model で並べて比べる（goal 73、ADR-t1063-1、task 1067。書式と振る舞いは
 # docs/design/supervisor-lifecycle/actor-model.md の provider）。model と effort は書かず、
 # Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する。
-# codex を受け付けるのは goal_review・review（ADR-t1207-1）・plan_review（task 1218）・throughput_review（task 1220）で、
-# この repository は goal_review と review と plan_review と throughput_review を codex にしている（plan_review は固定バイナリが
-# task 1218 を含んでから task 1219 が、throughput_review は task 1220 を含んでから task 1221 が足した）。
-# 他の役割は provider を書かず、今までどおり Claude で動く。
+# Codex で動ける役割は actor-model.md の provider の項（domain::actor_model::CODEX_ROLES）が持つ。
+# この repository で codex にしている役割は、この節とこの下に続く [roles.*] の節（足した task はそれぞれのコメント）で、
+# [roles.*] の節を持たない役割は provider を書かず、今までどおり Claude で動く。
 # [roles.<role>] の provider を知らない旧バイナリは dagq.toml を読めなくなるので、
 # 固定バイナリが task 1065 を含んでから足した。
 provider = "codex"
