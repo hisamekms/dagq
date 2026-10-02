@@ -443,7 +443,7 @@ fn build(dir: &TempDir) -> (SqliteQueue, HashMap<i64, i64>, std::path::PathBuf) 
                 priority: Default::default(),
                 change: None,
                 provider: None,
-                worker_mode: None,
+                worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
             })
             .unwrap();
         assert_eq!(task.id().as_i64(), ids[&fixture.real]);

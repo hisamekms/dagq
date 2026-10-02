@@ -221,7 +221,8 @@ mod tests {
             context: String::new(),
             created_at: "c".into(),
             updated_at: "u".into(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         })
         .unwrap()
     }

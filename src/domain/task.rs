@@ -5,10 +5,10 @@
 use serde::Serialize;
 
 use super::{
-    DomainError, EvidenceCheck, GoalId, NewTask, Priority, TaskChange, TaskEdit, TaskId,
+    DomainError, EvidenceCheck, GoalId, NewTask, Priority, Provider, TaskChange, TaskEdit, TaskId,
     TaskRecord, TaskStatus, require,
     scope::{dedup_globs, validate_path_globs},
-    worker::Worker,
+    worker::{Worker, WorkerMode},
 };
 
 /// What moves a task between statuses by hand or by plan review; only a
@@ -105,10 +105,15 @@ pub struct Task {
     /// (ADR-t980-1); null for a task registered without one.
     change: Option<TaskChange>,
     /// The provider and mode its worker runs on (ADR-t813-2 decision 1,
-    /// ADR-t813-1 decision 7): Claude interactive unless it asks for
-    /// another; shown as `provider` and `worker_mode`.
+    /// ADR-t1340-1): Claude headless unless it asks for another; shown as
+    /// `provider` and `worker_mode`, resolved.
     #[serde(flatten)]
     worker: Worker,
+    /// The mode the task names (`--interactive` / `--headless`); none
+    /// leaves it to the provider's default, so a task registered without
+    /// one follows a change of the default (ADR-t1340-1). Not shown.
+    #[serde(skip)]
+    named_mode: Option<WorkerMode>,
     status: TaskStatus,
     goal_id: Option<GoalId>,
     context: String,
@@ -127,6 +132,7 @@ impl Task {
         Ok(Self {
             id,
             worker: new.worker()?,
+            named_mode: new.worker_mode,
             required_evidence: new.required_evidence(),
             paths: dedup_globs(&new.paths),
             priority: new.priority,
@@ -165,6 +171,7 @@ impl Task {
             priority: record.priority,
             change: record.change,
             worker: record.worker,
+            named_mode: record.named_mode,
             status: record.status,
             goal_id: record.goal_id,
             context: record.context,
@@ -211,6 +218,16 @@ impl Task {
 
     pub fn worker(&self) -> Worker {
         self.worker
+    }
+
+    /// The mode the store keeps for the task: the one it names, or none
+    /// for the provider's default. A Codex task keeps `headless`, its only
+    /// mode, as it always has.
+    pub fn stored_worker_mode(&self) -> Option<WorkerMode> {
+        match self.worker.provider {
+            Provider::Claude => self.named_mode,
+            Provider::Codex => Some(self.worker.mode),
+        }
     }
 
     pub fn status(&self) -> TaskStatus {
@@ -349,6 +366,13 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
         task.change = Some(change);
     }
     task.worker = task.worker.with(edit.provider, edit.worker_mode)?;
+    // A new provider without a mode goes back to its default; a mode given
+    // is named. Neither keeps what the task named.
+    match (edit.provider, edit.worker_mode) {
+        (_, Some(mode)) => task.named_mode = Some(mode),
+        (Some(_), None) => task.named_mode = None,
+        (None, None) => {}
+    }
     Ok(task)
 }
 
@@ -474,8 +498,50 @@ mod tests {
             context: String::new(),
             created_at: "c".into(),
             updated_at: "u".into(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         }
+    }
+
+    /// ADR-t1340-1: a task that names no mode stores none and runs the
+    /// provider's default (headless); a named mode is stored, a new
+    /// provider without a mode names none again, and Codex keeps
+    /// `headless`, its only mode.
+    #[test]
+    fn the_stored_mode_is_the_named_one_or_none() {
+        use crate::domain::worker::Worker;
+        let task = Task::new(TaskId::new(1), new_task(), "c".into()).unwrap();
+        assert_eq!(task.worker(), Worker::CLAUDE_HEADLESS);
+        assert_eq!(task.stored_worker_mode(), None);
+        let named = Task::new(
+            TaskId::new(2),
+            NewTask {
+                worker_mode: Some(WorkerMode::Interactive),
+                ..new_task()
+            },
+            "c".into(),
+        )
+        .unwrap();
+        assert_eq!(named.worker(), Worker::CLAUDE_INTERACTIVE);
+        assert_eq!(named.stored_worker_mode(), Some(WorkerMode::Interactive));
+        let edit_of = |provider, worker_mode| TaskEdit {
+            provider,
+            worker_mode,
+            ..TaskEdit::default()
+        };
+        let retitled = TaskEdit {
+            title: Some("t2".into()),
+            ..TaskEdit::default()
+        };
+        let kept = edit(named, retitled).unwrap();
+        assert_eq!(kept.stored_worker_mode(), Some(WorkerMode::Interactive));
+        let codex = edit(kept, edit_of(Some(Provider::Codex), None)).unwrap();
+        assert_eq!(codex.stored_worker_mode(), Some(WorkerMode::Headless));
+        let back = edit(codex, edit_of(Some(Provider::Claude), None)).unwrap();
+        assert_eq!(back.worker(), Worker::CLAUDE_HEADLESS);
+        assert_eq!(back.stored_worker_mode(), None);
+        let headless = edit(back, edit_of(None, Some(WorkerMode::Headless))).unwrap();
+        assert_eq!(headless.stored_worker_mode(), Some(WorkerMode::Headless));
     }
 
     #[test]

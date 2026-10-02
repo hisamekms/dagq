@@ -751,7 +751,8 @@ mod tests {
                 context: String::new(),
                 created_at: String::new(),
                 updated_at: String::new(),
-                worker: crate::domain::worker::Worker::DEFAULT,
+                worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+                named_mode: None,
             })
             .unwrap()
         };

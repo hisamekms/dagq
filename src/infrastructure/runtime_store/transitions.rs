@@ -5,8 +5,8 @@ use super::*;
 use crate::domain::EventKind;
 
 impl SqliteQueue {
-    /// Reserve the next dependency-ready task of the interactive Claude
-    /// worker for this supervisor: the run,
+    /// Reserve the next dependency-ready task of a Claude worker
+    /// (interactive or headless) for this supervisor: the run,
     /// its `supervisor_token` and its lease row are created in one transaction,
     /// so a claimed run never exists without an owner. Concurrent supervisors
     /// on the same queue take different tasks.
@@ -21,7 +21,7 @@ impl SqliteQueue {
             &[],
             None,
             &WorkerTrial::default(),
-            &WorkerRoute::direct(&[Worker::DEFAULT]),
+            &WorkerRoute::direct(&[Worker::CLAUDE_INTERACTIVE, Worker::CLAUDE_HEADLESS]),
         )
     }
 

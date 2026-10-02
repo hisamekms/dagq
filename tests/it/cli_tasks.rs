@@ -436,23 +436,54 @@ fn the_task_kind_is_gone_from_add_edit_show_and_list() {
     }
 }
 
-/// `add --provider` and `--headless` store the task's worker (ADR-t813-2
-/// decision 1, ADR-t813-1 decision 7), which `show`, `list` and `search`
-/// print; a task that names none runs Claude interactively, Codex runs
-/// headless only, and `edit` changes the worker while the task is a draft.
+/// `add --provider`, `--headless` and `--interactive` store the task's
+/// worker (ADR-t813-2 decision 1, ADR-t1340-1), which `show`, `list` and
+/// `search` print; a task that names none runs Claude headless and stores
+/// no mode, Codex runs headless only, and `edit` changes the worker while
+/// the task is a draft.
 #[test]
 fn the_worker_provider_and_mode_are_added_shown_and_edited() {
     let (_dir, db) = queue();
+    let stored = |id: &Value| -> Option<String> {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT worker_mode FROM tasks WHERE id=?1",
+                [id.as_i64().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
     let plain = ok(&db, &["add", "plain worker"]);
     assert_eq!(
         (&plain["provider"], &plain["worker_mode"]),
+        (&json!("claude"), &json!("headless"))
+    );
+    assert_eq!(stored(&plain["id"]), None);
+    let interactive = ok(&db, &["add", "watched worker", "--interactive"]);
+    assert_eq!(
+        (&interactive["provider"], &interactive["worker_mode"]),
         (&json!("claude"), &json!("interactive"))
+    );
+    assert_eq!(stored(&interactive["id"]).as_deref(), Some("interactive"));
+    assert!(
+        !invoke(&db, &["add", "both", "--interactive", "--headless"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        refused(
+            &db,
+            &["add", "codex", "--provider", "codex", "--interactive"]
+        ),
+        "the codex worker has no interactive mode (codex runs headless only)"
     );
     let codex = ok(&db, &["add", "codex worker", "--provider", "codex"]);
     assert_eq!(
         (&codex["provider"], &codex["worker_mode"]),
         (&json!("codex"), &json!("headless"))
     );
+    assert_eq!(stored(&codex["id"]).as_deref(), Some("headless"));
     let id = codex["id"].to_string();
     let shown = &ok(&db, &["show", &id])["task"];
     assert_eq!(
@@ -476,31 +507,51 @@ fn the_worker_provider_and_mode_are_added_shown_and_edited() {
         (&headless["provider"], &headless["worker_mode"]),
         (&json!("claude"), &json!("headless"))
     );
+    assert_eq!(stored(&headless["id"]).as_deref(), Some("headless"));
     // Codex has no interactive mode.
     assert_eq!(
         refused(&db, &["edit", &id, "--interactive"]),
         "the codex worker has no interactive mode (codex runs headless only)"
     );
-    // A new provider without a mode takes that provider's default.
+    // A new provider without a mode takes that provider's default and
+    // names none.
     let edited = ok(&db, &["edit", &id, "--provider", "claude"]);
     assert_eq!(
         (&edited["provider"], &edited["worker_mode"]),
-        (&json!("claude"), &json!("interactive"))
+        (&json!("claude"), &json!("headless"))
     );
-    let event = ok(&db, &["show", &id, "--full"])["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rfind(|e| e["kind"] == "task_edited")
-        .unwrap()
-        .clone();
+    assert_eq!(stored(&codex["id"]), None);
+    let last_edit = || {
+        ok(&db, &["show", &id, "--full"])["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|e| e["kind"] == "task_edited")
+            .unwrap()
+            .clone()
+    };
+    let event = last_edit();
     assert_eq!(
         event["payload"]["from"],
         json!({"provider": "codex", "worker_mode": "headless"})
     );
     assert_eq!(
         event["payload"]["to"],
-        json!({"provider": "claude", "worker_mode": "interactive"})
+        json!({"provider": "claude", "worker_mode": null})
+    );
+    // Naming the default changes what is stored, recorded as such.
+    let edited = ok(&db, &["edit", &id, "--headless"]);
+    assert_eq!(edited["worker_mode"], "headless");
+    assert_eq!(stored(&codex["id"]).as_deref(), Some("headless"));
+    let event = last_edit();
+    assert_eq!(event["payload"]["from"], json!({"worker_mode": null}));
+    assert_eq!(event["payload"]["to"], json!({"worker_mode": "headless"}));
+    let edited = ok(&db, &["edit", &id, "--interactive"]);
+    assert_eq!(edited["worker_mode"], "interactive");
+    assert_eq!(stored(&codex["id"]).as_deref(), Some("interactive"));
+    assert_eq!(
+        last_edit()["payload"]["to"],
+        json!({"worker_mode": "interactive"})
     );
     let edited = ok(&db, &["edit", &id, "--headless"]);
     assert_eq!(edited["worker_mode"], "headless");

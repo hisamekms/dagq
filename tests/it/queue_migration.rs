@@ -1033,6 +1033,105 @@ fn migration_dropping_the_task_kind_keeps_tasks_and_their_change() {
     assert!(forecast.get("tasks").is_some(), "{forecast}");
 }
 
+/// ADR-t1340-1: the migration that makes Claude's default headless takes
+/// back the `interactive` an older `add` stored for a Claude task that
+/// named no mode, while no run has claimed it, so the task follows the new
+/// default. A mode `edit --interactive` named, a headless or Codex task, a
+/// claimed task and the runs' own worker_mode are kept.
+#[test]
+fn migration_to_the_headless_default_frees_the_unclaimed_default_tasks() {
+    // Found by its statement, not its number, which a landing may change.
+    let at = MIGRATIONS
+        .iter()
+        .position(|migration| migration.contains("UPDATE tasks SET worker_mode = NULL"))
+        .unwrap();
+    let before = i64::try_from(at).unwrap();
+    assert_eq!(floor_for(before + 1), floor_for(before));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let raw = Connection::open(&path).unwrap();
+    for migration in &MIGRATIONS[..at] {
+        raw.execute_batch(migration).unwrap();
+    }
+    raw.execute_batch(&format!(
+        "PRAGMA application_id = 1129599281; PRAGMA user_version = {before};
+         INSERT INTO schema_floor(singleton, floor) VALUES (1, {floor});
+         INSERT INTO tasks(title,description,acceptance,verification_commands,status,
+                           worker_provider,worker_mode)
+         VALUES ('draft','','','[]','draft','claude','interactive'),
+                ('submitted','','','[]','submitted','claude','interactive'),
+                ('ready','','','[]','ready','claude','interactive'),
+                ('named','','','[]','ready','claude','interactive'),
+                ('headless','','','[]','ready','claude','headless'),
+                ('codex','','','[]','ready','codex','headless'),
+                ('claimed','','','[]','in_progress','claude','interactive'),
+                ('landed','','','[]','completed','claude','interactive'),
+                ('dropped','','','[]','canceled','claude','interactive'),
+                ('older','','','[]','ready',NULL,NULL);
+         INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,
+                               worker_mode,base_commit)
+         VALUES ('run-7',7,'running','claude','claude','interactive','{BASE}');
+         INSERT INTO run_events(task_id,kind,payload) VALUES
+           (4,'task_edited',
+            '{{\"from\":{{\"worker_mode\":\"headless\"}},\"to\":{{\"worker_mode\":\"interactive\"}}}}'),
+           (3,'task_edited','{{\"from\":{{\"title\":\"r\"}},\"to\":{{\"title\":\"ready\"}}}}');",
+        floor = floor_for(before),
+    ))
+    .unwrap();
+    drop(raw);
+    let report = SqliteQueue::migrate(&path, None, 0).unwrap();
+    assert!(
+        report
+            .applied
+            .iter()
+            .any(|m| m.version == before + 1 && m.compatible)
+    );
+    let raw = Connection::open(&path).unwrap();
+    let stored: Vec<Option<String>> = raw
+        .prepare("SELECT worker_mode FROM tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let interactive = Some("interactive".to_owned());
+    let headless = Some("headless".to_owned());
+    assert_eq!(
+        stored,
+        [
+            None,
+            None,
+            None,
+            interactive.clone(),
+            headless.clone(),
+            headless,
+            interactive.clone(),
+            interactive.clone(),
+            interactive.clone(),
+            None,
+        ]
+    );
+    let run: String = raw
+        .query_row("SELECT worker_mode FROM task_runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(run, "interactive");
+    drop(raw);
+    let mut queue = SqliteQueue::open(&path).unwrap();
+    let mode = |queue: &mut SqliteQueue, id: i64| {
+        queue
+            .show(TaskId::new(id))
+            .unwrap()
+            .task
+            .worker()
+            .mode
+            .as_str()
+    };
+    assert_eq!(mode(&mut queue, 3), "headless");
+    assert_eq!(mode(&mut queue, 4), "interactive");
+    assert_eq!(mode(&mut queue, 7), "interactive");
+    assert_eq!(mode(&mut queue, 10), "headless");
+}
+
 /// ADR-t980-1: the task change is an addition. The tasks of an older queue
 /// have none after the migration, which raises no floor; an older binary's
 /// insert leaves it null, and a value that is not a label reads as none.

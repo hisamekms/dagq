@@ -31,7 +31,7 @@ fn dagq_toml_run_env_reaches_the_workspace_and_the_verification_commands() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     queue

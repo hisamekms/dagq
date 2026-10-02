@@ -165,7 +165,8 @@ fn the_cmux_adapter_sends_one_line_and_names_the_resume_workspace() {
                 context: String::new(),
                 created_at: String::new(),
                 updated_at: String::new(),
-                worker: dagq::domain::worker::Worker::DEFAULT,
+                worker: dagq::domain::worker::Worker::CLAUDE_INTERACTIVE,
+                named_mode: None,
             })
             .unwrap(),
             &run,

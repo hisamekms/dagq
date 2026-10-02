@@ -1,6 +1,6 @@
 # A worker's provider and route, and falling back
 
-Read this to choose which agent runs a task's worker and how, to read which one actually ran, or to tell a person what to do when a provider cannot be used. The decisions are ADR-t813-1 (the headless route), ADR-t813-2 (provider per task, mutual fallback) and ADR-t813-3 (Codex's permissions); the runtime's side is `docs/design/provider-lifecycle.md` and `docs/design/supervisor-lifecycle/headless-worker.md`.
+Read this to choose which agent runs a task's worker and how, to read which one actually ran, or to tell a person what to do when a provider cannot be used. The decisions are ADR-t813-1 (the headless route), ADR-t1340-1 (headless is Claude's default), ADR-t813-2 (provider per task, mutual fallback) and ADR-t813-3 (Codex's permissions); the runtime's side is `docs/design/provider-lifecycle.md` and `docs/design/supervisor-lifecycle/headless-worker.md`.
 
 ## Provider and route
 
@@ -8,18 +8,19 @@ A task's worker has a **provider** (`claude` or `codex`) and a **route** (`worke
 
 | registered with | provider | route |
 | --- | --- | --- |
-| nothing | `claude` | `interactive` (the default) |
-| `--headless` | `claude` | `headless` |
+| nothing | `claude` | `headless` (the default) |
+| `--interactive` | `claude` | `interactive` |
+| `--headless` | `claude` | `headless` (named) |
 | `--provider codex` | `codex` | `headless` |
 | `--provider codex --headless` | `codex` | `headless` (the same) |
 
-`add` takes `--provider claude|codex` and `--headless`. `edit ID` changes them on a draft or submitted task (a ready one goes back with `draft ID` first): `--provider claude|codex` takes that provider's default route (so `--provider claude` alone is Claude interactive) unless the same `edit` says `--headless` or `--interactive`; `--headless` or `--interactive` alone keeps the provider. Codex interactive is refused.
+`add` takes `--provider claude|codex` and `--interactive` or `--headless`. `edit ID` changes them on a draft or submitted task (a ready one goes back with `draft ID` first): `--provider claude|codex` takes that provider's default route (so `--provider claude` alone is Claude headless) unless the same `edit` says `--headless` or `--interactive`; `--headless` or `--interactive` alone keeps the provider. Codex interactive is refused by `add` and `edit`. A task given no route stores none and follows the default, also when the default changes; a named route stays. `show` prints the resolved route either way.
 
 ### Which to choose (planner)
 
-- No reason given: give neither flag. Claude interactive stays the default until a measuring task decides otherwise.
+- No reason given: give neither flag. The worker runs Claude headless, the default since ADR-t1340-1.
 - The person wants the task done on Codex: `--provider codex`. Codex does no subagent review: its run needs no `subagent_review` evidence (the supervisor's review job still reviews it before landing). A Codex worker asks as any worker does: its `dagq ask` inside the sandbox runs in client mode and goes to the queue service, which opens the `worker_question` at once for the run's worker (no `ask_request_taken`; `queue-service.md`, client mode). Only a turn started before the queue service writes a request to the run dir (`ask-requests/`) for the supervisor to open.
-- Claude headless (`--headless`): only when the person asks for it, for example to compare the routes.
+- Claude interactive (`--interactive`): only when the person asks to watch the worker's session or step into it, or when a headless run keeps failing on a task (until the fix lands). `--headless` names the default; it is not needed.
 - Never pick a provider to route around a login or a usage limit: the runtime falls back by itself (below).
 
 ## Reading which ran

@@ -25,7 +25,7 @@ fn evidence_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf) {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     assert_eq!(task.id(), TaskId::new(2));
@@ -335,7 +335,7 @@ fn scope_fixture(paths: &[&str]) -> (Fixture, PathBuf, PathBuf) {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     assert_eq!(task.id(), TaskId::new(2));

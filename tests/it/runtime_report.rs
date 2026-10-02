@@ -218,7 +218,7 @@ fn the_reports_carry_the_dependency_diagram_or_why_not() {
                 goal_id: None,
                 context: String::new(),
                 provider: None,
-                worker_mode: None,
+                worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
             })
             .unwrap()
             .id()

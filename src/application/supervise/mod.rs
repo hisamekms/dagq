@@ -668,7 +668,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     // The screens and idle markers are those of the interactive sessions.
     let interactive = ports
         .workers
-        .get(Worker::DEFAULT)
+        .get(Worker::CLAUDE_INTERACTIVE)
         .context("no adapters for the interactive Claude worker")?;
     for worker in ports.workers.workers() {
         if settings.no_claude && worker.provider == crate::domain::Provider::Claude {

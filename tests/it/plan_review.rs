@@ -107,7 +107,7 @@ pub(crate) fn add(
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id()
@@ -1518,7 +1518,7 @@ pub(crate) fn runtime_draft(
             goal_id: goal,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id();
@@ -2142,7 +2142,7 @@ fn add_text(queue: &mut SqliteQueue, title: &str, description: &str, acceptance:
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id()
@@ -2323,7 +2323,7 @@ fn add_paths(queue: &mut SqliteQueue, title: &str, paths: &[&str]) -> TaskId {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id()
@@ -2435,7 +2435,7 @@ fn an_in_progress_tasks_expected_files_are_what_its_run_changed() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id();

@@ -744,7 +744,13 @@ fn kpi_cross_reaches_periods_and_compare_without_replacing_single_axes() {
     for args in [
         vec!["add", "codex", "--provider", "codex", "--change", "fix"],
         vec!["add", "claude headless", "--headless", "--change", "fix"],
-        vec!["add", "claude interactive", "--change", "fix"],
+        vec![
+            "add",
+            "claude interactive",
+            "--interactive",
+            "--change",
+            "fix",
+        ],
         vec!["add", "different change", "--headless", "--change", "test"],
     ] {
         ok(&db, &args);

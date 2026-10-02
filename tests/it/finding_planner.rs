@@ -102,7 +102,7 @@ fn draft_at(
             goal_id: Some(goal),
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id()

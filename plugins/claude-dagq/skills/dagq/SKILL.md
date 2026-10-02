@@ -46,7 +46,7 @@ A goal has no verification commands; a goal-level check is a final task dependin
 
 ### Register the tasks
 
-Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` (the kind of change; the values are the repository's `[tasks] changes`, their meaning its rules), and the worker's `--provider claude|codex` / `--headless` (default: Claude interactive; `edit` changes them; `reference/provider.md`). The task's old `--kind` is removed (ADR-t980-1). What each means is in `reference/register.md`, the combinations per changed target in `reference/scope.md`.
+Split the goal into tasks, each one session in one worktree. Per task: title, description, acceptance, `--verify`, `--depends-on` (or `--depends-on-goal`), `--context`, `--evidence`, `--paths`, `--change` (the kind of change; the values are the repository's `[tasks] changes`, their meaning its rules), and the worker's `--provider claude|codex` / `--interactive` (default: Claude headless; `edit` changes them; `reference/provider.md`). The task's old `--kind` is removed (ADR-t980-1). What each means is in `reference/register.md`, the combinations per changed target in `reference/scope.md`.
 
 ```sh
 "$DAGQ" add "TITLE" --goal 1 \

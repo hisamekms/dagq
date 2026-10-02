@@ -592,7 +592,7 @@ fn add_file_task(
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     queue
@@ -1121,7 +1121,7 @@ fn add_ready_task_in(
             goal_id,
             context: context.into(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     queue
@@ -1605,7 +1605,7 @@ fn verification_failure_after_rebase_needs_a_session_and_keeps_the_rebased_tree(
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id();
@@ -2396,7 +2396,7 @@ fn add_script_task(
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     queue

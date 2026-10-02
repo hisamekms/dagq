@@ -70,8 +70,11 @@ pub fn recorded_floor(version: i64) -> Result<i64, crate::domain::DomainError> {
 /// default, `INSERT` into a table the same migration creates, and an
 /// `AFTER` trigger whose body only inserts into, updates or deletes from
 /// tables the same migration creates (an older binary's write then only
-/// adds to what it does not read), none of them with a foreign key, a
-/// block comment or `RAISE`. A statement with a CHECK that names a kind
+/// adds to what it does not read), and an `UPDATE` that only sets
+/// columns to `NULL` (a NOT NULL column fails the migration, and a column
+/// the older schema left nullable is one an older binary reads as null
+/// already: ADR-t1340-1), none of them with a foreign key, a block comment
+/// or `RAISE`. A statement with a CHECK that names a kind
 /// ([`kind_enumerations`]) is a violation too, even in a table the
 /// migration creates.
 pub fn compatibility_violations(migration: &str) -> Vec<String> {
@@ -104,6 +107,7 @@ pub fn compatibility_violations(migration: &str) -> Vec<String> {
             ["INSERT", "INTO", name, ..] | ["INSERT", "OR", _, "INTO", name, ..] => {
                 created.contains(&table_name(name))
             }
+            ["UPDATE", _, "SET", rest @ ..] => sets_only_null(rest),
             _ => false,
         };
         // A foreign key would make an older binary's DELETE of the parent
@@ -242,6 +246,23 @@ fn trigger_writes_only(words: &[&str], created: &[String]) -> bool {
                 _ => return false,
             };
             created.contains(&target)
+        })
+}
+
+/// Whether the `SET` clause of an `UPDATE` (upper-cased words after `SET`)
+/// assigns `NULL` to each column it names and nothing else, up to its
+/// `WHERE`, which only reads.
+fn sets_only_null(words: &[&str]) -> bool {
+    let end = words
+        .iter()
+        .position(|w| *w == "WHERE")
+        .unwrap_or(words.len());
+    let clause = words[..end].concat();
+    !clause.is_empty()
+        && !words.iter().any(|w| w.contains("RAISE"))
+        && clause.split(',').all(|assignment| {
+            matches!(assignment.split_once('='), Some((column, "NULL"))
+                if !column.is_empty() && !column.contains(['(', '\'', '"']))
         })
 }
 
@@ -412,6 +433,22 @@ mod tests {
         let violations = compatibility_violations(sql);
         assert_eq!(violations.len(), 6, "{violations:#?}");
         assert!(violations.iter().all(|v| v.starts_with("CREATE TRIGGER")));
+    }
+
+    #[test]
+    fn an_update_that_only_sets_null_is_compatible() {
+        let sql = "-- dagq-schema: compatible
+            UPDATE tasks SET worker_mode = NULL WHERE status IN ('draft', 'ready')
+              AND NOT EXISTS (SELECT 1 FROM run_events e WHERE e.task_id = tasks.id);
+            UPDATE tasks SET a=NULL, b = NULL;";
+        assert_eq!(compatibility_violations(sql), Vec::<String>::new());
+        let sql = "UPDATE tasks SET worker_mode = 'headless';
+            UPDATE tasks SET a = NULL, b = 'x';
+            UPDATE tasks SET a = coalesce(b, NULL);
+            UPDATE tasks SET WHERE id = 1;
+            UPDATE tasks SET a = NULL WHERE (SELECT RAISE(ABORT, 'no'));";
+        let violations = compatibility_violations(sql);
+        assert_eq!(violations.len(), 5, "{violations:#?}");
     }
 
     #[test]

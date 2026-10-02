@@ -356,7 +356,7 @@ fn the_runtime_opens_a_planner_for_a_proposal_with_its_reasons() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     let proposal = queue

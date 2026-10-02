@@ -49,7 +49,7 @@ fn claim_a_run(fixture: &Fixture, queue: &mut SqliteQueue, token: &str) -> Strin
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap();
     queue

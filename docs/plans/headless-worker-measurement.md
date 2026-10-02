@@ -37,6 +37,8 @@ goal 57 の測定。Claude の worker を非対話の経路（[ADR-t813-1](../ad
 
 **人の決定（2026-10-02）**: 人が planner の session で、条件 2 の残り（2a・2b）を待たずに Claude の既定を非対話にすると決め、既定を切り替える ADR と実装を task 1340（goal 85）として登録した（task 1200 の note 60084）。この文書は測定の記録として条件 2 を未達のまま残し、既定の切り替えは task 1340 が行う。この task（1200）は既定を変えていない。
 
+**既定の切り替え（task 1340、2026-10-02）**: 上の人の決定のとおり、task 1340 が [ADR-t1340-1](../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)（ADR-t813-1 決定 7 を amends）を書いて Claude の worker の既定を非対話に変えた。経路を指定しない Claude の task は非対話で動き、対話は `add` / `edit` の `--interactive` で選んだ task だけが使う。まだ claim されていない既定の task も migration で新しい既定に従わせた（保存の形は [provider-lifecycle](../design/provider-lifecycle.md#workerのproviderと経路)）。上の段落や「この task は測って書くだけで…」の文の「今も Claude の対話の経路」は、その時点の記録として残す。task 1200 の description は「条件がそろったら ADR と実装の task を follow_ups に挙げる」と書いているが、その ADR と実装はこの task 1340 なので、1200 がそれを follow_up に挙げると重複になる（挙げない）。条件 2 の残り（`worker_question` の answer の turn と `needs_session` の resume）は task 1200 が本番の記録を続け、非対話で問題が見つかれば直す task を作るか、その task に `--interactive` を付けて対処する。
+
 以下の「結論」の箇条書きから「測定を続けるには」までは 2 回目（task 1132）の内容。
 
 - 7 本とも 1 回目の turn が `succeeded` で終わった。失敗・停止・催促・権限の拒否・人への ask・resume は 0 件だった。review の差し戻し（1 件）は、同じ session の resume の turn で直って着地した

@@ -238,7 +238,7 @@ fn hit(row: &Row<'_>, terms: &[String], full: bool) -> rusqlite::Result<SearchHi
             .map(|(name, text)| (field_name(kind, name).to_owned(), json!(text)))
             .collect::<Map<_, _>>()
     });
-    // A task's worker, NULL columns read as Claude interactive.
+    // A task's worker, NULL columns read as the provider's default.
     let worker = match kind {
         SearchKind::Task => Some(
             Worker::resolve(

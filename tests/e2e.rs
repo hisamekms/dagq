@@ -708,9 +708,11 @@ fn add_ready_task_described(
     dependencies: &[&str],
     verify: &[&str],
 ) -> String {
+    // The stub worker plays Claude's interactive session.
     let mut args = vec![
         "add",
         title,
+        "--interactive",
         "--description",
         description,
         "--acceptance",
@@ -1211,6 +1213,7 @@ fn a_worker_question_is_answered_through_the_worker_terminal() {
         &[
             "add",
             "e2e asking task",
+            "--interactive",
             "--description",
             "E2E-ASK: ask which word goes into answer.txt, then add e2e.txt",
             "--acceptance",

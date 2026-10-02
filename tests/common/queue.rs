@@ -31,7 +31,7 @@ pub fn new_task(title: &str) -> NewTask {
         goal_id: None,
         context: String::new(),
         provider: None,
-        worker_mode: None,
+        worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
     }
 }
 

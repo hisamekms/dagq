@@ -173,3 +173,4 @@ goal 82（goal 38の段(1)〜(3)）のADRはtask 1233が書いた5本で、決�
 | [ADR-0062](0062-runs-waiting-for-a-person-leave-the-slot.md) | superseded | [ADR-0071](0071-runs-waiting-in-revise-and-resume-leave-the-slot.md) | 2026-09-26 |
 | [ADR-0069](0069-do-not-claim-tasks-overlapping-hot-files.md) | superseded | [ADR-0080](0080-supervisor-rereads-conflicts-config.md) | 2026-09-27 |
 | [ADR-t624-1](2026-09-27-t624-1-task-kind-is-a-free-label.md) | superseded | [ADR-t980-1](2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md) | 2026-09-29 |
+| [ADR-t1340-1](2026-10-02-t1340-1-claude-worker-defaults-to-headless.md) | Claudeのworkerの既定の経路を非対話にし、対話の経路はtaskごとに選んだ（`--interactive`）ときだけ使う。既定はdagq.tomlの欄にせずruntimeの既定として変え、既定と明示した経路を保存の上で区別し、まだclaimされていない既定のtaskも新しい既定に従わせる（ADR-t813-1決定7をamends） | 2026-10-02 |

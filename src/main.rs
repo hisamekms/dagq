@@ -164,10 +164,15 @@ enum Command {
         /// The agent the worker runs on (ADR-t813-2): claude or codex. Omitted: claude.
         #[arg(long, value_parser = PROVIDERS)]
         provider: Option<String>,
-        /// Run the worker non-interactively, one call per turn (ADR-t813-1). Omitted: Claude runs
-        /// in its interactive session; codex runs headless only.
-        #[arg(long)]
+        /// Run the worker non-interactively, one call per turn (ADR-t813-1), and store that mode.
+        /// Omitted (with no --interactive): the provider's default, headless for Claude
+        /// (ADR-t1340-1) and for codex (its only mode); the task follows a later change of it.
+        #[arg(long, conflicts_with = "interactive")]
         headless: bool,
+        /// Run the worker in Claude's interactive session in the cmux terminal (Claude only:
+        /// refused with --provider codex), for a task a person wants to watch or step into.
+        #[arg(long)]
+        interactive: bool,
     },
     /// List one page of tasks, newest first: unfinished ones unless --status or --all says otherwise.
     /// Prints {"tasks", "next", "total"}; pass `next` to --before for the following page (null: none).
@@ -343,13 +348,14 @@ enum Command {
         #[arg(long, group = "field")]
         change: Option<String>,
         /// The agent the worker runs on (`add --provider`): claude or codex. Without --headless or
-        /// --interactive, the worker takes that provider's default mode.
+        /// --interactive, the worker takes that provider's default mode (headless for both) and
+        /// the task names none.
         #[arg(long, group = "field", value_parser = PROVIDERS)]
         provider: Option<String>,
-        /// Run the worker non-interactively (`add --headless`).
+        /// Run the worker non-interactively (`add --headless`), named on the task.
         #[arg(long, group = "field", conflicts_with = "interactive")]
         headless: bool,
-        /// Run the worker in the agent's interactive session (Claude only).
+        /// Run the worker in the agent's interactive session (`add --interactive`; Claude only).
         #[arg(long, group = "field")]
         interactive: bool,
     },
@@ -2876,6 +2882,7 @@ fn execute(cli: Cli) -> Result<Value> {
             change,
             provider,
             headless,
+            interactive,
         } => serde_json::to_value(
             planning!().add(NewTask {
                 title,
@@ -2894,7 +2901,11 @@ fn execute(cli: Cli) -> Result<Value> {
                 priority: priority.parse()?,
                 change: change.map(|change| change.parse()).transpose()?,
                 provider: provider.map(|provider| provider.parse()).transpose()?,
-                worker_mode: headless.then_some(WorkerMode::Headless),
+                worker_mode: match (headless, interactive) {
+                    (true, _) => Some(WorkerMode::Headless),
+                    (_, true) => Some(WorkerMode::Interactive),
+                    _ => None,
+                },
             })?,
         )?,
         Command::Show { id, full, events } => {

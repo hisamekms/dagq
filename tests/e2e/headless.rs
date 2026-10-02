@@ -297,7 +297,7 @@ fn a_codex_worker_runs_its_turn_through_cmux_and_lands_on_main() {
 }
 
 /// The production CLI flag through real cmux: no Claude executable is
-/// present, a default (interactive Claude) task runs on Codex, and its
+/// present, an interactive Claude task runs on Codex, and its
 /// lease is released so a person's integration can land the receipt.
 #[test]
 #[ignore = "needs a running cmux; run with --ignored"]
@@ -316,6 +316,7 @@ fn no_claude_runs_codex_through_cmux_and_allows_manual_landing() {
         &[
             "add",
             "e2e manual landing",
+            "--interactive",
             "--description",
             "Add e2e.txt to the worktree.",
             "--acceptance",

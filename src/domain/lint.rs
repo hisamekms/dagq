@@ -500,7 +500,8 @@ mod tests {
             context: task.context().into(),
             created_at: task.created_at().into(),
             updated_at: task.updated_at().into(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         };
         edit(&mut record);
         Task::restore(record).unwrap()

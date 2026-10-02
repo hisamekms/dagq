@@ -42,6 +42,45 @@ fn add_task(
     task.id()
 }
 
+/// A Claude task that names no mode runs headless, the default
+/// (ADR-t1340-1); one that names `interactive` runs in the interactive
+/// session; Codex runs headless only.
+#[test]
+fn a_claude_task_without_a_mode_is_claimed_headless() {
+    let (_dir, _repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let plain = add_task(&mut queue, "plain", None, None);
+    let claude = add_task(&mut queue, "claude", Some(Provider::Claude), None);
+    let watched = add_task(&mut queue, "watched", None, Some(WorkerMode::Interactive));
+    let codex = add_task(&mut queue, "codex", Some(Provider::Codex), None);
+    let base = CommitSha::parse("0123456789abcdef0123456789abcdef01234567", "base").unwrap();
+    for (task, provider, mode) in [
+        (plain, Provider::Claude, WorkerMode::Headless),
+        (claude, Provider::Claude, WorkerMode::Headless),
+        (watched, Provider::Claude, WorkerMode::Interactive),
+        (codex, Provider::Codex, WorkerMode::Headless),
+    ] {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor_in_order(
+                &base,
+                &LeaseToken::new("t"),
+                &[task],
+                None,
+                &Default::default(),
+                &WorkerRoute::direct(&Worker::ALL),
+            )
+            .unwrap()
+        else {
+            panic!("task {task} is claimed")
+        };
+        assert_eq!(run.task_id(), task);
+        assert_eq!(
+            (run.requested_provider(), run.worker_mode()),
+            (provider, mode)
+        );
+    }
+}
+
 fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
     SqliteQueue::open(db)
         .unwrap()
@@ -81,14 +120,17 @@ fn a_claim_writes_the_worker_of_its_task_on_the_run() {
     };
     // Neither worker is run: the task of fixture() (interactive Claude)
     // is taken instead of the ones asked for first.
-    let ClaimOutcome::Claimed { run } = claim(&mut queue, &[codex, headless], &[Worker::DEFAULT])
-    else {
+    let ClaimOutcome::Claimed { run } = claim(
+        &mut queue,
+        &[codex, headless],
+        &[Worker::CLAUDE_INTERACTIVE],
+    ) else {
         panic!("the interactive task is claimed")
     };
     assert_eq!(run.task_id(), TaskId::new(1));
     assert_eq!(run.worker_mode(), WorkerMode::Interactive);
     assert!(matches!(
-        claim(&mut queue, &[], &[Worker::DEFAULT]),
+        claim(&mut queue, &[], &[Worker::CLAUDE_INTERACTIVE]),
         ClaimOutcome::NoReadyTask
     ));
     let ClaimOutcome::Claimed { run } = claim(&mut queue, &[], &Worker::ALL[..2]) else {

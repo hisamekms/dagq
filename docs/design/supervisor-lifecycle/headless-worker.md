@@ -8,6 +8,7 @@ updated: 2026-10-02
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t1340-1
   - design-supervisor-lifecycle
   - design-provider-lifecycle
   - adr-t1233-2
@@ -22,7 +23,7 @@ related:
 
 # 非対話のworker
 
-[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。taskの`worker_mode`が`headless`（`add --headless`、[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）のrunは、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
+[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の実装（task 815）。taskの`worker_mode`が`headless`（経路を指定しないClaudeのtask（既定、[ADR-t1340-1](../../adr/2026-10-02-t1340-1-claude-worker-defaults-to-headless.md)）と`add --headless`、Codexのtask。[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）のrunは、workerの1 turnを1回の非対話の呼び出しにする。動くのはClaude（`claude -p --output-format stream-json --verbose`）とCodex（`codex exec --json`と`codex exec resume --json`、task 816。[provider-lifecycle](../provider-lifecycle.md#codexの非対話のworker)）。providerの違いは`AgentProvider`の`turn_command`（呼び出しのargv）と`turn_reader`（出力を読む`TurnReader`）と`turn_permission_mode`に閉じ込め、supervisorとsession wrapperの流れはproviderを知らない。
 
 ## 経路の全体
 
@@ -122,4 +123,4 @@ wrapper自身がturnの途中で終わるとき（エラー）は、上と同じ
 
 ## 対話の経路との違い
 
-対話のrunの経路（画面の判定・idleの印・`/exit`・打ち込み・Enterの送り直し・既知のダイアログ・`prompt_waiting`・`stuck_exit`）はそのまま（決定7）。`headless`のrunだけが上の経路を通り、分岐はsupervisorの`headless(run)`とwrapperの`worker_mode`で行う。
+対話のrunの経路（画面の判定・idleの印・`/exit`・打ち込み・Enterの送り直し・既知のダイアログ・`prompt_waiting`・`stuck_exit`）はそのまま（決定7）。Claudeの既定は非対話で、対話の経路は`add` / `edit`の`--interactive`で選んだtaskだけが使う（ADR-t1340-1。保存の形と、既定の`interactive`をNULLに戻したmigration 0057は[provider-lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。`headless`のrunだけが上の経路を通り、分岐はsupervisorの`headless(run)`とwrapperの`worker_mode`で行う。

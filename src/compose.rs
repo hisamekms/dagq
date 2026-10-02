@@ -2761,7 +2761,7 @@ pub fn worker_adapters<'a>(
         transcripts,
     };
     let workers = WorkerAdapters::default()
-        .with(Worker::DEFAULT, adapter)
+        .with(Worker::CLAUDE_INTERACTIVE, adapter)
         .with(
             Worker {
                 provider: Provider::Claude,

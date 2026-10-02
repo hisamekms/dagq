@@ -377,7 +377,7 @@ mod tests {
         }
     }
 
-    const CLAUDE: Worker = Worker::DEFAULT;
+    const CLAUDE: Worker = Worker::CLAUDE_INTERACTIVE;
     const CLAUDE_HEADLESS: Worker = Worker::ALL[1];
     const CODEX: Worker = Worker::ALL[2];
 

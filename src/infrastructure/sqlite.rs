@@ -893,7 +893,7 @@ impl TaskStore for SqliteQueue {
             &WorkerTrial::default(),
             // What every binary runs (ADR-t813-2); a supervisor claims
             // through its table of adapters instead.
-            &WorkerRoute::direct(&[Worker::DEFAULT]),
+            &WorkerRoute::direct(&[Worker::CLAUDE_INTERACTIVE, Worker::CLAUDE_HEADLESS]),
         )?;
         tx.commit()?;
         Ok(outcome)
@@ -1311,6 +1311,7 @@ impl TaskStore for SqliteQueue {
         let old = read_task(&tx, task_id)?;
         // The event keeps the fields before the edit, which consumes the task.
         let old_json = serde_json::to_value(&old)?;
+        let old_mode = old.stored_worker_mode();
         let new = if old.status() == TaskStatus::InProgress {
             let latest: Option<String> = tx
                 .query_row(
@@ -1341,6 +1342,13 @@ impl TaskStore for SqliteQueue {
                 to.insert(field.to_owned(), new_json[field].clone());
             }
         }
+        // Naming the mode the default already resolves to (`--headless` on a
+        // Claude task that named none) changes what is stored, not what is
+        // shown: recorded with the stored values, null for the default.
+        if old_mode != new.stored_worker_mode() && !to.contains_key("worker_mode") {
+            from.insert("worker_mode".to_owned(), json!(old_mode));
+            to.insert("worker_mode".to_owned(), json!(new.stored_worker_mode()));
+        }
         if !to.is_empty() {
             tx.execute(
                 "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
@@ -1358,7 +1366,7 @@ impl TaskStore for SqliteQueue {
                     self.generators.clock.timestamp(),
                     task_id,
                     new.worker().provider.as_str(),
-                    new.worker().mode.as_str(),
+                    new.stored_worker_mode().map(WorkerMode::as_str),
                     new.change().map(TaskChange::as_str),
                 ],
             )?;
@@ -1464,7 +1472,7 @@ pub(super) fn insert_task(tx: &Connection, new: NewTask, now: &str) -> Result<Ta
                 task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
                 serde_json::to_string(task.paths())?, task.priority().as_i64(),
                 task.created_at(), task.updated_at(),
-                task.worker().provider.as_str(), task.worker().mode.as_str(),
+                task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
                 task.change().map(TaskChange::as_str)],
         )?;
     event(
@@ -2280,13 +2288,15 @@ fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
         change: row
             .get::<_, Option<String>>("change")?
             .and_then(|change| change.parse().ok()),
-        // NULL (a task from before the worker existed) is Claude,
-        // interactive; the columns' CHECK keeps any other value out.
+        // NULL is the provider's default (Claude, headless: ADR-t1340-1): a
+        // task that names no mode, and one from before the worker existed;
+        // the columns' CHECK keeps any other value out.
         worker: Worker::resolve(
             optional_enum_col(row, "worker_provider")?,
             optional_enum_col(row, "worker_mode")?,
         )
         .map_err(restore_error)?,
+        named_mode: optional_enum_col(row, "worker_mode")?,
         status: enum_col(row, "status")?,
         goal_id: row.get("goal_id")?,
         context: row.get("context")?,

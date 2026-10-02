@@ -59,13 +59,13 @@ fn calls(cmux: &Path) -> String {
 fn run_in(db: &Path, title: &str, mode: Option<WorkerMode>, workspace: &str) -> String {
     let mut queue = SqliteQueue::open(db).unwrap();
     let mut task = common::queue::new_task(title);
-    task.worker_mode = mode;
+    task.worker_mode = Some(mode.unwrap_or(WorkerMode::Interactive));
     let id = queue.add(task).unwrap().id();
     queue.transition(id, TaskAction::BypassReview).unwrap();
     let token = LeaseToken::new(format!("lease-{workspace}"));
     let worker = Worker {
         mode: mode.unwrap_or(WorkerMode::Interactive),
-        ..Worker::DEFAULT
+        ..Worker::CLAUDE_INTERACTIVE
     };
     let ClaimOutcome::Claimed { run } = queue
         .claim_for_supervisor_in_order(

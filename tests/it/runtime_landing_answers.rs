@@ -351,7 +351,7 @@ fn a_land_answer_is_applied_while_another_run_integrates() {
             goal_id: None,
             context: String::new(),
             provider: None,
-            worker_mode: None,
+            worker_mode: Some(dagq::domain::worker::WorkerMode::Interactive),
         })
         .unwrap()
         .id();

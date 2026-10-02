@@ -2,8 +2,10 @@
 //! ADR-t813-2 decision 1): the provider (`claude` / `codex`) and the mode
 //! (`interactive`: the agent's own session in the cmux terminal;
 //! `headless`: one non-interactive call per turn). A task that names
-//! neither runs Claude interactively; Codex runs headless only. A run
-//! carries the provider and mode its task asked for.
+//! neither runs Claude headless (ADR-t1340-1, amending ADR-t813-1
+//! decision 7); Claude runs interactively only when the task names that
+//! mode, and Codex runs headless only. A run carries the provider and mode
+//! its task asked for.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,18 +25,24 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// The worker of a task that names none: Claude, interactive.
-    pub const DEFAULT: Self = Self {
+    /// Claude in its interactive session: what a task runs on when it
+    /// names the interactive mode.
+    pub const CLAUDE_INTERACTIVE: Self = Self {
         provider: Provider::Claude,
         mode: WorkerMode::Interactive,
     };
+    /// Claude, one non-interactive call per turn.
+    pub const CLAUDE_HEADLESS: Self = Self {
+        provider: Provider::Claude,
+        mode: WorkerMode::Headless,
+    };
+    /// The worker of a task that names none: Claude, headless
+    /// (ADR-t1340-1).
+    pub const DEFAULT: Self = Self::CLAUDE_HEADLESS;
     /// Every worker a task may ask for.
     pub const ALL: [Self; 3] = [
-        Self::DEFAULT,
-        Self {
-            provider: Provider::Claude,
-            mode: WorkerMode::Headless,
-        },
+        Self::CLAUDE_INTERACTIVE,
+        Self::CLAUDE_HEADLESS,
         Self {
             provider: Provider::Codex,
             mode: WorkerMode::Headless,
@@ -52,13 +60,12 @@ impl Worker {
         }
     }
 
-    /// The mode of `provider` when none is given: interactive for Claude
-    /// (its default, ADR-t813-1 decision 7), headless for Codex (its only
-    /// one).
+    /// The mode of `provider` when none is given: headless for both, as
+    /// Claude's default (ADR-t1340-1, amending ADR-t813-1 decision 7) and
+    /// Codex's only mode.
     pub const fn default_mode(provider: Provider) -> WorkerMode {
         match provider {
-            Provider::Claude => WorkerMode::Interactive,
-            Provider::Codex => WorkerMode::Headless,
+            Provider::Claude | Provider::Codex => WorkerMode::Headless,
         }
     }
 
@@ -137,8 +144,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_task_without_a_worker_runs_claude_interactively() {
-        assert_eq!(Worker::resolve(None, None).unwrap(), Worker::DEFAULT);
+    fn a_task_without_a_worker_runs_claude_headless() {
+        assert_eq!(
+            Worker::resolve(None, None).unwrap(),
+            Worker::CLAUDE_HEADLESS
+        );
+        assert_eq!(
+            Worker::resolve(None, Some(WorkerMode::Interactive)).unwrap(),
+            Worker::CLAUDE_INTERACTIVE
+        );
         let codex = Worker::resolve(Some(Provider::Codex), None).unwrap();
         assert_eq!(codex.mode, WorkerMode::Headless);
         let headless = Worker::resolve(None, Some(WorkerMode::Headless)).unwrap();
@@ -151,14 +165,14 @@ mod tests {
 
     #[test]
     fn an_edit_replaces_the_fields_given() {
-        let worker = Worker::DEFAULT;
+        let worker = Worker::CLAUDE_INTERACTIVE;
         assert_eq!(worker.with(None, None).unwrap(), worker);
         let codex = worker.with(Some(Provider::Codex), None).unwrap();
         assert_eq!(codex, Worker::ALL[2]);
         assert!(codex.with(None, Some(WorkerMode::Interactive)).is_err());
         assert_eq!(
             codex.with(Some(Provider::Claude), None).unwrap(),
-            Worker::DEFAULT
+            Worker::CLAUDE_HEADLESS
         );
         assert_eq!(
             worker.with(None, Some(WorkerMode::Headless)).unwrap(),
@@ -168,8 +182,8 @@ mod tests {
 
     #[test]
     fn a_worker_is_unavailable_by_provider_or_by_mode() {
-        let supported = [Worker::DEFAULT];
-        assert_eq!(unavailable(Worker::DEFAULT, &supported), None);
+        let supported = [Worker::CLAUDE_INTERACTIVE];
+        assert_eq!(unavailable(Worker::CLAUDE_INTERACTIVE, &supported), None);
         assert_eq!(
             unavailable(Worker::ALL[1], &supported),
             Some(MODE_UNAVAILABLE)

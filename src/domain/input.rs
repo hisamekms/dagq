@@ -42,8 +42,8 @@ pub struct NewTask {
     /// The worker's provider (ADR-t813-2 decision 1); none is Claude.
     #[serde(default)]
     pub provider: Option<Provider>,
-    /// The worker's mode (ADR-t813-1 decision 7); none is the provider's
-    /// default (interactive for Claude, headless for Codex).
+    /// The worker's mode (ADR-t813-1 decision 7, ADR-t1340-1); none is the
+    /// provider's default (headless for both Claude and Codex).
     #[serde(default)]
     pub worker_mode: Option<WorkerMode>,
 }
@@ -227,6 +227,8 @@ pub struct TaskRecord {
     pub priority: Priority,
     pub change: Option<TaskChange>,
     pub worker: Worker,
+    /// The mode the store keeps: none is the provider's default.
+    pub named_mode: Option<WorkerMode>,
     pub status: TaskStatus,
     pub goal_id: Option<GoalId>,
     pub context: String,

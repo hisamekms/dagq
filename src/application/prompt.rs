@@ -2389,7 +2389,8 @@ mod tests {
             context: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         })
         .unwrap()
     }
@@ -2410,7 +2411,8 @@ mod tests {
             context: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         })
         .unwrap()
     }
@@ -2664,7 +2666,8 @@ mod tests {
             context: "context ".repeat(80),
             created_at: String::new(),
             updated_at: String::new(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         })
         .unwrap()
     }
@@ -2986,7 +2989,8 @@ mod tests {
             context: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         })
         .unwrap();
         for provider in [Provider::Claude, Provider::Codex] {
@@ -3067,7 +3071,8 @@ mod tests {
             context: String::new(),
             created_at: String::new(),
             updated_at: String::new(),
-            worker: crate::domain::worker::Worker::DEFAULT,
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
         })
         .unwrap();
         for mode in [WorkerMode::Interactive, WorkerMode::Headless] {
