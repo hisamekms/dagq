@@ -1505,15 +1505,14 @@ impl Supervisor<'_> {
             }
             // A plan review that just readied tasks is followed by one more
             // pass, which claims them.
-            // A login or usage limit that holds the queue starts no job
-            // (task 437); one in progress is followed.
-            let starting =
-                !stopping && self.claiming && self.queue_hold.is_none() && self.service_up;
+            // The plan and goal reviews decide on the hold itself: a login
+            // or usage limit that holds the queue starts no Claude job (task
+            // 437), but one whose role names its provider may run on Codex
+            // while Claude is held (ADR-t1063-1 decision 5). One in progress
+            // is followed.
+            let starting = !stopping && self.claiming && self.service_up;
             let mut progressed = self.plan_review_pass(options, starting);
-            // The goal review decides on the hold itself: one whose role
-            // names its provider may run on Codex while Claude is held
-            // (ADR-t1063-1 decision 5); one that names none waits as above.
-            progressed |= self.goal_review_pass(!stopping && self.claiming && self.service_up);
+            progressed |= self.goal_review_pass(starting);
             if self.slots.is_empty() {
                 // A running observer, KPI report job, plan review, landing recheck or
                 // cleanup for disk space or one a triage or resume waits

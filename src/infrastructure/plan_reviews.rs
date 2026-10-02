@@ -24,8 +24,8 @@ use super::{
 };
 use crate::{
     application::{
-        PlanDecided, PlanReviewApplied, PlanReviewApply, PlanReviewHold, PlanReviewJob,
-        PlanReviewStore, PlannerHold, ReopenedTask, RevisingProposal,
+        PlanDecided, PlanReviewApplied, PlanReviewApply, PlanReviewFailure, PlanReviewHold,
+        PlanReviewJob, PlanReviewStore, PlannerHold, ReopenedTask, RevisingProposal,
     },
     domain::{
         Ask, AskId, AskKind, HEARTBEAT_TIMEOUT_SECS, PlanAnswer, PlanReviewAction,
@@ -553,8 +553,10 @@ impl PlanReviewStore for SqliteQueue {
         )?;
         let anchor = anchor(&tx, proposal_id)?;
         // The job's Claude session id, given to it by the runtime (ADR-0048
-        // decision 4).
-        let session_id = self.generators.ids.uuid();
+        // decision 4); Codex names its thread itself, which the job's end
+        // records (ADR-t1063-1 decision 6).
+        let session_id = (launch.provider == crate::domain::Provider::Claude)
+            .then(|| self.generators.ids.uuid());
         let cwd = cwd.to_str().context("repository checkout is not UTF-8")?;
         event(
             &tx,
@@ -731,12 +733,7 @@ impl PlanReviewStore for SqliteQueue {
             Some(&verdict_json),
             None,
         )?;
-        event(
-            &tx,
-            job.anchor,
-            None,
-            EventKind::PlanReviewFinished,
-            json!({
+        let mut finished = json!({
                 "proposal_id": job.proposal_id,
                 "plan_review_id": job.id,
                 "attempt": job.attempt,
@@ -755,10 +752,19 @@ impl PlanReviewStore for SqliteQueue {
                 "ask_id": applied.ask.as_ref().map(|outcome| outcome.ask.id),
                 "duration_secs": apply.duration_secs,
                 "prediction_error": predictions.as_ref().err(),
-            }),
+        });
+        if let Some(session) = &apply.session {
+            session.record(&mut finished);
+        }
+        event(
+            &tx,
+            job.anchor,
+            None,
+            EventKind::PlanReviewFinished,
+            finished,
         )?;
         if let Ok(predictions) = &predictions {
-            record_predictions(&tx, job, predictions)?;
+            record_predictions(&tx, job, apply.session.as_ref(), predictions)?;
         }
         tx.commit()?;
         Ok(applied)
@@ -768,9 +774,10 @@ impl PlanReviewStore for SqliteQueue {
         &mut self,
         job: &PlanReviewJob,
         token: &LeaseToken,
-        error: &str,
-        duration_secs: u64,
+        failure: &PlanReviewFailure,
     ) -> Result<()> {
+        let error = failure.error.as_str();
+        let duration_secs = failure.duration_secs;
         let now = self.generators.clock.now();
         // The spans it closes read their transcripts first (task 543).
         let _read =
@@ -826,30 +833,34 @@ impl PlanReviewStore for SqliteQueue {
             tx.commit()?;
             return Ok(());
         }
-        finish_row(
-            &tx,
-            job.id,
-            now,
-            PlanReviewOutcome::Failed,
-            None,
-            Some(error),
-        )?;
-        set_hold(&tx, job.proposal_id, Some(ReviewHold::Failed))?;
-        event(
-            &tx,
-            job.anchor,
-            None,
-            EventKind::PlanReviewFailed,
-            json!({
-                "code": crate::domain::ReasonCode::JobFailed,
-                "proposal_id": job.proposal_id,
-                "plan_review_id": job.id,
-                "attempt": job.attempt,
-                "error": error,
-                "duration_secs": duration_secs,
-                "status": TaskStatus::Submitted.as_str(),
-            }),
-        )?;
+        // A provider that could not be used leaves the proposal unheld, to
+        // be reviewed again at once on the other provider (ADR-t1063-1
+        // decision 4).
+        let outcome = if failure.unusable.is_some() {
+            PlanReviewOutcome::Interrupted
+        } else {
+            PlanReviewOutcome::Failed
+        };
+        finish_row(&tx, job.id, now, outcome, None, Some(error))?;
+        if failure.unusable.is_none() {
+            set_hold(&tx, job.proposal_id, Some(ReviewHold::Failed))?;
+        }
+        let mut failed = json!({
+            "code": crate::domain::ReasonCode::JobFailed,
+            "proposal_id": job.proposal_id,
+            "plan_review_id": job.id,
+            "attempt": job.attempt,
+            "error": error,
+            "duration_secs": duration_secs,
+            "status": TaskStatus::Submitted.as_str(),
+        });
+        if let Some(session) = &failure.session {
+            session.record(&mut failed);
+        }
+        if let Some((provider, reason)) = failure.unusable {
+            failed["provider_unusable"] = json!({"provider": provider, "reason": reason});
+        }
+        event(&tx, job.anchor, None, EventKind::PlanReviewFailed, failed)?;
         tx.commit()?;
         Ok(())
     }
@@ -1228,25 +1239,29 @@ impl PlanReviewStore for SqliteQueue {
 /// Record `predictions` as one `task_weight_predicted` per task (ADR-0079
 /// decision 2), with the model and effort the job's session used, which the
 /// `session_closed` its `plan_review_finished` wrote carries (none when its
-/// transcript named no model). A later plan review of the task adds its own;
-/// the last one is the task's.
+/// transcript named no model), or, for a job that named its session itself
+/// (Codex), the model its output named (`named`). A later plan review of
+/// the task adds its own; the last one is the task's.
 fn record_predictions(
     conn: &Connection,
     job: &PlanReviewJob,
+    named: Option<&crate::domain::headless_job::JobSession>,
     predictions: &[prediction::TaskWeightPrediction],
 ) -> Result<()> {
-    let session: Option<String> = conn
-        .query_row(
-            "SELECT payload FROM run_events WHERE kind=?1 AND json_extract(payload,'$.session_id')=?2
-             ORDER BY id DESC LIMIT 1",
-            params![SESSION_CLOSED, job.session_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let session: Value = session
-        .map(|text| serde_json::from_str(&text))
-        .transpose()?
-        .unwrap_or(Value::Null);
+    let session: Value = match &job.session_id {
+        Some(session_id) => conn
+            .query_row(
+                "SELECT payload FROM run_events WHERE kind=?1 AND json_extract(payload,'$.session_id')=?2
+                 ORDER BY id DESC LIMIT 1",
+                params![SESSION_CLOSED, session_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|text| serde_json::from_str(&text))
+            .transpose()?
+            .unwrap_or(Value::Null),
+        None => json!({"model": named.and_then(|session| session.model.clone())}),
+    };
     for predicted in predictions {
         let mut body = serde_json::to_value(predicted)?;
         if let Some(body) = body.as_object_mut() {
@@ -1435,7 +1450,7 @@ mod tests {
         };
         let started = payload("plan_review_started");
         assert_eq!(started["cwd"], "/repo");
-        assert_eq!(started["session_id"], job.session_id.as_str());
+        assert_eq!(started["session_id"], job.session_id.as_deref().unwrap());
         assert_eq!(started["plan_review_id"], job.id);
         let opened = payload("session_opened");
         assert_eq!(opened["kind"], "plan_review");

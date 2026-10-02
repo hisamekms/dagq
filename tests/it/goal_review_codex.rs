@@ -21,11 +21,11 @@ use std::{
 };
 
 /// The model the stub `codex` writes to its rollouts.
-const CODEX_MODEL: &str = "gpt-6-astra";
+pub(crate) const CODEX_MODEL: &str = "gpt-6-astra";
 
 /// The home of the stub `codex`, next to the queue: its rollouts are under
 /// `sessions`.
-fn codex_home(fx: &Fixture) -> PathBuf {
+pub(crate) fn codex_home(fx: &Fixture) -> PathBuf {
     fx.db.parent().unwrap().join("codex-home")
 }
 
@@ -37,7 +37,7 @@ fn codex_home(fx: &Fixture) -> PathBuf {
 /// login (`auth`) or the usage limit (`limit`), or writes the
 /// thread's rollout with its model's `turn_context` and prints the reply in
 /// `codex-reply.jsonl` and `turn.completed`.
-fn stub_codex(fx: &Fixture, mode: &str, verdict: &Value) -> PathBuf {
+pub(crate) fn stub_codex(fx: &Fixture, mode: &str, verdict: &Value) -> PathBuf {
     let dir = fx.db.parent().unwrap();
     let stub = dir.join("codex");
     let reply = json!({"type": "item.completed", "item": {"id": "m1", "type": "agent_message", "text": verdict.to_string()}});
@@ -83,7 +83,7 @@ printf '{{"type":"turn.completed","usage":{{"input_tokens":10,"output_tokens":2}
 }
 
 /// The stub's lines of `name` (one per call).
-fn stub_lines(fx: &Fixture, name: &str) -> Vec<String> {
+pub(crate) fn stub_lines(fx: &Fixture, name: &str) -> Vec<String> {
     fs::read_to_string(fx.db.parent().unwrap().join(name))
         .unwrap_or_default()
         .lines()
@@ -92,7 +92,7 @@ fn stub_lines(fx: &Fixture, name: &str) -> Vec<String> {
 }
 
 /// Commit `dagq.toml` with `text` to the fixture's main checkout.
-fn roles(fx: &Fixture, text: &str) {
+pub(crate) fn roles(fx: &Fixture, text: &str) {
     fs::write(fx.repo.join("dagq.toml"), text).unwrap();
     git(&fx.repo, &["add", "dagq.toml"]);
     git(&fx.repo, &["commit", "-m", "roles"]);
@@ -111,7 +111,7 @@ fn achieved(summary: &str) -> Value {
 }
 
 /// The payloads of the queue's events of `kind`, oldest first.
-fn queue_events(fx: &Fixture, kind: &str) -> Vec<Value> {
+pub(crate) fn queue_events(fx: &Fixture, kind: &str) -> Vec<Value> {
     let connection = Connection::open(&fx.db).unwrap();
     let mut statement = connection
         .prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
@@ -125,7 +125,7 @@ fn queue_events(fx: &Fixture, kind: &str) -> Vec<Value> {
 
 /// The person's `~/.codex/config.toml`, which no job may change
 /// (ADR-t813-3 decision 6); `None` when there is none.
-fn codex_config() -> Option<Vec<u8>> {
+pub(crate) fn codex_config() -> Option<Vec<u8>> {
     let home = std::env::var_os("HOME")?;
     fs::read(Path::new(&home).join(".codex/config.toml")).ok()
 }
@@ -353,13 +353,13 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
     // file: `doctor` says so, and every role starts as before meanwhile.
     fs::write(
         fx.repo.join("dagq.toml"),
-        "[roles.plan_review]\nprovider = \"codex\"\n",
+        "[roles.recovery]\nprovider = \"codex\"\n",
     )
     .unwrap();
     let doctor = crate::common::cli::ok(&fx.db, &["doctor"]);
     let error = doctor["roles"]["error"].as_str().unwrap();
     assert!(
-        error.contains("[roles.plan_review]: provider codex cannot run the plan_review role"),
+        error.contains("[roles.recovery]: provider codex cannot run the recovery role"),
         "{error}"
     );
     assert_eq!(doctor["roles"]["review"]["provider"], "claude");

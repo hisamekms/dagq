@@ -14,8 +14,8 @@ use crate::domain::EventKind;
 use crate::domain::language::with_instruction;
 use crate::{
     application::{
-        PlanReviewApply, PlanReviewJob, PlannerHold, RevisingProposal, StatusFilter, TaskListItem,
-        TaskQuery,
+        PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RevisingProposal,
+        StatusFilter, TaskListItem, TaskQuery, job_start_failure,
         planner::{
             PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
             planner_last_activity, planner_view,
@@ -30,7 +30,7 @@ use crate::{
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
         PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
-        actor_model::{ActorLaunch, ModelRole},
+        actor_model::{ActorLaunch, JobRoute, ModelRole, job_route},
         claim_defer::expected_files,
         next_to_review,
         search::{SearchKind, SearchQuery, SearchRef, any_word_query},
@@ -50,12 +50,33 @@ const HOTSPOT_FILES: usize = 15;
 /// summary (task 591); the prompt says how many it left out.
 const QUEUED_TASKS: usize = 200;
 
+/// How the error of a plan review no agent ran begins when `--no-claude`
+/// leaves no provider for it: the proposal waits for a person
+/// (`plan_review_failed`, plan review by hand).
+const PLAN_REVIEW_PROVIDER_DISABLED: &str = "provider_disabled: Claude is disabled by --no-claude";
+
 /// The plan review job running now: one at a time, queue-wide.
 pub(super) struct PlanReviewWatch {
     pub(super) job: PlanReviewJob,
     pub(super) headless: HeadlessJob,
     /// How many times the proposal was sent back when the job started.
     pub(super) revise_count: u32,
+    /// Whether its role names its provider, so that a provider that cannot
+    /// be used moves it (ADR-t1063-1 decision 4).
+    pub(super) switchable: bool,
+}
+
+/// Where the next plan review goes (ADR-t1063-1 decisions 1, 4 and 5,
+/// ADR-t1204-1, as ADR-t1207-1 does for the run review).
+enum PlanReviewRoute {
+    /// Start on this launch; `true` when `[roles.plan_review]` names its
+    /// provider, so a provider that cannot be used moves it to the other.
+    Start(ActorLaunch, bool),
+    /// Wait until a provider can be used.
+    Wait,
+    /// Under `--no-claude` no provider can review it: a person does, told
+    /// why (`plan_review_failed`).
+    Manual(String),
 }
 
 impl Supervisor<'_> {
@@ -89,20 +110,66 @@ impl Supervisor<'_> {
                 }
             }
         }
-        // A job reaped above may have hit a login or the usage limit and
-        // raised the hold in this pass (task 438).
-        if !starting || self.queue_hold.is_some() {
+        if !starting {
             return progressed;
         }
-        for (what, result) in [
-            ("start a plan review", self.start_plan_review()),
-            ("deliver the revises", self.tend_planners(options)),
-        ] {
-            if let Err(error) = result {
-                warn!(error = %format_args!("{error:#}"), "plan review: could not {what}: {error:#}");
-            }
+        // A job reaped above may have hit a login or the usage limit and
+        // raised the hold in this pass (task 438): the route reads it, and
+        // a role that names its provider may run on Codex while Claude is
+        // held (ADR-t1063-1 decision 5).
+        if let Err(error) = self.start_plan_review() {
+            warn!(error = %format_args!("{error:#}"), "plan review: could not start a plan review: {error:#}");
+        }
+        // The planners are Claude's sessions: the hold stops them.
+        if self.queue_hold.is_none()
+            && let Err(error) = self.tend_planners(options)
+        {
+            warn!(error = %format_args!("{error:#}"), "plan review: could not deliver the revises: {error:#}");
         }
         progressed
+    }
+
+    /// Where the next plan review goes. A role that names no provider runs
+    /// on Claude as before: it waits while the queue's hold ask holds
+    /// Claude, and under `--no-claude` a person reviews it. One that names
+    /// its provider starts there when it can be used, else on the other
+    /// provider when that one runs the role and can be used, else waits,
+    /// or, under `--no-claude`, goes to a person told why; a Codex plan
+    /// review that fails under `--no-claude` never moves to Claude.
+    fn plan_review_route(&self) -> PlanReviewRoute {
+        let role = ModelRole::PlanReview;
+        let models = self.role_models(role);
+        let launch = models.launch(role);
+        if !models.switchable(role) {
+            if self.no_claude {
+                return PlanReviewRoute::Manual(format!(
+                    "{PLAN_REVIEW_PROVIDER_DISABLED}; handle this role manually"
+                ));
+            }
+            return match self.queue_hold {
+                Some(_) => PlanReviewRoute::Wait,
+                None => PlanReviewRoute::Start(launch, false),
+            };
+        }
+        match job_route(&launch, true, |provider| self.job_unusable(provider)) {
+            JobRoute::Start(launch) => PlanReviewRoute::Start(launch, true),
+            JobRoute::Wait { .. } if self.no_claude => {
+                let codex = self
+                    .job_unusable(Provider::Codex)
+                    .map_or("unknown", |reason| reason.as_str());
+                PlanReviewRoute::Manual(format!(
+                    "{PLAN_REVIEW_PROVIDER_DISABLED} and codex cannot be used ({codex}); handle this role manually"
+                ))
+            }
+            JobRoute::Wait { provider, reason } => {
+                tracing::debug!(
+                    "the plan review waits: {} cannot be used ({}), nor can the other provider",
+                    provider.as_str(),
+                    reason.as_str()
+                );
+                PlanReviewRoute::Wait
+            }
+        }
     }
 
     /// Start the plan review of the next candidate, when none runs.
@@ -113,7 +180,15 @@ impl Supervisor<'_> {
         let Some(proposal_id) = next_to_review(&self.queue.plan_review_candidates()?) else {
             return Ok(());
         };
-        let launch = self.actor_launch(ModelRole::PlanReview);
+        let (launch, switchable, manual) = match self.plan_review_route() {
+            PlanReviewRoute::Start(launch, switchable) => (launch, switchable, None),
+            PlanReviewRoute::Wait => return Ok(()),
+            // Recorded as a job that could not start, on the provider the
+            // role names, so that the person sees why.
+            PlanReviewRoute::Manual(why) => {
+                (self.actor_launch(ModelRole::PlanReview), false, Some(why))
+            }
+        };
         let Some(job) = self.queue.begin_plan_review(
             proposal_id,
             &self.token,
@@ -124,19 +199,56 @@ impl Supervisor<'_> {
         else {
             return Ok(());
         };
+        if let Some(why) = manual {
+            let error = format!("the headless plan review could not start: {why}");
+            self.fail_plan_review(
+                &job,
+                &PlanReviewFailure {
+                    error,
+                    ..PlanReviewFailure::default()
+                },
+            );
+            return Ok(());
+        }
         let proposal = self.queue.show_proposal(proposal_id)?;
         match self.spawn_plan_review(&job, &proposal, &launch) {
-            Ok(headless) => {
-                info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started", job.attempt);
+            Ok(Ok(headless)) => {
+                info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started on {}", job.attempt, launch.provider.as_str());
                 self.plan_review = Some(PlanReviewWatch {
                     job,
                     headless,
                     revise_count: proposal.revise_count(),
+                    switchable,
                 });
             }
-            Err(error) => {
-                let error = format!("the headless plan review could not start: {error:#}");
-                self.fail_plan_review(&job, &error, 0);
+            // Its own preparation failed: no provider was tried.
+            Err(failed) => {
+                let error = format!("the headless plan review could not start: {failed:#}");
+                self.fail_plan_review(
+                    &job,
+                    &PlanReviewFailure {
+                        error,
+                        ..PlanReviewFailure::default()
+                    },
+                );
+            }
+            Ok(Err(failed)) => {
+                let error = format!("the headless plan review could not start: {failed:#}");
+                let unusable = self.job_provider_failed(
+                    launch.provider,
+                    job_start_failure(&failed),
+                    (&error, &error),
+                    &HoldJob::PlanReview(proposal_id),
+                    switchable,
+                );
+                self.fail_plan_review(
+                    &job,
+                    &PlanReviewFailure {
+                        error,
+                        unusable,
+                        ..PlanReviewFailure::default()
+                    },
+                );
             }
         }
         Ok(())
@@ -144,12 +256,15 @@ impl Supervisor<'_> {
 
     /// Write the prompt into the job's directory and start the headless
     /// job in the repository's checkout, allowed to read only.
+    /// The outer error is one of the job's own preparation (its directory,
+    /// its prompt), the inner one the start of its provider's process: only
+    /// the latter says whether the provider can be used.
     fn spawn_plan_review(
         &mut self,
         job: &PlanReviewJob,
         proposal: &Proposal,
         launch: &ActorLaunch,
-    ) -> Result<HeadlessJob> {
+    ) -> Result<Result<HeadlessJob>> {
         self.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
@@ -158,18 +273,35 @@ impl Supervisor<'_> {
             .write(&job.dir.join("prompt.txt"), prompt.as_bytes())?;
         let stdout = job.dir.join("review.out");
         let stderr = job.dir.join("review.err");
+        Ok(self.start_plan_review_job(job, launch, &prompt, stdout, stderr))
+    }
+
+    /// Start the provider's process of the plan review: Claude's `claude
+    /// -p`, or Codex's `codex exec --json` in its read-only sandbox, which
+    /// reads the files and the queue as [`PLAN_REVIEW_ACCESS`] allows.
+    fn start_plan_review_job(
+        &mut self,
+        job: &PlanReviewJob,
+        launch: &ActorLaunch,
+        prompt: &str,
+        stdout: PathBuf,
+        stderr: PathBuf,
+    ) -> Result<HeadlessJob> {
+        let agent = self
+            .job_agent(launch.provider)
+            .with_context(|| format!("no {} runs on this supervisor", launch.provider.as_str()))?;
         let child = self
-            .actors()
+            .actors_on(agent)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::plan_review_job(job.proposal_id, job.attempt),
                 WorkspaceAccess::Read(self.layout.repo_root.clone()),
                 ActorProgram::Headless {
                     program: HeadlessProgram::Job {
                         cwd: &self.layout.repo_root,
-                        prompt: &prompt,
+                        prompt,
                         access: PLAN_REVIEW_ACCESS,
                     },
-                    session_id: Some(&job.session_id),
+                    session_id: job.session_id.as_deref(),
                     launch: Some(launch),
                     without_mcp: false,
                     env: Vec::new(),
@@ -193,7 +325,7 @@ impl Supervisor<'_> {
                 proposal_id: Some(job.proposal_id),
                 goal_id: None,
                 attempt: job.attempt,
-                provider: crate::domain::actor_model::ROLE_PROVIDER,
+                provider: launch.provider,
             },
         ))
     }
@@ -381,36 +513,66 @@ impl Supervisor<'_> {
     /// Reap the job once it ended and apply its verdict, or record its
     /// failure.
     fn poll_plan_review(&mut self) -> Result<bool> {
-        let Some(watch) = self.plan_review.as_mut() else {
+        let Some(provider) = self.plan_review.as_ref().map(|w| w.headless.provider) else {
             return Ok(false);
         };
-        let Some(outcome) = watch.headless.poll(&*self.files, self.reviewer)? else {
+        // The job's reply, session and failure are read by the provider
+        // it ran on (ADR-t1063-1 decisions 2, 4 and 6).
+        let agent = self.job_agent(provider).unwrap_or(self.reviewer);
+        let watch = self.plan_review.as_mut().expect("read above");
+        let Some(outcome) = watch.headless.poll(&*self.files, agent)? else {
             return Ok(false);
         };
         let watch = self.plan_review.take().expect("polled above");
         let duration_secs = watch.headless.started.elapsed().as_secs();
+        let stdout = self
+            .files
+            .read_to_string(&watch.headless.stdout)
+            .unwrap_or_default();
+        let session = agent.job_session(&stdout, watch.headless.started_at);
         let verdict = outcome.and_then(|stdout| PlanReviewVerdict::parse(&stdout));
         // Only a job that failed or printed no verdict is read for a wall:
         // a verdict's own text may quote anything (task 438).
-        let wall = verdict
-            .is_err()
-            .then(|| self.job_wall(&watch.headless))
-            .flatten();
+        let failure = verdict.is_err().then(|| self.job_failure(&watch.headless));
         let applied = verdict.map_err(|error| anyhow!(error)).and_then(|verdict| {
             let job = ActorContext::plan_review_job(watch.job.proposal_id, watch.job.attempt);
             self.for_job(&job, |sv| {
-                sv.apply_plan_verdict(&watch.job, watch.revise_count, verdict, duration_secs)
+                sv.apply_plan_verdict(
+                    &watch.job,
+                    watch.revise_count,
+                    verdict,
+                    duration_secs,
+                    session.clone(),
+                )
             })
         });
         if let Err(error) = applied {
             let error = format!("{error:#}");
-            // Stopped at a wall only a person moves: it joins the hold ask,
-            // whose `done` submits the proposal again, and its failure is
-            // no attention meanwhile (task 438).
-            if let Some(wall) = wall {
-                self.raise_job_wall(wall, &HoldJob::PlanReview(watch.job.proposal_id), &error);
-            }
-            self.fail_plan_review(&watch.job, &error, duration_secs);
+            // Stopped at Claude's wall only a person moves: it joins the
+            // hold ask, whose `done` submits the proposal again, and its
+            // failure is no attention meanwhile (task 438). A role that
+            // names its provider moves to the other one instead of
+            // waiting; Codex's own words (its `turn.failed` is on its
+            // stdout) may say when a usage limit resets.
+            let said = format!("{error}\n{stdout}");
+            let unusable = failure.and_then(|failure| {
+                self.job_provider_failed(
+                    watch.headless.provider,
+                    failure,
+                    (&error, &said),
+                    &HoldJob::PlanReview(watch.job.proposal_id),
+                    watch.switchable,
+                )
+            });
+            self.fail_plan_review(
+                &watch.job,
+                &PlanReviewFailure {
+                    error,
+                    duration_secs,
+                    session,
+                    unusable,
+                },
+            );
         }
         Ok(true)
     }
@@ -425,6 +587,7 @@ impl Supervisor<'_> {
         revise_count: u32,
         verdict: PlanReviewVerdict,
         duration_secs: u64,
+        session: Option<crate::domain::headless_job::JobSession>,
     ) -> Result<()> {
         let proposal = job.proposal_id;
         let (decision, overridden) = match verdict.verdict {
@@ -466,6 +629,7 @@ impl Supervisor<'_> {
                 revise_reasons,
                 ask,
                 duration_secs,
+                session,
             },
         )?;
         if applied.stale {
@@ -496,13 +660,20 @@ impl Supervisor<'_> {
     }
 
     /// Record the job's failure; the proposal waits for a person
-    /// (`plan_review_failed`) and is not reviewed again by itself.
-    fn fail_plan_review(&mut self, job: &PlanReviewJob, error: &str, duration_secs: u64) {
-        warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; it waits for a person", job.proposal_id, job.attempt);
-        if let Err(recorded) = self
-            .queue
-            .fail_plan_review(job, &self.token, error, duration_secs)
-        {
+    /// (`plan_review_failed`) and is not reviewed again by itself, unless
+    /// its provider could not be used and it moves (ADR-t1063-1 decision
+    /// 4).
+    fn fail_plan_review(&mut self, job: &PlanReviewJob, failure: &PlanReviewFailure) {
+        let error = &failure.error;
+        match failure.unusable {
+            Some((provider, reason)) => {
+                warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; {} cannot be used ({}), and the proposal is reviewed again on the other provider", job.proposal_id, job.attempt, provider.as_str(), reason.as_str());
+            }
+            None => {
+                warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; it waits for a person", job.proposal_id, job.attempt);
+            }
+        }
+        if let Err(recorded) = self.queue.fail_plan_review(job, &self.token, failure) {
             warn!(error = %format_args!("{recorded:#}"), "proposal {}: the plan review failure could not be recorded: {recorded:#}", job.proposal_id);
         }
     }

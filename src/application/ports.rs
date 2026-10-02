@@ -2431,8 +2431,10 @@ pub struct PlanReviewJob {
     pub attempt: usize,
     pub anchor: TaskId,
     pub dir: PathBuf,
-    /// The Claude session id the job is started with (ADR-0048 decision 4).
-    pub session_id: String,
+    /// The job's session id, given to it by the runtime (ADR-0048
+    /// decision 4); `None` for a provider that names its session itself
+    /// (Codex, whose thread its end records).
+    pub session_id: Option<String>,
 }
 
 /// What the runtime makes of a plan review's verdict before it is applied:
@@ -2448,6 +2450,26 @@ pub struct PlanReviewApply {
     pub revise_reasons: Vec<String>,
     pub ask: Option<NewAsk>,
     pub duration_secs: u64,
+    /// The session the job's output names (Codex's thread and model,
+    /// ADR-t1063-1 decision 6); `None` for a Claude job.
+    pub session: Option<crate::domain::headless_job::JobSession>,
+}
+
+/// Why a plan review job failed (`plan_review_failed`).
+#[derive(Debug, Clone, Default)]
+pub struct PlanReviewFailure {
+    pub error: String,
+    pub duration_secs: u64,
+    /// The session the job's output names, as in [`PlanReviewApply`].
+    pub session: Option<crate::domain::headless_job::JobSession>,
+    /// The job's provider could not be used, and why (ADR-t1063-1
+    /// decision 4): its row ends `interrupted` and the proposal is not
+    /// held, so it is reviewed again at once, on the other provider unless
+    /// both are held.
+    pub unusable: Option<(
+        crate::domain::Provider,
+        crate::domain::provider_switch::SwitchReason,
+    )>,
 }
 
 /// A ready task a verdict took back to submitted, with the proposal of its
@@ -2537,13 +2559,13 @@ pub trait PlanReviewStore {
         apply: &PlanReviewApply,
     ) -> Result<PlanReviewApplied>;
     /// Record the job's failure (`plan_review_failed`, the inbox's) and
-    /// hold the proposal as `failed`, unless the job moved on.
+    /// hold the proposal as `failed`, unless the job moved on or its
+    /// provider could not be used ([`PlanReviewFailure::unusable`]).
     fn fail_plan_review(
         &mut self,
         job: &PlanReviewJob,
         token: &LeaseToken,
-        error: &str,
-        duration_secs: u64,
+        failure: &PlanReviewFailure,
     ) -> Result<()>;
     /// Every proposal sent back to its planner, oldest first.
     fn revising_proposals(&self) -> Result<Vec<RevisingProposal>>;

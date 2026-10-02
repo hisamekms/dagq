@@ -47,8 +47,12 @@ impl ModelRole {
 pub const ROLE_PROVIDER: Provider = Provider::Claude;
 
 /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
-/// and 7): goal and run reviews. Claude runs every role.
-pub const CODEX_ROLES: [ModelRole; 2] = [ModelRole::GoalReview, ModelRole::Review];
+/// and 7): goal, run and plan reviews. Claude runs every role.
+pub const CODEX_ROLES: [ModelRole; 3] = [
+    ModelRole::GoalReview,
+    ModelRole::Review,
+    ModelRole::PlanReview,
+];
 
 /// Whether `provider` can run a session of `role`.
 pub fn runs_on(role: ModelRole, provider: Provider) -> bool {
@@ -459,7 +463,7 @@ mod tests {
     }
 
     /// `[roles.<role>]`'s `provider` (ADR-t1063-1 decision 1, ADR-t1207-1):
-    /// Codex runs the goal and run reviews, with a model of its own or its
+    /// Codex runs the goal, run and plan reviews, with a model of its own or its
     /// default, and the effort `medium` unless given; a role that names no
     /// provider runs on Claude and does not move.
     #[test]
@@ -495,15 +499,19 @@ mod tests {
         assert!(error.contains("Claude's"), "{error}");
         let mut review = RoleModels::default();
         review.entry(ModelRole::Review).provider = Some(Provider::Codex);
-        assert!(review.check().is_ok());
         review.entry(ModelRole::PlanReview).provider = Some(Provider::Codex);
+        assert!(review.check().is_ok());
+        review.entry(ModelRole::Recovery).provider = Some(Provider::Codex);
         let error = review.check().unwrap_err();
-        assert!(error.contains("cannot run the plan_review role"), "{error}");
+        assert!(error.contains("cannot run the recovery role"), "{error}");
         for role in ModelRole::ALL {
             assert!(runs_on(role, Provider::Claude));
             assert_eq!(
                 runs_on(role, Provider::Codex),
-                matches!(role, ModelRole::GoalReview | ModelRole::Review)
+                matches!(
+                    role,
+                    ModelRole::GoalReview | ModelRole::Review | ModelRole::PlanReview
+                )
             );
         }
         // Claude named explicitly is valid for every role.
@@ -577,15 +585,21 @@ mod tests {
         assert_eq!(moved.provider, Provider::Codex);
         // A run review whose `[roles.review]` names Claude moves to Codex
         // when Claude cannot be used, as the supervisor's review route does
-        // (ADR-t1207-1); a plan review, which Codex does not run, waits.
+        // (ADR-t1207-1), and so does a plan review; a recovery job, which
+        // Codex does not run, waits.
         let review = ActorLaunch::default_of(ModelRole::Review);
         let JobRoute::Start(moved) = job_route(&review, true, no_claude) else {
             panic!("moved the review to Codex");
         };
         assert_eq!(moved.provider, Provider::Codex);
         let plan_review = ActorLaunch::default_of(ModelRole::PlanReview);
+        let JobRoute::Start(moved) = job_route(&plan_review, true, no_claude) else {
+            panic!("moved the plan review to Codex");
+        };
+        assert_eq!(moved.provider, Provider::Codex);
+        let recovery = ActorLaunch::default_of(ModelRole::Recovery);
         assert!(matches!(
-            job_route(&plan_review, true, no_claude),
+            job_route(&recovery, true, no_claude),
             JobRoute::Wait { .. }
         ));
     }

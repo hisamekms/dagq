@@ -1942,7 +1942,10 @@ pub(crate) fn revise_request(
 /// What the headless plan review may do beyond what needs no permission:
 /// read files, and run the dagq CLI (ADR-0044 decision 22, ADR-t1063-1
 /// decision 2). It runs with the reviewer's role in its environment, like
-/// the review, so the CLI refuses every dagq command that writes.
+/// the review, so the CLI refuses every dagq command that writes. On Codex
+/// it is `codex exec` in the read-only sandbox (ADR-t1063-1 decision 2):
+/// its prompt names the repository's instructions and documents to read
+/// and leans on no Claude plugin, skill or hook.
 pub const PLAN_REVIEW_ACCESS: JobAccess = JobAccess::ReadFilesAndQueueCli;
 
 /// What the headless goal review may do: the same as the plan review (read
