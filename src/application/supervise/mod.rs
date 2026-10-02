@@ -1299,7 +1299,7 @@ impl Supervisor<'_> {
         // The jobs the loop stopped last (a handoff stops them all).
         self.write_job_ends();
         // A loop that ended on an error lets the cleanup job end after its
-        // current worktree, and records what it did (task 405).
+        // current worktree (all candidates for disk space), recording its work.
         if result.is_err() {
             self.poll_cleanup(true);
             self.finish_cleanup();
@@ -1424,7 +1424,7 @@ impl Supervisor<'_> {
                     // command would go on in the scratch worktree the next
                     // process uses (ADR-0068). None starts meanwhile (this
                     // pass drains). So is the cleanup job, which ends after
-                    // its current worktree (task 405).
+                    // its current worktree, or all candidates for disk space (task 648).
                     self.recheck_pass();
                     if !self.rechecks.running()
                         && !self.cleanup.running()
@@ -2447,7 +2447,11 @@ impl Supervisor<'_> {
                 // So would it, short of free disk space (task 377): it
                 // starts no verification until there is room.
                 if self.run_env_missing || self.landing_unresolved || self.disk.landing_short {
-                    if !self.draining {
+                    // A drain must use the reading after the cleanup, not
+                    // hand a recoverable shortage to a person (task 648).
+                    if !self.draining
+                        || (!self.run_env_missing && !self.landing_unresolved && self.disk.cleaning)
+                    {
                         return Ok(Step::Continue);
                     }
                     let why = if self.run_env_missing {

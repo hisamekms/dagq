@@ -14,8 +14,9 @@
 //! an ended run and leaves a reserved one for a later pass, as the
 //! cleanup on the loop came first. Before each worktree the job checks
 //! the queue again under that lock: a run leased since it was picked (by
-//! another supervisor) is left alone. A stop or a handoff lets the job end after its current
-//! worktree; the next sweep picks up the rest.
+//! another supervisor) is left alone. A stop or handoff finishes a job for
+//! disk space; ordinary cleanup ends after its current worktree and the
+//! next sweep picks up the rest.
 //!
 //! The job also removes what an ended run whose task is over left outside
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
@@ -95,8 +96,10 @@ pub(super) struct CleanupWatch {
     /// The runs the job picked and has not passed yet. The loop holds the
     /// lock while it leases an ended run and skips the runs listed.
     cleaning: Arc<Mutex<Vec<RunId>>>,
-    /// Set on a stop or a handoff: the job ends after its current worktree.
+    /// Stop ordinary cleanup after its current worktree; disk cleanup finishes.
     stop: Arc<AtomicBool>,
+    /// Stop accepting requests without interrupting a job for disk space.
+    ending: bool,
     /// The loop left a run reserved by the job for a later pass: it waits
     /// for the job, as for a run.
     pub(super) deferred: bool,
@@ -227,7 +230,7 @@ impl Supervisor<'_> {
     /// removed), for disk space when `disk` is given. It starts at once
     /// unless a job runs; then it waits for the next one.
     pub(super) fn request_cleanup(&mut self, task: Option<TaskId>, disk: Option<DiskRequest>) {
-        if self.cleanup.stop.load(Ordering::SeqCst) {
+        if self.cleanup.ending {
             return;
         }
         // For room while another job runs: that job counts for it, so the
@@ -251,10 +254,18 @@ impl Supervisor<'_> {
     }
     /// Join a finished job and record what it did, then start what waits;
     /// with `ending` (a stop or a handoff), let the job end after its
-    /// current worktree and start nothing more.
+    /// current worktree (all candidates for disk space) and start nothing more.
     pub(super) fn poll_cleanup(&mut self, ending: bool) {
         if ending {
-            self.cleanup.stop.store(true, Ordering::SeqCst);
+            self.cleanup.ending = true;
+            if !self
+                .cleanup
+                .job
+                .as_ref()
+                .is_some_and(|job| job.disk.is_some())
+            {
+                self.cleanup.stop.store(true, Ordering::SeqCst);
+            }
             self.cleanup.pending = Request::default();
         }
         let Some(job) = self.cleanup.job.take_if(|job| job.handle.is_finished()) else {
@@ -275,8 +286,8 @@ impl Supervisor<'_> {
         self.start_cleanup();
     }
     /// Once the loop ended: wait for the job and whatever waits for the
-    /// next one (after a stop, only for the job's current worktree), and
-    /// record what they did.
+    /// next one, and record what they did. After a stop, only the running
+    /// job remains; ordinary cleanup stops after its current worktree.
     pub(super) fn finish_cleanup(&mut self) {
         while let Some(job) = &self.cleanup.job {
             while !job.handle.is_finished() {

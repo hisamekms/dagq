@@ -838,3 +838,191 @@ fn a_runs_tmp_dir_goes_only_once_its_task_is_over() {
     backend.join();
     assert_eq!(payloads_of(&queue, &run, "run_tmp_removed").len(), 1);
 }
+
+/// State belongs to the single matrix test below, including under cargo test.
+struct DrainDisk {
+    db: PathBuf,
+    outputs: Vec<PathBuf>,
+    enough: bool,
+    stop: Arc<AtomicBool>,
+    stop_requested: bool,
+    stopping_passes: usize,
+}
+
+static DRAIN_DISK: Mutex<Option<DrainDisk>> = Mutex::new(None);
+static DRAIN_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn drain_free_space(_: &Path) -> Option<u64> {
+    DRAIN_READS.fetch_add(1, Ordering::SeqCst);
+    let mut state = DRAIN_DISK.lock().unwrap();
+    let state = state.as_mut()?;
+    // Request stop from a known point in a pass. The next reading follows
+    // poll_cleanup(ending=true), including when an empty loop then exits.
+    if state.stop_requested {
+        state.stop.store(true, Ordering::SeqCst);
+        state.stopping_passes += 1;
+    }
+    let queued = SqliteQueue::open(&state.db)
+        .unwrap()
+        .latest_event_of("landing_queued")
+        .unwrap()
+        .is_some();
+    Some(
+        if queued && (!state.enough || state.outputs.iter().any(|path| path.exists())) {
+            1
+        } else {
+            1 << 40
+        },
+    )
+}
+
+/// Task 648: stop and handoff both finish a disk cleanup, retain a landing
+/// lease until the fresh reading, then either land or return it. Ordinary
+/// cleanup still stops at the current worktree.
+#[test]
+fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
+    for handoff in [false, true] {
+        for disk in [None, Some(false), Some(true)] {
+            let (_dir, repo, db) = fixture();
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            add_ready_task(&mut queue, "second cleanup", &[]);
+            add_ready_task(&mut queue, "third cleanup", &[]);
+            let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+            supervise(&db, &repo, &backend).unwrap();
+            backend.join();
+            let runs: Vec<_> = (1..=3)
+                .map(|id| queue.show(TaskId::new(id)).unwrap().runs[0].clone())
+                .collect();
+            let outputs: Vec<_> = runs
+                .iter()
+                .map(|run| {
+                    let target = Path::new(run.worktree_path().unwrap()).join("target");
+                    fs::create_dir_all(&target).unwrap();
+                    fs::write(target.join("left"), vec![0; 4096]).unwrap();
+                    target
+                })
+                .collect();
+            if disk.is_some() {
+                queue
+                    .transition(TaskId::new(3), TaskAction::Cancel)
+                    .unwrap();
+                add_ready_task(&mut queue, "landing", &[]);
+            }
+            let files = GatedFiles::default();
+            let stop = Arc::new(AtomicBool::new(false));
+            *DRAIN_DISK.lock().unwrap() = Some(DrainDisk {
+                db: db.clone(),
+                outputs: outputs.clone(),
+                enough: disk == Some(true),
+                stop: stop.clone(),
+                stop_requested: false,
+                stopping_passes: 0,
+            });
+            let options = files.options(SuperviseOptions {
+                stop: stop.clone(),
+                disk: Some(dagq::domain::disk::DiskConfig {
+                    min_free_bytes: Some(1 << 30),
+                    ..Default::default()
+                }),
+                free_space: drain_free_space,
+                ..supervise_options(1, false)
+            });
+            let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+            let supervisor = {
+                let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+                thread::spawn(move || {
+                    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+                    runtime::supervise_with_reviewer(
+                        &db,
+                        &repo,
+                        &*backend,
+                        &claude_stub(&db),
+                        &reviewer,
+                        Path::new(env!("CARGO_BIN_EXE_dagq")),
+                        &options,
+                    )
+                })
+            };
+            let held = files.held();
+            let landing = disk.map(|_| {
+                wait_until(&db, common::STEP_LIMIT, |q| {
+                    q.latest_event_of("landing_queued").unwrap().is_some()
+                });
+                queue.show(TaskId::new(4)).unwrap().runs[0].clone()
+            });
+            // Let check_disk promote the running job before asking to end.
+            let reads = DRAIN_READS.load(Ordering::SeqCst);
+            wait_until(&db, common::STEP_LIMIT, |_| {
+                DRAIN_READS.load(Ordering::SeqCst) >= reads + 3
+            });
+            if handoff {
+                let registration = queue.supervisors().unwrap().pop().unwrap();
+                assert!(
+                    queue
+                        .request_handoff(&registration.token, "/next/dagq")
+                        .unwrap()
+                );
+            } else {
+                DRAIN_DISK.lock().unwrap().as_mut().unwrap().stop_requested = true;
+            }
+            // Multiple full passes after the request, while cleanup is gated.
+            let reads = DRAIN_READS.load(Ordering::SeqCst);
+            if disk.is_some() || handoff {
+                wait_until(&db, common::STEP_LIMIT, |_| {
+                    DRAIN_READS.load(Ordering::SeqCst) >= reads + 4
+                });
+            } else {
+                // With no slots a stop leaves the loop and joins the job.
+                wait_until(&db, common::STEP_LIMIT, |_| {
+                    DRAIN_DISK.lock().unwrap().as_ref().unwrap().stopping_passes >= 2
+                });
+            }
+            assert!(!supervisor.is_finished());
+            if let Some(run) = &landing {
+                assert!(queue.run_lease(run.id()).unwrap().is_some());
+                assert_eq!(
+                    queue.run(run.id()).unwrap().status(),
+                    RunStatus::AwaitingIntegration
+                );
+                assert!(payloads_of(&queue, run, "integration_started").is_empty());
+            }
+            files.open();
+            let outcome = joined(supervisor, "the cleanup and drain to finish").unwrap();
+            backend.join();
+            assert_eq!(outcome["errors"], json!([]), "{outcome}");
+            for (run, output) in runs.iter().zip(&outputs) {
+                let cleaned = disk.is_some() || *output == held;
+                assert_eq!(
+                    !output.exists(),
+                    cleaned,
+                    "handoff={handoff}, disk={disk:?}"
+                );
+                if disk.is_some() && run.task_id() == TaskId::new(3) {
+                    assert_eq!(payloads_of(&queue, run, "worktree_removed").len(), 1);
+                } else {
+                    assert_eq!(
+                        payloads_of(&queue, run, "build_outputs_removed").len(),
+                        if cleaned { 2 } else { 1 }
+                    );
+                }
+            }
+            if let Some(run) = &landing {
+                assert!(queue.run_lease(run.id()).unwrap().is_none());
+                assert_eq!(
+                    queue.run(run.id()).unwrap().status(),
+                    if disk == Some(true) {
+                        RunStatus::Integrated
+                    } else {
+                        RunStatus::AwaitingIntegration
+                    }
+                );
+                let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
+                assert_eq!(repair.payload["repair"], "disk_cleanup");
+                assert_eq!(
+                    repair.payload["detail"]["runs"].as_array().unwrap().len(),
+                    3
+                );
+            }
+        }
+    }
+}
