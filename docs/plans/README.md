@@ -22,6 +22,7 @@ tags:
 - [着地の検証でcoverageの計測をやめたときの短縮の見積もり](coverage-at-landing.md)（task 967）
 - [着地中にworkerのrunのCPUの優先度を下げたときの着地の検証の時間・workerの遅れ・loadの測定と、着地の枠を分ける効果の見積もり直し](landing-lane-cpu-share.md)（goal 65、task 961）
 - [新しいrunのworktreeに温まったtargetをAPFSのcloneで入れたときのbuildの短縮の見積もり](worktree-seed.md)（goal 65、task 968）
+- [着地をまとめて検証する（batching）効果の、着地の枠を分ける案と合わせた見積もりと方式の候補](landing-batching.md)（goal 65、task 969）
 - [sccache導入前後のintegrateのllvm-covの所要時間とhit率](sccache-measurement.md)（ADR-0049決定10の導入後の測定、task 460）
 - [NEXTEST_TEST_THREADSとRUST_TEST_THREADSが4の期間の基準値と、8への変更後の比べ方](nextest-test-threads.md)（task 566の前後の比較）
 - [遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり](slow-test-waits.md)（goal 68、task 975）
