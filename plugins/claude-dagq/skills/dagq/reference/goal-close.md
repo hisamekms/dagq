@@ -1,17 +1,34 @@
 # Closing a goal
 
-A goal is closed once, by the planner (the `dagq-planner` skill), after reviewing it; the runtime never closes it. When `goal show ID` lists every task as `completed` (or `canceled`):
+A goal is closed once. Closing it after its last task is not a planner's step (ADR-0047 decisions 16 and 43): the supervisor's headless **goal review** job judges it (`docs/design/supervisor-lifecycle/goal-review.md`).
 
-1. Look for `draft` tasks in `goal show ID`. `integrate` registered each landed receipt's `follow_ups` as a draft task on the goal (its context reads "follow_up proposed by the receipt of run <run-id> of task <id> (<title>)"; older landings carry a Japanese wording; the run's `follow_up_registered` events list them). The runtime opens a planner for each such draft, which submits, cancels or asks about it; a draft still waiting for that planner or its `planner_question`, or kept with `keep_draft`, is yours to decide like any draft (the `dagq-planner` skill's Basic policy): complete and submit it for plan review (the goal stays open until it is completed) or cancel it, and ask the user only what that policy raises (a `scope` or `discard` you cannot settle, or a follow_up past ADR-t808-1's limit, which waits for the user's adopt). Every draft blocks `achieved`. A run integrated by a binary older than this registration has no `follow_up_registered` events, and a `follow_up_registered` with `task_id: null` is an entry that was not registered: read those runs' receipt `follow_ups` (step 2) and treat them as gaps.
-2. For each completed task, read the `summary` of the receipt of its integrated run in `show TASK --full` (the `receipt` in the run's last `integration_receipt` event; `validation_finished` holds the receipt seen before landing) and compare what landed against the goal's `acceptance`. Anything the acceptance asks for that no task delivered, and no draft from step 1 covers, is a gap in the decomposition.
-3. Register each gap as a task on the same goal with `add --goal ID`, complete it (`lint`) and `submit` it for plan review, and report to the user that the goal stays open; close it after those tasks and the drafts submitted are completed. Do not close first: a closed goal refuses new tasks (a follow-up of a task of a closed goal is registered without a goal).
-4. Look at `dependents` in `goal show ID`: the unfinished tasks (of any goal, or of none) that depend on this goal (`reference/inspect.md`, "Wait for another goal"). Closing it `achieved` releases them, so a `ready` one may be claimed right after the close; tell the user which ones will start.
-5. When nothing is missing, record the verdict:
+## The goal review job
+
+The supervisor starts it (one at a time, needing no run slot) for an `open` goal whose tasks are all `completed` or `canceled`, with at least one `completed` and no `draft` or `submitted` task left (a follow_up draft from a receipt still waiting for its runtime planner, a `keep_draft`, an open `planner_question` hold it back), no `approve_goal` ask of it open, and its tasks' statuses changed since its last review. The job reads the goal, each task's integrated receipt (`summary`, evidence, `follow_ups`), the goal's notes and earlier reviews, and the repository, and returns one verdict, which the runtime applies after checking the goal and its tasks have not changed meanwhile:
+
+- **achieved**: the runtime closes the goal `achieved` (`goal_closed` with `by: "goal_review"`); `goal_review_finished` has `criteria`, the grounds per acceptance criterion. Its `dependents` are released.
+- **gaps**: each gap becomes a `draft` task on the goal (context `goal_gap: goal review N of goal ID found this missing`; `draft_origins` origin `goal_gap`), which a runtime planner adopts, drops or asks about like a follow_up draft (`reference/register.md`, "A runtime planner for a draft"). The goal stays open; once those drafts finish, the review starts again. A fourth `gaps` in a row turns into an ask.
+- **ask**: only when a person is needed (the acceptance changes, abandoning or splitting it, or the job cannot judge it): an `approve_goal` ask in the inbox, on the goal's first task, with `reason_category` `scope` or `discard`. Options: `achieved`, `abandoned`, `gaps` (or `gaps: <what is missing>`), `keep_open`, plus the job's own. The supervisor applies the first four (`goal_decided`): it closes the goal, registers the gaps as drafts, or leaves it open until its tasks change. An answer it does not apply (the job's own option, free text) comes back to the inbox to carry out and `ask close`.
+
+A failed job (non-zero exit, timeout, no verdict) leaves the goal open and is not tried again by itself: the inbox shows `goal review by hand` (`goal_review_failed`, on the goal's first task). On the person's word, `goal review ID` starts it again (also after a `keep_open` answer, once there is a reason to look again):
 
 ```sh
-"$DAGQ" goal close ID --verdict achieved
+"$DAGQ" goal review ID   # rearm the goal review; the person or the inbox, never a planner
 ```
 
-`achieved` is refused while any task is `draft`, `submitted`, `ready` or `in_progress` (the error names the count and status); cancel or finish them first. `abandoned` records that the goal is given up: it is refused while a task is `in_progress`, and it does not cancel the goal's `draft`, `submitted` or `ready` tasks, so cancel them yourself first or the supervisor still runs them. It never releases the `dependents`: they wait for good. Before closing `abandoned`, decide each of them with the user: remove the dependency (`dependency remove TASK --goal ID`), make it depend on another goal or task, or cancel it; `goal show ID` after the close still lists the ones left. Both verdicts are final; further work on the same problem is a new goal. `goal show ID` afterwards has `closed: true` at the top level, `verdict` and `closed_at` inside `goal`, and a `goal_closed` event with the task counts at close time.
+Follow it with `goal show ID` and `events --goal ID` (`goal_review_started`, `goal_review_finished`, `goal_review_failed`, `goal_review_rearmed`, `goal_decided`).
 
-Report a goal to the user as: its title and verdict (or open), its task counts from `goal list`, which tasks are `in_progress` or blocked, and, once every task is completed, whether the acceptance is met, which drafts from follow-ups await the user's decision (only those the Basic policy raises), and which tasks you registered.
+## What `goal close` is still for
+
+A planner, the person or the inbox (on the person's word) still runs `goal close`, but not as the routine end of a goal:
+
+- **A draft goal not adopted** (`goal add --draft`, or an old observer's): `goal close ID --verdict abandoned`.
+- **The person's decision**, said in a planner they opened or after `goal review by hand`: closing the goal `abandoned`, or `achieved` without another review.
+
+```sh
+"$DAGQ" goal close ID --verdict achieved   # or abandoned
+```
+
+`achieved` is refused while any task is `draft`, `submitted`, `ready` or `in_progress` (the error names the count and status); cancel or finish them first. Closing it `achieved` releases the unfinished tasks that depend on the goal (`dependents` in `goal show ID`; `reference/inspect.md`, "Wait for another goal"), so a `ready` one may be claimed right after the close: tell the person which ones will start. `abandoned` records that the goal is given up: it is refused while a task is `in_progress`, and it does not cancel the goal's `draft`, `submitted` or `ready` tasks, so cancel them first or the supervisor still runs them. It never releases the `dependents`: they wait for good. Before closing `abandoned`, decide each of them with the person: remove the dependency (`dependency remove TASK --goal ID`), make it depend on another goal or task, or cancel it; `goal show ID` after the close still lists the ones left. Both verdicts are final; further work on the same problem is a new goal. A closed goal refuses new tasks (a follow-up of a task of a closed goal is registered without a goal). `goal show ID` afterwards has `closed: true` at the top level, `verdict` and `closed_at` inside `goal`, and a `goal_closed` event with the task counts at close time.
+
+Report a goal to the person as: its title and verdict (or open), its task counts from `goal list`, which tasks are `in_progress` or blocked, and, once every task is finished, whether its goal review ran and what it decided (closed, gaps registered as drafts, an `approve_goal` ask, or failed).

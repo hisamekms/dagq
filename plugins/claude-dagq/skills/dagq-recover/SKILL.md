@@ -1,13 +1,13 @@
 ---
 name: dagq-recover
-description: What a person does by hand in a dagq queue, from the inbox or a planner, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer in a run's cmux workspace; bypass or resubmit a plan review; start, stop or update the runtime (up / down / install). Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+description: What a person does by hand in a dagq queue, from the inbox or a planner, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or push main; carry out a stuck_exit, answer_prompt or stalled (intervene) answer in a run's cmux workspace; bypass or resubmit a plan review; start, stop or update the runtime (up, down, install). Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", an answered stuck_exit, answer_prompt or stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
 ---
 
 # dagq: what a person does by hand
 
 Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` as in the `dagq` skill; the reference files below sit in `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/`. Never touch the queue database; never work around the binary's refusals. All of it is done on the person's word: `up` / `down` / `install` from the inbox or a planner, the rest (`integrate`, `review`, `recover`, `ready`, `cancel`, `answer`, `ask close`, keys in a run's workspace) from the inbox, which the CLI records as delegated (actor `inbox`), or by the person in a terminal without `DAGQ_ROLE` (actor `user`). A planner is refused them (`skills/dagq/reference/authority.md`). Write for the person in the language your prompt or the status's `language.instruction` names (`dagq` skill, section 5).
 
-Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), the headless recovery job fixes what it can of the rest, and only what neither could, or a person's call (scope, discarding work, login, cost), reaches the person. The next supervisor pass recovers a run without a lease whose processes are gone. Every `failed` / `interrupted` run, and one whose resumes ran out (`resume_exhausted`), goes to the recovery job (`triaging (runtime)`): it retries, retries carrying the commits over, resumes or waits; a `decide` ask opens only when it escalates, is not sure or used its three tries. A live run's alert (`long_background`, `idle_process`, `stuck_exit`, `prompt_waiting`) goes to the job too; its `stalled`, `stuck_exit` or `answer_prompt` ask opens only when the job cannot fix it (separately, the supervisor nudges a receipt-less idle session once, then asks `stalled`). Also, a `needs_session` run is resumed (`resuming (runtime)`). Do not recover, `ready`, type into or close these runs. `status` beats `watch`.
+Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), the headless recovery job fixes what it can of the rest, and only what neither could, or a person's call (scope, discarding work, login, cost), reaches the person. The next supervisor pass recovers a run without a lease whose processes are gone. Every `failed` / `interrupted` run, and one whose resumes ran out (`resume_exhausted`), goes to the recovery job (`triaging (runtime)`): it retries (carrying the commits over or not), resumes or waits; a `decide` ask opens only when it escalates, is not sure or used its three tries. A live run's alert (`long_background`, `idle_process`, `stuck_exit`, `prompt_waiting`) goes to the job too; its `stalled`, `stuck_exit` or `answer_prompt` ask opens only when the job cannot fix it (an idle session without a receipt is nudged once, then asked `stalled`). Also, a `needs_session` run is resumed (`resuming (runtime)`). Do not recover, `ready`, type into or close these runs. `status` beats `watch`.
 
 ## 1. Diagnose without changing state
 
@@ -29,7 +29,7 @@ Attention `recover run` (`kind` `runtime_error`): an unfinished run without a le
 "$DAGQ" recover RUN_ID
 ```
 
-The run becomes `interrupted` (an `integrating` one `awaiting_integration`); its worktree, workspace and run directory are kept. The next supervisor's recovery job takes it; start one (`up`) rather than deciding yourself.
+The run becomes `interrupted` (an `integrating` one `awaiting_integration`); its worktree, workspace and run dir stay. The next supervisor's recovery job takes it; start one (`up`) rather than deciding yourself.
 
 ## 4. Triage by hand, and recover by hand
 
@@ -45,7 +45,7 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 "$DAGQ" install         # build main, swap the binary, hand over
 ```
 
-`up --no-claude` explicitly forbids Claude, uses Codex workers and leaves unsupported roles for manual handling; drain before changing the policy. See `reference/up-down.md`.
+`up --no-claude` forbids Claude (Codex workers; unsupported roles by hand); drain before changing it.
 
 `up` is idempotent: one resident supervisor and the inbox workspace, no planner (a person opens each with `dagq plan`). `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`: supervisors take it over without waiting; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` kills the supervisor and loses its active runs: only on the person's explicit word. `--claude` and `--codex` (Codex workers) are fixed on the supervisor as real paths: from a cmux terminal pass `~/.local/bin/claude` and `~/.local/bin/codex`, and after updating either, `down --wait` and `up` again. `reference/up-down.md`: outcomes, the in-cmux case, logs.
 
@@ -55,10 +55,12 @@ Attention `review by hand` (`review_failed`: the supervisor's headless review fa
 
 ## 7. A run's session: dialogs, stalls, stuck exits, undelivered answers
 
-A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (also for an `answer_prompt` with no options, `input_not_ready`, and a `stalled` `send_unconfirmed`: send Enter or the text; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). A headless run (`worker_mode: headless`) has no screen and takes no keys: none of this applies; its `stalled` ask is in `reference/stalled.md`. What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
+A `stuck_exit`, `answer_prompt` or `stalled` ask means the runtime (known dialogs, `/exit` retries, a nudge) or, for a live alert, the recovery job could not fix it. Its answer, and `send the answer of ask <id> to the worker and close it`, are carried out in the run's cmux workspace with keys and text, never by `recover` while a supervisor runs. Follow `reference/session.md` (also an option-less `answer_prompt`, `input_not_ready`, a `stalled` `send_unconfirmed`: Enter or the text; `reference/stuck-exit.md` for `stuck_exit`; `reference/stalled.md` for a `stalled` `intervene`: the screen, background work, an instruction or `/exit`, then `ask close`). A headless run (`worker_mode: headless`) has no screen or keys: only its `stalled` ask applies (`reference/stalled.md`). What the runtime's resume sends and when it ends: `reference/resume.md`; never open a resume workspace yourself.
 
-## 8. Bypass plan review, and a failed plan review
+## 8. Bypass plan review; a failed plan or goal review
 
 Only plan review makes a task `ready`. A person may skip it with `"$DAGQ" ready ID --bypass-review` (a draft or submitted task; `review_bypassed`): on their explicit word only, per task, for an urgent fix, a failed plan review, or a concern they already decided. Never bypass as a habit or on a planner's judgment; a retry needs none (section 4).
 
 Attention `plan review by hand` (`plan_review_failed`): a proposal's headless plan review failed; it stays `submitted` and held. `check the planner` (`planner_unresponsive`): the person looks at that planner's workspace. What to read and the person's choices: `reference/plan-review-by-hand.md`.
+
+Attention `goal review by hand` (`goal_review_failed`): a goal review job failed; `reference/goal-review-by-hand.md`.

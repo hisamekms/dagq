@@ -1,6 +1,6 @@
 ---
 name: dagq-planner
-description: Be a dagq planner, one of possibly many on-demand sessions: hear the person's problem, write goals and draft tasks with the dagq skill, lint them and submit them as a proposal for plan review (never ready them), fix and resubmit what plan review sends back, decide a draft or a finding the runtime opened you for, decide findings with the person, and close a goal once its receipts meet its acceptance. Use when the session starts as a dagq planner (DAGQ_ROLE=planner, opened by dagq plan or by the runtime), or when the person wants to add, reshape, check or close work in the queue. Also starts or stops the runtime when the person asks. Answering asks is dagq-inbox; the rest by hand is dagq-recover.
+description: Be a dagq planner, one of possibly many on-demand sessions: hear the person's problem, write goals and draft tasks with the dagq skill, lint them and submit them as a proposal for plan review (never ready them), fix and resubmit what plan review sends back, decide a draft or a finding the runtime opened you for, and decide findings with the person (a goal review job, not you, closes a finished goal). Use when the session starts as a dagq planner (DAGQ_ROLE=planner, opened by dagq plan or by the runtime), or when the person wants to add, reshape, check or close work in the queue. Also starts or stops the runtime when the person asks. Answering asks is dagq-inbox; the rest by hand is dagq-recover.
 ---
 
 # dagq: plan the queue's work
@@ -42,9 +42,9 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 `"$DAGQ" goal list`, `goal show ID` and `graph --goal ID` show progress; report which are done, in progress or blocked. Add when it will finish from `"$DAGQ" forecast --goal ID`: p50 and p90 together with its premises and that it counts no inflow, so real finishes tend to be later; a null with `reason` is said as such (`skills/dagq/reference/kpi.md`). Runs waiting on a person are the inbox's. Decide the observer's findings (with the person, when one opened you) per `skills/dagq/reference/observer.md`: `findings`, then `submit ... --finding ID` or `finding dismiss ID --reason`. When a setting, the operation or the host changes (the runtime marks builds, `--parallel`, Claude and `[run.env]` itself), record `"$DAGQ" mark '<label>' --note '...'`; later judge it with `kpi --compare <mark id> --area <area>` (or `--change <change>`) (`skills/dagq/reference/kpi.md`).
 
-## 5. Close a goal
+## 5. A finished goal
 
-Once every task of a goal is `completed` or `canceled`, compare the receipts' summaries with the goal's acceptance, following `skills/dagq/reference/goal-close.md`: drafts from follow_ups decided, gaps added as tasks on the same goal and submitted (the goal stays open), then `"$DAGQ" goal close ID --verdict achieved`. Closing `achieved` releases its `dependents` (`goal show ID`); decide them with the person before `abandoned`. Report the verdict, what you added and released.
+Not yours (ADR-0047). Once every task of an open goal is `completed` or `canceled` with no draft (from `follow_ups` too) left, the supervisor's **goal review** job checks receipts against its acceptance: `achieved` closes it; gaps become `goal_gap` drafts (section 3); a question opens an inbox `approve_goal` ask. Close one only on the person's word (`"$DAGQ" goal close ID --verdict achieved`), or `--verdict abandoned` to drop a draft goal (`skills/dagq/reference/goal-close.md`).
 
 ## 6. Start or stop the runtime
 

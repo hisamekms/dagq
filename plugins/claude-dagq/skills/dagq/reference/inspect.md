@@ -85,7 +85,7 @@ The same steps apply to every planner, including one the runtime opened for a dr
 
 ## Wait for another goal (goal dependencies)
 
-A task can depend on a goal as well as on tasks (ADR-0038). It is not claimed until that goal is closed with `goal close --verdict achieved`; whether the goal's tasks are all finished does not matter, since `integrate` may still add drafts from `follow_ups` to it until the planner closes it.
+A task can depend on a goal as well as on tasks (ADR-0038). It is not claimed until that goal is closed `achieved` (by its goal review job, or `goal close --verdict achieved`); whether the goal's tasks are all finished does not matter, since `integrate` may still add drafts from `follow_ups` and its goal review drafts for gaps until it is closed (`reference/goal-close.md`).
 
 ```sh
 "$DAGQ" add "TITLE" --goal 2 --depends-on-goal 1 ...   # repeatable; combines with --depends-on
@@ -179,6 +179,7 @@ Next: while the task is `draft`, `submitted` or `ready`, widen its globs with `s
 "$DAGQ" set-goal TASK --none              # take a draft or ready task out of its goal
 "$DAGQ" goal edit ID --constraints "..."  # replace one or more fields (--title, --description, --acceptance, --constraints, --doc; --doc "" clears it)
 "$DAGQ" goal close ID --verdict achieved  # or abandoned; see goal-close.md
+"$DAGQ" goal review ID                     # rearm the goal review after `goal review by hand` or a keep_open answer (person or inbox)
 ```
 
 `set-goal` follows the dependency rules: only a `draft` or `ready` task can be moved, and a closed goal accepts no task. Take an `in_progress` task back with `draft ID` only if its run is finished; a `completed` task keeps the goal it landed with. `goal edit` records the old and new fields in a `goal_updated` event; a run already claimed keeps the prompt it started with, and runs claimed afterwards see the new text.

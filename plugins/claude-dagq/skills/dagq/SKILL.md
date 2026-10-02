@@ -1,15 +1,15 @@
 ---
 name: dagq
-description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, close a goal after reviewing its tasks' receipts and follow_ups, adopt or reject a draft goal, decide findings, read events, run timelines, KPIs and completion forecasts, mark a change, record or read notes, or find the dagq binary and queue database.
+description: Register and inspect dagq goals and tasks through the locally built dagq binary. Use when the user brings a development problem to queue for dagq (register it as a goal, decompose it into tasks with title, description, acceptance criteria, verification commands, dependencies and context), lint and submit them for plan review, edit a draft or submitted task, list goals or tasks, check a goal's progress or a task's status or run result, follow a finished goal's goal review, adopt or reject a draft goal, decide findings, read events, run timelines, KPIs and completion forecasts, mark a change, record or read notes, or find the dagq binary and queue database.
 ---
 
 # dagq: register and inspect tasks
 
 dagq runs development tasks in cmux workspaces and isolated Git worktrees. This skill drives the `dagq` binary; every command prints JSON on stdout, and a runtime error prints `{"error": ...}` on stderr with exit status 1. Never read or modify the SQLite queue file directly (no `sqlite3`, no editing); the binary is the only interface.
 
-A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering, submitting and closing belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, then runs and lands the queue; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
+A goal is the problem several tasks solve together; a task is one unit of work a session executes in its own worktree. Registering and submitting belong to a planner session (`dagq-planner`); the supervisor runs a headless plan review of each submitted proposal, runs and lands the queue, and has a goal review close a finished goal; its asks and attention go to the inbox (`dagq-inbox`); what a person does by hand (up / down, recovery, a review by hand) is `dagq-recover`.
 
-Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push), `reference/provider.md` (a worker's provider and route, fallbacks, turns) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
+Reference files, read only when needed, all in `${CLAUDE_PLUGIN_ROOT}/skills/dagq/`: `reference/locate.md` (install, version warnings, missing or moved queue), `reference/inspect.md` (inspect commands, fields, statuses, priority, editing), `reference/register.md` (registering in detail), `reference/goal-close.md` (goal review, closing a goal), `reference/kpi.md` (KPIs, change marks, the weekly throughput review, forecasts, reports, push), `reference/provider.md` (a worker's provider and route, fallbacks, turns) and `reference/authority.md` (what each role is refused, the inbox's delegated record).
 
 Every state change is checked against your role (`DAGQ_ROLE`) by a default-deny policy; a refusal (`<role> may not ...`, or a `queue_service` code in client mode) changes nothing. Take it as the answer and never work around it; the check is advisory on the host, not a sandbox (`reference/authority.md`).
 
@@ -68,7 +68,7 @@ Split the goal into tasks, each one session in one worktree. Per task: title, de
 
 Judge completion only from `show`: the run's `status`, `result_commit`, `last_error`, and the `validation_finished` event. A Stop hook, an idle session or a receipt file is not success. Summarize: task status, latest run status, branch and commit, and the next step.
 
-A goal is closed once, by the planner, after every task is `completed` or `canceled`, the drafts from receipts' `follow_ups` are decided with the user, and the receipts' `summary` meets the goal's acceptance (gaps become new tasks on it first). Read `reference/goal-close.md` before running `goal close`.
+A goal is closed once, by the planner (or the inbox) only to drop a draft goal or on the person's word. A goal whose tasks are all `completed` or `canceled`, with no draft left, is judged by the supervisor's goal review job instead: it closes it `achieved`, adds the gaps as drafts, or asks the person (`approve_goal`). Read `reference/goal-close.md` before `goal close` or `goal review`.
 
 ## 5. Language
 
