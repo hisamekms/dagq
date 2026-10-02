@@ -4,12 +4,14 @@ type: adr
 title: supervisorが毎時・日次・週次のスループットの見直しをheadlessのjobで行い、結果をinboxに知らせるだけのattentionで届ける（ADR-0047決定1・2・17をamends）
 status: accepted
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-10-03
 accepted_on: 2026-09-29
 amends:
   - adr-0047 decision 1
   - adr-0047 decision 2
   - adr-0047 decision 17
+amended_by:
+  - adr-t1418-1
 owners:
   - hisamekms
 tags:

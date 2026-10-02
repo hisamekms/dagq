@@ -2112,6 +2112,23 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
     }
 }
 
+/// Whether an attention event wakes the inbox's `watch` (ADR-t1418-1): the
+/// notices nobody acts on that come most often, `update_installed` and the
+/// hourly `throughput_review_reported`, do not on their own; the inbox gets
+/// them with the next event that does. Every other attention wakes it, the
+/// daily and weekly reviews and every failed `throughput_review_finished`
+/// included. Which events are attention is [`event_attention`]'s, unchanged.
+pub fn wakes_inbox(kind: &str, payload: &serde_json::Value) -> bool {
+    match kind {
+        UPDATE_INSTALLED => false,
+        event_kind::THROUGHPUT_REVIEW_REPORTED => {
+            payload.get("mode").and_then(serde_json::Value::as_str)
+                != Some(throughput_review::ReviewMode::Hourly.as_str())
+        }
+        _ => true,
+    }
+}
+
 fn ask_id(payload: &serde_json::Value) -> Option<AskId> {
     payload
         .get("ask_id")
@@ -2777,6 +2794,46 @@ mod attention_tests {
         assert_eq!(
             NewHold::question_for("Free the disk.", &[]),
             "Free the disk."
+        );
+    }
+
+    #[test]
+    fn only_update_installed_and_the_hourly_review_leave_the_inbox_asleep() {
+        let reported = |mode: &str| json!({"mode": mode, "label": "x"});
+        assert!(!wakes_inbox(UPDATE_INSTALLED, &json!({"version": "1"})));
+        assert!(!wakes_inbox(
+            event_kind::THROUGHPUT_REVIEW_REPORTED,
+            &reported("hourly")
+        ));
+        for mode in ["daily", "weekly"] {
+            assert!(wakes_inbox(
+                event_kind::THROUGHPUT_REVIEW_REPORTED,
+                &reported(mode)
+            ));
+        }
+        // A report without its mode wakes it, as before.
+        assert!(wakes_inbox(
+            event_kind::THROUGHPUT_REVIEW_REPORTED,
+            &json!({})
+        ));
+        for mode in ["hourly", "daily", "weekly"] {
+            for outcome in ["error", "failed"] {
+                let payload = json!({"mode": mode, "outcome": outcome});
+                assert!(
+                    event_attention(event_kind::THROUGHPUT_REVIEW_FINISHED, &payload).is_some()
+                );
+                assert!(wakes_inbox(
+                    event_kind::THROUGHPUT_REVIEW_FINISHED,
+                    &payload
+                ));
+            }
+        }
+        assert!(wakes_inbox(event_kind::ASK_OPENED, &json!({"ask_id": 1})));
+        assert!(wakes_inbox("push_failed", &json!({})));
+        // Both stay attention, which `events` and `status` show.
+        assert!(event_attention(UPDATE_INSTALLED, &json!({})).is_some());
+        assert!(
+            event_attention(event_kind::THROUGHPUT_REVIEW_REPORTED, &reported("hourly")).is_some()
         );
     }
 

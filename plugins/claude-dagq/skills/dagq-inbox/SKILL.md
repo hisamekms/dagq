@@ -23,7 +23,7 @@ This session holds no state of its own. After a restart, compaction or `/clear`,
 
 ## 2. Watch in the background
 
-Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (`reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed`; handle them (steps 3, 4), then start it again from its `cursor`. A non-zero exit is a failure: report it to the person. Keep exactly one watch running; never poll `status` in a loop. When a hook says to start the watch (SessionStart's first line, the Stop hook blocking your turn, or a `dagq:` line from the supervisor that no watch runs), start it first. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
+Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_in_background`, as it is: no shell loop around it (`reference/watch.md`). It has no timeout and returns only with `events` or `supervisors_changed` (not `update_installed` or an hourly review alone: those come with the next); handle them (steps 3, 4), then restart it from its `cursor`. A non-zero exit is a failure: report it. Keep exactly one watch; never poll `status` in a loop. When a hook says to start the watch (SessionStart's first line, the Stop hook blocking your turn, or a `dagq:` line from the supervisor that no watch runs), start it first. `status`'s `inbox_watcher` says whether one is running (`reference/status.md`).
 
 ## 3. Show an ask and write the answer
 
@@ -40,15 +40,15 @@ It prints each open ask in full, oldest first. Take them one at a time:
 "$DAGQ" answer <id> --text '<the answer>'
 ```
 
-3. `{"error": "ask <id> is not open"}` means the runtime closed it first (the dialog went, the session moved on or exited): tell the person and move on.
+3. `{"error": "ask <id> is not open"}`: the runtime closed it first (the dialog went, the session moved on or exited); tell the person.
 
-A run waiting on an ask holds no `--parallel` slot (`reference/status.md`, "Runs waiting for a person"). For context, read `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave an ask the person does not want to answer yet open.
+A run waiting on an ask holds no `--parallel` slot (`reference/status.md`, "Runs waiting for a person"). For context: `"$DAGQ" show <task_id>` (`--full` for a receipt). Leave open an ask the person will not answer yet.
 
 Before showing an ask whose kind, options or effect you are unsure of, read `reference/asks.md`: every kind (`approve_landing`, `decide`, `stalled`, `queue_hold`, ...), its options, and the answers the runtime applies (`propose`, `dismiss`). An answer the runtime does not apply comes back as `read the answer of ask <id> and close it` (step 4).
 
 ## 4. Report the other attention, act only on the person's word
 
-Report each in one short list (task, status, `next`, gist of `last_error`); do what the person says with `dagq-recover`. `(runtime)` entries need nothing.
+Report each in a short list (task, status, `next`, gist of `last_error`); act with `dagq-recover` on the person's word. `(runtime)` needs nothing.
 
 - `read the answer of ask <id> and close it` (`ask_answered`): an answer the runtime does not apply. `stuck_exit` `exit`, `answer_prompt`, `stalled` `intervene`, or the person's own text: carry it out as `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md` says, then `"$DAGQ" ask close <id>`. `wait`, or nothing to do: `ask close <id>`.
 - `send the answer of ask <id> to the worker and close it`: the supervisor could not type it; `session.md` too.
@@ -57,7 +57,7 @@ Report each in one short list (task, status, `next`, gist of `last_error`); do w
 - A worker provider that cannot be used: runs switch to the other by themselves; the person acts only on a `queue_hold` ask (login, limit). Codex's hold is `status`'s `provider_hold`; headless runs take no keys (`skills/dagq/reference/provider.md`).
 - `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH, so it claims and lands nothing; the person installs it. It clears by itself.
 - `report the update` (`update_installed`): tell its `version`, `commit` (or `release`) and any `reason`/`message`; reopened sessions load an updated plugin.
-- `report the review`, `check the failed review`: notices, `reference/watch.md`.
+- `report the review`, `check the failed review`: `reference/watch.md`.
 - `fix the push command` (`kpi_push_abandoned`): the KPI push command (`[push]` of `host.toml`) gave up a message after three failures; the person fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`, with the person.

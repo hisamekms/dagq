@@ -4,8 +4,8 @@ type: design
 title: "`events` / `watch`"
 status: current
 created: 2026-09-26
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03 # task 1418: notices that do not wake the inbox watch
+last_verified: 2026-10-03 # task 1418
 scope: runtime
 related:
   - design-supervisor-lifecycle-throughput-review
@@ -25,6 +25,8 @@ task 293（ADR-0044の決定22）で、`events`に`--full`と絞り込みを足�
 `dagq watch [--after <id>] [--timeout SECS（既定600） | --until-attention] [--interval SECS（既定2）] [--role <inbox|planner>]`はqueueをinterval秒ごとに読み、idより後にattentionイベントが1件以上あるか、登録済みsupervisorの健全性（tokenの集合と各`pid`・`alive`・`stale`、`domain::SupervisorPulse`）がwatch開始時のsnapshotと変わるまでblockする。返り値は`{events, supervisors_changed, supervisors, cursor}`で、`supervisors`は`status`と同じ形。timeoutでは`events`が空、`supervisors_changed: false`、`cursor`は渡したままで、exit codeは0。`--after`を省くと開始時の最新idから待つ。`--until-attention`（task 943）はdeadlineを持たず、attentionイベントかsupervisorの健全性の変化が来るまで読み続け、来たときだけ同じ形の`{events, supervisors_changed, supervisors, cursor}`を出してexit 0で終わる（空のtimeoutで返らないのでcursorの引き継ぎも要らない）。`--timeout`とは同時に付けられない（clapの`conflicts_with`で非0）。`--role`を問わず使える。inboxはこれをbackgroundで1本回し、shellのループを書かない（dagq-inbox skillの`reference/watch.md`）。queueを開けない・読めないなど途中のerrorは再試行せず、stderrのerror JSONと非0で終わる（errorを握りつぶしてloopを続けない。張り直すsessionの空回りを防ぐ）。`watch`はqueueを読むだけで何も書かず（`--role inbox`は下の生存の記録をqueueの外のファイルに書く）、`integrate`を呼ばない。
 
 `--role`を渡すと、そのroleに宛てたattentionイベント（`domain::ATTENTION_ROLE`、`status --role`と同じ）だけで起き、supervisorの健全性の変化で起きるのも同じrole（`inbox`）だけ（plannerは`events`が常に空で`supervisors_changed`が常にfalse）。inboxは`watch --role inbox`で`ask_opened`、`ask_answered`、ADR-0016のattention、supervisorの停止を受ける（ADR-0044の決定6）。cursorはrun_eventsのidのままで、askの登録と回答も`ask_opened` / `ask_answered`としてrun_eventsに書かれるのでcursorに乗る（roleの違うwatchが同じcursorを使ってよい）。`events`には`--role`は無い。
+
+`--role inbox`のwatchは、inbox宛てのattentionのうち`domain::wakes_inbox(kind, payload)`が偽のもの（`update_installed`と、`mode`が`hourly`の`throughput_review_reported`）だけでは起きない（[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)。常駐のinboxが起きるたびにcontextの全体を読み直すtokenを減らす）。cursorより後に起こすattentionが1件以上あるか、supervisorの健全性が変わったときだけ返り（`--timeout`も`--until-attention`も同じ）、そのときの`events`には起こさなかった知らせも含めてcursorより後のinbox宛てのattentionを古い順に全部入れ（inboxのwatchは件数の上限を持たない。roleなしと`--role planner`のwatchは今までどおり100件まで。`cursor`は返した最新）、知らせを取りこぼさない。起こすeventの前にも後にも知らせが何件あっても、健全性の変化で起きたときも、1回のwatchで全部返るので、残った知らせが次の起床まで待つことは無い。`--timeout`で返るときは今までどおり`events`が空で`cursor`は渡したままで、起こさなかった知らせは次に返るときに載る。日次・週次の`throughput_review_reported`、modeを問わない失敗の`throughput_review_finished`（`check the failed review`）、`ask_opened`ほか全てのattentionは今までどおり起こす。何がattentionかの判定（`event_attention`）・`next`・`events`・`status`・`--role planner`のwatch・roleなしのwatch（全てのattentionで起きる）・KPI（`attentions_per_landing`・`ask_seen_wait`）は変えていない。watchはqueue serviceのユースケースに無いので、クライアントモードのclientは`no_use_case`で断ってDBを開かない（[Queue service](../queue-service.md#クライアントモード)）。この判定はqueueを読み取り専用で開くwatch（inboxのもの）だけが行う。testは`src/domain/mod.rs`の`only_update_installed_and_the_hourly_review_leave_the_inbox_asleep`と`tests/it/inbox_watch_wake.rs`。
 
 ## inboxのwatcherの記録（ADR-t906-1）
 

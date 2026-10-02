@@ -35,6 +35,7 @@ mod finding_planner;
 mod goal_review;
 mod goal_review_codex;
 mod inbox_nudge;
+mod inbox_watch_wake;
 mod inbox_watcher;
 mod installed_plugin;
 mod landing_branch;

@@ -1124,7 +1124,8 @@ enum Command {
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
         /// Wake only for the attention addressed to this role: inbox for all of it and the
-        /// supervisors' health, planner never.
+        /// supervisors' health, except update_installed and an hourly throughput review alone,
+        /// which come back with the next events that wake it; planner never.
         #[arg(long, value_parser = ROLES)]
         role: Option<String>,
     },

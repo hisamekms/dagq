@@ -13,6 +13,7 @@ use crate::{
         ATTENTION_KINDS, EventFilter, EventId, RunEvent, RunId, SessionRole, UPDATE_EVENT_KINDS,
         event_attention,
         timeline::{self, Gap},
+        wakes_inbox,
     },
     infrastructure::{adapters::SystemProcesses, inbox_watchers, sqlite::SqliteQueue},
 };
@@ -24,9 +25,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// At most this many attention events come back from one `watch`; the
-/// cursor then points at the last one returned.
+/// At most this many attention events come back from one `watch` without
+/// a role or for the planner; the cursor then points at the last one
+/// returned. The inbox's watch has no limit: it comes back with every
+/// attention past the cursor, the notices that did not wake it included,
+/// so none waits past the wake for another (ADR-t1418-1).
 const WATCH_LIMIT: usize = 100;
+
+/// How many events one read of the queue takes at most.
+const PAGE: usize = 100;
 
 /// At most this many steps of the automatic update show in one `timeline`.
 const TIMELINE_UPDATES_LIMIT: usize = 200;
@@ -41,6 +48,21 @@ fn shown(event: &RunEvent, full: bool) -> Value {
     }
 }
 
+/// Whether an attention event wakes a `watch` for `role`: for the inbox, not
+/// the notices [`wakes_inbox`] leaves for its next wake (ADR-t1418-1); for
+/// any other role or none, every one.
+fn wakes(role: Option<SessionRole>, event: &RunEvent) -> bool {
+    role != Some(SessionRole::Inbox) || wakes_inbox(&event.kind, &event.payload)
+}
+
+/// The events [`read_events`] read: those kept, the cursor to continue
+/// from, and whether one kept wakes a `watch` for the role.
+struct Read {
+    events: Vec<Value>,
+    cursor: EventId,
+    woken: bool,
+}
+
 /// Up to `query.limit` events with `query.after < id <= upto` that its
 /// filter keeps, oldest first, and the cursor to continue from: the last
 /// event returned when the limit was reached, `upto` otherwise. Without
@@ -51,43 +73,55 @@ fn read_events(
     query: &EventsQuery,
     upto: EventId,
     role: Option<SessionRole>,
-) -> Result<(Vec<Value>, EventId)> {
+) -> Result<Read> {
     let (after, limit) = (query.after, query.limit.max(1));
     let attention = !query.all && query.filter.kinds.is_none();
     let filter = EventFilter {
         kinds: if attention {
-            Some(
-                ATTENTION_KINDS
-                    .iter()
-                    .map(|&kind| kind.to_owned())
-                    .collect(),
-            )
+            Some(attention_kinds())
         } else {
             query.filter.kinds.clone()
         },
         ..query.filter.clone()
     };
     let mut events = Vec::new();
+    let mut woken = false;
     let mut cursor = after;
     loop {
         // An attention kind can still be dropped by its payload, so pages
         // are read until the limit is filled or the range is exhausted.
-        let page = queue.events_between(cursor, upto, &filter, limit)?;
+        let page = queue.events_between(cursor, upto, &filter, limit.min(PAGE))?;
         if page.is_empty() {
-            return Ok((events, upto));
+            return Ok(Read {
+                events,
+                cursor: upto,
+                woken,
+            });
         }
         for event in page {
             cursor = event.id;
             if !attention
                 || (event_attention(&event.kind, &event.payload).is_some() && for_role(role))
             {
+                woken |= wakes(role, &event);
                 events.push(shown(&event, query.full));
                 if events.len() == limit {
-                    return Ok((events, cursor));
+                    return Ok(Read {
+                        events,
+                        cursor,
+                        woken,
+                    });
                 }
             }
         }
     }
+}
+
+fn attention_kinds() -> Vec<String> {
+    ATTENTION_KINDS
+        .iter()
+        .map(|&kind| kind.to_owned())
+        .collect()
 }
 
 /// What `events` reads and how it prints it.
@@ -127,7 +161,7 @@ pub fn events_matching(db: &Path, query: &EventsQuery) -> Result<Value> {
 /// opens it once.
 pub fn events_in(queue: &SqliteQueue, query: &EventsQuery) -> Result<Value> {
     let upto = queue.latest_event_id()?;
-    let (events, cursor) = read_events(queue, query, upto, None)?;
+    let Read { events, cursor, .. } = read_events(queue, query, upto, None)?;
     Ok(json!({"events": events, "cursor": cursor}))
 }
 
@@ -256,7 +290,11 @@ pub struct WatchOptions {
 /// the registered supervisors (the set of tokens, their PIDs, `alive` and
 /// `stale`) differs from what it was when `watch` started, reading the queue
 /// every `interval`. With a `role`, only the attention events addressed to
-/// it count, the supervisors' health included. A timeout
+/// it count, the supervisors' health included. For the inbox, the notices
+/// that do not wake it ([`wakes_inbox`]: `update_installed` and the hourly
+/// review, ADR-t1418-1) do not end the wait on their own; when something
+/// else does, they come back among the events, oldest first, all of them
+/// past the cursor with no limit. A timeout
 /// returns no events and the cursor unchanged; without one
 /// (`--until-attention`) it returns only when something came. An error
 /// reading the queue ends it at once, never retried. Never writes and never
@@ -301,7 +339,11 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
     );
     let query = EventsQuery {
         after,
-        limit: WATCH_LIMIT,
+        limit: if options.role == Some(SessionRole::Inbox) {
+            usize::MAX
+        } else {
+            WATCH_LIMIT
+        },
         all: false,
         full: false,
         filter: EventFilter::default(),
@@ -309,7 +351,11 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
     let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
     loop {
         let upto = queue.latest_event_id()?;
-        let (events, cursor) = read_events(&queue, &query, upto, options.role)?;
+        let Read {
+            events,
+            cursor,
+            woken,
+        } = read_events(&queue, &query, upto, options.role)?;
         let registrations = queue.supervisors()?;
         let now = queue.generators().clock.now();
         if let Some(record) = record.as_mut() {
@@ -318,11 +364,13 @@ pub fn watch(db: &Path, options: &WatchOptions) -> Result<Value> {
         let changed =
             for_role(options.role) && pulses(&registrations, now, &SystemProcesses) != baseline;
         let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        if !events.is_empty() || changed || remaining.is_some_and(|r| r.is_zero()) {
-            let cursor = if events.is_empty() && !changed {
-                after
+        if woken || changed || remaining.is_some_and(|r| r.is_zero()) {
+            // A timeout with nothing that woke it keeps the notices for the
+            // next watch.
+            let (events, cursor) = if woken || changed {
+                (events, cursor)
             } else {
-                cursor
+                (Vec::new(), after)
             };
             if let Some(record) = record.as_mut() {
                 let _ = record.end(now);

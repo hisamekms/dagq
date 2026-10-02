@@ -4,8 +4,8 @@ type: design
 title: "スループットの見直し（`throughput-review`）"
 status: current
 created: 2026-09-29
-updated: 2026-10-02 # task 1371: health in the input
-last_verified: 2026-10-02 # task 1371
+updated: 2026-10-03 # task 1418: notices that do not wake the inbox watch
+last_verified: 2026-10-03 # task 1418
 scope: runtime
 related:
   - design-supervisor-lifecycle
@@ -52,7 +52,7 @@ related:
 4. agentは`--launch`（supervisorが行き先として渡したもの。無ければ`[roles.throughput_review]`）の`provider`（既定のClaude、または下の「Codexで動かす」のCodex）で、actor executorの`HeadlessProgram::Job`（権限の意図`ACCESS`は`queue_cli`で、Claude Codeは`--allowedTools Bash(dagq:*)`に、Codexは読み取りだけのsandbox（queue serviceのjobのprofile）に訳す。MCPを読まない。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）で`DAGQ_ROLE=throughput-review-job`・`DAGQ_ACTOR_ID=throughput-review-job:<mode>:<period>`として起動し、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`。結果はproviderの`job_reply`が`output.out`だけから取り出した返答から読み、stderrは混ぜない）。時間の上限は`--timeout`（既定1800秒）で、過ぎたら子孫ごとkillする。model / effortは`dagq.toml`の`[roles.throughput_review]`（無ければproviderの既定。もう一方のproviderに切り替えたときはその既定）
 5. 成功したら`output.out`に`job_reply`を当てた返答を`parse_output`で読む: `## Conclusion`の見出しの下の行（無ければ先頭の行）を最大5行（`MAX_CONCLUSION_LINES`）の結論にし、`next_move`でfenceしたJSON（`summary`・`detail`・`why`）を次の一手として外した残りを全文として`review.md`に、結論・次の一手・読めなかった理由（`next_move_error`）・findingのIDを`review.json`に書く
 6. 週次だけ、次の一手をfindingにする: kind `throughput`、対象queue、subject `weekly/<period>`、summaryは`summary`、detailは`detail`と`Why:`、根拠は`throughput_review_started`のevent、`propose`（proposalを求める印）の理由は`why`、記録者は`supervisor`。runtimeのplannerの既存の経路（[Finding planners](finding-planners.md)）でproposalになり、`[kpi] max_improvement_proposals`に従う。毎時・日次の出力にblockがあっても記録しない
-7. `throughput_review_reported`（`mode`・`period`・`reasons`・`conclusion`・`path`（`review.md`）・`dir`・`finding_id`・`next_move_error`）を記録する。これがinbox宛ての知らせるだけのattention（`report the review`）
+7. `throughput_review_reported`（`mode`・`period`・`reasons`・`conclusion`・`path`（`review.md`）・`dir`・`finding_id`・`next_move_error`）を記録する。これがinbox宛ての知らせるだけのattention（`report the review`）。`mode`が`hourly`のものは`watch --role inbox`を単独では起こさず、inboxが次に別の件で起きたときにその`events`に古い順に載る（daily / weeklyは今までどおり起こす。[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)、[Events and watch](events-watch.md)）
 8. `throughput_review_finished`（`mode`・`period`・`outcome`（`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗））・`exit_code`・`error`・`reasons`・`dir`・`session_id`（Claudeはstartと同じ。区間を閉じる鍵、task 1086。Codexはthreadのid。skippedには無い）・`duration_secs`、Codexなら`model`・`model_unknown`、Codexが使えなかったなら`provider_unusable`（`provider`・`reason`）、成功なら`reported_event_id`・`finding_id`・`path`）を記録する。`outcome`が`error`か`failed`のもの（modeを問わない）はinbox宛ての知らせるだけのattention（`check the failed review`、task 1099）になり、askにはならず、claimと着地を止めない。失敗した期間はやり直さない（上の「期限」）。例外は`provider_unusable`を持つ終わり（Codexが認証・利用上限・起動の失敗・実行ファイルが無いことで使えなかった見直し。下の「Codexで動かす」）で、attentionにならず、supervisorがCodexを控えてその期間をもう一方のproviderで始め直す（`--no-claude`では始め直しが理由付きの`error`の終わりになり、それがattentionになる）。skippedと`succeeded`はattentionではない。attentionなので、KPIの`attentions_per_landing`（queueのeventのattentionも数える）にも加わる
 
 手順8のfinishは、期間が決まった後の処理の出口で1回だけ記録する（task 1111）。agentの起動前の着地の読み取り・入力の収集・checkoutの解決・dirの作成・promptと入力の保存・startedの記録の失敗も、`outcome: error`・`exit_code: null`・原因を含む失敗の文（`{:#}`）の`error`を持つpayloadとして記録して返す。分かれば`dir`・`session_id`も残し、`pid`・`parent_pid`は常に残す。dirの作成前なら`dir`はnullで、ログもまだ無い。queueを開く前・期間が決まる前（DBのcanonicalize・open）の失敗は、記録先や期間が無いので対象外でErrを返す。finish自体を記録できないときもErrを返し、記録を再試行しない。supervisorは子の非0終了からfinishを補わない。`--dry-run`は失敗時もeventを記録しない。
@@ -97,7 +97,7 @@ Claudeのheadlessのjobは、promptを`claude -p`の位置引数で受ける（C
 
 ## event
 
-`throughput_review_started` / `throughput_review_finished` / `throughput_review_reported`はqueueのevent（task・goal・runを持たない）。attentionは`throughput_review_reported`（`report the review`）と、`outcome`が`error` / `failed`の`throughput_review_finished`（`check the failed review`。task 1099）の2つで、どちらも知らせるだけ（[Events and watch](events-watch.md)）。`provider_unusable`を持つ`throughput_review_finished`は`outcome`が`error` / `failed`でもattentionにしない（その期間はもう一方のproviderで始め直すので、人に知らせることが無い。task 1220）。`events`・`watch`のcompact形は`throughput_review_reported`に`mode`・`period`・`reasons`・`conclusion`・`path`・`finding_id`を、`throughput_review_finished`に`mode`・`period`・`outcome`・`dir`（`output.out` / `output.err`のあるdir）と`exit_code`・`reason`（payloadの`error`）を載せる。
+`throughput_review_started` / `throughput_review_finished` / `throughput_review_reported`はqueueのevent（task・goal・runを持たない）。attentionは`throughput_review_reported`（`report the review`）と、`outcome`が`error` / `failed`の`throughput_review_finished`（`check the failed review`。task 1099）の2つで、どちらも知らせるだけ（[Events and watch](events-watch.md)）。inboxのwatchを起こさないのは`mode`が`hourly`の`throughput_review_reported`だけで、失敗の`throughput_review_finished`はmodeを問わず起こす（ADR-t1418-1）。`provider_unusable`を持つ`throughput_review_finished`は`outcome`が`error` / `failed`でもattentionにしない（その期間はもう一方のproviderで始め直すので、人に知らせることが無い。task 1220）。`events`・`watch`のcompact形は`throughput_review_reported`に`mode`・`period`・`reasons`・`conclusion`・`path`・`finding_id`を、`throughput_review_finished`に`mode`・`period`・`outcome`・`dir`（`output.out` / `output.err`のあるdir）と`exit_code`・`reason`（payloadの`error`）を載せる。
 
 ## test
 
