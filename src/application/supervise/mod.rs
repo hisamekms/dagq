@@ -1482,6 +1482,9 @@ impl Supervisor<'_> {
                             "supervisor {} asked to hand off to {binary}: no new work starts; it execs once the validations and landings in progress are done",
                             self.token
                         );
+                        // Read after the cleanup was polled: this pass
+                        // drains on it already.
+                        self.end_cleanup_for_handoff();
                     }
                 }
                 if let Some(binary) = self.handoff.clone() {
@@ -1489,7 +1492,8 @@ impl Supervisor<'_> {
                     // command would go on in the scratch worktree the next
                     // process uses (ADR-0068). None starts meanwhile (this
                     // pass drains). So is the cleanup job, which ends after
-                    // its current worktree, or all candidates for disk space (task 648).
+                    // its current worktree, or all candidates for disk space (task 648),
+                    // and the rest of a cleanup for room it took on (task 1426).
                     self.recheck_pass();
                     if !self.rechecks.running()
                         && !self.cleanup.running()
@@ -2529,8 +2533,9 @@ impl Supervisor<'_> {
                 // So would it, short of free disk space (task 377): it
                 // starts no verification until there is room.
                 if self.run_env_missing || self.landing_unresolved || self.disk.landing_short {
-                    // A drain must use the reading after the cleanup, not
-                    // hand a recoverable shortage to a person (task 648).
+                    // A drain must use the reading after the cleanup, and
+                    // the rest of one another job took on, not hand a
+                    // recoverable shortage to a person (task 648, task 1426).
                     if !self.draining
                         || (!self.run_env_missing && !self.landing_unresolved && self.disk.cleaning)
                     {

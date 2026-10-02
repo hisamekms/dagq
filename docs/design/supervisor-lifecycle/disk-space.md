@@ -4,8 +4,8 @@ type: design
 title: "空き容量を確かめる（claimと着地の検証の前）"
 status: current
 created: 2026-09-27
-updated: 2026-10-02 # task 1371: the free space is recorded; task 1289; task 1290
-last_verified: 2026-10-02 # task 1371, task 1289, task 1290
+updated: 2026-10-03 # task 1426; task 1371: the free space is recorded; task 1289; task 1290
+last_verified: 2026-10-03 # task 1426, task 1371, task 1289, task 1290
 scope: runtime
 related:
   - adr-t639-1
@@ -44,7 +44,7 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 
 1. 空きがclaimかlandingの閾値の大きい方を下回れば、掃除を自動で走らせる（60秒に1回まで）: 終わったrunのビルド成果物の消し残しと、誰も作業していない終わっていないrun（着地の列のrun、resumeを待つrunなど。leaseもslotも生きているsessionも無いもの）のビルド成果物（`build_outputs_removed`の`reason: disk_space`。人の答えを待つrunのものは空きによらず通常の周回で消える。[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)、task 1289）と、`completed` / `canceled`のtaskのworktreeとClaude Codeのscratchpadとrunの一時ファイルのdir（task 1290）の消し残し（[Run worktrees](run-worktrees.md)の`clean_ended_worktrees`と同じ）、`git worktree prune`。掃除はloopの外のjobが行い（[Run worktrees](run-worktrees.md#loopの外で掃除する)、task 405）、そのjobが終わるまでclaimと着地は控えるが、控えのeventもaskも記録しない。jobが終われば、何か消えればqueueイベント`auto_repaired`（`repair: disk_cleanup`、`layer: runtime`、`bytes`、`conditions: {free_bytes, needed_bytes, free_bytes_after}`、`detail: {bytes, runs}`、`supervisor`）を記録する。`bytes`は消したworktree・ビルド成果物・scratchpad・runの一時ファイルのdirの`bytes`の合計で、`runs`は何か消えたrunを1回ずつ並べる。その後の周回で読み直した空きで判定する
 2. claim: `fill_slots`の`hold_claims`が、空きとclaimの閾値を`ClaimHold::judge`に渡す。足りなければ理由`disk_space`で控え（load averageより先に判定する）、`claim_held`（`value`は空きbytes、`threshold`は要るbytes）を記録する。空きが戻れば`claim_resumed`
-3. 着地: 着地slotを待つrun（`Phase::AwaitingSlot`）は、空きが着地の閾値を下回る間`begin_integration`をしない。runは`awaiting_integration`のままleaseを持ち、rebaseも検証も始めない。`approve_landing`の`land`のanswerは足りない間もその場で適用してaskを閉じ、runを着地の列に並べる。列のrunの着地の開始（`start_approved_landings`）だけが、空きが戻るまで待つ（task 949、[Review](review.md#review-supervisor)の6）。着地を待つrunがあり足りない間はqueueイベント`landing_held`（payloadは`claim_held`と同じ。`message`は着地の文）を、空きが戻るか待つrunが無くなれば`landing_resumed`を記録する（`domain::claim_hold::LANDINGS`、`transition_of`）。着地の控えはhostのものではなく記録したsupervisorのslotのものなので、別の生きているsupervisorは`landing_resumed`で終えない（そのsupervisorが止まれば終えてよい）。stopやhandoffでdrainするsupervisorも、空き容量のための掃除jobが走っている間はleaseを持って待つ（task 648）。jobが最後のworktreeまで処理し、結果を記録した後の容量で判定し、足りれば着地へ進む。なお足りなければleaseを返してrunを`awaiting_integration`のまま人に残す。待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。`[run.env]`のprogramが無い場合は従来どおり掃除を待たずleaseを返す
+3. 着地: 着地slotを待つrun（`Phase::AwaitingSlot`）は、空きが着地の閾値を下回る間`begin_integration`をしない。runは`awaiting_integration`のままleaseを持ち、rebaseも検証も始めない。`approve_landing`の`land`のanswerは足りない間もその場で適用してaskを閉じ、runを着地の列に並べる。列のrunの着地の開始（`start_approved_landings`）だけが、空きが戻るまで待つ（task 949、[Review](review.md#review-supervisor)の6）。着地を待つrunがあり足りない間はqueueイベント`landing_held`（payloadは`claim_held`と同じ。`message`は着地の文）を、空きが戻るか待つrunが無くなれば`landing_resumed`を記録する（`domain::claim_hold::LANDINGS`、`transition_of`）。着地の控えはhostのものではなく記録したsupervisorのslotのものなので、別の生きているsupervisorは`landing_resumed`で終えない（そのsupervisorが止まれば終えてよい）。stopやhandoffでdrainするsupervisorも、空き容量のための掃除jobが走っている間はleaseを持って待つ（task 648）。通常の掃除jobに空き容量の掃除が乗ったときは、その残り（`Request::counted`）のjobが終わるまでも待つ（task 1426。`CleanupWatch::for_disk`がdrainの間は残りの待ちと残りのjobを含み、`disk.cleaning`が続く。handoffの頼みは周回の中で掃除のpollと空きの読み取りの後に読むので、handoffを初めて読んだ周回では、runを進める前に掃除をdrainの扱いにして`disk.cleaning`を読み直す（`end_cleanup_for_handoff`）。このとき終わったjobは回収しない。空きを読んだ後に終わったjobは次の周回で回収し、その後に読み直した空きで判定する）。jobが最後のworktreeまで処理し、結果を記録した後の容量で判定し、足りれば着地へ進む。なお足りなければleaseを返してrunを`awaiting_integration`のまま人に残す。待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。`[run.env]`のprogramが無い場合は従来どおり掃除を待たずleaseを返す
 
 走っているrun（session・validation・review・resume・triage）と、leaseを持つrun（ADR-0071の待ちを含む）には触れない。
 

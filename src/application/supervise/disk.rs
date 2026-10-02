@@ -48,6 +48,8 @@ pub(super) struct DiskWatch {
     /// A cleanup for room runs or waits to: nothing is held or asked for
     /// until it is done.
     pub(super) cleaning: bool,
+    /// This pass's reading is short of what a claim or a landing needs.
+    short: bool,
 }
 
 impl Supervisor<'_> {
@@ -73,7 +75,8 @@ impl Supervisor<'_> {
         self.free = free;
         // Short while the cleanup for room runs: the claims and landings
         // wait for it, and nothing is held or asked for yet.
-        let cleaning = short(free, most) && self.cleanup.for_disk();
+        self.disk.short = short(free, most);
+        let cleaning = self.disk.short && self.cleanup.for_disk();
         self.disk.cleaning = cleaning;
         let landings: Vec<RunId> = self
             .slots
@@ -118,6 +121,16 @@ impl Supervisor<'_> {
         };
         self.record_hold(claim_hold::LANDINGS, hold.as_ref())?;
         Ok(())
+    }
+    /// A handoff found after this pass polled the cleanup and read the
+    /// disk: the cleanup ends now, and the rest of a cleanup for room it
+    /// started this pass counts as one for this pass's reading, so the
+    /// drain's landings wait for it too (task 1426). A job that finished
+    /// since the reading is not joined here but on the next pass, whose
+    /// reading after it decides the landings.
+    pub(super) fn end_cleanup_for_handoff(&mut self) {
+        self.end_cleanup();
+        self.disk.cleaning = self.disk.short && self.cleanup.for_disk();
     }
     /// The free bytes of the queue's directory, where the run worktrees
     /// are; `None` when they cannot be read.

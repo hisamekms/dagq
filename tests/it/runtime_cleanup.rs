@@ -66,10 +66,13 @@ struct Gate {
     open: bool,
 }
 
-/// The local run files, but for the [`Gate`] on measuring build outputs.
+/// The local run files, but for the [`Gate`] on measuring build outputs:
+/// the first one, or only `only`'s; `then` gates a later one the same way.
 #[derive(Clone, Default)]
 struct GatedFiles {
     gate: Arc<(Mutex<Gate>, Condvar)>,
+    only: Option<PathBuf>,
+    then: Option<Box<GatedFiles>>,
 }
 
 impl GatedFiles {
@@ -88,7 +91,13 @@ impl GatedFiles {
         changed.notify_all();
     }
     fn wait(&self, dir: &Path) {
-        if !dir.ends_with("worktree/target") {
+        self.wait_here(dir);
+        if let Some(then) = &self.then {
+            then.wait_here(dir);
+        }
+    }
+    fn wait_here(&self, dir: &Path) {
+        if !dir.ends_with("worktree/target") || self.only.as_ref().is_some_and(|only| only != dir) {
             return;
         }
         let (lock, changed) = &*self.gate;
@@ -1292,6 +1301,286 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
                     repair.payload["detail"]["runs"].as_array().unwrap().len(),
                     3
                 );
+            }
+        }
+    }
+}
+
+/// State of the drain test below of the rest of a cleanup for room.
+struct RestDrain {
+    db: PathBuf,
+    idle_target: PathBuf,
+    enough: bool,
+    /// Ask for a handoff on the pass the rest of the cleanup starts, after
+    /// the cleanup was polled and before the handoff is read: the reading
+    /// once the first job's `auto_repaired` is recorded waits for the rest
+    /// to reach its gate, then asks.
+    handoff_at_rest: Option<AtRest>,
+}
+
+/// [`RestDrain::handoff_at_rest`].
+struct AtRest {
+    rest: GatedFiles,
+    /// With a worktree entry the rest's `git worktree prune`, its last
+    /// step, removes: the reading lets the rest go through and asks once
+    /// its job finished, after the disk was read short.
+    finished: Option<PathBuf>,
+}
+
+static REST_DRAIN: Mutex<Option<RestDrain>> = Mutex::new(None);
+static REST_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Short once a run waits to land, until the idle run's build outputs go
+/// (with `enough`; for ever without).
+fn rest_free_space(_: &Path) -> Option<u64> {
+    REST_READS.fetch_add(1, Ordering::SeqCst);
+    let state = REST_DRAIN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = state;
+    let state = state.as_mut()?;
+    let queue = SqliteQueue::open(&state.db).unwrap();
+    let queued = queue.latest_event_of("landing_queued").unwrap().is_some();
+    let short = queued && (!state.enough || state.idle_target.exists());
+    if state.handoff_at_rest.is_some() && queue.latest_event_of("auto_repaired").unwrap().is_some()
+    {
+        let at_rest = state.handoff_at_rest.take().unwrap();
+        at_rest.rest.held();
+        if let Some(entry) = &at_rest.finished {
+            at_rest.rest.open();
+            let deadline = Instant::now() + common::STEP_LIMIT;
+            while entry.exists() {
+                assert!(Instant::now() < deadline, "the rest was not pruned");
+                thread::sleep(Duration::from_millis(10));
+            }
+            // The prune is the job's last step: let its thread return.
+            // Passing does not depend on it; it makes sure the handoff is
+            // read with the job finished.
+            thread::sleep(Duration::from_millis(200));
+        }
+        let registration = queue.supervisors().unwrap().pop().unwrap();
+        assert!(
+            queue
+                .request_handoff(&registration.token, "/next/dagq")
+                .unwrap()
+        );
+    }
+    Some(if short { 1 } else { 1 << 40 })
+}
+
+/// How the supervisor of the test below drains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drain {
+    Stop,
+    /// Asked for while the first job is held.
+    Handoff,
+    /// Read first on the pass the rest of the cleanup starts.
+    HandoffAtRest,
+    /// Read first on that pass too, once the rest's job finished and freed
+    /// enough after the disk was read short.
+    HandoffAfterRest,
+}
+
+/// Wait for `count` more readings of the free space: whole passes.
+fn rest_passes(db: &Path, count: usize) {
+    let reads = REST_READS.load(Ordering::SeqCst);
+    wait_until(db, common::STEP_LIMIT, |_| {
+        REST_READS.load(Ordering::SeqCst) >= reads + count
+    });
+}
+
+/// Task 1426: a cleanup for room asked for while an ordinary cleanup runs
+/// is taken on by that job, and its rest (`Request::counted`) is not
+/// dropped by a stop or a handoff: it runs after the job, to its last
+/// candidate, removing the build outputs of a run nobody works on that
+/// waits for no answer (`build_outputs_removed`, `disk_space`), counted in
+/// `auto_repaired` (`disk_cleanup`). The run short of room to land keeps
+/// its lease until that rest is done, then lands on the reading after it,
+/// or, still short, gives the lease back and stays awaiting integration;
+/// so too when the handoff is read first on the pass the rest starts, and
+/// when the rest finished between that pass's reading and the handoff:
+/// the landing is decided on the next pass's reading, not the one before.
+#[test]
+fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
+    for drain in [
+        Drain::Stop,
+        Drain::Handoff,
+        Drain::HandoffAtRest,
+        Drain::HandoffAfterRest,
+    ] {
+        for enough in [true, false] {
+            if drain == Drain::HandoffAfterRest && !enough {
+                continue;
+            }
+            let (_dir, repo, db) = fixture();
+            let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+            let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            queue.answer(ask.id, "withdrawn").unwrap();
+            queue.close_ask(ask.id).unwrap();
+            // An ended run whose task goes on: the ordinary sweep's.
+            add_ready_task(&mut queue, "ended", &[]);
+            let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
+            supervise(&db, &repo, &building).unwrap();
+            building.join();
+            let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
+            assert_eq!(ended.status(), RunStatus::Failed);
+            let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
+            fs::create_dir_all(ended_target.join("debug")).unwrap();
+            fs::write(ended_target.join("debug/again"), vec![0u8; 4096]).unwrap();
+            let idle_target = Path::new(idle.worktree_path().unwrap()).join("target");
+            assert!(idle_target.join("debug/big").is_file());
+            add_ready_task(&mut queue, "landing", &[]);
+            let rest = GatedFiles {
+                only: Some(idle_target.clone()),
+                ..GatedFiles::default()
+            };
+            // A worktree entry only a cleanup for room prunes.
+            let finished = (drain == Drain::HandoffAfterRest).then(|| {
+                let stale = repo.with_file_name("stale-worktree");
+                git_out(
+                    &repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "stale-worktree",
+                        stale.to_str().unwrap(),
+                    ],
+                );
+                fs::remove_dir_all(&stale).unwrap();
+                let entry = repo.join(".git/worktrees/stale-worktree");
+                assert!(entry.is_dir());
+                entry
+            });
+            *REST_DRAIN.lock().unwrap() = Some(RestDrain {
+                db: db.clone(),
+                idle_target: idle_target.clone(),
+                enough,
+                handoff_at_rest: matches!(drain, Drain::HandoffAtRest | Drain::HandoffAfterRest)
+                    .then(|| AtRest {
+                        rest: rest.clone(),
+                        finished,
+                    }),
+            });
+            let files = GatedFiles {
+                then: Some(Box::new(rest.clone())),
+                ..GatedFiles::default()
+            };
+            let stop = Arc::new(AtomicBool::new(false));
+            let options = files.options(SuperviseOptions {
+                stop: stop.clone(),
+                disk: Some(DiskConfig {
+                    min_free_bytes: Some(GIB),
+                    ..DiskConfig::default()
+                }),
+                free_space: rest_free_space,
+                ..supervise_options(1, false)
+            });
+            let supervisor = {
+                let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+                thread::spawn(move || {
+                    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets acceptance")]);
+                    runtime::supervise_with_reviewer(
+                        &db,
+                        &repo,
+                        &*backend,
+                        &claude_stub(&db),
+                        &reviewer,
+                        Path::new(env!("CARGO_BIN_EXE_dagq")),
+                        &options,
+                    )
+                })
+            };
+            // The sweep's job, with room: the ended run only.
+            assert_eq!(files.held(), ended_target);
+            wait_until(&db, common::STEP_LIMIT, |q| {
+                q.latest_event_of("landing_queued").unwrap().is_some()
+            });
+            let landing = queue.show(TaskId::new(3)).unwrap().runs[0].clone();
+            // Short now: the held job takes on the cleanup for room.
+            rest_passes(&db, 3);
+            match drain {
+                Drain::Handoff => {
+                    let registration = queue.supervisors().unwrap().pop().unwrap();
+                    assert!(
+                        queue
+                            .request_handoff(&registration.token, "/next/dagq")
+                            .unwrap()
+                    );
+                }
+                Drain::Stop => stop.store(true, Ordering::SeqCst),
+                Drain::HandoffAtRest | Drain::HandoffAfterRest => {}
+            }
+            rest_passes(&db, 4);
+            let waits = |queue: &SqliteQueue| {
+                assert!(!supervisor.is_finished(), "{drain:?}, enough={enough}");
+                assert!(queue.run_lease(landing.id()).unwrap().is_some());
+                assert_eq!(
+                    queue.run(landing.id()).unwrap().status(),
+                    RunStatus::AwaitingIntegration
+                );
+                assert!(payloads_of(queue, &landing, "integration_started").is_empty());
+            };
+            waits(&queue);
+
+            // The job ends; the rest starts though the supervisor ends,
+            // and the landing waits for it too.
+            files.open();
+            assert_eq!(rest.held(), idle_target);
+            if drain != Drain::Stop && drain != Drain::Handoff {
+                wait_until(&db, common::STEP_LIMIT, |_| {
+                    REST_DRAIN
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .handoff_at_rest
+                        .is_none()
+                });
+            }
+            if drain != Drain::HandoffAfterRest {
+                rest_passes(&db, 4);
+                waits(&queue);
+                assert_eq!(
+                    payloads_of(&queue, &ended, "build_outputs_removed").len(),
+                    2
+                );
+                assert!(idle_target.join("debug/big").is_file());
+            }
+
+            rest.open();
+            let outcome = joined(supervisor, "the rest of the cleanup and the drain").unwrap();
+            backend.join();
+            assert_eq!(outcome["errors"], json!([]), "{outcome}");
+            assert_kept_but_the_build_outputs(&repo, &idle);
+            let removed = payloads_of(&queue, &idle, "build_outputs_removed");
+            assert_eq!(removed.len(), 1, "{removed:?}");
+            assert_eq!(removed[0]["reason"], "disk_space");
+            let repaired: Vec<Value> = queue
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == "auto_repaired")
+                .map(|event| event.payload)
+                .collect();
+            assert_eq!(repaired.len(), 2, "{repaired:?}");
+            assert_eq!(repaired[0]["detail"]["runs"], json!([ended.id().as_str()]));
+            assert_eq!(repaired[1]["repair"], "disk_cleanup");
+            assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
+            assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
+            assert!(queue.run_lease(landing.id()).unwrap().is_none());
+            assert_eq!(
+                queue.run(landing.id()).unwrap().status(),
+                if enough {
+                    RunStatus::Integrated
+                } else {
+                    RunStatus::AwaitingIntegration
+                },
+                "{drain:?}"
+            );
+            if drain != Drain::Stop {
+                assert_eq!(outcome["outcome"], "handoff", "{outcome}");
             }
         }
     }
