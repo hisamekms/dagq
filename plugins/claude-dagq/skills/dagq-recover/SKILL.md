@@ -38,14 +38,14 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 ## 5. Start, stop and update the runtime
 
 ```sh
-"$DAGQ" up --plugin-dir "$CLAUDE_PLUGIN_ROOT"            # add --parallel N, --max-waiting N, --auto-update, --claude EXE --codex EXE
-"$DAGQ" up --in-cmux --plugin-dir "$CLAUDE_PLUGIN_ROOT"  # only when the preflight sends you there
+"$DAGQ" up            # add --parallel N, --max-waiting N, --auto-update, --claude EXE --codex EXE
+"$DAGQ" up --in-cmux  # only when the preflight sends you there
 "$DAGQ" down            # stop claiming; the supervisor drains its runs and exits
 "$DAGQ" down --wait     # the same, and block until it is gone
-"$DAGQ" install         # build main, swap the binary, hand over
+"$DAGQ" install --from PATH  # swap the binary, hand over
 ```
 
-`up --no-claude` forbids Claude (Codex workers; unsupported roles by hand); drain before changing it.
+`--plugin-dir`: only a path the repository names, never `$CLAUDE_PLUGIN_ROOT`. `up --no-claude` forbids Claude (Codex workers; unsupported roles by hand); drain before changing it.
 
 `up` is idempotent: one resident supervisor and the inbox workspace, no planner (a person opens each with `dagq plan`). `restart supervisor` is answered with `up` (nothing else restarts an in-cmux supervisor). Update the binary with `install` (or `--rollback`), never `cp`: supervisors take it over without waiting; only a breaking migration drains (`--allow-breaking`). `up --auto-update` does it per runtime landing; it and the `update_failed` / `approve_update` asks: `reference/update.md`. A drain waits for runs waiting on an ask too. `down --force` kills the supervisor and loses its active runs: only on the person's explicit word. `--claude` and `--codex` (Codex workers) are fixed on the supervisor as real paths: from a cmux terminal pass `~/.local/bin/claude` and `~/.local/bin/codex`, and after updating either, `down --wait` and `up` again. `reference/up-down.md`: outcomes, the in-cmux case, logs.
 

@@ -1,14 +1,14 @@
-# Updating the fixed binary: install, auto-update and the update asks
+# Updating the dagq binary: install, auto-update and the update asks
 
-Read this when the person wants to update or roll back the fixed `dagq` binary, turn on automatic updates, or answer an `update_failed` / `approve_update` ask (ADR-0073). Everything here is typed from the inbox or a planner session, on the person's word; tell the person before a binary is replaced.
+Read this when the person wants to update or roll back the `dagq` binary the queue runs on, turn on automatic updates, or answer an `update_failed` / `approve_update` ask (ADR-0073). Everything here is typed from the inbox or a planner session, on the person's word; tell the person before a binary is replaced.
 
-A binary names itself by its build identifier (`dagq --version`): `X.Y.Z` for a release, `X.Y.Z-dev+<commit>[.dirty]` for a build of main. A supervisor is replaced whenever that identifier differs, so a rebuild from another commit is replaced like a release; no version bump is needed.
+A binary names itself by its build identifier (`dagq --version`). A supervisor is replaced whenever that identifier differs, not only when the version is higher.
 
 ## install
 
 ```sh
-"$DAGQ" install                    # build the queue's main checkout and put it in place
-"$DAGQ" install --from PATH        # a checkout (built) or a binary file
+"$DAGQ" install --from PATH        # a binary file, or a checkout of dagq's source (built)
+"$DAGQ" install                    # in dagq's source repository only: build the queue's main checkout
 "$DAGQ" install --rollback         # go back to <binary>.previous
 ```
 
@@ -16,13 +16,13 @@ When it builds a checkout of dagq's source (the main checkout, or `--from <dir>`
 
 - A supervisor listed under `not_handed_off` (a binary from before the handoff, or a launchd agent whose plist names another path) is replaced by the next `up`, which drains it.
 - `install` stops, replacing nothing, when a supervisor is live and the new binary itself predates the handoff (a `--rollback` to such a binary too): then `down --wait`, the same `install` (with no supervisor it replaces the file and applies the compatible migrations), and `up`.
-- **A breaking migration** (the error names it; `"$DAGQ" migrate --check` lists each with `compatible`): `install` refuses unless `--allow-breaking`, which drains: it stops the supervisor with `down --wait` (it waits for its runs, and for runs waiting on an ask, so show the person the open asks first), copies the queue to `backups/`, migrates, replaces the binary and starts the supervisor again with `up` in the mode it had. Pass what that `up` needs: `--claude EXE`, `--codex EXE` (the Codex workers' CLI, fixed like `--claude`), `--cmux EXE`, `--plugin-dir "$CLAUDE_PLUGIN_ROOT"`. That `up` carries the drained supervisor's `--auto-update` and `--max-waiting` over, so no second `up` is needed. A `--rollback` past a breaking migration is refused; the error names the backup.
-- `unsupported queue schema version ... install a newer dagq`: the queue was migrated past this binary; use the newer fixed binary. `run dagq migrate`: the binary has migrations the queue lacks; `install` or `up` applies the compatible ones, a breaking one goes as above.
+- **A breaking migration** (the error names it; `"$DAGQ" migrate --check` lists each with `compatible`): `install` refuses unless `--allow-breaking`, which drains: it stops the supervisor with `down --wait` (it waits for its runs, and for runs waiting on an ask, so show the person the open asks first), copies the queue to `backups/`, migrates, replaces the binary and starts the supervisor again with `up` in the mode it had. Pass what that `up` needs: `--claude EXE`, `--codex EXE` (the Codex workers' CLI, fixed like `--claude`), `--cmux EXE`, and `--plugin-dir PATH` only when the repository's instructions name one (never `$CLAUDE_PLUGIN_ROOT`, a per-version cache). That `up` carries the drained supervisor's `--auto-update` and `--max-waiting` over, so no second `up` is needed. A `--rollback` past a breaking migration is refused; the error names the backup.
+- `unsupported queue schema version ... install a newer dagq`: the queue was migrated past this binary; use the newer binary. `run dagq migrate`: the binary has migrations the queue lacks; `install` or `up` applies the compatible ones, a breaking one goes as above.
 
 ## Automatic updates (`up --auto-update`)
 
 ```sh
-"$DAGQ" up --plugin-dir "$CLAUDE_PLUGIN_ROOT" --auto-update   # with the same other flags as always
+"$DAGQ" up --auto-update   # with the same other flags as always
 ```
 
 `--auto-update` is written on the registration of the supervisor `up` starts or reuses, so turning it on needs no restart: an `up` whose build matches the running one answers `reused` and sets it. An `up` without the flag turns it off again, so every later `up` (including the `restart supervisor` one) must carry it. `status` shows `auto_update` (`enabled`, `state`, the last step) and each `supervisors[].auto_update`.

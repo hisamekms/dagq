@@ -254,7 +254,11 @@ fn skills_split_the_roles_of_inbox_planner_and_recover() {
     ] {
         assert!(recover.contains(section), "dagq-recover lacks {section}");
     }
-    assert!(recover.contains("\"$DAGQ\" up --plugin-dir \"$CLAUDE_PLUGIN_ROOT\""));
+    assert!(recover.contains("\"$DAGQ\" up"));
+    assert!(
+        !recover.contains("--plugin-dir \"$CLAUDE_PLUGIN_ROOT\""),
+        "dagq-recover must not pass the installed plugin's per-version cache to --plugin-dir"
+    );
     assert!(recover.contains("\"$DAGQ\" down --wait"));
     let stuck_exit =
         fs::read_to_string(plugin_root().join("skills/dagq-recover/reference/stuck-exit.md"))
