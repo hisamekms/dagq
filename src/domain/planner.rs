@@ -45,6 +45,11 @@ pub struct PlannerSession {
 /// registration before it counts as `lost`, as a run's startup is bounded.
 pub const PLANNER_STARTUP_SECS: i64 = 120;
 
+/// How long a person's planner stays open after its agent exited before the
+/// runtime closes its workspace and row (ADR-t1300-1): time for a person to
+/// read the last screen.
+pub const PERSON_PLANNER_CLOSE_GRACE_SECS: i64 = 60;
+
 /// What was looked at to judge a planner: whether cmux still lists its
 /// workspace, whether its wrapper's process is alive, the idle marker its
 /// agent's `Stop` hook wrote (only one no older than the session's last
@@ -140,6 +145,23 @@ impl PlannerSession {
 }
 
 impl PlannerSession {
+    /// Whether the runtime closes this person's planner now (ADR-t1300-1):
+    /// opened by a person, not closed, its workspace and wrapper recorded,
+    /// and its agent's exit recorded more than
+    /// [`PERSON_PLANNER_CLOSE_GRACE_SECS`] before `now`. A planner whose
+    /// wrapper is lost, or that is alive, is not.
+    pub fn person_exit_closes(&self, now: i64) -> bool {
+        self.origin == PlannerOrigin::Person
+            && self.closed_at.is_none()
+            && self.workspace_id.is_some()
+            && self.wrapper_pid.is_some()
+            && self
+                .exited_at
+                .is_some_and(|at| now - at > PERSON_PLANNER_CLOSE_GRACE_SECS)
+    }
+}
+
+impl PlannerSession {
     /// Whether nothing runs the planner's wrapper binary (its `runner`)
     /// any more, so the snapshot can go: its agent's exit is recorded, its
     /// wrapper's process is gone or its heartbeat older than
@@ -200,6 +222,41 @@ mod tests {
             idle: None,
             working: None,
             screen_idle: None,
+        }
+    }
+
+    #[test]
+    fn only_a_persons_planner_whose_agent_exited_past_the_grace_is_closed() {
+        let exited = PlannerSession {
+            exit_code: Some(0),
+            exited_at: Some(100),
+            ..session()
+        };
+        let past = 100 + PERSON_PLANNER_CLOSE_GRACE_SECS + 1;
+        assert!(exited.person_exit_closes(past));
+        // Within the grace, alive, closed, without a wrapper or opened by
+        // the runtime: not by this rule.
+        assert!(!exited.person_exit_closes(100 + PERSON_PLANNER_CLOSE_GRACE_SECS));
+        assert!(!session().person_exit_closes(past));
+        for other in [
+            PlannerSession {
+                closed_at: Some(105),
+                ..exited.clone()
+            },
+            PlannerSession {
+                wrapper_pid: None,
+                ..exited.clone()
+            },
+            PlannerSession {
+                workspace_id: None,
+                ..exited.clone()
+            },
+            PlannerSession {
+                origin: PlannerOrigin::Runtime,
+                ..exited.clone()
+            },
+        ] {
+            assert!(!other.person_exit_closes(past), "{other:?}");
         }
     }
 

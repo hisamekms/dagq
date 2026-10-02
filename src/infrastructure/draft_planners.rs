@@ -710,7 +710,7 @@ fn material_fields(
 /// Record what became of each draft of `planner`'s bundle not settled yet
 /// (`draft_bundle_members.outcome`, `draft_planner_settled`), inside the
 /// caller's write transaction, as the planner ends (ADR-t807-1).
-pub(super) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> Result<()> {
+pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> Result<()> {
     let members: Vec<TaskId> = conn
         .prepare(
             "SELECT task_id FROM draft_bundle_members

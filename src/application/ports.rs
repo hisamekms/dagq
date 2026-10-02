@@ -1892,6 +1892,10 @@ pub trait SessionRegistry {
     fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()>;
     /// Give the planner up; the first close and its error are kept.
     fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession>;
+    /// Close the planner's row as the runtime ends it and record
+    /// `planner_closed` with `payload` (ADR-t1300-1), once: `false` when the
+    /// row was closed already.
+    fn end_planner(&self, id: PlannerId, payload: &serde_json::Value) -> Result<bool>;
     fn planner(&self, id: PlannerId) -> Result<PlannerSession>;
     /// The planners not closed, oldest first; with `all`, every planner.
     fn planners(&self, all: bool) -> Result<Vec<PlannerSession>>;

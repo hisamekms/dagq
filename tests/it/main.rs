@@ -52,6 +52,7 @@ mod main_checkout;
 mod plan_review;
 mod plan_review_codex;
 mod plan_review_reasons;
+mod planner_close;
 mod planner_screen_idle;
 mod planner_slots;
 mod planner_timeout;

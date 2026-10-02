@@ -76,6 +76,25 @@ impl SqliteQueue {
         Ok(true)
     }
 
+    /// Close the row of planner `id` as the runtime ends it (ADR-t1300-1)
+    /// and record `planner_closed` with `payload` in the same transaction,
+    /// with what became of the drafts of its bundle (ADR-t807-1): `false`,
+    /// with nothing recorded, when the row was closed already.
+    pub fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let closed = tx.execute(
+            "UPDATE planners SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
+            params![id, now],
+        )? == 1;
+        if closed {
+            crate::infrastructure::draft_planners::settle_bundle(&tx, id, now)?;
+            super::run_log::queue_event(&tx, EventKind::PlannerClosed, payload)?;
+        }
+        tx.commit()?;
+        Ok(closed)
+    }
+
     /// The planners not closed that a `planner_unresponsive` names
     /// ([`Self::planner_silent`]), each with that event, oldest first. A
     /// planner a revise went to since is left out: the revise's own
@@ -151,6 +170,9 @@ impl SessionRegistry for SqliteQueue {
     }
     fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()> {
         SqliteQueue::planner_exited(self, id, wrapper_pid, exit_code)
+    }
+    fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
+        SqliteQueue::end_planner(self, id, payload)
     }
     fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
         SqliteQueue::planner_silent(self, id, payload)

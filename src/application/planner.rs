@@ -39,8 +39,8 @@ use super::{
     session::{OwnWorkspace, wrapper_refused},
 };
 use crate::domain::{
-    ActorContext, IdleProbe, PlannerId, PlannerOrigin, PlannerProbe, PlannerSession, PlannerState,
-    ProposalId, SessionRole, Task,
+    ActorContext, IdleProbe, PERSON_PLANNER_CLOSE_GRACE_SECS, PlannerCloseCode, PlannerId,
+    PlannerOrigin, PlannerProbe, PlannerSession, PlannerState, ProposalId, SessionRole, Task,
     actor_model::{ActorLaunch, ModelRole, REVISE_ESCALATION, RoleModels},
     language::{Language, with_instruction},
 };
@@ -330,6 +330,9 @@ pub struct PlannerWrapper<'a> {
     /// the wrapper and records no such workspace (task 806); `None`
     /// outside cmux.
     pub own_workspace: Option<OwnWorkspace<'a>>,
+    /// The workspace's terminal (stderr), where the wrapper of a person's
+    /// planner says when its workspace closes (ADR-t1300-1).
+    pub terminal: &'a mut dyn std::io::Write,
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
@@ -353,6 +356,7 @@ pub fn run_planner_session(
         files,
         pid,
         own_workspace,
+        terminal,
     } = ctx;
     // A wrapper started for a planner already given up (its create
     // reported failing although cmux made the workspace, task 806) closes
@@ -430,6 +434,18 @@ pub fn run_planner_session(
     };
     queue.planner_exited(id, pid, code)?;
     drop_own_runner(files, id, dir);
+    // A person's planner is closed by the supervisor after the grace
+    // (ADR-t1300-1); the terminal says so.
+    if queue
+        .planner(id)
+        .is_ok_and(|planner| planner.origin == PlannerOrigin::Person)
+    {
+        let notice = exited_notice(id, code, dir);
+        if let Err(error) = writeln!(terminal, "{notice}").and_then(|()| terminal.flush()) {
+            warn!(planner_id = %id, error = %error, "planner {id}: the closing notice could not be written: {error}");
+        }
+        return Ok(json!({"planner_id": id, "exit_code": code, "notice": notice}));
+    }
     Ok(json!({"planner_id": id, "exit_code": code}))
 }
 
@@ -658,11 +674,121 @@ pub fn close_abandoned_planners(
             screen_idle: None,
         };
         if planner.abandoned(&probe) {
-            queue.close_planner(planner.id, None)?;
-            closed.push(planner.id);
+            let payload = planner_closed_payload(
+                &planner,
+                PlannerCloseCode::Abandoned,
+                false,
+                &format!(
+                    "planner {}: its workspace is not listed and its wrapper is done; its record is closed",
+                    planner.id
+                ),
+            );
+            if queue.end_planner(planner.id, &payload)? {
+                closed.push(planner.id);
+            }
         }
     }
     Ok(closed)
+}
+
+/// The payload of the `planner_closed` the runtime records as it closes
+/// `planner` (ADR-t1300-1): who opened it, its workspace, why it closed
+/// (`code`, with `reason` in words), the agent's exit and whether the
+/// workspace was closed then. The screen is not in it.
+pub fn planner_closed_payload(
+    planner: &PlannerSession,
+    code: PlannerCloseCode,
+    workspace_closed: bool,
+    reason: &str,
+) -> Value {
+    json!({
+        "planner_id": planner.id,
+        "origin": planner.origin.as_str(),
+        "workspace_id": planner.workspace_id,
+        "proposal_id": planner.proposal_id,
+        "draft_task_id": planner.draft_task_id,
+        "finding_id": planner.finding_id,
+        "code": code.as_str(),
+        "reason": reason,
+        "exit_code": planner.exit_code,
+        "exited_at": planner.exited_at,
+        "workspace_closed": workspace_closed,
+    })
+}
+
+/// What [`close_exited_person_planners`] did: the planners it closed, and
+/// the workspaces it could not close (their rows stay open for the next
+/// try).
+#[derive(Debug, Default)]
+pub struct PersonPlannersClosed {
+    pub closed: Vec<PlannerId>,
+    pub failures: Vec<String>,
+}
+
+/// Close the person's planners whose agent exited more than
+/// [`PERSON_PLANNER_CLOSE_GRACE_SECS`] ago (ADR-t1300-1,
+/// [`PlannerSession::person_exit_closes`]): the workspace, when cmux's one
+/// listing of all windows has it, is closed the way a planner of the
+/// runtime's is (unpinned first), then the row, with `planner_closed`. A
+/// workspace not listed is left to [`close_abandoned_planners`]. A listing
+/// cmux fails to give closes nothing (the error is returned); a close that
+/// fails keeps the row open and is reported in `failures`.
+pub fn close_exited_person_planners(
+    queue: &dyn Queue,
+    cmux: &dyn WorkspaceBackend,
+    clock: &dyn Clock,
+) -> Result<PersonPlannersClosed> {
+    let now = clock.now();
+    let due: Vec<PlannerSession> = queue
+        .planners(false)?
+        .into_iter()
+        .filter(|planner| planner.person_exit_closes(now))
+        .collect();
+    let mut done = PersonPlannersClosed::default();
+    if due.is_empty() {
+        return Ok(done);
+    }
+    let listed = cmux
+        .listed_workspace_ids()
+        .context("the planners' workspaces could not be listed")?;
+    for planner in due {
+        let Some(workspace) = planner.workspace_id.as_deref() else {
+            continue;
+        };
+        if !listed.iter().any(|id| id.eq_ignore_ascii_case(workspace)) {
+            continue;
+        }
+        if let Err(error) = cmux.close(workspace) {
+            done.failures.push(format!(
+                "planner {}: its workspace {workspace} could not be closed: {error:#}",
+                planner.id
+            ));
+            continue;
+        }
+        let reason = format!(
+            "planner {} of a person: its agent exited (exit code {}) more than {PERSON_PLANNER_CLOSE_GRACE_SECS} seconds ago; its workspace and record are closed",
+            planner.id,
+            planner
+                .exit_code
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string()),
+        );
+        let payload =
+            planner_closed_payload(&planner, PlannerCloseCode::PersonExited, true, &reason);
+        if queue.end_planner(planner.id, &payload)? {
+            done.closed.push(planner.id);
+        }
+    }
+    Ok(done)
+}
+
+/// The line the wrapper of a person's planner prints once its agent exited
+/// (ADR-t1300-1): the supervisor, not the wrapper, closes the workspace
+/// after the grace.
+pub fn exited_notice(id: PlannerId, code: i32, dir: &Path) -> String {
+    format!(
+        "dagq closes this workspace in {PERSON_PLANNER_CLOSE_GRACE_SECS} seconds (planner {id}, exit code {code}, log at {})",
+        dir.join(PLANNER_DEBUG_LOG).display()
+    )
 }
 
 /// Remove the runner of every planner, closed or not, that nothing runs

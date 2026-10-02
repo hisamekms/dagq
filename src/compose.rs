@@ -2137,6 +2137,10 @@ same in one step",
             &SystemProcesses,
             &*self.generators.clock,
         );
+        // And the person's planners whose agent exited past the grace are
+        // closed (ADR-t1300-1); a failure is a warning, retried next time.
+        let exited =
+            planner::close_exited_person_planners(&queue, &recording, &*self.generators.clock);
         // And the runners of the planners nothing runs any more go.
         let runners = planner::remove_unused_planner_runners(
             &queue,
@@ -2174,7 +2178,11 @@ same in one step",
                 "[roles.planner] could not be read; the planner starts as before: {error}"
             ));
         }
-        for error in [swept.err(), runners.err()].into_iter().flatten() {
+        let exited = exited.map(|done| opened.warnings.extend(done.failures));
+        for error in [swept.err(), exited.err(), runners.err()]
+            .into_iter()
+            .flatten()
+        {
             opened.warnings.push(format!("{error:#}"));
         }
         Ok(serde_json::to_value(opened)?)
@@ -3103,11 +3111,20 @@ pub fn planner_session(
     let cmux = Cmux {
         executable: cmux.into(),
     };
-    planner_session_with_provider(db, id, &provider, plugin_dir, model, own_workspace(&cmux))
+    planner_session_with_provider(
+        db,
+        id,
+        &provider,
+        plugin_dir,
+        model,
+        own_workspace(&cmux),
+        &mut std::io::stderr(),
+    )
 }
 
 /// [`planner_session`] with any provider, in the working directory, in the
-/// workspace `own` (`None` knows none).
+/// workspace `own` (`None` knows none), writing what it tells the
+/// workspace's terminal to `terminal`.
 pub fn planner_session_with_provider(
     db: &Path,
     id: PlannerId,
@@ -3115,6 +3132,7 @@ pub fn planner_session_with_provider(
     plugin_dir: Option<&Path>,
     model: Option<(&str, &str)>,
     own: Option<OwnWorkspace<'_>>,
+    terminal: &mut dyn std::io::Write,
 ) -> Result<Value> {
     let queue = SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
         crate::domain::actor::ActorRole::Wrapper,
@@ -3130,6 +3148,7 @@ pub fn planner_session_with_provider(
             files: &LocalRunFiles,
             pid: std::process::id(),
             own_workspace: own,
+            terminal,
         },
         id,
         &planner::planner_dir(&planners_dir(db), id),

@@ -620,6 +620,33 @@ fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone
     for id in [person, runtime] {
         assert!(queue.planner(id).unwrap().closed_at.is_some());
     }
+    // Each close is recorded once, with why (ADR-t1300-1).
+    let mut closes: Vec<(i64, String, String, bool)> = queue
+        .latest_events_of("planner_closed", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| {
+            (
+                event.payload["planner_id"].as_i64().unwrap(),
+                event.payload["origin"].as_str().unwrap().to_owned(),
+                event.payload["code"].as_str().unwrap().to_owned(),
+                event.payload["workspace_closed"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    closes.sort();
+    assert_eq!(
+        closes,
+        [
+            (person.as_i64(), "person".into(), "abandoned".into(), false),
+            (
+                runtime.as_i64(),
+                "runtime".into(),
+                "abandoned".into(),
+                false
+            ),
+        ]
+    );
 }
 
 /// Task 696: the supervisor's sweep removes the runner of every planner

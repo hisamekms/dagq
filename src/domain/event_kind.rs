@@ -151,6 +151,7 @@ event_kinds! {
     PlanReviseSent => "plan_revise_sent",
     PlannerAnswerClaimed => "planner_answer_claimed",
     PlannerAnswerClosed => "planner_answer_closed",
+    PlannerClosed => "planner_closed",
     PlannerReleased => "planner_released",
     PlannerUnresponsive => "planner_unresponsive",
     PromptCleared => "prompt_cleared",
@@ -353,6 +354,9 @@ impl EventKind {
                 // revise with no planner, waiting past the planner timeout,
                 // gets its place (task 884).
                 | PlannerReleased
+                // A planner the runtime closed, a person's or its own
+                // (ADR-t1300-1).
+                | PlannerClosed
                 | SessionTurns
                 | SupervisorStarted
                 | SupervisorStopped
@@ -576,6 +580,7 @@ pub const OBSERVE_FINISHED: &str = EventKind::ObserveFinished.as_str();
 pub const OBSERVE_STARTED: &str = EventKind::ObserveStarted.as_str();
 pub const PLANNER_ANSWER_CLAIMED: &str = EventKind::PlannerAnswerClaimed.as_str();
 pub const PLANNER_ANSWER_CLOSED: &str = EventKind::PlannerAnswerClosed.as_str();
+pub const PLANNER_CLOSED: &str = EventKind::PlannerClosed.as_str();
 pub const PLANNER_RELEASED: &str = EventKind::PlannerReleased.as_str();
 pub const PLANNER_UNRESPONSIVE: &str = EventKind::PlannerUnresponsive.as_str();
 pub const PLAN_DECIDED: &str = EventKind::PlanDecided.as_str();
@@ -880,6 +885,7 @@ mod tests {
             (EventKind::PlanReviseSent, "plan_revise_sent"),
             (EventKind::PlannerAnswerClaimed, "planner_answer_claimed"),
             (EventKind::PlannerAnswerClosed, "planner_answer_closed"),
+            (EventKind::PlannerClosed, "planner_closed"),
             (EventKind::PlannerReleased, "planner_released"),
             (EventKind::PlannerUnresponsive, "planner_unresponsive"),
             (EventKind::PromptCleared, "prompt_cleared"),

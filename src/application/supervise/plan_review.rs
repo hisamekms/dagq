@@ -17,8 +17,8 @@ use crate::{
         PlanReviewApply, PlanReviewFailure, PlanReviewJob, PlannerHold, RevisingProposal,
         StatusFilter, TaskListItem, TaskQuery, job_start_failure,
         planner::{
-            PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView, open_runtime_planner,
-            planner_last_activity, planner_view,
+            self, PLANNER_DEBUG_LOG, PlannerLaunch, PlannerProbes, PlannerView,
+            open_runtime_planner, planner_last_activity, planner_view,
         },
         planner_idle_marker,
         prompt::{
@@ -29,7 +29,7 @@ use crate::{
     },
     domain::{
         MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanReviewDecision, PlanReviewVerdict,
-        PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
+        PlannerCloseCode, PlannerOrigin, PlannerState, Proposal, ProposalId, Task, TaskDetail,
         actor_model::{ActorLaunch, JobRoute, ModelRole, job_route},
         claim_defer::expected_files,
         next_to_review,
@@ -702,6 +702,7 @@ impl Supervisor<'_> {
     /// delivered yet, and end the runtime's planners that are done
     /// (ADR-0041 decisions 12, 13).
     fn tend_planners(&mut self, options: &LoopSettings) -> Result<()> {
+        self.close_exited_person_planners();
         if self.no_claude {
             return Ok(());
         }
@@ -1182,11 +1183,38 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Close the person's planners whose agent exited past the grace
+    /// (ADR-t1300-1, [`planner::close_exited_person_planners`]). A listing
+    /// that fails, or a workspace that does not close, closes no row and is
+    /// logged; the next pass tries again.
+    fn close_exited_person_planners(&mut self) {
+        match planner::close_exited_person_planners(
+            &*self.queue,
+            self.cmux,
+            &*self.generators.clock,
+        ) {
+            Ok(done) => {
+                for id in done.closed {
+                    info!(
+                        "planner {id} of a person exited past the grace; closed its workspace and record"
+                    );
+                }
+                for failure in done.failures {
+                    warn!("{failure}; tried again on the next pass");
+                }
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the exited planners of a person could not be closed: {error:#}");
+            }
+        }
+    }
+
     /// End the runtime's planners that are done: one idle with no revise of
     /// its own left is asked to `/exit` once, and closed after the exit
     /// timeout if it does not; one whose session is over is given up and
-    /// its workspace closed. A person's planner is never closed by the
-    /// runtime.
+    /// its workspace closed, with `planner_closed` (ADR-t1300-1). A
+    /// person's planner is closed by [`Self::close_exited_person_planners`]
+    /// once its agent exited.
     fn end_runtime_planners(&mut self, views: &[PlannerView]) -> Result<()> {
         let revising = self.queue.revising_proposals()?;
         for view in views
@@ -1208,12 +1236,50 @@ impl Supervisor<'_> {
                         self.cmux.exit_timeout().as_secs()
                     );
                 }
+                let mut workspace_closed = false;
                 if let Some(workspace) = &workspace
                     && self.cmux.exists(workspace)?
                 {
                     self.cmux.close(workspace)?;
+                    workspace_closed = true;
                 }
-                self.queue.close_planner(id, None)?;
+                let (code, reason) = if overdue {
+                    (
+                        PlannerCloseCode::RuntimeExitTimedOut,
+                        format!(
+                            "planner {id} of the runtime did not exit within {} seconds of /exit",
+                            self.cmux.exit_timeout().as_secs()
+                        ),
+                    )
+                } else {
+                    match view.state {
+                        PlannerState::Exited => (
+                            PlannerCloseCode::RuntimeExited,
+                            format!("planner {id} of the runtime: its agent exited"),
+                        ),
+                        PlannerState::Lost => (
+                            PlannerCloseCode::RuntimeLost,
+                            format!(
+                                "planner {id} of the runtime: its wrapper is lost or never registered"
+                            ),
+                        ),
+                        _ => (
+                            PlannerCloseCode::RuntimeSessionGone,
+                            format!(
+                                "planner {id} of the runtime: its workspace is not listed and its wrapper is done"
+                            ),
+                        ),
+                    }
+                };
+                self.queue.end_planner(
+                    id,
+                    &planner::planner_closed_payload(
+                        &view.planner,
+                        code,
+                        workspace_closed,
+                        &reason,
+                    ),
+                )?;
                 self.planner_exits.retain(|(sent, _)| *sent != id);
                 info!(
                     "planner {id} of the runtime ended ({})",

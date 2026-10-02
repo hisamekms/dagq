@@ -794,6 +794,20 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     supervise(&fx, &backend, &reviewer);
     assert!(backend.closed.lock().unwrap().contains(&"RT1".to_owned()));
     assert!(queue.planner(planners[0].id).unwrap().closed_at.is_some());
+    // The close is recorded once, with why (ADR-t1300-1).
+    let closes: Vec<Value> = queue
+        .latest_events_of("planner_closed", 10)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    assert_eq!(closes[0]["planner_id"], planners[0].id.as_i64());
+    assert_eq!(closes[0]["origin"], "runtime");
+    assert_eq!(closes[0]["code"], "runtime_exited");
+    assert_eq!(closes[0]["workspace_id"], "RT1");
+    assert_eq!(closes[0]["workspace_closed"], true);
+    assert_eq!(closes[0]["exit_code"], 0);
     assert_eq!(events(&mut queue, first, "plan_revise_lost").len(), 1);
     let open = queue.planners(false).unwrap();
     assert_eq!(open.len(), 1, "{open:?}");

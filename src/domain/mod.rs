@@ -338,6 +338,20 @@ string_enum!(PlannerOrigin {
     Runtime => "runtime",
 });
 
+// Why the runtime closed a planner (ADR-t1300-1), the `code` of its
+// `planner_closed`: a person's planner whose agent exited and whose grace
+// passed, a planner of the runtime's whose agent exited, whose wrapper was
+// lost, whose session is gone with its workspace, or which did not exit in
+// time after `/exit`, and a row whose workspace and wrapper were found gone.
+string_enum!(PlannerCloseCode {
+    PersonExited => "person_exited",
+    RuntimeExited => "runtime_exited",
+    RuntimeLost => "runtime_lost",
+    RuntimeSessionGone => "runtime_session_gone",
+    RuntimeExitTimedOut => "runtime_exit_timed_out",
+    Abandoned => "abandoned",
+});
+
 // How a planner session stands (see [`PlannerSession::state`]): `opening`
 // before its wrapper registers, `working` or `idle` while its agent runs,
 // `exited` once the agent exited in a workspace still open, `lost` when its
@@ -796,7 +810,7 @@ pub use plan_review::{
     MAX_PLAN_REVISES, PLAN_OPTIONS, PLAN_REVIEW_ASKER, PlanAnswer, PlanReviewAction,
     PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict, Reopen, next_to_review,
 };
-pub use planner::{IdleProbe, PlannerProbe, PlannerSession};
+pub use planner::{IdleProbe, PERSON_PLANNER_CLOSE_GRACE_SECS, PlannerProbe, PlannerSession};
 pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
 pub use reason::{Reason, ReasonCode};
 pub use receipt::{Receipt, ReceiptCheck, evidence_missing_reason, required_of};
