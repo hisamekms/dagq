@@ -63,6 +63,7 @@ event_kinds! {
     ClaimResumed => "claim_resumed",
     CleanupFailed => "cleanup_failed",
     ConcernDecided => "concern_decided",
+    ConcernSendBackEscalated => "concern_send_back_escalated",
     ConflictPrecheck => "conflict_precheck",
     ConflictReceiptRejected => "conflict_receipt_rejected",
     ConflictResolved => "conflict_resolved",
@@ -499,6 +500,11 @@ pub const CLEANUP_FAILED: &str = EventKind::CleanupFailed.as_str();
 /// What the runtime made of a review's `concern` (ADR-t451-1 decision 3):
 /// applied on the job's recommendation, or asked of a person and why.
 pub const CONCERN_DECIDED: &str = EventKind::ConcernDecided.as_str();
+/// A `send_back` the runtime applied on a review's `concern` that the live
+/// session did not fix, so that it went to a person in `approve_landing`
+/// after all (task 1392): the review `attempt` of the `concern_decided`,
+/// `why` and the `ask_id`.
+pub const CONCERN_SEND_BACK_ESCALATED: &str = EventKind::ConcernSendBackEscalated.as_str();
 pub const CONFLICT_PRECHECK: &str = EventKind::ConflictPrecheck.as_str();
 pub const CONFLICT_RECEIPT_REJECTED: &str = EventKind::ConflictReceiptRejected.as_str();
 pub const CONFLICT_RESOLVED: &str = EventKind::ConflictResolved.as_str();
@@ -802,6 +808,10 @@ mod tests {
             (EventKind::ClaimResumed, "claim_resumed"),
             (EventKind::CleanupFailed, "cleanup_failed"),
             (EventKind::ConcernDecided, "concern_decided"),
+            (
+                EventKind::ConcernSendBackEscalated,
+                "concern_send_back_escalated",
+            ),
             (EventKind::ConflictPrecheck, "conflict_precheck"),
             (
                 EventKind::ConflictReceiptRejected,

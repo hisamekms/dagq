@@ -326,7 +326,17 @@ impl Supervisor<'_> {
         {
             return Ok(phase);
         }
-        self.backfill_sent_back_concern(run, &history)?;
+        // Read again once it is backfilled: a revise from an applied
+        // send_back goes on as that concern (`sent_back_concern`).
+        let events = if self.backfill_sent_back_concern(run, &history)? {
+            self.queue.run_events(run.id())?
+        } else {
+            events
+        };
+        let history = RunHistory::from_events(&events);
+        let Some(anchor) = crate::domain::review_anchor(&events) else {
+            return self.start_review(run, session);
+        };
         let then = match anchor.kind.as_str() {
             event_kind::REVISE_REQUESTED => {
                 if let Some(live) = session.clone()
@@ -346,10 +356,11 @@ impl Supervisor<'_> {
                         run,
                         live,
                         attempt,
-                        Fix::Revise(
-                            serde_json::from_value(anchor.payload["reasons"].clone())
+                        Fix::Revise {
+                            reasons: serde_json::from_value(anchor.payload["reasons"].clone())
                                 .unwrap_or_default(),
-                        ),
+                            concern: sent_back_concern(&history, anchor),
+                        },
                         sent_at,
                         start,
                     )?;
@@ -415,6 +426,7 @@ impl Supervisor<'_> {
                         reasons: verdict.reasons,
                         summary: verdict.summary,
                         requested_by: review_job_before(run, &history, anchor.id),
+                        sent_back: None,
                     })
                 }
             }
@@ -473,6 +485,7 @@ impl Supervisor<'_> {
                         reasons: verdict.reasons,
                         summary: verdict.summary,
                         requested_by: review_job(run, anchor),
+                        sent_back: None,
                     }),
                     Err(_) => None,
                 }
@@ -770,13 +783,14 @@ impl Supervisor<'_> {
     /// the latest review is a concern with no `concern_decided` after it,
     /// and a revise request followed it, which only an applied `send_back`
     /// records. A `revise_unsent` after the request records it as `unsent`.
+    /// Whether it recorded one.
     fn backfill_sent_back_concern(
         &mut self,
         run: &TaskRun,
         history: &RunHistory<'_>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(review) = history.last(event_kind::REVIEW_FINISHED) else {
-            return Ok(());
+            return Ok(false);
         };
         // A send-back one of the review's subagents decided while the
         // verdict's own concern went lighter was no decision of that
@@ -786,18 +800,19 @@ impl Supervisor<'_> {
             || history.has_after(review.id, event_kind::CONCERN_DECIDED)
             || !history.has_after(review.id, event_kind::REVISE_REQUESTED)
         {
-            return Ok(());
+            return Ok(false);
         }
         let (Ok(verdict), Some(attempt)) = (verdict_of(review), review.payload["attempt"].as_u64())
         else {
-            return Ok(());
+            return Ok(false);
         };
         let escalated = history
             .has_after(review.id, event_kind::REVISE_UNSENT)
             .then_some(EscalatedBecause::Unsent);
         self.for_job(&ActorContext::review_job(run.id(), attempt), |sv| {
             sv.record_concern_decided(run, attempt as usize, &verdict, escalated)
-        })
+        })?;
+        Ok(true)
     }
     fn adopted_concern(
         &mut self,
@@ -841,6 +856,7 @@ impl Supervisor<'_> {
                 reasons: verdict.reasons,
                 summary: verdict.summary,
                 requested_by: job,
+                sent_back: None,
             },
         };
         Ok(Err(then))
@@ -938,7 +954,26 @@ fn agents_ask(
         reasons: combined.reasons,
         summary: combined.summary,
         requested_by: review_job(run, review),
+        sent_back: None,
     }
+}
+
+/// The concern whose `send_back` the revise request `anchor` applied: the
+/// review before it is a concern whose `concern_decided` (recorded after
+/// the request, or backfilled) says it was applied (task 1392).
+fn sent_back_concern(history: &RunHistory<'_>, anchor: &RunEvent) -> Option<SentBackConcern> {
+    let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED)?;
+    let attempt = review.payload["attempt"].as_u64()?;
+    let applied = history.events().iter().any(|event| {
+        event.id > review.id
+            && event.kind == event_kind::CONCERN_DECIDED
+            && event.payload["attempt"].as_u64() == Some(attempt)
+            && event.payload["applied"].as_bool() == Some(true)
+    });
+    if !applied {
+        return None;
+    }
+    SentBackConcern::of(&verdict_of(review).ok()?, attempt as usize)
 }
 
 /// The verdict a `review_finished` recorded, with a concern's

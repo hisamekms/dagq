@@ -7,12 +7,12 @@
 //! `send_back: <reason>`), and the decisions from the events listed in
 //! [`DECIDED_WITHOUT_ASK`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{EventId, RunEvent, TaskId};
+use super::{EventId, RunEvent, RunId, TaskId};
 use crate::domain::ANSWERED_BY_RUNTIME;
 
 /// The recommendations and the AI's own decisions of a window.
@@ -43,6 +43,10 @@ pub struct DecidedWithoutAsk {
     pub event: &'static str,
     pub ask_kind: &'static str,
     pub applies: fn(&Value) -> bool,
+    /// The event that records a decision of `event` going to a person
+    /// after all, matched by the run and the payload's `attempt`: a
+    /// decision it names is not counted, wherever it falls.
+    pub escalated_by: Option<&'static str>,
 }
 
 /// The records of the AI's own decisions, per ask kind. The later
@@ -56,6 +60,7 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         event: "follow_up_adopted",
         ask_kind: "planner_question",
         applies: |payload| payload["by"].as_str() == Some("planner") && payload["ask_id"].is_null(),
+        escalated_by: None,
     },
     DecidedWithoutAsk {
         // A plan review's sure concern the runtime applied as its
@@ -64,14 +69,18 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         event: crate::domain::event_kind::PLAN_CONCERN_DECIDED,
         ask_kind: "approve_plan",
         applies: |payload| payload["applied"].as_bool() == Some(true),
+        escalated_by: None,
     },
     DecidedWithoutAsk {
         // A review's concern the runtime landed or sent back on the job's
         // recommendation (ADR-t451-1 decision 3); one asked of a person
-        // records `applied: false`.
+        // records `applied: false`, and a send_back the session did not
+        // fix, which reached a person in approve_landing after all,
+        // `concern_send_back_escalated` (task 1392).
         event: crate::domain::event_kind::CONCERN_DECIDED,
         ask_kind: "approve_landing",
         applies: |payload| payload["applied"].as_bool() == Some(true),
+        escalated_by: Some(crate::domain::event_kind::CONCERN_SEND_BACK_ESCALATED),
     },
 ];
 
@@ -86,6 +95,21 @@ pub fn recommendations(
 ) -> Recommendations {
     let mut stats = Recommendations::default();
     let mut recommended: HashMap<String, String> = HashMap::new();
+    let escalated: HashSet<(&str, Option<&RunId>, Option<u64>)> = events
+        .iter()
+        .map(|event| {
+            (
+                event.kind.as_str(),
+                event.run_id.as_ref(),
+                event.payload["attempt"].as_u64(),
+            )
+        })
+        .filter(|(kind, _, _)| {
+            DECIDED_WITHOUT_ASK
+                .iter()
+                .any(|decided| decided.escalated_by == Some(*kind))
+        })
+        .collect();
     for event in events.iter().filter(|event| event.id <= upto) {
         let payload = &event.payload;
         match event.kind.as_str() {
@@ -116,6 +140,15 @@ pub fn recommendations(
                 for decided in DECIDED_WITHOUT_ASK
                     .iter()
                     .filter(|decided| decided.event == kind && (decided.applies)(payload))
+                    .filter(|decided| {
+                        decided.escalated_by.is_none_or(|by| {
+                            !escalated.contains(&(
+                                by,
+                                event.run_id.as_ref(),
+                                payload["attempt"].as_u64(),
+                            ))
+                        })
+                    })
                 {
                     *stats
                         .decided_without_ask
@@ -342,6 +375,47 @@ mod tests {
         assert_eq!(
             stats.decided_without_ask,
             BTreeMap::from([("approve_landing".to_owned(), 2)])
+        );
+    }
+
+    fn of_run(run: &str, mut event: RunEvent) -> RunEvent {
+        event.run_id = Some(RunId::new(run).unwrap());
+        event
+    }
+
+    /// A send_back the runtime applied that the session did not fix went
+    /// to a person after all (task 1392): it is not counted, while a land
+    /// and a send_back of another run or another review are.
+    #[test]
+    fn an_applied_send_back_that_reached_an_approve_landing_is_not_counted() {
+        let decided = |id, run, attempt, recommendation| {
+            of_run(
+                run,
+                event(
+                    id,
+                    "concern_decided",
+                    json!({"attempt": attempt, "applied": true, "recommendation": recommendation}),
+                ),
+            )
+        };
+        let events = vec![
+            decided(1, "r1", 1, "send_back"),
+            decided(2, "r1", 2, "send_back"),
+            decided(3, "r2", 1, "send_back"),
+            decided(4, "r3", 1, "land"),
+            of_run(
+                "r1",
+                event(
+                    5,
+                    "concern_send_back_escalated",
+                    json!({"attempt": 2, "why": "the session ended after revise 2", "ask_id": 9}),
+                ),
+            ),
+        ];
+        let stats = recommendations(&events, EventId::new(0), EventId::new(5), |_| true);
+        assert_eq!(
+            stats.decided_without_ask,
+            BTreeMap::from([("approve_landing".to_owned(), 3)])
         );
     }
 }

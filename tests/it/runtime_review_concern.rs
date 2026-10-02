@@ -193,6 +193,86 @@ fn a_high_send_back_revises_the_live_session() {
     assert_eq!(reviewer.prompts().len(), 2);
 }
 
+/// A worker that takes one revise request and ends without rewriting its
+/// receipt.
+const ENDS_ON_REVISE: &str = "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
+     while [ ! -f \"$MESSAGE\" ]; do sleep 0.1; done; rm \"$MESSAGE\"";
+
+/// The ask after a `send_back` the runtime applied that the session did
+/// not fix (task 1392): it says the review returned the concern and the
+/// runtime applied its recommendation, and why the session did not fix
+/// it, with the concern's reasons and no recommendation of its own; the
+/// escalation is recorded and stats does not count the send_back among
+/// the judgements made without an approve_landing.
+fn assert_asked_after_the_applied_send_back(db: &Path, run: &TaskRun, why: &str) {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let decided = concern_decided(&detail);
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["applied"], true);
+    let ask = landing_ask(&queue, run);
+    assert_eq!(ask.recommendation, None);
+    assert_eq!(ask.confidence, None);
+    assert_eq!(ask.reason_category, AskReason::Scope);
+    for part in [
+        &format!(
+            "returned concern (the review recommended send_back (high confidence), which the runtime applied, but {why}): judged"
+        ),
+        "\n- a finding",
+    ] {
+        assert!(ask.question.contains(part), "{part} in {}", ask.question);
+    }
+    assert!(
+        !ask.question.contains("returned revise"),
+        "{}",
+        ask.question
+    );
+    assert!(
+        !ask.question.contains("The review recommends"),
+        "{}",
+        ask.question
+    );
+    let escalated = payloads(&detail, "concern_send_back_escalated");
+    assert_eq!(
+        escalated,
+        [&json!({"attempt": 1, "why": why, "ask_id": ask.id})]
+    );
+    let kinds = event_kinds(&detail);
+    assert!(position(&kinds, "ask_opened") < position(&kinds, "concern_send_back_escalated"));
+    let stats = runtime::stats(db, &Default::default()).unwrap();
+    assert!(
+        stats["recommendations"]["decided_without_ask"]
+            .get("approve_landing")
+            .is_none(),
+        "{}",
+        stats["recommendations"]
+    );
+}
+
+/// A `send_back` of high confidence the runtime applied, whose session
+/// ended without fixing it, asks a person as that concern
+/// ([`assert_asked_after_the_applied_send_back`]).
+#[test]
+fn an_applied_send_back_the_session_did_not_fix_asks_as_the_concern() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, ENDS_ON_REVISE);
+    let reviewer = TestReviewer::new(&[concern("send_back", "high", None)]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_asked_after_the_applied_send_back(
+        &db,
+        &run,
+        "the session ended before it rewrote the receipt after revise 1",
+    );
+}
+
 /// A concern the runtime does not apply asks a person with the job's
 /// recommendation, confidence and reason; the session exits and its
 /// workspace closes before the ask. Here a `discard` of high confidence,
@@ -473,4 +553,82 @@ fn an_adopter_asks_with_the_reasons_of_the_subagent_that_sent_the_run_back() {
         }
         assert!(!ask.question.contains("- fine"), "{}", ask.question);
     }
+}
+
+/// A supervisor that died after it sent a concern back on the job's
+/// recommendation, having recorded its `concern_decided` or not (the
+/// adopter backfills it): its adopter waits for the live session on the
+/// revise, and when the session ends without fixing it, asks as that
+/// concern as the live supervisor does
+/// ([`assert_asked_after_the_applied_send_back`]).
+#[test]
+fn an_adopter_asks_as_the_concern_when_the_session_does_not_fix_its_send_back() {
+    for recorded in [true, false] {
+        adopt_an_unfixed_send_back(recorded);
+    }
+}
+
+fn adopt_an_unfixed_send_back(recorded: bool) {
+    let (_dir, repo, db) = fixture();
+    // The session ends, its receipt not rewritten, once `$EXIT.go` exists.
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        "commit work; receipt \"$(git rev-parse HEAD)\"; idle; \
+         while [ ! -f \"$EXIT.go\" ]; do sleep 0.05; done",
+    ));
+    let run = left_by_a_dead_supervisor(
+        &repo,
+        &db,
+        &backend,
+        vec![
+            (EventKind::ReviewStarted, json!({"attempt": 1})),
+            (
+                EventKind::ReviewFinished,
+                json!({"verdict": "concern", "reasons": ["a finding"], "summary": "judged",
+                       "attempt": 1, "recommendation": "send_back", "confidence": "high",
+                       "reason_category": null}),
+            ),
+        ],
+    );
+    // The request is sent a second after the session's idle marker, which
+    // then predates it. No `revise-1.txt` is written, so the adopter does
+    // not type it again.
+    await_second_after(modified_second(&run.idle_marker_path().unwrap()));
+    let queue = SqliteQueue::open(&db).unwrap();
+    let decided = (
+        EventKind::ConcernDecided,
+        json!({"attempt": 1, "recommendation": "send_back", "confidence": "high",
+               "reason_category": null, "applied": true, "escalated_because": null}),
+    );
+    for (kind, payload) in [(
+        EventKind::ReviseRequested,
+        json!({"attempt": 1, "reasons": ["a finding"], "sent_at": unix_second_now()}),
+    )]
+    .into_iter()
+    .chain(recorded.then_some(decided))
+    {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    let ends = {
+        let (db, run) = (db.clone(), run.clone());
+        thread::spawn(move || {
+            wait_until(&db, Duration::from_secs(30), |queue| {
+                !adoption_events(&queue.show(TaskId::new(1)).unwrap()).is_empty()
+            });
+            fs::write(
+                exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+                "",
+            )
+            .unwrap();
+        })
+    };
+    let outcome = adopt(&db, &repo, &backend, Vec::new());
+    joined(ends, "the session to be let end");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_asked_after_the_applied_send_back(
+        &db,
+        &run,
+        "the session ended before it rewrote the receipt after revise 1",
+    );
 }

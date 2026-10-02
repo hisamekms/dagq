@@ -2,6 +2,7 @@
 //! ([`ReviseWatch`], ADR-0027 decision 2).
 
 use super::*;
+use crate::domain::AskConfidence;
 
 /// The phase an idle the screen showed during a revise or a conflict
 /// request is recorded with (`idle_inferred`).
@@ -36,8 +37,12 @@ pub(super) struct ReviseWatch {
 
 /// What the live session was asked to fix (ADR-0027 decisions 2 and 4).
 pub(super) enum Fix {
-    /// A `revise` verdict's findings.
-    Revise(Vec<String>),
+    /// A `revise` verdict's findings, or those of a `concern` whose
+    /// `send_back` the runtime applied (`concern`, ADR-t451-1 decision 3).
+    Revise {
+        reasons: Vec<String>,
+        concern: Option<SentBackConcern>,
+    },
     /// A conflict with main found after a `pass`; the passed verdict, for
     /// the ask if the session does not resolve it.
     Conflict(ReviewVerdict),
@@ -48,15 +53,19 @@ impl Fix {
     /// `conflict request N`.
     pub(super) fn label(&self, attempt: usize) -> String {
         match self {
-            Fix::Revise(_) => format!("revise {attempt}"),
+            Fix::Revise { .. } => format!("revise {attempt}"),
             Fix::Conflict(_) => format!("conflict request {attempt}"),
         }
     }
 
     /// The `approve_landing` ask when the session cannot fix it: a revise
-    /// asks with `summary`; a conflict asks with its passed verdict.
-    /// `requested_by` is the review job the ask acts on, if any
-    /// ([`AfterExit::Ask`]).
+    /// asks with `summary`; a conflict asks with its passed verdict. A
+    /// `send_back` the runtime applied on a concern asks as that concern,
+    /// saying the runtime applied it and `why` the session did not fix it,
+    /// and records the escalation (task 1392). Neither carries a
+    /// recommendation: the one given was applied, and the ask is about
+    /// what the session did after it. `requested_by` is the review job the
+    /// ask acts on, if any ([`AfterExit::Ask`]).
     pub(super) fn ask(
         &self,
         summary: String,
@@ -64,7 +73,27 @@ impl Fix {
         requested_by: Option<ActorContext>,
     ) -> AfterExit {
         match self {
-            Fix::Revise(reasons) => AfterExit::Ask {
+            Fix::Revise {
+                reasons,
+                concern: Some(concern),
+            } => AfterExit::Ask {
+                decision: ReviewDecision::Concern,
+                reasons: reasons.clone(),
+                summary: concern.summary.clone(),
+                why: Some(concern.why(&why)),
+                recommendation: None,
+                confidence: None,
+                reason_category: None,
+                requested_by,
+                sent_back: Some(SentBackEscalation {
+                    attempt: concern.attempt,
+                    why,
+                }),
+            },
+            Fix::Revise {
+                reasons,
+                concern: None,
+            } => AfterExit::Ask {
                 decision: ReviewDecision::Revise,
                 reasons: reasons.clone(),
                 summary,
@@ -73,6 +102,7 @@ impl Fix {
                 confidence: None,
                 reason_category: None,
                 requested_by,
+                sent_back: None,
             },
             // The ask is about the conflict, not a concern's recommendation.
             Fix::Conflict(verdict) => AfterExit::Ask {
@@ -84,9 +114,47 @@ impl Fix {
                 confidence: None,
                 reason_category: None,
                 requested_by,
+                sent_back: None,
             },
         }
     }
+}
+
+/// A review's `concern` whose `send_back` the runtime applied as a revise
+/// (`concern_decided` with `applied: true`, ADR-t451-1 decision 3).
+pub(super) struct SentBackConcern {
+    /// The review attempt that returned it.
+    pub(super) attempt: usize,
+    pub(super) summary: String,
+    pub(super) confidence: Option<AskConfidence>,
+}
+
+impl SentBackConcern {
+    /// The concern of review `attempt`, when `verdict` is one.
+    pub(super) fn of(verdict: &ReviewVerdict, attempt: usize) -> Option<Self> {
+        (verdict.verdict == ReviewDecision::Concern).then(|| SentBackConcern {
+            attempt,
+            summary: verdict.summary.clone(),
+            confidence: verdict.confidence,
+        })
+    }
+
+    /// Why the ask is a person's: the runtime applied the review's
+    /// `send_back`, and the session did not fix it (`why`).
+    pub(super) fn why(&self, why: &str) -> String {
+        format!(
+            "the review recommended send_back ({} confidence), which the runtime applied, but {why}",
+            self.confidence.map_or("no", AskConfidence::as_str)
+        )
+    }
+}
+
+/// The escalation an `approve_landing` ask records after a `send_back` the
+/// runtime applied (`concern_send_back_escalated`, task 1392): the review
+/// `attempt` of its `concern_decided` and why the session did not fix it.
+pub(super) struct SentBackEscalation {
+    pub(super) attempt: usize,
+    pub(super) why: String,
 }
 
 pub(super) enum ReviseOutcome {

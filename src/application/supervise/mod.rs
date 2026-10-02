@@ -1248,6 +1248,10 @@ enum AfterExit {
         /// did not carry out), which is the supervisor's own step, or when
         /// an adopter cannot read the job's attempt from the history.
         requested_by: Option<ActorContext>,
+        /// A `send_back` the runtime applied on a `concern` that the
+        /// session did not fix: the ask records the escalation
+        /// (`concern_send_back_escalated`, task 1392).
+        sent_back: Option<SentBackEscalation>,
     },
     /// Record `review_failed` and give the lease back.
     ReviewFailed {
@@ -2847,7 +2851,7 @@ impl Supervisor<'_> {
                 match outcome {
                     ReviseOutcome::Rewritten(head) => {
                         let kind = match watch.fix {
-                            Fix::Revise(_) => EventKind::ReviseFinished,
+                            Fix::Revise { .. } => EventKind::ReviseFinished,
                             Fix::Conflict(_) => EventKind::ConflictResolved,
                         };
                         self.queue.record_runtime_event(
@@ -2887,7 +2891,7 @@ impl Supervisor<'_> {
                                     ),
                                 );
                                 let kind = match watch.fix {
-                                    Fix::Revise(_) => EventKind::ReviseReceiptRejected,
+                                    Fix::Revise { .. } => EventKind::ReviseReceiptRejected,
                                     Fix::Conflict(_) => EventKind::ConflictReceiptRejected,
                                 };
                                 self.queue.record_runtime_event(
@@ -2950,6 +2954,7 @@ impl Supervisor<'_> {
                         confidence,
                         reason_category,
                         requested_by,
+                        sent_back,
                     } => {
                         let open = |sv: &mut Self| {
                             sv.open_landing_ask(
@@ -2967,6 +2972,13 @@ impl Supervisor<'_> {
                             Some(job) => self.for_job(job, open)?,
                             None => open(self)?,
                         };
+                        if let Some(sent_back) = sent_back {
+                            self.queue.record_runtime_event(
+                                run.id(),
+                                EventKind::ConcernSendBackEscalated,
+                                json!({"attempt": sent_back.attempt, "why": sent_back.why, "ask_id": ask}),
+                            )?;
+                        }
                         info!(run_id = %run.id(), "run {} waits for a person in ask {ask}", run.id());
                         self.queue.release_lease(run.id(), &self.token)?;
                         Ok(Step::Done(Box::new(self.queue.run(run.id())?)))

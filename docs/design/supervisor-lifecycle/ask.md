@@ -4,8 +4,8 @@ type: design
 title: "`ask` / `answer` / `asks`"
 status: current
 created: 2026-09-26
-updated: 2026-10-02 # task 1389: reasoned_option
-last_verified: 2026-10-02 # task 1389
+updated: 2026-10-03 # task 1392: concern_send_back_escalated
+last_verified: 2026-10-03 # task 1392
 scope: runtime
 related:
   - adr-t451-1
@@ -57,5 +57,5 @@ related:
 - **欄**: askの行の`recommendation`（推奨のoptionの文）と`confidence`（`high` / `low`）。schema v59（`0059_ask_recommendation.sql`、compatible）で足し、無いaskと既存のaskは両方NULL。`domain::AskConfidence`が値を持ち、行を読むときは知らない値をnullとして読む。
 - **CLI**: `dagq ask ... [--recommend <option>] [--confidence <high|low>]`。どちらも全kindで任意で（`worker_question`にも求めない。`blocked`での必須化はtask 1319）、片方だけでもよい。`--recommend`は前後の空白を除いて比べ、空なら無しとして扱い、askのoptions（`--option`と、findingの`blocked`と`stalled`にruntimeが足す`propose` / `dismiss`。`NewAsk::offered_options`）のどれでもなければ`NewAsk::validate`が理由（推奨とoptionsの一覧）つきで拒む。queue serviceのクライアントモードの`ask`と、queue serviceより前のCodexのturnのrun dirの要求も同じ欄を運ぶ。同じ（task、run、kind、finding）のopenなaskを返すとき（`created: false`）は、既存のaskの推奨を書き換えない。
 - **表示**: `ask_opened`のpayloadと、`Ask`（`ask`・`asks`・`show`の`asks`の出力）、`status`の`asks`と`watch`の`ask_opened`の行に`recommendation`と`confidence`を載せる（無ければnull）。inboxは人にaskを見せるとき、推奨と確信度があれば尋ねたAIのものとして添え、自分の推奨は足さない（`dagq-inbox` skill）。
-- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録に残す。今数えるのはruntimeのplannerが`planner_question`を経ずに採用したfollow_up（`follow_up_adopted`の`by: planner`で`ask_id`がnull。[Draft planners](draft-planners.md)）、runtimeが適用したplan reviewの`concern`（[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`の`applied: true`）、[Review](review.md#aiが決めるconcern未実装)がjobの推奨を適用したconcern（`concern_decided`の`applied: true`を`approve_landing`に）。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のaskの無いfindingは、その実装taskが`domain::stats::recommendations::DECIDED_WITHOUT_ASK`に足す。
+- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録に残す。今数えるのはruntimeのplannerが`planner_question`を経ずに採用したfollow_up（`follow_up_adopted`の`by: planner`で`ask_id`がnull。[Draft planners](draft-planners.md)）、runtimeが適用したplan reviewの`concern`（[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`の`applied: true`）、[Review](review.md#aiが決めるconcern未実装)がjobの推奨を適用したconcern（`concern_decided`の`applied: true`を`approve_landing`に。適用した`send_back`をsessionが直さずに`approve_landing`のaskになったものは`concern_send_back_escalated`を記録して数えない。task 1392）。[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のaskの無いfindingは、その実装taskが`domain::stats::recommendations::DECIDED_WITHOUT_ASK`に足す。
 - **集計**: [Stats](stats.md#aiの推奨と確信度の集計)の`recommendations`。askのkindごとの「推奨を持つaskの答えのうち、answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。

@@ -618,7 +618,7 @@ impl Supervisor<'_> {
         match verdict.verdict {
             ReviewDecision::Pass => self.precheck(run, session, verdict, Some(job.clone())),
             ReviewDecision::Concern => self.act_on_concern(run, session, verdict, job, attempt),
-            ReviewDecision::Revise => self.send_revise(run, session, verdict, job),
+            ReviewDecision::Revise => self.send_revise(run, session, verdict, job, None),
         }
     }
     /// Whether the round of `run` has a revise left.
@@ -645,7 +645,10 @@ impl Supervisor<'_> {
         let combined = combined_verdict(&verdict, route, parent_decides);
         match route.destination {
             Destination::SendBack => {
-                let phase = self.send_revise(run, session, combined, job)?;
+                let concern = parent_concern
+                    .then(|| SentBackConcern::of(&verdict, attempt))
+                    .flatten();
+                let phase = self.send_revise(run, session, combined, job, concern)?;
                 if parent_concern {
                     // As `act_on_concern` records a send_back it could not
                     // apply.
@@ -695,7 +698,8 @@ impl Supervisor<'_> {
                 return self.precheck(run, session, verdict, Some(job.clone()));
             }
             ConcernDecision::SendBack => {
-                let phase = self.send_revise(run, session, verdict.clone(), job)?;
+                let concern = SentBackConcern::of(&verdict, attempt);
+                let phase = self.send_revise(run, session, verdict.clone(), job, concern)?;
                 let unsent =
                     (!matches!(phase, Phase::Revise(_))).then_some(EscalatedBecause::Unsent);
                 self.record_concern_decided(run, attempt, &verdict, unsent)?;
@@ -731,13 +735,16 @@ impl Supervisor<'_> {
     /// Send `verdict`'s reasons to the live session as the next revise (a
     /// `revise`, or a `concern` the job recommends sending back), the
     /// round's limit already checked; a person is asked when the session
-    /// ended or the request could not be sent.
+    /// ended or the request could not be sent. `concern` is the concern
+    /// whose `send_back` this applies, which the ask names when the session
+    /// does not fix it (task 1392).
     fn send_revise(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
         verdict: ReviewVerdict,
         job: &ActorContext,
+        concern: Option<SentBackConcern>,
     ) -> Result<Phase> {
         let carries = verdict.verdict == ReviewDecision::Concern;
         let ask = |why: String, verdict: ReviewVerdict, session| {
@@ -843,7 +850,10 @@ impl Supervisor<'_> {
             run,
             live,
             attempt,
-            Fix::Revise(verdict.reasons),
+            Fix::Revise {
+                reasons: verdict.reasons,
+                concern,
+            },
             sent_at,
             Some(StartCheck::new(
                 "revise request",
@@ -1514,6 +1524,7 @@ fn landing_ask(
             summary: verdict.summary,
             why,
             requested_by: Some(job.clone()),
+            sent_back: None,
         },
     ))
 }
