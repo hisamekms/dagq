@@ -1428,8 +1428,11 @@ enum Afterwards {
     ReregisterAndDie,
     /// Come back under the old build (the exec failed) and heartbeat on.
     ExecFails,
-    /// Register again like `Reregister`, next to a stale row of the same pid
-    /// and build started before the handoff was asked for.
+    /// Register again under a token of its own without taking the handoff
+    /// under its token first, next to a stale row of the same pid and build
+    /// started before the handoff was asked for: the install's wait sees the
+    /// token still asked until it deregisters, then only the stale row and
+    /// the new one of the pid.
     ReregisterOverStale,
     /// Deregister instead of taking the handoff, leaving only a stale row
     /// of the same pid and build.
@@ -1500,9 +1503,15 @@ fn take_as(fixture: &Fixture, processes: &FakeProcesses, token: &str, pid: u32, 
         Afterwards::ExecFails => "0.0.1",
         _ => VERSION,
     };
-    queue
-        .resume_registration(&LeaseToken::new(token), pid, version)
-        .unwrap();
+    // Taking the handoff under its token first would let the install's
+    // wait see that token taken between this and the deregistration below,
+    // and report it rather than the successor (task 1254): the pid
+    // registers again straight from the request.
+    if !matches!(then, Afterwards::ReregisterOverStale) {
+        queue
+            .resume_registration(&LeaseToken::new(token), pid, version)
+            .unwrap();
+    }
     let serving = match then {
         Afterwards::Reregister | Afterwards::ReregisterAndDie | Afterwards::ReregisterOverStale => {
             let again = format!("{token}-again");
@@ -1643,8 +1652,8 @@ fn the_update_job_follows_a_pid_that_registered_again_under_the_new_build() {
 
 /// Of two rows of the pid under the new build, the one it made after the
 /// handoff was asked for is its successor, not a stale one of a reused pid
-/// started before (task 633): both the install's wait and the watch follow
-/// it.
+/// started before (task 633): the install's wait follows it, and the
+/// watch goes on under it.
 #[test]
 fn the_update_job_follows_the_row_registered_after_the_handoff_over_a_stale_one() {
     let (report, calls, restarted, _) =
