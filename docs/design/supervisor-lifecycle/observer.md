@@ -8,6 +8,7 @@ updated: 2026-10-02
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t451-1
   - design-supervisor-lifecycle
   - adr-0044
   - adr-0051
@@ -65,3 +66,12 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 - **finding**: `forecast.*`のKPIの目標割れは`kpi.breaches`に`finding_kind: forecast`、`subject`は接頭辞`forecast.`を除いた`<指標>/<層>`（例: `p50_error_ratio/change=feature`、`p90_hit_rate/all`）で載り（`domain::kpi::observe::finding_kind`と`subject`）、observerは種類`forecast`・対象`queue`のfindingを記録か更新する。根拠・日と週のまとめ・解消・`--propose`はKPIの目標割れと同じで、改善のproposalの上限と優先度（ADR-0051の決定25・26）も同じく効く。`blocked`のaskにはせず、人には上げない。
 - 見込みのsnapshotのeventは記帳のeventとしてobserverを起こさない。`dagq forecast`は読み取りのコマンドで、promptの読むコマンドに並ぶ。
 - **test**: `domain::kpi::observe`のunit test `a_forecast_breach_is_a_forecast_finding_and_its_scoring_is_listed`と、`tests/it/runtime_observer.rs`の`observe_reads_the_forecast_errors_and_a_forecast_breach_becomes_a_forecast_finding`（p90を過ぎて完了したtaskの答え合わせが入力に載り、p90の的中率の目標割れが種類`forecast`のfindingになり、`kpi`のfindingにはならない）。
+
+## 今後の姿: 人が要る見立てだけをblockedにする（未実装、ADR-t451-1）<a id="人が要る見立てだけをblockedにする未実装"></a>
+
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定2（ADR-0047決定4・23をamends）。**未実装**で、今のobserverは「待てば解ける」見立てでも`blocked`のaskを上げうる。実装は後続のtaskが行う。
+
+- **prompt**: 見立てが「待てば解ける」「leave it」のものは`blocked`のaskにせず、findingの`detail`に見立てを書いて記録・更新だけにする。`blocked`のaskにするのは、見立てが人の判断（`--because scope` / `discard`。`authentication`・`cost`はqueueの控えのaskが持つ）か、runtimeと復旧jobが行えない人の手の操作（`recovery_failed`）を要るときだけで、見立てを`--recommend`と`--confidence`（[ask](ask.md#aiの推奨と確信度未実装)）で載せる。
+- **CLI**: `ask --kind blocked`は`--recommend`を必須にする。推奨がleave it / waitに当たるかはCLIでは判定しない（promptの規則）。
+- **集計**: observerの`observe_finished`に、askにせずfindingだけにした件数を足し、[Stats](stats.md)で`blocked`のaskの件数と並べる。
+- findingごとにopenな`blocked`のaskは1件のまま（決定23）。askの無いfindingは普通の状態で、人は`dagq findings`で見る。

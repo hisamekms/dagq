@@ -4,7 +4,7 @@ type: design
 title: Implementation plans
 status: current
 created: 2026-09-22
-updated: 2026-09-30
+updated: 2026-10-02
 last_verified: 2026-09-29
 tags:
   - planning
@@ -31,3 +31,4 @@ tags:
 - [task の cancel の理由の分類と、ラベルの定義案](cancel-reasons.md)（goal 64、task 952）
 - [スパイク：Claude（claude -p）と Codex（codex exec）の非対話の worker の測定](headless-worker-spike.md)（goal 57、task 812）
 - [本番の queue での Claude の非対話の worker と対話の worker の比較と、既定を切り替えるかの推奨](headless-worker-measurement.md)（goal 57、task 821）
+- [2026-09-26以降の本番のaskのkindごとの件数と、answerが推奨・見立てどおりだった割合](ask-outcomes-2026-09-26.md)（goal 42、task 451）

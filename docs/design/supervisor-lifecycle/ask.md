@@ -8,6 +8,7 @@ updated: 2026-10-02
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t451-1
   - design-supervisor-lifecycle
   - adr-0022
   - adr-0047
@@ -48,3 +49,11 @@ related:
 | `design_choice` | 条件・ADR・範囲に触れない実装の選び方。AGENTS.mdではaskにせずworkerが決めるもので、付いたaskはpromptの直しどころを示す（ADR-t947-2決定3） | この期間は無し | （人が要る理由が無い） |
 | `discard_work` | できた成果を捨てるか、やり直すか | この期間は無し | `discard` |
 | `other` | どれにも当たらない。問いの文で説明する | この期間は無し | — |
+
+## 今後の姿: AIの推奨と確信度をaskに持たせる（未実装、ADR-t451-1）<a id="aiの推奨と確信度未実装"></a>
+
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1。**未実装**で、今の`ask`はこの欄を持たない。実装は後続のtaskが行う。
+
+- **欄**: AIが作るask（`planner_question`・`blocked`・`approve_landing`・`approve_plan`）に`recommendation`（推奨のoptionの文。無ければ`null`）と`confidence`（`high` / `low` / `null`）を足し、`ask_opened`のpayloadと`asks`の出力に載せる。inboxは推奨と確信度を人に見せる。`dagq ask`は`--recommend <option>`と`--confidence <high|low>`を受ける（`worker_question`には求めない）。
+- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録（[Review](review.md#aiが決めるconcern未実装)の`concern_decided`、[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`、[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のfinding、[Draft planners](draft-planners.md#推奨が出せればplannerが決める未実装)のnoteと`follow_up_adopted`）に残す。
+- **集計**: [Stats](stats.md)にaskのkindごとの「answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。

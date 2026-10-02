@@ -8,6 +8,7 @@ updated: 2026-10-02
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t451-1
   - design-supervisor-lifecycle
   - adr-0041
   - adr-0044
@@ -68,3 +69,11 @@ execの[引き継ぎ](handoff.md)で止めたjobは、引き継いだsupervisor�
 | `other` | どれにも当たらない（ADRの番号の衝突はADR-t598-1の後は起きないのでここ） | 945の`adr_number_collision` |
 
 - **人の答えからの補い**（ADR-t947-1決定4）: 11の`approve_plan`の答えを適用するとき（`decide_plan`の同じトランザクション、`plan_decided`の前）、proposalの直近のverdictのある`plan_reviews`の行の`outcome`が`concern`なら、それを指す`plan_review_outcome`（proposalのanchorのtaskに付け、`proposal_id`、`plan_review_id`、`ask_id`、`outcome`、行のverdictの`reason_codes`と`primary_code`）を記録する（`record_plan_outcome`）。`ready` → `deviation_accepted`（plan reviewの誤りの候補を含む）、`send_back` → `deviation_rejected`（`reason_codes`を引き継ぐ）、`cancel` → `canceled`。
+
+## 今後の姿: AIが決めるconcern（未実装、ADR-t451-1）<a id="aiが決めるconcern未実装"></a>
+
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定4（ADR-0047決定11をamends）。**未実装**で、今は`concern`をすべて`approve_plan`のaskにしている（本番では2026-10-02までに0件）。実装は後続のtaskが行う。
+
+- **verdictの欄**: `concern`のverdictに`recommendation`（`ready` / `send_back`）、`confidence`（`high` / `low`）、`reason_category`（`scope` / `discard` / `null`）を足す。`scope`はADR・goalのconstraints・人の先例と矛盾するまま通す判断、`discard`はcancel。無いverdict（今の形）は今までどおりaskにする。
+- **適用**: `confidence: high`かつ`reason_category: null`のとき、`send_back`はreviseとして持ち主のplannerに返し（reviseの回数に数える）、`ready`はpassと同じに適用する（`actions`の検査を含む）。それ以外は`approve_plan`のaskにし、jobの推奨をaskの`recommendation`に載せる。jobが自分でしてよい修正の4つは変えない。
+- **記録**: `plan_concern_decided`（`proposal_id`、`plan_review_id`、`recommendation`、`confidence`、`reason_category`、`applied`、`escalated_because`）。

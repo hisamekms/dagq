@@ -8,6 +8,7 @@ updated: 2026-10-02
 last_verified: 2026-10-02
 scope: runtime
 related:
+  - adr-t451-1
   - design-supervisor-lifecycle
   - adr-0040
   - adr-0027
@@ -96,3 +97,13 @@ related:
 `supervise_retrying` / `supervise_retrying_with` / `awaiting_run_retrying` を明示する。
 `supervise_reviewed` / `supervise_reviewed_with` と直接の runtime 呼び出しは caller の
 設定を保つので、既存の `TestReviewer` による retry の検証は既定の 1 回のままである。
+
+## 今後の姿: AIが決めるconcern（未実装、ADR-t451-1）<a id="aiが決めるconcern未実装"></a>
+
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定3（ADR-0027決定1・2をamends）。**未実装**で、今は`concern`をすべて`approve_landing`のaskにしている。実装は後続のtaskが行う。
+
+- **verdictの欄**: `concern`のverdictに`recommendation`（`land` / `send_back`）、`confidence`（`high` / `low`）、`reason_category`（`scope` / `discard` / `null`）を足す。`scope`は「着地させると受け入れ条件・ADR・goalの決定からの外れを受け入れることになる」、`discard`はcancelや成果を捨てる判断で、どちらでもなければ`null`。3つが無いverdict（今の形）は今までどおり`approve_landing`のaskにする。`pass`と`revise`には要らない。
+- **適用**: `confidence: high`かつ`reason_category: null`のとき、`send_back`はreviseと同じく生きているsessionに返し（`revise_requested`を記録し、reviseの上限（2回）に数える）、`land`はpassと同じ経路で着地へ進める。それ以外（`low`、`scope`、`discard`）と、reviseの上限を超えた3回目のreview、reviewのagentが動かなかったもの（`provider_disabled`・`job_failed`）は`approve_landing`のaskにし、askの`recommendation`・`confidence`（[ask](ask.md#aiの推奨と確信度未実装)）にjobの推奨を載せる。
+- **記録**: 適用でもaskでも`concern_decided`（`run_id`、`attempt`、`recommendation`、`confidence`、`reason_category`、`applied`: bool、`escalated_because`: `low_confidence` / `scope` / `discard` / `revise_limit` / `null`）を記録する。
+- **e2eと検証**: AIの`land`も、passと人の`land`と同じく、e2eが要るrunは[着地の前のe2e](#着地の前のe2e)を通ってから着地を依頼する。`integrate`の検証も変わらない。sessionの`/exit`とcloseは、AIの`land`では着地の直前、askにするときはaskを作る前。
+- **prompt**: reviewのpromptに、推奨と確信度の付け方と、`scope` / `discard`の判断を人に残す基準（ADR-t451-1決定1）を足す。

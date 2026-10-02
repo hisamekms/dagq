@@ -4,10 +4,11 @@ type: design
 title: "Finding planners (supervisor)"
 status: current
 created: 2026-09-27
-updated: 2026-09-28
+updated: 2026-10-02
 last_verified: 2026-09-28
 scope: runtime
 related:
+  - adr-t451-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-draft-planners
   - design-supervisor-lifecycle-observer
@@ -32,3 +33,7 @@ related:
 10. **終わり**: runtimeのplannerは、closeされていない自分のfindingの`planner_question`があるあいだと、打ち込んだanswerの後にまだidleになっていないあいだは`/exit`されない。それ以外でidleになれば`/exit`され、終わったworkspaceは閉じられる（`end_runtime_planners`）。idleは印が無くても画面から推定するが（ADR-t803-1）、画面も読めないまま`--planner-timeout`（既定3600秒）のあいだ入力・marker・推定のidleのどれも見えなければ、plannerごとに1回`planner_unresponsive`（`subject: "planner"`、`finding_id`）がinboxに届き、attention `check the planner`が出る。`planner_question`を待っているあいだは数えない。plannerは閉じない（[Planner sessions](plan-planners.md)の「runtimeのplannerの時間切れ」、task 805）。
 11. **改善の上限**（ADR-0051の決定25、task 433）: 動いている改善（`ImprovementLimit`、`SqliteQueue::improvements`）は、`findings.proposal_id`が指す別々のproposalで持ち主がruntimeのplanner（`owner_origin: runtime`）のもののうち`finding::improvement_running`（`settle`がまだ決めない: `canceled`でなく、終わっていないtaskがある）のものと、閉じていないruntimeのplannerのうちfindingが`open`のもの（submitすればfindingが`proposed`になり、そのproposalの方を数える）の合計。ADR-0051の決定25は数え方をproposalで書くが、runtimeのplannerも数えるのは、同時に立ったplannerがそれぞれsubmitして上限を超えないため（決定25の「plannerがすでに立った後に上限を超えることはない」）。上限は`dagq.toml`の`[kpi]`の`max_improvement_proposals`（既定2、host.tomlでは変えない。supervisorは`Ports::max_improvement_proposals`で毎回読み直し、読めなければ既定値でwarnを出す）。合計が上限以上のあいだ、`open_finding_planner`は（人のanswerを運ぶとき以外は）plannerを立てず、findingは`open`のまま待つ。eventは書かない。人のanswerを運ぶplannerは、質問したplannerが数えられていたことと人の判断であることから上限を超えて立つ。人が開いたplannerから`submit --finding`したproposal（持ち主が`person`。runtimeのproposalを人が出し直すと持ち主が替わり、数えなくなる）とfollow_upのdraftの採否は数えず止めない。`dagq findings`は`improvements`（`running`・`limit`・`reached`・`waiting`: 上限に達しているときの対象のfindingの`finding_id`と`reason: improvement_limit`）を返し、observerの入力にも同じものが載る。
 12. **test**: `tests/it/finding_planner.rs`がcmuxのdoubleとstubのplan reviewで、印のあるfindingにだけplannerが1つ立ち（次のpass、上限を上げたpass、直接の`open_finding_planner`でも2つ目は立たない）、promptの中身、plannerのworkspaceからのsubmitでfindingが`proposed`になりproposalに紐づくこと、他のproposalで`proposed`のfindingを名指したsubmitの失敗、plan reviewのpassでtaskが`ready`になりplannerに`/exit`が送られること、taskのcancelでfindingが印なしの`open`に戻ること、`blocked`のaskのoptionsと`propose` / `dismiss`のanswerの適用（askが閉じ、attentionにならない）、`stalled`のaskの`propose`でfindingが作られること、findingへの`planner_question`のanswerがplannerに打ち込まれること、決めずに終わったplannerの後に次が立ち3回で`finding_planner_exhausted`とattentionになること、人の`submit --finding`でそれが消えることを確かめる。`improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most`は、`dagq.toml`の上限1で2つ目のfindingにplannerが立たず（直接の`open_finding_planner`は`AtLimit`）、`improvements_of`が待つfindingを出し、submitした`high`のtaskがplan reviewのpassで`normal`に下がり（`by: plan_review`）、proposalが終わるまで待ち、終われば立ち、人が`submit --finding`したproposalは数えないことを確かめる。規則は`src/domain/finding.rs`のunit test。
+
+## 今後の姿: 推奨が出せればplannerが決める（未実装、ADR-t451-1）<a id="推奨が出せればplannerが決める未実装"></a>
+
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定5。**未実装**。findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればplannerが決める未実装)と同じく、推奨が出せる判断（既存のgoalへのtask、新しいgoal、`finding dismiss`）は自分で決めて理由をproposalのtaskの`context`かfindingの`--reason`に書き、`planner_question`はADR-0047決定41の`scope`・`discard`に当たり材料で決めきれないものと確信度が`low`のものだけにする（推奨と確信度を載せる）。findingから作るproposalはfollow_upの上限の対象にならない（ADR-0047決定20）。
