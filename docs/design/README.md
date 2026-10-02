@@ -26,5 +26,6 @@ tags:
 - [Plugin integration](plugin-integration.md)
 - [Manual smoke](manual-smoke.md)
 - [Stress CI](stress-ci.md)（mainで直近に足した・変えたtestをGitHub Actionsの定時実行で繰り返し、落ちたらflaky-testのissueで知らせる）
+- [CI failure issues](ci-failure-issues.md)（mainへのpushのCI（ci.yml）が落ちたらci-failureのissueを開くか追記し、次に通ったら閉じる。workflow全体の結論で決め、continue-on-errorのjobの失敗だけでは開かない）
 - [Slow tests](slow-tests.md)（nextestの出力から遅いtestの上位と1秒・5秒・30秒を超えた本数と合計を出すscripts/slow-tests.sh。CIのjob summaryにも出す）
 - [Linux CI](linux-ci.md)（CIのubuntuのjobでcargo buildと全体のtestを流し、落ちたtestの名前をjob summaryに出す。macOSに固有のtestを分けるまではcontinue-on-errorで失敗を通す。goal 83）

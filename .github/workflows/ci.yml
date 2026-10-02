@@ -1,5 +1,8 @@
 name: CI
 
+# A push run on main that fails opens or updates the ci-failure issue, and a
+# later one that passes closes it (ci-failure.yml, which keys on this
+# workflow's name; docs/design/ci-failure-issues.md).
 on:
   push:
     branches: [main]
