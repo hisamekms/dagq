@@ -398,3 +398,79 @@ fn an_adopter_records_a_send_back_left_unrecorded_by_a_dead_supervisor() {
     let ask = landing_ask(&queue, &run);
     assert_eq!(ask.recommendation.as_deref(), Some("send_back"));
 }
+
+/// A supervisor that died after one of the review's subagents sent the
+/// run back (ADR-t1453-1 decision 7) and the request could not be typed:
+/// the adopter asks with the agent's name and reasons, not the verdict's
+/// alone, and records no `concern_decided` for a verdict whose own concern
+/// (`land`, `high`) the agent overrode. Under a `pass` there is no concern
+/// to record either.
+#[test]
+fn an_adopter_asks_with_the_reasons_of_the_subagent_that_sent_the_run_back() {
+    for (parent, extra) in [
+        ("pass", json!({})),
+        (
+            "concern",
+            json!({"recommendation": "land", "confidence": "high"}),
+        ),
+    ] {
+        let (_dir, repo, db) = fixture();
+        let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+        let mut finished = json!({
+            "verdict": parent, "reasons": ["fine"], "summary": "judged", "attempt": 1,
+            "recommendation": null, "confidence": null, "reason_category": null,
+            "agents": [
+                {"agent": "design", "status": "completed", "verdict": "pass", "reasons": [], "summary": "ok"},
+                {"agent": "tests", "status": "completed", "verdict": "revise", "reasons": ["add a test"], "summary": "s"},
+            ],
+            "route": {"destination": "send_back", "parent": "land", "parent_lighter": true, "agents": [
+                {"agent": "design", "destination": "land", "escalated_because": null},
+                {"agent": "tests", "destination": "send_back", "escalated_because": null},
+            ]},
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            finished[key] = value.clone();
+        }
+        let run = left_by_a_dead_supervisor(
+            &repo,
+            &db,
+            &backend,
+            vec![
+                (EventKind::ReviewStarted, json!({"attempt": 1})),
+                (EventKind::ReviewFinished, finished),
+                (
+                    EventKind::ReviseRequested,
+                    json!({"attempt": 1, "reasons": ["tests: add a test"]}),
+                ),
+                (
+                    EventKind::ReviseUnsent,
+                    json!({"attempt": 1, "error": "the revise request could not be sent"}),
+                ),
+            ],
+        );
+        let outcome = adopt(&db, &repo, &backend, Vec::new());
+        assert_eq!(outcome["errors"], json!([]), "{parent}: {outcome}");
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        let detail = queue.show(TaskId::new(1)).unwrap();
+        assert_eq!(
+            detail.runs[0].status(),
+            RunStatus::AwaitingIntegration,
+            "{parent}"
+        );
+        assert!(concern_decided(&detail).is_empty(), "{parent}");
+        let ask = landing_ask(&queue, &run);
+        assert_eq!(ask.recommendation, None, "{parent}");
+        for part in [
+            "returned revise (the revise request could not be sent; a person decides: the subagent tests returned revise",
+            "the review's own verdict",
+            "\n- tests: add a test",
+        ] {
+            assert!(
+                ask.question.contains(part),
+                "{parent}: {part} in {}",
+                ask.question
+            );
+        }
+        assert!(!ask.question.contains("- fine"), "{}", ask.question);
+    }
+}

@@ -392,19 +392,48 @@ impl Supervisor<'_> {
             // A revise request recorded but not sent asks a person, as it
             // did before the supervisor was replaced.
             event_kind::REVISE_UNSENT => {
-                passed_before(&history, anchor.id).map(|verdict| AfterExit::Ask {
-                    why: anchor.payload["error"].as_str().map(str::to_owned),
-                    decision: verdict.verdict,
-                    recommendation: verdict.recommendation,
-                    confidence: verdict.confidence,
-                    reason_category: verdict.reason_category,
-                    reasons: verdict.reasons,
-                    summary: verdict.summary,
-                    requested_by: review_job_before(run, &history, anchor.id),
-                })
+                // A revise the review's subagents decided (ADR-t1453-1
+                // decision 7) is asked with their reasons, as the
+                // supervisor that could not send it asked.
+                let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED);
+                if let Some(review) = review.filter(|r| agents_decided(&r.payload))
+                    && let Ok(verdict) = verdict_of(review)
+                {
+                    let why = anchor.payload["error"]
+                        .as_str()
+                        .unwrap_or("the revise request could not be sent");
+                    // The request was recorded, so the round had a revise
+                    // left when the review was decided.
+                    Some(agents_ask(run, review, verdict, true, why.to_owned()))
+                } else {
+                    passed_before(&history, anchor.id).map(|verdict| AfterExit::Ask {
+                        why: anchor.payload["error"].as_str().map(str::to_owned),
+                        decision: verdict.verdict,
+                        recommendation: verdict.recommendation,
+                        confidence: verdict.confidence,
+                        reason_category: verdict.reason_category,
+                        reasons: verdict.reasons,
+                        summary: verdict.summary,
+                        requested_by: review_job_before(run, &history, anchor.id),
+                    })
+                }
             }
             event_kind::REVIEW_FINISHED => {
                 match verdict_of(anchor) {
+                    // A review whose subagents sent the run further than
+                    // its verdict, or carried reasons of their own
+                    // (ADR-t1453-1 decision 7), asks a person: an adopter
+                    // does not apply the verdict alone.
+                    Ok(verdict) if agents_decided(&anchor.payload) => {
+                        let revise_left = decide_revise(&history) != ReviseDecision::Ask;
+                        let why = format!(
+                            "the review's subagents sent the run to {} and the supervisor was replaced before it was applied",
+                            anchor.payload["route"]["destination"]
+                                .as_str()
+                                .unwrap_or("a person")
+                        );
+                        Some(agents_ask(run, anchor, verdict, revise_left, why))
+                    }
                     // A concern is decided again from its verdict
                     // (ADR-t451-1 decision 3).
                     Ok(verdict) if verdict.verdict == ReviewDecision::Concern => {
@@ -749,7 +778,11 @@ impl Supervisor<'_> {
         let Some(review) = history.last(event_kind::REVIEW_FINISHED) else {
             return Ok(());
         };
+        // A send-back one of the review's subagents decided while the
+        // verdict's own concern went lighter was no decision of that
+        // concern (ADR-t1453-1 decision 7): nothing to record.
         if review.payload["verdict"] != ReviewDecision::Concern.as_str()
+            || (agents_decided(&review.payload) && !parent_decided(&review.payload))
             || history.has_after(review.id, event_kind::CONCERN_DECIDED)
             || !history.has_after(review.id, event_kind::REVISE_REQUESTED)
         {
@@ -859,15 +892,119 @@ pub(super) fn passed_before(history: &RunHistory<'_>, before: EventId) -> Option
         .and_then(|e| verdict_of(e).ok())
 }
 
+/// Whether the route a `review_finished` recorded (ADR-t1453-1 decision
+/// 7) was decided by one of its subagents: one went further than landing,
+/// to where the review went.
+fn agents_decided(payload: &Value) -> bool {
+    let route = &payload["route"];
+    let Some(destination) = route["destination"].as_str() else {
+        return false;
+    };
+    destination != "land"
+        && route["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|a| a["destination"] == destination))
+}
+
+/// Whether the verdict's own judgment went where the route a
+/// `review_finished` recorded went (ADR-t1453-1 decision 7).
+fn parent_decided(payload: &Value) -> bool {
+    let route = &payload["route"];
+    route["parent"].is_string() && route["parent"] == route["destination"]
+}
+
+/// The `approve_landing` ask an adopter opens for `review`, a
+/// `review_finished` whose route one of its subagents decided: the reasons
+/// of every judgment that went there, an agent's under its name, the
+/// `discard` or `scope` they give, and why (`why` after what each of them
+/// returned), at the review job's request.
+fn agents_ask(
+    run: &TaskRun,
+    review: &RunEvent,
+    verdict: ReviewVerdict,
+    revise_left: bool,
+    why: String,
+) -> AfterExit {
+    let route = verdict.route(revise_left);
+    let parent_decides = route.parent == route.destination;
+    let combined = landing::combined_verdict(&verdict, &route, parent_decides);
+    let judged = landing::agents_escalation(&verdict, &route, parent_decides);
+    AfterExit::Ask {
+        why: Some(format!("{why}; {judged}")),
+        decision: combined.verdict,
+        recommendation: None,
+        confidence: None,
+        reason_category: combined.reason_category,
+        reasons: combined.reasons,
+        summary: combined.summary,
+        requested_by: review_job(run, review),
+    }
+}
+
 /// The verdict a `review_finished` recorded, with a concern's
 /// recommendation, confidence and reason when it gave them.
 fn verdict_of(event: &RunEvent) -> serde_json::Result<ReviewVerdict> {
-    serde_json::from_value(json!({
+    let mut verdict = json!({
         "verdict": event.payload["verdict"],
         "reasons": event.payload["reasons"],
         "summary": event.payload["summary"],
         "recommendation": event.payload["recommendation"],
         "confidence": event.payload["confidence"],
         "reason_category": event.payload["reason_category"],
-    }))
+    });
+    // The required subagents' results, recorded only when the review had
+    // them (ADR-t1453-1).
+    if let Some(agents) = event.payload.get("agents").filter(|a| a.is_array()) {
+        verdict["agents"] = agents.clone();
+    }
+    serde_json::from_value(verdict)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An adopter asks a person rather than apply a verdict whose
+    /// subagents sent the run further (ADR-t1453-1 decision 7); a review
+    /// without a route, or whose agents all let it land, goes as before.
+    #[test]
+    fn only_a_route_one_of_its_agents_decided_stops_an_adopter() {
+        let route = |destination: &str, agents: &[&str]| {
+            json!({"route": {"destination": destination, "agents": agents
+                .iter()
+                .map(|d| json!({"agent": "a", "destination": d}))
+                .collect::<Vec<_>>()}})
+        };
+        assert!(!agents_decided(&json!({"verdict": "pass"})));
+        assert!(!agents_decided(&route("land", &["land"])));
+        assert!(!agents_decided(&route("send_back", &["land"])));
+        assert!(agents_decided(&route("send_back", &["land", "send_back"])));
+        assert!(agents_decided(&route("ask", &["ask"])));
+    }
+
+    /// The verdict an adopter reads back from `review_finished` keeps the
+    /// agents' results it recorded, and reads as before without them.
+    #[test]
+    fn a_recorded_verdict_keeps_its_agents_results() {
+        let event = |payload: Value| RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: event_kind::REVIEW_FINISHED.to_owned(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let mut payload = json!({"verdict": "pass", "reasons": [], "summary": "ok", "attempt": 1});
+        let plain = verdict_of(&event(payload.clone())).unwrap();
+        assert!(plain.agents.is_empty());
+        payload["agents"] = json!([{"agent": "tests", "status": "completed", "verdict": "revise",
+            "reasons": ["add a test"], "summary": "s"}]);
+        let with = verdict_of(&event(payload)).unwrap();
+        assert_eq!(with.agents[0].agent, "tests");
+        let route = with.route(true);
+        let combined = landing::combined_verdict(&with, &route, false);
+        assert_eq!(combined.reasons, ["tests: add a test"]);
+    }
 }

@@ -5,7 +5,7 @@ title: "Actor model"
 status: current
 created: 2026-09-27
 updated: 2026-10-03
-last_verified: 2026-10-02
+last_verified: 2026-10-03
 scope: runtime
 related:
   - adr-t1394-1
@@ -82,7 +82,7 @@ plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のpl
 ```
 
 - `provider`: sessionを起動したprovider（task 1062、goal 73）。値の集合はworkerのrunの`requested_provider` / `actual_provider`と同じ`domain::Provider`（`claude` / `codex`）。`ActorLaunch::default_of`は`domain::actor_model::ROLE_PROVIDER`（`claude`）を、`RoleModels::launch`は表の`provider`（無ければ`claude`。上の[provider](#provider)、task 1065）を入れ、段上げ（`escalated`）は元のproviderを引き継ぐ。`provider`の無い過去の`launch`（task 1062より前の記録）は`ActorLaunch::recorded`が`claude`として読む（それより前はClaudeでしか動かなかった）
-- `switched_from` / `switch_reason`: 使えないproviderから切り替えて起動したjobだけ（task 1065）。例: `{"role": "goal_review", "provider": "claude", "model": null, "effort": null, "source": "default", "switched_from": "codex", "switch_reason": "authentication"}`
+- `switched_from` / `switch_reason`: 使えないproviderから切り替えて起動したjobだけ（task 1065）。必須のreviewのsubagentを動かせないproviderからrunのreviewを切り替えたときは`switch_reason: subagents_unsupported`（providerは使えるので控えにしない。[Review](review.md#reviewのsubagent)、task 1455）。例: `{"role": "goal_review", "provider": "claude", "model": null, "effort": null, "source": "default", "switched_from": "codex", "switch_reason": "authentication"}`
 - `source`: `default`（渡していない。`model` / `effort`はnullで、実際の値はsessionが閉じたときの`session_closed`の`model` / `effort`が持つ）、`dagq.toml`、`revise_escalation`。`escalated_from` / `escalation_reason`は段上げのときだけ
 - **jobの開始のevent**: `review_started`・`triage_started`・`plan_review_started`・`goal_review_started`・`observe_started`・`throughput_review_started`の`launch`、生きているrunの復旧のjobは`recovery_requested`の`launch`（生きているrunのjobのpromptのfactsにも、その後の終わったrunのjobのfactsにも含めない）。どれも`provider`を持つ。jobの区間の`session_opened`（`domain::sessions::changes`の`job`）は開始のeventの`launch`を写す（生きているrunの復旧のjobは区間を持たない）。終わったrunの復旧のjobは`triage_started`の`launch`（`ActorLaunch::recorded`）で起動する
 - **planner**: 開く側（`open_person_planner` / `open_runtime_planner` / `open_draft_planner`）が決め、`dagq plan`の結果の`launch`、workspaceの`--env DAGQ_LAUNCH=<launchのJSON>`、wrapperのargvの`planner-session ... --model <model> --effort <effort>`（渡すときだけ）にする。wrapper（`run_planner_session`）は`planner_command`の後に`select_model`で渡す。pluginのhookが記録するplannerの区間の`session_opened`は`DAGQ_LAUNCH`を`launch`に写す（`SessionHook::launch`。JSONのobjectとして読めなければ写さない）。同じworkspaceで人が`claude`を打ち直したsessionも同じ`launch`を持つが、その起動には引数が無い

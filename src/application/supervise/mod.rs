@@ -2744,22 +2744,32 @@ impl Supervisor<'_> {
                 slot.phase = match outcome {
                     ReviewEnd::Verdict(verdict) => {
                         let job = ActorContext::review_job(run.id(), attempt);
+                        let mut finished = json!({
+                            "verdict": verdict.verdict,
+                            "reasons": verdict.reasons,
+                            "reason_codes": verdict.recorded_codes(),
+                            "primary_code": verdict.primary_code(),
+                            "summary": verdict.summary,
+                            "duration_secs": duration_secs,
+                            "attempt": attempt,
+                            "recommendation": verdict.recommendation,
+                            "confidence": verdict.confidence,
+                            "reason_category": verdict.reason_category,
+                        });
+                        // Each required agent's result, and where they and
+                        // the verdict send the run (ADR-t1453-1 decisions
+                        // 5 and 7); a review that requires none records as
+                        // before.
+                        if !verdict.agents.is_empty() {
+                            let revise_left = self.revise_left(run.id())?;
+                            finished["agents"] = json!(verdict.agents);
+                            finished["route"] = verdict.route(revise_left).event_value();
+                        }
                         self.for_job(&job, |sv| {
                             sv.queue.record_runtime_event(
                                 run.id(),
                                 EventKind::ReviewFinished,
-                                json!({
-                                    "verdict": verdict.verdict,
-                                    "reasons": verdict.reasons,
-                                    "reason_codes": verdict.recorded_codes(),
-                                    "primary_code": verdict.primary_code(),
-                                    "summary": verdict.summary,
-                                    "duration_secs": duration_secs,
-                                    "attempt": attempt,
-                                    "recommendation": verdict.recommendation,
-                                    "confidence": verdict.confidence,
-                                    "reason_category": verdict.reason_category,
-                                }),
+                                finished,
                             )?;
                             info!(run_id = %run.id(), "run {} review {attempt}: {} ({})", run.id(), verdict.verdict.as_str(), verdict.summary);
                             sv.act_on_verdict(&run, session, verdict, &job, attempt)

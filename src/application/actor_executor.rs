@@ -128,6 +128,10 @@ pub enum HeadlessProgram<'a> {
         run: &'a TaskRun,
         prompt: &'a str,
         access: JobAccess,
+        /// The review's required subagents (ADR-t1453-1), which the
+        /// provider hands its job; none for a review that requires none,
+        /// whose command is as before.
+        subagents: &'a [crate::domain::review_subagents::AgentDefinition],
     },
     /// A job in `cwd` allowed what `access` says beyond what needs no
     /// permission (ADR-t1063-1 decision 2): the recovery job, the plan and
@@ -762,7 +766,14 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         run,
                         prompt,
                         access,
-                    } => provider.review_command(run, prompt, access)?,
+                        subagents,
+                    } => {
+                        let mut command = provider.review_command(run, prompt, access)?;
+                        if !subagents.is_empty() {
+                            provider.review_subagents(&mut command, subagents)?;
+                        }
+                        command
+                    }
                     HeadlessProgram::Job {
                         cwd,
                         prompt,
@@ -1708,6 +1719,7 @@ mod tests {
                             run: &run,
                             prompt: "review",
                             access: JobAccess::ReadFiles,
+                            subagents: &[],
                         },
                         session_id: None,
                         launch: None,

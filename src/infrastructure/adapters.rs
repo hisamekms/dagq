@@ -3157,6 +3157,31 @@ impl AgentProvider for ClaudeCode {
             .arg(prompt);
         Ok(command)
     }
+    fn runs_review_subagents(&self) -> bool {
+        true
+    }
+    /// `--agents <json>` with each definition (its `description`, its body
+    /// as the `prompt`, and only the review's reads as its `tools`),
+    /// `--allowedTools Agent` so the review can start them, and
+    /// `--setting-sources ""` so that neither the worktree's
+    /// `.claude/agents` nor its `.claude/settings.json` is loaded
+    /// (ADR-t1453-1 decision 8). The review's `--settings` and its
+    /// `--disallowedTools`, which reach the subagents too, stay.
+    fn review_subagents(
+        &self,
+        command: &mut CommandSpec,
+        agents: &[crate::domain::review_subagents::AgentDefinition],
+    ) -> Result<()> {
+        command.option_args([
+            "--agents".to_owned(),
+            claude_review_agents(agents)?,
+            "--allowedTools".to_owned(),
+            "Agent".to_owned(),
+            "--setting-sources".to_owned(),
+            String::new(),
+        ]);
+        Ok(())
+    }
     /// `claude [--plugin-dir <dir>] -- <prompt>`: the inbox's workspace
     /// keeps its role and queue in its own environment (ADR-0026), so a
     /// `claude` started again there still has them.
@@ -3318,6 +3343,29 @@ pub fn claude_tools(access: JobAccess) -> Vec<&'static str> {
         tools.push("Bash(dagq:*)");
     }
     tools
+}
+
+/// The `--agents` JSON of the review's subagents: each definition's
+/// `description` and body (`prompt`), allowed only
+/// [`SUBAGENT_TOOLS`](crate::domain::review_subagents::SUBAGENT_TOOLS)
+/// whatever the definition says.
+pub fn claude_review_agents(
+    agents: &[crate::domain::review_subagents::AgentDefinition],
+) -> Result<String> {
+    let map: serde_json::Map<String, serde_json::Value> = agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.name.clone(),
+                serde_json::json!({
+                    "description": agent.description,
+                    "prompt": agent.prompt,
+                    "tools": crate::domain::review_subagents::SUBAGENT_TOOLS,
+                }),
+            )
+        })
+        .collect();
+    Ok(serde_json::to_string(&map)?)
 }
 
 /// Claude Code's tools the review of `access` is refused outright: it
@@ -4393,6 +4441,72 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("Read,Grep,Glob,Bash(dagq:*)")));
         assert!(args.contains(&std::ffi::OsStr::new("Edit,Write,NotebookEdit")));
+    }
+
+    /// A review that requires subagents hands Claude their definitions as
+    /// `--agents`, allowed only the reads, lets the review start them with
+    /// `Agent`, and loads no setting sources, so the worktree's
+    /// `.claude/agents` and `.claude/settings.json` are not read
+    /// (ADR-t1453-1 decision 8). The review's settings and refusals stay;
+    /// a review without them is as before.
+    #[test]
+    fn the_review_hands_claude_its_subagents_and_no_worktree_settings() {
+        use crate::domain::review_subagents::AgentDefinition;
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_in(dir.path());
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        assert!(claude.runs_review_subagents());
+        let plain = claude
+            .review_command(&run, "review it", crate::application::prompt::REVIEW_ACCESS)
+            .unwrap();
+        let mut command = plain.clone();
+        let agents = [
+            AgentDefinition::read(
+                "design",
+                "---\ndescription: design checks\n---\nCheck it.\n",
+            ),
+            AgentDefinition::read("plain", "No frontmatter.\n"),
+        ];
+        claude.review_subagents(&mut command, &agents).unwrap();
+        let args = |command: &CommandSpec| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let before = args(&plain);
+        let after = args(&command);
+        let prompt_at = before.len() - 2;
+        assert_eq!(after[..prompt_at], before[..prompt_at]);
+        assert_eq!(after[after.len() - 2..], ["--", "review it"]);
+        let added = &after[prompt_at..after.len() - 2];
+        assert_eq!(added[0], "--agents");
+        assert_eq!(
+            added[2..],
+            ["--allowedTools", "Agent", "--setting-sources", ""]
+        );
+        let handed: Value = serde_json::from_str(&added[1]).unwrap();
+        assert_eq!(
+            handed,
+            serde_json::json!({
+                "design": {"description": "design checks", "prompt": "Check it.\n", "tools": ["Read", "Grep", "Glob"]},
+                "plain": {"description": "The review subagent plain", "prompt": "No frontmatter.\n", "tools": ["Read", "Grep", "Glob"]},
+            })
+        );
+        // The review's own settings and refusals reach the subagents.
+        for kept in [
+            "--settings",
+            "--disallowedTools",
+            "Bash,Edit,Write,NotebookEdit",
+        ] {
+            assert!(after.iter().any(|arg| arg == kept), "{kept}");
+        }
+        // Without subagents nothing of them is in the command.
+        for absent in ["--agents", "--setting-sources", "Agent"] {
+            assert!(!before.iter().any(|arg| arg == absent), "{absent}");
+        }
     }
 
     #[test]

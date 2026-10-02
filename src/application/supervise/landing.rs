@@ -19,6 +19,7 @@ use crate::domain::concern::{
 use crate::domain::language::with_instruction;
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_reason;
+use crate::domain::review_subagents::{AgentDefinition, Destination, VerdictRoute};
 use crate::domain::worker_model::{self, Escalation};
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
@@ -32,6 +33,20 @@ const STALE_LANDING_ASK_CLOSED: &str =
 /// `provider_disabled` and its ask says no review agent ran.
 pub(super) const REVIEW_PROVIDER_DISABLED: &str =
     "provider_disabled: Claude is disabled by --no-claude";
+
+/// How the error of a review begins when no provider that can be used can
+/// run its required subagents (ADR-t1453-1 decision 8).
+pub(super) const SUBAGENTS_UNSUPPORTED: &str = "subagents_unsupported";
+
+/// Why a review that requires the subagents `required` did not start on
+/// `provider`, which cannot run them, nor on another provider.
+pub(super) fn subagents_unsupported(provider: Provider, required: &[String]) -> String {
+    format!(
+        "{SUBAGENTS_UNSUPPORTED}: the review requires the subagents {}, which {} cannot run, and no other provider that can run them can be used",
+        required.join(", "),
+        provider.as_str()
+    )
+}
 
 /// A review job that started: its process and its stdout and stderr.
 type StartedReview = (Box<dyn Spawned>, PathBuf, PathBuf);
@@ -300,22 +315,24 @@ impl Supervisor<'_> {
             Err(snapshot) => {
                 let error =
                     format!("the review's required subagents could not be read: {snapshot:#}");
-                warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
-                // For the person; a material that cannot be written (a
-                // receipt that cannot be read fails both) still fails the
-                // review rather than the supervisor's pass.
-                if let Err(material) = (self.review_material)(run.task_id(), None) {
-                    warn!(run_id = %run.id(), "run {}: its review material could not be written: {material:#}", run.id());
+                return self.unstarted_review_failed(run, session, attempt, retried, error);
+            }
+        };
+        let required: Vec<String> = subagents
+            .iter()
+            .flat_map(|s| s.agents.iter().map(|a| a.name.clone()))
+            .collect();
+        // A provider that cannot run the required subagents does not start
+        // the review: the other one does, or a person reviews it
+        // (ADR-t1453-1 decision 8). Nothing is skipped silently.
+        let launch = if required.is_empty() {
+            launch
+        } else {
+            match self.subagent_launch(launch, &required) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    return self.unstarted_review_failed(run, session, attempt, retried, error);
                 }
-                return Ok(Phase::Exiting(ExitWatch::new(
-                    session,
-                    AfterExit::ReviewFailed {
-                        attempt,
-                        error,
-                        duration_secs: 0,
-                        output: unstarted_review_output(retried, attempt),
-                    },
-                )));
             }
         };
         // The job's Claude session id (ADR-0048 decision 4).
@@ -355,6 +372,7 @@ impl Supervisor<'_> {
                     attempt,
                     retried,
                     switchable,
+                    required,
                     job,
                 }));
             }
@@ -395,6 +413,59 @@ impl Supervisor<'_> {
                 output: unstarted_review_output(retried, attempt),
             },
         )))
+    }
+    /// Fail review `attempt`, which did not start, to the person with
+    /// `error` (`review_failed` and the `approve_landing` ask once the
+    /// session exited): its required subagents could not be known or run.
+    fn unstarted_review_failed(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        attempt: usize,
+        retried: bool,
+        error: String,
+    ) -> Result<Phase> {
+        warn!(run_id = %run.id(), error = %error, "run {}: {error}", run.id());
+        // For the person; a material that cannot be written (a receipt
+        // that cannot be read fails both) still fails the review rather
+        // than the supervisor's pass.
+        if let Err(material) = (self.review_material)(run.task_id(), None) {
+            warn!(run_id = %run.id(), "run {}: its review material could not be written: {material:#}", run.id());
+        }
+        Ok(Phase::Exiting(ExitWatch::new(
+            session,
+            AfterExit::ReviewFailed {
+                attempt,
+                error,
+                duration_secs: 0,
+                output: unstarted_review_output(retried, attempt),
+            },
+        )))
+    }
+    /// The launch of a review that requires the subagents `required`
+    /// (ADR-t1453-1 decision 8): `launch` when its provider can run them,
+    /// else the other provider's when that one can run them and be used,
+    /// with why it was switched; else why neither can, for the person.
+    fn subagent_launch(
+        &self,
+        launch: ActorLaunch,
+        required: &[String],
+    ) -> std::result::Result<ActorLaunch, String> {
+        let runs = |provider| {
+            self.job_agent(provider)
+                .is_some_and(|agent| agent.runs_review_subagents())
+        };
+        if runs(launch.provider) {
+            return Ok(launch);
+        }
+        let other = launch.provider.other();
+        if crate::domain::actor_model::runs_on(ModelRole::Review, other)
+            && self.job_unusable(other).is_none()
+            && runs(other)
+        {
+            return Ok(launch.switched(other, SwitchReason::SubagentsUnsupported));
+        }
+        Err(subagents_unsupported(launch.provider, required))
     }
     /// The review's required subagents from the landing branch's commit
     /// ([`snapshot_subagents`]); the range is the receipt's, read only when
@@ -474,6 +545,13 @@ impl Supervisor<'_> {
         } else {
             &[]
         };
+        // Each required agent's definition as committed on the landing
+        // branch, for the provider to hand its job.
+        let definitions: Vec<AgentDefinition> = subagents
+            .iter()
+            .flat_map(|s| &s.agents)
+            .map(|agent| AgentDefinition::read(&agent.name, &agent.definition))
+            .collect();
         let started = (|| {
             let agent = self.job_agent(launch.provider).with_context(|| {
                 format!("no {} runs on this supervisor", launch.provider.as_str())
@@ -490,6 +568,7 @@ impl Supervisor<'_> {
                                 run,
                                 prompt: &prompt,
                                 access: REVIEW_ACCESS,
+                                subagents: &definitions,
                             },
                             session_id: Some(session_id),
                             launch: Some(launch),
@@ -524,10 +603,70 @@ impl Supervisor<'_> {
         job: &ActorContext,
         attempt: usize,
     ) -> Result<Phase> {
+        // With its agents' results, the review goes where the heaviest of
+        // its judgments sends it (ADR-t1453-1 decision 7). When no agent's
+        // judgment goes there, the verdict's own decides, as before.
+        if !verdict.agents.is_empty() {
+            let route = verdict.route(self.revise_left(run.id())?);
+            if !route.deciding().is_empty() {
+                if route.parent_lighter() {
+                    warn!(run_id = %run.id(), "run {} review {attempt}: the verdict {} is lighter than its subagents' ({}); the run goes to {}", run.id(), verdict.verdict.as_str(), route.deciding().iter().map(|a| a.agent.as_str()).collect::<Vec<_>>().join(", "), route.destination.as_str());
+                }
+                return self.act_on_agents(run, session, verdict, &route, job, attempt);
+            }
+        }
         match verdict.verdict {
             ReviewDecision::Pass => self.precheck(run, session, verdict, Some(job.clone())),
             ReviewDecision::Concern => self.act_on_concern(run, session, verdict, job, attempt),
             ReviewDecision::Revise => self.send_revise(run, session, verdict, job),
+        }
+    }
+    /// Whether the round of `run` has a revise left.
+    pub(super) fn revise_left(&self, run: &RunId) -> Result<bool> {
+        let events = self.queue.run_events(run)?;
+        Ok(decide_revise(&RunHistory::from_events(&events)) != ReviseDecision::Ask)
+    }
+    /// Go where `route` sends a verdict one of whose agents' judgments
+    /// decides it (ADR-t1453-1 decision 7): back to the session with the
+    /// reasons of every judgment that sends it back (one revise of the
+    /// round, a person past the limit), or to a person with every judgment
+    /// that asks for one.
+    fn act_on_agents(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        verdict: ReviewVerdict,
+        route: &VerdictRoute,
+        job: &ActorContext,
+        attempt: usize,
+    ) -> Result<Phase> {
+        let parent_decides = route.parent == route.destination;
+        let parent_concern = parent_decides && verdict.verdict == ReviewDecision::Concern;
+        let combined = combined_verdict(&verdict, route, parent_decides);
+        match route.destination {
+            Destination::SendBack => {
+                let phase = self.send_revise(run, session, combined, job)?;
+                if parent_concern {
+                    // As `act_on_concern` records a send_back it could not
+                    // apply.
+                    let unsent =
+                        (!matches!(phase, Phase::Revise(_))).then_some(EscalatedBecause::Unsent);
+                    self.record_concern_decided(run, attempt, &verdict, unsent)?;
+                }
+                Ok(phase)
+            }
+            Destination::Ask | Destination::Land => {
+                if parent_concern {
+                    let escalated = match verdict.concern_decision(true) {
+                        ConcernDecision::Ask(why) => why,
+                        // Past the revise limit only.
+                        _ => EscalatedBecause::ReviseLimit,
+                    };
+                    self.record_concern_decided(run, attempt, &verdict, Some(escalated))?;
+                }
+                let why = agents_escalation(&verdict, route, parent_decides);
+                Ok(landing_ask(Some(why), combined, session, job, true))
+            }
         }
     }
     /// A `concern` (ADR-t451-1 decision 3): with a `high` confidence and
@@ -1535,6 +1674,130 @@ fn failed_review_question(
     question
 }
 
+/// The verdict a review whose agents decide where it goes (`route`)
+/// applies: the reasons of every judgment that goes there, an agent's
+/// prefixed with its name (the verdict's own when `parent_decides`), as a
+/// `revise` when it goes back and a `concern` when it asks. Its concern
+/// fields are those that make a person needed: a `discard` when any
+/// judgment that asks gives one, else a `scope`; no recommendation, which
+/// each judgment's line of the ask carries.
+pub(super) fn combined_verdict(
+    verdict: &ReviewVerdict,
+    route: &VerdictRoute,
+    parent_decides: bool,
+) -> ReviewVerdict {
+    let mut reasons = Vec::new();
+    let mut reason_codes = Vec::new();
+    if parent_decides {
+        reasons.extend(verdict.reasons.iter().cloned());
+        reason_codes.extend(verdict.recorded_codes());
+    }
+    let deciding = route.deciding();
+    let results = verdict
+        .agents
+        .iter()
+        .filter(|r| deciding.iter().any(|a| a.agent == r.agent));
+    let mut categories = Vec::new();
+    if parent_decides {
+        categories.extend(verdict.reason_category);
+    }
+    for result in results {
+        categories.extend(result.reason_category);
+        let texts = if result.reasons.is_empty() {
+            vec![result.summary.clone()]
+        } else {
+            result.reasons.clone()
+        };
+        for text in texts {
+            reasons.push(format!("{}: {text}", result.agent));
+            reason_codes.push(vec![review_reason::UNLABELED.to_owned()]);
+        }
+    }
+    let asks = route.destination == Destination::Ask;
+    let reason_category = asks.then(|| {
+        if categories.contains(&ConcernReason::Discard) {
+            ConcernReason::Discard
+        } else {
+            ConcernReason::Scope
+        }
+    });
+    ReviewVerdict {
+        verdict: if asks {
+            ReviewDecision::Concern
+        } else {
+            ReviewDecision::Revise
+        },
+        reasons,
+        reason_codes,
+        summary: verdict.summary.clone(),
+        recommendation: None,
+        confidence: None,
+        reason_category,
+        agents: verdict.agents.clone(),
+    }
+}
+
+/// Why a review whose agents decide where it goes asks a person: each
+/// judgment that asks for one, by whom, with its decision, recommendation,
+/// confidence and the reason a person is needed; and the verdict's own
+/// decision when it was lighter.
+pub(super) fn agents_escalation(
+    verdict: &ReviewVerdict,
+    route: &VerdictRoute,
+    parent_decides: bool,
+) -> String {
+    let describe = |who: &str,
+                    decision: Option<ReviewDecision>,
+                    recommendation: Option<LandingRecommendation>,
+                    confidence: Option<AskConfidence>,
+                    category: Option<ConcernReason>| {
+        let mut said = format!(
+            "{who} returned {}",
+            decision.map_or("nothing", ReviewDecision::as_str)
+        );
+        if decision == Some(ReviewDecision::Concern) {
+            said.push_str(&format!(
+                " recommending {} ({} confidence{})",
+                recommendation.map_or("nothing", LandingRecommendation::as_str),
+                confidence.map_or("no", AskConfidence::as_str),
+                category
+                    .map(|c| format!(", {}", c.as_str()))
+                    .unwrap_or_default()
+            ));
+        }
+        said
+    };
+    let mut parts = Vec::new();
+    if parent_decides {
+        parts.push(describe(
+            "the review",
+            Some(verdict.verdict),
+            verdict.recommendation,
+            verdict.confidence,
+            verdict.reason_category,
+        ));
+    }
+    for agent in route.deciding() {
+        if let Some(result) = verdict.agents.iter().find(|r| r.agent == agent.agent) {
+            parts.push(describe(
+                &format!("the subagent {}", result.agent),
+                result.verdict,
+                result.recommendation,
+                result.confidence,
+                result.reason_category,
+            ));
+        }
+    }
+    let mut why = format!("a person decides: {}", parts.join("; "));
+    if route.parent_lighter() {
+        why.push_str(&format!(
+            "; the review's own verdict {} was lighter",
+            verdict.verdict.as_str()
+        ));
+    }
+    why
+}
+
 /// Why a `concern` goes to a person (`escalated`), for its ask; `None` for
 /// a verdict with no recommendation, which asks as it always did.
 pub(super) fn concern_escalation(
@@ -1895,5 +2158,99 @@ mod tests {
             )
         );
         assert!(!question.contains("recommends"), "{question}");
+    }
+
+    /// A verdict without the completed result of each required agent is
+    /// never acted on as a verdict: it is the unreadable one, retried once
+    /// and then failed to a person (ADR-t1453-1 decision 6); one of a
+    /// review that requires none and names none reads as before.
+    #[test]
+    fn a_verdict_lacking_its_agents_results_is_unreadable() {
+        use super::super::jobs::review_end;
+        let required = vec!["design".to_owned()];
+        let pass = || verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok"}));
+        let end = review_end(pass(), &required);
+        let ReviewEnd::Unreadable(why) = &end else {
+            panic!("a pass without its agent's result was acted on");
+        };
+        assert!(why.ends_with("no result of design"), "{why}");
+        assert!(retries_review(&end, true, false, false));
+        assert!(!retries_review(&end, true, true, false));
+        assert!(matches!(review_end(pass(), &[]), ReviewEnd::Verdict(_)));
+        let failed = verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok",
+            "agents": [{"agent": "design", "status": "failed"}]}));
+        assert!(matches!(
+            review_end(failed.clone(), &required),
+            ReviewEnd::Unreadable(_)
+        ));
+        // A repository without agents does not take a result it never asked for.
+        assert!(matches!(review_end(failed, &[]), ReviewEnd::Unreadable(_)));
+        let whole = verdict(json!({"verdict": "pass", "reasons": [], "summary": "ok",
+            "agents": [{"agent": "design", "status": "completed", "verdict": "pass", "summary": "ok"}]}));
+        assert!(matches!(
+            review_end(whole, &required),
+            ReviewEnd::Verdict(_)
+        ));
+    }
+
+    /// What a review whose agents decide where it goes applies and asks
+    /// with: the reasons of the judgments that go there, each agent's
+    /// named, a discard over a scope, and each judgment that asks in why.
+    #[test]
+    fn the_agents_that_decide_give_their_reasons_and_why() {
+        let lighter = verdict(json!({
+            "verdict": "pass", "reasons": ["fine"], "summary": "ok",
+            "agents": [
+                {"agent": "design", "status": "completed", "verdict": "revise", "reasons": ["docs drift"], "summary": "s"},
+                {"agent": "lint", "status": "completed", "verdict": "pass", "summary": "ok"},
+                {"agent": "terse", "status": "completed", "verdict": "revise", "summary": "add a test"},
+            ],
+        }));
+        let route = lighter.route(true);
+        let combined = combined_verdict(&lighter, &route, false);
+        assert_eq!(combined.verdict, ReviewDecision::Revise);
+        assert_eq!(
+            combined.reasons,
+            ["design: docs drift", "terse: add a test"]
+        );
+        assert_eq!(combined.reason_codes.len(), 2);
+        assert_eq!(combined.reason_category, None);
+        let asking = verdict(json!({
+            "verdict": "concern", "reasons": ["mine"], "summary": "look",
+            "recommendation": "land", "confidence": "low",
+            "agents": [
+                {"agent": "design", "status": "completed", "verdict": "concern", "reasons": ["drop it"],
+                 "summary": "s", "recommendation": "send_back", "confidence": "high", "reason_category": "discard"},
+            ],
+        }));
+        let route = asking.route(true);
+        assert_eq!(route.destination, Destination::Ask);
+        let combined = combined_verdict(&asking, &route, true);
+        assert_eq!(combined.verdict, ReviewDecision::Concern);
+        assert_eq!(combined.reasons, ["mine", "design: drop it"]);
+        assert_eq!(combined.reason_category, Some(ConcernReason::Discard));
+        assert_eq!(combined.recommendation, None);
+        assert_eq!(
+            agents_escalation(&asking, &route, true),
+            "a person decides: the review returned concern recommending land (low confidence); the subagent design returned concern recommending send_back (high confidence, discard)"
+        );
+        let scope = verdict(json!({
+            "verdict": "pass", "reasons": [], "summary": "ok",
+            "agents": [{"agent": "design", "status": "completed", "verdict": "concern", "reasons": [],
+                        "summary": "s", "reason_category": "scope"}],
+        }));
+        let route = scope.route(true);
+        assert_eq!(
+            combined_verdict(&scope, &route, false).reason_category,
+            Some(ConcernReason::Scope)
+        );
+        assert_eq!(
+            agents_escalation(&scope, &route, false),
+            "a person decides: the subagent design returned concern recommending nothing (no confidence, scope); the review's own verdict pass was lighter"
+        );
+        assert_eq!(
+            subagents_unsupported(Provider::Codex, &["design".to_owned(), "lint".to_owned()]),
+            "subagents_unsupported: the review requires the subagents design, lint, which codex cannot run, and no other provider that can run them can be used"
+        );
     }
 }

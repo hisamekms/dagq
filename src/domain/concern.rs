@@ -86,8 +86,14 @@ pub fn decide(
 /// `land` with `high` confidence and no reason a person is needed, which
 /// the runtime lands as it does a pass (ADR-t451-1 decision 3). Read from
 /// the verdict alone, so every reader of a passed review agrees with
-/// [`decide`], whose `land` needs no revise left.
+/// [`decide`], whose `land` needs no revise left. A review with required
+/// subagents records where its verdict and its agents' results sent the
+/// run (`route`, ADR-t1453-1 decision 7): it lets the run land only when
+/// that is to land.
 pub fn lets_land(review: &Value) -> bool {
+    if let Some(destination) = review["route"]["destination"].as_str() {
+        return destination == "land";
+    }
     match review["verdict"].as_str() {
         Some("pass") => true,
         Some("concern") => {
@@ -143,6 +149,20 @@ mod tests {
     use super::*;
     use AskConfidence::{High, Low};
     use LandingRecommendation::{Land, SendBack};
+
+    /// A review with required subagents lets the run land only when the
+    /// route its verdict and agents gave is to land (ADR-t1453-1).
+    #[test]
+    fn a_route_decides_whether_a_review_lets_the_run_land() {
+        let pass = json!({"verdict": "pass"});
+        assert!(lets_land(&pass));
+        let mut sent_back = pass.clone();
+        sent_back["route"] = json!({"destination": "send_back"});
+        assert!(!lets_land(&sent_back));
+        let mut landed = json!({"verdict": "revise"});
+        landed["route"] = json!({"destination": "land"});
+        assert!(lets_land(&landed));
+    }
 
     #[test]
     fn only_a_high_confidence_without_a_reason_is_applied() {

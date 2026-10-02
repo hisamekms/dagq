@@ -469,6 +469,10 @@ pub(super) struct ReviewWatch {
     /// Whether `[roles.review]` names its provider: a provider that cannot
     /// be used then moves the review to the other (ADR-t1207-1).
     pub(super) switchable: bool,
+    /// The review's required subagents (ADR-t1453-1): the verdict must
+    /// carry the completed result of each and of no other agent; none for
+    /// a review that requires none.
+    pub(super) required: Vec<String>,
     pub(super) job: HeadlessJob,
 }
 
@@ -476,7 +480,9 @@ pub(super) struct ReviewWatch {
 pub(super) enum ReviewEnd {
     Verdict(ReviewVerdict),
     /// The job ended well but its stdout held no readable verdict JSON
-    /// (task 328): worth one more review with the same input.
+    /// (task 328), or a verdict without the completed results of its
+    /// required subagents (ADR-t1453-1 decision 6): worth one more review
+    /// with the same input.
     Unreadable(String),
     /// The job itself failed: it exited non-zero or timed out.
     Failed(String),
@@ -491,11 +497,21 @@ impl ReviewWatch {
     ) -> Result<Option<ReviewEnd>> {
         Ok(self.job.poll(files, provider)?.map(|output| match output {
             Ok(stdout) => match ReviewVerdict::parse(&stdout) {
-                Ok(verdict) => ReviewEnd::Verdict(verdict),
+                Ok(verdict) => review_end(verdict, &self.required),
                 Err(error) => ReviewEnd::Unreadable(error),
             },
             Err(error) => ReviewEnd::Failed(error),
         }))
+    }
+}
+
+/// How a review whose stdout held `verdict` ended: as its verdict when it
+/// carries the completed results of exactly the `required` agents, else
+/// as an unreadable one, which is never a pass (ADR-t1453-1 decision 6).
+pub(super) fn review_end(verdict: ReviewVerdict, required: &[String]) -> ReviewEnd {
+    match crate::domain::review_subagents::incomplete(required, &verdict.agents) {
+        None => ReviewEnd::Verdict(verdict),
+        Some(why) => ReviewEnd::Unreadable(why),
     }
 }
 

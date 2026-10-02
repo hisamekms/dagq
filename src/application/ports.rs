@@ -596,6 +596,25 @@ pub trait AgentProvider {
         prompt: &str,
         access: crate::domain::headless_job::JobAccess,
     ) -> Result<CommandSpec>;
+    /// Whether this provider's review job can run the review's required
+    /// subagents (ADR-t1453-1 decision 8): one that cannot is not started
+    /// for a review that requires them. None can by default.
+    fn runs_review_subagents(&self) -> bool {
+        false
+    }
+    /// Hand the review `command` ([`AgentProvider::review_command`]) the
+    /// definitions of its required subagents, allowed only the review's
+    /// reads, and keep it from loading agents or settings of the
+    /// worktree. A provider that cannot ([`AgentProvider::runs_review_subagents`])
+    /// refuses.
+    fn review_subagents(
+        &self,
+        command: &mut CommandSpec,
+        agents: &[crate::domain::review_subagents::AgentDefinition],
+    ) -> Result<()> {
+        let _ = (command, agents);
+        anyhow::bail!("this provider cannot run the review's subagents")
+    }
     /// The agent of the inbox (ADR-0022): an interactive agent with
     /// `prompt` as its first message that loads `plugin_dir`, run as the
     /// command of its workspace, with no settings of dagq's (a person works

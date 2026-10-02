@@ -306,8 +306,15 @@ pub fn review_subagents_prompt(snapshot: &SubagentSnapshot, input: &Path) -> Str
             paths = agent.matched.join(", "),
         ));
     }
+    out.push_str(SUBAGENTS_INSTRUCTION);
     out
 }
+
+/// How the review runs its required subagents and reports their results
+/// (ADR-t1453-1 decisions 5 and 6), after the list of agents.
+pub const SUBAGENTS_INSTRUCTION: &str = "Each of these agents is given to you as a subagent of the same name with that definition. Besides your own review, run every one of them as a subagent on this review's changes, wait until all of them have finished, and fold their findings into your one verdict. Your verdict must not be lighter than any agent's (pass < revise < concern), and it keeps each agent's reasons, recommendation, confidence and reason_category. Do not skip an agent: one that could not run or finish is reported as failed, and the review does not pass then.
+Add to the verdict JSON an \"agents\" array with exactly one entry per agent above and no other: {\"agent\": \"<name>\", \"status\": \"completed\" or \"failed\", \"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [...], \"summary\": \"...\"}, and for a concern also \"recommendation\", \"confidence\" and \"reason_category\" as in the verdict.
+";
 
 /// Write `text` and then the full diff `<base>...<head>` as a fenced block to
 /// `temporary`. Git streams the diff to the file `diff` first, as raw bytes

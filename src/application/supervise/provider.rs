@@ -297,7 +297,8 @@ impl Supervisor<'_> {
             SwitchReason::Authentication => Some(Wall::Authentication),
             SwitchReason::Disabled
             | SwitchReason::LaunchFailed
-            | SwitchReason::ExecutableMissing => None,
+            | SwitchReason::ExecutableMissing
+            | SwitchReason::SubagentsUnsupported => None,
         };
         if from == Provider::Claude && reason != SwitchReason::LaunchFailed {
             return Ok(wall_of(reason));
@@ -400,7 +401,8 @@ impl Supervisor<'_> {
             // An agent that did not start is no wall a person moves.
             SwitchReason::Disabled
             | SwitchReason::LaunchFailed
-            | SwitchReason::ExecutableMissing => return Ok(()),
+            | SwitchReason::ExecutableMissing
+            | SwitchReason::SubagentsUnsupported => return Ok(()),
         };
         let (outcome, _) = ask::hold(
             &mut *self.queue,

@@ -33,6 +33,10 @@ string_enum!(SwitchReason {
     Authentication => "authentication",
     UsageLimit => "usage_limit",
     LaunchFailed => "launch_failed",
+    // A review that requires subagents its provider cannot run
+    // (ADR-t1453-1 decision 8): the provider itself can be used, so it is
+    // not held.
+    SubagentsUnsupported => "subagents_unsupported",
 });
 
 impl SwitchReason {
@@ -63,7 +67,9 @@ impl SwitchReason {
     /// text says ends then instead ([`reset_at`]).
     pub const fn hold_secs(self) -> i64 {
         match self {
-            Self::Disabled => 0, // Policy, never a timed provider hold.
+            // Policy, never a timed provider hold; nor is a review's need
+            // of subagents (ADR-t1453-1 decision 8).
+            Self::Disabled | Self::SubagentsUnsupported => 0,
             Self::UsageLimit => 1800,
             Self::Authentication => 900,
             Self::LaunchFailed | Self::ExecutableMissing => 600,

@@ -4,8 +4,8 @@ type: design
 title: Domain model
 status: current
 created: 2026-09-21
-updated: 2026-10-02
-last_verified: 2026-10-02
+updated: 2026-10-03
+last_verified: 2026-10-03
 scope: domain
 related:
   - adr-t1340-1
@@ -369,6 +369,7 @@ domainの関数は業務上の拒否を`DomainError`（`src/domain/error.rs`）�
 | `authentication` | turnが認証の失敗で止まった（読み手の`authentication`） | 900秒 |
 | `usage_limit` | turnが利用上限かrate limitで止まった（読み手の`usage_limit`） | 1800秒 |
 | `launch_failed` | turnのagentを起動できない、または出力無しに非0で終わった（turnの`failure`が`launch`） | 600秒（Claudeもこの理由では`ProviderHold`で控える） |
+| `subagents_unsupported` | runのreviewが必須のreviewのsubagentを持ち、行き先のproviderがそれを動かせない（[Review](supervisor-lifecycle/review.md#reviewのsubagent)、[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)決定8）。reviewの`launch`の`switch_reason`にだけ入る | （控えない。providerは使える） |
 
 `SwitchPhase`（`start` / `answer` / `revise` / `resume` / `nudge`）は切り替え先で行う呼び出しの種類。runの切り替えは`MAX_PROVIDER_SWITCHES`（2）回まで。
 

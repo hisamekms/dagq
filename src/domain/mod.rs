@@ -411,6 +411,10 @@ pub struct ReviewVerdict {
     /// `scope` nor `discard`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_category: Option<concern::ConcernReason>,
+    /// The results of the review's required subagents (ADR-t1453-1
+    /// decision 5), one per agent; none for a review that requires none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<review_subagents::AgentResult>,
 }
 
 #[derive(Deserialize)]
@@ -425,6 +429,8 @@ struct PrintedReviewVerdict {
     confidence: Option<String>,
     #[serde(default)]
     reason_category: Option<String>,
+    #[serde(default)]
+    agents: Vec<review_subagents::AgentResult>,
 }
 
 impl From<PrintedReviewVerdict> for ReviewVerdict {
@@ -446,11 +452,28 @@ impl From<PrintedReviewVerdict> for ReviewVerdict {
             reason_category: concern
                 .then(|| concern::reason(printed.reason_category.as_deref()))
                 .flatten(),
+            agents: printed.agents,
         }
     }
 }
 
 impl ReviewVerdict {
+    /// Where this verdict sends the run with its agents' results
+    /// (ADR-t1453-1 decision 7), `revise_left` saying whether the round
+    /// has a revise left.
+    pub fn route(&self, revise_left: bool) -> review_subagents::VerdictRoute {
+        review_subagents::route(
+            (
+                self.verdict,
+                self.recommendation,
+                self.confidence,
+                self.reason_category,
+            ),
+            &self.agents,
+            revise_left,
+        )
+    }
+
     /// The codes `review_finished` records for each reason, `unlabeled`
     /// for one without them.
     pub fn recorded_codes(&self) -> Vec<Vec<String>> {
