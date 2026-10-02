@@ -261,7 +261,7 @@ pub fn worker_question_topics(
     table
 }
 
-fn rate(part: i64, whole: i64) -> Option<f64> {
+pub(super) fn rate(part: i64, whole: i64) -> Option<f64> {
     #[allow(clippy::cast_precision_loss)]
     (whole > 0).then(|| ((part as f64 / whole as f64) * 1000.0).round() / 1000.0)
 }

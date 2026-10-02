@@ -106,6 +106,8 @@ fn resume_taken_over_at_dialog(handoff: bool, max_waiting: usize) {
     }
     let ask = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::AnswerPrompt,
             task_id: Some(run.task_id()),

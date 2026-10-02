@@ -189,6 +189,8 @@ impl Inbox {
 fn open_ask(queue: &mut SqliteQueue) -> dagq::domain::AskId {
     queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: Some(TaskId::new(1)),

@@ -678,6 +678,8 @@ fn triage_answers_resume_the_run_or_ready_the_task() {
     let ask = |queue: &mut SqliteQueue| {
         queue
             .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
                 topics: Vec::new(),
                 kind: AskKind::Decide,
                 task_id: None,
@@ -1027,6 +1029,8 @@ fn failed_review_asked_before_death_at(
     }
     let ask = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::ApproveLanding,
             task_id: None,
@@ -1233,6 +1237,8 @@ fn an_adopted_run_whose_concern_was_asked_waits_for_the_ask() {
             .unwrap();
         let ask = queue
             .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
                 topics: Vec::new(),
                 kind: AskKind::ApproveLanding,
                 task_id: None,

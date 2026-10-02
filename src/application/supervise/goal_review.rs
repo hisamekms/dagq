@@ -426,6 +426,8 @@ impl Supervisor<'_> {
         let goal = job.goal_id;
         let (decision, overridden) = decide(verdict.verdict, job.gaps_in_a_row);
         let ask = (decision == GoalReviewDecision::Ask).then(|| NewAsk {
+            recommendation: None,
+            confidence: None,
             kind: AskKind::ApproveGoal,
             task_id: Some(job.anchor),
             run_id: None,

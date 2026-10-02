@@ -147,6 +147,8 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
     queue.close_ask(dagq::domain::AskId::new(1)).unwrap();
 
     let new_ask = |question: &str| NewAsk {
+        recommendation: None,
+        confidence: None,
         topics: Vec::new(),
         kind: AskKind::ApproveLanding,
         task_id: None,
@@ -187,6 +189,8 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
         &db,
         &other,
         NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Decide,
             task_id: Some(TaskId::new(1)),
@@ -215,6 +219,8 @@ fn only_a_new_ask_notifies_and_it_goes_to_the_inbox() {
         &db,
         &other,
         NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: None,
@@ -257,6 +263,8 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
     // A `decide` ask: the supervisor applies an `approve_landing` answer
     // itself (see a_third_review_that_does_not_pass_asks_a_person_and_land_lands_it).
     let new_ask = |question: &str| NewAsk {
+        recommendation: None,
+        confidence: None,
         topics: Vec::new(),
         kind: AskKind::Decide,
         task_id: None,
@@ -289,6 +297,7 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
         json!([{"id": before + 1, "kind": "ask_opened", "task_id": 1, "run_id": run.id(),
                 "ask_id": opened.ask.id, "next": format!("answer ask {}", opened.ask.id),
                 "reason_category": "recovery_failed",
+                "recommendation": null, "confidence": null,
                 "created_at": woke["events"][0]["created_at"]}])
     );
     assert_eq!(woke["supervisors_changed"], false);
@@ -655,6 +664,8 @@ fn status_reports_failed_runs_and_unanswered_exit_requests() {
     // The timeout alone is no attention: the supervisor's stuck_exit ask is.
     queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::StuckExit,
             task_id: None,
@@ -826,6 +837,8 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
     // answer goes to a new planner (none works on the draft).
     let asked = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(draft),

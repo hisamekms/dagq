@@ -33,7 +33,7 @@ Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_i
 
 It prints each open ask in full, oldest first. Take them one at a time:
 
-1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices when available. Add no recommendation of your own.
+1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices when available. Show the asker's `recommendation` and `confidence` when set. Add no recommendation of your own.
 2. Write the answer exactly as the person gave it: the option's text, or their own words.
 
 ```sh
@@ -48,7 +48,7 @@ Before showing an ask whose kind, options or effect you are unsure of, read `ref
 
 ## 4. Report the other attention, act only on the person's word
 
-Report each to the person in one short list (task, status, `next`, gist of `last_error`); do what they say with the `dagq-recover` skill. `(runtime)` entries need nothing.
+Report each in one short list (task, status, `next`, gist of `last_error`); do what the person says with `dagq-recover`. `(runtime)` entries need nothing.
 
 - `read the answer of ask <id> and close it` (`ask_answered`): an answer the runtime does not apply. `stuck_exit` `exit`, `answer_prompt`, `stalled` `intervene`, or the person's own text: carry it out as `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/session.md` says, then `"$DAGQ" ask close <id>`. `wait`, or nothing to do: `ask close <id>`.
 - `send the answer of ask <id> to the worker and close it`: the supervisor could not type it; `session.md` too.
@@ -56,7 +56,7 @@ Report each to the person in one short list (task, status, `next`, gist of `last
 - `decide the draft in a planner` (`draft_planner_exhausted`), `decide the finding in a planner` (`finding_planner_exhausted`), `decide the waiting tasks in a planner` (`dependency_stranded`), `check the planner` (`planner_unresponsive`), `plan review by hand` (`plan_review_failed`): tell the person, who works in a planner (`dagq-recover` section 8).
 - A worker provider that cannot be used: runs switch to the other by themselves; the person acts only on a `queue_hold` ask (login, limit). Codex's hold is `status`'s `provider_hold`; headless runs take no keys (`skills/dagq/reference/provider.md`).
 - `install tool` (`run_env_program_missing`): a `[run.env]` program is not on the supervisor's PATH, so it claims and lands nothing; the person installs it. It clears by itself.
-- `report the update` (`update_installed`): tell the person its `version`, `commit` (or `release`) and any `reason`/`message`; after a plugin update, reopened inbox and planner sessions load the new plugin.
+- `report the update` (`update_installed`): tell its `version`, `commit` (or `release`) and any `reason`/`message`; reopened sessions load an updated plugin.
 - `report the review`, `check the failed review`: notices, `reference/watch.md`.
 - `fix the push command` (`kpi_push_abandoned`): the KPI push command (`[push]` of `host.toml`) gave up a message after three failures; the person fixes the command or its service. It clears with the next push that succeeds.
 - `restart supervisor` (`supervisor_stopped`, `supervisor_stale`): `up` once the person says so (`dagq-recover`, section 5).

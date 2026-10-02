@@ -653,6 +653,8 @@ fn integrate_closes_the_blocked_asks_of_the_run_and_its_task() {
     let mut blocked = |task_id: Option<TaskId>, run_id: Option<RunId>| {
         queue
             .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
                 topics: Vec::new(),
                 kind: AskKind::Blocked,
                 task_id,

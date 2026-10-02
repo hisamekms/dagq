@@ -62,7 +62,9 @@ fn answer(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Valu
 
 /// The service's answer is what the command line prints for `args`. A
 /// read that tells the time now is read again when the clock moved
-/// between the two service calls around the command line's.
+/// between the two service calls around the command line's. When it moves
+/// on every try (a loaded host makes each call cross a second), the
+/// answers are compared without the fields that only measure the clock.
 fn same_as_cli(queue: &Queue, token: &str, use_case: UseCase, params: &Value, args: &[&str]) {
     for _ in 0..3 {
         let before = answer(queue, token, use_case, params);
@@ -72,8 +74,35 @@ fn same_as_cli(queue: &Queue, token: &str, use_case: UseCase, params: &Value, ar
             assert_eq!(before, printed, "{use_case:?} {params} against {args:?}");
             return;
         }
+        let before = without_clock(before);
+        if before == without_clock(after) {
+            assert_eq!(
+                before,
+                without_clock(printed),
+                "{use_case:?} {params} against {args:?}"
+            );
+            return;
+        }
     }
     panic!("{use_case:?} {params} kept changing");
+}
+
+/// `value` without the fields that grow with the clock alone: the length
+/// of a window that ends now (`landing_utilization`'s `window_secs` of
+/// the period not over yet, in `stats` and every period of `kpi`).
+fn without_clock(mut value: Value) -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("window_secs");
+                object.values_mut().for_each(strip);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut value);
+    value
 }
 
 #[test]

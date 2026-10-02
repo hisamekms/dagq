@@ -39,6 +39,8 @@ fn ask_during_review(db: &std::path::Path) -> AskId {
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
     let ask = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: vec!["task_overlap".into()],
             kind: AskKind::WorkerQuestion,
             task_id: Some(run.task_id()),

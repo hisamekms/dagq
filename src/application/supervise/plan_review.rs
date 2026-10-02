@@ -610,6 +610,8 @@ impl Supervisor<'_> {
         let mut revise_reasons = verdict.reasons.clone();
         revise_reasons.extend(precedents.iter().cloned());
         let ask = (decision == PlanReviewDecision::Concern).then(|| NewAsk {
+            recommendation: None,
+            confidence: None,
             kind: AskKind::ApprovePlan,
             task_id: Some(job.anchor),
             run_id: None,

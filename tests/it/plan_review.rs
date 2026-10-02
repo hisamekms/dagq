@@ -590,6 +590,8 @@ fn a_revise_goes_to_the_live_planner_with_the_precedents_and_times_out_to_the_in
     // A person answered the same kind of mismatch before.
     let earlier = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: None,
@@ -1748,6 +1750,8 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     // The planner cannot decide: it asks and stops.
     let asked = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(first),
@@ -1799,6 +1803,8 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     );
     let asked = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(second),
@@ -1836,6 +1842,8 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
     // planner is opened for it again.
     let asked = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(second),
@@ -1880,6 +1888,8 @@ fn a_planner_question_answer_another_supervisor_claimed_is_not_typed_again() {
     let planner = queue.planners(false).unwrap()[0].clone();
     let asked = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::PlannerQuestion,
             task_id: Some(draft),

@@ -414,6 +414,8 @@ receipt "$(git rev-parse HEAD)"; idle; await_exit
         .unwrap();
     let asked = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Stalled,
             task_id: None,

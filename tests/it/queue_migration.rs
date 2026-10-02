@@ -1239,6 +1239,8 @@ fn migration_adding_the_answerer_keeps_older_answers_unknown() {
     // This binary records both.
     let asked = queue
         .ask(dagq::domain::NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: dagq::domain::AskKind::Decide,
             task_id: Some(TaskId::new(1)),
@@ -1373,6 +1375,8 @@ fn migration_opening_the_kinds_keeps_rows_and_moves_their_rules_to_the_write_por
         .record_queue_event(EventKind::MarkRecorded, serde_json::json!({}))
         .unwrap();
     let ask = |kind: AskKind, task: Option<i64>, run: Option<&str>| NewAsk {
+        recommendation: None,
+        confidence: None,
         topics: Vec::new(),
         kind,
         task_id: task.map(TaskId::new),

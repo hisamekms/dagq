@@ -203,6 +203,8 @@ fn adopt_revise_at_dialog(max_waiting: usize) {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::AnswerPrompt,
             task_id: Some(run.task_id()),
@@ -788,6 +790,8 @@ fn reviewed_run_asked_to_exit(
     if failed_ask {
         queue
             .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
                 topics: Vec::new(),
                 kind: AskKind::ApproveLanding,
                 task_id: None,

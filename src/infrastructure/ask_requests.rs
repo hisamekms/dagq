@@ -40,6 +40,8 @@ mod tests {
             question: "Which?".to_owned(),
             options: vec![],
             topics: vec!["other".to_owned()],
+            recommend: None,
+            confidence: None,
             run_id: Some("r".to_owned()),
             task_id: None,
             finding_id: None,

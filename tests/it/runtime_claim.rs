@@ -1986,6 +1986,8 @@ fn status_and_doctor_measure_to_the_injected_clock() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Blocked,
             task_id: Some(TaskId::new(1)),

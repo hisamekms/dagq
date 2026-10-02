@@ -42,6 +42,12 @@ pub struct AskRequest {
     pub options: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    // Written only when given, so that a supervisor of an older build
+    // still reads the request (ADR-t451-1 decision 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
     #[serde(default)]
     pub run_id: Option<String>,
     #[serde(default)]
@@ -125,7 +131,15 @@ impl AskRequest {
             .map(RunId::new)
             .transpose()
             .map_err(|error| format!("run: {error}"))?;
+        let confidence = self
+            .confidence
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|error| format!("confidence: {error}"))?;
         let ask = NewAsk {
+            recommendation: self.recommend.clone(),
+            confidence,
             kind,
             task_id: self.task_id.map(TaskId::new),
             run_id,
@@ -153,6 +167,8 @@ mod tests {
             question: "Which?".to_owned(),
             options: vec!["a".to_owned()],
             topics: vec!["design_choice".to_owned()],
+            recommend: Some("a".to_owned()),
+            confidence: Some("high".to_owned()),
             run_id: Some("run-1".to_owned()),
             task_id: None,
             finding_id: None,
@@ -166,6 +182,19 @@ mod tests {
         assert_eq!(ask.reason_category, AskReason::Scope);
         assert_eq!(ask.run_id.unwrap().as_str(), "run-1");
         assert_eq!(ask.asked_by, "worker");
+        assert_eq!(ask.recommendation.as_deref(), Some("a"));
+        assert_eq!(ask.confidence, Some(crate::domain::AskConfidence::High));
+        // Without them the request is written as an older build reads it.
+        let plain = serde_json::to_string(&AskRequest {
+            recommend: None,
+            confidence: None,
+            ..request()
+        })
+        .unwrap();
+        assert!(
+            !plain.contains("recommend") && !plain.contains("confidence"),
+            "{plain}"
+        );
     }
 
     #[test]
@@ -185,6 +214,14 @@ mod tests {
             },
             AskRequest {
                 topics: vec![],
+                ..request()
+            },
+            AskRequest {
+                recommend: Some("b".to_owned()),
+                ..request()
+            },
+            AskRequest {
+                confidence: Some("medium".to_owned()),
                 ..request()
             },
         ];

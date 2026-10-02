@@ -947,6 +947,8 @@ impl Supervisor<'_> {
             &mut *self.queue,
             &self.layout.main_checkout,
             NewAsk {
+                recommendation: None,
+                confidence: None,
                 kind: AskKind::ApproveLanding,
                 task_id: None,
                 run_id: Some(run.id().clone()),

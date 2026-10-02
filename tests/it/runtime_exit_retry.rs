@@ -576,6 +576,8 @@ fn used_up_retries_do_not_close_a_run_with_an_open_worker_question() {
             SqliteQueue::open(db)
                 .unwrap()
                 .ask(NewAsk {
+                    recommendation: None,
+                    confidence: None,
                     topics: vec!["task_overlap".into()],
                     kind: AskKind::WorkerQuestion,
                     task_id: Some(run.task_id()),
@@ -647,6 +649,8 @@ fn an_adopter_does_not_retry_after_a_stuck_exit_ask() {
         SqliteQueue::open(db)
             .unwrap()
             .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
                 topics: Vec::new(),
                 kind: AskKind::StuckExit,
                 task_id: Some(run.task_id()),

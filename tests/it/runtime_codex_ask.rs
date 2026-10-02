@@ -555,6 +555,8 @@ fn a_request_is_opened_once_even_after_its_ask_closed() {
     let (_dir, repo, db, _backend, _codex) = codex_fixture();
     let run_id = claimed(&repo, &db);
     let ask = || NewAsk {
+        recommendation: None,
+        confidence: None,
         kind: AskKind::WorkerQuestion,
         task_id: None,
         run_id: Some(run_id.clone()),

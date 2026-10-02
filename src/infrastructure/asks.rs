@@ -13,8 +13,7 @@ use crate::domain::write_rules::check_run_has_task;
 use crate::domain::{
     APPROVE_RELEASE_OPTIONS, AnswerAuthority, Answerer, AskId, AskKind, AskOutcome, AskReason,
     HoldOutcome, LANDING_OPTIONS, NewAsk, NewHold, RunId, RunStatus, TaskId, UPDATE_FAILED_OPTIONS,
-    answer_approves, check_ask_kind, check_event_target, finding, option_index,
-    session_takes_answers,
+    answer_approves, check_ask_kind, check_event_target, option_index, session_takes_answers,
 };
 
 pub use crate::application::AskQuery;
@@ -212,6 +211,8 @@ impl SqliteQueue {
                         "asked_by": hold.asked_by,
                         "reason_category": hold.reason_category,
                         "affected": affected,
+                        "recommendation": null,
+                        "confidence": null,
                     }),
                 )?;
                 HoldOutcome {
@@ -584,6 +585,8 @@ impl SqliteQueue {
             "kind": kind,
             "asked_by": asked_by,
             "reason_category": reason,
+            "recommendation": null,
+            "confidence": null,
         });
         if let (Some(payload), serde_json::Value::Object(details)) =
             (payload.as_object_mut(), details)
@@ -994,11 +997,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     // An ask about a finding offers to make a proposal of it or dismiss
     // it, a `stalled` one to make a proposal of its cause (ADR-0044
     // decision 19); the runtime applies those answers.
-    let options = match (&ask.kind, ask.finding_id) {
-        (AskKind::Blocked, Some(_)) => finding::with_finding_options(&ask.options),
-        (AskKind::Stalled, _) => finding::with_propose_option(&ask.options),
-        _ => ask.options.clone(),
-    };
+    let options = ask.offered_options();
     if let Some(existing) = tx
             .query_row(
                 "SELECT * FROM asks WHERE ifnull(task_id,0)=ifnull(?1,0) AND ifnull(run_id,'')=ifnull(?2,'')
@@ -1020,9 +1019,13 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     let topics_column = (!topics.is_empty())
         .then(|| serde_json::to_string(&topics))
         .transpose()?;
+    // The asking AI's recommendation and confidence (ADR-t451-1 decision
+    // 1); NULL without them.
+    let recommendation = ask.recommended_option();
+    let confidence = ask.confidence.map(|confidence| confidence.as_str());
     tx.execute(
-        "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             ask.kind.as_str(),
             task_id,
@@ -1032,7 +1035,9 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
             ask.asked_by,
             ask.reason_category.as_str(),
             ask.finding_id,
-            topics_column
+            topics_column,
+            recommendation,
+            confidence
         ],
     )?;
     let id = AskId::new(tx.last_insert_rowid());
@@ -1041,6 +1046,8 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
         "kind": ask.kind,
         "asked_by": ask.asked_by,
         "reason_category": ask.reason_category,
+        "recommendation": recommendation,
+        "confidence": confidence,
     });
     if !topics.is_empty() {
         payload["topics"] = json!(topics);
@@ -1190,6 +1197,11 @@ pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
             .get::<_, Option<String>>("topics")?
             .and_then(|value| serde_json::from_str(&value).ok())
             .unwrap_or_default(),
+        recommendation: row.get("recommendation")?,
+        // A newer binary's confidence this one does not know reads as none.
+        confidence: row
+            .get::<_, Option<String>>("confidence")?
+            .and_then(|value| value.parse().ok()),
         subject: row.get("subject")?,
         affected: json_col(row, "affected")?,
         created_at: row.get("created_at")?,
@@ -1542,6 +1554,8 @@ mod tests {
         .unwrap();
         let ask = queue
             .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
                 topics: vec!["task_overlap".into()],
                 kind: AskKind::WorkerQuestion,
                 task_id: Some(task_id),

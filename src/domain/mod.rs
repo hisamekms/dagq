@@ -851,6 +851,13 @@ pub struct Ask {
     /// kind and for an ask opened before topics were kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<String>,
+    /// The option the AI that opened it recommends (ADR-t451-1 decision
+    /// 1); `None` without one and for an ask opened before it was kept.
+    #[serde(default)]
+    pub recommendation: Option<String>,
+    /// How sure that AI is of its judgement; `None` likewise.
+    #[serde(default)]
+    pub confidence: Option<AskConfidence>,
     /// What a `queue_hold` ask is about within its reason (the usage limit
     /// or the disk for `cost`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -989,6 +996,11 @@ pub struct NewAsk {
     /// What a `worker_question` left undecided (ADR-t947-2), primary
     /// first: one at least for that kind, none for any other.
     pub topics: Vec<String>,
+    /// The option the asking AI recommends (ADR-t451-1 decision 1): one of
+    /// the ask's options, those the runtime adds included ([`Self::offered_options`]).
+    pub recommendation: Option<String>,
+    /// How sure the asking AI is of its judgement.
+    pub confidence: Option<AskConfidence>,
     /// The finding a `blocked` ask raises; the one-open-ask rule then holds
     /// per finding (ADR-0044 decision 23). A `planner_question` names the
     /// finding its planner of the runtime's was opened for (ADR-0044
@@ -996,7 +1008,34 @@ pub struct NewAsk {
     pub finding_id: Option<FindingId>,
 }
 
+// How sure an AI is of the judgement behind an ask's recommendation
+// (ADR-t451-1 decision 1).
+string_enum!(AskConfidence {
+    High => "high",
+    Low => "low",
+});
+
 impl NewAsk {
+    /// The options the ask is written with: the asker's own, and for an
+    /// ask about a finding or a stall those the runtime adds to apply
+    /// (ADR-0044 decision 19).
+    pub fn offered_options(&self) -> Vec<String> {
+        match (&self.kind, self.finding_id) {
+            (AskKind::Blocked, Some(_)) => finding::with_finding_options(&self.options),
+            (AskKind::Stalled, _) => finding::with_propose_option(&self.options),
+            _ => self.options.clone(),
+        }
+    }
+
+    /// The recommendation as written: trimmed, and none when blank.
+    pub fn recommended_option(&self) -> Option<String> {
+        self.recommendation
+            .as_deref()
+            .map(str::trim)
+            .filter(|option| !option.is_empty())
+            .map(str::to_owned)
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         require(!self.question.trim().is_empty(), || DomainError::Blank {
             field: "question",
@@ -1025,6 +1064,16 @@ impl NewAsk {
                     kind: self.kind.clone(),
                 }
             })?;
+        }
+        if let Some(recommendation) = self.recommended_option() {
+            let options = self.offered_options();
+            require(
+                options.iter().any(|option| option.trim() == recommendation),
+                || DomainError::AskRecommendationNotAnOption {
+                    recommendation,
+                    options: options.clone(),
+                },
+            )?;
         }
         require(
             self.finding_id.is_none()
@@ -2149,6 +2198,64 @@ mod attention_tests {
     use super::*;
     use serde_json::json;
 
+    /// A recommendation (ADR-t451-1 decision 1) must be one of the ask's
+    /// options once trimmed, those the runtime adds included; a blank one
+    /// is none. The confidence is `high` or `low`.
+    #[test]
+    fn a_recommendation_is_one_of_the_options_offered() {
+        let ask = |kind: AskKind, recommendation: &str, finding: Option<i64>| NewAsk {
+            kind,
+            task_id: Some(TaskId::new(1)),
+            run_id: None,
+            question: "q".into(),
+            options: vec!["land".into(), "cancel".into()],
+            asked_by: "planner".into(),
+            reason_category: AskReason::Scope,
+            topics: Vec::new(),
+            recommendation: Some(recommendation.into()),
+            confidence: Some(AskConfidence::Low),
+            finding_id: finding.map(FindingId::new),
+        };
+        assert!(
+            ask(AskKind::ApproveLanding, " land ", None)
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            ask(AskKind::ApproveLanding, " land ", None).recommended_option(),
+            Some("land".to_owned())
+        );
+        let blank = ask(AskKind::ApproveLanding, "  ", None);
+        assert!(blank.validate().is_ok());
+        assert_eq!(blank.recommended_option(), None);
+        let refused = ask(AskKind::ApproveLanding, "dismiss", None)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains(
+                r#"--recommend "dismiss" is none of the ask's options ("land", "cancel")"#
+            ),
+            "{refused}"
+        );
+        assert!(ask(AskKind::Blocked, "dismiss", Some(1)).validate().is_ok());
+        assert!(ask(AskKind::Stalled, "propose", None).validate().is_ok());
+        let mut without = ask(AskKind::Decide, "land", None);
+        without.options.clear();
+        assert!(
+            without
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("it has none")
+        );
+        assert_eq!(
+            "high".parse::<AskConfidence>().unwrap(),
+            AskConfidence::High
+        );
+        assert!("medium".parse::<AskConfidence>().is_err());
+    }
+
     /// The answer chooses the first option equal to it once trimmed; any
     /// other answer is free.
     #[test]
@@ -2162,6 +2269,8 @@ mod attention_tests {
 
     fn ask_of(kind: AskKind, options: &[&str]) -> Ask {
         Ask {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             id: AskId::new(1),
             kind,
@@ -2242,6 +2351,8 @@ mod attention_tests {
     #[test]
     fn asks_wait_for_the_inbox_until_closed() {
         let mut ask = Ask {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             id: AskId::new(1),
             kind: AskKind::Decide,
@@ -2401,6 +2512,8 @@ mod attention_tests {
     #[test]
     fn new_ask_rejects_blank_texts_and_bad_ids() {
         let valid = NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: vec!["task_overlap".into()],
             kind: AskKind::WorkerQuestion,
             task_id: Some(TaskId::new(1)),

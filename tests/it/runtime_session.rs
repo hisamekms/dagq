@@ -1178,6 +1178,8 @@ fn a_failed_answer_delivery_is_left_to_the_inbox() {
     let cursor = queue.latest_event_id().unwrap().as_i64();
     let late = queue
         .ask(dagq::domain::NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: vec!["task_overlap".into()],
             kind: "worker_question".parse().unwrap(),
             task_id: None,

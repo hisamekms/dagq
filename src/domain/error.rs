@@ -209,6 +209,12 @@ pub enum DomainError {
     AskTopicNotWorkerQuestion {
         kind: AskKind,
     },
+    /// A recommendation that is none of the ask's options (ADR-t451-1
+    /// decision 1).
+    AskRecommendationNotAnOption {
+        recommendation: String,
+        options: Vec<String>,
+    },
     /// An ask of `kind` names neither a task nor a run; only `blocked` may.
     AskWithoutTarget {
         kind: AskKind,
@@ -520,6 +526,22 @@ impl fmt::Display for DomainError {
                 f,
                 "only a worker_question carries --topic, not {}",
                 kind.as_str()
+            ),
+            Self::AskRecommendationNotAnOption {
+                recommendation,
+                options,
+            } => write!(
+                f,
+                "--recommend {recommendation:?} is none of the ask's options ({}): recommend one of them by its text",
+                if options.is_empty() {
+                    "it has none".to_owned()
+                } else {
+                    options
+                        .iter()
+                        .map(|option| format!("{option:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
             ),
             Self::AskFindingNotBlocked { kind } => write!(
                 f,

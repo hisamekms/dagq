@@ -223,6 +223,10 @@ struct AskParams {
     #[serde(default)]
     topics: Vec<String>,
     #[serde(default)]
+    recommend: Option<String>,
+    #[serde(default)]
+    confidence: Option<String>,
+    #[serde(default)]
     task_id: Option<i64>,
     #[serde(default)]
     run_id: Option<String>,
@@ -361,6 +365,8 @@ fn run(
         UseCase::Ask => {
             let p: AskParams = params(use_case, raw)?;
             let ask = NewAsk {
+                recommendation: p.recommend,
+                confidence: p.confidence.as_deref().map(str::parse).transpose()?,
                 kind: p.kind.unwrap_or_default().parse::<AskKind>()?,
                 task_id: p.task_id.map(TaskId::new),
                 run_id: p.run_id.map(RunId::new).transpose()?,

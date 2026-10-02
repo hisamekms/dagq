@@ -1020,6 +1020,14 @@ enum Command {
         /// when two came at once. A code outside the list is kept as given.
         #[arg(long = "topic")]
         topics: Vec<String>,
+        /// The option you recommend (ADR-t451-1 decision 1): one of the ask's --option texts (or
+        /// `propose` / `dismiss`, which the runtime adds to a blocked ask about a finding).
+        /// Optional on every kind; the inbox shows it to the person next to the options.
+        #[arg(long = "recommend")]
+        recommend: Option<String>,
+        /// How sure you are of the judgement behind the ask: high or low (ADR-t451-1 decision 1).
+        #[arg(long, value_parser = ["high", "low"])]
+        confidence: Option<String>,
         /// Task the ask is about. Only a blocked ask, or a planner_question about a finding, may
         /// name neither a task nor a run.
         #[arg(long = "task", conflicts_with = "run")]
@@ -2128,6 +2136,8 @@ fn requested_ask(
         options,
         because,
         topics,
+        recommend,
+        confidence,
         task_id,
         run,
         finding,
@@ -2149,6 +2159,8 @@ fn requested_ask(
         question: question.clone().unwrap_or_default(),
         options: options.clone(),
         topics: topics.clone(),
+        recommend: recommend.clone(),
+        confidence: confidence.clone(),
         run_id: run.clone(),
         task_id: *task_id,
         finding_id: *finding,
@@ -2389,15 +2401,25 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             options,
             because,
             topics,
+            recommend,
+            confidence,
             task_id,
             run,
             finding,
             cmux: _,
-        } => (
-            UseCase::Ask,
-            json!({"kind": kind, "question": question, "options": options, "because": because,
-                   "topics": topics, "task_id": task_id, "run_id": run, "finding_id": finding}),
-        ),
+        } => {
+            let mut params = json!({"kind": kind, "question": question, "options": options,
+                "because": because, "topics": topics, "task_id": task_id, "run_id": run,
+                "finding_id": finding});
+            // Only when given: a service of an older build refuses a field it
+            // does not know (ADR-t451-1 decision 1).
+            for (key, value) in [("recommend", recommend), ("confidence", confidence)] {
+                if let Some(value) = value {
+                    params[key] = json!(value);
+                }
+            }
+            (UseCase::Ask, params)
+        }
         Command::Proposal {
             command: ProposalCommand::List { all },
         } => (UseCase::ProposalList, json!({"all": all})),
@@ -3178,6 +3200,8 @@ fn execute(cli: Cli) -> Result<Value> {
             options,
             because,
             topics,
+            recommend,
+            confidence,
             task_id,
             run,
             finding,
@@ -3189,6 +3213,8 @@ fn execute(cli: Cli) -> Result<Value> {
                 executable: executable(&cmux).unwrap_or(cmux),
             };
             dialogue!(&cmux).ask(NewAsk {
+                recommendation: recommend,
+                confidence: confidence.as_deref().map(str::parse).transpose()?,
                 kind: kind.unwrap_or_default().parse::<AskKind>()?,
                 task_id: task_id.map(TaskId::new),
                 run_id: run.map(RunId::new).transpose()?,

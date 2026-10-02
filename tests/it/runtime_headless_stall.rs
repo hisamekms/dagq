@@ -218,6 +218,8 @@ esac"#
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = queue
         .ask(NewAsk {
+            recommendation: None,
+            confidence: None,
             topics: Vec::new(),
             kind: AskKind::Stalled,
             task_id: None,

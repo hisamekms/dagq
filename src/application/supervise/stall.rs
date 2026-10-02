@@ -299,6 +299,8 @@ fn new_stalled_ask(
         &mut *sv.queue,
         &sv.layout.main_checkout,
         NewAsk {
+            recommendation: None,
+            confidence: None,
             kind: AskKind::Stalled,
             task_id: Some(run.task_id()),
             run_id: Some(run.id().clone()),

@@ -2,6 +2,8 @@
 
 Read this when an open ask's kind, options or effect is unclear (the `dagq-inbox` skill, step 3). Whatever the kind, show the ask as written and add no recommendation of your own.
 
+An ask an AI opened (a review's `approve_landing`, plan review's `approve_plan`, a planner's `planner_question`, the observer's `blocked`) may carry that AI's `recommendation` (one of its options) and `confidence` (`high` / `low`), in `asks`, `status` and `watch` (null when it has none; ADR-t451-1). Show them next to the options as the asker's, e.g. "recommended by the asker: `land` (confidence: low)", and still let the person choose: never answer with the recommendation on your own. `stats`' `recommendations` counts how often the answers chose it.
+
 - `approve_landing`: a review's doubt: `land` / `send_back` / `cancel`. When the run's last review was a `revise` or `concern` (not a failed review), the supervisor records the answer as `review_outcome` against that review's codes for `stats` `review_reasons` (ADR-t947-1); the codes come from the review, so never ask the person for one.
 - `approve_plan`: plan review's concern: `ready` / `send_back: <reason>` / `cancel`. Recorded the same way as `plan_review_outcome`; never ask the person for a code.
 - `decide`: a failed, interrupted or resume-exhausted run the recovery job could not fix: `retry` / `resume` / `cancel`, no `resume` once resumes are used up, plus the job's options, which send the run back to the job.

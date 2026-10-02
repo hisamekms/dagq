@@ -29,6 +29,7 @@ pub mod landing_utilization;
 pub mod measures;
 pub mod predictions;
 pub mod providers;
+pub mod recommendations;
 pub mod retries;
 pub mod review_reasons;
 pub mod sessions;
@@ -576,6 +577,11 @@ pub struct Stats {
     /// their rate over the runs claimed, the answer times at night and by
     /// day, and what followed the answers; `unlabeled` without topics.
     pub worker_question_topics: worker_question_topics::WorkerQuestionTopics,
+    /// The AI's recommendations on the asks of the same window as `asks`
+    /// (ADR-t451-1 decision 1): per ask kind, how often the answer chose
+    /// the recommended option, and the judgements an AI made itself
+    /// without opening that kind of ask.
+    pub recommendations: recommendations::Recommendations,
     /// The use of the single integration slot over the window of `host`
     /// in time (goal 72): the share the `integrate` attempts held it,
     /// landed or not, its busiest hour, each attempt's time and the runs
@@ -1066,6 +1072,8 @@ pub fn stats(
         live.utc_offset_secs,
         counts,
     );
+    let recommendations =
+        recommendations::recommendations(events, window_start, next_cursor, counts);
     let claim_holds =
         super::claim_hold::claim_holds(events, window_start, next_cursor, window_end, counts);
     let landing_holds = super::claim_hold::holds_of(
@@ -1216,6 +1224,7 @@ pub fn stats(
         draft_flow,
         follow_up_categories,
         worker_question_topics,
+        recommendations,
         landing_utilization,
         host: None,
         next_cursor,

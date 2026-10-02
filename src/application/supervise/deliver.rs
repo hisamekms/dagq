@@ -320,6 +320,8 @@ pub(super) fn ask_unsubmitted(
         &mut *sv.queue,
         &sv.layout.main_checkout,
         NewAsk {
+            recommendation: None,
+            confidence: None,
             kind: AskKind::AnswerPrompt,
             task_id: Some(run.task_id()),
             run_id: Some(run.id().clone()),

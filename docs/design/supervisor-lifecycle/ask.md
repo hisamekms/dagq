@@ -50,10 +50,12 @@ related:
 | `discard_work` | できた成果を捨てるか、やり直すか | この期間は無し | `discard` |
 | `other` | どれにも当たらない。問いの文で説明する | この期間は無し | — |
 
-## 今後の姿: AIの推奨と確信度をaskに持たせる（未実装、ADR-t451-1）<a id="aiの推奨と確信度未実装"></a>
+## AIの推奨と確信度<a id="aiの推奨と確信度未実装"></a>
 
-[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1。**未実装**で、今の`ask`はこの欄を持たない。実装は後続のtaskが行う。
+[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)の決定1（task 1318で欄・CLI・表示・集計を実装）。AIが作るask（`planner_question`・`blocked`・`approve_landing`・`approve_plan`）に推奨と確信度を載せる。それぞれのaskに推奨を載せるのはreview・plan review・observer・plannerの実装task（1316・1317・1319・1320）が行い、この節の欄と集計を使う。
 
-- **欄**: AIが作るask（`planner_question`・`blocked`・`approve_landing`・`approve_plan`）に`recommendation`（推奨のoptionの文。無ければ`null`）と`confidence`（`high` / `low` / `null`）を足し、`ask_opened`のpayloadと`asks`の出力に載せる。inboxは推奨と確信度を人に見せる。`dagq ask`は`--recommend <option>`と`--confidence <high|low>`を受ける（`worker_question`には求めない）。
-- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録（[Review](review.md#aiが決めるconcern未実装)の`concern_decided`、[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`、[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のfinding、[Draft planners](draft-planners.md#推奨が出せればplannerが決める未実装)のnoteと`follow_up_adopted`）に残す。
-- **集計**: [Stats](stats.md)にaskのkindごとの「answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。
+- **欄**: askの行の`recommendation`（推奨のoptionの文）と`confidence`（`high` / `low`）。schema v59（`0059_ask_recommendation.sql`、compatible）で足し、無いaskと既存のaskは両方NULL。`domain::AskConfidence`が値を持ち、行を読むときは知らない値をnullとして読む。
+- **CLI**: `dagq ask ... [--recommend <option>] [--confidence <high|low>]`。どちらも全kindで任意で（`worker_question`にも求めない。`blocked`での必須化はtask 1319）、片方だけでもよい。`--recommend`は前後の空白を除いて比べ、空なら無しとして扱い、askのoptions（`--option`と、findingの`blocked`と`stalled`にruntimeが足す`propose` / `dismiss`。`NewAsk::offered_options`）のどれでもなければ`NewAsk::validate`が理由（推奨とoptionsの一覧）つきで拒む。queue serviceのクライアントモードの`ask`と、queue serviceより前のCodexのturnのrun dirの要求も同じ欄を運ぶ。同じ（task、run、kind、finding）のopenなaskを返すとき（`created: false`）は、既存のaskの推奨を書き換えない。
+- **表示**: `ask_opened`のpayloadと、`Ask`（`ask`・`asks`・`show`の`asks`の出力）、`status`の`asks`と`watch`の`ask_opened`の行に`recommendation`と`confidence`を載せる（無ければnull）。inboxは人にaskを見せるとき、推奨と確信度があれば尋ねたAIのものとして添え、自分の推奨は足さない（`dagq-inbox` skill）。
+- **AIが決めたものの記録**: AIが推奨を適用してaskを作らなかった判断は、kindごとの記録に残す。今数えるのはruntimeのplannerが`planner_question`を経ずに採用したfollow_up（`follow_up_adopted`の`by: planner`で`ask_id`がnull。[Draft planners](draft-planners.md)）。[Review](review.md#aiが決めるconcern未実装)の`concern_decided`、[Plan review](plan-review.md#aiが決めるconcern未実装)の`plan_concern_decided`、[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のaskの無いfindingは、それぞれの実装taskが`domain::stats::recommendations::DECIDED_WITHOUT_ASK`に足す。
+- **集計**: [Stats](stats.md#aiの推奨と確信度の集計)の`recommendations`。askのkindごとの「推奨を持つaskの答えのうち、answerが`recommendation`と一致した割合」と、AIが決めてaskにしなかった件数を並べる（ADR-t451-1のContextの数え方を、question・optionsの文でなく欄から再導出する）。

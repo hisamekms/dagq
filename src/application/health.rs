@@ -309,6 +309,10 @@ pub fn status(
                 "reason_category": ask.reason_category,
                 "affected": ask.affected,
                 "age_secs": now - ask.created_at,
+                // The asking AI's recommendation and confidence
+                // (ADR-t451-1 decision 1), null without them.
+                "recommendation": ask.recommendation,
+                "confidence": ask.confidence,
             });
             // What a worker_question left undecided (ADR-t947-2), primary
             // first; absent for the kinds and the asks without topics.
@@ -745,6 +749,13 @@ pub fn compact_event(event: &RunEvent) -> Value {
     }
     if let Some(reason) = payload.get("reason_category") {
         object.insert("reason_category".into(), reason.clone());
+    }
+    if event.kind == crate::domain::event_kind::EventKind::AskOpened.as_str() {
+        // The asking AI's recommendation and confidence (ADR-t451-1
+        // decision 1), null without them and for an ask opened before.
+        for key in ["recommendation", "confidence"] {
+            object.insert(key.into(), payload.get(key).cloned().unwrap_or(Value::Null));
+        }
     }
     if crate::domain::UPDATE_EVENT_KINDS.contains(&event.kind.as_str()) {
         // Which build a step of the automatic update is about, and where
