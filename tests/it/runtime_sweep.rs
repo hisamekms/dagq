@@ -618,6 +618,7 @@ fn the_sweep_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone
             .planner_workspace_created(planner.id, workspace)
             .unwrap();
         queue.register_planner_wrapper(planner.id, pid).unwrap();
+        queue.register_planner_agent(planner.id, pid, pid).unwrap();
         planner.id
     };
     let person = record(PlannerOrigin::Person, "W-PERSON", dead_pid);
@@ -699,6 +700,7 @@ fn the_sweep_removes_the_runners_of_planners_whose_wrapper_is_done() {
             .planner_workspace_created(planner.id, workspace)
             .unwrap();
         queue.register_planner_wrapper(planner.id, pid).unwrap();
+        queue.register_planner_agent(planner.id, pid, pid).unwrap();
         let dir = planners_dir(&db).join(planner.id.to_string());
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("runner"), "binary").unwrap();

@@ -595,6 +595,7 @@ fn a_planner_question_about_a_finding_is_typed_to_its_planner_and_undecided_plan
             .find(|p| p.finding_id == Some(found))
         {
             queue.register_planner_wrapper(open.id, 1).unwrap();
+            queue.register_planner_agent(open.id, 1, 1).unwrap();
             queue.planner_exited(open.id, 1, 0).unwrap();
         }
     }

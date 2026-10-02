@@ -480,6 +480,9 @@ fn idle_person_planner(queue: &SqliteQueue, db: &Path, workspace: &str) {
     queue
         .register_planner_wrapper(planner.id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
     let dir = planners_dir(db).join(planner.id.to_string());
     fs::create_dir_all(&dir).unwrap();
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
@@ -792,6 +795,7 @@ fn a_revise_without_a_live_planner_opens_planners_within_the_limit() {
     // closed and the revise of proposal one goes to a new planner first;
     // the limit still holds for proposal two.
     queue.register_planner_wrapper(planners[0].id, 1).unwrap();
+    queue.register_planner_agent(planners[0].id, 1, 1).unwrap();
     queue.planner_exited(planners[0].id, 1, 0).unwrap();
     supervise(&fx, &backend, &reviewer);
     assert!(backend.closed.lock().unwrap().contains(&"RT1".to_owned()));
@@ -1421,6 +1425,9 @@ fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
     queue
         .register_planner_wrapper(planners[0].id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planners[0].id, std::process::id(), std::process::id())
+        .unwrap();
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
     supervise(&fx, &backend, &passing);
     assert_eq!(
@@ -1487,6 +1494,9 @@ fn a_withdrawn_reopen_gets_a_planner_of_the_runtimes_with_the_reason() {
     assert_eq!(own_planner[0].proposal_id, Some(own));
     queue
         .register_planner_wrapper(own_planner[0].id, 1)
+        .unwrap();
+    queue
+        .register_planner_agent(own_planner[0].id, 1, 1)
         .unwrap();
     queue.planner_exited(own_planner[0].id, 1, 0).unwrap();
     supervise_with(&fx, &backend, &reviewer, &options);
@@ -1577,6 +1587,9 @@ pub(crate) fn planner_prompt(db: &Path, planner: dagq::domain::PlannerId) -> Str
 pub(crate) fn idle(queue: &SqliteQueue, db: &Path, planner: dagq::domain::PlannerId) {
     queue
         .register_planner_wrapper(planner, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner, std::process::id(), std::process::id())
         .unwrap();
     let dir = planners_dir(db).join(planner.to_string());
     fs::write(planner_idle_marker(&dir), "{}").unwrap();
@@ -1705,6 +1718,7 @@ fn drafts_of_the_runtime_get_planners_within_the_limit_and_a_persons_draft_none(
             .find(|p| p.draft_task_id == Some(gap))
             .unwrap();
         queue.register_planner_wrapper(open.id, 1).unwrap();
+        queue.register_planner_agent(open.id, 1, 1).unwrap();
         queue.planner_exited(open.id, 1, 0).unwrap();
         // One pass closes it, the next opens the next one.
         supervise(&fx, &backend, &reviewer);
@@ -1858,6 +1872,7 @@ fn a_planner_question_answer_is_typed_into_its_planner_or_carried_by_a_new_one()
         .ask;
     queue.answer(asked.id, "keep_draft").unwrap();
     queue.register_planner_wrapper(planners[0].id, 1).unwrap();
+    queue.register_planner_agent(planners[0].id, 1, 1).unwrap();
     queue.planner_exited(planners[0].id, 1, 0).unwrap();
     for _ in 0..3 {
         supervise(&fx, &backend, &reviewer);

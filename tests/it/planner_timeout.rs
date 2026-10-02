@@ -150,11 +150,17 @@ fn a_silent_runtime_planner_is_told_to_the_inbox_once() {
     queue
         .register_planner_wrapper(planner.id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
     // A person's planner, as silent, is never timed.
     let person = queue.open_planner(PlannerOrigin::Person, None).unwrap();
     queue.planner_workspace_created(person.id, "PW").unwrap();
     queue
         .register_planner_wrapper(person.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(person.id, std::process::id(), std::process::id())
         .unwrap();
     *backend.screen.lock().unwrap() = Some(Err("cmux read-screen failed".into()));
     let dir = planners_dir(&fx.db).join(planner.id.to_string());
@@ -263,6 +269,9 @@ fn a_silent_finding_planner_is_told_to_the_inbox_once() {
     queue
         .register_planner_wrapper(planner.id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
     heartbeat_ahead(&fx.db);
     *backend.screen.lock().unwrap() = Some(Err("cmux read-screen failed".into()));
 
@@ -303,6 +312,9 @@ fn a_planner_inferred_idle_by_its_screen_is_not_told_to_the_inbox() {
     let workspace = planner.workspace_id.clone().unwrap();
     queue
         .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
         .unwrap();
     heartbeat_ahead(&fx.db);
     let dir = planners_dir(&fx.db).join(planner.id.to_string());

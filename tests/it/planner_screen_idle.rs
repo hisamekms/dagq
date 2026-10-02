@@ -188,6 +188,9 @@ fn a_runtime_planner_without_its_marker_is_ended_by_its_screen() {
     queue
         .register_planner_wrapper(planner.id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
     fs::write(
         dir(&fx, planner.id).join("claude.log"),
         "2026-09-27T01:00:00Z [DEBUG] turn\n\
@@ -274,6 +277,9 @@ fn a_persons_planner_shows_idle_by_its_screen_and_is_not_asked_to_exit() {
     queue.planner_workspace_created(planner.id, "PW1").unwrap();
     queue
         .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
         .unwrap();
     fs::create_dir_all(dir(&fx, planner.id)).unwrap();
     let backend = PlanWorkspace::listing(&["PW1"]);
@@ -371,6 +377,9 @@ fn a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit() {
     queue
         .register_planner_wrapper(planner.id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
     *backend.screen.lock().unwrap() = Some(Ok(BACKGROUND.into()));
 
     for at in [2, 2 + SCREEN_IDLE_SECS, 3 + SCREEN_IDLE_SECS * 3] {
@@ -396,4 +405,48 @@ fn a_runtime_planner_whose_screen_shows_background_work_is_not_asked_to_exit() {
     assert_eq!(events.len(), 2, "{events:?}");
     // The latest first.
     assert_eq!(events[0]["background_running"], false, "{events:?}");
+}
+
+/// A runtime's planner whose wrapper runs but has not recorded its agent's
+/// pid is `opening`, whatever its idle marker and screen show, and is not
+/// asked to exit; once the agent is recorded it is `idle` with its pid
+/// (task 1329: `dagq planners` showed idle planners without `agent_pid`).
+#[test]
+fn a_runtime_planner_is_idle_only_once_its_agent_is_recorded() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    runtime_draft(
+        &mut queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::GoalGap,
+        json!({"findings": ["the acceptance names a check nobody runs"]}),
+    );
+    let backend = PlanWorkspace::default();
+    let clock = Arc::new(Ahead::default());
+    supervise(&fx, &backend, &clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    assert_eq!(planner.origin, PlannerOrigin::Runtime);
+    let me = std::process::id();
+    queue.register_planner_wrapper(planner.id, me).unwrap();
+    fs::write(planner_idle_marker(&dir(&fx, planner.id)), "{}").unwrap();
+    *backend.screen.lock().unwrap() = Some(Ok(READY.into()));
+
+    for at in [1, 2 + SCREEN_IDLE_SECS] {
+        supervise(&fx, &backend, &clock, at);
+        let view = &views(&fx, &backend, &clock, ScreenIdle::Peek)[0];
+        assert_eq!(view.state, PlannerState::Opening, "{view:?}");
+        assert!(view.alive);
+        assert_eq!(view.idle_since, None);
+        assert_eq!(view.planner.agent_pid, None);
+    }
+    assert!(backend.exits.lock().unwrap().is_empty());
+
+    queue.register_planner_agent(planner.id, me, me).unwrap();
+    let view = &views(&fx, &backend, &clock, ScreenIdle::Peek)[0];
+    assert_eq!(view.state, PlannerState::Idle, "{view:?}");
+    assert!(view.idle_since.is_some());
+    assert_eq!(view.planner.agent_pid, Some(me));
+    assert_eq!(view.planner.origin, PlannerOrigin::Runtime);
 }

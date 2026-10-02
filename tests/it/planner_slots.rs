@@ -133,6 +133,9 @@ fn answered_draft_planner(
     queue
         .register_planner_wrapper(planner.id, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
     heartbeat_ahead(&fx.db);
     let asked = queue
         .ask(NewAsk {
@@ -307,6 +310,9 @@ fn a_planner_waiting_on_a_person_keeps_its_place_past_the_timeout() {
     let planner = queue.planners(false).unwrap().remove(0);
     queue
         .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
         .unwrap();
     heartbeat_ahead(&fx.db);
     queue

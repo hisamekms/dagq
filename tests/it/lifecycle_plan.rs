@@ -697,6 +697,7 @@ fn a_planner_session_is_judged_alive_and_idle_like_a_worker() {
     let second = lifecycle::plan(&fixture.location, &fixture.repo, &cmux, &options).unwrap();
     let second_id = PlannerId::new(second["planner"]["id"].as_i64().unwrap());
     queue.register_planner_wrapper(second_id, 4242).unwrap();
+    queue.register_planner_agent(second_id, 4242, 4242).unwrap();
     queue.heartbeat_planner(second_id, 4242).unwrap();
     assert_eq!(state(false)[1], (PlannerState::Working, true, false));
     fs::write(
@@ -777,9 +778,15 @@ fn plan_closes_the_records_of_planners_whose_workspace_and_wrapper_are_gone() {
     queue
         .register_planner_wrapper(exited, std::process::id())
         .unwrap();
+    queue
+        .register_planner_agent(exited, std::process::id(), std::process::id())
+        .unwrap();
     queue.planner_exited(exited, std::process::id(), 0).unwrap();
     queue
         .register_planner_wrapper(alive, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(alive, std::process::id(), std::process::id())
         .unwrap();
     queue.register_planner_wrapper(listed, dead_pid()).unwrap();
     for workspace in [&dead_ws, &exited_ws, &alive_ws] {
@@ -886,6 +893,7 @@ fn a_new_planner_does_not_take_the_idle_marker_an_old_database_left() {
 
     let queue = SqliteQueue::open(&fixture.location.db).unwrap();
     queue.register_planner_wrapper(id, 4242).unwrap();
+    queue.register_planner_agent(id, 4242, 4242).unwrap();
     queue.heartbeat_planner(id, 4242).unwrap();
     let processes = FakeProcesses::default();
     let signals = dagq::infrastructure::adapters::ClaudeCode {
@@ -989,6 +997,7 @@ fn a_planner_workspace_made_although_its_create_failed_is_not_left_open() {
         .unwrap()
         .to_owned();
     queue.register_planner_wrapper(id, 4242).unwrap();
+    queue.register_planner_agent(id, 4242, 4242).unwrap();
     let error = dagq::compose::planner_session_with_provider(
         &db,
         id,
@@ -1050,6 +1059,7 @@ fn plan_closes_a_persons_planner_whose_agent_exited_past_the_grace() {
     let me = std::process::id();
     for id in [past, fresh, alive] {
         queue.register_planner_wrapper(id, me).unwrap();
+        queue.register_planner_agent(id, me, me).unwrap();
     }
     queue.register_planner_wrapper(lost, dead_pid()).unwrap();
     queue.planner_exited(past, me, 2).unwrap();

@@ -50,6 +50,7 @@ fn the_supervisor_closes_a_persons_planner_once_its_agent_exited_past_the_grace(
             .planner_workspace_created(planner.id, workspace)
             .unwrap();
         queue.register_planner_wrapper(planner.id, pid).unwrap();
+        queue.register_planner_agent(planner.id, pid, pid).unwrap();
         planner.id
     };
     let past = record("W-PAST", me);
@@ -128,6 +129,7 @@ fn a_persons_planner_whose_workspace_does_not_close_stays_open() {
         .planner_workspace_created(planner.id, "W-STUCK")
         .unwrap();
     queue.register_planner_wrapper(planner.id, me).unwrap();
+    queue.register_planner_agent(planner.id, me, me).unwrap();
     queue.planner_exited(planner.id, me, 0).unwrap();
     exited_ago(&db, planner.id, 61);
 

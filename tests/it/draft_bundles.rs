@@ -59,6 +59,7 @@ fn planner_of(queue: &SqliteQueue, draft: TaskId) -> Option<PlannerSession> {
 fn end(fx: &Fixture, backend: &PlanWorkspace, reviewer: &StubReviewer, planner: PlannerId) {
     let queue = SqliteQueue::open(&fx.db).unwrap();
     queue.register_planner_wrapper(planner, 1).unwrap();
+    queue.register_planner_agent(planner, 1, 1).unwrap();
     queue.planner_exited(planner, 1, 0).unwrap();
     pass(fx, backend, reviewer);
     pass(fx, backend, reviewer);

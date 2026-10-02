@@ -82,7 +82,8 @@ impl PlannerSession {
     /// exited in a workspace still open is `exited`; a wrapper whose process
     /// is gone or whose heartbeat is older than [`HEARTBEAT_TIMEOUT_SECS`]
     /// without a recorded exit is `lost`; before the wrapper registers it is
-    /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed. A live agent is `working` while its screen shows a turn,
+    /// `opening`, and `lost` once [`PLANNER_STARTUP_SECS`] passed; a live
+    /// wrapper that has not recorded its agent's pid is `opening` too. A live agent is `working` while its screen shows a turn,
     /// and `idle` once its `Stop` hook wrote the marker with no background
     /// work left; without a marker (or with one older than its last
     /// input) it is `idle` once its screen was inferred idle with no
@@ -107,6 +108,12 @@ impl PlannerSession {
         let age = self.heartbeat_at.map_or(i64::MAX, |at| probe.now - at);
         if heartbeat_stale(probe.wrapper_alive, age) {
             return PlannerState::Lost;
+        }
+        if self.agent_pid.is_none() {
+            // The wrapper runs but has not recorded its agent yet: no idle
+            // marker or screen is the agent's (task 1329), and input sent
+            // now would reach no agent.
+            return PlannerState::Opening;
         }
         if probe.working == Some(true) {
             return PlannerState::Working;
@@ -469,6 +476,36 @@ mod tests {
             ..session()
         };
         assert_eq!(unregistered.state(&probe()), PlannerState::Opening);
+        // A wrapper that has not recorded its agent is opening, whatever an
+        // idle marker or the screen shows (task 1329).
+        let agentless = PlannerSession {
+            agent_pid: None,
+            ..session()
+        };
+        let idle = IdleProbe {
+            since: 105,
+            background_running: false,
+        };
+        for seen in [
+            probe(),
+            PlannerProbe {
+                idle: Some(idle),
+                ..probe()
+            },
+            PlannerProbe {
+                screen_idle: Some(idle),
+                ..probe()
+            },
+        ] {
+            assert_eq!(agentless.state(&seen), PlannerState::Opening);
+        }
+        assert_eq!(
+            agentless.state(&PlannerProbe {
+                wrapper_alive: false,
+                ..probe()
+            }),
+            PlannerState::Lost
+        );
         assert_eq!(
             opening.state(&PlannerProbe {
                 now: 90 + PLANNER_STARTUP_SECS + 1,
