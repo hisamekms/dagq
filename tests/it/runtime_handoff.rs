@@ -159,13 +159,13 @@ fn canceling_a_handoff_during_a_landing_resumes_claims_without_exec() {
     let token = only_registration(&db).token;
     let mut queue = SqliteQueue::open(&db).unwrap();
     assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
-    await_passes(&passes, SOME_PASSES);
+    await_passes_landing(&passes, &mut queue);
     assert_eq!(
         queue.handoff_request(&token).unwrap().as_deref(),
         Some("/next/dagq")
     );
     assert!(queue.cancel_handoff(&token, "/next/dagq").unwrap());
-    await_passes(&passes, SOME_PASSES);
+    await_passes_landing(&passes, &mut queue);
     assert_eq!(only_registration(&db).token, token);
     add_ready_task(&mut queue, "after cancellation", &[]);
     wait_until(&db, crate::common::STEP_LIMIT, |queue| {
@@ -383,6 +383,32 @@ was not handed off to /next/dagq",
         queue.show(TaskId::new(1)).unwrap().task.status(),
         TaskStatus::Completed
     );
+}
+
+/// [`await_passes`] of [`SOME_PASSES`] while task 1's landing must still
+/// be in progress, failing at once with the run's reason when it is not: a
+/// landing that ended (its verification failed on a broken quote, task
+/// 1335) leaves no slot the handoff waits for, so the supervisor takes the
+/// request and execs, and the passes stop.
+fn await_passes_landing(passes: &AtomicU64, queue: &mut SqliteQueue) {
+    let from = passes.load(Ordering::SeqCst);
+    let target = from + SOME_PASSES + 1;
+    let started = Instant::now();
+    while passes.load(Ordering::SeqCst) < target {
+        let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+        assert_eq!(
+            run.status(),
+            RunStatus::Integrating,
+            "the landing the test holds ended: {:?}",
+            run.last_error()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the supervisor made {} of the {SOME_PASSES} passes waited for in 60 seconds",
+            passes.load(Ordering::SeqCst).saturating_sub(from + 1)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The supervisor the exec'd binary runs: the same token, continued.
